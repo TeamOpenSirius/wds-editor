@@ -148,14 +148,22 @@ bool ChartPreviewPanel::ensure_ui_font_scale() {
 bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
                                           const wds::renderer::PreviewVisualConfig& visual,
                                           const std::string& ui_font_path) {
+  last_init_error_.clear();
   window_ = window;
   if (!transport_.initialize(visual.effects_directory, visual.bgm_path)) {
+    last_init_error_ =
+        "音频初始化失败（BASS / effects：" + visual.effects_directory + "）";
     std::fprintf(stderr, "ChartPreviewPanel: audio init failed\n");
     window_ = nullptr;
     return false;
   }
 
   if (!preview_.initialize(window, visual)) {
+    // Distinguish the common CI libpng header/dylib skew (skins) from Vulkan.
+    last_init_error_ =
+        "预览初始化失败（Vulkan 或 skins PNG）。skins=" + visual.skins_directory +
+        " — 若 stderr 出现 libpng version mismatch / png_create_read_struct "
+        "failed，说明程序链到了错误的 libpng，请重装完整程序包";
     std::fprintf(stderr, "ChartPreviewPanel: preview init failed\n");
     transport_.shutdown();
     window_ = nullptr;

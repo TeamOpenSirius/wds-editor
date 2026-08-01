@@ -209,10 +209,15 @@ int run_editor(int argc, char** argv) {
   wds::ui::UiManager ui;
   if (!ui.chart_preview().initialize_empty(window.handle(), visual, ui_font)) {
     wds::ui::StartupDependencyReport deps;
+    const std::string& detail = ui.chart_preview().last_init_error();
+    deps.missing.push_back(detail.empty()
+                               ? "预览初始化失败（音频 / Vulkan / skins）"
+                               : detail);
+#if defined(__APPLE__)
     deps.missing.push_back(
-        "预览初始化失败（音频 / Vulkan / skins）。macOS 请确认 .app 内含 "
-        "Contents/MacOS/lib/libMoltenVK.dylib 与 Resources/vulkan/icd.d/"
-        "MoltenVK_icd.json；下载安装后可执行：xattr -cr \"/Applications/WDS Editor.app\"");
+        "macOS：确认 .app 含 libMoltenVK.dylib 与 Resources/vulkan/icd.d/"
+        "MoltenVK_icd.json；下载后可执行 xattr -cr \"/Applications/WDS Editor.app\"");
+#endif
     window.destroy();
     glfwTerminate();
     return wds::ui::fail_startup_dependencies(deps);

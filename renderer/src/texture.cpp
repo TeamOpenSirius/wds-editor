@@ -62,6 +62,13 @@ bool load_png_rgba8(const std::string& path, std::vector<unsigned char>& out, in
 
   png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
   if (png == nullptr) {
+    // Typical CI failure mode: compiled against libpng 1.4 headers but linked /
+    // bundled 1.6 — create_read_struct rejects the version string.
+    std::fprintf(stderr,
+                 "load_png_rgba8: png_create_read_struct failed for %s "
+                 "(headers=" PNG_LIBPNG_VER_STRING ", runtime=%lu)\n",
+                 path.c_str(),
+                 static_cast<unsigned long>(png_access_version_number()));
     std::fclose(fp);
     return false;
   }

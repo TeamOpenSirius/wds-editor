@@ -32,6 +32,8 @@ class ChartPreviewPanel {
   void shutdown();
 
   bool ready() const noexcept { return ready_; }
+  // Populated when initialize / initialize_empty returns false.
+  const std::string& last_init_error() const noexcept { return last_init_error_; }
 
   wds::audio::Transport& transport() noexcept { return transport_; }
   const wds::audio::Transport& transport() const noexcept { return transport_; }
@@ -77,6 +79,7 @@ class ChartPreviewPanel {
   // Independent of playback rate; falls back to 60 Hz when refresh rate is unknown.
   int64_t display_frame_lead_us() const noexcept;
 
+  std::string last_init_error_;
   PlaybackPreviewView preview_;
   wds::audio::Transport transport_;
   wds::chart_editor::ChartEditorEngine engine_;

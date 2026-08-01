@@ -154,6 +154,23 @@ configure_macos_arm() {
     prefix="$(brew --prefix)"
   fi
 
+  # Pin Homebrew libpng headers+dylib together. CI / XQuartz trees often expose
+  # libpng 1.4 headers under /opt/X11 while packaging copies brew's 1.6 dylib —
+  # png_create_read_struct then fails and every skin PNG load returns false.
+  local brew_png=""
+  if command -v brew >/dev/null 2>&1; then
+    brew_png="$(brew --prefix libpng 2>/dev/null || true)"
+  fi
+  if [[ -n "${brew_png}" && -d "${brew_png}/include" && -f "${brew_png}/lib/libpng.dylib" ]]; then
+    if [[ -n "${prefix}" ]]; then
+      prefix="${brew_png};${prefix}"
+    else
+      prefix="${brew_png}"
+    fi
+  else
+    brew_png=""
+  fi
+
   local -a args=(
     -S "${ROOT}"
     -B "${build_dir}"
@@ -164,6 +181,13 @@ configure_macos_arm() {
   )
   if [[ -n "${prefix}" ]]; then
     args+=(-DCMAKE_PREFIX_PATH="${prefix}")
+  fi
+  if [[ -n "${brew_png}" ]]; then
+    args+=(
+      -DPNG_PNG_INCLUDE_DIR="${brew_png}/include"
+      -DPNG_LIBRARY="${brew_png}/lib/libpng.dylib"
+    )
+    echo "Using Homebrew libpng: ${brew_png}"
   fi
   args+=("$@")
 

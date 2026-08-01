@@ -80,6 +80,41 @@ if(NOT TARGET PNG::PNG)
   find_package(PNG REQUIRED)
 endif()
 
+# Headers and the linked dylib must be the same libpng major line. A 1.4 header
+# with a 1.6 dylib (common when /opt/X11 precedes Homebrew) makes every
+# png_create_read_struct fail → skin atlas load fails at startup.
+set(_wds_png_ver "")
+if(DEFINED PNG_VERSION_STRING AND PNG_VERSION_STRING)
+  set(_wds_png_ver "${PNG_VERSION_STRING}")
+endif()
+if(NOT _wds_png_ver AND TARGET PNG::PNG)
+  get_target_property(_wds_png_inc PNG::PNG INTERFACE_INCLUDE_DIRECTORIES)
+  if(_wds_png_inc)
+    foreach(_wds_png_inc_dir IN LISTS _wds_png_inc)
+      if(EXISTS "${_wds_png_inc_dir}/png.h")
+        file(STRINGS "${_wds_png_inc_dir}/png.h" _wds_png_ver_line
+             REGEX "^#define[ \t]+PNG_LIBPNG_VER_STRING[ \t]+")
+        if(_wds_png_ver_line)
+          string(REGEX REPLACE "^#define[ \t]+PNG_LIBPNG_VER_STRING[ \t]+\"([^\"]+)\".*"
+                 "\\1" _wds_png_ver "${_wds_png_ver_line}")
+          break()
+        endif()
+      endif()
+    endforeach()
+  endif()
+endif()
+message(STATUS "PNG: version=${_wds_png_ver} include=${PNG_PNG_INCLUDE_DIR} lib=${PNG_LIBRARY}")
+if(_wds_png_ver AND _wds_png_ver VERSION_LESS "1.6")
+  message(FATAL_ERROR
+    "libpng >= 1.6 required for skin PNG loading (found ${_wds_png_ver} via "
+    "include=${PNG_PNG_INCLUDE_DIR}). On macOS: brew install libpng, and ensure "
+    "CMAKE_PREFIX_PATH prefers Homebrew over /opt/X11.")
+endif()
+unset(_wds_png_ver)
+unset(_wds_png_inc)
+unset(_wds_png_inc_dir)
+unset(_wds_png_ver_line)
+
 # Vendored binary is Linux x86_64; only use it when it actually runs on this host.
 set(_wds_vendored_glslang "${CMAKE_CURRENT_SOURCE_DIR}/third_party/bin/glslangValidator")
 unset(WDS_GLSLANG_VALIDATOR CACHE)
