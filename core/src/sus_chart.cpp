@@ -1,0 +1,919 @@
+#include <wds/core/sus_chart.hpp>
+
+#include <wds/core/gimmick.hpp>
+#include <wds/core/timing_map.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <map>
+#include <numeric>
+#include <sstream>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace wds::chart_editor {
+namespace {
+
+std::string trim_copy(std::string s) {
+  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  return s;
+}
+
+std::string to_lower_ascii(std::string s) {
+  for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  return s;
+}
+
+bool ends_with_ci(const std::string& value, const std::string& suffix) {
+  if (value.size() < suffix.size()) return false;
+  return to_lower_ascii(value.substr(value.size() - suffix.size())) == to_lower_ascii(suffix);
+}
+
+int base36_value(char ch) {
+  if (ch >= '0' && ch <= '9') return ch - '0';
+  if (ch >= 'a' && ch <= 'z') return 10 + (ch - 'a');
+  if (ch >= 'A' && ch <= 'Z') return 10 + (ch - 'A');
+  return -1;
+}
+
+char base36_digit(int value) {
+  value = std::clamp(value, 0, 35);
+  if (value < 10) return static_cast<char>('0' + value);
+  return static_cast<char>('a' + (value - 10));
+}
+
+bool parse_quoted(const std::string& raw, std::string& out) {
+  const std::string t = trim_copy(raw);
+  if (t.size() >= 2 && t.front() == '"' && t.back() == '"') {
+    out = t.substr(1, t.size() - 2);
+    return true;
+  }
+  out = t;
+  return !out.empty() || t == "\"\"";
+}
+
+bool parse_double(const std::string& text, double& out) {
+  try {
+    size_t idx = 0;
+    out = std::stod(trim_copy(text), &idx);
+    return idx > 0;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool parse_int(const std::string& text, int& out) {
+  try {
+    size_t idx = 0;
+    out = std::stoi(trim_copy(text), &idx);
+    return idx > 0;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::string read_file_text(const std::string& path, SerializeResult& status) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    status = {SerializeError::IoError, "failed to open: " + path};
+    return {};
+  }
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  status = {SerializeError::Ok, {}};
+  return ss.str();
+}
+
+SerializeResult write_file_text(const std::string& path, const std::string& text) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return {SerializeError::IoError, "failed to open for writing: " + path};
+  out << text;
+  if (!out) return {SerializeError::IoError, "failed while writing: " + path};
+  return {SerializeError::Ok, {}};
+}
+
+struct RawEvent {
+  int64_t tick = 0;
+  int lane = 0;
+  int width = 1;
+  int type = 0;       // first digit of note pair
+  int channel = 0;    // hold/slide channel
+  int category = 0;   // 1 tap, 2 hold, 3/4 slide, 5 directional
+};
+
+struct HoldKey {
+  int category = 0;
+  int channel = 0;
+  int lane = -1;  // only for category 2
+  bool operator<(const HoldKey& o) const {
+    if (category != o.category) return category < o.category;
+    if (channel != o.channel) return channel < o.channel;
+    return lane < o.lane;
+  }
+};
+
+NoteType tap_type_from_sus(int type) {
+  switch (type) {
+    case 2:
+      return NoteType::Critical;
+    case 3:
+      return NoteType::Flick;
+    default:
+      return NoteType::Normal;
+  }
+}
+
+int32_t flick_scratch_from_directional(int type) {
+  // 1 up, 2 down, 3 left-up, 4 right-up, 5 left-down, 6 right-down
+  switch (type) {
+    case 3:
+    case 5:
+      return -1;
+    case 4:
+    case 6:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+}  // namespace
+
+bool SusChartFormat::looks_like_sus_path(const std::string& path) {
+  return ends_with_ci(path, ".sus");
+}
+
+bool SusChartFormat::looks_like_sus_text(const std::string& text) {
+  std::istringstream ss(text);
+  std::string line;
+  int scored = 0;
+  while (std::getline(ss, line) && scored < 3) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const std::string t = trim_copy(line);
+    if (t.empty() || t[0] != '#') continue;
+    if (t.rfind("#TITLE", 0) == 0 || t.rfind("#WAVE", 0) == 0 || t.rfind("#REQUEST", 0) == 0 ||
+        t.rfind("#BPM", 0) == 0) {
+      ++scored;
+      continue;
+    }
+    // Data header like #00012: or #00220a:
+    if (t.size() >= 6 && t[0] == '#' && t.find(':') != std::string::npos) {
+      bool digits = true;
+      for (size_t i = 1; i <= 3 && i < t.size(); ++i) {
+        if (t[i] < '0' || t[i] > '9') digits = false;
+      }
+      if (digits) ++scored;
+    }
+  }
+  return scored >= 1;
+}
+
+SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResult& out) {
+  SusChartMetadata meta;
+  meta.ticks_per_beat = 480;
+
+  std::unordered_map<int, double> bpm_defs;
+  std::map<int, double> measure_lengths;  // measure -> beats (applies from that measure on)
+  measure_lengths[0] = 4.0;
+
+  struct BpmChange {
+    int64_t tick;
+    double bpm;
+  };
+  std::vector<BpmChange> bpm_changes;
+  std::vector<RawEvent> events;
+
+  int measure_base = 0;
+  std::istringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const std::string trimmed = trim_copy(line);
+    if (trimmed.empty() || trimmed[0] != '#') continue;
+
+    std::string header;
+    std::string data;
+    // Data rows are `#mmm…:` with no space before ':'. Metadata is `#KEY value`
+    // (and may contain ':' inside Windows paths like F:\...).
+    const size_t colon = trimmed.find(':');
+    const size_t first_space = trimmed.find_first_of(" \t", 1);
+    const bool colon_is_data_sep =
+        colon != std::string::npos && (first_space == std::string::npos || colon < first_space);
+    if (colon_is_data_sep) {
+      header = trim_copy(trimmed.substr(1, colon - 1));
+      data = trim_copy(trimmed.substr(colon + 1));
+    } else {
+      const std::string body = trim_copy(trimmed.substr(1));
+      const size_t sp = body.find_first_of(" \t");
+      if (sp == std::string::npos) {
+        header = body;
+      } else {
+        header = trim_copy(body.substr(0, sp));
+        data = trim_copy(body.substr(sp + 1));
+      }
+    }
+    const std::string header_l = to_lower_ascii(header);
+
+    auto set_meta_str = [&](const char* key, std::string& field) {
+      if (to_lower_ascii(header) == key) {
+        parse_quoted(data, field);
+        return true;
+      }
+      return false;
+    };
+
+    // WAVE must be matched exactly before other handlers; Windows paths contain ':'.
+    if (header_l == "wave") {
+      parse_quoted(data, meta.wave_path);
+      continue;
+    }
+
+    if (set_meta_str("title", meta.title) || set_meta_str("subtitle", meta.subtitle) ||
+        set_meta_str("artist", meta.artist) || set_meta_str("designer", meta.designer) ||
+        set_meta_str("desinger", meta.designer) || set_meta_str("songid", meta.song_id) ||
+        set_meta_str("jacket", meta.jacket_path)) {
+      continue;
+    }
+    if (header_l == "difficulty") {
+      parse_quoted(data, meta.difficulty);
+      if (meta.difficulty.empty()) meta.difficulty = trim_copy(data);
+      continue;
+    }
+    if (header_l == "playlevel") {
+      meta.play_level = trim_copy(data);
+      continue;
+    }
+    if (header_l == "waveoffset") {
+      parse_double(data, meta.wave_offset_sec);
+      continue;
+    }
+    if (header_l == "basebpm") {
+      parse_double(data, meta.base_bpm);
+      continue;
+    }
+    if (header_l == "request") {
+      std::string req;
+      parse_quoted(data, req);
+      // ticks_per_beat N
+      std::istringstream rs(req);
+      std::string token;
+      if (rs >> token && to_lower_ascii(token) == "ticks_per_beat") {
+        int tpq = 480;
+        if (rs >> tpq && tpq > 0) meta.ticks_per_beat = tpq;
+      }
+      continue;
+    }
+    if (header_l == "measurebs") {
+      int base = 0;
+      if (parse_int(data, base)) measure_base = base;
+      continue;
+    }
+    if (header_l.rfind("bpm", 0) == 0 && header.size() >= 5) {
+      const int id = base36_value(header[3]) * 36 + base36_value(header[4]);
+      double bpm = 120.0;
+      if (id >= 0 && parse_double(data, bpm) && bpm > 0.0) bpm_defs[id] = bpm;
+      continue;
+    }
+    // Ignore TIL / HISPEED / ATTRIBUTE blocks for now.
+    if (header_l.rfind("til", 0) == 0 || header_l == "hispeed" || header_l == "nospeed" ||
+        header_l.rfind("atr", 0) == 0 || header_l == "attribute" || header_l == "noattribute" ||
+        header_l == "noattirbute" || header_l == "measurehs" || header_l == "genre" ||
+        header_l == "background" || header_l == "movie" || header_l == "movieoffset") {
+      continue;
+    }
+
+    // Numeric measure data headers.
+    if (header.size() < 5) continue;
+    bool meas_ok = true;
+    int measure = 0;
+    for (int i = 0; i < 3; ++i) {
+      if (header[i] < '0' || header[i] > '9') {
+        meas_ok = false;
+        break;
+      }
+      measure = measure * 10 + (header[i] - '0');
+    }
+    if (!meas_ok) continue;
+    measure += measure_base;
+
+    const std::string rest = header.substr(3);
+    const int tpq = meta.ticks_per_beat;
+
+    auto ticks_per_measure_at = [&](int meas) {
+      double beats = 4.0;
+      for (const auto& [m, len] : measure_lengths) {
+        if (m > meas) break;
+        beats = len;
+      }
+      return static_cast<int64_t>(std::llround(beats * tpq));
+    };
+
+    // Lazy absolute tick for measure start — computed after all measure lengths known;
+    // store relative for now via deferred resolution. We'll resolve after the scan.
+    // For streaming we need measure lengths first — two-pass.
+    // Here just store raw with measure + index; resolve later.
+    (void)ticks_per_measure_at;
+
+    if (rest == "02") {
+      double beats = 4.0;
+      if (parse_double(data, beats) && beats > 0.0) measure_lengths[measure] = beats;
+      continue;
+    }
+    if (rest == "08") {
+      // BPM change: data is zz ids packed in pairs.
+      const std::string cleaned = trim_copy(data);
+      const int n = static_cast<int>(cleaned.size() / 2);
+      if (n <= 0) continue;
+      for (int i = 0; i < n; ++i) {
+        const int a = base36_value(cleaned[static_cast<size_t>(i) * 2]);
+        const int b = base36_value(cleaned[static_cast<size_t>(i) * 2 + 1]);
+        if (a < 0 || b < 0) continue;
+        const int id = a * 36 + b;
+        const auto it = bpm_defs.find(id);
+        if (it == bpm_defs.end()) continue;
+        // tick filled in pass 2
+        bpm_changes.push_back({(static_cast<int64_t>(measure) << 32) |
+                                   static_cast<int64_t>((i << 16) | n),
+                               it->second});
+      }
+      continue;
+    }
+
+    int category = 0;
+    int lane = 0;
+    int channel = 0;
+    bool note_header = false;
+    if (rest.size() == 2 && rest[0] == '1') {
+      category = 1;
+      lane = base36_value(rest[1]);
+      note_header = lane >= 0;
+    } else if (rest.size() == 2 && rest[0] == '5') {
+      category = 5;
+      lane = base36_value(rest[1]);
+      note_header = lane >= 0;
+    } else if (rest.size() == 3 && (rest[0] == '2' || rest[0] == '3' || rest[0] == '4')) {
+      category = rest[0] - '0';
+      lane = base36_value(rest[1]);
+      channel = base36_value(rest[2]);
+      note_header = lane >= 0 && channel >= 0;
+    }
+    if (!note_header) continue;
+
+    const std::string cleaned = trim_copy(data);
+    if (cleaned.size() < 2 || (cleaned.size() % 2) != 0) continue;
+    const int slots = static_cast<int>(cleaned.size() / 2);
+    for (int i = 0; i < slots; ++i) {
+      const int type = base36_value(cleaned[static_cast<size_t>(i) * 2]);
+      const int width = base36_value(cleaned[static_cast<size_t>(i) * 2 + 1]);
+      if (type <= 0 || width <= 0) continue;
+      RawEvent ev;
+      // Encode measure/slot temporarily in tick; rewrite in pass 2.
+      ev.tick = (static_cast<int64_t>(measure) << 32) | static_cast<int64_t>((i << 16) | slots);
+      ev.lane = lane;
+      ev.width = std::clamp(width, 1, 35);
+      ev.type = type;
+      ev.channel = channel;
+      ev.category = category;
+      events.push_back(ev);
+    }
+  }
+
+  // Pass 2: resolve measure → absolute ticks.
+  auto measure_start_tick = [&](int measure) -> int64_t {
+    int64_t tick = 0;
+    double beats = 4.0;
+    auto it = measure_lengths.begin();
+    for (int m = 0; m < measure; ++m) {
+      while (it != measure_lengths.end() && it->first <= m) {
+        beats = it->second;
+        ++it;
+      }
+      // re-walk lengths properly
+      beats = 4.0;
+      for (const auto& [mm, len] : measure_lengths) {
+        if (mm > m) break;
+        beats = len;
+      }
+      tick += static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+    }
+    return tick;
+  };
+
+  auto decode_packed = [&](int64_t packed, int64_t& out_tick) {
+    const int measure = static_cast<int>(packed >> 32);
+    const int slots = static_cast<int>(packed & 0xffff);
+    const int index = static_cast<int>((packed >> 16) & 0xffff);
+    const int64_t mstart = measure_start_tick(measure);
+    double beats = 4.0;
+    for (const auto& [mm, len] : measure_lengths) {
+      if (mm > measure) break;
+      beats = len;
+    }
+    const int64_t mlen = static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+    out_tick = mstart + (slots > 0 ? mlen * index / slots : mstart);
+  };
+
+  for (auto& ev : events) {
+    int64_t tick = 0;
+    decode_packed(ev.tick, tick);
+    ev.tick = tick;
+  }
+  for (auto& ch : bpm_changes) {
+    int64_t tick = 0;
+    decode_packed(ch.tick, tick);
+    ch.tick = tick;
+  }
+
+  NotationChart chart;
+  chart.timing.ticks_per_quarter = meta.ticks_per_beat;
+  chart.timing.offset_ms =
+      static_cast<int64_t>(std::llround(meta.wave_offset_sec * 1000.0));
+
+  // Timing points from BPM changes.
+  std::sort(bpm_changes.begin(), bpm_changes.end(),
+            [](const BpmChange& a, const BpmChange& b) { return a.tick < b.tick; });
+  if (!bpm_changes.empty()) {
+    chart.timing.bpm = bpm_changes.front().bpm;
+  } else if (meta.base_bpm > 0.0) {
+    chart.timing.bpm = meta.base_bpm;
+  } else if (!bpm_defs.empty()) {
+    chart.timing.bpm = bpm_defs.begin()->second;
+  } else {
+    chart.timing.bpm = 120.0;
+  }
+  chart.timing.points.clear();
+  chart.timing.points.push_back(
+      TimingPoint{0, chart.timing.bpm, /*num*/ 4, /*den*/ 4});
+  for (const auto& ch : bpm_changes) {
+    if (ch.tick <= 0) {
+      chart.timing.points[0].bpm = ch.bpm;
+      chart.timing.bpm = ch.bpm;
+      continue;
+    }
+    chart.timing.points.push_back(TimingPoint{static_cast<int32_t>(ch.tick), ch.bpm, 4, 4});
+  }
+  normalize_timing_points(chart.timing);
+
+  // Lane offset: Ched 12-key often uses 2..d.
+  int min_lane = 99;
+  int max_end = 0;
+  for (const auto& ev : events) {
+    min_lane = std::min(min_lane, ev.lane);
+    max_end = std::max(max_end, ev.lane + ev.width);
+  }
+  int lane_offset = 0;
+  if (min_lane < 99 && max_end > 12 && min_lane >= 2) {
+    lane_offset = min_lane;  // usually 2
+  } else if (min_lane < 99 && max_end > 12) {
+    lane_offset = std::max(0, max_end - 12);
+  }
+
+  auto map_lane = [&](int lane) {
+    return std::clamp(lane - lane_offset, 0, 11);
+  };
+  auto map_width = [&](int lane, int width) {
+    const int left = map_lane(lane);
+    return std::clamp(width, 1, 12 - left);
+  };
+
+  std::vector<NotationNote> notes;
+  int32_t next_id = 0;
+
+  // Directionals first → flick map by tick+lane.
+  struct FlickKey {
+    int64_t tick;
+    int lane;
+    bool operator<(const FlickKey& o) const {
+      return tick < o.tick || (tick == o.tick && lane < o.lane);
+    }
+  };
+  std::map<FlickKey, int32_t> directional_scratch;
+  for (const auto& ev : events) {
+    if (ev.category != 5) continue;
+    FlickKey key{ev.tick, map_lane(ev.lane)};
+    directional_scratch[key] = flick_scratch_from_directional(ev.type);
+  }
+
+  // Taps.
+  for (const auto& ev : events) {
+    if (ev.category != 1) continue;
+    NotationNote note;
+    note.id = next_id++;
+    note.start_tick = static_cast<float>(ev.tick);
+    note.end_tick = note.start_tick;
+    note.lane = map_lane(ev.lane);
+    note.width = map_width(ev.lane, ev.width);
+    note.note_type = tap_type_from_sus(ev.type);
+    note.gimmick_type = GimmickType::None;
+    note.scratch_length = 0;
+    FlickKey key{ev.tick, note.lane};
+    if (const auto it = directional_scratch.find(key); it != directional_scratch.end()) {
+      note.note_type = NoteType::Flick;
+      note.scratch_length = it->second;
+      directional_scratch.erase(it);
+    } else if (note.note_type == NoteType::Flick) {
+      note.scratch_length = 0;
+    }
+    notes.push_back(note);
+  }
+
+  // Remaining directionals without tap → standalone flicks.
+  for (const auto& [key, scratch] : directional_scratch) {
+    NotationNote note;
+    note.id = next_id++;
+    note.start_tick = static_cast<float>(key.tick);
+    note.end_tick = note.start_tick;
+    note.lane = key.lane;
+    note.width = 1;
+    note.note_type = NoteType::Flick;
+    note.scratch_length = scratch;
+    notes.push_back(note);
+  }
+
+  // Holds / slides.
+  std::map<HoldKey, std::vector<RawEvent>> hold_groups;
+  for (const auto& ev : events) {
+    if (ev.category != 2 && ev.category != 3 && ev.category != 4) continue;
+    HoldKey key;
+    key.category = ev.category == 2 ? 2 : 3;  // treat 3/4 as slide family
+    key.channel = ev.channel;
+    key.lane = (ev.category == 2) ? ev.lane : -1;
+    hold_groups[key].push_back(ev);
+  }
+
+  for (auto& [key, group] : hold_groups) {
+    std::sort(group.begin(), group.end(),
+              [](const RawEvent& a, const RawEvent& b) { return a.tick < b.tick; });
+    const RawEvent* start = nullptr;
+    const RawEvent* end = nullptr;
+    std::vector<const RawEvent*> mids;
+    for (const auto& ev : group) {
+      if (ev.type == 1) start = &ev;
+      else if (ev.type == 2) end = &ev;
+      else if (ev.type == 3 || ev.type == 5) mids.push_back(&ev);
+      // type 4 bezier control — skip
+    }
+    if (start == nullptr || end == nullptr) continue;
+    if (end->tick < start->tick) continue;
+
+    const bool slide = key.category != 2;
+    const int start_lane = map_lane(start->lane);
+    const int start_width = map_width(start->lane, start->width);
+    const int end_lane = map_lane(end->lane);
+    const int end_right = std::min(11, end_lane + map_width(end->lane, end->width) - 1);
+
+    NotationNote head;
+    head.id = next_id++;
+    head.start_tick = static_cast<float>(start->tick);
+    head.end_tick = static_cast<float>(end->tick);
+    head.lane = start_lane;
+    head.width = start_width;
+    head.note_type = NoteType::HoldStart;
+    head.gimmick_type = GimmickType::None;
+    head.scratch_length = 0;
+
+    NotationNote body = head;
+    body.id = next_id++;
+    if (slide && (end_lane != start_lane || end_right != start_lane + start_width - 1)) {
+      body.note_type = NoteType::ScratchHold;
+      set_scratch_hold_end_lanes(body, end_lane, end_right);
+      head.note_type = NoteType::ScratchHoldStart;
+    } else {
+      body.note_type = NoteType::Hold;
+    }
+    notes.push_back(head);
+    notes.push_back(body);
+
+    for (const RawEvent* mid : mids) {
+      if (mid->tick <= start->tick || mid->tick >= end->tick) continue;
+      NotationNote star;
+      star.id = next_id++;
+      star.start_tick = static_cast<float>(mid->tick);
+      star.end_tick = star.start_tick;
+      star.lane = map_lane(mid->lane);
+      star.width = map_width(mid->lane, mid->width);
+      star.note_type = NoteType::Sound;
+      star.gimmick_type = GimmickType::None;
+      star.scratch_length = 0;
+      notes.push_back(star);
+    }
+  }
+
+  std::sort(notes.begin(), notes.end(), [](const NotationNote& a, const NotationNote& b) {
+    if (a.start_tick != b.start_tick) return a.start_tick < b.start_tick;
+    if (a.lane != b.lane) return a.lane < b.lane;
+    return a.id < b.id;
+  });
+  for (size_t i = 0; i < notes.size(); ++i) notes[i].id = static_cast<int32_t>(i);
+
+  chart.notes = std::move(notes);
+  chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
+
+  out.chart = std::move(chart);
+  out.meta = std::move(meta);
+  return {SerializeError::Ok, {}};
+}
+
+SerializeResult SusChartFormat::load_file(const std::string& path, SusChartLoadResult& out) {
+  SerializeResult status;
+  const std::string text = read_file_text(path, status);
+  if (status.error != SerializeError::Ok) return status;
+  return parse(text, out);
+}
+
+SerializeResult SusChartFormat::serialize(const NotationChart& chart,
+                                          const SusChartSaveOptions& options,
+                                          std::string& out_text) {
+  MusicTiming timing = chart.timing;
+  normalize_timing_points(timing);
+  const int tpq = std::max(1, timing.ticks_per_quarter);
+  const int lane_pad = options.ched_lane_padding ? 2 : 0;
+
+  auto sus_lane = [&](int32_t lane) { return std::clamp(lane + lane_pad, 0, 35); };
+
+  // Measure length: fixed 4 beats for export simplicity.
+  const int64_t ticks_per_measure = static_cast<int64_t>(tpq) * 4;
+
+  auto measure_of = [&](int64_t tick) -> int {
+    return static_cast<int>(tick / std::max<int64_t>(1, ticks_per_measure));
+  };
+  auto slot_of = [&](int64_t tick, int slots) -> int {
+    const int64_t local = tick % std::max<int64_t>(1, ticks_per_measure);
+    if (slots <= 0) return 0;
+    return static_cast<int>((local * slots + ticks_per_measure / 2) / ticks_per_measure);
+  };
+
+  // Choose subdivision so every note tick lands on a slot (gcd-friendly: use 1920 or 480*4).
+  // Per-measure we pick the LCM of needed divisions capped at 192.
+  auto needed_div = [&](int64_t tick) {
+    const int64_t local = tick % ticks_per_measure;
+    if (local == 0) return 1;
+    int div = static_cast<int>(ticks_per_measure / std::gcd(local, ticks_per_measure));
+    return std::clamp(div, 1, 192);
+  };
+
+  std::ostringstream ss;
+  ss << "This file was generated by WDS Chart Editor.\n";
+  const auto& meta = options.meta;
+  auto emit_str = [&](const char* key, const std::string& value) {
+    ss << '#' << key << " \"" << value << "\"\n";
+  };
+  emit_str("TITLE", meta.title);
+  emit_str("ARTIST", meta.artist);
+  emit_str("DESIGNER", meta.designer);
+  if (!meta.difficulty.empty()) ss << "#DIFFICULTY " << meta.difficulty << '\n';
+  else ss << "#DIFFICULTY 0\n";
+  if (!meta.play_level.empty()) ss << "#PLAYLEVEL " << meta.play_level << '\n';
+  emit_str("SONGID", meta.song_id);
+  emit_str("WAVE", meta.wave_path);
+  ss.setf(std::ios::fixed);
+  ss.precision(3);
+  ss << "#WAVEOFFSET " << (meta.wave_offset_sec != 0.0
+                               ? meta.wave_offset_sec
+                               : static_cast<double>(timing.offset_ms) / 1000.0)
+     << '\n';
+  emit_str("JACKET", meta.jacket_path);
+  ss << "\n#REQUEST \"ticks_per_beat " << tpq << "\"\n\n";
+
+  // BPM definitions from timing points.
+  std::map<double, int> bpm_to_id;
+  int next_bpm_id = 1;
+  auto bpm_id_for = [&](double bpm) {
+    const auto it = bpm_to_id.find(bpm);
+    if (it != bpm_to_id.end()) return it->second;
+    const int id = next_bpm_id++;
+    bpm_to_id[bpm] = id;
+    return id;
+  };
+  for (const auto& p : timing.points) bpm_id_for(p.bpm);
+  for (const auto& [bpm, id] : bpm_to_id) {
+    ss.precision(4);
+    ss << "#BPM" << base36_digit(id / 36) << base36_digit(id % 36) << ": " << bpm << '\n';
+  }
+  ss << '\n';
+
+  // Emit BPM changes per measure as #mmm08 lines (one slot at measure start for each point).
+  struct MeasBpm {
+    int measure;
+    int id;
+  };
+  std::vector<MeasBpm> meas_bpms;
+  for (const auto& p : timing.points) {
+    meas_bpms.push_back({measure_of(p.tick), bpm_id_for(p.bpm)});
+  }
+  std::map<int, int> measure_bpm_id;
+  for (const auto& mb : meas_bpms) measure_bpm_id[mb.measure] = mb.id;
+  for (const auto& [meas, id] : measure_bpm_id) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%03d", meas % 1000);
+    ss << '#' << buf << "08: " << base36_digit(id / 36) << base36_digit(id % 36) << '\n';
+  }
+  ss << '\n';
+
+  // Channel allocator for holds.
+  int next_channel = 0;
+  auto alloc_channel = [&]() {
+    const int ch = next_channel++ % 36;
+    return ch;
+  };
+
+  // Group notes into emit buckets: header -> measure -> (slot data map).
+  // key: header without measure (e.g. "12", "20a", "52")
+  struct Cell {
+    int type = 0;
+    int width = 0;
+  };
+  // header_suffix -> measure -> slot_count -> slot_index -> cell
+  std::map<std::string, std::map<int, std::map<int, std::map<int, Cell>>>> buckets;
+
+  auto place = [&](const std::string& suffix, int64_t tick, int type, int width) {
+    const int meas = measure_of(tick);
+    int div = needed_div(tick);
+    // Raise existing division if needed.
+    auto& by_div = buckets[suffix][meas];
+    if (!by_div.empty()) {
+      const int existing = by_div.begin()->first;
+      const int lcm = existing / static_cast<int>(std::gcd(existing, div)) * div;
+      div = std::min(192, lcm);
+      if (div != existing) {
+        // Remap old slots into new division.
+        std::map<int, Cell> remapped;
+        for (const auto& [idx, cell] : by_div[existing]) {
+          remapped[idx * div / existing] = cell;
+        }
+        by_div.clear();
+        by_div[div] = std::move(remapped);
+      }
+    }
+    const int slot = slot_of(tick, div);
+    by_div[div][slot] = Cell{type, width};
+  };
+
+  // Index hold bodies by start for pairing with heads.
+  std::unordered_map<int32_t, const NotationNote*> hold_body_by_start_id;
+  for (const auto& n : chart.notes) {
+    if (n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
+        n.note_type == NoteType::ScratchHold || n.note_type == NoteType::ScratchCriticalHold ||
+        n.note_type == NoteType::NontailHold || n.note_type == NoteType::NontailCriticalHold ||
+        n.note_type == NoteType::NontailScratchHold ||
+        n.note_type == NoteType::NontailScratchCriticalHold) {
+      // Match by same start_tick+lane as a head later.
+      (void)n;
+    }
+  }
+
+  // Mid stars keyed under nearest hold channel — emit as type2 mid on same channel.
+  // Simpler: emit mid stars as tap-like Sound via hold channel after allocating holds.
+
+  struct HoldEmit {
+    const NotationNote* head = nullptr;
+    const NotationNote* body = nullptr;
+    int channel = 0;
+  };
+  std::vector<HoldEmit> holds;
+  std::vector<const NotationNote*> mids;
+  std::vector<const NotationNote*> taps;
+
+  for (const auto& n : chart.notes) {
+    if (n.note_type == NoteType::HoldStart || n.note_type == NoteType::CriticalHoldStart ||
+        n.note_type == NoteType::ScratchHoldStart ||
+        n.note_type == NoteType::ScratchCriticalHoldStart) {
+      HoldEmit h;
+      h.head = &n;
+      holds.push_back(h);
+    } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::SoundPurple ||
+               n.note_type == NoteType::HoldEighth) {
+      mids.push_back(&n);
+    } else if (n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
+               n.note_type == NoteType::ScratchHold || n.note_type == NoteType::ScratchCriticalHold ||
+               n.note_type == NoteType::NontailHold || n.note_type == NoteType::NontailCriticalHold ||
+               n.note_type == NoteType::NontailScratchHold ||
+               n.note_type == NoteType::NontailScratchCriticalHold) {
+      // Attach to unmatched head with same start/lane.
+      for (auto& h : holds) {
+        if (h.body != nullptr || h.head == nullptr) continue;
+        if (h.head->start_tick == n.start_tick && h.head->lane == n.lane) {
+          h.body = &n;
+          break;
+        }
+      }
+    } else if (n.gimmick_type == GimmickType::None || !is_split_lane_gimmick(n.gimmick_type)) {
+      if (n.note_type != NoteType::None && n.note_type != NoteType::HiSpeed) {
+        taps.push_back(&n);
+      }
+    }
+  }
+
+  for (auto& h : holds) {
+    if (h.head == nullptr) continue;
+    h.channel = alloc_channel();
+    const auto* body = h.body != nullptr ? h.body : h.head;
+    const int64_t t0 = static_cast<int64_t>(std::llround(h.head->start_tick));
+    const int64_t t1 = static_cast<int64_t>(std::llround(body->end_tick));
+    const int sl = sus_lane(h.head->lane);
+    const int w = std::clamp(h.head->width, 1, 35);
+    std::string suffix = "2";
+    suffix.push_back(base36_digit(sl));
+    suffix.push_back(base36_digit(h.channel));
+    place(suffix, t0, 1, w);
+
+    int end_l = h.head->lane;
+    int end_w = h.head->width;
+    if (body->note_type == NoteType::ScratchHold ||
+        body->note_type == NoteType::ScratchCriticalHold ||
+        body->note_type == NoteType::NontailScratchHold ||
+        body->note_type == NoteType::NontailScratchCriticalHold) {
+      const auto range = get_scratch_end_lane_range(*body);
+      end_l = range.first;
+      end_w = std::max(1, range.second - range.first + 1);
+    }
+    const int end_sl = sus_lane(end_l);
+    std::string end_suffix = "2";
+    // If end lane differs, use slide category 3.
+    if (end_l != h.head->lane || end_w != h.head->width) {
+      suffix = "3";
+      suffix.push_back(base36_digit(sl));
+      suffix.push_back(base36_digit(h.channel));
+      // Re-place start as slide
+      // (already placed as hold — also place slide start/end)
+      place(suffix, t0, 1, w);
+      end_suffix = "3";
+    }
+    end_suffix.push_back(base36_digit(end_sl));
+    end_suffix.push_back(base36_digit(h.channel));
+    place(end_suffix, t1, 2, std::clamp(end_w, 1, 35));
+
+    for (const NotationNote* mid : mids) {
+      if (mid->start_tick <= h.head->start_tick || mid->start_tick >= body->end_tick) continue;
+      // Same lane band loosely.
+      if (mid->lane + mid->width <= h.head->lane ||
+          mid->lane >= h.head->lane + h.head->width) {
+        continue;
+      }
+      std::string mid_suffix = suffix.substr(0, 1);
+      mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
+      mid_suffix.push_back(base36_digit(h.channel));
+      place(mid_suffix, static_cast<int64_t>(std::llround(mid->start_tick)), 3,
+            std::clamp(mid->width, 1, 35));
+    }
+  }
+
+  for (const NotationNote* n : taps) {
+    const int64_t tick = static_cast<int64_t>(std::llround(n->start_tick));
+    const int sl = sus_lane(n->lane);
+    const int w = std::clamp(n->width, 1, 35);
+    if (n->note_type == NoteType::Flick) {
+      std::string tap_suffix = "1";
+      tap_suffix.push_back(base36_digit(sl));
+      place(tap_suffix, tick, 3, w);
+      int dir = 1;  // up
+      if (n->scratch_length < 0) dir = 3;
+      else if (n->scratch_length > 0) dir = 4;
+      std::string dir_suffix = "5";
+      dir_suffix.push_back(base36_digit(sl));
+      place(dir_suffix, tick, dir, w);
+    } else {
+      const int type = (n->note_type == NoteType::Critical) ? 2 : 1;
+      std::string suffix = "1";
+      suffix.push_back(base36_digit(sl));
+      place(suffix, tick, type, w);
+    }
+  }
+
+  // Flush buckets to text.
+  for (const auto& [suffix, by_meas] : buckets) {
+    for (const auto& [meas, by_div] : by_meas) {
+      if (by_div.empty()) continue;
+      const int div = by_div.begin()->first;
+      const auto& cells = by_div.begin()->second;
+      std::string data(static_cast<size_t>(div) * 2, '0');
+      for (const auto& [slot, cell] : cells) {
+        if (slot < 0 || slot >= div) continue;
+        data[static_cast<size_t>(slot) * 2] = base36_digit(cell.type);
+        data[static_cast<size_t>(slot) * 2 + 1] = base36_digit(cell.width);
+      }
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%03d", meas % 1000);
+      ss << '#' << buf << suffix << ": " << data << '\n';
+    }
+  }
+
+  out_text = ss.str();
+  return {SerializeError::Ok, {}};
+}
+
+SerializeResult SusChartFormat::save_file(const NotationChart& chart, const std::string& path,
+                                          const SusChartSaveOptions& options) {
+  std::string text;
+  const auto result = serialize(chart, options, text);
+  if (result.error != SerializeError::Ok) return result;
+  return write_file_text(path, text);
+}
+
+}  // namespace wds::chart_editor

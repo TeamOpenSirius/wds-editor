@@ -1,0 +1,50 @@
+# =============================================================================
+# Track sources + runtime/packaging assets needed to build, package, and run.
+# =============================================================================
+
+# --- OS / editor junk ---
+.DS_Store
+**/.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+*.tmp
+.idea/
+.vscode/
+*.user
+*.suo
+*.code-workspace
+
+# --- Build outputs / caches ---
+/build/
+/build-*/
+/dist/
+/.cache/
+.cache/
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+compile_commands.json
+.clangd/
+.cmake/
+
+# --- Machine-local secrets / absolute paths ---
+/scripts/env.local
+.env
+.env.local
+.env.*.local
+
+# Local tool checkouts dropped inside the repo
+/vcpkg/
+/VulkanSDK/
+
+# MSI Binary-table dumps (not build inputs; WixUI assets come from wixl-data)
+/Binary/
+
+# Optional local-only docs
+/docs/
+
+# Optional sample BGM for local testing
+/suzume_no_tojimari.ogg

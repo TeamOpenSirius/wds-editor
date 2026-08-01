@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Product shell for dist/wds-win-x86_64.msi.
+  File components are harvested at packaging time via wixl-heat into a sibling fragment.
+  Config is NOT installed: runtime writes %LOCALAPPDATA%\WDS\config\config.yml.
+  UI: scripts/win-msi-ui.wxs (install dir + shortcuts + progress + exit).
+
+  Language must stay 1033 to match wixl Template summary (x64;1033).
+  Shortcut features are toggled via Remove ControlEvents (wixl lacks Component/Feature Condition).
+
+  Upgrades:
+  - Same UpgradeCode + MajorUpgrade removes the previous product (single ARP entry).
+  - HKLM InstallDir is remembered so UpdateDlg installs over the existing folder.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="WDS Editor"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="WDS"
+           UpgradeCode="A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="WDS Chart Editor (Windows x64)"
+             Comments="Self-contained editor; preferences live under LocalAppData"/>
+
+    <!-- Remove previous product before installing so Apps & Features stays a single entry.
+         AllowSameVersionUpgrades: same ProductVersion still replaces (sets
+         WIX_SAME_VERSION_UPGRADE_DETECTED in wixl / msitools). -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of WDS Editor is already installed."
+                  AllowSameVersionUpgrades="yes"/>
+    <MediaTemplate EmbedCab="yes"/>
+
+    <Property Id="ARPPRODUCTICON" Value="WdsEditorIcon"/>
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes"/>
+    <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes"/>
+    <!-- Parent folder chosen in BrowseDlg; CustomAction appends "WDS Editor". -->
+    <Property Id="WDSINSTALLPARENT" Secure="yes"/>
+    <!-- Remembered install path from the previous MSI (Win64 HKLM). -->
+    <Property Id="WDS_PREVIOUS_INSTALL" Secure="yes">
+      <RegistrySearch Id="FindWdsInstallDir"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="InstallDir"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <CustomAction Id="SetInstallDirFromBrowse"
+                  Property="INSTALLDIR"
+                  Value="[WDSINSTALLPARENT]WDS Editor"/>
+    <CustomAction Id="SetInstallDirFromPrevious"
+                  Property="INSTALLDIR"
+                  Value="[WDS_PREVIOUS_INSTALL]"/>
+
+    <UIRef Id="WdsUI"/>
+
+    <InstallUISequence>
+      <Custom Action="SetInstallDirFromPrevious" After="AppSearch">
+        WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
+    </InstallUISequence>
+    <InstallExecuteSequence>
+      <Custom Action="SetInstallDirFromPrevious" After="AppSearch">
+        WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
+    </InstallExecuteSequence>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="WDS Editor"/>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="WDS Editor"/>
+      </Directory>
+      <Directory Id="DesktopFolder" Name="Desktop"/>
+    </Directory>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="C8D9E0F1-2A3B-4C5D-6E7F-8091A2B3C4D5" Win64="yes">
+        <Shortcut Id="WdsEditorStartMenu"
+                  Name="WDS Editor"
+                  Description="World Dai Star chart editor"
+                  Target="[INSTALLDIR]wds_editor.exe"
+                  WorkingDirectory="INSTALLDIR"
+                  Icon="WdsEditorIcon"
+                  IconIndex="0"/>
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall"/>
+        <RegistryValue Root="HKCU"
+                       Key="Software\WDS\Editor"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="D9E0F1A2-3B4C-5D6E-7F80-91A2B3C4D5E6" Win64="yes">
+        <Shortcut Id="WdsEditorDesktop"
+                  Name="WDS Editor"
+                  Description="World Dai Star chart editor"
+                  Target="[INSTALLDIR]wds_editor.exe"
+                  WorkingDirectory="INSTALLDIR"
+                  Icon="WdsEditorIcon"
+                  IconIndex="0"/>
+        <RegistryValue Root="HKCU"
+                       Key="Software\WDS\Editor"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="RegistryInstallDir" Guid="E0F1A2B3-4C5D-6E7F-8091-A2B3C4D5E6F7" Win64="yes">
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="InstallDir"
+                       Type="string"
+                       Value="[INSTALLDIR]"
+                       KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <!-- Prefer BMP-only ICO generated at package time (PNG-compressed ICO can crash msiexec UI). -->
+    <Icon Id="WdsEditorIcon" SourceFile="$(var.SourceDir)/wds-msi.ico"/>
+
+    <Feature Id="ProductFeature" Title="WDS Editor" Level="1">
+      <ComponentGroupRef Id="ProductFiles"/>
+      <ComponentRef Id="RegistryInstallDir"/>
+    </Feature>
+    <Feature Id="StartMenuFeature" Title="Start Menu Shortcut" Level="1">
+      <ComponentRef Id="ApplicationShortcut"/>
+    </Feature>
+    <Feature Id="DesktopFeature" Title="Desktop Shortcut" Level="1">
+      <ComponentRef Id="DesktopShortcut"/>
+    </Feature>
+  </Product>
+</Wix>

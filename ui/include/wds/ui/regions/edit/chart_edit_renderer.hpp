@@ -1,0 +1,72 @@
+#pragma once
+
+#include "wds/ui/regions/edit/edit_draw_depth.hpp"
+#include "wds/ui/regions/edit/edit_viewport.hpp"
+
+#include <wds/core/notation.hpp>
+#include <wds/core/preview_config.hpp>
+
+#include <wds/interaction/ui_painter.hpp>
+#include <wds/renderer/draw_batch.hpp>
+#include <wds/renderer/skin_catalog.hpp>
+
+#include <optional>
+#include <unordered_set>
+#include <vector>
+
+namespace wds::ui {
+
+struct EditGhost {
+  wds::chart_editor::NotationNote note;
+  bool visible = true;
+  float alpha = 0.45f;
+};
+
+class ChartEditRenderer {
+ public:
+  const EditDrawDepthConfig& draw_depth() const noexcept { return depth_; }
+  EditDrawDepthConfig& draw_depth() noexcept { return depth_; }
+  void set_draw_depth(EditDrawDepthConfig depth) noexcept { depth_ = depth; }
+
+  void paint(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+             const wds::chart_editor::MusicTiming& timing,
+             const std::vector<wds::chart_editor::NotationNote>& notes,
+             const wds::chart_editor::PreviewConfig& preview,
+             const std::unordered_set<int32_t>& selected,
+             const std::optional<EditGhost>& ghost = std::nullopt,
+             const std::vector<EditGhost>& extra_ghosts = {},
+             const std::optional<wds::interaction::Rect>& marquee = std::nullopt,
+             const wds::renderer::SkinCatalog* skin = nullptr,
+             bool show_beat_grid = true) const;
+
+  // Drawn after skinned notes so the highlight sits on top of sprites.
+  void paint_overlays(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                      const std::vector<wds::chart_editor::NotationNote>& notes,
+                      const std::unordered_set<int32_t>& selected,
+                      const std::optional<wds::interaction::Rect>& marquee = std::nullopt) const;
+
+  void append_skinned_backdrop(wds::renderer::DrawBatch& batch,
+                               const wds::renderer::SkinCatalog& skin,
+                               const EditViewport& viewport, int fb_w, int fb_h,
+                               wds::renderer::ScreenBounds screen,
+                               float stage_opacity = 0.8f) const;
+
+  void append_skinned_notes(wds::renderer::DrawBatch& batch,
+                            const wds::renderer::SkinCatalog& skin,
+                            const EditViewport& viewport,
+                            const std::vector<wds::chart_editor::NotationNote>& notes,
+                            const std::unordered_set<int32_t>& selected, int fb_w, int fb_h,
+                            wds::renderer::ScreenBounds screen) const;
+
+  void append_skinned_ghosts(wds::renderer::DrawBatch& batch,
+                             const wds::renderer::SkinCatalog& skin,
+                             const EditViewport& viewport,
+                             const std::optional<EditGhost>& ghost,
+                             const std::vector<EditGhost>& extra_ghosts, int fb_w, int fb_h,
+                             wds::renderer::ScreenBounds screen) const;
+
+ private:
+  EditDrawDepthConfig depth_{};
+};
+
+}  // namespace wds::ui

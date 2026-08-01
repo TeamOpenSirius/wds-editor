@@ -1,0 +1,477 @@
+#include "wds/ui/regions/edit/edit_gutters.hpp"
+
+#include "wds/ui/regions/edit/edit_viewport.hpp"
+
+#include <wds/core/edit_grid.hpp>
+#include <wds/core/gimmick.hpp>
+#include <wds/core/notation.hpp>
+
+#include <wds/interaction/theme.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace wds::ui {
+namespace {
+
+using wds::chart_editor::NotationNote;
+using wds::interaction::Color;
+using wds::interaction::Rect;
+using wds::interaction::Vec2;
+
+float gutter_font_px() { return wds::interaction::theme::kFontSizeGutter; }
+float split_label_h() { return wds::interaction::theme::px(28.0f); }
+float timing_label_h() { return wds::interaction::theme::px(52.0f); }
+float split_band_gap() { return wds::interaction::theme::px(1.0f); }
+float gutter_label_pad() { return wds::interaction::theme::px(2.0f); }
+
+constexpr Color kSplitStartColor{0.22f, 0.48f, 0.95f, 1.0f};
+constexpr Color kSplitEndColor{0.92f, 0.28f, 0.28f, 1.0f};
+constexpr Color kBpmLabelColor{0.48f, 0.30f, 0.14f, 0.96f};
+
+}  // namespace
+
+std::string format_bpm_label(double bpm) {
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.6f", bpm);
+  std::string s(buf);
+  if (s.find('.') != std::string::npos) {
+    while (!s.empty() && s.back() == '0') {
+      s.pop_back();
+    }
+    if (!s.empty() && s.back() == '.') {
+      s.pop_back();
+    }
+  }
+  return s.empty() ? "0" : s;
+}
+
+void split_boundaries_12(int32_t split_count, std::vector<int32_t>& out) {
+  out.clear();
+  switch (split_count) {
+    case 2:
+      out = {5};
+      break;
+    case 3:
+      out = {3, 7};
+      break;
+    case 4:
+      out = {2, 5, 8};
+      break;
+    case 5:
+      out = {2, 4, 6, 8};
+      break;
+    case 6:
+      out = {1, 3, 5, 7, 9};
+      break;
+    default:
+      break;
+  }
+}
+
+bool split_track_for_lane(int32_t split_count, int32_t lane_count, int32_t probe_lane,
+                          int32_t& out_lane, int32_t& out_width) noexcept {
+  const int32_t n = std::max(1, lane_count);
+  const int32_t lane = std::clamp(probe_lane, 0, n - 1);
+  std::vector<int32_t> mids;
+  split_boundaries_12(split_count, mids);
+  // Boundaries store the last lane index of each track before the final one;
+  // vertical lines are drawn at mid + 1 (see draw_split_boundaries).
+  int32_t start = 0;
+  for (const int32_t mid : mids) {
+    const int32_t next = mid + 1;
+    if (lane < next) {
+      out_lane = start;
+      out_width = next - start;
+      return out_width > 0;
+    }
+    start = next;
+  }
+  out_lane = start;
+  out_width = n - start;
+  return out_width > 0;
+}
+
+Color split_color_for_id(int32_t color_id) noexcept {
+  const uint32_t h = static_cast<uint32_t>(color_id) * 2654435761u;
+  const float hue = (h % 360) / 360.0f;
+  const float s = 0.72f;
+  const float v = 0.88f;
+  const float c = v * s;
+  const float x = c * (1.0f - std::fabs(std::fmod(hue * 6.0f, 2.0f) - 1.0f));
+  const float m = v - c;
+  float r = 0, g = 0, b = 0;
+  const int sector = static_cast<int>(hue * 6.0f) % 6;
+  switch (sector) {
+    case 0:
+      r = c;
+      g = x;
+      break;
+    case 1:
+      r = x;
+      g = c;
+      break;
+    case 2:
+      g = c;
+      b = x;
+      break;
+    case 3:
+      g = x;
+      b = c;
+      break;
+    case 4:
+      r = x;
+      b = c;
+      break;
+    default:
+      r = c;
+      b = x;
+      break;
+  }
+  return {r + m, g + m, b + m, 1.0f};
+}
+
+Color split_slot_color(int32_t color_id, int32_t line_slot,
+                       const wds::renderer::SkinCatalog* skin) noexcept {
+  if (skin != nullptr) {
+    const auto suffixes = skin->split_lines.suffixes_for(color_id);
+    if (suffixes.size() > 1) {
+      const size_t idx =
+          static_cast<size_t>(line_slot < 0 ? 0 : line_slot) % suffixes.size();
+      uint32_t h = 2166136261u;
+      for (unsigned char c : suffixes[idx]) {
+        h ^= c;
+        h *= 16777619u;
+      }
+      return split_color_for_id(static_cast<int32_t>(h & 0x7fffffff));
+    }
+  }
+  return split_color_for_id(color_id);
+}
+
+namespace {
+int64_t split_fade_ms(float seconds) noexcept {
+  return std::max<int64_t>(
+      1, static_cast<int64_t>(std::llround(static_cast<double>(seconds) * 1000.0)));
+}
+}  // namespace
+
+std::vector<SplitCoverageMs> collect_split_coverage_ms(
+    const std::vector<NotationNote>& notes, const wds::chart_editor::MusicTiming& timing,
+    const wds::chart_editor::PreviewConfig& preview) {
+  std::vector<SplitCoverageMs> out;
+  const int64_t appear_ms = split_fade_ms(preview.split_line_animation_start_sec);
+  const int64_t disappear_ms = split_fade_ms(preview.split_line_animation_end_sec);
+  for (const auto& note : notes) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    SplitCoverageMs range;
+    range.steady_start_ms = note.start_ms(timing);
+    range.steady_end_ms = std::max(range.steady_start_ms, note.end_ms(timing));
+    range.fade_start_ms = range.steady_start_ms - appear_ms;
+    range.fade_end_ms = range.steady_end_ms + disappear_ms;
+    range.split_count = wds::chart_editor::get_split_count(note.gimmick_type);
+    range.color_id = note.scratch_length;
+    out.push_back(range);
+  }
+  return out;
+}
+
+std::vector<std::pair<float, float>> merged_split_hide_ranges_ms(
+    const std::vector<NotationNote>& notes, const wds::chart_editor::MusicTiming& timing,
+    const wds::chart_editor::PreviewConfig& preview, float view_ms_lo, float view_ms_hi) {
+  std::vector<std::pair<float, float>> covered;
+  for (const auto& range : collect_split_coverage_ms(notes, timing, preview)) {
+    const float lo = std::max(view_ms_lo, static_cast<float>(range.fade_start_ms));
+    const float hi = std::min(view_ms_hi, static_cast<float>(range.fade_end_ms));
+    if (hi > lo) covered.emplace_back(lo, hi);
+  }
+  std::sort(covered.begin(), covered.end());
+  std::vector<std::pair<float, float>> merged;
+  for (const auto& seg : covered) {
+    if (merged.empty() || seg.first > merged.back().second) {
+      merged.push_back(seg);
+    } else {
+      merged.back().second = std::max(merged.back().second, seg.second);
+    }
+  }
+  return merged;
+}
+
+float split_line_opacity_at_ms(const NotationNote& note,
+                               const wds::chart_editor::MusicTiming& timing,
+                               const wds::chart_editor::PreviewConfig& preview,
+                               int64_t time_ms) noexcept {
+  if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return 0.0f;
+  const int64_t start_ms = note.start_ms(timing);
+  const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
+  const int64_t appear_ms = split_fade_ms(preview.split_line_animation_start_sec);
+  const int64_t disappear_ms = split_fade_ms(preview.split_line_animation_end_sec);
+  const int64_t fade_start = start_ms - appear_ms;
+  const int64_t fade_end = end_ms + disappear_ms;
+  if (time_ms < fade_start || time_ms > fade_end) return 0.0f;
+  if (time_ms < start_ms) {
+    return std::clamp(static_cast<float>(time_ms - fade_start) / static_cast<float>(appear_ms),
+                      0.0f, 1.0f);
+  }
+  if (time_ms > end_ms) {
+    return std::clamp(static_cast<float>(fade_end - time_ms) / static_cast<float>(disappear_ms),
+                      0.0f, 1.0f);
+  }
+  return 1.0f;
+}
+
+float split_line_opacity_at_tick(const NotationNote& note,
+                                 const wds::chart_editor::MusicTiming& timing,
+                                 const wds::chart_editor::PreviewConfig& preview,
+                                 int32_t tick) noexcept {
+  return split_line_opacity_at_ms(
+      note, timing, preview,
+      wds::chart_editor::tick_to_milliseconds(static_cast<float>(tick), timing));
+}
+
+const NotationNote* split_note_covering_tick(const std::vector<NotationNote>& notes,
+                                             const wds::chart_editor::MusicTiming& timing,
+                                             const wds::chart_editor::PreviewConfig& preview,
+                                             int32_t tick) {
+  // Cover check is wall-clock (same as preview fade), not BPM→tick conversion /
+  // subdivision banding — otherwise edit-mode hide edges snap to 拍内分割.
+  const int64_t time_ms =
+      wds::chart_editor::tick_to_milliseconds(static_cast<float>(tick), timing);
+  for (const auto& note : notes) {
+    if (split_line_opacity_at_ms(note, timing, preview, time_ms) > 0.0f) return &note;
+  }
+  return nullptr;
+}
+
+void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                           const Rect& area) {
+  const auto& grid = viewport.grid();
+  const auto range = viewport.visible_tick_range();
+  const int32_t start = range.first;
+  const int32_t end = range.second;
+  if (end < start) return;
+
+  // Screen-space LOD: when consecutive ticks land < ~1.25px apart, further lines alias.
+  constexpr float kMinLineGapPx = 1.25f;
+  auto draw_h = [&](int32_t tick, float thickness, const Color& color, float& last_y,
+                    bool& have_last) {
+    const float y = viewport.y_at(static_cast<float>(tick));
+    if (y < area.y || y > area.bottom()) return;
+    if (have_last && std::abs(y - last_y) < kMinLineGapPx) return;
+    painter.fill_rect({area.x, y - thickness * 0.5f, area.w, thickness}, color, 0.0f, 0.905f);
+    last_y = y;
+    have_last = true;
+  };
+
+  const int32_t subdiv_step = wds::chart_editor::subdivision_tick_step(grid);
+  const int32_t beat_step = std::max(1, grid.ticks_per_quarter);
+  // Upper bound: one rect per candidate tick (LOD may draw fewer).
+  const int32_t span = std::max(0, end - start);
+  painter.reserve_rects(static_cast<std::size_t>(span / std::max(1, subdiv_step) + 8));
+
+  float last_sub_y = 0.0f;
+  bool have_sub = false;
+  if (subdiv_step > 0) {
+    const int32_t first =
+        static_cast<int32_t>(std::ceil(static_cast<double>(start) / static_cast<double>(subdiv_step))) *
+        subdiv_step;
+    for (int32_t tick = first; tick <= end; tick += subdiv_step) {
+      if (tick % beat_step == 0) continue;  // beat lines drawn thicker below
+      draw_h(tick, 1.0f, {0.28f, 0.30f, 0.34f, 0.75f}, last_sub_y, have_sub);
+    }
+  }
+
+  float last_beat_y = 0.0f;
+  bool have_beat = false;
+  const int32_t first_beat =
+      static_cast<int32_t>(std::ceil(static_cast<double>(start) / static_cast<double>(beat_step))) *
+      beat_step;
+  for (int32_t tick = first_beat; tick <= end; tick += beat_step) {
+    draw_h(tick, 2.0f, {0.72f, 0.74f, 0.78f, 0.95f}, last_beat_y, have_beat);
+  }
+}
+
+void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                         const Rect& gutter, const wds::chart_editor::MusicTiming& timing,
+                         int32_t view_start_tick, int32_t view_end_tick, bool show_timing_marks) {
+  painter.fill_rect(gutter, {0.06f, 0.07f, 0.09f, 1.0f}, 0.0f, 0.85f);
+  if (!show_timing_marks) {
+    return;  // Official charts have no authored BPM/meter — hide measures + labels.
+  }
+  // Right gutter: measure lines only (no beat / subdivision grid).
+
+  for (const int tick :
+       wds::chart_editor::measure_ticks_in_range(view_start_tick, view_end_tick, timing)) {
+    const float y = viewport.y_at(static_cast<float>(tick));
+    if (y < gutter.y || y > gutter.bottom()) continue;
+    painter.fill_rect({gutter.x, y - 1.0f, gutter.w, 2.0f}, {0.72f, 0.74f, 0.78f, 0.95f}, 0.0f,
+                      0.906f);
+  }
+
+  const auto hits = build_timing_label_hits(viewport, gutter, timing);
+  // Later ticks first so earlier labels paint on top.
+  for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
+    const auto& hit = *it;
+    const auto& p =
+        *std::find_if(timing.points.begin(), timing.points.end(),
+                      [&](const wds::chart_editor::TimingPoint& tp) {
+                        return tp.tick == hit.point_tick;
+                      });
+    const std::string bpm = format_bpm_label(p.bpm);
+    const std::string meter =
+        std::to_string(p.numerator) + "/" + std::to_string(p.denominator);
+    painter.fill_rect(hit.bounds, kBpmLabelColor, 2.0f, 0.93f);
+    const float half = hit.bounds.h * 0.5f;
+    const float gutter_px = gutter_font_px();
+    painter.label({hit.bounds.x, hit.bounds.y, hit.bounds.w, half}, bpm,
+                  {0.98f, 0.93f, 0.84f, 1.0f}, 0.931f, false, gutter_px);
+    painter.label({hit.bounds.x, hit.bounds.y + half, hit.bounds.w, half}, meter,
+                  {0.90f, 0.82f, 0.70f, 1.0f}, 0.931f, false, gutter_px);
+  }
+}
+
+void paint_split_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                        const Rect& gutter, const std::vector<NotationNote>& notes,
+                        const wds::renderer::SkinCatalog* /*skin*/, bool show_beat_grid) {
+  painter.fill_rect(gutter, {0.05f, 0.06f, 0.08f, 1.0f}, 0.0f, 0.85f);
+  if (show_beat_grid) {
+    paint_horizontal_grid(painter, viewport, gutter);
+  }
+
+  const auto hits = build_split_label_hits(viewport, gutter, notes);
+  for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
+    const auto& hit = *it;
+    const Color c = hit.is_start ? kSplitStartColor : kSplitEndColor;
+    // Bands only — text is painted in ChartEditPanel::paint_overlays so it stays
+    // above skinned notes (avoids a second mismatched font size).
+    painter.fill_rect(hit.bounds, c, 3.0f, 0.94f);
+    painter.fill_rect(hit.bounds.inset(1.0f, 1.0f), {0.08f, 0.08f, 0.10f, 0.40f}, 2.0f, 0.941f);
+  }
+}
+
+void paint_split_lane_preview(wds::interaction::UiPainter& painter, const Rect& area,
+                              int32_t split_count, int32_t color_id,
+                              const wds::renderer::SkinCatalog* skin) {
+  painter.fill_rect(area, {0.02f, 0.03f, 0.05f, 1.0f}, 2.0f, 0.996f);
+  constexpr int32_t kLanes = 12;
+  // Only effect split boundaries — no gray default lane dividers.
+  std::vector<int32_t> mids;
+  split_boundaries_12(split_count, mids);
+  const float line_w = std::clamp(area.w / static_cast<float>(kLanes) * 0.35f, 3.0f, 8.0f);
+
+  auto draw_edge = [&](int32_t edge_lane, int32_t slot) {
+    const float x = std::floor(area.x + static_cast<float>(edge_lane) * area.w /
+                                            static_cast<float>(kLanes) +
+                                0.5f);
+    const Rect line{x - line_w * 0.5f, area.y + 2.0f, line_w, area.h - 4.0f};
+    auto c = split_slot_color(color_id, slot, skin);
+    if (skin != nullptr && skin->soft_split_line) {
+      painter.sprite(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.997f);
+      return;
+    }
+    if (skin != nullptr) {
+      if (const auto* tex = skin->split_lines.texture_for(color_id, slot, /*steady*/ 1)) {
+        painter.sprite(line, *tex, {1.0f, 1.0f, 1.0f, 1.0f}, 0.997f);
+        return;
+      }
+    }
+    painter.fill_rect(line, c, 1.0f, 0.997f);
+  };
+  draw_edge(0, 0);
+  int32_t slot = 1;
+  for (int32_t b : mids) draw_edge(b + 1, slot++);
+  draw_edge(kLanes, std::max(1, split_count));
+}
+
+std::vector<GutterLabelHit> build_split_label_hits(const EditViewport& viewport, const Rect& gutter,
+                                                   const std::vector<NotationNote>& notes) {
+  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
+  const float label_x = gutter.x + gutter_label_pad();
+  std::vector<GutterLabelHit> out;
+  for (const auto& note : notes) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    const int32_t start_tick = static_cast<int32_t>(note.start_tick);
+    const int32_t end_tick = static_cast<int32_t>(std::max(note.start_tick, note.end_tick));
+    const float y0 = viewport.y_at(note.start_tick);
+    const float y1 = viewport.y_at(static_cast<float>(end_tick));
+    // Upper band = start, lower band = end. No anti-overlap offsets.
+    if (y0 >= gutter.y - split_label_h() * 2.0f && y0 <= gutter.bottom() + split_label_h()) {
+      GutterLabelHit hit;
+      hit.note_id = note.id;
+      hit.is_start = true;
+      hit.anchor_tick = start_tick;
+      hit.bounds = {label_x, y0 - split_label_h() - split_band_gap(), label_w, split_label_h()};
+      out.push_back(hit);
+    }
+    if (y1 >= gutter.y - split_label_h() && y1 <= gutter.bottom() + split_label_h() * 2.0f &&
+        note.end_tick > note.start_tick) {
+      GutterLabelHit hit;
+      hit.note_id = note.id;
+      hit.is_start = false;
+      hit.anchor_tick = end_tick;
+      hit.bounds = {label_x, y1 + split_band_gap(), label_w, split_label_h()};
+      out.push_back(hit);
+    }
+  }
+  // Ascending time: hit-test prefers earlier; paint should reverse-iterate.
+  std::sort(out.begin(), out.end(), [](const GutterLabelHit& a, const GutterLabelHit& b) {
+    if (a.anchor_tick != b.anchor_tick) return a.anchor_tick < b.anchor_tick;
+    if (a.is_start != b.is_start) return a.is_start;  // start before end at same tick
+    return a.note_id < b.note_id;
+  });
+  return out;
+}
+
+std::vector<TimingLabelHit> build_timing_label_hits(const EditViewport& viewport, const Rect& gutter,
+                                                    const wds::chart_editor::MusicTiming& timing) {
+  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
+  const float label_x = gutter.x + gutter_label_pad();
+  std::vector<TimingLabelHit> out;
+  for (const auto& p : timing.points) {
+    const float y = viewport.y_at(static_cast<float>(p.tick));
+    if (y < gutter.y - timing_label_h() || y > gutter.bottom() + timing_label_h()) continue;
+    TimingLabelHit hit;
+    hit.point_tick = p.tick;
+    hit.bounds = {label_x, y - timing_label_h() * 0.5f, label_w, timing_label_h()};
+    out.push_back(hit);
+  }
+  std::sort(out.begin(), out.end(), [](const TimingLabelHit& a, const TimingLabelHit& b) {
+    return a.point_tick < b.point_tick;
+  });
+  return out;
+}
+
+std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport, const Rect& gutter,
+                                              const wds::chart_editor::MusicTiming& timing,
+                                              Vec2 point) {
+  if (!gutter.contains(point)) return std::nullopt;
+  const int tick = viewport.tick_at(point.y);
+  const int32_t measure = wds::chart_editor::snap_to_measure(tick, timing);
+  const float y = viewport.y_at(static_cast<float>(measure));
+  if (std::abs(point.y - y) > 8.0f) return std::nullopt;
+  for (const auto& p : timing.points) {
+    if (p.tick == measure) return std::nullopt;
+  }
+  return measure;
+}
+
+Rect split_start_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
+  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
+  const float label_x = gutter.x + gutter_label_pad();
+  const float y = viewport.y_at(static_cast<float>(tick));
+  return {label_x, y - split_label_h() - split_band_gap(), label_w, split_label_h()};
+}
+
+Rect timing_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
+  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
+  const float label_x = gutter.x + gutter_label_pad();
+  const float y = viewport.y_at(static_cast<float>(tick));
+  return {label_x, y - timing_label_h() * 0.5f, label_w, timing_label_h()};
+}
+
+}  // namespace wds::ui

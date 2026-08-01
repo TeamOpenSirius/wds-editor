@@ -1,0 +1,5 @@
+WDSPROJECT 1
+MUSIC music.ogg
+CHART_DELAY_MS 3019
+CHART chart.wdschart
+END
