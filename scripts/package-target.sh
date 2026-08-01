@@ -885,8 +885,9 @@ write_macos_app_bundle() {
     done
   fi
 
-  # ICD for loader auto-discovery (GUI apps often ignore shell VK_* vars).
-  # library_path is relative to this JSON file's directory.
+  # ICD under Resources (NOT MacOS/): non-Mach-O files in Contents/MacOS break
+  # codesign sealing. Startup setenv uses an absolute path to this JSON so host
+  # VK_ICD_FILENAMES cannot win; library_path is relative to the JSON directory.
   cat >"${resources}/vulkan/icd.d/MoltenVK_icd.json" <<'EOF'
 {
     "file_format_version": "1.0.0",
@@ -905,13 +906,16 @@ EOF
   [[ -f "$icns" ]] || die "missing macOS app icon: $icns (run scripts/generate-app-icons.sh)"
   cp -a "$icns" "${resources}/wds.icns"
 
-  cat >"${app}/Contents/Info.plist" <<'EOF'
+  # Mach-O as CFBundleExecutable — bash wrappers break under Gatekeeper quarantine
+  # (SIGKILL / empty launch) and are unnecessary once prepare_macos_vulkan_environment
+  # forces the bundled ICD before glfwInit.
+  cat >"${app}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>WDS</string>
+  <string>${demo_name}</string>
   <key>CFBundleIdentifier</key>
   <string>com.wds.editor</string>
   <key>CFBundleName</key>
@@ -932,23 +936,13 @@ EOF
 </plist>
 EOF
 
-  cat >"${payload}/WDS" <<EOF
-#!/bin/bash
-set -euo pipefail
-DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-RES="\$(cd "\${DIR}/../Resources" && pwd)"
-export DYLD_LIBRARY_PATH="\${DIR}/lib\${DYLD_LIBRARY_PATH:+:\${DYLD_LIBRARY_PATH}}"
-# Override stale host SDK paths — a bad VK_ICD_FILENAMES disables bundle discovery.
-export VK_ICD_FILENAMES="\${RES}/vulkan/icd.d/MoltenVK_icd.json"
-export VK_DRIVER_FILES="\${VK_ICD_FILENAMES}"
-cd "\${RES}"
-exec "\${DIR}/${demo_name}" "\$@"
-EOF
-  chmod +x "${payload}/WDS" "${payload}/${demo_name}"
+  chmod +x "${payload}/${demo_name}"
 
   # install_name_tool invalidates existing ad-hoc signatures on copied Homebrew
   # dylibs; modern macOS then SIGKILLs at load with "Code Signature Invalid".
   codesign_macos_app "$app"
+
+  verify_macos_vulkan_icd "$app"
 }
 
 codesign_macos_app() {
@@ -956,7 +950,7 @@ codesign_macos_app() {
   need_cmd codesign
   local f
   # Ad-hoc resign after install_name_tool (fixes CODESIGNING / Invalid Page).
-  # Assets live in Contents/Resources; MacOS/ only has Mach-O + launcher.
+  # Assets live in Contents/Resources; MacOS/ only has Mach-O + dylibs.
   while IFS= read -r -d '' f; do
     codesign --force --sign - "$f" >/dev/null 2>&1
   done < <(
@@ -967,6 +961,82 @@ codesign_macos_app() {
   codesign --force --sign - "$app" >/dev/null
   codesign --verify "$app" >/dev/null \
     || die "codesign --verify failed for $app"
+}
+
+# Fail packaging if the bundled ICD cannot create a Vulkan instance (portability).
+# Catches wrong library_path / missing MoltenVK before shipping a broken DMG.
+verify_macos_vulkan_icd() {
+  local app="$1"
+  local payload="${app}/Contents/MacOS"
+  local icd="${app}/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
+  local loader="${payload}/lib/libvulkan.1.dylib"
+  local molten="${payload}/lib/libMoltenVK.dylib"
+
+  [[ -f "$icd" ]] || die "missing auto-discovery ICD: $icd"
+  [[ -f "$loader" ]] || die "missing bundled vulkan loader: $loader"
+  [[ -f "$molten" ]] || die "missing bundled MoltenVK: $molten"
+
+  python3 - "$icd" "$molten" <<'PY' || die "MoltenVK_icd.json library_path invalid"
+import json, sys
+from pathlib import Path
+icd, molten = Path(sys.argv[1]), Path(sys.argv[2]).resolve()
+data = json.loads(icd.read_text())
+lp = data["ICD"]["library_path"]
+resolved = (icd.parent / lp).resolve()
+if resolved != molten:
+    raise SystemExit(f"library_path {lp!r} -> {resolved} != {molten}")
+print(f"ICD OK: {icd} -> {resolved}")
+PY
+
+  local probe_src probe_bin
+  probe_src="$(mktemp /tmp/wds-vkprobe.XXXXXX.c)"
+  probe_bin="$(mktemp /tmp/wds-vkprobe.XXXXXX)"
+  rm -f "$probe_bin"
+  cat >"$probe_src" <<'EOF'
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef int32_t VkResult;
+typedef void* VkInstance;
+typedef struct {
+  int32_t sType; const void* pNext; const char* pAppName; uint32_t appVer;
+  const char* pEngine; uint32_t engVer; uint32_t apiVer;
+} VkApplicationInfo;
+typedef struct {
+  int32_t sType; const void* pNext; int32_t flags; const VkApplicationInfo* pAppInfo;
+  uint32_t lc; const char* const* ln; uint32_t ec; const char* const* en;
+} VkInstanceCreateInfo;
+int main(int argc, char** argv) {
+  if (argc < 2) return 1;
+  void* h = dlopen(argv[1], RTLD_NOW);
+  if (!h) { fprintf(stderr, "dlopen loader: %s\n", dlerror()); return 2; }
+  typedef VkResult (*F)(const VkInstanceCreateInfo*, const void*, VkInstance*);
+  F create = (F)dlsym(h, "vkCreateInstance");
+  if (!create) { fprintf(stderr, "no vkCreateInstance\n"); return 3; }
+  VkApplicationInfo app = {0, NULL, "wds-probe", 0, NULL, 0, (1u << 22) | (1u << 12)};
+  const char* exts[] = {"VK_KHR_portability_enumeration", "VK_KHR_surface",
+                        "VK_EXT_metal_surface"};
+  VkInstanceCreateInfo ci = {1, NULL, 1, &app, 0, NULL, 3, exts};
+  VkInstance inst = NULL;
+  VkResult r = create(&ci, NULL, &inst);
+  fprintf(stderr, "vkCreateInstance => %d\n", (int)r);
+  return r == 0 ? 0 : 4;
+}
+EOF
+  if ! cc -O0 -o "$probe_bin" "$probe_src" 2>/dev/null; then
+    rm -f "$probe_src" "$probe_bin"
+    echo "warning: could not compile Vulkan ICD probe; skipping runtime check" >&2
+    return 0
+  fi
+  local rc=0
+  if ! env -i HOME="${HOME:-/tmp}" PATH="/usr/bin:/bin" \
+      VK_ICD_FILENAMES="$icd" VK_DRIVER_FILES="$icd" \
+      "$probe_bin" "$loader" 2>&1; then
+    rc=1
+  fi
+  rm -f "$probe_src" "$probe_bin"
+  [[ "$rc" -eq 0 ]] || die "bundled MoltenVK ICD failed vkCreateInstance (see above)"
+  echo "Vulkan ICD probe OK (Resources/vulkan/icd.d/MoltenVK_icd.json)"
 }
 
 make_macos_dmg_background() {

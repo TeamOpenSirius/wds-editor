@@ -1,7 +1,13 @@
 #include "wds/ui/resource_paths.hpp"
 
+#include <cstring>
 #include <filesystem>
+#include <string>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace wds::ui {
 
@@ -11,6 +17,21 @@ namespace {
 
 fs::path exe_dir_from_argv0(const char* argv0) {
   std::error_code ec;
+#if defined(__APPLE__)
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  if (size > 0) {
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) == 0) {
+      buf.resize(std::strlen(buf.c_str()));
+      const fs::path resolved = fs::weakly_canonical(fs::path(buf), ec);
+      if (!ec && !resolved.empty()) {
+        return resolved.parent_path();
+      }
+      return fs::path(buf).lexically_normal().parent_path();
+    }
+  }
+#endif
   if (argv0 == nullptr || argv0[0] == '\0') {
     return {};
   }

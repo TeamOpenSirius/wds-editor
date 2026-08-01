@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -15,7 +16,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#elif !defined(__APPLE__)
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
 #include <dlfcn.h>
 #endif
 
@@ -26,6 +29,23 @@ namespace {
 
 fs::path exe_dir_from_argv0(const char* argv0) {
   std::error_code ec;
+#if defined(__APPLE__)
+  // Prefer the real Mach-O path — argv[0] can be wrong under LaunchServices /
+  // App Translocation / odd shells, which then breaks bundled ICD discovery.
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  if (size > 0) {
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) == 0) {
+      buf.resize(std::strlen(buf.c_str()));
+      const fs::path resolved = fs::weakly_canonical(fs::path(buf), ec);
+      if (!ec && !resolved.empty()) {
+        return resolved.parent_path();
+      }
+      return fs::path(buf).lexically_normal().parent_path();
+    }
+  }
+#endif
   if (argv0 == nullptr || argv0[0] == '\0') {
     return {};
   }
@@ -96,6 +116,8 @@ void check_bass_runtime(StartupDependencyReport& report, const fs::path& exe_dir
 }
 
 fs::path bundled_moltenvk_icd(const fs::path& exe_dir) {
+  // Loader auto-discovery path for .app bundles. Must live under Resources/
+  // (not Contents/MacOS/) so codesign can seal the bundle.
   const fs::path standard =
       (exe_dir / ".." / "Resources" / "vulkan" / "icd.d" / "MoltenVK_icd.json").lexically_normal();
   if (is_regular(standard)) {
@@ -167,6 +189,9 @@ std::string StartupDependencyReport::format_message() const {
     body += '\n';
   }
   body += "\n请重新安装完整程序包，或检查显卡驱动 / Vulkan 运行时。";
+#if defined(__APPLE__)
+  body += "\n若刚从浏览器下载，可先执行：\n  xattr -cr \"/Applications/WDS Editor.app\"";
+#endif
   return body;
 }
 
@@ -183,7 +208,9 @@ void prepare_macos_vulkan_environment(const char* argv0) {
   // Always prefer the bundled ICD inside a shipped .app. Stale host
   // VK_ICD_FILENAMES values otherwise override Resources/vulkan/icd.d discovery
   // and vkCreateInstance fails with VK_ERROR_INCOMPATIBLE_DRIVER (-9).
-  const std::string icd_utf8 = icd.string();
+  std::error_code ec;
+  const fs::path abs_icd = fs::weakly_canonical(icd, ec);
+  const std::string icd_utf8 = (!ec && !abs_icd.empty() ? abs_icd : icd).string();
   ::setenv("VK_ICD_FILENAMES", icd_utf8.c_str(), 1);
   ::setenv("VK_DRIVER_FILES", icd_utf8.c_str(), 1);
 #else
