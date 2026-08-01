@@ -35,7 +35,7 @@ Writes: dist/wds-win-x86_64.msi   (+ portable dist/wds-win-x86_64.zip)
 
 Environment (see scripts/env.example):
   WDS_ENV_FILE / scripts/env.local
-  WDS_RUNTIME_CACHE / WDS_VULKAN_RT_URL / WDS_VULKAN_COMPONENTS_URL
+  WDS_RUNTIME_CACHE / WDS_VULKAN_COMPONENTS_URL
   WDS_MSITOOLS_PREFIX / WDS_MSITOOLS_LIB_DIR / WDS_WIXL_SHARE_DIRS / WDS_WIXL_VERSION
   WDS_MINGW_CXX / WDS_MINGW_OBJDUMP / WDS_MINGW_DLL_DIRS
   WDS_PRODUCT_VERSION
@@ -239,12 +239,11 @@ This zip is a portable copy of the same payload.
 Bundled next to wds_editor.exe:
   skins\ effects\ fonts\ icons\ shaders\ wds.png
   bass.dll, vulkan-1.dll, Uninstall.exe
-  installers\VulkanRuntimeInstaller.exe  (optional system install)
 MinGW libgcc/libstdc++/winpthread are statically linked into the exe when possible.
 
 1. Keep this folder layout intact, then double-click wds_editor.exe.
-2. If Vulkan fails to start and you have never installed a Vulkan runtime,
-   run installers\VulkanRuntimeInstaller.exe once.
+2. If Vulkan fails to start, install a Vulkan Runtime from
+   https://vulkan.lunarg.com/ (most GPU drivers already provide one).
 3. Settings live in %LOCALAPPDATA%\WDS\config\config.yml
    so MSI upgrades / replacing this folder do not wipe preferences.
 4. MSI installs offer path + shortcut options; Uninstall.exe removes the MSI install.
@@ -337,7 +336,7 @@ package_win() {
 
   local stage="${DIST_DIR}/staging/wds-win-x86_64"
   rm -rf "$stage"
-  mkdir -p "${stage}/installers"
+  mkdir -p "${stage}"
   # Exe at package root for double-click launch.
   # Never ship config/ next to the exe — prefs go to %LOCALAPPDATA%\WDS\config\.
   cp -a "$demo" "${stage}/"
@@ -398,11 +397,6 @@ package_win() {
         ;;
     esac
   done
-
-  local rt_url="${WDS_VULKAN_RT_URL:-https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime.exe?Human=true}"
-  local rt_cache="${CACHE_DIR}/VulkanRuntimeInstaller.exe"
-  download "$rt_url" "$rt_cache"
-  cp -a "$rt_cache" "${stage}/installers/VulkanRuntimeInstaller.exe"
 
   local comp_url="${WDS_VULKAN_COMPONENTS_URL:-https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime-components.zip?Human=true}"
   local comp_zip="${CACHE_DIR}/vulkan-runtime-components.zip"
