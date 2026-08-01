@@ -43,10 +43,9 @@ class Transport {
 
   // Apply queued intents, advance committed timeline, drive music when present.
   // wall_delta_us is real frame elapsed time when Playing.
-  // With music: audio-primary clock — wall*rate interpolates between BASS updates,
-  // then a small dead zone (~4ms) + strong slew keeps notes phase-locked to music
-  // (and therefore to POS-synced hit SFX). Wide dead zones / weak slew let the
-  // wall clock drift from the device clock so SFX slowly walks off the notes.
+  // With music: audio-primary clock — wall*rate predicts between BASS updates, then
+  // an EMA (tau ~20–30ms) absorbs UPDATEPERIOD staircases so notes stay phase-locked
+  // to music / POS-synced hit SFX without hitchy catch-up. Seek/pause resets the filter.
   // Without music: wall clock advances the timeline directly (rate-scaled).
   // Pass real frame time in microseconds — millisecond truncation stalls wall-clock
   // playback under MAILBOX / high refresh (common on Windows).
@@ -72,6 +71,9 @@ class Transport {
   bool playing_ = false;
   bool music_start_pending_ = false;
   wds::common::Microseconds committed_position_{0};
+  // EMA of BASS music position used as the smooth audio master (µs).
+  int64_t filtered_audio_us_ = 0;
+  bool audio_filter_valid_ = false;
 
   bool pending_play_ = false;
   bool pending_pause_ = false;

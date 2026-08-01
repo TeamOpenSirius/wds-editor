@@ -95,25 +95,32 @@ void check_bass_runtime(StartupDependencyReport& report, const fs::path& exe_dir
 #endif
 }
 
+fs::path bundled_moltenvk_icd(const fs::path& exe_dir) {
+  const fs::path standard =
+      (exe_dir / ".." / "Resources" / "vulkan" / "icd.d" / "MoltenVK_icd.json").lexically_normal();
+  if (is_regular(standard)) {
+    return standard;
+  }
+  const fs::path legacy =
+      (exe_dir / ".." / "Resources" / "share" / "vulkan" / "icd" / "MoltenVK_icd.json")
+          .lexically_normal();
+  if (is_regular(legacy)) {
+    return legacy;
+  }
+  return {};
+}
+
 void check_vulkan_runtime_files(StartupDependencyReport& report, const fs::path& exe_dir) {
 #if defined(__APPLE__)
   if (looks_like_macos_app(exe_dir)) {
     const fs::path molten = exe_dir / "lib" / "libMoltenVK.dylib";
-    const fs::path icd =
-        exe_dir / ".." / "Resources" / "share" / "vulkan" / "icd" / "MoltenVK_icd.json";
+    const fs::path icd = bundled_moltenvk_icd(exe_dir);
     if (!is_regular(molten)) {
       report.missing.push_back("libMoltenVK.dylib（.app 内 Contents/MacOS/lib/）");
     }
-    if (!is_regular(icd.lexically_normal())) {
-      report.missing.push_back("MoltenVK_icd.json（.app 内 Contents/Resources/share/vulkan/icd/）");
-    }
-    // Launcher sets VK_ICD_FILENAMES; warn if someone runs the Mach-O without it.
-    const char* icd_env = std::getenv("VK_ICD_FILENAMES");
-    const char* driver_env = std::getenv("VK_DRIVER_FILES");
-    if ((icd_env == nullptr || icd_env[0] == '\0') &&
-        (driver_env == nullptr || driver_env[0] == '\0')) {
+    if (icd.empty()) {
       report.missing.push_back(
-          "Vulkan ICD 环境变量（请通过 WDS Editor.app 启动，勿直接运行 wds_editor）");
+          "MoltenVK_icd.json（.app 内 Contents/Resources/vulkan/icd.d/）");
     }
   } else {
     // Dev / zip layout: optional MoltenVK beside the binary; loader may use brew ICD.
@@ -161,6 +168,27 @@ std::string StartupDependencyReport::format_message() const {
   }
   body += "\n请重新安装完整程序包，或检查显卡驱动 / Vulkan 运行时。";
   return body;
+}
+
+void prepare_macos_vulkan_environment(const char* argv0) {
+#if defined(__APPLE__)
+  const fs::path exe_dir = exe_dir_from_argv0(argv0);
+  if (!looks_like_macos_app(exe_dir)) {
+    return;
+  }
+  const fs::path icd = bundled_moltenvk_icd(exe_dir);
+  if (icd.empty()) {
+    return;
+  }
+  // Always prefer the bundled ICD inside a shipped .app. Stale host
+  // VK_ICD_FILENAMES values otherwise override Resources/vulkan/icd.d discovery
+  // and vkCreateInstance fails with VK_ERROR_INCOMPATIBLE_DRIVER (-9).
+  const std::string icd_utf8 = icd.string();
+  ::setenv("VK_ICD_FILENAMES", icd_utf8.c_str(), 1);
+  ::setenv("VK_DRIVER_FILES", icd_utf8.c_str(), 1);
+#else
+  (void)argv0;
+#endif
 }
 
 StartupDependencyReport check_startup_dependencies(const char* argv0) {

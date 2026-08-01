@@ -162,6 +162,9 @@ int run_editor(int argc, char** argv) {
 
   glfwSetErrorCallback(glfw_error_callback);
 
+  // Must run before glfwInit / Vulkan loader init so bundled MoltenVK wins.
+  wds::ui::prepare_macos_vulkan_environment(argv[0]);
+
   {
     wds::ui::StartupDependencyReport deps = wds::ui::check_startup_dependencies(argv[0]);
     if (!deps.ok()) {

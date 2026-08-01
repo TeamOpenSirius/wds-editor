@@ -14,6 +14,10 @@ struct StartupDependencyReport {
   std::string format_message() const;
 };
 
+// On macOS .app bundles: point VK_ICD_FILENAMES at the bundled MoltenVK ICD
+// before glfwInit. Overrides stale host SDK paths that would otherwise win.
+void prepare_macos_vulkan_environment(const char* argv0);
+
 // Probe companion libs (BASS / MoltenVK / vulkan-1) and skins/fonts/icons/effects.
 StartupDependencyReport check_startup_dependencies(const char* argv0);
 

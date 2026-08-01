@@ -258,7 +258,8 @@ WDS Editor package (macos-arm) — self-contained .app
 
 Inside WDS Editor.app:
   Contents/MacOS/       wds_editor + lib/ (glfw, png, vulkan, MoltenVK, bass)
-  Contents/Resources/   skins effects fonts icons shaders wds.icns wds.png + MoltenVK ICD
+  Contents/Resources/   skins effects fonts icons shaders wds.icns wds.png
+                        + vulkan/icd.d/MoltenVK_icd.json
 
 1. Prefer the DMG: open wds-macos-arm.dmg, drag WDS Editor.app into Applications.
 2. Or from this zip: double-click WDS Editor.app (keep the .app bundle intact).
@@ -841,7 +842,8 @@ write_macos_app_bundle() {
   local app="${stage}/WDS Editor.app"
   local payload="${app}/Contents/MacOS"
   local resources="${app}/Contents/Resources"
-  mkdir -p "${payload}/lib" "${resources}/share/vulkan/icd"
+  # Vulkan loader discovers ICDs at Contents/Resources/vulkan/icd.d (not share/...).
+  mkdir -p "${payload}/lib" "${resources}/vulkan/icd.d"
 
   cp -a "$demo_src" "${payload}/${demo_name}"
 
@@ -883,12 +885,13 @@ write_macos_app_bundle() {
     done
   fi
 
-  # ICD lives under Resources; library_path is relative to the JSON file.
-  cat >"${resources}/share/vulkan/icd/MoltenVK_icd.json" <<'EOF'
+  # ICD for loader auto-discovery (GUI apps often ignore shell VK_* vars).
+  # library_path is relative to this JSON file's directory.
+  cat >"${resources}/vulkan/icd.d/MoltenVK_icd.json" <<'EOF'
 {
     "file_format_version": "1.0.0",
     "ICD": {
-        "library_path": "../../../../MacOS/lib/libMoltenVK.dylib",
+        "library_path": "../../../MacOS/lib/libMoltenVK.dylib",
         "api_version": "1.4.0",
         "is_portability_driver": true
     }
@@ -935,7 +938,8 @@ set -euo pipefail
 DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 RES="\$(cd "\${DIR}/../Resources" && pwd)"
 export DYLD_LIBRARY_PATH="\${DIR}/lib\${DYLD_LIBRARY_PATH:+:\${DYLD_LIBRARY_PATH}}"
-export VK_ICD_FILENAMES="\${RES}/share/vulkan/icd/MoltenVK_icd.json"
+# Override stale host SDK paths — a bad VK_ICD_FILENAMES disables bundle discovery.
+export VK_ICD_FILENAMES="\${RES}/vulkan/icd.d/MoltenVK_icd.json"
 export VK_DRIVER_FILES="\${VK_ICD_FILENAMES}"
 cd "\${RES}"
 exec "\${DIR}/${demo_name}" "\$@"

@@ -13,6 +13,8 @@ bool Transport::initialize(const std::string& effects_directory, const std::stri
   }
   playing_ = false;
   committed_position_ = wds::common::Microseconds{0};
+  filtered_audio_us_ = 0;
+  audio_filter_valid_ = false;
   pending_play_ = false;
   pending_pause_ = false;
   pending_seek_ = false;
@@ -25,6 +27,8 @@ void Transport::shutdown() {
   playing_ = false;
   music_start_pending_ = false;
   committed_position_ = wds::common::Microseconds{0};
+  filtered_audio_us_ = 0;
+  audio_filter_valid_ = false;
   pending_play_ = false;
   pending_pause_ = false;
   pending_seek_ = false;
@@ -105,6 +109,8 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
 
   auto apply_seek = [&]() {
     committed_position_ = clamp_time(seek_time);
+    filtered_audio_us_ = committed_position_.count();
+    audio_filter_valid_ = true;
     if (audio_.has_music()) {
       // Timeline == music clock (chart delay is in note times, not a BGM hold-off).
       // set_position silences SFX and bumps position_generation_ for UI resync.
@@ -122,18 +128,22 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
   if (playing_) {
     if (audio_.has_music()) {
       // Audio-primary display clock. Hit SFX is hard-locked to BASS music POS;
-      // if the note timeline follows wall time with a wide dead zone, notes and
-      // SFX slowly walk apart as the device clock drifts from the wall clock.
+      // the note timeline follows a filtered copy of that clock so ~5ms
+      // UPDATEPERIOD staircases do not show up as hitchy pull-backs.
       const auto raw = clamp_time(audio_.position());
-      // Between ~5ms BASS updates, advance by wall*rate for sub-update smoothness,
-      // then pull back toward audio. Tiny dead zone absorbs position staircases;
-      // outside it, correct aggressively so phase cannot accumulate over a song.
-      constexpr int64_t kHardSnapUs = 100000;  // 100ms
-      constexpr int64_t kDeadZoneUs = 4000;    // < UPDATEPERIOD — ignore quantize noise
-      constexpr double kErrorGain = 0.35;      // catch wall/audio drift within a few frames
-      if (music_start_pending_) {
+      constexpr int64_t kHardSnapUs = 100000;  // 100ms — seek / glitch
+      // EMA time constant: several UPDATEPERIODs so steps are rounded off, but
+      // short enough that wall/device drift cannot accumulate over a phrase.
+#if defined(_WIN32)
+      constexpr double kFilterTauUs = 30000.0;  // WASAPI/DWM noisier
+#else
+      constexpr double kFilterTauUs = 22000.0;
+#endif
+      if (music_start_pending_ || !audio_filter_valid_) {
         // Audible BGM not started yet — keep UI locked to the paused playhead
         // so wall time does not drift ahead and then get yanked back.
+        filtered_audio_us_ = raw.count();
+        audio_filter_valid_ = true;
         committed_position_ = raw;
       } else {
         const int64_t step_us = std::max<int64_t>(0, wall_delta_us);
@@ -142,25 +152,26 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
                               static_cast<double>(step_us) *
                               static_cast<double>(playback_rate_)))
                         : int64_t{0};
+        // Predict with wall*rate between BASS quantize steps.
         if (advance_us > 0) {
-          committed_position_ =
-              clamp_time(committed_position_ + wds::common::Microseconds{advance_us});
+          filtered_audio_us_ += advance_us;
         }
 
-        const int64_t err = raw.count() - committed_position_.count();
+        const int64_t err = raw.count() - filtered_audio_us_;
         if (err >= kHardSnapUs || err <= -kHardSnapUs) {
-          committed_position_ = raw;
-        } else if (err > kDeadZoneUs || err < -kDeadZoneUs) {
-          const int64_t excess =
-              err > 0 ? err - kDeadZoneUs : err + kDeadZoneUs;
-          int64_t nudge = static_cast<int64_t>(
-              std::llround(static_cast<double>(excess) * kErrorGain));
-          if (nudge == 0) {
-            nudge = excess > 0 ? 1 : -1;
-          }
-          committed_position_ =
-              clamp_time(committed_position_ + wds::common::Microseconds{nudge});
+          filtered_audio_us_ = raw.count();
+        } else if (step_us > 0) {
+          // alpha = 1 - e^{-dt/tau}: independent of error magnitude, so a 5ms
+          // BASS step bleeds in smoothly instead of a proportional yank.
+          const double alpha =
+              1.0 - std::exp(-static_cast<double>(step_us) / kFilterTauUs);
+          filtered_audio_us_ +=
+              static_cast<int64_t>(std::llround(static_cast<double>(err) * alpha));
         }
+
+        committed_position_ =
+            clamp_time(wds::common::Microseconds{filtered_audio_us_});
+        filtered_audio_us_ = committed_position_.count();
       }
 
       // Natural end-of-stream: BASS stops near duration — snap and pause.
@@ -197,6 +208,9 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
       audio_.begin_timeline_control();
       playing_ = false;
       music_start_pending_ = false;
+      // Re-seed filter on next play from the paused playhead.
+      filtered_audio_us_ = committed_position_.count();
+      audio_filter_valid_ = false;
     } else if (playing_ && !music_start_pending_ && audio_.has_music() &&
                !audio_.stream_playing() && !audio_.stream_stopped()) {
       // Recover stalled channel while still intending to play (and already audible).
@@ -220,6 +234,8 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         // the first DSP-scheduled hits could land late or with a clipped attack.
         // set_position also clears any stale DSP SFX queue.
         audio_.set_position(committed_position_);
+        filtered_audio_us_ = committed_position_.count();
+        audio_filter_valid_ = false;
         // Keep-alive / DEV_NONSTOP keep the device hot; skip heavy warmup on resume.
         music_start_pending_ = true;
       } else {
