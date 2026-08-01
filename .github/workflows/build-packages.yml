@@ -18,6 +18,10 @@ jobs:
   win-x86_64:
     name: win-x86_64
     runs-on: ubuntu-24.04
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-root
+      VCPKG_DEFAULT_TRIPLET: x64-mingw-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-linux
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,30 +33,36 @@ jobs:
             mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
             binutils-mingw-w64-x86-64 \
             cmake ninja-build zip curl unzip \
-            glslang-tools msitools python3-pil
+            glslang-tools msitools python3-pil \
+            git zip tar curl unzip pkg-config
 
-      - name: Cache vcpkg
-        id: cache-vcpkg
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: .vcpkg-root
+          # Need a complete tree (triplets/); avoid restoring cache into an empty root first.
+          fetch-depth: 1
+
+      - name: Cache vcpkg artifacts
         uses: actions/cache@v4
         with:
           path: |
-            .vcpkg-root/installed
-            .vcpkg-root/packages
-            .vcpkg-root/downloads
-          key: vcpkg-x64-mingw-static-v1-${{ runner.os }}-libpng-zlib-glfw3-vulkan-loader
+            ${{ env.VCPKG_ROOT }}/installed
+            ${{ env.VCPKG_ROOT }}/packages
+            ${{ env.VCPKG_ROOT }}/downloads
+          key: vcpkg-x64-mingw-static-v2-${{ runner.os }}-libpng-zlib-glfw3-vulkan-loader
 
       - name: Bootstrap vcpkg
         run: |
-          if [[ ! -d .vcpkg-root/.git ]]; then
-            git clone --depth 1 https://github.com/microsoft/vcpkg.git .vcpkg-root
-          fi
-          if [[ ! -x .vcpkg-root/vcpkg ]]; then
-            .vcpkg-root/bootstrap-vcpkg.sh -disableMetrics
-          fi
+          test -f "${VCPKG_ROOT}/triplets/x64-linux.cmake"
+          test -f "${VCPKG_ROOT}/triplets/community/x64-mingw-static.cmake"
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          "${VCPKG_ROOT}/vcpkg" version
 
       - name: Install vcpkg packages
         run: |
-          .vcpkg-root/vcpkg install \
+          "${VCPKG_ROOT}/vcpkg" install \
             libpng:x64-mingw-static \
             zlib:x64-mingw-static \
             glfw3:x64-mingw-static \
@@ -60,7 +70,7 @@ jobs:
 
       - name: Build and package
         env:
-          WDS_VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-root
+          WDS_VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
         run: ./scripts/build-target.sh win-x86_64
 
       - name: Upload MSI
@@ -78,16 +88,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install Homebrew dependencies
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
-          python3 -m pip install --user dmgbuild pillow
+
+      - name: Setup Python packaging tools
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install dmgbuild pillow
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Build and package
-        run: ./scripts/build-target.sh macos-arm
+        run: |
+          # Prefer the venv so package-target.sh's `python3 -m dmgbuild` / Pillow resolve.
+          export PATH="${{ github.workspace }}/.venv/bin:$PATH"
+          ./scripts/build-target.sh macos-arm
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
