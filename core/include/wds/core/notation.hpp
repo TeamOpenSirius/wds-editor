@@ -14,12 +14,16 @@
 
 namespace wds::chart_editor {
 
-// BPM + meter change authoring point. Tick 0 is mandatory and undeletable.
+// BPM / meter authoring point. Tick 0 is mandatory and undeletable.
+// has_bpm / has_meter mark which fields are authored labels (values are always
+// filled — inherited fields mirror the previous authored change).
 struct TimingPoint {
   int32_t tick = 0;
   double bpm = 120.0;
   int32_t numerator = 4;    // beats per bar
   int32_t denominator = 4;  // note value of one beat (4 = quarter)
+  bool has_bpm = true;
+  bool has_meter = true;
 };
 
 struct MusicTiming {

@@ -104,6 +104,8 @@ class UiManager {
  private:
   void apply_region_bounds();
   void prepare_painter(wds::interaction::UiPainter& painter) const;
+  // Clear + rebind the active "editor" shortcut namespace from current chords.
+  void bind_editor_shortcuts();
   // If dirty, open the unsaved dialog and run `continue_fn` after Save/Discard.
   void with_save_if_dirty(std::function<void()> continue_fn);
   // Schedule continue (and optional save) for the start of the next update().

@@ -82,14 +82,18 @@ struct GutterLabelHit {
   wds::interaction::Rect bounds{};
 };
 
+enum class TimingLabelKind { Bpm, Meter };
+
 struct TimingLabelHit {
   int32_t point_tick = 0;
+  TimingLabelKind kind = TimingLabelKind::Bpm;
   wds::interaction::Rect bounds{};
 };
 
 // Hits are sorted by time ascending: earlier labels sit on top and win hit-tests.
 // Paint callers should draw in reverse so later labels are underneath.
 
+// Subdivision + beat + measure lines (uses viewport timing + grid).
 void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                            const wds::interaction::Rect& area);
 
@@ -97,6 +101,12 @@ void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewpor
                          const wds::interaction::Rect& gutter,
                          const wds::chart_editor::MusicTiming& timing, int32_t view_start_tick,
                          int32_t view_end_tick, bool show_timing_marks = true);
+
+// Far-right column: 1-based measure indices centered on each measure line.
+void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                                const wds::interaction::Rect& gutter,
+                                const wds::chart_editor::MusicTiming& timing,
+                                int32_t view_start_tick, int32_t view_end_tick);
 
 void paint_split_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                       const wds::interaction::Rect& gutter,
@@ -119,20 +129,30 @@ std::vector<TimingLabelHit> build_timing_label_hits(const EditViewport& viewport
                                                     const wds::interaction::Rect& gutter,
                                                     const wds::chart_editor::MusicTiming& timing);
 
+// Snap pointer to a subdivision line for BPM placement (nullopt if too far / occupied).
+std::optional<int32_t> timing_bpm_tick_at(const EditViewport& viewport,
+                                          const wds::interaction::Rect& gutter,
+                                          const wds::chart_editor::MusicTiming& timing,
+                                          wds::interaction::Vec2 point);
+
+// Snap pointer to a measure line for meter placement (nullopt if too far / occupied).
 std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport,
                                               const wds::interaction::Rect& gutter,
                                               const wds::chart_editor::MusicTiming& timing,
                                               wds::interaction::Vec2 point);
 
-// Placement-preview band geometry (same as real start / BPM labels).
+// Placement-preview band geometry (same as real start / BPM / meter labels).
 wds::interaction::Rect split_start_label_bounds(const EditViewport& viewport,
                                                 const wds::interaction::Rect& gutter,
                                                 int32_t tick);
-wds::interaction::Rect timing_label_bounds(const EditViewport& viewport,
-                                           const wds::interaction::Rect& gutter, int32_t tick);
+wds::interaction::Rect bpm_label_bounds(const EditViewport& viewport,
+                                        const wds::interaction::Rect& gutter, int32_t tick);
+wds::interaction::Rect meter_label_bounds(const EditViewport& viewport,
+                                          const wds::interaction::Rect& gutter, int32_t tick);
 
 // Solid placement ghosts for gutter labels (no text yet).
 inline constexpr wds::interaction::Color kSplitLabelGhostColor{0.22f, 0.48f, 0.95f, 0.45f};
 inline constexpr wds::interaction::Color kBpmLabelGhostColor{0.48f, 0.30f, 0.14f, 0.45f};
+inline constexpr wds::interaction::Color kMeterLabelGhostColor{0.10f, 0.38f, 0.24f, 0.45f};
 
 }  // namespace wds::ui

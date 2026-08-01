@@ -21,24 +21,41 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
   const bool was_hold = is_hold_with_tail(note.note_type);
   const bool target_hold = is_hold_with_tail(target);
   const bool was_scratch_hold = is_scratch_hold_body(note.note_type);
+  const bool target_scratch_hold = is_scratch_hold_body(target);
+  const bool split = is_split_lane_gimmick(note.gimmick_type);
+
   if (!was_hold && target_hold) {
-    note.end_tick = note.start_tick + std::max(1, ticks_per_quarter);
+    note.end_tick = note.start_tick + static_cast<float>(std::max(1, ticks_per_quarter));
   } else if (was_hold && !target_hold) {
     note.end_tick = note.start_tick;
   }
 
-  // Scratch hold bodies encode tail direction/span in scratch_length (Sirius).
-  // Converting to Flick keeps ScratchHold; equal-width directional force uses
-  // ±width (width edits will recalculate direction from the end span again).
-  if (was_scratch_hold && target == NoteType::Flick) {
-    note.note_type = NoteType::ScratchHold;
-    // Preserve an existing non-zero span; if equal to body, keep current signed
-    // direction encoding (0 / ±width). Callers may set scratch_length first.
-    return note;
-  }
   note.note_type = target;
-  if ((target == NoteType::Hold || target == NoteType::CriticalHold) && was_scratch_hold) {
-    note.scratch_length = 0;
+
+  // JumpScratch / OneDirection are ScratchHold-family only.
+  if (!target_scratch_hold && (is_jump_scratch(note.gimmick_type) || is_one_direction(note.gimmick_type))) {
+    note.gimmick_type = GimmickType::None;
+  }
+
+  // scratch_length: flick/Scratch direction, ScratchHold end span, or split color.
+  if (!split) {
+    if (target == NoteType::Flick || target == NoteType::Scratch) {
+      // ScratchHold stores ±width (or wider JumpScratch spans); collapse to flick ±1.
+      if (was_scratch_hold) {
+        if (note.scratch_length < 0) note.scratch_length = -1;
+        else if (note.scratch_length > 0) note.scratch_length = 1;
+        else note.scratch_length = 0;
+      }
+    } else if (target_scratch_hold) {
+      // Flick/Scratch encode ±1; ScratchHold equal-width direction uses ±width.
+      if (!was_scratch_hold) {
+        if (note.scratch_length < 0) note.scratch_length = -std::max(1, note.width);
+        else if (note.scratch_length > 0) note.scratch_length = std::max(1, note.width);
+        else note.scratch_length = 0;
+      }
+    } else {
+      note.scratch_length = 0;
+    }
   }
   return note;
 }
@@ -283,52 +300,68 @@ NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& no
                                 NoteType target) noexcept {
   const bool scratch_body = is_scratch_hold_body(note.note_type);
   const bool hold_body = is_hold_with_tail(note.note_type);
-  const bool head = is_hold_head_note(note) || is_legacy_scratch_hold_head(note);
+  // Legacy Normal/Critical/BlueTap heads only count when paired with a ScratchHold body.
+  // Lone taps share those types and must not be treated as hold heads (ConvertHold
+  // would otherwise incorrectly resolve them to HoldStart).
+  const bool legacy_paired_head =
+      is_legacy_scratch_hold_head(note) && paired_hold_body_for(doc, note).has_value();
+  const bool head = is_hold_head_note(note) || legacy_paired_head;
   const bool scratch_head = [&] {
     if (note.note_type == NoteType::ScratchHoldStart ||
         note.note_type == NoteType::ScratchCriticalHoldStart) {
       return true;
     }
-    if (!head) return false;
+    if (!legacy_paired_head) return false;
     if (auto body = paired_hold_body_for(doc, note)) {
       return is_scratch_hold_body(body->note_type);
     }
     return false;
   }();
 
-  if (target == NoteType::Critical) {
-    // Official AppConst has CriticalHold (101) for import, but Sirius paints gold only
-    // on the start head. Editor converts never promote a hold body to CriticalHold*.
-    if (hold_body) return scratch_body ? NoteType::ScratchHold : NoteType::Hold;
-    if (scratch_head) return NoteType::ScratchCriticalHoldStart;
-    if (head && (is_hold_start(note.note_type) || paired_hold_body_for(doc, note))) {
-      return NoteType::CriticalHoldStart;
+  // Hold-head retints (head-only selection). Illegal targets keep the current type.
+  if (head && !hold_body) {
+    if (target == NoteType::Critical) {
+      return scratch_head ? NoteType::ScratchCriticalHoldStart : NoteType::CriticalHoldStart;
     }
+    if (target == NoteType::Normal || target == NoteType::HoldStart) {
+      return scratch_head ? NoteType::ScratchHoldStart : NoteType::HoldStart;
+    }
+    if (target == NoteType::Hold) {
+      // Scratch-family heads cannot become HoldStart while the body stays ScratchHold.
+      return scratch_head ? note.note_type : NoteType::HoldStart;
+    }
+    if (target == NoteType::ScratchHold) {
+      return scratch_head ? NoteType::ScratchHoldStart : note.note_type;
+    }
+    // Flick / other: not a legal head conversion.
+    return note.note_type;
+  }
+
+  if (target == NoteType::Critical) {
+    // Hold bodies collapse to Critical taps (not CriticalHold*).
     return NoteType::Critical;
   }
 
   if (target == NoteType::Normal) {
-    // ConvertTap: demote critical family; keep official hold-head types.
-    if (scratch_body) return NoteType::ScratchHold;
-    if (hold_body) return NoteType::Hold;
-    if (scratch_head) return NoteType::ScratchHoldStart;
-    if (is_hold_start(note.note_type) || (head && paired_hold_body_for(doc, note))) {
-      return NoteType::HoldStart;
-    }
     return NoteType::Normal;
   }
 
   if (target == NoteType::HoldStart) {
-    if (hold_body) return scratch_body ? NoteType::ScratchHold : NoteType::Hold;
-    if (scratch_head) return NoteType::ScratchHoldStart;
+    // Body collapses to a head at start (ScratchHold → ScratchHoldStart).
+    if (scratch_body) return NoteType::ScratchHoldStart;
     return NoteType::HoldStart;
   }
 
   if (target == NoteType::Hold) {
-    // Heads stay heads (matched start type); bodies stay / become Hold* bodies.
-    if (head) return scratch_head ? NoteType::ScratchHoldStart : NoteType::HoldStart;
-    if (scratch_body) return NoteType::ScratchHold;
     return NoteType::Hold;
+  }
+
+  if (target == NoteType::ScratchHold) {
+    return NoteType::ScratchHold;
+  }
+
+  if (target == NoteType::Flick) {
+    return NoteType::Flick;
   }
 
   return target;

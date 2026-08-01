@@ -30,9 +30,12 @@ float width_edge_prefer_px() { return wds::interaction::theme::px(6.0f); }
 float width_edge_max_px() { return wds::interaction::theme::px(7.0f); }
 float time_edge_prefer_px() { return wds::interaction::theme::px(6.0f); }
 float time_edge_max_px() { return wds::interaction::theme::px(7.0f); }
-// Wide enough for readable BPM / split labels at kFontSizeGutter.
-float left_gutter_w() { return wds::interaction::theme::px(80.0f); }
-float right_gutter_w() { return wds::interaction::theme::px(72.0f); }
+// Narrow gutters sized for kFontSizeGutter text: split ids (5 digits), BPM/meter,
+// and a far-right measure index column (up to 4 digits). Total side width matches
+// the previous left+right sum so the playfield width stays unchanged.
+float left_gutter_w() { return wds::interaction::theme::px(60.0f); }
+float right_gutter_w() { return wds::interaction::theme::px(52.0f); }
+float measure_gutter_w() { return wds::interaction::theme::px(40.0f); }
 
 bool is_visible_mid_star(NoteType type) noexcept {
   return type == NoteType::Sound || type == NoteType::SoundPurple;
@@ -174,10 +177,12 @@ void ChartEditPanel::sync_viewport() const {
   const auto panel = absolute_bounds();
   const float lgw = left_gutter_w();
   const float rgw = right_gutter_w();
+  const float mgw = measure_gutter_w();
   left_gutter_ = {panel.x, panel.y, lgw, panel.h};
-  right_gutter_ = {panel.right() - rgw, panel.y, rgw, panel.h};
-  playfield_ = {left_gutter_.right(), panel.y, std::max(1.0f, panel.w - lgw - rgw),
-                panel.h};
+  measure_gutter_ = {panel.right() - mgw, panel.y, mgw, panel.h};
+  right_gutter_ = {measure_gutter_.x - rgw, panel.y, rgw, panel.h};
+  playfield_ = {left_gutter_.right(), panel.y,
+                std::max(1.0f, panel.w - lgw - rgw - mgw), panel.h};
   viewport_.set_bounds(playfield_);
   viewport_.set_timing(engine_.document().timing());
 }
@@ -234,10 +239,10 @@ wds::interaction::Vec2 ChartEditPanel::place_note_center() const {
 wds::interaction::SwipeDirection ChartEditPanel::update_place_swipe(
     wds::interaction::Vec2 pointer) {
   sync_viewport();
-  // Horizontal place gestures require ≥ half a lane of dx (same threshold unlocks).
-  const float half_lane = viewport_.lane_width(1) * 0.5f;
+  // Horizontal place gestures require ≥ one lane of dx (same threshold unlocks).
+  const float horizontal_min = viewport_.lane_width(1);
   // dx from press point; dy from the snapped note's time (not press Y / lane center).
-  return place_swipe_.update(drag_start_pos_.x, place_note_center().y, pointer, half_lane,
+  return place_swipe_.update(drag_start_pos_.x, place_note_center().y, pointer, horizontal_min,
                              wds::interaction::kEditorSwipeMinDistancePx);
 }
 
@@ -447,7 +452,7 @@ void ChartEditPanel::on_hover_leave() {
   set_hover_cursor(wds::interaction::CursorKind::Default);
 }
 
-void ChartEditPanel::hide_gutter_ghost() { gutter_ghost_visible_ = false; }
+void ChartEditPanel::hide_gutter_ghost() { gutter_ghosts_.clear(); }
 
 void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
   hide_gutter_ghost();
@@ -465,9 +470,8 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
     for (const auto& hit : hits) {
       if (hit.is_start && hit.anchor_tick == tick) return;
     }
-    gutter_ghost_bounds_ = split_start_label_bounds(viewport_, left_gutter_, tick);
-    gutter_ghost_color_ = kSplitLabelGhostColor;
-    gutter_ghost_visible_ = true;
+    gutter_ghosts_.push_back(
+        {split_start_label_bounds(viewport_, left_gutter_, tick), kSplitLabelGhostColor});
     return;
   }
 
@@ -477,10 +481,14 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
     for (const auto& hit : hits) {
       if (hit.bounds.contains(point)) return;
     }
+    // BPM (above subdiv) and meter (below measure) can both ghost on a bar line.
+    if (auto bpm_tick = timing_bpm_tick_at(viewport_, right_gutter_, timing, point)) {
+      gutter_ghosts_.push_back(
+          {bpm_label_bounds(viewport_, right_gutter_, *bpm_tick), kBpmLabelGhostColor});
+    }
     if (auto measure = timing_measure_tick_at(viewport_, right_gutter_, timing, point)) {
-      gutter_ghost_bounds_ = timing_label_bounds(viewport_, right_gutter_, *measure);
-      gutter_ghost_color_ = kBpmLabelGhostColor;
-      gutter_ghost_visible_ = true;
+      gutter_ghosts_.push_back(
+          {meter_label_bounds(viewport_, right_gutter_, *measure), kMeterLabelGhostColor});
     }
   }
 }
@@ -574,10 +582,15 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
     return;
   }
 
-  // BPM / split gutters: solid blue label ghost (no text).
+  // BPM / split gutters: solid label ghosts (no text). Measure index is display-only.
   if (left_gutter_.contains(point) || right_gutter_.contains(point)) {
     ghost_.visible = false;
     update_gutter_ghost(point);
+    return;
+  }
+  if (measure_gutter_.contains(point)) {
+    ghost_.visible = false;
+    hide_gutter_ghost();
     return;
   }
   hide_gutter_ghost();
@@ -1385,25 +1398,87 @@ void ChartEditPanel::finish_hold_adjust() {
 bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> scratch_length) {
   if (!engine_.is_editable() || selected_.empty()) return false;
   const auto& doc = engine_.document();
-  std::unordered_set<int32_t> ids = selected_;
-  // Demoting via ConvertTap / Hold* may clean an imported CriticalHold body with its head.
-  // ConvertCritical only retints heads — do not drag the body into CriticalHold.
-  const bool sync_hold_pair =
-      target == NoteType::Normal || target == NoteType::HoldStart || target == NoteType::Hold;
-  if (sync_hold_pair) {
+
+  // Tap / Critical / HoldStart / Flick on a selected hold *body* collapses the hold
+  // (delete head, convert body). Head-only selection only retints the head legally.
+  const bool collapse_hold = target == NoteType::Normal || target == NoteType::Critical ||
+                             target == NoteType::HoldStart || target == NoteType::Flick;
+  // Hold / ScratchHold: when a body is selected, retarget the whole head↔body pair.
+  // Head-only selection only changes the head type (if legal for that body family).
+  const bool sync_hold_family =
+      target == NoteType::Hold || target == NoteType::ScratchHold;
+
+  std::unordered_set<int32_t> ids;
+  std::vector<NotationNote> remove_notes;
+  std::unordered_set<int32_t> remove_ids;
+
+  auto queue_remove = [&](const NotationNote& note) {
+    if (remove_ids.insert(note.id).second) remove_notes.push_back(note);
+  };
+
+  const bool any_body_selected = [&] {
+    for (const int32_t id : selected_) {
+      auto note = doc.find_note(id);
+      if (note && wds::chart_editor::is_hold_with_tail(note->note_type)) return true;
+    }
+    return false;
+  }();
+
+  if (collapse_hold) {
+    std::unordered_set<int32_t> collapse_bodies;
     for (const int32_t id : selected_) {
       auto note = doc.find_note(id);
       if (!note) continue;
-      if (auto body = wds::chart_editor::paired_hold_body_for(doc, *note)) {
-        ids.insert(body->id);
+      if (wds::chart_editor::is_hold_with_tail(note->note_type)) {
+        collapse_bodies.insert(note->id);
+        ids.insert(note->id);
+        continue;
       }
-      if (auto head = wds::chart_editor::paired_hold_head_for(doc, *note)) {
-        ids.insert(head->id);
+      if (auto body = wds::chart_editor::paired_hold_body_for(doc, *note)) {
+        // Selected a paired head.
+        if (selected_.count(body->id)) {
+          // Body also selected → collapse via body (head deleted below).
+          collapse_bodies.insert(body->id);
+          ids.insert(body->id);
+        } else {
+          // Head only → legal head retint; keep the hold body.
+          ids.insert(note->id);
+        }
+        continue;
+      }
+      // Tap / flick / orphan head: convert in place.
+      ids.insert(note->id);
+    }
+    for (const int32_t body_id : collapse_bodies) {
+      auto body = doc.find_note(body_id);
+      if (!body) continue;
+      for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *body)) {
+        queue_remove(dep);
+      }
+      if (auto head = wds::chart_editor::paired_hold_head_for(doc, *body)) {
+        queue_remove(*head);
       }
     }
+    for (const int32_t id : remove_ids) ids.erase(id);
+  } else if (sync_hold_family) {
+    ids = selected_;
+    if (any_body_selected) {
+      for (const int32_t id : selected_) {
+        auto note = doc.find_note(id);
+        if (!note) continue;
+        if (auto body = wds::chart_editor::paired_hold_body_for(doc, *note)) {
+          ids.insert(body->id);
+        }
+        if (auto head = wds::chart_editor::paired_hold_head_for(doc, *note)) {
+          ids.insert(head->id);
+        }
+      }
+    }
+  } else {
+    ids = selected_;
   }
 
-  std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
+  std::unordered_map<int32_t, NotationNote> after_by_id;
   const int tpq = doc.timing().ticks_per_quarter;
   for (const int32_t id : ids) {
     auto note = doc.find_note(id);
@@ -1419,12 +1494,79 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
         after.scratch_length = dir < 0 ? -after.width : (dir > 0 ? after.width : 0);
       }
     }
-    if (after.note_type != note->note_type || after.end_tick != note->end_tick ||
-        after.scratch_length != note->scratch_length) {
-      changes[id] = {*note, after};
+    after_by_id[id] = after;
+  }
+
+  // When Hold↔ScratchHold converts include a body, force paired heads to the matching
+  // start type (head-only path above keeps illegal family flips as no-ops).
+  if (sync_hold_family && any_body_selected) {
+    for (auto& [id, after] : after_by_id) {
+      if (!wds::chart_editor::is_hold_with_tail(after.note_type)) continue;
+      auto before = doc.find_note(id);
+      if (!before) continue;
+      if (auto head = wds::chart_editor::paired_hold_head_for(doc, *before)) {
+        auto it = after_by_id.find(head->id);
+        if (it == after_by_id.end()) continue;
+        it->second.note_type = wds::chart_editor::is_scratch_hold_body(after.note_type)
+                                   ? NoteType::ScratchHoldStart
+                                   : NoteType::HoldStart;
+      }
     }
   }
-  return commit_updates(changes, "Convert notes");
+
+  // Safety net: if a hold body still leaves the hold family, drop leftovers.
+  for (const auto& [id, after] : after_by_id) {
+    auto before = doc.find_note(id);
+    if (!before) continue;
+    if (!wds::chart_editor::is_hold_with_tail(before->note_type) ||
+        wds::chart_editor::is_hold_with_tail(after.note_type)) {
+      continue;
+    }
+    for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *before)) {
+      queue_remove(dep);
+    }
+    if (auto head = wds::chart_editor::paired_hold_head_for(doc, *before)) {
+      queue_remove(*head);
+    }
+  }
+  for (const int32_t id : remove_ids) after_by_id.erase(id);
+
+  std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
+  for (const auto& [id, after] : after_by_id) {
+    auto before = doc.find_note(id);
+    if (!before) continue;
+    if (after.note_type != before->note_type || after.end_tick != before->end_tick ||
+        after.scratch_length != before->scratch_length ||
+        after.gimmick_type != before->gimmick_type) {
+      changes[id] = {*before, after};
+    }
+  }
+  if (changes.empty() && remove_notes.empty()) return false;
+
+  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Convert notes");
+  if (!changes.empty()) {
+    composite->add(
+        std::make_unique<wds::chart_editor::UpdateNotesCommand>(std::move(changes), "Convert notes"));
+  }
+  if (!remove_notes.empty()) {
+    composite->add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(
+        std::move(remove_notes), "Convert cleanup"));
+  }
+  if (!engine_.execute_command(std::move(composite))) return false;
+
+  for (const int32_t id : remove_ids) selected_.erase(id);
+
+  // Converted hold bodies stay headless by default (unlike place-hold). Still refresh
+  // eighths for any body that remains / becomes a hold.
+  for (const auto& [id, after] : after_by_id) {
+    if (!wds::chart_editor::is_hold_with_tail(after.note_type)) continue;
+    if (auto note = engine_.document().find_note(id)) {
+      wds::chart_editor::recompute_hold_eighths(engine_.document(), *note);
+    }
+  }
+  engine_.rebuild_snapshot();
+  sync_hold_sel_focus_to_selection();
+  return true;
 }
 
 bool ChartEditPanel::mirror_selected(bool about_center) {
@@ -1675,9 +1817,13 @@ void ChartEditPanel::paint_gutters(wds::interaction::UiPainter& painter) const {
                      show_timing_grid);
   paint_timing_gutter(painter, viewport_, right_gutter_, timing, range.first, range.second,
                       show_timing_grid);
+  paint_measure_index_gutter(painter, viewport_, measure_gutter_, timing, range.first,
+                             range.second);
   painter.fill_rect({left_gutter_.right() - 0.5f, left_gutter_.y, 1.0f, left_gutter_.h},
                     {0.35f, 0.37f, 0.40f, 0.9f});
   painter.fill_rect({right_gutter_.x - 0.5f, right_gutter_.y, 1.0f, right_gutter_.h},
+                    {0.35f, 0.37f, 0.40f, 0.9f});
+  painter.fill_rect({measure_gutter_.x - 0.5f, measure_gutter_.y, 1.0f, measure_gutter_.h},
                     {0.35f, 0.37f, 0.40f, 0.9f});
 }
 
@@ -1695,7 +1841,7 @@ void ChartEditPanel::layout_popup_rects() const {
   split_picker_bounds_ = {host.x + (host.w - picker_w) * 0.5f, host.y + (host.h - picker_h) * 0.5f,
                           picker_w, picker_h};
 
-  // Compact timing dialog: label | gap | field block (BPM + 拍号 row share the same outer edges).
+  // Compact timing dialog: BPM-only or meter-only (separate left/right gutter actions).
   const float kTimingPad = th::px(12.0f);
   const float kTimingLabelCol = th::kLabelW2;
   const float kTimingLabelGap = th::px(10.0f);
@@ -1706,9 +1852,8 @@ void ChartEditPanel::layout_popup_rects() const {
   const float field_h = th::kControlHeight;
   const float tbtn_h = th::kControlHeight;
   const float timing_w = kTimingPad + kTimingLabelCol + kTimingLabelGap + kTimingFieldW + kTimingPad;
-  const float timing_h =
-      th::px(5.0f) + title_h + th::px(8.0f) + field_h + th::px(8.0f) + field_h + th::px(14.0f) +
-      tbtn_h + kTimingPad;
+  const float timing_h = th::px(5.0f) + title_h + th::px(8.0f) + field_h + th::px(14.0f) + tbtn_h +
+                         kTimingPad;
   timing_popup_bounds_ = {host.x + (host.w - timing_w) * 0.5f, host.y + (host.h - timing_h) * 0.5f,
                           timing_w, timing_h};
 
@@ -1767,11 +1912,11 @@ void ChartEditPanel::layout_popup_rects() const {
 
   const float fields_x =
       timing_popup_bounds_.x + kTimingPad + kTimingLabelCol + kTimingLabelGap;
-  timing_bpm_field_ = {fields_x, timing_popup_bounds_.y + title_h + th::px(8.0f), kTimingFieldW,
-                       field_h};
+  const float field_y = timing_popup_bounds_.y + title_h + th::px(8.0f);
+  timing_bpm_field_ = {fields_x, field_y, kTimingFieldW, field_h};
   const float sig_field_w =
       (kTimingFieldW - kTimingSlashW - kTimingSlashGap * 2.0f) * 0.5f;
-  timing_num_field_ = {fields_x, timing_bpm_field_.bottom() + th::px(8.0f), sig_field_w, field_h};
+  timing_num_field_ = {fields_x, field_y, sig_field_w, field_h};
   timing_den_field_ = {timing_num_field_.right() + kTimingSlashGap + kTimingSlashW + kTimingSlashGap,
                        timing_num_field_.y, sig_field_w, field_h};
   const float tbtn_w = th::px(60.0f);
@@ -1865,16 +2010,15 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
     const float title_h = wds::interaction::theme::kFontSizeMd + wds::interaction::theme::px(5.0f);
     const float kTimingPad = wds::interaction::theme::px(12.0f);
     const float kTimingLabelCol = wds::interaction::theme::kLabelW2;
+    const bool bpm_mode = timing_popup_mode_ == TimingPopupMode::Bpm;
     painter.label({timing_popup_bounds_.x + kTimingPad,
                    timing_popup_bounds_.y + wds::interaction::theme::px(5.0f),
                    timing_popup_bounds_.w - kTimingPad * 2.0f, title_h},
-                  "节奏信息编辑", {0.96f, 0.96f, 0.98f, 1.0f}, kZText);
-    painter.label({timing_popup_bounds_.x + kTimingPad, timing_bpm_field_.y, kTimingLabelCol,
-                   timing_bpm_field_.h},
-                  "BPM", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
-    painter.label({timing_popup_bounds_.x + kTimingPad, timing_num_field_.y, kTimingLabelCol,
-                   timing_num_field_.h},
-                  "拍号", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
+                  bpm_mode ? "BPM 编辑" : "拍号编辑", {0.96f, 0.96f, 0.98f, 1.0f}, kZText);
+    painter.label({timing_popup_bounds_.x + kTimingPad,
+                   bpm_mode ? timing_bpm_field_.y : timing_num_field_.y, kTimingLabelCol,
+                   bpm_mode ? timing_bpm_field_.h : timing_num_field_.h},
+                  bpm_mode ? "BPM" : "拍号", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
     const auto field_bg = [&](const wds::interaction::Rect& r, int field) {
       const bool focused = timing_focus_field_ == field;
       const Color fill =
@@ -1882,15 +2026,18 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
       const Color outline = focused ? wds::interaction::theme::kPrimary : Color{0.38f, 0.38f, 0.42f, 1.0f};
       painter.fill_rect_outline(r, fill, outline, 6.0f, kZCtrl);
     };
-    field_bg(timing_bpm_field_, 0);
-    field_bg(timing_num_field_, 1);
-    field_bg(timing_den_field_, 2);
-    painter.label(timing_bpm_field_, timing_bpm_text_, {1, 1, 1, 1}, kZText);
-    painter.label(timing_num_field_, timing_num_text_, {1, 1, 1, 1}, kZText);
-    painter.label({timing_num_field_.right(), timing_num_field_.y,
-                   timing_den_field_.x - timing_num_field_.right(), timing_num_field_.h},
-                  "/", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
-    painter.label(timing_den_field_, timing_den_text_, {1, 1, 1, 1}, kZText);
+    if (bpm_mode) {
+      field_bg(timing_bpm_field_, 0);
+      painter.label(timing_bpm_field_, timing_bpm_text_, {1, 1, 1, 1}, kZText);
+    } else {
+      field_bg(timing_num_field_, 1);
+      field_bg(timing_den_field_, 2);
+      painter.label(timing_num_field_, timing_num_text_, {1, 1, 1, 1}, kZText);
+      painter.label({timing_num_field_.right(), timing_num_field_.y,
+                     timing_den_field_.x - timing_num_field_.right(), timing_num_field_.h},
+                    "/", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
+      painter.label(timing_den_field_, timing_den_text_, {1, 1, 1, 1}, kZText);
+    }
 
     const auto paint_caret = [&](const wds::interaction::Rect& r, const std::string& text) {
       const float px = wds::interaction::theme::kFontSizeMd;
@@ -1899,7 +2046,7 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
       // Keep z < ortho far (1.0); kZText+epsilon was clipped away.
       wds::interaction::caret::paint(painter, r, text_x + size.x, kZText, timing_caret_blink_t_);
     };
-    if (timing_focus_field_ == 0) paint_caret(timing_bpm_field_, timing_bpm_text_);
+    if (bpm_mode) paint_caret(timing_bpm_field_, timing_bpm_text_);
     else if (timing_focus_field_ == 1) paint_caret(timing_num_field_, timing_num_text_);
     else paint_caret(timing_den_field_, timing_den_text_);
   }
@@ -2014,17 +2161,30 @@ void ChartEditPanel::confirm_split_picker() {
   close_split_picker();
 }
 
-void ChartEditPanel::open_timing_popup(int32_t tick) {
+void ChartEditPanel::open_bpm_popup(int32_t tick) {
   timing_popup_open_ = true;
+  timing_popup_mode_ = TimingPopupMode::Bpm;
   timing_edit_tick_ = tick;
   timing_focus_field_ = 0;
   timing_caret_blink_t_ = 0.0f;
   const auto& timing = engine_.document().timing();
   const auto& p = wds::chart_editor::timing_point_at(timing, tick);
   timing_bpm_text_ = format_bpm_label(p.bpm);
+  timing_bpm_committed_ = timing_bpm_text_;
+  close_split_picker();
+  hide_gutter_ghost();
+}
+
+void ChartEditPanel::open_meter_popup(int32_t tick) {
+  timing_popup_open_ = true;
+  timing_popup_mode_ = TimingPopupMode::Meter;
+  timing_edit_tick_ = tick;
+  timing_focus_field_ = 1;
+  timing_caret_blink_t_ = 0.0f;
+  const auto& timing = engine_.document().timing();
+  const auto& p = wds::chart_editor::timing_meter_at(timing, tick);
   timing_num_text_ = std::to_string(p.numerator);
   timing_den_text_ = std::to_string(p.denominator);
-  timing_bpm_committed_ = timing_bpm_text_;
   timing_num_committed_ = timing_num_text_;
   timing_den_committed_ = timing_den_text_;
   close_split_picker();
@@ -2059,46 +2219,85 @@ void ChartEditPanel::commit_timing_popup() {
     }
   };
 
-  const auto bpm = parse_positive(timing_bpm_text_);
-  const auto num = parse_positive_int(timing_num_text_);
-  const auto den = parse_positive_int(timing_den_text_);
-  if (!bpm || !num || !den) {
-    timing_bpm_text_ = timing_bpm_committed_;
-    timing_num_text_ = timing_num_committed_;
-    timing_den_text_ = timing_den_committed_;
-    return;
-  }
-
-  auto timing = engine_.document().timing();
-  wds::chart_editor::TimingPoint point;
-  point.tick = timing_edit_tick_;
-  point.bpm = *bpm;
-  point.numerator = *num;
-  point.denominator = *den;
-  bool found = false;
+  const auto before = engine_.document().timing();
+  auto timing = before;
+  wds::chart_editor::TimingPoint* existing = nullptr;
   for (auto& p : timing.points) {
     if (p.tick == timing_edit_tick_) {
-      p = point;
-      found = true;
+      existing = &p;
       break;
     }
   }
-  if (!found) timing.points.push_back(point);
-  engine_.document().set_timing(std::move(timing));
-  engine_.rebuild_snapshot();
+
+  if (timing_popup_mode_ == TimingPopupMode::Bpm) {
+    const auto bpm = parse_positive(timing_bpm_text_);
+    if (!bpm) {
+      timing_bpm_text_ = timing_bpm_committed_;
+      return;
+    }
+    if (existing) {
+      existing->bpm = *bpm;
+      existing->has_bpm = true;
+    } else {
+      wds::chart_editor::TimingPoint point;
+      point.tick = timing_edit_tick_;
+      point.bpm = *bpm;
+      point.has_bpm = true;
+      point.has_meter = false;
+      timing.points.push_back(point);
+    }
+    engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
+        before, std::move(timing), existing ? "Edit BPM" : "Add BPM"));
+  } else {
+    const auto num = parse_positive_int(timing_num_text_);
+    const auto den = parse_positive_int(timing_den_text_);
+    if (!num || !den) {
+      timing_num_text_ = timing_num_committed_;
+      timing_den_text_ = timing_den_committed_;
+      return;
+    }
+    if (existing) {
+      existing->numerator = *num;
+      existing->denominator = *den;
+      existing->has_meter = true;
+    } else {
+      wds::chart_editor::TimingPoint point;
+      point.tick = timing_edit_tick_;
+      point.numerator = *num;
+      point.denominator = *den;
+      point.has_bpm = false;
+      point.has_meter = true;
+      timing.points.push_back(point);
+    }
+    wds::chart_editor::normalize_timing_points(timing);
+    wds::chart_editor::prune_orphaned_meter_changes(timing, timing_edit_tick_);
+    engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
+        before, std::move(timing), existing ? "Edit meter" : "Add meter"));
+  }
   close_timing_popup();
 }
 
-bool ChartEditPanel::delete_timing_point(int32_t tick) {
+bool ChartEditPanel::delete_timing_label(int32_t tick, TimingPopupMode kind) {
   if (!engine_.is_editable() || tick == 0) return false;
-  auto timing = engine_.document().timing();
-  const auto it = std::remove_if(timing.points.begin(), timing.points.end(),
-                                 [&](const wds::chart_editor::TimingPoint& p) { return p.tick == tick; });
+  const auto before = engine_.document().timing();
+  auto timing = before;
+  auto it = std::find_if(timing.points.begin(), timing.points.end(),
+                         [&](const wds::chart_editor::TimingPoint& p) { return p.tick == tick; });
   if (it == timing.points.end()) return false;
-  timing.points.erase(it, timing.points.end());
-  engine_.document().set_timing(std::move(timing));
-  engine_.rebuild_snapshot();
-  return true;
+  if (kind == TimingPopupMode::Bpm) {
+    if (!it->has_bpm) return false;
+    it->has_bpm = false;
+  } else {
+    if (!it->has_meter) return false;
+    it->has_meter = false;
+  }
+  wds::chart_editor::normalize_timing_points(timing);
+  if (kind == TimingPopupMode::Meter) {
+    wds::chart_editor::prune_orphaned_meter_changes(timing, tick);
+  }
+  const char* label = kind == TimingPopupMode::Bpm ? "Delete BPM" : "Delete meter";
+  return engine_.execute_command(
+      std::make_unique<wds::chart_editor::SetTimingCommand>(before, std::move(timing), label));
 }
 
 bool ChartEditPanel::delete_split_note(int32_t note_id) {
@@ -2152,20 +2351,23 @@ bool ChartEditPanel::handle_popup_pointer_down(const wds::interaction::PointerDo
       commit_timing_popup();
       return true;
     }
-    if (timing_bpm_field_.contains(event.position)) {
-      timing_focus_field_ = 0;
-      timing_caret_blink_t_ = 0.0f;
-      return true;
-    }
-    if (timing_num_field_.contains(event.position)) {
-      timing_focus_field_ = 1;
-      timing_caret_blink_t_ = 0.0f;
-      return true;
-    }
-    if (timing_den_field_.contains(event.position)) {
-      timing_focus_field_ = 2;
-      timing_caret_blink_t_ = 0.0f;
-      return true;
+    if (timing_popup_mode_ == TimingPopupMode::Bpm) {
+      if (timing_bpm_field_.contains(event.position)) {
+        timing_focus_field_ = 0;
+        timing_caret_blink_t_ = 0.0f;
+        return true;
+      }
+    } else {
+      if (timing_num_field_.contains(event.position)) {
+        timing_focus_field_ = 1;
+        timing_caret_blink_t_ = 0.0f;
+        return true;
+      }
+      if (timing_den_field_.contains(event.position)) {
+        timing_focus_field_ = 2;
+        timing_caret_blink_t_ = 0.0f;
+        return true;
+      }
     }
     if (!timing_popup_bounds_.contains(event.position)) close_timing_popup();
     return true;
@@ -2213,6 +2415,8 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
 }
 
 bool ChartEditPanel::handle_right_gutter_pointer_down(const wds::interaction::PointerDownEvent& event) {
+  // Measure-index column is display-only; absorb clicks so they do not hit the playfield.
+  if (measure_gutter_.contains(event.position)) return true;
   if (!right_gutter_.contains(event.position)) return false;
   // Official charts have no BPM/meter authoring — ignore timing-gutter clicks.
   if (!engine_.is_editable()) return true;
@@ -2221,20 +2425,34 @@ bool ChartEditPanel::handle_right_gutter_pointer_down(const wds::interaction::Po
   const auto hits = build_timing_label_hits(viewport_, right_gutter_, timing);
   for (const auto& hit : hits) {
     if (!hit.bounds.contains(event.position)) continue;
+    const auto kind =
+        hit.kind == TimingLabelKind::Bpm ? TimingPopupMode::Bpm : TimingPopupMode::Meter;
     if (event.button == wds::interaction::PointerButton::Middle) {
-      if (hit.point_tick != 0) delete_timing_point(hit.point_tick);
+      delete_timing_label(hit.point_tick, kind);
       return true;
     }
-    if (wds::interaction::is_left_button(event.button)) {
-      open_timing_popup(hit.point_tick);
+    if (kind == TimingPopupMode::Bpm && wds::interaction::is_left_button(event.button)) {
+      open_bpm_popup(hit.point_tick);
+      return true;
+    }
+    // Meter: right-click (authoring) or left-click on an existing label to edit.
+    if (kind == TimingPopupMode::Meter && (wds::interaction::is_right_button(event.button) ||
+                                          wds::interaction::is_left_button(event.button))) {
+      open_meter_popup(hit.point_tick);
       return true;
     }
     return true;
   }
   if (event.button == wds::interaction::PointerButton::Middle) return true;
-  if (wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
+  if (wds::interaction::is_left_button(event.button)) {
+    if (auto bpm_tick = timing_bpm_tick_at(viewport_, right_gutter_, timing, event.position)) {
+      open_bpm_popup(*bpm_tick);
+    }
+    return true;
+  }
+  if (wds::interaction::is_right_button(event.button)) {
     if (auto measure = timing_measure_tick_at(viewport_, right_gutter_, timing, event.position)) {
-      open_timing_popup(*measure);
+      open_meter_popup(*measure);
     }
     return true;
   }
@@ -2267,8 +2485,8 @@ void ChartEditPanel::paint_overlays(wds::interaction::UiPainter& painter) const 
     painter.label(hit.bounds, std::to_string(note->scratch_length), {1.0f, 1.0f, 1.0f, 1.0f},
                   0.98f, false, label_px);
   }
-  if (gutter_ghost_visible_) {
-    painter.fill_rect(gutter_ghost_bounds_, gutter_ghost_color_, th::kCornerRadiusSm, 0.977f);
+  for (const auto& ghost : gutter_ghosts_) {
+    painter.fill_rect(ghost.bounds, ghost.color, th::kCornerRadiusSm, 0.977f);
   }
 }
 
@@ -3653,9 +3871,9 @@ void ChartEditPanel::on_scroll(const wds::interaction::ScrollEvent& event) {
 void ChartEditPanel::on_key_down(const wds::interaction::KeyDownEvent& event) {
   active_mods_ = event.mods;
   if (timing_popup_open_) {
-    auto* field = timing_focus_field_ == 0 ? &timing_bpm_text_
-                  : timing_focus_field_ == 1 ? &timing_num_text_
-                                             : &timing_den_text_;
+    auto* field = timing_popup_mode_ == TimingPopupMode::Bpm ? &timing_bpm_text_
+                  : timing_focus_field_ == 1                 ? &timing_num_text_
+                                                             : &timing_den_text_;
     if (event.key == wds::interaction::KeyCode::Backspace) {
       if (!field->empty()) field->pop_back();
       timing_caret_blink_t_ = 0.0f;
@@ -3670,10 +3888,24 @@ void ChartEditPanel::on_key_down(const wds::interaction::KeyDownEvent& event) {
       return;
     }
     if (event.key == wds::interaction::KeyCode::Tab) {
-      timing_focus_field_ = (timing_focus_field_ + 1) % 3;
-      timing_caret_blink_t_ = 0.0f;
+      if (timing_popup_mode_ == TimingPopupMode::Meter) {
+        timing_focus_field_ = timing_focus_field_ == 1 ? 2 : 1;
+        timing_caret_blink_t_ = 0.0f;
+      }
       return;
     }
+    return;
+  }
+  if (split_picker_open_) {
+    if (event.key == wds::interaction::KeyCode::Escape) {
+      close_split_picker();
+    }
+    return;
+  }
+  // Esc clears selection and resets hold drill layer to outer (None), so the next
+  // hold click starts at Chain/Whole instead of residual Parts/Stars.
+  if (event.key == wds::interaction::KeyCode::Escape) {
+    clear_selection();
     return;
   }
   if (wds::interaction::is_primary_modifier(event.mods) &&
@@ -3702,12 +3934,13 @@ void ChartEditPanel::on_key_up(const wds::interaction::KeyUpEvent& event) {
 
 void ChartEditPanel::on_text_input(const wds::interaction::TextInputEvent& event) {
   if (!timing_popup_open_ || event.text.empty()) return;
-  std::string* field = timing_focus_field_ == 0 ? &timing_bpm_text_
+  const bool bpm_mode = timing_popup_mode_ == TimingPopupMode::Bpm;
+  std::string* field = bpm_mode                  ? &timing_bpm_text_
                        : timing_focus_field_ == 1 ? &timing_num_text_
                                                   : &timing_den_text_;
   bool changed = false;
   for (char c : event.text) {
-    if ((c >= '0' && c <= '9') || (timing_focus_field_ == 0 && c == '.')) {
+    if ((c >= '0' && c <= '9') || (bpm_mode && c == '.')) {
       field->push_back(c);
       changed = true;
     }

@@ -43,7 +43,11 @@ enum class KeyCode : int32_t {
   Right = 262,
   Up = 265,
   Down = 264,
-  F11 = 290,  // matches GLFW_KEY_F11
+  F1 = 290,   // matches GLFW_KEY_F1
+  F2 = 291,
+  F3 = 292,
+  F4 = 293,
+  F11 = 300,  // matches GLFW_KEY_F11
   A = 65,
   Z = 90,
 };

@@ -121,18 +121,16 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
 
   if (playing_) {
     if (audio_.has_music()) {
-      // Soft-lock display clock to the music stream (1:1 with timeline).
+      // Audio-primary display clock. Hit SFX is hard-locked to BASS music POS;
+      // if the note timeline follows wall time with a wide dead zone, notes and
+      // SFX slowly walk apart as the device clock drifts from the wall clock.
       const auto raw = clamp_time(audio_.position());
-      // Wall-primary display clock, light audio lock:
-      //   committed += real_wall * rate
-      // UPDATEPERIOD is already 5ms — no continuous rebase / lead-cap freeze.
-      // Tight dead zone absorbs staircase + brief DWM phase error; average frame
-      // rate pulls phase back. Outside the zone, only a light slew on the excess.
-      // Do NOT EMA-pace wall_delta: that breaks content_delta/wall_delta ≈ 1× and
-      // turns hitch/short frames into visible phase lag then catch-up (worse jitter).
+      // Between ~5ms BASS updates, advance by wall*rate for sub-update smoothness,
+      // then pull back toward audio. Tiny dead zone absorbs position staircases;
+      // outside it, correct aggressively so phase cannot accumulate over a song.
       constexpr int64_t kHardSnapUs = 100000;  // 100ms
-      constexpr int64_t kDeadZoneUs = 15000;   // 15ms ≈ 3× UPDATEPERIOD; UI stays near audio
-      constexpr double kErrorGain = 0.015;     // barely-there correction past the dead zone
+      constexpr int64_t kDeadZoneUs = 4000;    // < UPDATEPERIOD — ignore quantize noise
+      constexpr double kErrorGain = 0.35;      // catch wall/audio drift within a few frames
       if (music_start_pending_) {
         // Audible BGM not started yet — keep UI locked to the paused playhead
         // so wall time does not drift ahead and then get yanked back.
@@ -155,11 +153,11 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         } else if (err > kDeadZoneUs || err < -kDeadZoneUs) {
           const int64_t excess =
               err > 0 ? err - kDeadZoneUs : err + kDeadZoneUs;
-          const int64_t max_nudge =
-              std::max(int64_t{500}, advance_us > 0 ? advance_us / 20 : int64_t{500});
           int64_t nudge = static_cast<int64_t>(
               std::llround(static_cast<double>(excess) * kErrorGain));
-          nudge = std::clamp(nudge, -max_nudge, max_nudge);
+          if (nudge == 0) {
+            nudge = excess > 0 ? 1 : -1;
+          }
           committed_position_ =
               clamp_time(committed_position_ + wds::common::Microseconds{nudge});
         }

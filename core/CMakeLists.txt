@@ -13,6 +13,7 @@ add_library(wds_core STATIC
     src/gimmick.cpp
     src/split_lane_simulator.cpp
     src/chart_serializer.cpp
+    src/file_io.cpp
     src/project.cpp
     src/official_chart.cpp
     src/sus_chart.cpp

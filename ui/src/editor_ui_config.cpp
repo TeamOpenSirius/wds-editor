@@ -1,5 +1,7 @@
 #include "wds/ui/editor_ui_config.hpp"
 
+#include <wds/interaction/platform.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -104,7 +106,28 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
         cfg.width_slots[static_cast<std::size_t>(idx_ch - '0')] = static_cast<int>(v);
       }
     }
+  } else if (key.rfind("shortcut_", 0) == 0) {
+    const std::string id = key.substr(9);
+    for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+      const auto sid = static_cast<wds::interaction::EditorShortcut>(i);
+      if (id == wds::interaction::editor_shortcut_id(sid)) {
+        if (const auto parsed = wds::interaction::parse_shortcut_chord(value)) {
+          cfg.shortcuts[i] = *parsed;
+          cfg.shortcuts_initialized = true;
+        }
+        break;
+      }
+    }
   }
+}
+
+void ensure_shortcut_defaults(EditorUiConfig& cfg) {
+  if (cfg.shortcuts_initialized) return;
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    cfg.shortcuts[i] =
+        wds::interaction::default_editor_shortcut(static_cast<wds::interaction::EditorShortcut>(i));
+  }
+  cfg.shortcuts_initialized = true;
 }
 
 fs::path exe_parent_dir(const char* argv0) {
@@ -193,6 +216,7 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
   if (!in) return false;
 
   EditorUiConfig cfg = out;
+  ensure_shortcut_defaults(cfg);
   std::string line;
   while (std::getline(in, line)) {
     const auto hash = line.find('#');
@@ -248,6 +272,22 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "width_slot_3: " << cfg.width_slots[3] << '\n'
       << "width_slot_4: " << cfg.width_slots[4] << '\n'
       << "width_slot_5: " << cfg.width_slots[5] << '\n';
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    const auto id = static_cast<wds::interaction::EditorShortcut>(i);
+    const auto chord = cfg.shortcuts_initialized
+                           ? cfg.shortcuts[i]
+                           : wds::interaction::default_editor_shortcut(id);
+    // Persist with Ctrl (platform-neutral primary); load accepts Cmd/Ctrl.
+    wds::interaction::ShortcutChord stored = chord;
+    stored.mods = wds::interaction::normalize_primary(stored.mods);
+    std::string text = wds::interaction::format_shortcut_chord(stored);
+    // format_* uses Cmd on Apple — rewrite every token for a stable config file.
+    for (std::string::size_type pos = 0; (pos = text.find("Cmd", pos)) != std::string::npos;) {
+      text.replace(pos, 3, "Ctrl");
+      pos += 4;
+    }
+    out << "shortcut_" << wds::interaction::editor_shortcut_id(id) << ": " << text << '\n';
+  }
   return static_cast<bool>(out);
 }
 

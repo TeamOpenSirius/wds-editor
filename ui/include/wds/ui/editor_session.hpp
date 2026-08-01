@@ -1,5 +1,6 @@
 #pragma once
 
+#include <wds/core/edit_history.hpp>
 #include <wds/core/notation.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
@@ -75,6 +76,8 @@ class EditorSession {
     std::string path;  // empty = not yet saved to a .wdschart file
     wds::chart_editor::NotationChart chart;
     bool dirty = false;
+    // Per-chart undo stack; swapped with the engine history on chart switch.
+    wds::chart_editor::EditHistory history;
   };
 
   void stash_active();

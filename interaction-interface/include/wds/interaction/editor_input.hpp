@@ -1,6 +1,7 @@
 #pragma once
 
 #include "events.hpp"
+#include "editor_shortcuts.hpp"
 #include "gesture.hpp"
 #include "platform.hpp"
 #include "shortcuts.hpp"
@@ -104,5 +105,8 @@ ShortcutChord chord_delete_selection() noexcept;
 ShortcutChord chord_toggle_fullscreen() noexcept;
 // Default note width slots (Q/W/E/A/S/D → 1/2/3/4/6/12).
 ShortcutChord chord_width_slot(int slot_index) noexcept;  // 0..5
+// Playback rate presets: F1–F4 → 0.25x / 0.5x / 0.75x / 1x.
+ShortcutChord chord_playback_rate_slot(int slot_index) noexcept;  // 0..3
+std::optional<float> playback_rate_for_slot(int slot_index) noexcept;
 
 }  // namespace wds::interaction

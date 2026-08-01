@@ -1,5 +1,7 @@
 #pragma once
 
+#include <wds/interaction/editor_shortcuts.hpp>
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -32,6 +34,9 @@ struct EditorUiConfig {
   // At visible_hectoms=20, 1x = 100ms/notch (scales proportionally with range).
   // Legacy hardcoded scrub was 50ms/notch at range 20 (= 0.5x). Default is 1x.
   float scroll_wheel_speed = 1.0f;
+  // User-configurable editor chords (defaults match built-in bindings).
+  std::array<wds::interaction::ShortcutChord, wds::interaction::kEditorShortcutCount> shortcuts{};
+  bool shortcuts_initialized = false;
 };
 
 // Resolves the platform config path (creates nothing; save may create dirs).

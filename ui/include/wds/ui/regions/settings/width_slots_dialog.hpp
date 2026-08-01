@@ -2,6 +2,7 @@
 
 #include "wds/ui/editor_ui_config.hpp"
 
+#include <wds/interaction/editor_shortcuts.hpp>
 #include <wds/interaction/widget.hpp>
 
 #include <array>
@@ -9,7 +10,7 @@
 
 namespace wds::ui {
 
-// Settings modal with left tabs: 文件 / 音频 / 输入 / 快捷键宽.
+// Settings modal with left tabs: 文件 / 音频 / 输入 / 快捷键宽 / 快捷键设置.
 class WidthSlotsDialog final : public wds::interaction::Widget {
  public:
   WidthSlotsDialog();
@@ -33,27 +34,38 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   void paint_dropdown(wds::interaction::UiPainter& painter) const;
   Widget* hit_test(wds::interaction::Vec2 point) override;
   void on_click(const wds::interaction::ClickEvent& event) override;
+  void on_scroll(const wds::interaction::ScrollEvent& event) override;
 
  private:
-  enum class Tab { File, Audio, Input, Width };
+  enum class Tab { File, Audio, Input, Width, Shortcuts };
 
   void sync_fields_from_state();
   void apply_fields();
   void layout_content(const wds::interaction::Rect& host);
   void set_tab(Tab tab);
   void update_tab_visibility();
+  void clamp_shortcut_scroll();
+  bool shortcut_conflicts(std::size_t self_index,
+                          const wds::interaction::ShortcutChord& chord) const;
 
   bool open_ = false;
   Tab tab_ = Tab::File;
+  // Snapshot of toolbar "停止播放后停在当前时间" for pause-shortcut labels.
+  bool pause_at_current_ = false;
   std::function<void()> on_applied_;
   wds::interaction::Rect content_bounds_{};
   wds::interaction::Rect tab_file_bounds_{};
   wds::interaction::Rect tab_audio_bounds_{};
   wds::interaction::Rect tab_input_bounds_{};
   wds::interaction::Rect tab_width_bounds_{};
+  wds::interaction::Rect tab_shortcuts_bounds_{};
+  wds::interaction::Rect shortcut_list_bounds_{};
+  float shortcut_scroll_ = 0.0f;
 
-  // Width tab: Q/W/E/A/S/D fields (2 columns × 3 rows).
+  // Width tab: 一档…六档 fields (2 columns × 3 rows).
   std::array<wds::interaction::Widget*, 6> fields_{};
+  // Shortcut tab: one ShortcutField per EditorShortcut.
+  std::array<wds::interaction::Widget*, wds::interaction::kEditorShortcutCount> shortcut_fields_{};
   // File / Audio / Input options.
   wds::interaction::Widget* sus_auto_convert_ = nullptr;
   wds::interaction::Widget* mute_hold_body_sfx_ = nullptr;

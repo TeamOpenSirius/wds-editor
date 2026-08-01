@@ -140,10 +140,11 @@ jobs:
           echo "tag=main-${short_sha}" >> "$GITHUB_OUTPUT"
           echo "name=WDS Editor ${short_sha}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$COMMIT_MSG" > release_notes.md
-          echo "Artifacts:" >> release_notes.md
-          ls -lh artifacts/*.msi artifacts/*.dmg >> release_notes.md
           echo "---- release_notes.md ----"
           cat release_notes.md
+          # Ensure artifacts exist without embedding ls metadata (mode/time/size) in notes.
+          test -f artifacts/wds-win-x86_64.msi
+          test -f artifacts/wds-macos-arm.dmg
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

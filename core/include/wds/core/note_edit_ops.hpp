@@ -19,9 +19,11 @@ bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick);
 bool nudge_notes_lane(std::vector<NotationNote>& notes, int32_t delta_lane, int32_t lane_count);
 
 // Map a toolbar convert target to the note-family-correct type.
-// Critical only retints heads (CriticalHoldStart / ScratchCriticalHoldStart / Critical
-// tap). Hold *bodies* stay Hold / ScratchHold — CriticalHold* body ids exist for
-// official import/export but are not produced by editor converts.
+// Hold heads (when converted alone): only legal head retints
+// (HoldStart↔CriticalHoldStart / ScratchHoldStart↔ScratchCriticalHoldStart); illegal
+// targets keep the current type. Hold bodies under Tap/Critical/HoldStart/Flick collapse
+// to that instantaneous type (UI deletes the paired head). ConvertHold /
+// ConvertScratchHold force the matching hold-body type.
 NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& note,
                                 NoteType target) noexcept;
 

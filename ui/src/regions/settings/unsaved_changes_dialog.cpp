@@ -60,8 +60,8 @@ void UnsavedChangesDialog::layout_content(const wds::interaction::Rect& host) {
   const float gap = th::kUiGap;
   const float ctrl_h = th::kControlHeight;
   const float title_h = ctrl_h;
-  const float msg_h = th::kFontSizeMd * 2.4f + gap;
-  const float panel_w = std::min(th::px(380.0f), std::max(th::px(280.0f), host.w * 0.44f));
+  const float msg_h = th::kFontSizeGutter * 2.4f + gap;
+  const float panel_w = std::min(th::px(300.0f), std::max(th::px(240.0f), host.w * 0.34f));
   const float panel_h = pad * 2.0f + title_h + gap + msg_h + gap + ctrl_h * 3.0f + gap * 3.0f;
   content_bounds_ = {(host.w - panel_w) * 0.5f, (host.h - panel_h) * 0.5f, panel_w, panel_h};
 
@@ -99,10 +99,10 @@ void UnsavedChangesDialog::paint_modal(wds::interaction::UiPainter& painter) con
   const float ctrl_h = th::kControlHeight;
   painter.label({content.x + pad, content.y + pad, content.w - pad * 2.0f, ctrl_h}, "未保存的更改",
                 th::kOnSurface, 0.987f);
-  const float msg_h = th::kFontSizeMd * 2.4f + gap;
+  const float msg_h = th::kFontSizeGutter * 2.4f + gap;
   painter.label({content.x + pad, content.y + pad + ctrl_h + gap, content.w - pad * 2.0f, msg_h},
                 "当前项目有未保存的更改，是否保存？", th::kOnSurfaceMuted, 0.987f, true,
-                th::kFontSizeMd);
+                th::kFontSizeGutter);
 
   constexpr float kFieldZ = 0.988f;
   static_cast<const wds::interaction::Button*>(save_button_)->paint_at(painter, kFieldZ);

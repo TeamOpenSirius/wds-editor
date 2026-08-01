@@ -1,6 +1,8 @@
 #include <wds/core/official_chart.hpp>
 
+#include <wds/core/file_io.hpp>
 #include <wds/core/gimmick.hpp>
+#include <wds/core/notation.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -79,20 +81,17 @@ bool parse_int(const std::string& text, int32_t& out) {
 }
 
 float seconds_to_tick(double seconds, const MusicTiming& timing) {
-  if (timing.bpm <= 0.0 || timing.ticks_per_quarter <= 0) {
-    return 0.0f;
-  }
-  const double ticks =
-      seconds * (timing.bpm / 60.0) * static_cast<double>(timing.ticks_per_quarter);
-  return static_cast<float>(ticks);
+  // Official CSV seconds are chart-local (DelaySeconds lives in music_config).
+  MusicTiming local = timing;
+  local.offset_ms = 0;
+  return milliseconds_to_tick(static_cast<int64_t>(std::llround(seconds * 1000.0)), local);
 }
 
 double tick_to_seconds(float tick, const MusicTiming& timing) {
-  if (timing.bpm <= 0.0 || timing.ticks_per_quarter <= 0) {
-    return 0.0;
-  }
-  return static_cast<double>(tick) * 60.0 /
-         (timing.bpm * static_cast<double>(timing.ticks_per_quarter));
+  // Integrate BPM changes; exclude project-level chart delay (music_config DelaySeconds).
+  MusicTiming local = timing;
+  local.offset_ms = 0;
+  return static_cast<double>(tick_to_milliseconds(tick, local)) / 1000.0;
 }
 
 bool parse_gimmick_token(const std::string& token, GimmickType& out) {
@@ -146,15 +145,7 @@ std::string read_file_text(const std::string& path, SerializeResult& status) {
 }
 
 SerializeResult write_file_text(const std::string& path, const std::string& text) {
-  std::ofstream file(path, std::ios::binary | std::ios::trunc);
-  if (!file) {
-    return {SerializeError::IoError, "failed to open file for writing: " + path};
-  }
-  file << text;
-  if (!file) {
-    return {SerializeError::IoError, "failed while writing: " + path};
-  }
-  return {SerializeError::Ok, {}};
+  return write_text_atomic(path, text);
 }
 
 bool path_ends_with_ci(const std::string& path, const std::string& suffix) {

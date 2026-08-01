@@ -21,6 +21,8 @@ void ShortcutNamespace::unbind(ShortcutChord chord) {
   bindings_.erase(chord);
 }
 
+void ShortcutNamespace::clear() noexcept { bindings_.clear(); }
+
 bool ShortcutNamespace::dispatch(const KeyDownEvent& event) const {
   const ShortcutChord chord{event.key, normalize_primary(event.mods)};
   const auto it = bindings_.find(chord);

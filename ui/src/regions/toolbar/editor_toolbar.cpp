@@ -368,7 +368,7 @@ void EditorToolbar::run(Action action) {
       if (on_open_) {
         on_open_();
       } else if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-        session_.open_wdsproject(*path);
+        (void)session_.open_wdsproject(*path);
       }
       break;
     case Action::Save:

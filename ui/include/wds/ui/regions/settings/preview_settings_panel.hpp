@@ -22,6 +22,9 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
   void capture_config(EditorUiConfig& cfg) const;
   void set_persist_handler(std::function<void()> handler) { on_persist_ = std::move(handler); }
 
+  // Preset playback rate (e.g. F1–F4 → 0.25x–1x). Updates transport + rate combo.
+  void set_playback_rate(float rate);
+
  private:
   void apply_music_gain();
   void apply_sfx_gain();

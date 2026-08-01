@@ -1,5 +1,7 @@
 #include "wds/interaction/editor_input.hpp"
 
+#include "wds/interaction/platform.hpp"
+
 #include <algorithm>
 
 namespace wds::interaction {
@@ -153,72 +155,88 @@ void set_scroll_wheel_speed(float speed) noexcept {
 }
 
 std::optional<int> default_width_for_key(KeyCode key) noexcept {
-  // Letter values match ASCII (GLFW maps A–Z → 65–90). Compare as int so
-  // Q/W/E/S/D work even though KeyCode only enumerates A and Z explicitly.
+  // Match configured width-slot chords (bare key, no modifiers).
   const auto& slots = slots_storage();
-  switch (static_cast<int>(key)) {
-    case 'Q':
-      return slots[0];
-    case 'W':
-      return slots[1];
-    case 'E':
-      return slots[2];
-    case 'A':
-      return slots[3];
-    case 'S':
-      return slots[4];
-    case 'D':
-      return slots[5];
-    default:
-      return std::nullopt;
+  static constexpr EditorShortcut kIds[6] = {
+      EditorShortcut::WidthSlot0, EditorShortcut::WidthSlot1, EditorShortcut::WidthSlot2,
+      EditorShortcut::WidthSlot3, EditorShortcut::WidthSlot4, EditorShortcut::WidthSlot5,
+  };
+  for (int i = 0; i < 6; ++i) {
+    const ShortcutChord& chord = editor_shortcut(kIds[i]);
+    if (chord.key == key && !chord.mods.any()) return slots[static_cast<std::size_t>(i)];
   }
+  return std::nullopt;
 }
 
 EditKeyResult resolve_edit_key(const KeyDownEvent& event) noexcept {
-  if (is_delete_selection_key(event.key)) {
+  const ShortcutChord chord{event.key, normalize_primary(event.mods)};
+  if (chord == editor_shortcut(EditorShortcut::DeleteSelection)) {
     return {EditKeyAction::DeleteSelection, 0};
   }
-  if (const auto width = default_width_for_key(event.key)) {
-    return {EditKeyAction::SetDefaultWidth, *width};
+  static constexpr EditorShortcut kWidthIds[6] = {
+      EditorShortcut::WidthSlot0, EditorShortcut::WidthSlot1, EditorShortcut::WidthSlot2,
+      EditorShortcut::WidthSlot3, EditorShortcut::WidthSlot4, EditorShortcut::WidthSlot5,
+  };
+  for (int i = 0; i < 6; ++i) {
+    if (chord == editor_shortcut(kWidthIds[i])) {
+      return {EditKeyAction::SetDefaultWidth, slots_storage()[static_cast<std::size_t>(i)]};
+    }
   }
   return {};
 }
 
-ShortcutChord chord_toggle_playback() noexcept { return {KeyCode::Space, {}}; }
+ShortcutChord chord_toggle_playback() noexcept {
+  return editor_shortcut(EditorShortcut::TogglePlayback);
+}
 ShortcutChord chord_pause_playback() noexcept {
-  Modifiers mods;
-  mods.shift = true;
-  return {KeyCode::Space, mods};
+  return editor_shortcut(EditorShortcut::PausePlayback);
 }
-ShortcutChord chord_save() noexcept { return chord_primary(static_cast<KeyCode>('S')); }
-ShortcutChord chord_open() noexcept { return chord_primary(static_cast<KeyCode>('O')); }
-ShortcutChord chord_undo() noexcept { return chord_primary(static_cast<KeyCode>('Z')); }
-ShortcutChord chord_redo() noexcept { return chord_primary(static_cast<KeyCode>('Y')); }
-ShortcutChord chord_copy() noexcept { return chord_primary(static_cast<KeyCode>('C')); }
-ShortcutChord chord_paste() noexcept { return chord_primary(static_cast<KeyCode>('V')); }
-ShortcutChord chord_mirror() noexcept { return chord_primary(static_cast<KeyCode>('M')); }
+ShortcutChord chord_save() noexcept { return editor_shortcut(EditorShortcut::Save); }
+ShortcutChord chord_open() noexcept { return editor_shortcut(EditorShortcut::Open); }
+ShortcutChord chord_undo() noexcept { return editor_shortcut(EditorShortcut::Undo); }
+ShortcutChord chord_redo() noexcept { return editor_shortcut(EditorShortcut::Redo); }
+ShortcutChord chord_copy() noexcept { return editor_shortcut(EditorShortcut::Copy); }
+ShortcutChord chord_paste() noexcept { return editor_shortcut(EditorShortcut::Paste); }
+ShortcutChord chord_mirror() noexcept { return editor_shortcut(EditorShortcut::Mirror); }
 ShortcutChord chord_mirror_about_center() noexcept {
-  return chord_primary(static_cast<KeyCode>('M'), true);
+  return editor_shortcut(EditorShortcut::MirrorAboutCenter);
 }
-ShortcutChord chord_nudge_up() noexcept { return {KeyCode::Up, {}}; }
-ShortcutChord chord_nudge_down() noexcept { return {KeyCode::Down, {}}; }
-ShortcutChord chord_nudge_left() noexcept { return {KeyCode::Left, {}}; }
-ShortcutChord chord_nudge_right() noexcept { return {KeyCode::Right, {}}; }
-ShortcutChord chord_delete_selection() noexcept { return {KeyCode::Delete, {}}; }
+ShortcutChord chord_nudge_up() noexcept { return editor_shortcut(EditorShortcut::NudgeUp); }
+ShortcutChord chord_nudge_down() noexcept { return editor_shortcut(EditorShortcut::NudgeDown); }
+ShortcutChord chord_nudge_left() noexcept { return editor_shortcut(EditorShortcut::NudgeLeft); }
+ShortcutChord chord_nudge_right() noexcept { return editor_shortcut(EditorShortcut::NudgeRight); }
+ShortcutChord chord_delete_selection() noexcept {
+  return editor_shortcut(EditorShortcut::DeleteSelection);
+}
 
 // Ctrl+Shift+F11 (Cmd+Shift+F11 on macOS) — avoids bare F11 (macOS Show Desktop /
 // browser fullscreen) and Ctrl+Cmd+F (system Enter Full Screen).
 ShortcutChord chord_toggle_fullscreen() noexcept {
-  return chord_primary(KeyCode::F11, /*shift=*/true);
+  return editor_shortcut(EditorShortcut::ToggleFullscreen);
 }
 
 ShortcutChord chord_width_slot(int slot_index) noexcept {
-  static constexpr KeyCode kKeys[6] = {
-      static_cast<KeyCode>('Q'), static_cast<KeyCode>('W'), static_cast<KeyCode>('E'),
-      KeyCode::A,                static_cast<KeyCode>('S'), static_cast<KeyCode>('D'),
+  static constexpr EditorShortcut kIds[6] = {
+      EditorShortcut::WidthSlot0, EditorShortcut::WidthSlot1, EditorShortcut::WidthSlot2,
+      EditorShortcut::WidthSlot3, EditorShortcut::WidthSlot4, EditorShortcut::WidthSlot5,
   };
   const int idx = std::clamp(slot_index, 0, 5);
-  return {kKeys[idx], {}};
+  return editor_shortcut(kIds[idx]);
+}
+
+ShortcutChord chord_playback_rate_slot(int slot_index) noexcept {
+  static constexpr EditorShortcut kIds[4] = {
+      EditorShortcut::PlaybackRate0, EditorShortcut::PlaybackRate1, EditorShortcut::PlaybackRate2,
+      EditorShortcut::PlaybackRate3,
+  };
+  const int idx = std::clamp(slot_index, 0, 3);
+  return editor_shortcut(kIds[idx]);
+}
+
+std::optional<float> playback_rate_for_slot(int slot_index) noexcept {
+  static constexpr float kRates[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  if (slot_index < 0 || slot_index > 3) return std::nullopt;
+  return kRates[slot_index];
 }
 
 }  // namespace wds::interaction

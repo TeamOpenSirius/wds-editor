@@ -1,11 +1,13 @@
 #include "wds/ui/regions/settings/width_slots_dialog.hpp"
 
 #include <wds/interaction/editor_input.hpp>
+#include <wds/interaction/platform.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/validators.hpp>
 #include <wds/interaction/widgets/button.hpp>
 #include <wds/interaction/widgets/checkbox.hpp>
 #include <wds/interaction/widgets/combo_box.hpp>
+#include <wds/interaction/widgets/shortcut_field.hpp>
 #include <wds/interaction/widgets/text_field.hpp>
 
 #include <algorithm>
@@ -19,7 +21,7 @@ namespace {
 
 namespace th = wds::interaction::theme;
 
-constexpr const char* kKeyLabels[6] = {"Q", "W", "E", "A", "S", "D"};
+constexpr const char* kWidthSlotLabels[6] = {"一档", "二档", "三档", "四档", "五档", "六档"};
 
 const std::vector<std::string>& scroll_speed_items() {
   static const std::vector<std::string> kItems{"0.25x", "0.5x",  "0.75x", "1x",   "1.25x",
@@ -90,6 +92,16 @@ WidthSlotsDialog::WidthSlotsDialog() {
     add_child(std::move(field));
   }
 
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    auto field = std::make_unique<wds::interaction::ShortcutField>();
+    auto* raw = field.get();
+    raw->set_conflict_checker([this, i](const wds::interaction::ShortcutChord& chord) {
+      return shortcut_conflicts(i, chord);
+    });
+    shortcut_fields_[i] = raw;
+    add_child(std::move(field));
+  }
+
   auto sus = std::make_unique<wds::interaction::Checkbox>("导入 sus 谱面时自动转换（实验性）");
   sus_auto_convert_ = sus.get();
   add_child(std::move(sus));
@@ -128,6 +140,20 @@ WidthSlotsDialog::WidthSlotsDialog() {
   update_tab_visibility();
 }
 
+bool WidthSlotsDialog::shortcut_conflicts(std::size_t self_index,
+                                          const wds::interaction::ShortcutChord& chord) const {
+  wds::interaction::ShortcutChord normalized = chord;
+  normalized.mods = wds::interaction::normalize_primary(normalized.mods);
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    if (i == self_index || shortcut_fields_[i] == nullptr) continue;
+    wds::interaction::ShortcutChord other =
+        static_cast<const wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord();
+    other.mods = wds::interaction::normalize_primary(other.mods);
+    if (other == normalized) return true;
+  }
+  return false;
+}
+
 void WidthSlotsDialog::open() {
   open_ = true;
   set_visible(true);
@@ -139,12 +165,14 @@ void WidthSlotsDialog::open() {
 void WidthSlotsDialog::close() {
   open_ = false;
   set_visible(false);
+  shortcut_scroll_ = 0.0f;
   if (auto* combo = static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)) {
     combo->dismiss_popups({-1.0f, -1.0f});
   }
 }
 
 void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
+  pause_at_current_ = cfg.pause_at_current;
   static_cast<wds::interaction::Checkbox*>(sus_auto_convert_)->set_checked(cfg.sus_auto_convert);
   static_cast<wds::interaction::Checkbox*>(mute_hold_body_sfx_)->set_checked(cfg.mute_hold_body_sfx);
   static_cast<wds::interaction::Checkbox*>(invert_scroll_wheel_)->set_checked(cfg.invert_scroll_wheel);
@@ -153,6 +181,13 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
   for (int i = 0; i < 6; ++i) {
     static_cast<wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
         ->set_text(std::to_string(cfg.width_slots[static_cast<std::size_t>(i)]));
+  }
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    const auto id = static_cast<wds::interaction::EditorShortcut>(i);
+    const auto chord = cfg.shortcuts_initialized
+                           ? cfg.shortcuts[i]
+                           : wds::interaction::editor_shortcut(id);
+    static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])->set_chord(chord);
   }
 }
 
@@ -175,6 +210,11 @@ void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
       }
     }
   }
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    cfg.shortcuts[i] =
+        static_cast<const wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord();
+  }
+  cfg.shortcuts_initialized = true;
 }
 
 void WidthSlotsDialog::sync_fields_from_state() {
@@ -182,6 +222,10 @@ void WidthSlotsDialog::sync_fields_from_state() {
   for (int i = 0; i < 6; ++i) {
     static_cast<wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
         ->set_text(std::to_string(slots[static_cast<std::size_t>(i)]));
+  }
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])
+        ->set_chord(wds::interaction::editor_shortcut(static_cast<wds::interaction::EditorShortcut>(i)));
   }
 }
 
@@ -201,6 +245,11 @@ void WidthSlotsDialog::apply_fields() {
       static_cast<wds::interaction::Checkbox*>(invert_scroll_wheel_)->checked());
   wds::interaction::set_scroll_wheel_speed(scroll_speed_from_label(
       static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)->text()));
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    wds::interaction::set_editor_shortcut(
+        static_cast<wds::interaction::EditorShortcut>(i),
+        static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord());
+  }
   if (on_applied_) on_applied_();
 }
 
@@ -210,6 +259,7 @@ void WidthSlotsDialog::set_tab(Tab tab) {
       combo->dismiss_popups({-1.0f, -1.0f});
     }
   }
+  if (tab != Tab::Shortcuts) shortcut_scroll_ = 0.0f;
   tab_ = tab;
   update_tab_visibility();
   if (open_) layout_content(bounds_);
@@ -220,8 +270,15 @@ void WidthSlotsDialog::update_tab_visibility() {
   const bool file = tab_ == Tab::File;
   const bool audio = tab_ == Tab::Audio;
   const bool input = tab_ == Tab::Input;
+  const bool shortcuts = tab_ == Tab::Shortcuts;
   for (auto* f : fields_) {
     if (f) f->set_visible(open_ && width);
+  }
+  // Shortcut rows: layout_content owns per-row clip visibility while this tab is open.
+  if (!open_ || !shortcuts) {
+    for (auto* f : shortcut_fields_) {
+      if (f) f->set_visible(false);
+    }
   }
   if (sus_auto_convert_) sus_auto_convert_->set_visible(open_ && file);
   if (mute_hold_body_sfx_) mute_hold_body_sfx_->set_visible(open_ && audio);
@@ -229,27 +286,43 @@ void WidthSlotsDialog::update_tab_visibility() {
   if (scroll_wheel_speed_) scroll_wheel_speed_->set_visible(open_ && input);
 }
 
+void WidthSlotsDialog::clamp_shortcut_scroll() {
+  const float ctrl_h = th::kControlHeight;
+  const float gap = th::kUiGap;
+  const float row_h = ctrl_h + gap;
+  const float content_h = row_h * static_cast<float>(wds::interaction::kEditorShortcutCount) - gap;
+  const float max_scroll = std::max(0.0f, content_h - shortcut_list_bounds_.h);
+  shortcut_scroll_ = std::clamp(shortcut_scroll_, 0.0f, max_scroll);
+}
+
 void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
+  // Shortcuts stay compact; other tabs use 2× row gap. Tall panel fits more bindings.
   const float pad = th::kUiPad * 1.5f;
   const float gap = th::kUiGap;
+  const float body_gap = th::kUiGap * 2.0f;
   const float ctrl_h = th::kControlHeight;
-  const float title_h = ctrl_h;
+  const float title_h = ctrl_h + th::px(4.0f);
   const float btn_h = ctrl_h;
   const float tab_w = th::px(110.0f);
-  const float panel_w = std::min(th::px(560.0f), std::max(th::px(380.0f), host.w * 0.48f));
-  const float panel_h =
-      pad * 2.0f + title_h + gap + ctrl_h * 5.0f + gap * 4.0f + btn_h + gap;
+  const float panel_w = std::min(th::px(600.0f), std::max(th::px(400.0f), host.w * 0.52f));
+  const float min_panel_h =
+      pad * 2.0f + title_h + gap + ctrl_h * 6.0f + body_gap * 5.0f + btn_h + gap;
+  // Prefer ~80% of window height so shortcut settings can list many bindings.
+  const float panel_h = std::clamp(host.h * 0.80f, min_panel_h, host.h * 0.92f);
   content_bounds_ = {(host.w - panel_w) * 0.5f, (host.h - panel_h) * 0.5f, panel_w, panel_h};
 
   const float tab_x = content_bounds_.x + pad;
   float tab_y = content_bounds_.y + pad + title_h + gap;
+  const float tab_gap = gap * 0.65f;
   tab_file_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
-  tab_y += ctrl_h + gap * 0.5f;
+  tab_y += ctrl_h + tab_gap;
   tab_audio_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
-  tab_y += ctrl_h + gap * 0.5f;
+  tab_y += ctrl_h + tab_gap;
   tab_input_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
-  tab_y += ctrl_h + gap * 0.5f;
+  tab_y += ctrl_h + tab_gap;
   tab_width_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
+  tab_y += ctrl_h + tab_gap;
+  tab_shortcuts_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
 
   const float body_x = content_bounds_.x + pad + tab_w + gap * 1.5f;
   const float body_w = content_bounds_.right() - pad - body_x;
@@ -261,7 +334,7 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
 
   // Input: invert checkbox, then labeled scroll-speed combo.
   invert_scroll_wheel_->set_bounds({body_x, y, body_w, ctrl_h});
-  const float speed_y = y + ctrl_h + gap;
+  const float speed_y = y + ctrl_h + body_gap;
   // Tighter than kSettingsLabelW so the combo sits close to "滚轮速度".
   const float speed_label_w = th::px(88.0f);
   const float speed_label_gap = th::px(4.0f);
@@ -271,25 +344,53 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
       std::max(th::px(72.0f), (body_w - speed_label_w - speed_label_gap) / 3.0f);
   scroll_wheel_speed_->set_bounds({combo_x, speed_y, speed_combo_w, ctrl_h});
 
-  // Width: 2 columns × 3 rows.
-  const float label_w = th::px(28.0f);
-  const float col_gap = gap;
+  // Width: 2 columns × 3 rows. Labels are 一档…六档 — take width from fields.
+  const float label_w = th::px(56.0f);
+  const float col_gap = body_gap;
   const float col_w = (body_w - col_gap) * 0.5f;
-  const float field_w = std::max(th::px(48.0f), col_w - label_w);
+  const float field_w = std::max(th::px(40.0f), col_w - label_w);
   for (int i = 0; i < 6; ++i) {
     const int row = i / 2;
     const int col = i % 2;
     const float fx = body_x + static_cast<float>(col) * (col_w + col_gap) + label_w;
-    const float fy = y + static_cast<float>(row) * (ctrl_h + gap);
+    const float fy = y + static_cast<float>(row) * (ctrl_h + body_gap);
     fields_[static_cast<std::size_t>(i)]->set_bounds({fx, fy, field_w, ctrl_h});
+  }
+
+  // Shortcuts: scrollable one-row-per-action list (compact gap).
+  const float btn_y = content_bounds_.bottom() - pad - btn_h;
+  const float list_bottom = btn_y - gap;
+  shortcut_list_bounds_ = {body_x, y, body_w, std::max(0.0f, list_bottom - y)};
+  clamp_shortcut_scroll();
+  // Longest pause label: 「在开始播放位置暂停」.
+  const float shortcut_label_w = th::px(234.0f);
+  const float shortcut_field_w = std::max(th::px(72.0f), body_w - shortcut_label_w - th::px(6.0f));
+  const float row_h = ctrl_h + gap;
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    const float row_y = y + static_cast<float>(i) * row_h - shortcut_scroll_;
+    const bool fully_visible =
+        row_y >= y - 0.5f && row_y + ctrl_h <= list_bottom + 0.5f;
+    auto* field = shortcut_fields_[i];
+    if (!field) continue;
+    field->set_visible(open_ && tab_ == Tab::Shortcuts && fully_visible);
+    field->set_bounds(
+        {body_x + shortcut_label_w + th::px(6.0f), row_y, shortcut_field_w, ctrl_h});
   }
 
   const float inner_w = panel_w - pad * 2.0f;
   const float btn_w = std::min(th::px(120.0f), (inner_w - gap) * 0.5f);
-  const float btn_y = content_bounds_.bottom() - pad - btn_h;
   cancel_button_->set_bounds({content_bounds_.x + pad, btn_y, btn_w, btn_h});
   confirm_button_->set_bounds({content_bounds_.right() - pad - btn_w, btn_y, btn_w, btn_h});
   update_tab_visibility();
+  // layout sets row clip before update_tab_visibility; restore visible rows.
+  if (open_ && tab_ == Tab::Shortcuts) {
+    for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+      const float row_y = y + static_cast<float>(i) * row_h - shortcut_scroll_;
+      const bool fully_visible =
+          row_y >= y - 0.5f && row_y + ctrl_h <= list_bottom + 0.5f;
+      if (shortcut_fields_[i]) shortcut_fields_[i]->set_visible(fully_visible);
+    }
+  }
 }
 
 void WidthSlotsDialog::layout(const wds::interaction::Rect& parent_bounds) {
@@ -318,9 +419,12 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
 
   const float pad = th::kUiPad * 1.5f;
   const float gap = th::kUiGap;
+  const float body_gap = th::kUiGap * 2.0f;
   const float ctrl_h = th::kControlHeight;
-  painter.label({content.x + pad, content.y + pad, content.w - pad * 2.0f, ctrl_h}, "设置",
-                th::kOnSurface, 0.987f);
+  const float title_h = ctrl_h + th::px(4.0f);
+  const float title_px = th::kFontSizeMd + 4.0f;
+  painter.label({content.x + pad, content.y + pad, content.w - pad * 2.0f, title_h}, "设置",
+                th::kOnSurface, 0.987f, false, title_px, false);
 
   auto paint_tab = [&](const wds::interaction::Rect& local, const char* title, bool selected) {
     wds::interaction::Rect r = local;
@@ -334,20 +438,48 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
   paint_tab(tab_audio_bounds_, "音频", tab_ == Tab::Audio);
   paint_tab(tab_input_bounds_, "输入", tab_ == Tab::Input);
   paint_tab(tab_width_bounds_, "快捷键宽", tab_ == Tab::Width);
+  paint_tab(tab_shortcuts_bounds_, "快捷键设置", tab_ == Tab::Shortcuts);
 
   if (tab_ == Tab::Width) {
     const float tab_w = th::px(110.0f);
     const float body_x = content.x + pad + tab_w + gap * 1.5f;
     const float body_w = content.right() - pad - body_x;
-    const float label_w = th::px(28.0f);
-    const float col_w = (body_w - gap) * 0.5f;
-    const float y0 = content.y + pad + ctrl_h + gap;
+    const float label_w = th::px(56.0f);
+    const float col_w = (body_w - body_gap) * 0.5f;
+    const float y0 = content.y + pad + title_h + gap;
     for (int i = 0; i < 6; ++i) {
       const int row = i / 2;
       const int col = i % 2;
-      const float x = body_x + static_cast<float>(col) * (col_w + gap);
-      const float y = y0 + static_cast<float>(row) * (ctrl_h + gap);
-      painter.label({x, y, label_w, ctrl_h}, kKeyLabels[i], th::kOnSurfaceMuted, 0.987f);
+      const float x = body_x + static_cast<float>(col) * (col_w + body_gap);
+      const float y = y0 + static_cast<float>(row) * (ctrl_h + body_gap);
+      painter.label({x, y, label_w, ctrl_h}, kWidthSlotLabels[i], th::kOnSurfaceMuted, 0.987f);
+    }
+  }
+
+  if (tab_ == Tab::Shortcuts) {
+    const float tab_w = th::px(110.0f);
+    const float body_x = content.x + pad + tab_w + gap * 1.5f;
+    const float body_w = content.right() - pad - body_x;
+    const float shortcut_label_w = th::px(234.0f);
+    const float y0 = content.y + pad + title_h + gap;
+    const float list_h = shortcut_list_bounds_.h;
+    const float row_h = ctrl_h + gap;
+    // Scroll edge indicators.
+    if (shortcut_scroll_ > 1.0f) {
+      painter.fill_rect({body_x, y0, body_w, 3.0f}, th::kOutline, 0.0f, 0.989f);
+    }
+    const float content_h =
+        row_h * static_cast<float>(wds::interaction::kEditorShortcutCount) - gap;
+    if (shortcut_scroll_ + list_h < content_h - 1.0f) {
+      painter.fill_rect({body_x, y0 + list_h - 3.0f, body_w, 3.0f}, th::kOutline, 0.0f, 0.989f);
+    }
+    for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+      const float row_y = y0 + static_cast<float>(i) * row_h - shortcut_scroll_;
+      if (row_y < y0 - 0.5f || row_y + ctrl_h > y0 + list_h + 0.5f) continue;
+      const auto id = static_cast<wds::interaction::EditorShortcut>(i);
+      painter.label({body_x, row_y, shortcut_label_w, ctrl_h},
+                    wds::interaction::editor_shortcut_label(id, pause_at_current_),
+                    th::kOnSurfaceMuted, 0.987f, false, 0.0f, true);
     }
   }
 
@@ -364,10 +496,15 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
     static_cast<const wds::interaction::Checkbox*>(invert_scroll_wheel_)->paint_at(painter, kFieldZ);
     const float tab_w = th::px(110.0f);
     const float body_x = content.x + pad + tab_w + gap * 1.5f;
-    const float speed_y = content.y + pad + ctrl_h + gap + ctrl_h + gap;
+    const float speed_y = content.y + pad + title_h + gap + ctrl_h + body_gap;
     painter.label({body_x, speed_y, th::px(88.0f), ctrl_h}, "滚轮速度", th::kOnSurfaceMuted,
                   0.987f, false, 0.0f, true);
     static_cast<const wds::interaction::ComboBox*>(scroll_wheel_speed_)->paint_at(painter, kFieldZ);
+  } else if (tab_ == Tab::Shortcuts) {
+    for (auto* field : shortcut_fields_) {
+      if (field == nullptr || !field->visible()) continue;
+      static_cast<const wds::interaction::ShortcutField*>(field)->paint_at(painter, kFieldZ);
+    }
   }
   cancel_button_->paint(painter);
   confirm_button_->paint(painter);
@@ -382,11 +519,52 @@ void WidthSlotsDialog::paint_dropdown(wds::interaction::UiPainter& painter) cons
 wds::interaction::Widget* WidthSlotsDialog::hit_test(wds::interaction::Vec2 point) {
   if (!open_ || !visible_ || !enabled_) return nullptr;
   if (!absolute_bounds().contains(point)) return nullptr;
+
+  if (tab_ == Tab::Shortcuts) {
+    const wds::interaction::Rect abs = absolute_bounds();
+    wds::interaction::Rect list = shortcut_list_bounds_;
+    list.x += abs.x;
+    list.y += abs.y;
+    if (list.contains(point)) {
+      for (auto it = shortcut_fields_.rbegin(); it != shortcut_fields_.rend(); ++it) {
+        if (*it == nullptr || !(*it)->visible()) continue;
+        if (Widget* hit = (*it)->hit_test(point)) return hit;
+      }
+    }
+    // Still allow confirm/cancel / tabs outside the list.
+    for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
+      if (!(*it)->visible()) continue;
+      // Skip shortcut fields — handled above with clip.
+      bool is_shortcut = false;
+      for (auto* f : shortcut_fields_) {
+        if (f == it->get()) {
+          is_shortcut = true;
+          break;
+        }
+      }
+      if (is_shortcut) continue;
+      if (Widget* hit = (*it)->hit_test(point)) return hit;
+    }
+    return this;
+  }
+
   for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
     if (!(*it)->visible()) continue;
     if (Widget* hit = (*it)->hit_test(point)) return hit;
   }
   return this;
+}
+
+void WidthSlotsDialog::on_scroll(const wds::interaction::ScrollEvent& event) {
+  if (!open_ || tab_ != Tab::Shortcuts) return;
+  const wds::interaction::Rect abs = absolute_bounds();
+  wds::interaction::Rect list = shortcut_list_bounds_;
+  list.x += abs.x;
+  list.y += abs.y;
+  if (!list.contains(event.position)) return;
+  shortcut_scroll_ -= event.delta_y * 24.0f;
+  clamp_shortcut_scroll();
+  layout_content(bounds_);
 }
 
 void WidthSlotsDialog::on_click(const wds::interaction::ClickEvent& event) {
@@ -412,6 +590,10 @@ void WidthSlotsDialog::on_click(const wds::interaction::ClickEvent& event) {
   }
   if (hit_tab(tab_width_bounds_)) {
     set_tab(Tab::Width);
+    return;
+  }
+  if (hit_tab(tab_shortcuts_bounds_)) {
+    set_tab(Tab::Shortcuts);
     return;
   }
 

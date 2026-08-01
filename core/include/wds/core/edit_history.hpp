@@ -45,6 +45,19 @@ class SetNotesCommand final : public IEditCommand {
   std::string label_;
 };
 
+class SetTimingCommand final : public IEditCommand {
+ public:
+  SetTimingCommand(MusicTiming before, MusicTiming after, std::string label = "Set timing");
+  bool execute(ChartDocument& doc) override;
+  bool undo(ChartDocument& doc) override;
+  std::string label() const override;
+
+ private:
+  MusicTiming before_;
+  MusicTiming after_;
+  std::string label_;
+};
+
 class AddNotesCommand final : public IEditCommand {
  public:
   explicit AddNotesCommand(std::vector<NotationNote> notes, std::string label = "Add notes");

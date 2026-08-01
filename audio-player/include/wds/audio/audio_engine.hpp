@@ -61,14 +61,16 @@ class AudioEngine {
   bool stream_stopped() const noexcept;
 
   // --- SFX ---
-  void play_sfx(HitSfxClip clip);
+  // Returns false when no voice could be started (caller may retry).
+  bool play_sfx(HitSfxClip clip);
   // Prime Hold channel / ensure keep-alive. Safe to call repeatedly.
   void warmup_sfx();
   // Arm a one-shot at an absolute music playtime. Fired via BASS_SYNC_POS on a
   // separate sample voice (1× pitch) so BGM BASS_ATTRIB_FREQ does not stretch
   // hits. Falls back to immediate play when there is no music.
-  void schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at);
-  void schedule_sfx_after(HitSfxClip clip, wds::common::Microseconds delay);
+  // Returns false if the hit could not be armed or played (caller may retry).
+  bool schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at);
+  bool schedule_sfx_after(HitSfxClip clip, wds::common::Microseconds delay);
   void clear_scheduled_sfx();
   void set_hold_looping(bool enabled);
   // Stop currently audible sample voices (one-shots / Hold). Pending music
@@ -99,7 +101,7 @@ class AudioEngine {
   float effective_sfx_volume() const noexcept;
   void ensure_keep_alive();
   void pause_keep_alive();
-  void play_sfx_internal(HitSfxClip clip, bool lock_music);
+  bool play_sfx_internal(HitSfxClip clip, bool lock_music);
   void cache_music_format();
   std::uint64_t align_music_bytes(std::uint64_t bytes) const noexcept;
 

@@ -1,4 +1,5 @@
 #include "wds/interaction/editor_input.hpp"
+#include "wds/interaction/editor_shortcuts.hpp"
 #include "wds/interaction/font_atlas.hpp"
 #include "wds/interaction/gesture.hpp"
 #include "wds/interaction/platform.hpp"
@@ -7,12 +8,14 @@
 #include "wds/interaction/widget_root.hpp"
 #include "wds/interaction/widgets/button.hpp"
 #include "wds/interaction/widgets/checkbox.hpp"
+#include "wds/interaction/widgets/shortcut_field.hpp"
 #include "wds/interaction/widgets/slider.hpp"
 #include "wds/interaction/widgets/stepper.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <string>
 
 namespace {
 
@@ -248,6 +251,136 @@ int main() {
   expect(chord_width_slot(0).key == static_cast<KeyCode>('Q'), "width slot Q");
   expect(chord_width_slot(3).key == KeyCode::A, "width slot A");
   expect(chord_width_slot(5).key == static_cast<KeyCode>('D'), "width slot D");
+
+  expect(is_forbidden_shortcut_key(KeyCode::Num1), "digit forbidden as shortcut");
+  expect(is_forbidden_shortcut_key(static_cast<KeyCode>(46)), "period forbidden as shortcut");
+  expect(!is_forbidden_shortcut_key(static_cast<KeyCode>('C')), "letter allowed as shortcut");
+  expect(is_completing_shortcut_key(KeyCode::Space), "space completes shortcut");
+  expect(is_completing_shortcut_key(KeyCode::F11), "F11 completes shortcut");
+  expect(!is_completing_shortcut_key(KeyCode::Unknown), "unknown does not complete");
+  expect(!is_completing_shortcut_key(KeyCode::Num5), "digit does not complete");
+  {
+    const auto parsed = parse_shortcut_chord("Shift+Ctrl+C");
+    expect(parsed.has_value(), "parse Shift+Ctrl+C");
+    if (parsed) {
+      expect(parsed->key == static_cast<KeyCode>('C'), "parsed key C");
+      expect(parsed->mods.shift && parsed->mods.control, "parsed Shift+Ctrl");
+      const std::string shown = format_shortcut_chord(*parsed);
+      expect(shown.find('C') != std::string::npos, "format contains C");
+#ifdef __APPLE__
+      expect(shown.find("Cmd") != std::string::npos, "Apple format uses Cmd");
+#else
+      expect(shown.find("Ctrl") != std::string::npos, "non-Apple format uses Ctrl");
+#endif
+    }
+    expect(parse_shortcut_chord("Cmd+S").has_value(), "parse Cmd+S");
+    expect(parse_shortcut_chord("").has_value() == false, "empty parse fails");
+    expect(parse_shortcut_chord("Shift").has_value() == false, "mods-only parse fails");
+  }
+  // Round-trip every default binding through format/parse.
+  for (std::size_t i = 0; i < kEditorShortcutCount; ++i) {
+    const auto id = static_cast<EditorShortcut>(i);
+    const ShortcutChord def = default_editor_shortcut(id);
+    const auto again = parse_shortcut_chord(format_shortcut_chord(def));
+    expect(again.has_value() && *again == def, editor_shortcut_id(id));
+  }
+  expect(!editor_shortcut_conflicts(EditorShortcut::Copy, chord_copy()),
+         "self chord is not a conflict");
+  expect(editor_shortcut_conflicts(EditorShortcut::Save, chord_copy()),
+         "save setting to copy chord conflicts");
+  expect(!editor_shortcut_conflicts(EditorShortcut::Save, chord_save()),
+         "save keeping its own chord is fine");
+
+  // Rebind width slot 0 and confirm resolve/default helpers follow the registry.
+  {
+    const ShortcutChord original = editor_shortcut(EditorShortcut::WidthSlot0);
+    set_editor_shortcut(EditorShortcut::WidthSlot0, {static_cast<KeyCode>('Z'), {}});
+    expect(default_width_for_key(static_cast<KeyCode>('Z')) == 1, "rebound width Z");
+    expect(!default_width_for_key(static_cast<KeyCode>('Q')).has_value(),
+           "old width Q unbound from helper");
+    expect(resolve_edit_key(KeyDownEvent{static_cast<KeyCode>('Z'), {}}).action ==
+               EditKeyAction::SetDefaultWidth,
+           "resolve rebound width Z");
+    expect(chord_width_slot(0).key == static_cast<KeyCode>('Z'), "chord_width_slot follows registry");
+    set_editor_shortcut(EditorShortcut::WidthSlot0, original);
+    reset_editor_shortcuts();
+  }
+
+  // ShortcutField: commit, conflict revert, forbidden reject, blur revert, captures_keys.
+  {
+    ShortcutField field;
+    field.set_bounds({0, 0, 120, 28});
+    field.set_chord(chord_primary(static_cast<KeyCode>('S')));
+    int changes = 0;
+    field.on_change([&](const ShortcutChord&) { ++changes; });
+    const ShortcutChord blocked = chord_primary(static_cast<KeyCode>('C'));
+    field.set_conflict_checker([&](const ShortcutChord& c) { return c == blocked; });
+
+    field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
+    expect(field.visual_state() == WidgetState::Focused, "shortcut field focuses");
+    expect(field.captures_keys(), "shortcut field captures keys while focused");
+
+    Modifiers shift;
+    shift.shift = true;
+    field.on_key_down(KeyDownEvent{KeyCode::Unknown, shift, false});
+    expect(field.visual_state() == WidgetState::Focused, "modifier keeps focus");
+
+    field.on_key_down(KeyDownEvent{static_cast<KeyCode>('X'), shift, false});
+    expect(field.visual_state() == WidgetState::Normal, "completing key blurs");
+    expect(field.chord().key == static_cast<KeyCode>('X') && field.chord().mods.shift,
+           "committed Shift+X");
+    expect(changes == 1, "on_change after commit");
+
+    field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
+    const int changes_before = changes;
+    field.on_key_down(KeyDownEvent{blocked.key, blocked.mods, false});
+    expect(field.chord().key == static_cast<KeyCode>('X'), "conflict keeps old chord");
+    expect(changes == changes_before, "conflict does not fire on_change");
+    expect(field.visual_state() == WidgetState::Focused, "conflict stays focused");
+
+    field.on_key_down(KeyDownEvent{KeyCode::Num3, {}, false});
+    expect(field.chord().key == static_cast<KeyCode>('X'), "digit rejected");
+
+    field.on_key_down(KeyDownEvent{KeyCode::Escape, {}, false});
+    expect(field.visual_state() == WidgetState::Normal, "escape cancels capture");
+
+    field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
+    field.on_key_down(KeyDownEvent{KeyCode::Unknown, shift, false});
+    field.on_blur();
+    expect(field.chord().key == static_cast<KeyCode>('X'), "blur reverts draft mods");
+    expect(!field.captures_keys(), "blur clears captures_keys");
+  }
+
+  // Focused ShortcutField must receive keys before ShortcutManager.
+  {
+    WidgetRoot root2;
+    root2.set_bounds({0, 0, 400, 400});
+    auto sf = std::make_unique<ShortcutField>();
+    auto* raw = sf.get();
+    raw->set_bounds({10, 10, 100, 28});
+    raw->set_chord({KeyCode::Space, {}});
+    root2.add_child(std::move(sf));
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int fired = 0;
+    ns.bind({static_cast<KeyCode>('K'), {}}, [&] { ++fired; });
+    mgr.set_active_namespace("editor");
+
+    root2.process_frame(0.016f, {PointerDownEvent{{20, 20}, PointerButton::Left, {}}});
+    expect(root2.focused_widget() == raw, "root focuses shortcut field");
+    root2.process_frame(0.016f, {KeyDownEvent{static_cast<KeyCode>('K'), {}, false}}, &mgr);
+    expect(fired == 0, "global shortcut suppressed while capturing");
+    expect(raw->chord().key == static_cast<KeyCode>('K'), "field consumed K");
+  }
+
+  {
+    ShortcutNamespace ns;
+    expect(ns.bind({KeyCode::Space, {}}, [] {}), "clear-test bind");
+    ns.clear();
+    expect(ns.size() == 0, "namespace clear empties bindings");
+    expect(ns.bind({KeyCode::Space, {}}, [] {}), "bind after clear");
+  }
 
   return failures == 0 ? 0 : 1;
 }

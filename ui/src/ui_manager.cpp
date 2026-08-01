@@ -53,6 +53,8 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     cfg.sus_auto_convert = session_->sus_auto_convert();
     cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
     cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
+    cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
+    cfg.shortcuts_initialized = true;
     width_slots_dialog_->set_config(cfg);
     width_slots_dialog_->open();
   });
@@ -62,7 +64,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   toolbar->set_open_handler([this] {
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-        session_->open_wdsproject(*path);
+        (void)session_->open_wdsproject(*path);
       }
     });
   });
@@ -136,6 +138,10 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
+      if (cfg.shortcuts_initialized) {
+        wds::interaction::set_editor_shortcuts(cfg.shortcuts);
+      }
+      bind_editor_shortcuts();
       persist();
     });
   }
@@ -147,8 +153,12 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   }
 
   shortcuts_.set_active_namespace("editor");
+  bind_editor_shortcuts();
+}
+
+void UiManager::bind_editor_shortcuts() {
   auto& editor = shortcuts_.namespace_for("editor");
-  auto& transport = chart_preview_->transport();
+  editor.clear();
   using wds::interaction::chord_copy;
   using wds::interaction::chord_delete_selection;
   using wds::interaction::chord_mirror;
@@ -164,11 +174,14 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   using wds::interaction::chord_pause_playback;
   using wds::interaction::chord_toggle_fullscreen;
   using wds::interaction::chord_toggle_playback;
+  using wds::interaction::chord_playback_rate_slot;
   using wds::interaction::chord_undo;
   using wds::interaction::chord_width_slot;
-  using wds::interaction::default_width_for_key;
+  using wds::interaction::playback_rate_for_slot;
+  using wds::interaction::width_slot_values_const;
 
-  const auto handle_playback = [this, &transport](bool shift) {
+  const auto handle_playback = [this](bool shift) {
+    auto& transport = chart_preview_->transport();
     auto* edit = edit_panel();
     const bool pause_at_current = edit != nullptr && edit->pause_at_current();
     if (!transport.playing()) {
@@ -193,7 +206,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   editor.bind(chord_open(), [this] {
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-        session_->open_wdsproject(*path);
+        (void)session_->open_wdsproject(*path);
       }
     });
   });
@@ -228,18 +241,29 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   editor.bind(chord_delete_selection(), [this] {
     if (auto* panel = edit_panel()) panel->delete_selected();
   });
-  // Q/W/E/A/S/D → default place width. Bound globally so focus on toolbar/settings
+  // Width slots → default place width. Bound globally so focus on toolbar/settings
   // still updates the edit panel (widget key path only reaches the focused widget).
   for (int slot = 0; slot < 6; ++slot) {
-    const auto chord = chord_width_slot(slot);
-    editor.bind(chord, [this, key = chord.key] {
+    editor.bind(chord_width_slot(slot), [this, slot] {
       if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
       if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
       if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
       if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
       if (auto* panel = edit_panel()) {
-        if (const auto width = default_width_for_key(key)) panel->set_default_width(*width);
+        panel->set_default_width(width_slot_values_const()[static_cast<std::size_t>(slot)]);
       }
+    });
+  }
+  // Playback rate presets (default F1–F4 → 0.25x / 0.5x / 0.75x / 1x).
+  for (int slot = 0; slot < 4; ++slot) {
+    editor.bind(chord_playback_rate_slot(slot), [this, slot] {
+      if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
+      if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
+      if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
+      if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
+      const auto rate = playback_rate_for_slot(slot);
+      if (!rate) return;
+      if (auto* settings = settings_panel()) settings->set_playback_rate(*rate);
     });
   }
 }
@@ -350,6 +374,10 @@ void UiManager::load_ui_config() {
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
+  if (cfg.shortcuts_initialized) {
+    wds::interaction::set_editor_shortcuts(cfg.shortcuts);
+    bind_editor_shortcuts();
+  }
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
   if (auto* settings = settings_panel()) settings->apply_config(cfg);
   if (auto* toolbar = toolbar_panel()) toolbar->apply_config(cfg);
@@ -365,6 +393,8 @@ void UiManager::save_ui_config() {
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
+  cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
+  cfg.shortcuts_initialized = true;
   save_editor_ui_config(config_path_, cfg);
 }
 

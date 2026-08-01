@@ -42,11 +42,12 @@ class HitSfxPlayer {
   // Increments on set_position / begin_timeline_control (seek / scrub / play).
   uint64_t position_generation() const noexcept;
 
-  void play(HitSfxClip clip);
+  // Returns false when the engine could not start/arm the voice (retry later).
+  bool play(HitSfxClip clip);
   // Absolute music-stream time. Armed via BASS_SYNC_POS → 1× ChannelPlay.
-  void schedule_at(HitSfxClip clip, wds::common::Microseconds music_time);
+  bool schedule_at(HitSfxClip clip, wds::common::Microseconds music_time);
   // Relative to the live music clock: fires after `delay` of stream time.
-  void schedule_after(HitSfxClip clip, wds::common::Microseconds delay);
+  bool schedule_after(HitSfxClip clip, wds::common::Microseconds delay);
   void clear_scheduled();
   // Drop pending syncs and cut audible one-shots / Hold (pause, seek, scrub).
   void stop_all();

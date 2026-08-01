@@ -1,5 +1,6 @@
 #include <wds/core/sus_chart.hpp>
 
+#include <wds/core/file_io.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/timing_map.hpp>
 
@@ -91,11 +92,7 @@ std::string read_file_text(const std::string& path, SerializeResult& status) {
 }
 
 SerializeResult write_file_text(const std::string& path, const std::string& text) {
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) return {SerializeError::IoError, "failed to open for writing: " + path};
-  out << text;
-  if (!out) return {SerializeError::IoError, "failed while writing: " + path};
-  return {SerializeError::Ok, {}};
+  return write_text_atomic(path, text);
 }
 
 struct RawEvent {
@@ -435,7 +432,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   chart.timing.offset_ms =
       static_cast<int64_t>(std::llround(meta.wave_offset_sec * 1000.0));
 
-  // Timing points from BPM changes.
+  // Timing points from BPM changes + #mmm02 measure lengths.
   std::sort(bpm_changes.begin(), bpm_changes.end(),
             [](const BpmChange& a, const BpmChange& b) { return a.tick < b.tick; });
   if (!bpm_changes.empty()) {
@@ -449,14 +446,48 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
   chart.timing.points.clear();
   chart.timing.points.push_back(
-      TimingPoint{0, chart.timing.bpm, /*num*/ 4, /*den*/ 4});
+      TimingPoint{0, chart.timing.bpm, /*num*/ 4, /*den*/ 4, true, true});
   for (const auto& ch : bpm_changes) {
     if (ch.tick <= 0) {
       chart.timing.points[0].bpm = ch.bpm;
+      chart.timing.points[0].has_bpm = true;
       chart.timing.bpm = ch.bpm;
       continue;
     }
-    chart.timing.points.push_back(TimingPoint{static_cast<int32_t>(ch.tick), ch.bpm, 4, 4});
+    TimingPoint point;
+    point.tick = static_cast<int32_t>(ch.tick);
+    point.bpm = ch.bpm;
+    point.numerator = 4;
+    point.denominator = 4;
+    point.has_bpm = true;
+    point.has_meter = false;
+    chart.timing.points.push_back(point);
+  }
+
+  auto upsert_meter = [&](int32_t tick, int32_t numerator, int32_t denominator) {
+    for (auto& p : chart.timing.points) {
+      if (p.tick == tick) {
+        p.numerator = numerator;
+        p.denominator = denominator;
+        p.has_meter = true;
+        return;
+      }
+    }
+    TimingPoint point;
+    point.tick = tick;
+    point.bpm = chart.timing.bpm;
+    point.numerator = numerator;
+    point.denominator = denominator;
+    point.has_bpm = false;
+    point.has_meter = true;
+    chart.timing.points.push_back(point);
+  };
+  for (const auto& [measure, beats] : measure_lengths) {
+    if (beats <= 0.0) continue;
+    const int32_t tick = static_cast<int32_t>(measure_start_tick(measure));
+    // SUS measure length is in ticks_per_beat units; map to N/4 meter (tick-equivalent).
+    const int32_t numerator = std::max(1, static_cast<int32_t>(std::llround(beats)));
+    upsert_meter(tick, numerator, 4);
   }
   normalize_timing_points(chart.timing);
 
@@ -637,24 +668,64 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
 
   auto sus_lane = [&](int32_t lane) { return std::clamp(lane + lane_pad, 0, 35); };
 
-  // Measure length: fixed 4 beats for export simplicity.
-  const int64_t ticks_per_measure = static_cast<int64_t>(tpq) * 4;
+  // Build measure starts from the real timing map (meters / bar lengths).
+  int64_t max_tick = 0;
+  for (const auto& p : timing.points) {
+    max_tick = std::max(max_tick, static_cast<int64_t>(p.tick));
+  }
+  for (const auto& n : chart.notes) {
+    max_tick = std::max(max_tick, static_cast<int64_t>(std::llround(n.start_tick)));
+    max_tick = std::max(max_tick, static_cast<int64_t>(std::llround(n.end_tick)));
+  }
+  std::vector<int32_t> measure_starts = measure_ticks_in_range(0, static_cast<int32_t>(max_tick), timing);
+  if (measure_starts.empty()) measure_starts.push_back(0);
+  // Extend one bar past the last content tick so locate() always has a length.
+  while (static_cast<int64_t>(measure_starts.back()) <= max_tick) {
+    const TimingPoint& meter = timing_meter_at(timing, measure_starts.back());
+    const int32_t step = measure_length_ticks(meter, tpq);
+    const int32_t candidate = measure_starts.back() + step;
+    if (candidate <= measure_starts.back()) break;
+    measure_starts.push_back(candidate);
+  }
 
-  auto measure_of = [&](int64_t tick) -> int {
-    return static_cast<int>(tick / std::max<int64_t>(1, ticks_per_measure));
+  struct MeasureLoc {
+    int measure = 0;
+    int64_t local = 0;
+    int64_t measure_len = 1;
   };
+  auto locate_tick = [&](int64_t tick) -> MeasureLoc {
+    MeasureLoc loc;
+    if (measure_starts.empty()) return loc;
+    tick = std::max<int64_t>(0, tick);
+    auto it = std::upper_bound(measure_starts.begin(), measure_starts.end(),
+                               static_cast<int32_t>(tick));
+    size_t idx = 0;
+    if (it != measure_starts.begin()) idx = static_cast<size_t>((it - measure_starts.begin()) - 1);
+    loc.measure = static_cast<int>(idx);
+    loc.local = tick - measure_starts[idx];
+    const int64_t start = measure_starts[idx];
+    const int64_t end = (idx + 1 < measure_starts.size())
+                            ? static_cast<int64_t>(measure_starts[idx + 1])
+                            : start + measure_length_ticks(timing_meter_at(timing, static_cast<int32_t>(start)),
+                                                          tpq);
+    loc.measure_len = std::max<int64_t>(1, end - start);
+    if (loc.local >= loc.measure_len) loc.local = loc.measure_len - 1;
+    return loc;
+  };
+
+  auto measure_of = [&](int64_t tick) -> int { return locate_tick(tick).measure; };
   auto slot_of = [&](int64_t tick, int slots) -> int {
-    const int64_t local = tick % std::max<int64_t>(1, ticks_per_measure);
+    const auto loc = locate_tick(tick);
     if (slots <= 0) return 0;
-    return static_cast<int>((local * slots + ticks_per_measure / 2) / ticks_per_measure);
+    return static_cast<int>((loc.local * slots + loc.measure_len / 2) / loc.measure_len);
   };
 
-  // Choose subdivision so every note tick lands on a slot (gcd-friendly: use 1920 or 480*4).
+  // Choose subdivision so every note tick lands on a slot (gcd-friendly).
   // Per-measure we pick the LCM of needed divisions capped at 192.
   auto needed_div = [&](int64_t tick) {
-    const int64_t local = tick % ticks_per_measure;
-    if (local == 0) return 1;
-    int div = static_cast<int>(ticks_per_measure / std::gcd(local, ticks_per_measure));
+    const auto loc = locate_tick(tick);
+    if (loc.local == 0) return 1;
+    int div = static_cast<int>(loc.measure_len / std::gcd(loc.local, loc.measure_len));
     return std::clamp(div, 1, 192);
   };
 
@@ -681,7 +752,31 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   emit_str("JACKET", meta.jacket_path);
   ss << "\n#REQUEST \"ticks_per_beat " << tpq << "\"\n\n";
 
-  // BPM definitions from timing points.
+  // #mmm02 measure lengths from the timing map (SUS beats = measure_ticks / tpq).
+  {
+    double prev_beats = -1.0;
+    for (size_t i = 0; i + 1 < measure_starts.size(); ++i) {
+      const double beats =
+          static_cast<double>(measure_starts[i + 1] - measure_starts[i]) / static_cast<double>(tpq);
+      if (i > 0 && std::abs(beats - prev_beats) < 1e-9) continue;
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(i % 1000));
+      ss.precision(4);
+      ss << '#' << buf << "02: " << beats << '\n';
+      prev_beats = beats;
+    }
+    if (!measure_starts.empty() && prev_beats < 0.0) {
+      // Single trailing start with no length sample — emit active meter at tick 0.
+      const TimingPoint& meter = timing_meter_at(timing, 0);
+      const double beats =
+          static_cast<double>(measure_length_ticks(meter, tpq)) / static_cast<double>(tpq);
+      ss.precision(4);
+      ss << "#00002: " << beats << '\n';
+    }
+    ss << '\n';
+  }
+
+  // BPM definitions from authored BPM points.
   std::map<double, int> bpm_to_id;
   int next_bpm_id = 1;
   auto bpm_id_for = [&](double bpm) {
@@ -691,28 +786,44 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     bpm_to_id[bpm] = id;
     return id;
   };
-  for (const auto& p : timing.points) bpm_id_for(p.bpm);
+  for (const auto& p : timing.points) {
+    if (p.has_bpm) bpm_id_for(p.bpm);
+  }
+  if (bpm_to_id.empty()) bpm_id_for(timing.bpm);
   for (const auto& [bpm, id] : bpm_to_id) {
     ss.precision(4);
     ss << "#BPM" << base36_digit(id / 36) << base36_digit(id % 36) << ": " << bpm << '\n';
   }
   ss << '\n';
 
-  // Emit BPM changes per measure as #mmm08 lines (one slot at measure start for each point).
-  struct MeasBpm {
-    int measure;
-    int id;
+  // Emit #mmm08 BPM changes at real in-measure subdivisions (not just bar heads).
+  struct MeasBpmEvent {
+    int64_t tick = 0;
+    int id = 1;
   };
-  std::vector<MeasBpm> meas_bpms;
+  std::map<int, std::vector<MeasBpmEvent>> bpm_by_measure;
   for (const auto& p : timing.points) {
-    meas_bpms.push_back({measure_of(p.tick), bpm_id_for(p.bpm)});
+    if (!p.has_bpm) continue;
+    const auto loc = locate_tick(p.tick);
+    bpm_by_measure[loc.measure].push_back({p.tick, bpm_id_for(p.bpm)});
   }
-  std::map<int, int> measure_bpm_id;
-  for (const auto& mb : meas_bpms) measure_bpm_id[mb.measure] = mb.id;
-  for (const auto& [meas, id] : measure_bpm_id) {
+  for (auto& [meas, events] : bpm_by_measure) {
+    std::sort(events.begin(), events.end(),
+              [](const MeasBpmEvent& a, const MeasBpmEvent& b) { return a.tick < b.tick; });
+    int div = 1;
+    for (const auto& ev : events) {
+      const int need = needed_div(ev.tick);
+      div = std::min(192, div / static_cast<int>(std::gcd(div, need)) * need);
+    }
+    std::string data(static_cast<size_t>(div) * 2, '0');
+    for (const auto& ev : events) {
+      const int slot = std::clamp(slot_of(ev.tick, div), 0, div - 1);
+      data[static_cast<size_t>(slot) * 2] = base36_digit(ev.id / 36);
+      data[static_cast<size_t>(slot) * 2 + 1] = base36_digit(ev.id % 36);
+    }
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%03d", meas % 1000);
-    ss << '#' << buf << "08: " << base36_digit(id / 36) << base36_digit(id % 36) << '\n';
+    ss << '#' << buf << "08: " << data << '\n';
   }
   ss << '\n';
 

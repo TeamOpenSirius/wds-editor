@@ -217,6 +217,7 @@ void EditorSession::stash_active() {
   slot.chart = engine().document().to_notation_chart();
   slot.chart.timing.offset_ms = 0;
   slot.dirty = slot.dirty || engine().is_dirty();
+  slot.history = std::move(engine().history());
 }
 
 bool EditorSession::activate_chart(std::size_t index) {
@@ -226,7 +227,8 @@ bool EditorSession::activate_chart(std::size_t index) {
   chart.timing.offset_ms = offset_ms_;
   const auto mode = read_only_ ? wds::chart_editor::ChartEditMode::OfficialPreviewOnly
                                : wds::chart_editor::ChartEditMode::Editable;
-  engine().load_chart(chart, mode);
+  engine().load_chart(chart, mode);  // clears engine history
+  engine().history() = std::move(charts_[index].history);
   apply_chart_delay();
   if (!charts_[index].dirty) {
     engine().mark_saved();
@@ -261,32 +263,66 @@ bool EditorSession::new_project() {
 
 bool EditorSession::open_wdsproject(const std::string& path) {
   wds::chart_editor::WdsProject project;
-  if (!ok(wds::chart_editor::ProjectSerializer::load_from_file(path, project))) return false;
-  project_path_ = path;
-  // MUSIC is stored relative to the .wdsproject; resolve to an absolute path for playback.
-  music_path_ = wds::chart_editor::ProjectSerializer::resolve_path(path, project.music_path);
-  charts_.clear();
+  if (!ok(wds::chart_editor::ProjectSerializer::load_from_file(path, project))) {
+    native_file_dialog::alert_error("打开工程失败", "无法读取工程文件:\n" + path);
+    return false;
+  }
+
+  // Resolve and load every chart into a temporary buffer first — never mutate the
+  // live session until the whole project is known to be loadable.
+  const std::string new_music =
+      wds::chart_editor::ProjectSerializer::resolve_path(path, project.music_path);
+  std::vector<ChartSlot> loaded;
+  loaded.reserve(project.chart_paths.size());
   for (const auto& chart_rel : project.chart_paths) {
     const std::string chart_path =
         wds::chart_editor::ProjectSerializer::resolve_path(path, chart_rel);
     wds::chart_editor::NotationChart chart;
-    if (!ok(wds::chart_editor::ChartSerializer::load_from_file(chart_path, chart))) return false;
+    if (!ok(wds::chart_editor::ChartSerializer::load_from_file(chart_path, chart))) {
+      native_file_dialog::alert_error("打开工程失败", "无法加载谱面:\n" + chart_path);
+      return false;
+    }
     chart.timing.offset_ms = 0;
-    charts_.push_back(ChartSlot{chart_path, std::move(chart), false});
+    ChartSlot slot;
+    slot.path = chart_path;
+    slot.chart = std::move(chart);
+    slot.dirty = false;
+    loaded.push_back(std::move(slot));
   }
-  if (charts_.empty()) return false;
-  active_chart_index_ =
-      static_cast<std::size_t>(std::clamp(project.active_chart_index, 0,
-                                          static_cast<int32_t>(charts_.size() - 1)));
+  if (loaded.empty()) {
+    native_file_dialog::alert_error("打开工程失败", "工程未包含任何谱面");
+    return false;
+  }
+
+  const std::size_t new_active = static_cast<std::size_t>(
+      std::clamp(project.active_chart_index, 0, static_cast<int32_t>(loaded.size() - 1)));
+
+  // Try the new BGM before committing session metadata. On failure, restore the
+  // previous track so the in-memory project stays consistent.
+  const std::string previous_music = music_path_;
+  if (!preview_.load_music(new_music, false)) {
+    (void)preview_.load_music(previous_music, false);
+    native_file_dialog::alert_error("打开工程失败",
+                                    "无法加载音乐文件:\n" +
+                                        (new_music.empty() ? std::string("(空路径)") : new_music));
+    return false;
+  }
+
+  // Commit project state only after charts + music succeeded.
+  project_path_ = path;
+  music_path_ = new_music;
+  charts_ = std::move(loaded);
+  active_chart_index_ = new_active;
   offset_ms_ = project.offset_ms;
   metadata_dirty_ = false;
   read_only_ = false;
   allow_delay_when_read_only_ = false;
   reset_music_config_meta();
-  // Empty MUSIC → unload BGM; otherwise load the resolved path.
-  // Do not preserve the previous project's playhead (preview is time-windowed).
-  if (!preview_.load_music(music_path_, false)) return false;
-  if (!activate_chart(active_chart_index_)) return false;
+
+  if (!activate_chart(active_chart_index_)) {
+    native_file_dialog::alert_error("打开工程失败", "无法激活工程中的谱面");
+    return false;
+  }
   preview_.reset_playback();
   return true;
 }
@@ -369,7 +405,9 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
     chart.timing.offset_ms = 0;
     // Keep charts in memory only — do not bind official CSV paths (avoids overwriting
     // them when the user later saves a .wdsproject / .wdschart).
-    loaded.push_back(ChartSlot{{}, std::move(chart), false});
+    ChartSlot slot;
+    slot.chart = std::move(chart);
+    loaded.push_back(std::move(slot));
   }
 
   const std::string audio = find_music_ogg(dir, music.cue_name);
@@ -439,7 +477,12 @@ bool EditorSession::import_official(const std::string& chart_path,
   auto chart = engine().document().to_notation_chart();
   chart.timing.offset_ms = 0;
   charts_.clear();
-  charts_.push_back(ChartSlot{chart_path, std::move(chart), false});
+  {
+    ChartSlot slot;
+    slot.path = chart_path;
+    slot.chart = std::move(chart);
+    charts_.push_back(std::move(slot));
+  }
   active_chart_index_ = 0;
   apply_chart_delay();
   engine().mark_saved();
@@ -475,7 +518,13 @@ bool EditorSession::import_sus(const std::string& path) {
   charts_.clear();
   // Auto-convert: editable in-memory WDS project (do not bind the .sus path).
   const bool convert = sus_auto_convert_;
-  charts_.push_back(ChartSlot{convert ? std::string{} : path, std::move(chart), convert});
+  {
+    ChartSlot slot;
+    slot.path = convert ? std::string{} : path;
+    slot.chart = std::move(chart);
+    slot.dirty = convert;
+    charts_.push_back(std::move(slot));
+  }
   active_chart_index_ = 0;
   metadata_dirty_ = convert;
   read_only_ = !convert;
@@ -690,7 +739,12 @@ bool EditorSession::add_chart_from_file(const std::string& path) {
   if (!ok(wds::chart_editor::ChartSerializer::load_from_file(path, chart))) return false;
   chart.timing.offset_ms = 0;
   stash_active();
-  charts_.push_back(ChartSlot{path, std::move(chart), false});
+  {
+    ChartSlot slot;
+    slot.path = path;
+    slot.chart = std::move(chart);
+    charts_.push_back(std::move(slot));
+  }
   metadata_dirty_ = true;
   return activate_chart(charts_.size() - 1);
 }

@@ -32,25 +32,25 @@ uint64_t HitSfxPlayer::position_generation() const noexcept {
   return audio_->position_generation();
 }
 
-void HitSfxPlayer::play(HitSfxClip clip) {
+bool HitSfxPlayer::play(HitSfxClip clip) {
   if (audio_ == nullptr) {
-    return;
+    return false;
   }
-  audio_->play_sfx(clip);
+  return audio_->play_sfx(clip);
 }
 
-void HitSfxPlayer::schedule_at(HitSfxClip clip, wds::common::Microseconds music_time) {
+bool HitSfxPlayer::schedule_at(HitSfxClip clip, wds::common::Microseconds music_time) {
   if (audio_ == nullptr) {
-    return;
+    return false;
   }
-  audio_->schedule_sfx_at(clip, music_time);
+  return audio_->schedule_sfx_at(clip, music_time);
 }
 
-void HitSfxPlayer::schedule_after(HitSfxClip clip, wds::common::Microseconds delay) {
+bool HitSfxPlayer::schedule_after(HitSfxClip clip, wds::common::Microseconds delay) {
   if (audio_ == nullptr) {
-    return;
+    return false;
   }
-  audio_->schedule_sfx_after(clip, delay);
+  return audio_->schedule_sfx_after(clip, delay);
 }
 
 void HitSfxPlayer::clear_scheduled() {

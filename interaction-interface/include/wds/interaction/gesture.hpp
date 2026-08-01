@@ -15,7 +15,7 @@ SwipeDirection classify_swipe(Vec2 start, Vec2 end,
 
 // Axis lock for chart place gestures: once horizontal (L/R) or vertical-up is
 // acquired, only that axis feeds classification. The same per-axis threshold
-// both arms the gesture and clears the lock (editor: horizontal ≥ half a lane,
+// both arms the gesture and clears the lock (editor: horizontal ≥ one lane,
 // vertical = kEditorSwipeMinDistancePx). After unlock, classification runs in
 // the same update so another axis can arm immediately.
 enum class PlaceAxisLock { None, Horizontal, Vertical };

@@ -41,31 +41,24 @@ SerializeResult ChartEditorEngine::save_to_file(const std::string& path) {
             "official preview charts cannot be saved as .wdschart; export CSV instead"};
   }
 
-  if (!document_.normalize_for_save()) {
-    return {SerializeError::ReadOnly, "normalize_for_save rejected"};
-  }
-
-  // Chart files omit CHART_DELAY_MS; keep the in-memory song delay across reload.
+  // Normalize a copy for disk — never mutate the live document / history before I/O succeeds.
+  NotationChart chart = document_.normalized_chart();
   const int64_t preserved_offset_ms = document_.timing().offset_ms;
+  chart.timing.offset_ms = 0;
 
-  const auto result = ChartSerializer::save_to_file(document_.to_notation_chart(), path);
+  const auto result = ChartSerializer::save_to_file(chart, path);
   if (result.error != SerializeError::Ok) {
     return result;
   }
 
-  const auto reload = load_from_file(path);
-  if (reload.error != SerializeError::Ok) {
-    return reload;
-  }
-
-  MusicTiming timing = document_.timing();
-  if (timing.offset_ms != preserved_offset_ms) {
-    timing.offset_ms = preserved_offset_ms;
-    document_.set_timing(timing);
-    bump_revision();
-    publish_snapshot();
-  }
+  // Commit normalized IDs only after a successful write. History still refers to
+  // pre-normalize ids, so clear it together with the in-memory renumber.
+  chart.timing.offset_ms = preserved_offset_ms;
+  document_.load_from_chart(chart, ChartEditMode::Editable);
+  history_.clear();
   document_.mark_saved();
+  bump_revision();
+  publish_snapshot();
   return result;
 }
 

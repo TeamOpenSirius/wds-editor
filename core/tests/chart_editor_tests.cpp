@@ -2,6 +2,7 @@
 
 #include <wds/core/chart_index.hpp>
 #include <wds/core/chart_serializer.hpp>
+#include <wds/core/chart_session.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/edit_history.hpp>
 #include <wds/core/detail/start_ms_avl_index.hpp>
@@ -10,6 +11,7 @@
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
+#include <wds/core/timing_map.hpp>
 #include <wds/core/core.hpp>
 
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -856,6 +859,36 @@ void test_edit_grid_and_note_operations() {
   CHECK_EQ(hold.end_tick, 960.0f);
   const NotationNote restored = convert_note_type(hold, NoteType::Flick, 480);
   CHECK_EQ(static_cast<int>(restored.note_type), static_cast<int>(NoteType::Flick));
+  CHECK_EQ(restored.end_tick, restored.start_tick);
+
+  // ScratchHold → Flick must leave the hold family and clear ScratchHold-only fields.
+  NotationNote scratch_body = make_tap(480.0f, 3);
+  scratch_body.width = 2;
+  scratch_body.end_tick = 960.0f;
+  scratch_body.note_type = NoteType::ScratchHold;
+  scratch_body.scratch_length = 4;
+  scratch_body.gimmick_type = GimmickType::JumpScratch;
+  const NotationNote from_scratch = convert_note_type(scratch_body, NoteType::Flick, 480);
+  CHECK_EQ(static_cast<int>(from_scratch.note_type), static_cast<int>(NoteType::Flick));
+  CHECK_EQ(from_scratch.end_tick, from_scratch.start_tick);
+  CHECK_EQ(from_scratch.scratch_length, 1);
+  CHECK_EQ(static_cast<int>(from_scratch.gimmick_type), static_cast<int>(GimmickType::None));
+  const NotationNote back_to_tap = convert_note_type(from_scratch, NoteType::Normal, 480);
+  CHECK_EQ(static_cast<int>(back_to_tap.note_type), static_cast<int>(NoteType::Normal));
+  CHECK_EQ(back_to_tap.scratch_length, 0);
+
+  // Lone tap must resolve ConvertHold → Hold (not HoldStart via legacy-head false positive).
+  {
+    ChartDocument resolve_doc;
+    NotationNote lone = make_tap(0, 1);
+    lone.id = 1;
+    lone.width = 2;
+    CHECK(resolve_doc.add_note(lone) == 1);
+    CHECK(resolve_convert_target(resolve_doc, *resolve_doc.find_note(1), NoteType::Hold) ==
+          NoteType::Hold);
+    CHECK(resolve_convert_target(resolve_doc, *resolve_doc.find_note(1), NoteType::ScratchHold) ==
+          NoteType::ScratchHold);
+  }
 
   std::vector<NotationNote> notes = {make_tap(0, 0), make_tap(480, 10)};
   notes[1].width = 2;
@@ -910,6 +943,206 @@ void test_edit_grid_and_note_operations() {
   CHECK_EQ(split_notes[0].scratch_length, 3);
 }
 
+void test_timing_bpm_meter_split_and_prune() {
+  MusicTiming timing;
+  timing.ticks_per_quarter = 480;
+  timing.bpm = 120.0;
+  timing.points = {
+      TimingPoint{0, 120.0, 4, 4, true, true},
+      TimingPoint{480, 180.0, 4, 4, true, false},   // BPM-only mid-bar
+      TimingPoint{1920, 180.0, 3, 4, false, true},  // 3/4 at bar 2
+      TimingPoint{2400, 180.0, 5, 4, false, true},  // orphan after 3/4 edit below
+      TimingPoint{3360, 180.0, 4, 4, false, true},  // still a measure under 3/4
+  };
+  normalize_timing_points(timing);
+
+  // BPM-only mid point must not move measure lines (still every 1920).
+  const auto measures = measure_ticks_in_range(0, 4000, timing);
+  CHECK(!measures.empty());
+  CHECK_EQ(measures[0], 0);
+  CHECK_EQ(measures[1], 1920);
+
+  // Beats still step by quarter from meter anchors (BPM does not change tick step).
+  const auto beats = beat_ticks_in_range(0, 1000, timing);
+  CHECK(std::find(beats.begin(), beats.end(), 0) != beats.end());
+  CHECK(std::find(beats.begin(), beats.end(), 480) != beats.end());
+  CHECK(std::find(beats.begin(), beats.end(), 960) != beats.end());
+
+  // Edit 3/4 at 1920 → 2400 is no longer a measure; prune until 3360 which still is.
+  for (auto& p : timing.points) {
+    if (p.tick == 1920) {
+      p.numerator = 3;
+      p.denominator = 4;
+      p.has_meter = true;
+    }
+  }
+  prune_orphaned_meter_changes(timing, 1920);
+  bool has_2400_meter = false;
+  bool has_3360_meter = false;
+  for (const auto& p : timing.points) {
+    if (p.tick == 2400 && p.has_meter) has_2400_meter = true;
+    if (p.tick == 3360 && p.has_meter) has_3360_meter = true;
+  }
+  CHECK(!has_2400_meter);
+  CHECK(has_3360_meter);
+  CHECK(is_measure_tick(3360, timing));
+
+  // Serializer round-trip keeps flags.
+  NotationChart chart;
+  chart.timing = timing;
+  const fs::path path = temp_chart_path("timing_flags.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(chart, path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  bool found_bpm_only = false;
+  for (const auto& p : loaded.timing.points) {
+    if (p.tick == 480) {
+      CHECK(p.has_bpm);
+      CHECK(!p.has_meter);
+      found_bpm_only = true;
+    }
+  }
+  CHECK(found_bpm_only);
+}
+
+void test_truncated_wdschart_rejected() {
+  const fs::path path = temp_chart_path("truncated_missing_end.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 120 4 4 3\nNOTES 2\n"
+           "N 0 0 0 10 0 1 0 0\n";
+  }
+  NotationChart chart;
+  const auto result = ChartSerializer::load_from_file(path.string(), chart);
+  CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::ParseError));
+
+  const fs::path path2 = temp_chart_path("truncated_count_mismatch.wdschart");
+  {
+    std::ofstream out(path2);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 120 4 4 3\nNOTES 2\n"
+           "N 0 0 0 10 0 1 0 0\nCONCURRENT 0\nEND\n";
+  }
+  const auto result2 = ChartSerializer::load_from_file(path2.string(), chart);
+  CHECK_EQ(static_cast<int>(result2.error), static_cast<int>(SerializeError::ParseError));
+}
+
+void test_official_csv_tempo_map_export() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.offset_ms = 3000;  // must not affect CSV seconds
+  chart.timing.points = {
+      TimingPoint{0, 120.0, 4, 4, true, true},
+      TimingPoint{480, 240.0, 4, 4, true, false},
+  };
+  NotationNote note = make_tap(960.0f, 0);
+  note.id = 0;
+  chart.notes.push_back(note);
+
+  std::string text;
+  OfficialChartSaveOptions options;
+  options.convert_lane_to_one_based = false;
+  const auto result = OfficialChartFormat::serialize_chart(chart, text, options);
+  CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
+
+  // 480 ticks @120 BPM = 0.5s, then 480 ticks @240 BPM = 0.25s → 0.75s.
+  const double start_sec = std::stod(text.substr(0, text.find(',')));
+  CHECK(std::abs(start_sec - 0.75) < 1e-3);
+}
+
+void test_save_failure_preserves_note_ids() {
+  ChartEditorEngine engine;
+  NotationNote late = make_tap(960.0f, 2);
+  late.id = 99;
+  NotationNote early = make_tap(0.0f, 0);
+  early.id = 42;
+  CHECK(engine.document().set_notes({late, early}));
+  CHECK(engine.execute_command(
+      std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(480.0f, 1)})));
+  CHECK(engine.history().can_undo());
+  CHECK(engine.document().find_note(99).has_value());
+  CHECK(engine.document().find_note(42).has_value());
+
+  const auto result =
+      engine.save_to_file((fs::temp_directory_path() / "wds_no_such_dir_xyz" / "fail.wdschart")
+                              .string());
+  CHECK_NE(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int32_t>(engine.document().notes().size()), 3);
+  CHECK(engine.document().find_note(99).has_value());
+  CHECK(engine.document().find_note(42).has_value());
+  CHECK(engine.history().can_undo());
+}
+
+void test_sus_meter_and_mid_measure_bpm_roundtrip() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  // 3/4 measure (1440 ticks); BPM change halfway through first bar.
+  chart.timing.points = {
+      TimingPoint{0, 120.0, 3, 4, true, true},
+      TimingPoint{720, 180.0, 3, 4, true, false},
+  };
+  NotationNote tap = make_tap(0.0f, 1);
+  tap.id = 0;
+  chart.notes.push_back(tap);
+
+  SusChartSaveOptions options;
+  options.ched_lane_padding = false;
+  std::string text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(text.find("#00002:") != std::string::npos);
+  CHECK(text.find("#00008:") != std::string::npos);
+  // Mid-bar BPM must not collapse to a single measure-head token pair.
+  const auto pos08 = text.find("#00008:");
+  CHECK(pos08 != std::string::npos);
+  const auto line_end = text.find('\n', pos08);
+  const std::string line08 = text.substr(pos08, line_end - pos08);
+  CHECK(line08.size() > std::string("#00008: 01").size());
+
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  bool found_meter = false;
+  bool found_mid_bpm = false;
+  for (const auto& p : loaded.chart.timing.points) {
+    if (p.tick == 0 && p.has_meter) {
+      CHECK_EQ(p.numerator, 3);
+      CHECK_EQ(p.denominator, 4);
+      found_meter = true;
+    }
+    if (p.has_bpm && std::abs(p.bpm - 180.0) < 1e-6) {
+      CHECK_EQ(p.tick, 720);
+      found_mid_bpm = true;
+    }
+  }
+  CHECK(found_meter);
+  CHECK(found_mid_bpm);
+}
+
+void test_chart_session_preserves_per_chart_history() {
+  ChartSession session;  // starts with one empty chart
+  ChartDocument* doc_a = session.document();
+  CHECK(doc_a != nullptr);
+  NotationNote tap = make_tap(0.0f, 0);
+  tap.id = 7;
+  CHECK(session.history()->execute(std::make_unique<AddNotesCommand>(std::vector<NotationNote>{tap}),
+                                   *doc_a));
+  CHECK(session.history()->can_undo());
+
+  session.add_chart(ChartDocument{});
+  CHECK(session.switch_chart(1));
+  CHECK(!session.history()->can_undo());
+
+  CHECK(session.switch_chart(0));
+  CHECK(session.history()->can_undo());
+  CHECK(session.document()->find_note(7).has_value());
+  CHECK(session.history()->undo(*session.document()));
+  CHECK(!session.document()->find_note(7).has_value());
+}
+
 void test_history_hold_eighths_and_project_v2() {
   ChartDocument doc;
   NotationNote note = make_tap(0, 0);
@@ -921,6 +1154,21 @@ void test_history_hold_eighths_and_project_v2() {
   CHECK(!doc.find_note(9).has_value());
   CHECK(history.redo(doc));
   CHECK(doc.find_note(9).has_value());
+
+  {
+    const MusicTiming before = doc.timing();
+    MusicTiming after = before;
+    after.points.push_back(TimingPoint{480, 180.0, 3, 4});
+    CHECK(history.execute(std::make_unique<SetTimingCommand>(before, after, "Add timing"), doc));
+    CHECK_EQ(static_cast<int>(doc.timing().points.size()), 2);
+    CHECK(std::fabs(doc.timing().points[1].bpm - 180.0) < 0.01);
+    CHECK_EQ(doc.timing().points[1].numerator, 3);
+    CHECK(history.undo(doc));
+    CHECK_EQ(static_cast<int>(doc.timing().points.size()), 1);
+    CHECK(history.redo(doc));
+    CHECK_EQ(static_cast<int>(doc.timing().points.size()), 2);
+    CHECK(std::fabs(doc.timing().points[1].bpm - 180.0) < 0.01);
+  }
 
   NotationNote hold = make_tap(0, 2);
   hold.id = 10;
@@ -1219,16 +1467,30 @@ void test_resolve_convert_scratch_head_stays_official() {
   head.note_type = NoteType::ScratchHoldStart;
   CHECK(doc.add_note(head) == 2);
 
+  // Head-only: legal retints stay in the ScratchHold head family.
   CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Critical) ==
         NoteType::ScratchCriticalHoldStart);
   CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Normal) ==
         NoteType::ScratchHoldStart);
   CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::HoldStart) ==
         NoteType::ScratchHoldStart);
+  // Scratch head cannot become HoldStart while body stays ScratchHold.
   CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Hold) ==
         NoteType::ScratchHoldStart);
-  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::HoldStart) ==
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::ScratchHold) ==
+        NoteType::ScratchHoldStart);
+  // Flick is not a legal head conversion → keep current type.
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Flick) ==
+        NoteType::ScratchHoldStart);
+  // Bodies still collapse to the instantaneous / forced body type.
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Hold) == NoteType::Hold);
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::ScratchHold) ==
         NoteType::ScratchHold);
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Normal) == NoteType::Normal);
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Critical) == NoteType::Critical);
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::HoldStart) ==
+        NoteType::ScratchHoldStart);
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Flick) == NoteType::Flick);
 }
 
 int main() {
@@ -1264,6 +1526,12 @@ int main() {
   test_load_repo_test_official_charts();
   test_wdsproject_format_roundtrip_and_relative_paths();
   test_edit_grid_and_note_operations();
+  test_timing_bpm_meter_split_and_prune();
+  test_truncated_wdschart_rejected();
+  test_official_csv_tempo_map_export();
+  test_save_failure_preserves_note_ids();
+  test_sus_meter_and_mid_measure_bpm_roundtrip();
+  test_chart_session_preserves_per_chart_history();
   test_history_hold_eighths_and_project_v2();
 
   // SUS sample (optional — skip if missing).

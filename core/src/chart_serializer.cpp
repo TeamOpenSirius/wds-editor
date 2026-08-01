@@ -1,5 +1,6 @@
 #include <wds/core/chart_serializer.hpp>
 
+#include <wds/core/file_io.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
 #include <wds/core/timing_map.hpp>
@@ -7,47 +8,108 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 namespace wds::chart_editor {
+namespace {
+
+bool is_known_note_type(int32_t raw) noexcept {
+  switch (static_cast<NoteType>(raw)) {
+    case NoteType::HiSpeed:
+    case NoteType::None:
+    case NoteType::Normal:
+    case NoteType::Critical:
+    case NoteType::Sound:
+    case NoteType::SoundPurple:
+    case NoteType::Scratch:
+    case NoteType::Flick:
+    case NoteType::HoldStart:
+    case NoteType::CriticalHoldStart:
+    case NoteType::ScratchHoldStart:
+    case NoteType::ScratchCriticalHoldStart:
+    case NoteType::Hold:
+    case NoteType::CriticalHold:
+    case NoteType::ScratchHold:
+    case NoteType::ScratchCriticalHold:
+    case NoteType::NontailHold:
+    case NoteType::NontailCriticalHold:
+    case NoteType::NontailScratchHold:
+    case NoteType::NontailScratchCriticalHold:
+    case NoteType::BlueTap:
+    case NoteType::HoldEighth:
+      return true;
+  }
+  return false;
+}
+
+bool is_known_gimmick(int32_t raw) noexcept {
+  switch (static_cast<GimmickType>(raw)) {
+    case GimmickType::None:
+    case GimmickType::JumpScratch:
+    case GimmickType::OneDirection:
+    case GimmickType::Split1:
+    case GimmickType::Split2:
+    case GimmickType::Split3:
+    case GimmickType::Split4:
+    case GimmickType::Split5:
+    case GimmickType::Split6:
+    case GimmickType::FullSplit1:
+    case GimmickType::FullSplit2:
+    case GimmickType::FullSplit3:
+    case GimmickType::FullSplit4:
+    case GimmickType::FullSplit5:
+    case GimmickType::FullSplit6:
+    case GimmickType::LightSplit1:
+    case GimmickType::LightSplit2:
+    case GimmickType::LightSplit3:
+    case GimmickType::LightSplit4:
+    case GimmickType::LightSplit5:
+    case GimmickType::LightSplit6:
+    case GimmickType::IgnoreSplit1:
+    case GimmickType::IgnoreSplit2:
+    case GimmickType::IgnoreSplit3:
+    case GimmickType::IgnoreSplit4:
+    case GimmickType::IgnoreSplit5:
+    case GimmickType::IgnoreSplit6:
+      return true;
+  }
+  return false;
+}
+
+}  // namespace
 
 SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
                                               const std::string& path) {
-  std::ofstream file(path, std::ios::binary | std::ios::trunc);
-  if (!file) {
-    return {SerializeError::IoError, "failed to open file for writing: " + path};
-  }
-
   MusicTiming timing = chart.timing;
   normalize_timing_points(timing);
 
-  // WDSCHART v3 — official column layout + TIMING BPM/meter points.
+  std::ostringstream ss;
+  // WDSCHART v4 — TIMING points with has_bpm / has_meter flags (bit0 / bit1).
   // Chart delay lives in .wdsproject (one song, many charts) — not in the chart file.
-  file << "WDSCHART " << kFormatVersion << '\n';
-  file << "BPM " << timing.bpm << '\n';
-  file << "TPQ " << timing.ticks_per_quarter << '\n';
-  file << "TIMING " << timing.points.size() << '\n';
+  ss << "WDSCHART " << kFormatVersion << '\n';
+  ss << "BPM " << timing.bpm << '\n';
+  ss << "TPQ " << timing.ticks_per_quarter << '\n';
+  ss << "TIMING " << timing.points.size() << '\n';
   for (const auto& p : timing.points) {
-    file << "T " << p.tick << ' ' << p.bpm << ' ' << p.numerator << ' ' << p.denominator << '\n';
+    const int flags = (p.has_bpm ? 1 : 0) | (p.has_meter ? 2 : 0);
+    ss << "T " << p.tick << ' ' << p.bpm << ' ' << p.numerator << ' ' << p.denominator << ' '
+       << flags << '\n';
   }
-  file << "NOTES " << chart.notes.size() << '\n';
+  ss << "NOTES " << chart.notes.size() << '\n';
 
   for (const auto& note : chart.notes) {
-    file << "N " << note.id << ' ' << note.start_tick << ' ' << note.end_tick << ' '
-         << static_cast<int32_t>(note.note_type) << ' ' << note.lane << ' ' << note.width << ' '
-         << static_cast<int32_t>(note.gimmick_type) << ' ' << note.scratch_length << '\n';
+    ss << "N " << note.id << ' ' << note.start_tick << ' ' << note.end_tick << ' '
+       << static_cast<int32_t>(note.note_type) << ' ' << note.lane << ' ' << note.width << ' '
+       << static_cast<int32_t>(note.gimmick_type) << ' ' << note.scratch_length << '\n';
   }
 
-  file << "CONCURRENT " << chart.concurrent_lines.size() << '\n';
+  ss << "CONCURRENT " << chart.concurrent_lines.size() << '\n';
   for (const auto& line : chart.concurrent_lines) {
-    file << "C " << line.milliseconds << ' ' << line.start_lane << ' ' << line.width << '\n';
+    ss << "C " << line.milliseconds << ' ' << line.start_lane << ' ' << line.width << '\n';
   }
 
-  file << "END\n";
-  if (!file) {
-    return {SerializeError::IoError, "failed while writing: " + path};
-  }
-
-  return {SerializeError::Ok, {}};
+  ss << "END\n";
+  return write_text_atomic(path, ss.str());
 }
 
 SerializeResult ChartSerializer::load_from_file(const std::string& path, NotationChart& out_chart) {
@@ -69,18 +131,28 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   size_t note_count = 0;
   size_t concurrent_count = 0;
   size_t timing_count = 0;
+  bool saw_timing = false;
+  bool saw_notes = false;
+  bool saw_concurrent = false;
+  bool saw_end = false;
+  std::unordered_set<int32_t> seen_ids;
 
   while (file >> key) {
     if (key == "BPM") {
       file >> chart.timing.bpm;
+      if (!file) return {SerializeError::ParseError, "malformed BPM"};
     } else if (key == "TPQ") {
       file >> chart.timing.ticks_per_quarter;
+      if (!file) return {SerializeError::ParseError, "malformed TPQ"};
     } else if (key == "OFFSET_MS") {
       // Legacy charts may still contain OFFSET_MS; discard — offset is project-scoped.
       int64_t ignored = 0;
       file >> ignored;
+      if (!file) return {SerializeError::ParseError, "malformed OFFSET_MS"};
     } else if (key == "TIMING") {
       file >> timing_count;
+      if (!file) return {SerializeError::ParseError, "malformed TIMING count"};
+      saw_timing = true;
       chart.timing.points.clear();
       chart.timing.points.reserve(timing_count);
     } else if (key == "T") {
@@ -89,9 +161,29 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       if (!file) {
         return {SerializeError::ParseError, "malformed timing point"};
       }
+      // v4+: optional flags. v3 rows omit them → both BPM and meter authored.
+      point.has_bpm = true;
+      point.has_meter = true;
+      if (version >= 4) {
+        int flags = 3;
+        file >> flags;
+        if (!file) {
+          return {SerializeError::ParseError, "malformed timing point flags"};
+        }
+        point.has_bpm = (flags & 1) != 0;
+        point.has_meter = (flags & 2) != 0;
+        if (!point.has_bpm && !point.has_meter) {
+          point.has_bpm = true;
+        }
+      }
+      if (point.tick < 0 || point.bpm <= 0.0 || point.numerator <= 0 || point.denominator <= 0) {
+        return {SerializeError::ParseError, "timing point out of range"};
+      }
       chart.timing.points.push_back(point);
     } else if (key == "NOTES") {
       file >> note_count;
+      if (!file) return {SerializeError::ParseError, "malformed NOTES count"};
+      saw_notes = true;
       chart.notes.reserve(note_count);
     } else if (key == "N") {
       NotationNote note;
@@ -117,11 +209,29 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
         }
       }
 
+      if (!is_known_note_type(note_type_raw)) {
+        return {SerializeError::ParseError, "unknown note type"};
+      }
+      if (!is_known_gimmick(gimmick_raw)) {
+        return {SerializeError::ParseError, "unknown gimmick type"};
+      }
+      if (note.lane < 0 || note.width < 0 || note.lane + note.width > 12) {
+        return {SerializeError::ParseError, "note lane/width out of range"};
+      }
+      if (note.start_tick < 0.0f || note.end_tick < 0.0f) {
+        return {SerializeError::ParseError, "note tick out of range"};
+      }
+      if (note.id >= 0 && !seen_ids.insert(note.id).second) {
+        return {SerializeError::ParseError, "duplicate note id"};
+      }
+
       note.note_type = static_cast<NoteType>(note_type_raw);
       note.gimmick_type = static_cast<GimmickType>(gimmick_raw);
       chart.notes.push_back(note);
     } else if (key == "CONCURRENT") {
       file >> concurrent_count;
+      if (!file) return {SerializeError::ParseError, "malformed CONCURRENT count"};
+      saw_concurrent = true;
       chart.concurrent_lines.reserve(concurrent_count);
     } else if (key == "C") {
       ConcurrentLineNote line;
@@ -129,12 +239,29 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       if (!file) {
         return {SerializeError::ParseError, "malformed concurrent line record"};
       }
+      if (line.start_lane < 0 || line.width < 0 || line.start_lane + line.width > 12) {
+        return {SerializeError::ParseError, "concurrent lane/width out of range"};
+      }
       chart.concurrent_lines.push_back(line);
     } else if (key == "END") {
+      saw_end = true;
       break;
     } else {
       return {SerializeError::ParseError, "unknown token: " + key};
     }
+  }
+
+  if (!saw_end) {
+    return {SerializeError::ParseError, "chart file missing END"};
+  }
+  if (saw_timing && chart.timing.points.size() != timing_count) {
+    return {SerializeError::ParseError, "TIMING count mismatch"};
+  }
+  if (saw_notes && chart.notes.size() != note_count) {
+    return {SerializeError::ParseError, "NOTES count mismatch"};
+  }
+  if (saw_concurrent && chart.concurrent_lines.size() != concurrent_count) {
+    return {SerializeError::ParseError, "CONCURRENT count mismatch"};
   }
 
   normalize_timing_points(chart.timing);

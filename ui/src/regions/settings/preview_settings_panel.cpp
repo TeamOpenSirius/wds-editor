@@ -222,6 +222,12 @@ void PreviewSettingsPanel::apply_playback_rate() {
   preview_.transport().set_playback_rate(playback_rate_);
 }
 
+void PreviewSettingsPanel::set_playback_rate(float rate) {
+  playback_rate_ = rate_from_label(format_rate(rate));
+  apply_playback_rate();
+  sync_from_state();
+}
+
 void PreviewSettingsPanel::notify_persist() const {
   if (on_persist_) on_persist_();
 }

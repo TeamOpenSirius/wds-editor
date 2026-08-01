@@ -62,6 +62,8 @@ class Widget {
   virtual bool dismiss_popups(Vec2 point);
   virtual bool wants_focus() const { return false; }
   virtual bool is_focusable() const { return false; }
+  // When true, WidgetRoot routes KeyDown to this widget before ShortcutManager.
+  virtual bool captures_keys() const { return false; }
   // When true, WidgetRoot skips the floating tooltip bubble (widget paints tip itself).
   virtual bool paints_inline_tooltip() const { return false; }
 

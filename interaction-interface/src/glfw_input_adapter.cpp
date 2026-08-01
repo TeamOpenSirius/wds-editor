@@ -55,8 +55,18 @@ KeyCode from_glfw_key(int key) {
       return KeyCode::Up;
     case GLFW_KEY_DOWN:
       return KeyCode::Down;
+    case GLFW_KEY_F1:
+      return KeyCode::F1;
+    case GLFW_KEY_F2:
+      return KeyCode::F2;
+    case GLFW_KEY_F3:
+      return KeyCode::F3;
+    case GLFW_KEY_F4:
+      return KeyCode::F4;
     case GLFW_KEY_F11:
       return KeyCode::F11;
+    case GLFW_KEY_PERIOD:
+      return static_cast<KeyCode>(46);  // '.' — forbidden as shortcut key
     default:
       return KeyCode::Unknown;
   }

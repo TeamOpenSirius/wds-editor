@@ -63,7 +63,9 @@ void WidgetRoot::update_hover(Vec2 point) {
 
 void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortcuts) {
   if (std::holds_alternative<KeyDownEvent>(event) && shortcuts != nullptr) {
-    if (shortcuts->dispatch(std::get<KeyDownEvent>(event))) {
+    // Focused shortcut/text capture widgets must see keys before global chords.
+    const bool capture_keys = focused_ != nullptr && focused_->captures_keys();
+    if (!capture_keys && shortcuts->dispatch(std::get<KeyDownEvent>(event))) {
       return;
     }
   }

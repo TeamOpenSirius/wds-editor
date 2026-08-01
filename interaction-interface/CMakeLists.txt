@@ -5,6 +5,7 @@ add_library(wds_interaction STATIC
   src/bitmap_font.cpp
   src/font_atlas.cpp
   src/editor_input.cpp
+  src/editor_shortcuts.cpp
   src/gesture.cpp
   src/platform.cpp
   src/shortcuts.cpp
@@ -15,6 +16,7 @@ add_library(wds_interaction STATIC
   src/widgets/button.cpp
   src/widgets/checkbox.cpp
   src/widgets/text_field.cpp
+  src/widgets/shortcut_field.cpp
   src/widgets/slider.cpp
   src/widgets/dropdown.cpp
   src/widgets/combo_box.cpp

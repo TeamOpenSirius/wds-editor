@@ -26,13 +26,22 @@ using wds::interaction::Vec2;
 
 float gutter_font_px() { return wds::interaction::theme::kFontSizeGutter; }
 float split_label_h() { return wds::interaction::theme::px(28.0f); }
-float timing_label_h() { return wds::interaction::theme::px(52.0f); }
+float timing_label_h() { return wds::interaction::theme::px(28.0f); }
 float split_band_gap() { return wds::interaction::theme::px(1.0f); }
 float gutter_label_pad() { return wds::interaction::theme::px(2.0f); }
+constexpr float kLineSnapPx = 8.0f;
+
+bool rects_overlap(const Rect& a, const Rect& b) noexcept {
+  return a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y;
+}
 
 constexpr Color kSplitStartColor{0.22f, 0.48f, 0.95f, 1.0f};
 constexpr Color kSplitEndColor{0.92f, 0.28f, 0.28f, 1.0f};
 constexpr Color kBpmLabelColor{0.48f, 0.30f, 0.14f, 0.96f};
+constexpr Color kMeterLabelColor{0.10f, 0.38f, 0.24f, 0.96f};
+constexpr Color kSubdivLineColor{0.28f, 0.30f, 0.34f, 0.75f};
+constexpr Color kBeatLineColor{0.50f, 0.52f, 0.56f, 0.88f};
+constexpr Color kMeasureLineColor{0.72f, 0.74f, 0.78f, 0.95f};
 
 }  // namespace
 
@@ -251,6 +260,7 @@ const NotationNote* split_note_covering_tick(const std::vector<NotationNote>& no
 void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                            const Rect& area) {
   const auto& grid = viewport.grid();
+  const auto& timing = viewport.timing();
   const auto range = viewport.visible_tick_range();
   const int32_t start = range.first;
   const int32_t end = range.second;
@@ -268,50 +278,82 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
     have_last = true;
   };
 
-  const int32_t subdiv_step = wds::chart_editor::subdivision_tick_step(grid);
-  const int32_t beat_step = std::max(1, grid.ticks_per_quarter);
-  // Upper bound: one rect per candidate tick (LOD may draw fewer).
-  const int32_t span = std::max(0, end - start);
-  painter.reserve_rects(static_cast<std::size_t>(span / std::max(1, subdiv_step) + 8));
+  const auto measure_ticks =
+      wds::chart_editor::measure_ticks_in_range(start, end, timing);
+  const auto beat_ticks = wds::chart_editor::beat_ticks_in_range(start, end, timing);
+  auto is_in = [](const std::vector<int32_t>& ticks, int32_t tick) {
+    return std::binary_search(ticks.begin(), ticks.end(), tick);
+  };
+
+  // Subdivision ticks: meter segments stepped by beat/subdivs.
+  std::vector<int32_t> subdiv_ticks;
+  {
+    const int32_t tpq = std::max(1, timing.ticks_per_quarter);
+    const int32_t subdivs = std::max(1, grid.subdivisions_per_beat);
+    std::vector<const wds::chart_editor::TimingPoint*> meters;
+    for (const auto& p : timing.points) {
+      if (p.has_meter) meters.push_back(&p);
+    }
+    if (meters.empty()) {
+      // Fallback: constant TPQ grid when timing is empty/unnormalized.
+      const int32_t step = wds::chart_editor::subdivision_tick_step(grid);
+      if (step > 0) {
+        const int32_t first = static_cast<int32_t>(std::ceil(static_cast<double>(start) /
+                                                             static_cast<double>(step))) *
+                              step;
+        for (int32_t t = first; t <= end; t += step) subdiv_ticks.push_back(t);
+      }
+    } else {
+      for (size_t i = 0; i < meters.size(); ++i) {
+        const auto& p = *meters[i];
+        const int32_t seg_end =
+            (i + 1 < meters.size()) ? meters[i + 1]->tick : end + 1;
+        const int32_t step =
+            wds::chart_editor::subdivision_length_ticks(p, tpq, subdivs);
+        int32_t t = p.tick;
+        if (t < start) {
+          const int32_t delta = start - t;
+          t += ((delta + step - 1) / step) * step;
+        }
+        for (; t < seg_end && t <= end; t += step) {
+          if (t >= start) subdiv_ticks.push_back(t);
+        }
+      }
+    }
+  }
+
+  painter.reserve_rects(subdiv_ticks.size() + beat_ticks.size() + measure_ticks.size() + 8);
 
   float last_sub_y = 0.0f;
   bool have_sub = false;
-  if (subdiv_step > 0) {
-    const int32_t first =
-        static_cast<int32_t>(std::ceil(static_cast<double>(start) / static_cast<double>(subdiv_step))) *
-        subdiv_step;
-    for (int32_t tick = first; tick <= end; tick += subdiv_step) {
-      if (tick % beat_step == 0) continue;  // beat lines drawn thicker below
-      draw_h(tick, 1.0f, {0.28f, 0.30f, 0.34f, 0.75f}, last_sub_y, have_sub);
-    }
+  for (int32_t tick : subdiv_ticks) {
+    if (is_in(beat_ticks, tick) || is_in(measure_ticks, tick)) continue;
+    draw_h(tick, 1.0f, kSubdivLineColor, last_sub_y, have_sub);
   }
 
   float last_beat_y = 0.0f;
   bool have_beat = false;
-  const int32_t first_beat =
-      static_cast<int32_t>(std::ceil(static_cast<double>(start) / static_cast<double>(beat_step))) *
-      beat_step;
-  for (int32_t tick = first_beat; tick <= end; tick += beat_step) {
-    draw_h(tick, 2.0f, {0.72f, 0.74f, 0.78f, 0.95f}, last_beat_y, have_beat);
+  for (int32_t tick : beat_ticks) {
+    if (is_in(measure_ticks, tick)) continue;
+    draw_h(tick, 1.5f, kBeatLineColor, last_beat_y, have_beat);
+  }
+
+  float last_measure_y = 0.0f;
+  bool have_measure = false;
+  for (int32_t tick : measure_ticks) {
+    draw_h(tick, 2.5f, kMeasureLineColor, last_measure_y, have_measure);
   }
 }
 
 void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                          const Rect& gutter, const wds::chart_editor::MusicTiming& timing,
-                         int32_t view_start_tick, int32_t view_end_tick, bool show_timing_marks) {
+                         int32_t /*view_start_tick*/, int32_t /*view_end_tick*/,
+                         bool show_timing_marks) {
   painter.fill_rect(gutter, {0.06f, 0.07f, 0.09f, 1.0f}, 0.0f, 0.85f);
   if (!show_timing_marks) {
-    return;  // Official charts have no authored BPM/meter — hide measures + labels.
+    return;  // Official charts have no authored BPM/meter — hide grid + labels.
   }
-  // Right gutter: measure lines only (no beat / subdivision grid).
-
-  for (const int tick :
-       wds::chart_editor::measure_ticks_in_range(view_start_tick, view_end_tick, timing)) {
-    const float y = viewport.y_at(static_cast<float>(tick));
-    if (y < gutter.y || y > gutter.bottom()) continue;
-    painter.fill_rect({gutter.x, y - 1.0f, gutter.w, 2.0f}, {0.72f, 0.74f, 0.78f, 0.95f}, 0.0f,
-                      0.906f);
-  }
+  paint_horizontal_grid(painter, viewport, gutter);
 
   const auto hits = build_timing_label_hits(viewport, gutter, timing);
   // Later ticks first so earlier labels paint on top.
@@ -322,16 +364,39 @@ void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewpor
                       [&](const wds::chart_editor::TimingPoint& tp) {
                         return tp.tick == hit.point_tick;
                       });
-    const std::string bpm = format_bpm_label(p.bpm);
-    const std::string meter =
-        std::to_string(p.numerator) + "/" + std::to_string(p.denominator);
-    painter.fill_rect(hit.bounds, kBpmLabelColor, 2.0f, 0.93f);
-    const float half = hit.bounds.h * 0.5f;
     const float gutter_px = gutter_font_px();
-    painter.label({hit.bounds.x, hit.bounds.y, hit.bounds.w, half}, bpm,
-                  {0.98f, 0.93f, 0.84f, 1.0f}, 0.931f, false, gutter_px);
-    painter.label({hit.bounds.x, hit.bounds.y + half, hit.bounds.w, half}, meter,
-                  {0.90f, 0.82f, 0.70f, 1.0f}, 0.931f, false, gutter_px);
+    if (hit.kind == TimingLabelKind::Bpm) {
+      painter.fill_rect(hit.bounds, kBpmLabelColor, 2.0f, 0.93f);
+      painter.label(hit.bounds, format_bpm_label(p.bpm), {0.98f, 0.93f, 0.84f, 1.0f}, 0.931f,
+                    false, gutter_px);
+    } else {
+      const std::string meter =
+          std::to_string(p.numerator) + "/" + std::to_string(p.denominator);
+      painter.fill_rect(hit.bounds, kMeterLabelColor, 2.0f, 0.93f);
+      painter.label(hit.bounds, meter, {0.86f, 0.96f, 0.90f, 1.0f}, 0.931f, false, gutter_px);
+    }
+  }
+}
+
+void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                                const Rect& gutter, const wds::chart_editor::MusicTiming& timing,
+                                int32_t view_start_tick, int32_t view_end_tick) {
+  painter.fill_rect(gutter, {0.05f, 0.06f, 0.08f, 1.0f}, 0.0f, 0.85f);
+  if (view_end_tick < view_start_tick) return;
+
+  // Number from the chart start so indices stay correct when scrolled mid-song.
+  const auto ticks =
+      wds::chart_editor::measure_ticks_in_range(0, view_end_tick, timing);
+  const float font_px = gutter_font_px();
+  const float label_h = timing_label_h();
+  for (size_t i = 0; i < ticks.size(); ++i) {
+    const int32_t tick = ticks[i];
+    if (tick < view_start_tick) continue;
+    const float y = viewport.y_at(static_cast<float>(tick));
+    if (y < gutter.y - label_h || y > gutter.bottom() + label_h) continue;
+    const Rect bounds{gutter.x, y - label_h * 0.5f, gutter.w, label_h};
+    painter.label(bounds, std::to_string(static_cast<int>(i) + 1),
+                  {0.78f, 0.80f, 0.84f, 0.95f}, 0.932f, false, font_px);
   }
 }
 
@@ -429,21 +494,44 @@ std::vector<GutterLabelHit> build_split_label_hits(const EditViewport& viewport,
 
 std::vector<TimingLabelHit> build_timing_label_hits(const EditViewport& viewport, const Rect& gutter,
                                                     const wds::chart_editor::MusicTiming& timing) {
-  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
-  const float label_x = gutter.x + gutter_label_pad();
   std::vector<TimingLabelHit> out;
   for (const auto& p : timing.points) {
-    const float y = viewport.y_at(static_cast<float>(p.tick));
-    if (y < gutter.y - timing_label_h() || y > gutter.bottom() + timing_label_h()) continue;
-    TimingLabelHit hit;
-    hit.point_tick = p.tick;
-    hit.bounds = {label_x, y - timing_label_h() * 0.5f, label_w, timing_label_h()};
-    out.push_back(hit);
+    // Visible label ⇒ clickable: include by painted bounds, not only anchor-line Y.
+    if (p.has_bpm) {
+      TimingLabelHit hit;
+      hit.point_tick = p.tick;
+      hit.kind = TimingLabelKind::Bpm;
+      hit.bounds = bpm_label_bounds(viewport, gutter, p.tick);
+      if (rects_overlap(hit.bounds, gutter)) out.push_back(hit);
+    }
+    if (p.has_meter) {
+      TimingLabelHit hit;
+      hit.point_tick = p.tick;
+      hit.kind = TimingLabelKind::Meter;
+      hit.bounds = meter_label_bounds(viewport, gutter, p.tick);
+      if (rects_overlap(hit.bounds, gutter)) out.push_back(hit);
+    }
   }
   std::sort(out.begin(), out.end(), [](const TimingLabelHit& a, const TimingLabelHit& b) {
-    return a.point_tick < b.point_tick;
+    if (a.point_tick != b.point_tick) return a.point_tick < b.point_tick;
+    return static_cast<int>(a.kind) < static_cast<int>(b.kind);
   });
   return out;
+}
+
+std::optional<int32_t> timing_bpm_tick_at(const EditViewport& viewport, const Rect& gutter,
+                                          const wds::chart_editor::MusicTiming& timing,
+                                          Vec2 point) {
+  if (!gutter.contains(point)) return std::nullopt;
+  const int32_t raw = viewport.tick_at(point.y);
+  const int32_t snapped = wds::chart_editor::snap_to_subdivision(
+      raw, timing, viewport.grid().subdivisions_per_beat);
+  const float y = viewport.y_at(static_cast<float>(snapped));
+  if (std::abs(point.y - y) > kLineSnapPx) return std::nullopt;
+  for (const auto& p : timing.points) {
+    if (p.tick == snapped && p.has_bpm) return std::nullopt;
+  }
+  return snapped;
 }
 
 std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport, const Rect& gutter,
@@ -453,9 +541,9 @@ std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport, cons
   const int tick = viewport.tick_at(point.y);
   const int32_t measure = wds::chart_editor::snap_to_measure(tick, timing);
   const float y = viewport.y_at(static_cast<float>(measure));
-  if (std::abs(point.y - y) > 8.0f) return std::nullopt;
+  if (std::abs(point.y - y) > kLineSnapPx) return std::nullopt;
   for (const auto& p : timing.points) {
-    if (p.tick == measure) return std::nullopt;
+    if (p.tick == measure && p.has_meter) return std::nullopt;
   }
   return measure;
 }
@@ -467,11 +555,18 @@ Rect split_start_label_bounds(const EditViewport& viewport, const Rect& gutter, 
   return {label_x, y - split_label_h() - split_band_gap(), label_w, split_label_h()};
 }
 
-Rect timing_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
+Rect bpm_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
   const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
   const float label_x = gutter.x + gutter_label_pad();
   const float y = viewport.y_at(static_cast<float>(tick));
-  return {label_x, y - timing_label_h() * 0.5f, label_w, timing_label_h()};
+  return {label_x, y - timing_label_h() - split_band_gap(), label_w, timing_label_h()};
+}
+
+Rect meter_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
+  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
+  const float label_x = gutter.x + gutter_label_pad();
+  const float y = viewport.y_at(static_cast<float>(tick));
+  return {label_x, y + split_band_gap(), label_w, timing_label_h()};
 }
 
 }  // namespace wds::ui

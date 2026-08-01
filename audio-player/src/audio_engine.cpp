@@ -262,10 +262,11 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
           continue;
         }
         // One-shots play on their own voices (never mixed into FREQ-scaled BGM).
-        // OVER_POS: if a clip exceeds max voices, steal the oldest rather than drop.
+        // OVER_POS: when NEW voices are exhausted, play_sfx_internal falls back to a
+        // recycled channel and steals the oldest rather than dropping the hit.
         const DWORD flags =
             (clip == HitSfxClip::Hold) ? BASS_SAMPLE_LOOP : BASS_SAMPLE_OVER_POS;
-        const DWORD max_ch = (clip == HitSfxClip::Hold) ? 1 : 64;
+        const DWORD max_ch = (clip == HitSfxClip::Hold) ? 1 : 128;
         const HSAMPLE sample = sample_from_path(path, max_ch, flags);
         if (sample == 0) {
           WDS_LOG("AudioEngine: SampleLoad failed %s code=%d\n", path.string().c_str(),
@@ -490,7 +491,9 @@ void AudioEngine::set_playback_rate(float rate) {
   apply_music_rate();
 }
 
-void AudioEngine::play_sfx(HitSfxClip clip) { play_sfx_internal(clip, /*lock_music=*/false); }
+bool AudioEngine::play_sfx(HitSfxClip clip) {
+  return play_sfx_internal(clip, /*lock_music=*/false);
+}
 
 void AudioEngine::ensure_keep_alive() {
   if (impl_ == nullptr || impl_->keep_alive == 0) {
@@ -518,31 +521,41 @@ std::uint64_t AudioEngine::align_music_bytes(std::uint64_t bytes) const noexcept
   return (bytes / impl_->music_bpf) * impl_->music_bpf;
 }
 
-void AudioEngine::play_sfx_internal(HitSfxClip clip, bool lock_music) {
+bool AudioEngine::play_sfx_internal(HitSfxClip clip, bool lock_music) {
   if (!sfx_ready_ || impl_ == nullptr || clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
-    return;
+    return false;
   }
   const size_t idx = static_cast<size_t>(clip);
   if (!impl_->sample_ok[idx]) {
-    return;
+    return false;
   }
-  ensure_keep_alive();
-  // BASS_SAMCHAN_NEW: do not recycle a still-playing channel. Without this,
-  // rapid same-clip hits (e.g. 32nds) restart the previous voice and only one
-  // sound is heard.
-  const HCHANNEL ch = BASS_SampleGetChannel(impl_->samples[idx], BASS_SAMCHAN_NEW);
+  // BGM already keeps the device hot. Starting keep-alive alongside music causes
+  // dual-stream resampling that can intermittently drop or smear hit attacks.
+  if (music_playing_) {
+    pause_keep_alive();
+  } else {
+    ensure_keep_alive();
+  }
+  // Prefer a fresh voice so rapid same-clip hits (e.g. 32nds) do not restart an
+  // older channel. If the sample's max polyphony is exhausted, fall back to a
+  // recycled OVER_POS voice so the new hit is heard instead of silently dropped.
+  HCHANNEL ch = BASS_SampleGetChannel(impl_->samples[idx], BASS_SAMCHAN_NEW);
   if (ch == 0) {
-    return;
+    ch = BASS_SampleGetChannel(impl_->samples[idx], 0);
+  }
+  if (ch == 0) {
+    return false;
   }
   BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
   const bool do_lock = lock_music && impl_->music != 0;
   if (do_lock) {
     BASS_ChannelLock(impl_->music, TRUE);
   }
-  BASS_ChannelPlay(ch, TRUE);
+  const BOOL ok = BASS_ChannelPlay(ch, TRUE);
   if (do_lock) {
     BASS_ChannelLock(impl_->music, FALSE);
   }
+  return ok != FALSE;
 }
 
 void AudioEngine::cache_music_format() {
@@ -610,16 +623,15 @@ void AudioEngine::warmup_sfx() {
   BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
 }
 
-void AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at) {
+bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at) {
   if (!sfx_ready_ || impl_ == nullptr || clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
-    return;
+    return false;
   }
   if (!impl_->sample_ok[static_cast<size_t>(clip)]) {
-    return;
+    return false;
   }
   if (impl_->music == 0) {
-    play_sfx_internal(clip, /*lock_music=*/false);
-    return;
+    return play_sfx_internal(clip, /*lock_music=*/false);
   }
 
   // Separate sample voices keep hit pitch at 1× while BGM uses BASS_ATTRIB_FREQ.
@@ -627,42 +639,50 @@ void AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
   // SetSync will never fire — play immediately. Otherwise playtime ONETIME sync
   // fires with audible BGM (not mixtime, which would be early by the buffer).
   const QWORD target = align_music_bytes(us_to_bytes(impl_->music, at));
-  const QWORD decode_pos =
-      BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE | BASS_POS_DECODE);
-  const QWORD play_pos = BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
-  const QWORD frontier = decode_pos > play_pos ? decode_pos : play_pos;
-  if (target <= frontier) {
-    play_sfx_internal(clip, /*lock_music=*/false);
-    return;
+  auto frontier_bytes = [&]() -> QWORD {
+    const QWORD decode_pos =
+        BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE | BASS_POS_DECODE);
+    const QWORD play_pos = BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
+    return decode_pos > play_pos ? decode_pos : play_pos;
+  };
+  if (target <= frontier_bytes()) {
+    return play_sfx_internal(clip, /*lock_music=*/false);
   }
 
   const HSYNC sync = BASS_ChannelSetSync(
       impl_->music, BASS_SYNC_POS | BASS_SYNC_ONETIME, target, sfx_pos_sync_proc, this);
   if (sync == 0) {
     WDS_LOG("AudioEngine: ChannelSetSync failed code=%d\n", BASS_ErrorGetCode());
-    play_sfx_internal(clip, /*lock_music=*/false);
-    return;
+    return play_sfx_internal(clip, /*lock_music=*/false);
+  }
+
+  // TOCTOU: decode may pass `target` between the frontier check and SetSync.
+  // A playtime ONETIME sync set behind the playhead never fires on a non-looping
+  // stream — fall back to immediate play.
+  if (target <= frontier_bytes()) {
+    BASS_ChannelRemoveSync(impl_->music, sync);
+    return play_sfx_internal(clip, /*lock_music=*/false);
   }
 
   std::lock_guard<std::mutex> lock(impl_->sfx_mu);
   impl_->pending_syncs.push_back(Impl::PendingSync{sync, clip});
+  return true;
 }
 
-void AudioEngine::schedule_sfx_after(HitSfxClip clip, wds::common::Microseconds delay) {
+bool AudioEngine::schedule_sfx_after(HitSfxClip clip, wds::common::Microseconds delay) {
   if (!sfx_ready_ || impl_ == nullptr) {
-    return;
+    return false;
   }
   if (impl_->music == 0) {
     if (delay.count() <= 0) {
-      play_sfx_internal(clip, /*lock_music=*/false);
+      return play_sfx_internal(clip, /*lock_music=*/false);
     }
-    return;
+    return false;
   }
   if (delay.count() <= 0) {
-    schedule_sfx_at(clip, position());
-    return;
+    return schedule_sfx_at(clip, position());
   }
-  schedule_sfx_at(clip, position() + delay);
+  return schedule_sfx_at(clip, position() + delay);
 }
 
 void AudioEngine::clear_scheduled_sfx() {

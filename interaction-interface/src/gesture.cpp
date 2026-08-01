@@ -48,7 +48,7 @@ SwipeDirection PlaceSwipeTracker::update(float origin_x, float origin_y, Vec2 cu
     return last_;
   }
 
-  // Unlocked: arm with per-axis thresholds (horizontal is typically half a lane).
+  // Unlocked: arm with per-axis thresholds (editor horizontal is typically one lane).
   constexpr float kAngleTan = 0.7002075382f;  // tan(35°)
   const bool horizontal_ok =
       std::abs(delta.x) >= horizontal_min_px && std::abs(delta.y) <= std::abs(delta.x) * kAngleTan;

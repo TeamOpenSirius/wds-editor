@@ -1007,7 +1007,10 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
       }
       // Music byte sync (not display-frame quantized). Engine plays immediately if
       // decode already passed the target so SetSync cannot miss silently.
-      hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)));
+      // If arming/play fails (voice limit race, etc.), unmark so a later tick retries.
+      if (!hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)))) {
+        hit_sfx_played_.erase(key);
+      }
       return;
     }
 
@@ -1020,7 +1023,9 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     if (!mark_hit_sfx_event(key)) {
       return;
     }
-    hit_sfx_.play(clip);
+    if (!hit_sfx_.play(clip)) {
+      hit_sfx_played_.erase(key);
+    }
   };
 
   constexpr uint32_t kHead = 0;

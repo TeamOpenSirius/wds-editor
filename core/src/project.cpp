@@ -1,8 +1,11 @@
 #include <wds/core/project.hpp>
 
+#include <wds/core/file_io.hpp>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <system_error>
 
 namespace wds::chart_editor {
@@ -106,26 +109,18 @@ std::string ProjectSerializer::make_relative_path(const std::string& project_fil
 
 SerializeResult ProjectSerializer::save_to_file(const WdsProject& project,
                                                 const std::string& path) {
-  std::ofstream file(path, std::ios::binary | std::ios::trunc);
-  if (!file) {
-    return {SerializeError::IoError, "failed to open project for writing: " + path};
-  }
-
-  file << "WDSPROJECT " << kFormatVersion << '\n';
-  file << "MUSIC " << project.music_path << '\n';
-  file << "CHART_DELAY_MS " << project.offset_ms << '\n';
+  std::ostringstream ss;
+  ss << "WDSPROJECT " << kFormatVersion << '\n';
+  ss << "MUSIC " << project.music_path << '\n';
+  ss << "CHART_DELAY_MS " << project.offset_ms << '\n';
   const int32_t active = project.chart_paths.empty()
                              ? 0
                              : std::clamp(project.active_chart_index, 0,
                                           static_cast<int32_t>(project.chart_paths.size()) - 1);
-  file << "ACTIVE_CHART " << active << '\n';
-  for (const auto& chart_path : project.chart_paths) file << "CHART " << chart_path << '\n';
-  file << "END\n";
-
-  if (!file) {
-    return {SerializeError::IoError, "failed while writing project: " + path};
-  }
-  return {SerializeError::Ok, {}};
+  ss << "ACTIVE_CHART " << active << '\n';
+  for (const auto& chart_path : project.chart_paths) ss << "CHART " << chart_path << '\n';
+  ss << "END\n";
+  return write_text_atomic(path, ss.str());
 }
 
 SerializeResult ProjectSerializer::save_relativized(WdsProject project,

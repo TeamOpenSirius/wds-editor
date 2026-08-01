@@ -30,6 +30,12 @@ bool SetNotesCommand::execute(ChartDocument& doc) { return doc.set_notes(after_)
 bool SetNotesCommand::undo(ChartDocument& doc) { return doc.set_notes(before_); }
 std::string SetNotesCommand::label() const { return label_; }
 
+SetTimingCommand::SetTimingCommand(MusicTiming before, MusicTiming after, std::string label)
+    : before_(std::move(before)), after_(std::move(after)), label_(std::move(label)) {}
+bool SetTimingCommand::execute(ChartDocument& doc) { return doc.set_timing(after_); }
+bool SetTimingCommand::undo(ChartDocument& doc) { return doc.set_timing(before_); }
+std::string SetTimingCommand::label() const { return label_; }
+
 AddNotesCommand::AddNotesCommand(std::vector<NotationNote> notes, std::string label)
     : notes_(std::move(notes)), label_(std::move(label)) {}
 bool AddNotesCommand::execute(ChartDocument& doc) {

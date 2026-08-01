@@ -36,6 +36,7 @@ class ShortcutNamespace {
   bool bind(ShortcutChord chord, ShortcutAction action);
   bool bind_primary(KeyCode key, ShortcutAction action, bool shift = false);
   void unbind(ShortcutChord chord);
+  void clear() noexcept;
   bool dispatch(const KeyDownEvent& event) const;
 
   bool has(const ShortcutChord& chord) const;

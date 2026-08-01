@@ -212,10 +212,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void scroll_split_picker_to_color(int32_t color_id);
   void close_split_picker();
   void confirm_split_picker();
-  void open_timing_popup(int32_t tick);
+  enum class TimingPopupMode { Bpm, Meter };
+  void open_bpm_popup(int32_t tick);
+  void open_meter_popup(int32_t tick);
   void close_timing_popup();
   void commit_timing_popup();
-  bool delete_timing_point(int32_t tick);
+  bool delete_timing_label(int32_t tick, TimingPopupMode kind);
   bool delete_split_note(int32_t note_id);
   void update_gutter_ghost(wds::interaction::Vec2 point);
   void hide_gutter_ghost();
@@ -227,7 +229,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   ChartEditRenderer renderer_;
   const wds::renderer::SkinCatalog* skin_ = nullptr;
   mutable wds::interaction::Rect left_gutter_{};
-  mutable wds::interaction::Rect right_gutter_{};
+  mutable wds::interaction::Rect right_gutter_{};       // BPM / meter
+  mutable wds::interaction::Rect measure_gutter_{};     // measure index (far right)
   mutable wds::interaction::Rect playfield_{};
   mutable wds::interaction::Rect split_picker_bounds_{};
   mutable wds::interaction::Rect timing_popup_bounds_{};
@@ -261,6 +264,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   float split_color_scroll_ = 0.0f;
 
   bool timing_popup_open_ = false;
+  TimingPopupMode timing_popup_mode_ = TimingPopupMode::Bpm;
   int32_t timing_edit_tick_ = 0;
   std::string timing_bpm_text_;
   std::string timing_num_text_;
@@ -277,10 +281,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t pending_split_note_id_ = -1;
   bool pending_split_is_end_ = false;
 
-  // Solid label preview on BPM / split gutters (no text).
-  bool gutter_ghost_visible_ = false;
-  wds::interaction::Rect gutter_ghost_bounds_{};
-  wds::interaction::Color gutter_ghost_color_{};
+  // Solid label previews on BPM / meter / split gutters (no text).
+  struct GutterGhost {
+    wds::interaction::Rect bounds{};
+    wds::interaction::Color color{};
+  };
+  std::vector<GutterGhost> gutter_ghosts_{};
 
   Mode mode_ = Mode::Idle;
   wds::interaction::GestureTracker gesture_;

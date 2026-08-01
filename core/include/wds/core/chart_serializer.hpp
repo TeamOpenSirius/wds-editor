@@ -27,11 +27,12 @@ struct SerializeResult {
 // MusicTiming::offset_ms is NOT serialized here (see .wdsproject CHART_DELAY_MS).
 class ChartSerializer {
  public:
-  static constexpr int32_t kFormatVersion = 3;
+  static constexpr int32_t kFormatVersion = 4;
   static constexpr int32_t kMinSupportedVersion = 1;
 
-  // Native .wdschart format (always writes v3).
-  // v3 adds TIMING points (BPM + meter). v1/v2 load creates a default tick-0 point.
+  // Native .wdschart format (always writes latest).
+  // v3 adds TIMING points (BPM + meter). v4 adds has_bpm/has_meter flags on T rows.
+  // v1/v2 load creates a default tick-0 point.
   static SerializeResult save_to_file(const NotationChart& chart, const std::string& path);
   static SerializeResult load_from_file(const std::string& path, NotationChart& out_chart);
 

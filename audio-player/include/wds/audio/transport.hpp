@@ -36,23 +36,24 @@ class Transport {
   void set_chart_offset_ms(int64_t offset_ms) noexcept;
   int64_t chart_offset_ms() const noexcept { return chart_offset_ms_; }
 
-  // Preview clock rate (and BGM rate). Hit SFX timing follows the clock; SFX sample rate stays 1x.
+  // Preview clock rate (and BGM rate). Hit SFX locks to BASS music POS (1× samples);
+  // the committed note timeline must stay phase-locked to that same music clock.
   void set_playback_rate(float rate);
   float playback_rate() const noexcept { return playback_rate_; }
 
   // Apply queued intents, advance committed timeline, drive music when present.
-  // wall_delta_us is real frame elapsed time (rate-scaled) when Playing.
-  // With music: advance by true wall delta (content_delta/wall_delta ≈ 1×). BASS is a
-  // soft master — tight dead zone (~15ms ≈ 3× UPDATEPERIOD) ignores staircases / brief
-  // DWM phase error; only a barely-there slew outside the zone. No EMA pacing, no
-  // lead-cap freeze (average frame rate pulls phase back). Hard-snap on large desync.
+  // wall_delta_us is real frame elapsed time when Playing.
+  // With music: audio-primary clock — wall*rate interpolates between BASS updates,
+  // then a small dead zone (~4ms) + strong slew keeps notes phase-locked to music
+  // (and therefore to POS-synced hit SFX). Wide dead zones / weak slew let the
+  // wall clock drift from the device clock so SFX slowly walks off the notes.
   // Without music: wall clock advances the timeline directly (rate-scaled).
   // Pass real frame time in microseconds — millisecond truncation stalls wall-clock
   // playback under MAILBOX / high refresh (common on Windows).
   // Caller applies the returned snapshot to core/UI via engine.apply_timeline(snap).
   //
   // On play, music start is deferred until start_pending_music() so the UI can arm
-  // mixtime SFX syncs against a still-paused stream (avoids first-frame catch-up).
+  // POS SFX syncs against a still-paused stream (avoids first-frame catch-up).
   wds::common::TimelineSnapshot poll(int64_t wall_delta_us);
 
   // Begin audible BGM after hit-SFX schedules have been armed for this play request.
