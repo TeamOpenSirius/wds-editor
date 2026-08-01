@@ -1,0 +1,137 @@
+name: Build packages
+
+on:
+  push:
+    branches: [dev, main]
+
+concurrency:
+  group: build-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "4"
+
+jobs:
+  win-x86_64:
+    name: win-x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
+            binutils-mingw-w64-x86-64 \
+            cmake ninja-build zip curl unzip \
+            glslang-tools msitools python3-pil
+
+      - name: Cache vcpkg
+        id: cache-vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg-root/installed
+            .vcpkg-root/packages
+            .vcpkg-root/downloads
+          key: vcpkg-x64-mingw-static-v1-${{ runner.os }}-libpng-zlib-glfw3-vulkan-loader
+
+      - name: Bootstrap vcpkg
+        run: |
+          if [[ ! -d .vcpkg-root/.git ]]; then
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git .vcpkg-root
+          fi
+          if [[ ! -x .vcpkg-root/vcpkg ]]; then
+            .vcpkg-root/bootstrap-vcpkg.sh -disableMetrics
+          fi
+
+      - name: Install vcpkg packages
+        run: |
+          .vcpkg-root/vcpkg install \
+            libpng:x64-mingw-static \
+            zlib:x64-mingw-static \
+            glfw3:x64-mingw-static \
+            vulkan-loader:x64-mingw-static
+
+      - name: Build and package
+        env:
+          WDS_VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-root
+        run: ./scripts/build-target.sh win-x86_64
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: wds-win-x86_64
+          path: dist/wds-win-x86_64.msi
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-arm:
+    name: macos-arm
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+        run: |
+          brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
+          python3 -m pip install --user dmgbuild pillow
+
+      - name: Build and package
+        run: ./scripts/build-target.sh macos-arm
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: wds-macos-arm
+          path: dist/wds-macos-arm.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: github.ref == 'refs/heads/main'
+    needs: [win-x86_64, macos-arm]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: wds-*
+          merge-multiple: true
+
+      - name: Prepare release metadata
+        id: meta
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          short_sha="$(printf '%s' '${{ github.sha }}' | cut -c1-7)"
+          echo "tag=main-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "name=WDS Editor ${short_sha}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$COMMIT_MSG" > release_notes.md
+          echo "Artifacts:" >> release_notes.md
+          ls -lh artifacts/*.msi artifacts/*.dmg >> release_notes.md
+          echo "---- release_notes.md ----"
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          body_path: release_notes.md
+          files: |
+            artifacts/wds-win-x86_64.msi
+            artifacts/wds-macos-arm.dmg
+          fail_on_unmatched_files: true
+          make_latest: true
