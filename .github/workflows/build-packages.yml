@@ -36,6 +36,8 @@ jobs:
             binutils-mingw-w64-x86-64 \
             cmake ninja-build zip curl unzip git tar pkg-config \
             glslang-tools msitools wixl wixl-data python3-pil
+          command -v wixl wixl-heat msiinfo
+          wixl --version || true
 
       - name: Checkout vcpkg
         uses: actions/checkout@v6
