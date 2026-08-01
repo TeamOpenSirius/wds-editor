@@ -35,7 +35,7 @@ jobs:
             mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
             binutils-mingw-w64-x86-64 \
             cmake ninja-build zip curl unzip git tar pkg-config \
-            glslang-tools msitools python3-pil
+            glslang-tools msitools wixl wixl-data python3-pil
 
       - name: Checkout vcpkg
         uses: actions/checkout@v6
