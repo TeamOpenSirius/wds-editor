@@ -108,5 +108,7 @@ ShortcutChord chord_width_slot(int slot_index) noexcept;  // 0..5
 // Playback rate presets: F1–F4 → 0.25x / 0.5x / 0.75x / 1x.
 ShortcutChord chord_playback_rate_slot(int slot_index) noexcept;  // 0..3
 std::optional<float> playback_rate_for_slot(int slot_index) noexcept;
+// Default X — toggle SFX mute on the preview settings panel.
+ShortcutChord chord_toggle_sfx_mute() noexcept;
 
 }  // namespace wds::interaction

@@ -228,6 +228,13 @@ void PreviewSettingsPanel::set_playback_rate(float rate) {
   sync_from_state();
 }
 
+void PreviewSettingsPanel::toggle_sfx_mute() {
+  sfx_muted_ = !sfx_muted_;
+  apply_sfx_gain();
+  sync_from_state();
+  notify_persist();
+}
+
 void PreviewSettingsPanel::notify_persist() const {
   if (on_persist_) on_persist_();
 }

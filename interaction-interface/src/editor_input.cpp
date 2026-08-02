@@ -239,4 +239,8 @@ std::optional<float> playback_rate_for_slot(int slot_index) noexcept {
   return kRates[slot_index];
 }
 
+ShortcutChord chord_toggle_sfx_mute() noexcept {
+  return editor_shortcut(EditorShortcut::ToggleSfxMute);
+}
+
 }  // namespace wds::interaction

@@ -38,6 +38,7 @@ enum class EditorShortcut : int {
   PlaybackRate1,
   PlaybackRate2,
   PlaybackRate3,
+  ToggleSfxMute,
   Count
 };
 

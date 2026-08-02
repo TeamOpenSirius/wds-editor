@@ -216,6 +216,7 @@ void UiManager::bind_editor_shortcuts() {
   using wds::interaction::chord_pause_playback;
   using wds::interaction::chord_toggle_fullscreen;
   using wds::interaction::chord_toggle_playback;
+  using wds::interaction::chord_toggle_sfx_mute;
   using wds::interaction::chord_playback_rate_slot;
   using wds::interaction::chord_undo;
   using wds::interaction::chord_width_slot;
@@ -308,6 +309,13 @@ void UiManager::bind_editor_shortcuts() {
       if (auto* settings = settings_panel()) settings->set_playback_rate(*rate);
     });
   }
+  editor.bind(chord_toggle_sfx_mute(), [this] {
+    if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
+    if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
+    if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
+    if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
+    if (auto* settings = settings_panel()) settings->toggle_sfx_mute();
+  });
 }
 
 UiManager::~UiManager() = default;
