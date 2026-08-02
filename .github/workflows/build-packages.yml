@@ -1,0 +1,159 @@
+name: Build packages
+
+on:
+  push:
+    branches: [dev, main]
+
+concurrency:
+  group: build-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "4"
+
+jobs:
+  win-x86_64:
+    name: win-x86_64
+    runs-on: ubuntu-24.04
+    env:
+      # Do NOT name this directory ".vcpkg-root": vcpkg treats a path component /
+      # marker of that name as the install root and then mis-detects the repo root.
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg-ci
+      VCPKG_DEFAULT_TRIPLET: x64-mingw-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
+            binutils-mingw-w64-x86-64 \
+            cmake ninja-build zip curl unzip git tar pkg-config \
+            glslang-tools msitools wixl wixl-data python3-pil
+          command -v wixl wixl-heat msiinfo
+          wixl --version || true
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v6
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg-ci
+          fetch-depth: 1
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}/installed
+            ${{ env.VCPKG_ROOT }}/packages
+            ${{ env.VCPKG_ROOT }}/downloads
+          key: vcpkg-x64-mingw-static-v3-${{ runner.os }}-libpng-zlib-glfw3-vulkan-loader
+
+      - name: Bootstrap vcpkg
+        run: |
+          test -f "${VCPKG_ROOT}/triplets/x64-linux.cmake"
+          test -f "${VCPKG_ROOT}/triplets/community/x64-mingw-static.cmake"
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          "${VCPKG_ROOT}/vcpkg" --vcpkg-root="${VCPKG_ROOT}" version
+          "${VCPKG_ROOT}/vcpkg" --vcpkg-root="${VCPKG_ROOT}" help triplets | head -n 40
+
+      - name: Install vcpkg packages
+        run: |
+          "${VCPKG_ROOT}/vcpkg" --vcpkg-root="${VCPKG_ROOT}" install \
+            libpng:x64-mingw-static \
+            zlib:x64-mingw-static \
+            glfw3:x64-mingw-static \
+            vulkan-loader:x64-mingw-static
+
+      - name: Build and package
+        env:
+          WDS_VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+        run: ./scripts/build-target.sh win-x86_64
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v6
+        with:
+          name: wds-win-x86_64
+          path: dist/wds-win-x86_64.msi
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-arm:
+    name: macos-arm
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Homebrew dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+        run: |
+          brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
+
+      - name: Setup Python packaging tools
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install dmgbuild pillow
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Build and package
+        run: |
+          export PATH="${{ github.workspace }}/.venv/bin:$PATH"
+          ./scripts/build-target.sh macos-arm
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v6
+        with:
+          name: wds-macos-arm
+          path: dist/wds-macos-arm.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: github.ref == 'refs/heads/main'
+    needs: [win-x86_64, macos-arm]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          pattern: wds-*
+          merge-multiple: true
+
+      - name: Prepare release metadata
+        id: meta
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          short_sha="$(printf '%s' '${{ github.sha }}' | cut -c1-7)"
+          echo "tag=main-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "name=WDS Editor ${short_sha}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$COMMIT_MSG" > release_notes.md
+          echo "---- release_notes.md ----"
+          cat release_notes.md
+          # Ensure artifacts exist without embedding ls metadata (mode/time/size) in notes.
+          test -f artifacts/wds-win-x86_64.msi
+          test -f artifacts/wds-macos-arm.dmg
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          body_path: release_notes.md
+          files: |
+            artifacts/wds-win-x86_64.msi
+            artifacts/wds-macos-arm.dmg
+          fail_on_unmatched_files: true
+          make_latest: true

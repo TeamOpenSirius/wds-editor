@@ -1,0 +1,2 @@
+#pragma once
+#include <wds/core/chart_session.hpp>
