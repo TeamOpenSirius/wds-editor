@@ -2,6 +2,7 @@
 
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/platform.hpp>
+#include <wds/interaction/shortcuts.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/validators.hpp>
 #include <wds/interaction/widgets/button.hpp>
@@ -14,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace wds::ui {
@@ -95,11 +97,21 @@ WidthSlotsDialog::WidthSlotsDialog() {
   for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
     auto field = std::make_unique<wds::interaction::ShortcutField>();
     auto* raw = field.get();
-    raw->set_conflict_checker([this, i](const wds::interaction::ShortcutChord& chord) {
-      return shortcut_conflicts(i, chord);
+    raw->on_change([this](const wds::interaction::ShortcutChord&) {
+      refresh_shortcut_conflict_highlights();
     });
     shortcut_fields_[i] = raw;
     add_child(std::move(field));
+
+    auto clear = std::make_unique<wds::interaction::Button>("×");
+    clear->set_tone(wds::interaction::ButtonTone::Cancel);
+    clear->on_click([this, i] {
+      if (shortcut_fields_[i] == nullptr) return;
+      static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])->clear_chord();
+      refresh_shortcut_conflict_highlights();
+    });
+    shortcut_clear_buttons_[i] = clear.get();
+    add_child(std::move(clear));
   }
 
   auto sus = std::make_unique<wds::interaction::Checkbox>("导入 sus 谱面时自动转换（实验性）");
@@ -124,10 +136,7 @@ WidthSlotsDialog::WidthSlotsDialog() {
 
   auto confirm = std::make_unique<wds::interaction::Button>("确认");
   confirm->set_tone(wds::interaction::ButtonTone::Confirm);
-  confirm->on_click([this] {
-    apply_fields();
-    close();
-  });
+  confirm->on_click([this] { try_confirm(); });
   confirm_button_ = confirm.get();
   add_child(std::move(confirm));
 
@@ -140,18 +149,75 @@ WidthSlotsDialog::WidthSlotsDialog() {
   update_tab_visibility();
 }
 
-bool WidthSlotsDialog::shortcut_conflicts(std::size_t self_index,
-                                          const wds::interaction::ShortcutChord& chord) const {
-  wds::interaction::ShortcutChord normalized = chord;
-  normalized.mods = wds::interaction::normalize_primary(normalized.mods);
+void WidthSlotsDialog::refresh_shortcut_conflict_highlights() {
+  std::unordered_map<wds::interaction::ShortcutChord, int, wds::interaction::ShortcutChordHash>
+      counts;
   for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
-    if (i == self_index || shortcut_fields_[i] == nullptr) continue;
-    wds::interaction::ShortcutChord other =
-        static_cast<const wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord();
-    other.mods = wds::interaction::normalize_primary(other.mods);
-    if (other == normalized) return true;
+    if (shortcut_fields_[i] == nullptr) continue;
+    wds::interaction::ShortcutChord chord =
+        static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord();
+    chord.mods = wds::interaction::normalize_primary(chord.mods);
+    if (chord.key == wds::interaction::KeyCode::Unknown) continue;
+    ++counts[chord];
   }
-  return false;
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    if (shortcut_fields_[i] == nullptr) continue;
+    auto* field = static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i]);
+    wds::interaction::ShortcutChord chord = field->chord();
+    chord.mods = wds::interaction::normalize_primary(chord.mods);
+    const bool conflict =
+        chord.key != wds::interaction::KeyCode::Unknown && counts[chord] > 1;
+    field->set_conflict_highlight(conflict);
+  }
+}
+
+std::optional<std::size_t> WidthSlotsDialog::first_shortcut_conflict_index() const {
+  std::unordered_map<wds::interaction::ShortcutChord, int, wds::interaction::ShortcutChordHash>
+      counts;
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    if (shortcut_fields_[i] == nullptr) continue;
+    wds::interaction::ShortcutChord chord =
+        static_cast<const wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord();
+    chord.mods = wds::interaction::normalize_primary(chord.mods);
+    if (chord.key == wds::interaction::KeyCode::Unknown) continue;
+    ++counts[chord];
+  }
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    if (shortcut_fields_[i] == nullptr) continue;
+    wds::interaction::ShortcutChord chord =
+        static_cast<const wds::interaction::ShortcutField*>(shortcut_fields_[i])->chord();
+    chord.mods = wds::interaction::normalize_primary(chord.mods);
+    if (chord.key == wds::interaction::KeyCode::Unknown) continue;
+    if (counts[chord] > 1) return i;
+  }
+  return std::nullopt;
+}
+
+void WidthSlotsDialog::ensure_shortcut_row_visible(std::size_t index) {
+  const float ctrl_h = th::kControlHeight;
+  const float gap = th::kUiGap;
+  const float row_h = ctrl_h + gap;
+  const float row_top = static_cast<float>(index) * row_h;
+  const float row_bottom = row_top + ctrl_h;
+  const float list_h = shortcut_list_bounds_.h;
+  if (row_top < shortcut_scroll_) {
+    shortcut_scroll_ = row_top;
+  } else if (row_bottom > shortcut_scroll_ + list_h) {
+    shortcut_scroll_ = row_bottom - list_h;
+  }
+  clamp_shortcut_scroll();
+}
+
+void WidthSlotsDialog::try_confirm() {
+  refresh_shortcut_conflict_highlights();
+  if (const auto conflict = first_shortcut_conflict_index()) {
+    set_tab(Tab::Shortcuts);
+    ensure_shortcut_row_visible(*conflict);
+    if (open_) layout_content(bounds_);
+    return;
+  }
+  apply_fields();
+  close();
 }
 
 void WidthSlotsDialog::open() {
@@ -189,6 +255,7 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
                            : wds::interaction::editor_shortcut(id);
     static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])->set_chord(chord);
   }
+  refresh_shortcut_conflict_highlights();
 }
 
 void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
@@ -227,6 +294,7 @@ void WidthSlotsDialog::sync_fields_from_state() {
     static_cast<wds::interaction::ShortcutField*>(shortcut_fields_[i])
         ->set_chord(wds::interaction::editor_shortcut(static_cast<wds::interaction::EditorShortcut>(i)));
   }
+  refresh_shortcut_conflict_highlights();
 }
 
 void WidthSlotsDialog::apply_fields() {
@@ -278,6 +346,9 @@ void WidthSlotsDialog::update_tab_visibility() {
   if (!open_ || !shortcuts) {
     for (auto* f : shortcut_fields_) {
       if (f) f->set_visible(false);
+    }
+    for (auto* b : shortcut_clear_buttons_) {
+      if (b) b->set_visible(false);
     }
   }
   if (sus_auto_convert_) sus_auto_convert_->set_visible(open_ && file);
@@ -364,17 +435,26 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   clamp_shortcut_scroll();
   // Longest pause label: 「在开始播放位置暂停」.
   const float shortcut_label_w = th::px(234.0f);
-  const float shortcut_field_w = std::max(th::px(72.0f), body_w - shortcut_label_w - th::px(6.0f));
+  const float clear_w = th::kStepButtonW + th::px(4.0f);
+  const float clear_gap = th::px(4.0f);
+  const float shortcut_field_w =
+      std::max(th::px(72.0f), body_w - shortcut_label_w - th::px(6.0f) - clear_gap - clear_w);
   const float row_h = ctrl_h + gap;
   for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
     const float row_y = y + static_cast<float>(i) * row_h - shortcut_scroll_;
     const bool fully_visible =
         row_y >= y - 0.5f && row_y + ctrl_h <= list_bottom + 0.5f;
     auto* field = shortcut_fields_[i];
+    auto* clear = shortcut_clear_buttons_[i];
     if (!field) continue;
-    field->set_visible(open_ && tab_ == Tab::Shortcuts && fully_visible);
-    field->set_bounds(
-        {body_x + shortcut_label_w + th::px(6.0f), row_y, shortcut_field_w, ctrl_h});
+    const bool show = open_ && tab_ == Tab::Shortcuts && fully_visible;
+    field->set_visible(show);
+    const float field_x = body_x + shortcut_label_w + th::px(6.0f);
+    field->set_bounds({field_x, row_y, shortcut_field_w, ctrl_h});
+    if (clear) {
+      clear->set_visible(show);
+      clear->set_bounds({field_x + shortcut_field_w + clear_gap, row_y, clear_w, ctrl_h});
+    }
   }
 
   const float inner_w = panel_w - pad * 2.0f;
@@ -389,6 +469,7 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
       const bool fully_visible =
           row_y >= y - 0.5f && row_y + ctrl_h <= list_bottom + 0.5f;
       if (shortcut_fields_[i]) shortcut_fields_[i]->set_visible(fully_visible);
+      if (shortcut_clear_buttons_[i]) shortcut_clear_buttons_[i]->set_visible(fully_visible);
     }
   }
 }
@@ -501,9 +582,15 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
                   0.987f, false, 0.0f, true);
     static_cast<const wds::interaction::ComboBox*>(scroll_wheel_speed_)->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Shortcuts) {
-    for (auto* field : shortcut_fields_) {
-      if (field == nullptr || !field->visible()) continue;
-      static_cast<const wds::interaction::ShortcutField*>(field)->paint_at(painter, kFieldZ);
+    for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+      auto* field = shortcut_fields_[i];
+      if (field != nullptr && field->visible()) {
+        static_cast<const wds::interaction::ShortcutField*>(field)->paint_at(painter, kFieldZ);
+      }
+      auto* clear = shortcut_clear_buttons_[i];
+      if (clear != nullptr && clear->visible()) {
+        static_cast<const wds::interaction::Button*>(clear)->paint_at(painter, kFieldZ);
+      }
     }
   }
   cancel_button_->paint(painter);
@@ -526,6 +613,10 @@ wds::interaction::Widget* WidthSlotsDialog::hit_test(wds::interaction::Vec2 poin
     list.x += abs.x;
     list.y += abs.y;
     if (list.contains(point)) {
+      for (auto it = shortcut_clear_buttons_.rbegin(); it != shortcut_clear_buttons_.rend(); ++it) {
+        if (*it == nullptr || !(*it)->visible()) continue;
+        if (Widget* hit = (*it)->hit_test(point)) return hit;
+      }
       for (auto it = shortcut_fields_.rbegin(); it != shortcut_fields_.rend(); ++it) {
         if (*it == nullptr || !(*it)->visible()) continue;
         if (Widget* hit = (*it)->hit_test(point)) return hit;
@@ -534,12 +625,20 @@ wds::interaction::Widget* WidthSlotsDialog::hit_test(wds::interaction::Vec2 poin
     // Still allow confirm/cancel / tabs outside the list.
     for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
       if (!(*it)->visible()) continue;
-      // Skip shortcut fields — handled above with clip.
+      // Skip shortcut fields/buttons — handled above with clip.
       bool is_shortcut = false;
       for (auto* f : shortcut_fields_) {
         if (f == it->get()) {
           is_shortcut = true;
           break;
+        }
+      }
+      if (!is_shortcut) {
+        for (auto* b : shortcut_clear_buttons_) {
+          if (b == it->get()) {
+            is_shortcut = true;
+            break;
+          }
         }
       }
       if (is_shortcut) continue;

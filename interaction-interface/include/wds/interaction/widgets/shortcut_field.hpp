@@ -10,19 +10,22 @@ namespace wds::interaction {
 
 // Click-to-capture chord field. Modifiers update the label without committing;
 // a completing key (letter / F-key / arrow / …) commits and blurs. Digits and
-// period are rejected. Conflict → red flash + revert. Click-away → revert.
+// period are rejected (brief red flash). Duplicate chords are allowed temporarily
+// and highlighted red by the parent via set_conflict_highlight.
 class ShortcutField : public Widget {
  public:
   using ChangeHandler = std::function<void(const ShortcutChord&)>;
-  using ConflictChecker = std::function<bool(const ShortcutChord&)>;
 
   ShortcutField();
 
   void set_chord(ShortcutChord chord);
   const ShortcutChord& chord() const noexcept { return committed_; }
+  void clear_chord();
 
   void on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
-  void set_conflict_checker(ConflictChecker checker) { conflict_checker_ = std::move(checker); }
+  // Persistent red outline/text while this binding collides with another.
+  void set_conflict_highlight(bool on) noexcept { conflict_highlight_ = on; }
+  bool conflict_highlight() const noexcept { return conflict_highlight_; }
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
@@ -41,17 +44,17 @@ class ShortcutField : public Widget {
   void begin_capture();
   void cancel_capture();
   void try_commit(ShortcutChord chord);
-  void flash_conflict();
+  void flash_reject();
   void refresh_capture_label(const Modifiers& mods);
   std::string display_text() const;
 
   ShortcutChord committed_{};
   ShortcutChord draft_{};
   bool capturing_ = false;
-  float conflict_flash_t_ = 0.0f;
+  bool conflict_highlight_ = false;
+  float reject_flash_t_ = 0.0f;
   std::string capture_label_;
   ChangeHandler on_change_;
-  ConflictChecker conflict_checker_;
 };
 
 }  // namespace wds::interaction

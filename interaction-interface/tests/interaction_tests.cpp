@@ -306,7 +306,7 @@ int main() {
     reset_editor_shortcuts();
   }
 
-  // ShortcutField: commit, conflict revert, forbidden reject, blur revert, captures_keys.
+  // ShortcutField: commit, allow duplicate temporarily, forbidden reject, clear, blur.
   {
     ShortcutField field;
     field.set_bounds({0, 0, 120, 28});
@@ -314,7 +314,6 @@ int main() {
     int changes = 0;
     field.on_change([&](const ShortcutChord&) { ++changes; });
     const ShortcutChord blocked = chord_primary(static_cast<KeyCode>('C'));
-    field.set_conflict_checker([&](const ShortcutChord& c) { return c == blocked; });
 
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     expect(field.visual_state() == WidgetState::Focused, "shortcut field focuses");
@@ -334,20 +333,26 @@ int main() {
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     const int changes_before = changes;
     field.on_key_down(KeyDownEvent{blocked.key, blocked.mods, false});
-    expect(field.chord().key == static_cast<KeyCode>('X'), "conflict keeps old chord");
-    expect(changes == changes_before, "conflict does not fire on_change");
-    expect(field.visual_state() == WidgetState::Focused, "conflict stays focused");
+    expect(field.chord().key == blocked.key, "duplicate chord is allowed temporarily");
+    expect(changes == changes_before + 1, "duplicate still fires on_change");
+    field.set_conflict_highlight(true);
+    expect(field.conflict_highlight(), "parent can mark conflict highlight");
 
+    field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     field.on_key_down(KeyDownEvent{KeyCode::Num3, {}, false});
-    expect(field.chord().key == static_cast<KeyCode>('X'), "digit rejected");
+    expect(field.chord().key == blocked.key, "digit rejected");
 
     field.on_key_down(KeyDownEvent{KeyCode::Escape, {}, false});
     expect(field.visual_state() == WidgetState::Normal, "escape cancels capture");
 
+    field.clear_chord();
+    expect(field.chord().key == KeyCode::Unknown, "clear empties chord");
+    expect(changes == changes_before + 2, "clear fires on_change");
+
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     field.on_key_down(KeyDownEvent{KeyCode::Unknown, shift, false});
     field.on_blur();
-    expect(field.chord().key == static_cast<KeyCode>('X'), "blur reverts draft mods");
+    expect(field.chord().key == KeyCode::Unknown, "blur reverts draft mods");
     expect(!field.captures_keys(), "blur clears captures_keys");
   }
 

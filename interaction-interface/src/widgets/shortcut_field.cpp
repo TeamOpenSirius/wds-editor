@@ -19,14 +19,26 @@ void ShortcutField::set_chord(ShortcutChord chord) {
   committed_ = chord;
   draft_ = chord;
   capturing_ = false;
+  conflict_highlight_ = false;
+  reject_flash_t_ = 0.0f;
   capture_label_ = format_shortcut_chord(committed_);
+}
+
+void ShortcutField::clear_chord() {
+  committed_ = {};
+  draft_ = {};
+  capturing_ = false;
+  reject_flash_t_ = 0.0f;
+  capture_label_ = format_shortcut_chord(committed_);
+  set_visual_state(WidgetState::Normal);
+  if (on_change_) on_change_(committed_);
 }
 
 void ShortcutField::begin_capture() {
   capturing_ = true;
   draft_ = committed_;
   capture_label_.clear();
-  conflict_flash_t_ = 0.0f;
+  reject_flash_t_ = 0.0f;
 }
 
 void ShortcutField::cancel_capture() {
@@ -36,8 +48,8 @@ void ShortcutField::cancel_capture() {
   set_visual_state(WidgetState::Normal);
 }
 
-void ShortcutField::flash_conflict() {
-  conflict_flash_t_ = 0.85f;
+void ShortcutField::flash_reject() {
+  reject_flash_t_ = 0.85f;
   draft_ = committed_;
   capture_label_ = format_shortcut_chord(committed_);
 }
@@ -49,13 +61,10 @@ void ShortcutField::refresh_capture_label(const Modifiers& mods) {
 void ShortcutField::try_commit(ShortcutChord chord) {
   chord.mods = normalize_primary(chord.mods);
   if (is_forbidden_shortcut_key(chord.key) || !is_completing_shortcut_key(chord.key)) {
-    flash_conflict();
+    flash_reject();
     return;
   }
-  if (conflict_checker_ && conflict_checker_(chord)) {
-    flash_conflict();
-    return;
-  }
+  // Conflicts are allowed temporarily; the settings dialog marks collisions in red.
   committed_ = chord;
   draft_ = chord;
   capturing_ = false;
@@ -74,8 +83,8 @@ std::string ShortcutField::display_text() const {
 
 void ShortcutField::update(float delta_seconds) {
   Widget::update(delta_seconds);
-  if (conflict_flash_t_ > 0.0f) {
-    conflict_flash_t_ = std::max(0.0f, conflict_flash_t_ - delta_seconds);
+  if (reject_flash_t_ > 0.0f) {
+    reject_flash_t_ = std::max(0.0f, reject_flash_t_ - delta_seconds);
   }
 }
 
@@ -89,7 +98,7 @@ void ShortcutField::paint_at(UiPainter& painter, float z) const {
 
   const Rect abs = absolute_bounds();
   const bool focused = visual_state_ == WidgetState::Focused;
-  const bool conflict = conflict_flash_t_ > 0.0f;
+  const bool conflict = conflict_highlight_ || reject_flash_t_ > 0.0f;
   const Color fill = focused ? theme::kSurface : theme::kSurfaceVariant;
   Color outline = focused ? theme::kPrimary : theme::kOutline;
   if (conflict) outline = theme::kError;
@@ -128,7 +137,7 @@ void ShortcutField::on_key_down(const KeyDownEvent& event) {
   // Modifier-only (or unmapped) keys: show mods, keep capturing.
   if (!is_completing_shortcut_key(event.key)) {
     if (is_forbidden_shortcut_key(event.key)) {
-      flash_conflict();
+      flash_reject();
       return;
     }
     refresh_capture_label(event.mods);

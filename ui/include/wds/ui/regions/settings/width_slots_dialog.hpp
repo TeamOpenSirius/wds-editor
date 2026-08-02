@@ -6,7 +6,9 @@
 #include <wds/interaction/widget.hpp>
 
 #include <array>
+#include <cstddef>
 #include <functional>
+#include <optional>
 
 namespace wds::ui {
 
@@ -41,12 +43,14 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
 
   void sync_fields_from_state();
   void apply_fields();
+  void try_confirm();
   void layout_content(const wds::interaction::Rect& host);
   void set_tab(Tab tab);
   void update_tab_visibility();
   void clamp_shortcut_scroll();
-  bool shortcut_conflicts(std::size_t self_index,
-                          const wds::interaction::ShortcutChord& chord) const;
+  void refresh_shortcut_conflict_highlights();
+  std::optional<std::size_t> first_shortcut_conflict_index() const;
+  void ensure_shortcut_row_visible(std::size_t index);
 
   bool open_ = false;
   Tab tab_ = Tab::File;
@@ -64,8 +68,9 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
 
   // Width tab: 一档…六档 fields (2 columns × 3 rows).
   std::array<wds::interaction::Widget*, 6> fields_{};
-  // Shortcut tab: one ShortcutField per EditorShortcut.
+  // Shortcut tab: one ShortcutField + clear (×) button per EditorShortcut.
   std::array<wds::interaction::Widget*, wds::interaction::kEditorShortcutCount> shortcut_fields_{};
+  std::array<wds::interaction::Widget*, wds::interaction::kEditorShortcutCount> shortcut_clear_buttons_{};
   // File / Audio / Input options.
   wds::interaction::Widget* sus_auto_convert_ = nullptr;
   wds::interaction::Widget* mute_hold_body_sfx_ = nullptr;

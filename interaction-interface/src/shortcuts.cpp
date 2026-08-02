@@ -5,6 +5,10 @@ namespace wds::interaction {
 
 bool ShortcutNamespace::bind(ShortcutChord chord, ShortcutAction action) {
   chord.mods = normalize_primary(chord.mods);
+  // Cleared shortcuts use Unknown — skip so they neither fire nor collide in the map.
+  if (chord.key == KeyCode::Unknown) {
+    return false;
+  }
   if (bindings_.find(chord) != bindings_.end()) {
     return false;
   }
