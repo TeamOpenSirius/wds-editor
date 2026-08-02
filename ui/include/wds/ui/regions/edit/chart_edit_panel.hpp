@@ -91,6 +91,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool delete_note_at(wds::interaction::Vec2 point);
 
   bool wants_focus() const override { return true; }
+  // Timing / split modals own the keyboard so Space/Delete/arrows do not hit global chords.
+  bool captures_keys() const override { return has_modal_popup(); }
 
   void update(float delta_seconds) override;
   void paint(wds::interaction::UiPainter& painter) const override;

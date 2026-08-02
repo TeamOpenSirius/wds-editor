@@ -8,9 +8,11 @@
 #include "wds/interaction/widget_root.hpp"
 #include "wds/interaction/widgets/button.hpp"
 #include "wds/interaction/widgets/checkbox.hpp"
+#include "wds/interaction/widgets/combo_box.hpp"
 #include "wds/interaction/widgets/shortcut_field.hpp"
 #include "wds/interaction/widgets/slider.hpp"
 #include "wds/interaction/widgets/stepper.hpp"
+#include "wds/interaction/widgets/text_field.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -377,6 +379,39 @@ int main() {
     root2.process_frame(0.016f, {KeyDownEvent{static_cast<KeyCode>('K'), {}, false}}, &mgr);
     expect(fired == 0, "global shortcut suppressed while capturing");
     expect(raw->chord().key == static_cast<KeyCode>('K'), "field consumed K");
+  }
+
+  // Focused TextField must suppress global chords (e.g. Space play/pause) while typing.
+  {
+    WidgetRoot root3;
+    root3.set_bounds({0, 0, 400, 400});
+    auto tf = std::make_unique<TextField>();
+    auto* raw = tf.get();
+    raw->set_bounds({10, 10, 120, 28});
+    root3.add_child(std::move(tf));
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int fired = 0;
+    ns.bind({KeyCode::Space, {}}, [&] { ++fired; });
+    mgr.set_active_namespace("editor");
+
+    root3.process_frame(0.016f, {PointerDownEvent{{20, 20}, PointerButton::Left, {}}});
+    expect(root3.focused_widget() == raw, "root focuses text field");
+    expect(raw->captures_keys(), "text field captures keys while focused");
+    root3.process_frame(0.016f, {KeyDownEvent{KeyCode::Space, {}, false}}, &mgr);
+    expect(fired == 0, "Space shortcut suppressed while typing");
+    root3.process_frame(0.016f, {TextInputEvent{" "}}, &mgr);
+    expect(raw->text() == " ", "space still inserts into text field");
+  }
+
+  // Editable ComboBox captures; dropdown-only only while menu open.
+  {
+    ComboBox editable;
+    expect(editable.captures_keys(), "editable combo captures keys");
+    ComboBox menu_only;
+    menu_only.set_dropdown_only(true);
+    expect(!menu_only.captures_keys(), "closed dropdown-only does not capture");
   }
 
   {
