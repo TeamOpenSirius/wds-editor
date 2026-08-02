@@ -852,6 +852,22 @@ void test_edit_grid_and_note_operations() {
   // Off-grid origin + grid delta must land on a division line (drag-move snap).
   CHECK_EQ(snap_tick(100.0f, grid) + 120, 240);
 
+  // Odd subdivs: fixed-step accumulation left a gap before the next beat; exact
+  // (i*beat)/subdivs must land flush on beat edges and still evenly space interiors.
+  {
+    EditGridConfig odd = grid;
+    odd.subdivisions_per_beat = 7;
+    const auto ticks = subdivision_ticks_in_range(0, 480, odd);
+    CHECK_EQ(static_cast<int32_t>(ticks.size()), 6);
+    CHECK_EQ(ticks.front(), static_cast<int32_t>((1 * 480) / 7));
+    CHECK_EQ(ticks.back(), static_cast<int32_t>((6 * 480) / 7));
+    CHECK(std::find(ticks.begin(), ticks.end(), 476) == ticks.end());
+    CHECK_EQ(snap_tick(0.0f, odd), 0);
+    CHECK_EQ(snap_tick(480.0f, odd), 480);
+    CHECK_EQ(snap_tick(470.0f, odd), 480);
+    CHECK_EQ(snap_tick(static_cast<float>((6 * 480) / 7), odd), (6 * 480) / 7);
+  }
+
   NotationNote tap = make_tap(480.0f, 3);
   tap.width = 2;
   const NotationNote hold = convert_note_type(tap, NoteType::Hold, 480);
@@ -967,6 +983,17 @@ void test_timing_bpm_meter_split_and_prune() {
   CHECK(std::find(beats.begin(), beats.end(), 0) != beats.end());
   CHECK(std::find(beats.begin(), beats.end(), 480) != beats.end());
   CHECK(std::find(beats.begin(), beats.end(), 960) != beats.end());
+
+  // Meter-aware odd subdivs: last interior tick + next beat must meet (no remainder gap).
+  {
+    const auto subdivs = subdivision_ticks_in_range(0, 480, timing, 7);
+    CHECK(std::find(subdivs.begin(), subdivs.end(), (6 * 480) / 7) != subdivs.end());
+    CHECK(std::find(subdivs.begin(), subdivs.end(), 480) != subdivs.end());
+    CHECK(std::find(subdivs.begin(), subdivs.end(), 476) == subdivs.end());
+    CHECK_EQ(snap_to_subdivision(476, timing, 7), 480);
+    CHECK_EQ(snap_to_subdivision((6 * 480) / 7, timing, 7), (6 * 480) / 7);
+    CHECK_EQ(subdivision_offset_ticks(480, 7, 7), 480);
+  }
 
   // Edit 3/4 at 1920 → 2400 is no longer a measure; prune until 3360 which still is.
   for (auto& p : timing.points) {

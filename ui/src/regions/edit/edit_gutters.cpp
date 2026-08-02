@@ -285,7 +285,8 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
     return std::binary_search(ticks.begin(), ticks.end(), tick);
   };
 
-  // Subdivision ticks: meter segments stepped by beat/subdivs.
+  // Subdivision ticks: exact in-beat offsets (i*beat)/subdivs so odd subdivs
+  // (7/9/11/13) still land flush with the next beat line.
   std::vector<int32_t> subdiv_ticks;
   {
     const int32_t tpq = std::max(1, timing.ticks_per_quarter);
@@ -296,29 +297,14 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
     }
     if (meters.empty()) {
       // Fallback: constant TPQ grid when timing is empty/unnormalized.
-      const int32_t step = wds::chart_editor::subdivision_tick_step(grid);
-      if (step > 0) {
-        const int32_t first = static_cast<int32_t>(std::ceil(static_cast<double>(start) /
-                                                             static_cast<double>(step))) *
-                              step;
-        for (int32_t t = first; t <= end; t += step) subdiv_ticks.push_back(t);
-      }
+      wds::chart_editor::EditGridConfig cfg = grid;
+      cfg.ticks_per_quarter = tpq;
+      cfg.subdivisions_per_beat = subdivs;
+      subdiv_ticks =
+          wds::chart_editor::subdivision_ticks_in_range(start, end, cfg);
     } else {
-      for (size_t i = 0; i < meters.size(); ++i) {
-        const auto& p = *meters[i];
-        const int32_t seg_end =
-            (i + 1 < meters.size()) ? meters[i + 1]->tick : end + 1;
-        const int32_t step =
-            wds::chart_editor::subdivision_length_ticks(p, tpq, subdivs);
-        int32_t t = p.tick;
-        if (t < start) {
-          const int32_t delta = start - t;
-          t += ((delta + step - 1) / step) * step;
-        }
-        for (; t < seg_end && t <= end; t += step) {
-          if (t >= start) subdiv_ticks.push_back(t);
-        }
-      }
+      subdiv_ticks = wds::chart_editor::subdivision_ticks_in_range(
+          start, end, timing, subdivs);
     }
   }
 

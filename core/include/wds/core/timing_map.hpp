@@ -17,13 +17,25 @@ int32_t beat_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter) n
 // Ticks per measure under a point.
 int32_t measure_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter) noexcept;
 
-// Ticks per subdivision under a meter point.
+// Approximate ticks per subdivision (floor(beat/subdivs)). Prefer
+// subdivision_offset_ticks for exact in-beat positions when beat % subdivs != 0.
 int32_t subdivision_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter,
                                  int32_t subdivisions_per_beat) noexcept;
+
+// Exact tick offset of subdivision index `index` within a beat (index in 0..subdivs).
+// Multiply-then-divide so index==subdivs lands exactly on beat_length.
+int32_t subdivision_offset_ticks(int32_t beat_length, int32_t subdivisions_per_beat,
+                                 int32_t index) noexcept;
 
 // Nearest subdivision tick (uses active meter beat length).
 int32_t snap_to_subdivision(int32_t tick, const MusicTiming& timing,
                             int32_t subdivisions_per_beat) noexcept;
+
+// Interior + boundary subdivision ticks in [start_tick, end_tick] under meter beats.
+// Boundaries coincide with beat ticks; callers may filter those out for drawing.
+std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_tick,
+                                                const MusicTiming& timing,
+                                                int32_t subdivisions_per_beat);
 
 // Active timing point at or before `tick` (requires normalized points).
 const TimingPoint& timing_point_at(const MusicTiming& timing, int32_t tick) noexcept;

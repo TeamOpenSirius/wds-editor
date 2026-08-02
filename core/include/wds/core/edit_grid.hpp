@@ -48,7 +48,9 @@ struct EditLeadIn {
 };
 
 int32_t round_to_int_tick(float tick);
+// Approximate floor(TPQ/subdivs) for nudge / min-hold duration.
 int32_t subdivision_tick_step(const EditGridConfig& cfg);
+// Snap to nearest in-beat subdivision using (i*TPQ)/subdivs (exact on beat edges).
 int32_t snap_tick(float tick, const EditGridConfig& cfg);
 int32_t snap_lane(float lane_center, const EditGridConfig& cfg);
 int32_t clamp_lane_for_width(int32_t lane, int32_t width, int32_t lane_count);
