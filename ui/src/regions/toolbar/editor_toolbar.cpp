@@ -4,6 +4,7 @@
 #include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/native_file_dialog.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/regions/status/status_bar.hpp"
 
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/edit_grid.hpp>
@@ -369,41 +370,61 @@ void EditorToolbar::run(Action action) {
         on_open_();
       } else if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
         (void)session_.open_wdsproject(*path);
+      } else {
+        session_.report_status("打开已取消", StatusLevel::Info);
       }
       break;
     case Action::Save:
-      if (session_.read_only()) break;
+      if (session_.read_only()) {
+        session_.report_status("只读预览无法保存", StatusLevel::Error);
+        break;
+      }
       if (session_.project_path().empty()) {
         if (auto path = native_file_dialog::save_file("保存 WDS 工程", "untitled.wdsproject",
-                                                      {"wdsproject"}))
-          session_.save_as(*path);
+                                                      {"wdsproject"})) {
+          (void)session_.save_as(*path);
+        } else {
+          session_.report_status("保存已取消", StatusLevel::Info);
+        }
       } else {
-        session_.save();
+        (void)session_.save();
       }
       break;
     case Action::Import:
       if (on_import_) {
         on_import_();
       } else if (auto path = native_file_dialog::open_file("导入官方谱面", {"csv", "sus"})) {
-        session_.import_official(*path);
+        if (!session_.import_official(*path)) {
+          session_.report_status("导入失败：" + *path, StatusLevel::Error);
+        }
+      } else {
+        session_.report_status("导入已取消", StatusLevel::Info);
       }
       break;
     case Action::Export:
-      if (session_.read_only()) break;
+      if (session_.read_only()) {
+        session_.report_status("只读预览无法导出", StatusLevel::Error);
+        break;
+      }
       if (on_export_) {
         on_export_();
       } else if (auto path = native_file_dialog::save_file(
                      "导出官方谱面", session_.official_chart_filename(session_.active_chart_index()),
                      {"csv"})) {
-        session_.export_official(*path);
+        (void)session_.export_official(*path);
+      } else {
+        session_.report_status("导出已取消", StatusLevel::Info);
       }
       break;
     case Action::Settings:
       if (on_settings_) on_settings_();
       break;
     case Action::Music:
-      if (auto path = native_file_dialog::open_file("导入音乐", {"ogg", "wav"}))
-        session_.import_music(*path);
+      if (auto path = native_file_dialog::open_file("导入音乐", {"ogg", "wav"})) {
+        (void)session_.import_music(*path);
+      } else {
+        session_.report_status("导入音乐已取消", StatusLevel::Info);
+      }
       break;
     case Action::Undo:
       engine.undo();
@@ -632,6 +653,7 @@ void EditorToolbar::paint(wds::interaction::UiPainter& painter) const {
   const bool editable = !session_.read_only();
   action_buttons_[1]->set_enabled(editable);
   action_buttons_[3]->set_enabled(editable);
+  action_buttons_[1]->set_tooltip("保存工程");
   delay_field_->set_enabled(session_.delay_editable());
   // Read-only pack imports may still switch among multiple charts.
   chart_dropdown_->set_enabled(editable || session_.chart_count() > 1);

@@ -10,6 +10,7 @@
 #include "wds/ui/regions/settings/preview_settings_panel.hpp"
 #include "wds/ui/regions/settings/unsaved_changes_dialog.hpp"
 #include "wds/ui/regions/settings/width_slots_dialog.hpp"
+#include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 
 #include <wds/core/edit_grid.hpp>
@@ -28,12 +29,17 @@ namespace wds::ui {
 
 UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   session_ = std::make_unique<EditorSession>(*chart_preview_);
+  session_->set_status_handler([this](std::string text, StatusLevel level) {
+    set_status(std::move(text), level);
+  });
 
-  // Child order: toolbar → settings → edit → dialogs (topmost).
+  // Child order: toolbar → settings → edit → status → dialogs (topmost).
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
+  auto status = std::make_unique<StatusBar>();
+  status_bar_ = status.get();
   auto width_dialog = std::make_unique<WidthSlotsDialog>();
   width_slots_dialog_ = width_dialog.get();
   auto export_dialog = std::make_unique<ExportChoiceDialog>();
@@ -65,13 +71,19 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
         (void)session_->open_wdsproject(*path);
+      } else {
+        set_status("打开已取消", StatusLevel::Info);
       }
     });
   });
   toolbar->set_import_handler([this] {
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("导入官方谱面", {"csv", "sus"})) {
-        session_->import_official(*path);
+        if (!session_->import_official(*path)) {
+          set_status("导入失败：" + *path, StatusLevel::Error);
+        }
+      } else {
+        set_status("导入已取消", StatusLevel::Info);
       }
     });
   });
@@ -79,12 +91,25 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (chart_add_dialog_ != nullptr) chart_add_dialog_->open();
   });
   chart_add->on_create_new([this] {
-    if (!session_->read_only()) session_->add_chart();
+    if (!session_->read_only()) {
+      if (session_->add_chart()) set_status("已添加空白谱面", StatusLevel::Info);
+    } else {
+      set_status("只读预览无法添加谱面", StatusLevel::Error);
+    }
   });
   chart_add->on_add_existing([this] {
-    if (session_->read_only()) return;
+    if (session_->read_only()) {
+      set_status("只读预览无法添加谱面", StatusLevel::Error);
+      return;
+    }
     if (auto path = native_file_dialog::open_file("添加已有谱面", {"wdschart"})) {
-      session_->add_chart_from_file(*path);
+      if (session_->add_chart_from_file(*path)) {
+        set_status("已添加谱面：" + *path, StatusLevel::Info);
+      } else {
+        set_status("添加谱面失败：" + *path, StatusLevel::Error);
+      }
+    } else {
+      set_status("添加谱面已取消", StatusLevel::Info);
     }
   });
   unsaved->on_save([this] { schedule_pending_after_save_prompt(/*save_first=*/true); });
@@ -95,39 +120,56 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     pending_save_before_continue_ = false;
   });
   export_dialog->on_export_project([this](ExportFormat format) {
-    if (session_->read_only()) return;
+    if (session_->read_only()) {
+      set_status("只读预览无法导出", StatusLevel::Error);
+      return;
+    }
     if (format == ExportFormat::Sus) {
       if (auto dir = native_file_dialog::choose_directory("选择 SUS 导出目录")) {
-        session_->export_sus_project(*dir);
+        (void)session_->export_sus_project(*dir);
+      } else {
+        set_status("导出已取消", StatusLevel::Info);
       }
       return;
     }
     if (auto dir = native_file_dialog::choose_directory("选择导出目录")) {
-      session_->export_official_project(*dir);
+      (void)session_->export_official_project(*dir);
+    } else {
+      set_status("导出已取消", StatusLevel::Info);
     }
   });
   export_dialog->on_export_chart([this](ExportFormat format) {
-    if (session_->read_only()) return;
+    if (session_->read_only()) {
+      set_status("只读预览无法导出", StatusLevel::Error);
+      return;
+    }
     if (format == ExportFormat::Sus) {
       const std::string default_name = session_->sus_chart_filename(session_->active_chart_index());
       if (auto path = native_file_dialog::save_file("导出当前谱面 (SUS)", default_name, {"sus"})) {
-        session_->export_sus(*path);
+        (void)session_->export_sus(*path);
+      } else {
+        set_status("导出已取消", StatusLevel::Info);
       }
       return;
     }
     const std::string default_name =
         session_->official_chart_filename(session_->active_chart_index());
     if (auto path = native_file_dialog::save_file("导出当前谱面", default_name, {"csv"})) {
-      session_->export_official(*path);
+      (void)session_->export_official(*path);
+    } else {
+      set_status("导出已取消", StatusLevel::Info);
     }
   });
   root_.add_child(std::move(toolbar));
   root_.add_child(std::move(settings));
   root_.add_child(std::move(edit));
+  root_.add_child(std::move(status));
   root_.add_child(std::move(width_dialog));
   root_.add_child(std::move(export_dialog));
   root_.add_child(std::move(chart_add));
   root_.add_child(std::move(unsaved));
+
+  set_status("就绪", StatusLevel::Info);
 
   const auto persist = [this] { save_ui_config(); };
   if (width_slots_dialog_ != nullptr) {
@@ -294,6 +336,12 @@ PreviewSettingsPanel* UiManager::settings_panel() noexcept {
   return static_cast<PreviewSettingsPanel*>(children[1].get());
 }
 
+StatusBar* UiManager::status_bar() noexcept { return status_bar_; }
+
+void UiManager::set_status(std::string text, StatusLevel level) {
+  if (status_bar_ != nullptr) status_bar_->set_message(std::move(text), level);
+}
+
 WidthSlotsDialog* UiManager::width_slots_dialog() noexcept { return width_slots_dialog_; }
 
 ExportChoiceDialog* UiManager::export_choice_dialog() noexcept { return export_choice_dialog_; }
@@ -305,12 +353,16 @@ UnsavedChangesDialog* UiManager::unsaved_changes_dialog() noexcept {
 }
 
 bool UiManager::save_current_project() {
-  if (session_->read_only()) return false;
+  if (session_->read_only()) {
+    set_status("只读预览无法保存", StatusLevel::Error);
+    return false;
+  }
   if (session_->project_path().empty()) {
     if (auto path = native_file_dialog::save_file("保存 WDS 工程", "untitled.wdsproject",
                                                   {"wdsproject"})) {
       return session_->save_as(*path);
     }
+    set_status("保存已取消", StatusLevel::Info);
     return false;
   }
   return session_->save();
@@ -342,7 +394,7 @@ void UiManager::flush_pending_after_save_prompt() {
   const bool save_first = pending_save_before_continue_;
   pending_save_before_continue_ = false;
   if (save_first) {
-    if (session_->read_only() || !save_current_project()) {
+    if (!save_current_project()) {
       pending_after_save_ = {};
       return;
     }
@@ -425,13 +477,14 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
 
 void UiManager::apply_region_bounds() {
   const auto& children = root_.children();
-  if (children.size() >= 3) {
+  if (children.size() >= 4) {
     children[0]->set_bounds(layout_.toolbar);
     children[1]->set_bounds(layout_.settings);
     children[2]->set_bounds(layout_.edit);
+    children[3]->set_bounds(layout_.status);
   }
   // Modal dialogs cover the whole window.
-  for (std::size_t i = 3; i < children.size(); ++i) {
+  for (std::size_t i = 4; i < children.size(); ++i) {
     children[i]->set_bounds(root_.bounds());
   }
 }

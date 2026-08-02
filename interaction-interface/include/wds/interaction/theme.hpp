@@ -43,6 +43,7 @@ inline constexpr float kFontSizeTooltip = 16.0f;
 inline constexpr float kFontSizeGutter = 22.0f;
 
 inline constexpr float kControlHeight = 29.0f;
+inline constexpr float kStatusBarHeight = 26.0f;
 inline constexpr float kToolbarIconSize = 22.0f;
 inline constexpr float kToolbarGap = 6.0f;
 inline constexpr float kUiPad = 7.0f;

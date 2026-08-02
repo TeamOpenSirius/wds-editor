@@ -7,15 +7,17 @@
 
 namespace wds::ui {
 
-// Four-region editor shell (see requests/2/design.jpg):
-//   preview (top-left) | edit (full-height right)
+// Editor shell (see requests/2/design.jpg) plus a full-width status strip:
+//   preview (top-left) | edit (right, above status)
 //   settings           |
 //   toolbar (split)    |
+//   -------------- status bar (full width) --------------
 struct EditorLayoutRects {
   wds::interaction::Rect preview{};
   wds::interaction::Rect settings{};
   wds::interaction::Rect toolbar{};
   wds::interaction::Rect edit{};
+  wds::interaction::Rect status{};
 };
 
 struct PreviewContentRect {

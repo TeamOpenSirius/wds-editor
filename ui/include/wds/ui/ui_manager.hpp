@@ -2,6 +2,8 @@
 
 #include "wds/ui/layout/editor_layout.hpp"
 
+#include "wds/ui/regions/status/status_bar.hpp"
+
 #include "wds/interaction/shortcuts.hpp"
 #include "wds/interaction/types.hpp"
 #include "wds/interaction/ui_painter.hpp"
@@ -19,6 +21,7 @@ class EditorSession;
 class ChartEditPanel;
 class PreviewSettingsPanel;
 class EditorToolbar;
+class StatusBar;
 class WidthSlotsDialog;
 class ExportChoiceDialog;
 class ChartAddDialog;
@@ -41,10 +44,14 @@ class UiManager {
   const ChartEditPanel* edit_panel() const noexcept;
   EditorToolbar* toolbar_panel() noexcept;
   PreviewSettingsPanel* settings_panel() noexcept;
+  StatusBar* status_bar() noexcept;
   WidthSlotsDialog* width_slots_dialog() noexcept;
   ExportChoiceDialog* export_choice_dialog() noexcept;
   ChartAddDialog* chart_add_dialog() noexcept;
   UnsavedChangesDialog* unsaved_changes_dialog() noexcept;
+
+  // Latest-only status line shown in the bottom bar.
+  void set_status(std::string text, StatusLevel level = StatusLevel::Info);
 
   // Load/save editor UI prefs (OS data dir; see resolve_editor_config_path).
   void set_config_path(std::string path) { config_path_ = std::move(path); }
@@ -128,6 +135,7 @@ class UiManager {
   ExportChoiceDialog* export_choice_dialog_ = nullptr;
   ChartAddDialog* chart_add_dialog_ = nullptr;
   UnsavedChangesDialog* unsaved_changes_dialog_ = nullptr;
+  StatusBar* status_bar_ = nullptr;
   std::string config_path_;
   std::function<void()> pending_after_save_;
   std::function<void()> request_close_;

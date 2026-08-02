@@ -5,8 +5,11 @@
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
 
+#include "wds/ui/regions/status/status_bar.hpp"
+
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -34,11 +37,20 @@ class EditorSession {
   wds::chart_editor::ChartEditorEngine& engine() noexcept;
   const wds::chart_editor::ChartEditorEngine& engine() const noexcept;
 
+  // Optional sink for user-visible status lines (wired to the bottom status bar).
+  void set_status_handler(std::function<void(std::string, StatusLevel)> handler) {
+    status_handler_ = std::move(handler);
+  }
+  void report_status(std::string text, StatusLevel level = StatusLevel::Info) {
+    status(std::move(text), level);
+  }
+
   bool new_project();
   bool open_wdsproject(const std::string& path);
   bool save();
   bool save_as(const std::string& path);
-  // Auto-detect: music_config.csv pack / .sus / official CSV. All imports are read-only.
+  // Auto-detect: music_config.csv pack / .sus / official CSV. All imports are read-only
+  // unless SUS auto-convert is enabled (in-memory → editable .wdschart, unbound path).
   bool import_official(const std::string& chart_path, const std::string& music_config_path = {});
   bool export_official(const std::string& path);
   // Export audio + music_config.csv + 1.csv..N.csv into `directory` using official names.
@@ -73,17 +85,19 @@ class EditorSession {
 
  private:
   struct ChartSlot {
-    std::string path;  // empty = not yet saved to a .wdschart file
+    std::string path;  // empty = not yet bound to a .wdschart file
     wds::chart_editor::NotationChart chart;
     bool dirty = false;
     // Per-chart undo stack; swapped with the engine history on chart switch.
     wds::chart_editor::EditHistory history;
   };
 
+  void status(std::string text, StatusLevel level);
   void stash_active();
   bool activate_chart(std::size_t index);
   void apply_chart_delay();
-  bool ensure_chart_paths_for_save();
+  // Prompt for unbound chart destinations into `out_paths` (does not mutate session).
+  bool collect_chart_paths_for_save(std::vector<std::string>& out_paths);
   bool write_all_charts_and_project(const std::string& project_path);
   bool import_official_pack(const std::string& music_config_path);
   bool import_sus(const std::string& path);
@@ -93,6 +107,7 @@ class EditorSession {
   std::string official_audio_filename() const;
 
   ChartPreviewPanel& preview_;
+  std::function<void(std::string, StatusLevel)> status_handler_;
   std::string project_path_;
   std::string music_path_;
   std::vector<ChartSlot> charts_;

@@ -1,5 +1,6 @@
 #include "wds/ui/editor_ui_config.hpp"
 
+#include <wds/core/file_io.hpp>
 #include <wds/interaction/platform.hpp>
 
 #include <algorithm>
@@ -7,7 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
+#include <sstream>
 #include <string>
 
 namespace wds::ui {
@@ -212,11 +213,13 @@ std::string resolve_editor_config_path(const char* argv0) {
 }
 
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
-  std::ifstream in(path);
-  if (!in) return false;
+  wds::chart_editor::SerializeResult status;
+  const std::string bytes = wds::chart_editor::read_text_file(path, status);
+  if (status.error != wds::chart_editor::SerializeError::Ok) return false;
 
   EditorUiConfig cfg = out;
   ensure_shortcut_defaults(cfg);
+  std::istringstream in(bytes);
   std::string line;
   while (std::getline(in, line)) {
     const auto hash = line.find('#');
@@ -235,13 +238,6 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
 }
 
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
-  std::error_code ec;
-  const fs::path file(path);
-  fs::create_directories(file.parent_path(), ec);
-
-  std::ofstream out(path, std::ios::trunc);
-  if (!out) return false;
-
   auto emit_bool = [](bool v) { return v ? "true" : "false"; };
   char speed[64];
   char music[64];
@@ -253,6 +249,7 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
   std::snprintf(scroll_speed, sizeof(scroll_speed), "%.2f",
                 static_cast<double>(cfg.scroll_wheel_speed));
 
+  std::ostringstream out;
   out << "# WDS editor UI preferences\n"
       << "note_speed: " << speed << '\n'
       << "visible_hectoms: " << cfg.visible_hectoms << '\n'
@@ -288,7 +285,9 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
     }
     out << "shortcut_" << wds::interaction::editor_shortcut_id(id) << ": " << text << '\n';
   }
-  return static_cast<bool>(out);
+
+  return wds::chart_editor::write_text_atomic(path, out.str()).error ==
+         wds::chart_editor::SerializeError::Ok;
 }
 
 }  // namespace wds::ui

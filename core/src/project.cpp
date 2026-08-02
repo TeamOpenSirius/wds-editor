@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
 #include <sstream>
 #include <system_error>
 
@@ -30,6 +29,23 @@ std::string read_rest_of_line(std::istream& in) {
   return trim_copy(std::move(line));
 }
 
+fs::path path_from_utf8(const std::string& utf8) {
+#if defined(_WIN32)
+  return fs::u8path(utf8);
+#else
+  return fs::path(utf8);
+#endif
+}
+
+std::string path_to_utf8(const fs::path& path) {
+#if defined(_WIN32)
+  const auto u8 = path.generic_u8string();
+  return std::string(u8.begin(), u8.end());
+#else
+  return path.generic_string();
+#endif
+}
+
 }  // namespace
 
 const std::string& WdsProject::chart_path() const noexcept {
@@ -50,11 +66,11 @@ std::string& WdsProject::chart_path() {
 }
 
 std::string ProjectSerializer::project_directory(const std::string& project_file_path) {
-  const fs::path parent = fs::path(project_file_path).parent_path();
+  const fs::path parent = path_from_utf8(project_file_path).parent_path();
   if (parent.empty()) {
     return {};
   }
-  return parent.generic_string();
+  return path_to_utf8(parent);
 }
 
 std::string ProjectSerializer::resolve_path(const std::string& project_file_path,
@@ -62,15 +78,15 @@ std::string ProjectSerializer::resolve_path(const std::string& project_file_path
   if (stored_path.empty()) {
     return {};
   }
-  const fs::path stored(stored_path);
+  const fs::path stored = path_from_utf8(stored_path);
   if (stored.is_absolute()) {
-    return stored.generic_string();
+    return path_to_utf8(stored);
   }
-  const fs::path base = fs::path(project_file_path).parent_path();
+  const fs::path base = path_from_utf8(project_file_path).parent_path();
   if (base.empty()) {
-    return stored.generic_string();
+    return path_to_utf8(stored);
   }
-  return (base / stored).lexically_normal().generic_string();
+  return path_to_utf8((base / stored).lexically_normal());
 }
 
 std::string ProjectSerializer::make_relative_path(const std::string& project_file_path,
@@ -79,32 +95,24 @@ std::string ProjectSerializer::make_relative_path(const std::string& project_fil
     return {};
   }
 
-  std::error_code ec;
-  const fs::path base = fs::path(project_file_path).parent_path();
-  fs::path target(path);
+  // Lexical only — avoid fs::relative/absolute which on MinGW+Windows may route
+  // through the narrow ACP and corrupt/fail non-ASCII music paths.
+  const fs::path base = path_from_utf8(project_file_path).parent_path();
+  const fs::path target = path_from_utf8(path);
 
   if (!target.is_absolute()) {
-    // Already relative — normalize separators only.
-    return target.lexically_normal().generic_string();
+    return path_to_utf8(target.lexically_normal());
+  }
+  if (base.empty() || !base.is_absolute()) {
+    return path_to_utf8(target);
   }
 
-  if (base.empty()) {
-    return target.generic_string();
+  const fs::path relative = target.lexically_relative(base);
+  // Empty / absolute result means roots differ or relativization is impossible.
+  if (relative.empty() || relative.is_absolute()) {
+    return path_to_utf8(target);
   }
-
-  fs::path abs_base = base;
-  if (!abs_base.is_absolute()) {
-    abs_base = fs::absolute(abs_base, ec);
-    if (ec) {
-      return target.generic_string();
-    }
-  }
-
-  const fs::path relative = fs::relative(target, abs_base, ec);
-  if (ec || relative.empty()) {
-    return target.generic_string();
-  }
-  return relative.generic_string();
+  return path_to_utf8(relative.lexically_normal());
 }
 
 SerializeResult ProjectSerializer::save_to_file(const WdsProject& project,
@@ -133,10 +141,10 @@ SerializeResult ProjectSerializer::save_relativized(WdsProject project,
 
 SerializeResult ProjectSerializer::load_from_file(const std::string& path,
                                                   WdsProject& out_project) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    return {SerializeError::IoError, "failed to open project for reading: " + path};
-  }
+  SerializeResult io_status;
+  const std::string bytes = read_text_file(path, io_status);
+  if (io_status.error != SerializeError::Ok) return io_status;
+  std::istringstream file(bytes);
 
   std::string magic;
   int32_t version = 0;

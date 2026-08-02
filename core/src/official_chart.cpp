@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -129,19 +128,7 @@ std::string format_gimmick(GimmickType gimmick, bool use_names) {
 }
 
 std::string read_file_text(const std::string& path, SerializeResult& status) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    status = {SerializeError::IoError, "failed to open file for reading: " + path};
-    return {};
-  }
-  std::ostringstream ss;
-  ss << file.rdbuf();
-  if (!file && !file.eof()) {
-    status = {SerializeError::IoError, "failed while reading: " + path};
-    return {};
-  }
-  status = {SerializeError::Ok, {}};
-  return ss.str();
+  return read_text_file(path, status);
 }
 
 SerializeResult write_file_text(const std::string& path, const std::string& text) {

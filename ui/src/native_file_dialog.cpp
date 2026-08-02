@@ -348,11 +348,7 @@ std::optional<std::string> choose_directory(const std::string& title) {
 
 bool confirm(const std::string& title, const std::string& message) {
 #if defined(__APPLE__)
-  const auto reply =
-      run_line("osascript -e 'button returned of (display dialog " + apple_quote(message) +
-               " with title " + apple_quote(title) +
-               " buttons {\"No\", \"Yes\"} default button \"No\")'");
-  return reply && *reply == "Yes";
+  return macos_file_dialog::confirm(title, message);
 #elif defined(_WIN32)
   const std::wstring title_w = utf8_to_wide(title);
   const std::wstring message_w = utf8_to_wide(message);
@@ -370,9 +366,7 @@ bool confirm(const std::string& title, const std::string& message) {
 
 void alert_error(const std::string& title, const std::string& message) {
 #if defined(__APPLE__)
-  (void)run_line("osascript -e 'display dialog " + apple_quote(message) + " with title " +
-                 apple_quote(title) +
-                 " with icon stop buttons {\"确定\"} default button \"确定\"'");
+  macos_file_dialog::alert_error(title, message);
 #elif defined(_WIN32)
   const std::wstring title_w = utf8_to_wide(title);
   const std::wstring message_w = utf8_to_wide(message);
@@ -390,17 +384,7 @@ void alert_error(const std::string& title, const std::string& message) {
 
 SaveDiscardCancel confirm_save_discard_cancel(const std::string& title, const std::string& message) {
 #if defined(__APPLE__)
-  // Always offer Cancel. Escape / cancel-button → error -128 → "取消".
-  // Do not mark 不保存 as the cancel button — that would abort instead of discard.
-  const auto reply = run_line(
-      "osascript -e 'try' -e 'button returned of (display dialog " + apple_quote(message) +
-      " with title " + apple_quote(title) +
-      " buttons {\"取消\", \"不保存\", \"保存\"} default button \"保存\" cancel button \"取消\")' "
-      "-e 'on error number -128' -e '\"取消\"' -e 'end try'");
-  if (!reply) return SaveDiscardCancel::Cancel;
-  if (*reply == "保存") return SaveDiscardCancel::Save;
-  if (*reply == "不保存") return SaveDiscardCancel::Discard;
-  return SaveDiscardCancel::Cancel;
+  return macos_file_dialog::confirm_save_discard_cancel(title, message);
 #elif defined(_WIN32)
   const std::wstring title_w = utf8_to_wide(title);
   const std::wstring message_w = utf8_to_wide(message);

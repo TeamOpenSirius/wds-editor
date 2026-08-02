@@ -19,6 +19,7 @@ add_library(wds_ui STATIC
   src/regions/settings/export_choice_dialog.cpp
   src/regions/settings/chart_add_dialog.cpp
   src/regions/settings/unsaved_changes_dialog.cpp
+  src/regions/status/status_bar.cpp
   src/regions/toolbar/editor_toolbar.cpp
 )
 if(APPLE)

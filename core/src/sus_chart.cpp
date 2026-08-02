@@ -8,7 +8,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <fstream>
 #include <map>
 #include <numeric>
 #include <sstream>
@@ -80,15 +79,7 @@ bool parse_int(const std::string& text, int& out) {
 }
 
 std::string read_file_text(const std::string& path, SerializeResult& status) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    status = {SerializeError::IoError, "failed to open: " + path};
-    return {};
-  }
-  std::ostringstream ss;
-  ss << in.rdbuf();
-  status = {SerializeError::Ok, {}};
-  return ss.str();
+  return read_text_file(path, status);
 }
 
 SerializeResult write_file_text(const std::string& path, const std::string& text) {

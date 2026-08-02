@@ -6,7 +6,6 @@
 #include <wds/core/timing_map.hpp>
 
 #include <algorithm>
-#include <fstream>
 #include <sstream>
 #include <unordered_set>
 
@@ -113,10 +112,10 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
 }
 
 SerializeResult ChartSerializer::load_from_file(const std::string& path, NotationChart& out_chart) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    return {SerializeError::IoError, "failed to open file for reading: " + path};
-  }
+  SerializeResult io_status;
+  const std::string bytes = read_text_file(path, io_status);
+  if (io_status.error != SerializeError::Ok) return io_status;
+  std::istringstream file(bytes);
 
   std::string magic;
   int32_t version = 0;
@@ -291,22 +290,22 @@ SerializeResult ChartSerializer::load_auto(const std::string& path, NotationChar
     return OfficialChartFormat::load_chart_with_music_config(path, music_config_path, out_chart);
   }
 
-  std::ifstream peek(path, std::ios::binary);
-  if (peek) {
-    std::string sample;
-    sample.resize(512);
-    peek.read(sample.data(), static_cast<std::streamsize>(sample.size()));
-    sample.resize(static_cast<size_t>(std::max<std::streamsize>(0, peek.gcount())));
-    if (SusChartFormat::looks_like_sus_text(sample)) {
-      set_mode(ChartEditMode::OfficialPreviewOnly);
-      SusChartLoadResult loaded;
-      const auto result = SusChartFormat::load_file(path, loaded);
-      if (result.error == SerializeError::Ok) out_chart = std::move(loaded.chart);
-      return result;
-    }
-    if (OfficialChartFormat::looks_like_official_chart_text(sample)) {
-      set_mode(ChartEditMode::OfficialPreviewOnly);
-      return OfficialChartFormat::load_chart_with_music_config(path, music_config_path, out_chart);
+  {
+    SerializeResult peek_status;
+    const std::string bytes = read_text_file(path, peek_status);
+    if (peek_status.error == SerializeError::Ok) {
+      const std::string sample = bytes.substr(0, std::min<std::size_t>(bytes.size(), 512));
+      if (SusChartFormat::looks_like_sus_text(sample)) {
+        set_mode(ChartEditMode::OfficialPreviewOnly);
+        SusChartLoadResult loaded;
+        const auto result = SusChartFormat::load_file(path, loaded);
+        if (result.error == SerializeError::Ok) out_chart = std::move(loaded.chart);
+        return result;
+      }
+      if (OfficialChartFormat::looks_like_official_chart_text(sample)) {
+        set_mode(ChartEditMode::OfficialPreviewOnly);
+        return OfficialChartFormat::load_chart_with_music_config(path, music_config_path, out_chart);
+      }
     }
   }
 
