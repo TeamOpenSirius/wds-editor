@@ -703,38 +703,40 @@ PY
   regs="$(msiinfo_export "$msi_path" RegLocator | tr -d '\r')" || die "msiinfo failed: RegLocator"
   upgrades="$(msiinfo_export "$msi_path" Upgrade | tr -d '\r')" || die "msiinfo failed: Upgrade"
 
-  echo "${ui_seq}" | grep -q 'WelcomeEulaDlg' && \
+  # Use <<< (not echo|grep): with pipefail, grep -q exiting early SIGPIPEs echo and
+  # falsely trips `|| die` (seen as "MSI File table missing wds_editor.exe").
+  grep -q 'WelcomeEulaDlg' <<<"${ui_seq}" && \
     die "MSI still schedules WelcomeEulaDlg; refusing broken UI"
-  echo "${ui_seq}" | grep -q 'InstallDirDlg' || \
+  grep -q 'InstallDirDlg' <<<"${ui_seq}" || \
     die "MSI missing InstallDirDlg in InstallUISequence"
-  echo "${ui_seq}" | grep -q 'UpdateDlg' || \
+  grep -q 'UpdateDlg' <<<"${ui_seq}" || \
     die "MSI missing UpdateDlg in InstallUISequence"
-  echo "${props}" | grep -q $'ProductLanguage\t1033' || \
+  grep -q $'ProductLanguage\t1033' <<<"${props}" || \
     die "MSI ProductLanguage is not 1033 (UI language mismatch risk)"
-  echo "${events}" | grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT' || \
+  grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT' <<<"${events}" || \
     die "MSI missing conditional Remove for DesktopFeature"
-  echo "${events}" | grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT' || \
+  grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT' <<<"${events}" || \
     die "MSI missing conditional Remove for StartMenuFeature"
-  echo "${features}" | grep -q 'DesktopFeature' || die "MSI missing DesktopFeature"
-  echo "${features}" | grep -q 'StartMenuFeature' || die "MSI missing StartMenuFeature"
-  echo "${dialogs}" | grep -q 'BrowseDlg' || die "MSI missing BrowseDlg"
-  echo "${customs}" | grep -Fq 'SetInstallDirFromBrowse' || \
+  grep -q 'DesktopFeature' <<<"${features}" || die "MSI missing DesktopFeature"
+  grep -q 'StartMenuFeature' <<<"${features}" || die "MSI missing StartMenuFeature"
+  grep -q 'BrowseDlg' <<<"${dialogs}" || die "MSI missing BrowseDlg"
+  grep -Fq 'SetInstallDirFromBrowse' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromBrowse custom action"
-  echo "${customs}" | grep -Fq 'SetInstallDirFromPrevious' || \
+  grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
-  echo "${regs}" | grep -q 'FindWdsInstallDir' || \
+  grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
-  echo "${upgrades}" | grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' || \
+  grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing MajorUpgrade Upgrade table entry"
   # Runtime DLLs must be in the File table (merged into the exe component at harvest).
   local files_tbl=""
   files_tbl="$(msiinfo_export "$msi_path" File | tr -d '\r')" || die "msiinfo failed: File"
-  echo "${files_tbl}" | grep -Fq 'bass.dll' || die "MSI File table missing bass.dll"
-  echo "${files_tbl}" | grep -Fq 'vulkan-1.dll' || die "MSI File table missing vulkan-1.dll"
-  echo "${files_tbl}" | grep -Fq 'wds_editor.exe' || die "MSI File table missing wds_editor.exe"
+  grep -Fq 'bass.dll' <<<"${files_tbl}" || die "MSI File table missing bass.dll"
+  grep -Fq 'vulkan-1.dll' <<<"${files_tbl}" || die "MSI File table missing vulkan-1.dll"
+  grep -Fq 'wds_editor.exe' <<<"${files_tbl}" || die "MSI File table missing wds_editor.exe"
   # InstallDirDlg must run after FindRelatedProducts / costing (not sequence 1).
   local dir_seq
-  dir_seq="$(echo "${ui_seq}" | awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}')"
+  dir_seq="$(awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}' <<<"${ui_seq}")"
   [[ -n "${dir_seq}" && "${dir_seq}" -ge 1000 ]] || \
     die "InstallDirDlg sequence ${dir_seq:-unset} is too early (want >= 1000)"
 
