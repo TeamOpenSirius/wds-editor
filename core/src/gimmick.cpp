@@ -74,7 +74,8 @@ void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t en
   const bool ext_left = end_left < note.lane;
   const bool ext_right = end_right > note.end_lane();
   if (!ext_left && !ext_right) {
-    // Equal to body → bidirectional (width edits recalculate direction).
+    // Equal span placeholder; joint tips must call apply_scratch_chain_joint_direction
+    // afterward (score → 0 / ±width). Do not try to preserve a prior sign here.
     note.scratch_length = 0;
     return;
   }

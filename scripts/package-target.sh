@@ -713,9 +713,13 @@ PY
     die "MSI missing UpdateDlg in InstallUISequence"
   grep -q $'ProductLanguage\t1033' <<<"${props}" || \
     die "MSI ProductLanguage is not 1033 (UI language mismatch risk)"
-  grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT' <<<"${events}" || \
+  grep -Fq $'AddLocal\tDesktopFeature\tCREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
+    die "MSI missing conditional AddLocal for DesktopFeature"
+  grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing conditional Remove for DesktopFeature"
-  grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT' <<<"${events}" || \
+  grep -Fq $'AddLocal\tStartMenuFeature\tCREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
+    die "MSI missing conditional AddLocal for StartMenuFeature"
+  grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing conditional Remove for StartMenuFeature"
   grep -q 'DesktopFeature' <<<"${features}" || die "MSI missing DesktopFeature"
   grep -q 'StartMenuFeature' <<<"${features}" || die "MSI missing StartMenuFeature"
@@ -724,8 +728,16 @@ PY
     die "MSI missing SetInstallDirFromBrowse custom action"
   grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
+  grep -Fq 'ApplyDesktopPrefFromReg' <<<"${customs}" || \
+    die "MSI missing ApplyDesktopPrefFromReg custom action"
+  grep -Fq 'PersistDesktopShortcutOn' <<<"${customs}" || \
+    die "MSI missing PersistDesktopShortcutOn custom action"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
+  grep -q 'FindDesktopShortcutPref' <<<"${regs}" || \
+    die "MSI missing FindDesktopShortcutPref registry search"
+  grep -q 'FindStartMenuShortcutPref' <<<"${regs}" || \
+    die "MSI missing FindStartMenuShortcutPref registry search"
   grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing MajorUpgrade Upgrade table entry"
   # Runtime DLLs must be in the File table (merged into the exe component at harvest).

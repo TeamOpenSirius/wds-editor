@@ -12,7 +12,9 @@
 #include <wds/renderer/draw_batch.hpp>
 #include <wds/renderer/skin_catalog.hpp>
 
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -319,6 +321,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t resize_chain_peer_id_ = -1;   // prev when editing body; next when editing end
   int32_t resize_chain_next_id_ = -1;   // next body for cover validation while editing body
   bool adjust_end_ = true;
+  // Last geometry committed during ResizeWidth — skip recompute while the pointer holds still.
+  int32_t resize_applied_end_l_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_end_r_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_body_lane_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_body_width_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_peer_lane_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_peer_width_ = std::numeric_limits<int32_t>::min();
   std::unordered_map<int32_t, wds::chart_editor::NotationNote> drag_originals_;
   wds::interaction::Vec2 drag_start_pos_{};
   // MoveSelection: tick/lane at pointer-down (grab offset), not note origin.

@@ -6,11 +6,14 @@
   UI: scripts/win-msi-ui.wxs (install dir + shortcuts + progress + exit).
 
   Language must stay 1033 to match wixl Template summary (x64;1033).
-  Shortcut features are toggled via Remove ControlEvents (wixl lacks Component/Feature Condition).
+  Shortcut features are toggled via AddLocal/Remove ControlEvents (wixl lacks
+  Component/Feature Condition).
 
   Upgrades:
   - Same UpgradeCode + MajorUpgrade removes the previous product (single ARP entry).
   - HKLM InstallDir is remembered so UpdateDlg installs over the existing folder.
+  - HKLM Create*Shortcut prefs are remembered so ShortcutsDlg defaults match the
+    last install/update; the user can change them and the new choice is saved.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -33,6 +36,7 @@
     <MediaTemplate EmbedCab="yes"/>
 
     <Property Id="ARPPRODUCTICON" Value="WdsEditorIcon"/>
+    <!-- Fresh install defaults to both shortcuts on; AppSearch/CAs overlay prior prefs. -->
     <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes"/>
     <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes"/>
     <!-- Parent folder chosen in BrowseDlg; CustomAction appends "WDS Editor". -->
@@ -46,12 +50,70 @@
                       Type="raw"
                       Win64="yes"/>
     </Property>
+    <!-- Explicit 0/1 prefs written on every install/update (machine-wide). -->
+    <Property Id="WDS_REG_DESKTOP_PREF" Secure="yes">
+      <RegistrySearch Id="FindDesktopShortcutPref"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="CreateDesktopShortcut"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <Property Id="WDS_REG_STARTMENU_PREF" Secure="yes">
+      <RegistrySearch Id="FindStartMenuShortcutPref"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="CreateStartMenuShortcut"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <!-- Legacy KeyPath markers from older MSIs (present only when that shortcut was installed). -->
+    <Property Id="WDS_REG_DESKTOP_LEGACY" Secure="yes">
+      <RegistrySearch Id="FindDesktopShortcutLegacy"
+                      Root="HKCU"
+                      Key="Software\WDS\Editor"
+                      Name="DesktopShortcut"
+                      Type="raw"/>
+    </Property>
+    <Property Id="WDS_REG_STARTMENU_LEGACY" Secure="yes">
+      <RegistrySearch Id="FindStartMenuShortcutLegacy"
+                      Root="HKCU"
+                      Key="Software\WDS\Editor"
+                      Name="StartMenuShortcut"
+                      Type="raw"/>
+    </Property>
     <CustomAction Id="SetInstallDirFromBrowse"
                   Property="INSTALLDIR"
                   Value="[WDSINSTALLPARENT]WDS Editor"/>
     <CustomAction Id="SetInstallDirFromPrevious"
                   Property="INSTALLDIR"
                   Value="[WDS_PREVIOUS_INSTALL]"/>
+    <!-- Apply remembered shortcut prefs before ShortcutsDlg (UI sequence). -->
+    <CustomAction Id="ApplyDesktopPrefFromReg"
+                  Property="CREATE_DESKTOP_SHORTCUT"
+                  Value="[WDS_REG_DESKTOP_PREF]"/>
+    <CustomAction Id="ApplyDesktopPrefLegacyOff"
+                  Property="CREATE_DESKTOP_SHORTCUT"
+                  Value="0"/>
+    <CustomAction Id="ApplyStartMenuPrefFromReg"
+                  Property="CREATE_STARTMENU_SHORTCUT"
+                  Value="[WDS_REG_STARTMENU_PREF]"/>
+    <CustomAction Id="ApplyStartMenuPrefLegacyOff"
+                  Property="CREATE_STARTMENU_SHORTCUT"
+                  Value="0"/>
+    <!-- Normalize checkbox (set/"1" vs cleared) to 0/1 for HKLM persistence. -->
+    <CustomAction Id="PersistDesktopShortcutOn"
+                  Property="WDS_DESKTOP_SHORTCUT_PREF"
+                  Value="1"/>
+    <CustomAction Id="PersistDesktopShortcutOff"
+                  Property="WDS_DESKTOP_SHORTCUT_PREF"
+                  Value="0"/>
+    <CustomAction Id="PersistStartMenuShortcutOn"
+                  Property="WDS_STARTMENU_SHORTCUT_PREF"
+                  Value="1"/>
+    <CustomAction Id="PersistStartMenuShortcutOff"
+                  Property="WDS_STARTMENU_SHORTCUT_PREF"
+                  Value="0"/>
 
     <UIRef Id="WdsUI"/>
 
@@ -59,10 +121,47 @@
       <Custom Action="SetInstallDirFromPrevious" After="AppSearch">
         WDS_PREVIOUS_INSTALL AND NOT Installed
       </Custom>
+      <Custom Action="ApplyDesktopPrefFromReg" After="SetInstallDirFromPrevious">
+        WDS_REG_DESKTOP_PREF
+      </Custom>
+      <Custom Action="ApplyDesktopPrefLegacyOff" After="ApplyDesktopPrefFromReg">
+        NOT WDS_REG_DESKTOP_PREF AND WDS_PREVIOUS_INSTALL AND NOT WDS_REG_DESKTOP_LEGACY AND NOT Installed
+      </Custom>
+      <Custom Action="ApplyStartMenuPrefFromReg" After="ApplyDesktopPrefLegacyOff">
+        WDS_REG_STARTMENU_PREF
+      </Custom>
+      <Custom Action="ApplyStartMenuPrefLegacyOff" After="ApplyStartMenuPrefFromReg">
+        NOT WDS_REG_STARTMENU_PREF AND WDS_PREVIOUS_INSTALL AND NOT WDS_REG_STARTMENU_LEGACY AND NOT Installed
+      </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
       <Custom Action="SetInstallDirFromPrevious" After="AppSearch">
         WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
+      <!-- Quiet installs have no ShortcutsDlg; mirror registry prefs here only. -->
+      <Custom Action="ApplyDesktopPrefFromReg" After="SetInstallDirFromPrevious">
+        UILevel=2 AND WDS_REG_DESKTOP_PREF
+      </Custom>
+      <Custom Action="ApplyDesktopPrefLegacyOff" After="ApplyDesktopPrefFromReg">
+        UILevel=2 AND NOT WDS_REG_DESKTOP_PREF AND WDS_PREVIOUS_INSTALL AND NOT WDS_REG_DESKTOP_LEGACY AND NOT Installed
+      </Custom>
+      <Custom Action="ApplyStartMenuPrefFromReg" After="ApplyDesktopPrefLegacyOff">
+        UILevel=2 AND WDS_REG_STARTMENU_PREF
+      </Custom>
+      <Custom Action="ApplyStartMenuPrefLegacyOff" After="ApplyStartMenuPrefFromReg">
+        UILevel=2 AND NOT WDS_REG_STARTMENU_PREF AND WDS_PREVIOUS_INSTALL AND NOT WDS_REG_STARTMENU_LEGACY AND NOT Installed
+      </Custom>
+      <Custom Action="PersistDesktopShortcutOn" Before="WriteRegistryValues">
+        CREATE_DESKTOP_SHORTCUT="1"
+      </Custom>
+      <Custom Action="PersistDesktopShortcutOff" Before="PersistDesktopShortcutOn">
+        NOT CREATE_DESKTOP_SHORTCUT="1"
+      </Custom>
+      <Custom Action="PersistStartMenuShortcutOn" Before="PersistDesktopShortcutOff">
+        CREATE_STARTMENU_SHORTCUT="1"
+      </Custom>
+      <Custom Action="PersistStartMenuShortcutOff" Before="PersistStartMenuShortcutOn">
+        NOT CREATE_STARTMENU_SHORTCUT="1"
       </Custom>
     </InstallExecuteSequence>
 
@@ -122,6 +221,20 @@
                        Value="[INSTALLDIR]"
                        KeyPath="yes"/>
       </Component>
+      <!-- Always installed: last-chosen shortcut prefs for the next update UI. -->
+      <Component Id="RegistryShortcutPrefs" Guid="F1A2B3C4-5D6E-7F80-91A2-B3C4D5E6F708" Win64="yes">
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="CreateDesktopShortcut"
+                       Type="string"
+                       Value="[WDS_DESKTOP_SHORTCUT_PREF]"
+                       KeyPath="yes"/>
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="CreateStartMenuShortcut"
+                       Type="string"
+                       Value="[WDS_STARTMENU_SHORTCUT_PREF]"/>
+      </Component>
     </DirectoryRef>
 
     <!-- Prefer BMP-only ICO generated at package time (PNG-compressed ICO can crash msiexec UI). -->
@@ -130,6 +243,7 @@
     <Feature Id="ProductFeature" Title="WDS Editor" Level="1">
       <ComponentGroupRef Id="ProductFiles"/>
       <ComponentRef Id="RegistryInstallDir"/>
+      <ComponentRef Id="RegistryShortcutPrefs"/>
     </Feature>
     <Feature Id="StartMenuFeature" Title="Start Menu Shortcut" Level="1">
       <ComponentRef Id="ApplicationShortcut"/>
