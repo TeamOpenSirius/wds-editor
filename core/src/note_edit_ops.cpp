@@ -15,7 +15,46 @@ bool overlaps(const NotationNote& a, const NotationNote& b) {
   return a.lane <= b.end_lane() && b.lane <= a.end_lane();
 }
 
+bool same_tick(float a, float b) noexcept { return std::abs(a - b) < 0.5f; }
+
+std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<NotationNote> notes,
+                                                            const NotationNote& hold,
+                                                            int32_t ticks_per_quarter) {
+  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return notes;
+  notes.erase(std::remove_if(notes.begin(), notes.end(),
+                             [&](const NotationNote& note) {
+                               return note.note_type == NoteType::HoldEighth &&
+                                      note.start_tick > hold.start_tick &&
+                                      note.start_tick < hold.end_tick && overlaps(note, hold);
+                             }),
+              notes.end());
+  const int32_t step = std::max(1, ticks_per_quarter / 2);
+  for (float tick = hold.start_tick + static_cast<float>(step); tick < hold.end_tick;
+       tick += static_cast<float>(step)) {
+    const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
+      return (note.note_type == NoteType::Sound || note.note_type == NoteType::SoundPurple) &&
+             same_tick(note.start_tick, tick) && overlaps(note, hold);
+    });
+    if (!occupied) {
+      NotationNote eighth = hold;
+      eighth.id = kAutoNoteId;
+      eighth.start_tick = tick;
+      eighth.end_tick = tick;
+      eighth.note_type = NoteType::HoldEighth;
+      eighth.scratch_length = 0;
+      notes.push_back(eighth);
+    }
+  }
+  return notes;
+}
+
 }  // namespace
+
+std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote> notes,
+                                                       const NotationNote& hold,
+                                                       int32_t ticks_per_quarter) {
+  return notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
+}
 
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
   const bool was_hold = is_hold_with_tail(note.note_type);
@@ -168,7 +207,6 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
                                                 const NotationNote& hold) {
   if (!is_hold_with_tail(hold.note_type) || hold.width < 1) return std::nullopt;
 
-  const auto same_tick = [](float a, float b) { return std::abs(a - b) < 0.5f; };
   const auto mark_range = [&](std::vector<char>& occupied, int32_t lo, int32_t hi) {
     lo = std::max(lo, hold.lane);
     hi = std::min(hi, hold.end_lane());
@@ -233,7 +271,8 @@ std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
   if (!is_hold_with_tail(hold.note_type)) return std::nullopt;
   std::optional<NotationNote> legacy;
   for (const auto& note : doc.notes()) {
-    if (note.id == hold.id || note.start_tick != hold.start_tick || !overlaps(note, hold)) {
+    if (note.id == hold.id || !same_tick(note.start_tick, hold.start_tick) ||
+        !overlaps(note, hold)) {
       continue;
     }
     if (is_hold_head_note(note)) return note;
@@ -250,7 +289,7 @@ std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
   // still finds the body before repair_legacy_hold_heads runs.
   if (!is_hold_head_note(head) && !is_legacy_scratch_hold_head(head)) return std::nullopt;
   for (const auto& note : doc.notes()) {
-    if (!is_hold_with_tail(note.note_type) || note.start_tick != head.start_tick ||
+    if (!is_hold_with_tail(note.note_type) || !same_tick(note.start_tick, head.start_tick) ||
         !overlaps(note, head)) {
       continue;
     }
@@ -369,29 +408,8 @@ NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& no
 
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold) {
   if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return false;
-  std::vector<NotationNote> notes = doc.notes();
-  notes.erase(std::remove_if(notes.begin(), notes.end(), [&](const NotationNote& note) {
-                return note.note_type == NoteType::HoldEighth &&
-                       note.start_tick > hold.start_tick && note.start_tick < hold.end_tick &&
-                       overlaps(note, hold);
-              }),
-              notes.end());
-  const int32_t step = std::max(1, doc.timing().ticks_per_quarter / 2);
-  for (float tick = hold.start_tick + step; tick < hold.end_tick; tick += step) {
-    const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
-      return (note.note_type == NoteType::Sound || note.note_type == NoteType::SoundPurple) &&
-             note.start_tick == tick && overlaps(note, hold);
-    });
-    if (!occupied) {
-      NotationNote eighth = hold;
-      eighth.id = kAutoNoteId;
-      eighth.start_tick = tick;
-      eighth.end_tick = tick;
-      eighth.note_type = NoteType::HoldEighth;
-      eighth.scratch_length = 0;
-      notes.push_back(eighth);
-    }
-  }
+  auto notes =
+      notes_with_recomputed_hold_eighths(doc.notes(), hold, doc.timing().ticks_per_quarter);
   return doc.set_notes(std::move(notes));
 }
 

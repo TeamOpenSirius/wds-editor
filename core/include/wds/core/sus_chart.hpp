@@ -13,6 +13,21 @@ namespace wds::chart_editor {
 // WDS maps a practical subset: metadata, BPM, measure length, taps (#1),
 // holds (#2), slides (#3/#4 ≈ hold), directionals (#5 → flick).
 //
+// Hold convention:
+// - #2 = Hold family, #3/#4 = ScratchHold family (including stationary purple holds).
+// - Export never writes HoldStart/ScratchHoldStart as separate taps — only the
+//   hold/slide channel. CriticalHold* additionally emits a Critical tap (金头).
+//   Truly headless bodies (no authored head, start not fully covered) get a
+//   Damage (#1 type 4) marker of equal lane/width; fully covered headless
+//   needs no Damage (covering notes may be Normal/Critical/Flick/etc.).
+// - Import: Critical fully covering start → CriticalHold*/ScratchCriticalHold*
+//   body (headless; Critical tap kept for judgment). Damage → intentional
+//   headless. Other full covers → headless. Otherwise auto-generate a head via
+//   make_auto_hold_head. HoldEighth is never written (would become Sound stars).
+//   Hold channel exports body lane/width (partial heads do not shrink the body).
+//   Scratch taps have no SUS type (export as Normal). Ched lane pad L→L+2 imports
+//   with offset 2 when data fits the 2..d window.
+//
 // 12-lane Ched charts commonly occupy SUS lanes 2..d; import auto-detects a
 // lane offset so notes land in editor lanes 0..11. Export writes lanes as
 // WDS+2 for Ched compatibility.

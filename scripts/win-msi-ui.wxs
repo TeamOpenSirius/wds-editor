@@ -14,8 +14,11 @@
   - PathEdit without Indirect (Indirect is ignored / unstable in wixl)
   - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
   - Shortcut toggles via AddLocal/Remove ControlEvents (no Component/Feature Condition)
+  - Execute re-applies CREATE_* via ApplyShortcutFeatureStates after MigrateFeatureStates
+    (otherwise upgrade migration discards the dialog selection)
   - Conditions use CREATE_*="1" so registry-loaded "0" stays unchecked / removed
   - Defaults on update come from HKLM Create*Shortcut (see win-msi-product.wxs)
+  - CREATE_* are patched into SecureCustomProperties after wixl (see package-target.sh)
   - ASCII UI strings only (MSI codepage 1252)
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">

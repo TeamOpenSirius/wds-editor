@@ -2,6 +2,7 @@
 
 #include <wds/core/file_io.hpp>
 #include <wds/core/gimmick.hpp>
+#include <wds/core/note_edit_ops.hpp>
 #include <wds/core/timing_map.hpp>
 
 #include <algorithm>
@@ -11,7 +12,6 @@
 #include <map>
 #include <numeric>
 #include <sstream>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -106,15 +106,83 @@ struct HoldKey {
   }
 };
 
+// SUS #mmm1x first digit (spec reserves 1..6). Ched: 1 tap, 2 ExTap, 3 flick, 4 damage.
+constexpr int kSusTapNormal = 1;
+constexpr int kSusTapCritical = 2;
+constexpr int kSusTapFlick = 3;
+constexpr int kSusTapDamage = 4;
+
 NoteType tap_type_from_sus(int type) {
   switch (type) {
-    case 2:
+    case kSusTapCritical:
       return NoteType::Critical;
-    case 3:
+    case kSusTapFlick:
       return NoteType::Flick;
     default:
       return NoteType::Normal;
   }
+}
+
+bool same_tick_f(float a, float b) { return std::abs(a - b) < 0.5f; }
+
+// Start lanes fully occupied by non-hold-body notes (or other hold tails ending
+// here). Other hold bodies that merely start here are ignored — same occupancy
+// model as make_auto_hold_head.
+bool hold_start_fully_covered(const NotationNote& hold,
+                              const std::vector<NotationNote>& notes) {
+  if (hold.width < 1) return true;
+  auto mark_range = [&](std::vector<char>& occupied, int32_t lo, int32_t hi) {
+    lo = std::max(lo, hold.lane);
+    hi = std::min(hi, hold.end_lane());
+    for (int32_t lane = lo; lane <= hi; ++lane) {
+      occupied[static_cast<size_t>(lane - hold.lane)] = 1;
+    }
+  };
+  std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
+  for (const auto& note : notes) {
+    if (note.id == hold.id) continue;
+    if (is_hold_with_tail(note.note_type)) {
+      if (!same_tick_f(note.end_tick, hold.start_tick)) continue;
+      if (is_scratch_hold_body(note.note_type)) {
+        const auto [tail_lo, tail_hi] = get_scratch_end_lane_range(note);
+        mark_range(occupied, tail_lo, tail_hi);
+      } else {
+        mark_range(occupied, note.lane, note.end_lane());
+      }
+      continue;
+    }
+    if (!same_tick_f(note.start_tick, hold.start_tick)) continue;
+    mark_range(occupied, note.lane, note.end_lane());
+  }
+  return std::all_of(occupied.begin(), occupied.end(), [](char c) { return c != 0; });
+}
+
+struct SusDamageMarker {
+  float tick = 0.0f;
+  int32_t lane = 0;
+  int32_t width = 1;
+};
+
+bool matches_damage_marker(const SusDamageMarker& dmg, const NotationNote& hold) {
+  return same_tick_f(dmg.tick, hold.start_tick) && dmg.lane == hold.lane &&
+         dmg.width == hold.width;
+}
+
+// Critical tap that fully covers the hold start span (金头 marker on export).
+bool hold_start_fully_covered_by_critical(const NotationNote& hold,
+                                          const std::vector<NotationNote>& notes) {
+  if (hold.width < 1) return false;
+  std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
+  for (const auto& note : notes) {
+    if (note.note_type != NoteType::Critical) continue;
+    if (!same_tick_f(note.start_tick, hold.start_tick)) continue;
+    const int32_t lo = std::max(note.lane, hold.lane);
+    const int32_t hi = std::min(note.end_lane(), hold.end_lane());
+    for (int32_t lane = lo; lane <= hi; ++lane) {
+      occupied[static_cast<size_t>(lane - hold.lane)] = 1;
+    }
+  }
+  return std::all_of(occupied.begin(), occupied.end(), [](char c) { return c != 0; });
 }
 
 int32_t flick_scratch_from_directional(int type) {
@@ -166,7 +234,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   SusChartMetadata meta;
   meta.ticks_per_beat = 480;
 
-  std::unordered_map<int, double> bpm_defs;
+  std::map<int, double> bpm_defs;  // ordered: fallback picks lowest id
   std::map<int, double> measure_lengths;  // measure -> beats (applies from that measure on)
   measure_lengths[0] = 4.0;
 
@@ -473,16 +541,29 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     point.has_meter = true;
     chart.timing.points.push_back(point);
   };
+  auto beats_to_meter = [](double beats) -> std::pair<int32_t, int32_t> {
+    // Prefer exact M/2^n as N/D meter: measure ticks = num * (tpq*4/den) ≈ beats*tpq.
+    for (const int32_t den : {4, 8, 16, 32}) {
+      const double num_f = beats * static_cast<double>(den) / 4.0;
+      const int32_t num = static_cast<int32_t>(std::llround(num_f));
+      if (num < 1) continue;
+      if (std::abs(num_f - static_cast<double>(num)) < 1e-6) return {num, den};
+    }
+    const int32_t num =
+        std::max(1, static_cast<int32_t>(std::llround(beats * 32.0 / 4.0)));
+    return {num, 32};
+  };
   for (const auto& [measure, beats] : measure_lengths) {
     if (beats <= 0.0) continue;
     const int32_t tick = static_cast<int32_t>(measure_start_tick(measure));
-    // SUS measure length is in ticks_per_beat units; map to N/4 meter (tick-equivalent).
-    const int32_t numerator = std::max(1, static_cast<int32_t>(std::llround(beats)));
-    upsert_meter(tick, numerator, 4);
+    const auto [numerator, denominator] = beats_to_meter(beats);
+    upsert_meter(tick, numerator, denominator);
   }
   normalize_timing_points(chart.timing);
 
-  // Lane offset: Ched 12-key often uses 2..d.
+  // Lane offset: WDS export with ched_lane_padding writes L → L+2 (Ched 12-key
+  // window 2..d). Prefer offset 2 whenever data fits that window so right-side
+  // notes (e.g. WDS lane 7 → SUS 9) do not import as lane 9 with offset 0.
   int min_lane = 99;
   int max_end = 0;
   for (const auto& ev : events) {
@@ -490,8 +571,10 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     max_end = std::max(max_end, ev.lane + ev.width);
   }
   int lane_offset = 0;
-  if (min_lane < 99 && max_end > 12 && min_lane >= 2) {
-    lane_offset = min_lane;  // usually 2
+  if (min_lane < 99 && min_lane >= 2 && max_end <= 14) {
+    lane_offset = 2;
+  } else if (min_lane < 99 && max_end > 12 && min_lane >= 2) {
+    lane_offset = min_lane;
   } else if (min_lane < 99 && max_end > 12) {
     lane_offset = std::max(0, max_end - 12);
   }
@@ -507,7 +590,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   std::vector<NotationNote> notes;
   int32_t next_id = 0;
 
-  // Directionals first → flick map by tick+lane.
+  // Directionals first → flick map by tick+lane (keep width for standalone flicks).
   struct FlickKey {
     int64_t tick;
     int lane;
@@ -515,16 +598,31 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       return tick < o.tick || (tick == o.tick && lane < o.lane);
     }
   };
-  std::map<FlickKey, int32_t> directional_scratch;
+  struct DirectionalInfo {
+    int32_t scratch = 0;
+    int width = 1;
+  };
+  std::map<FlickKey, DirectionalInfo> directional_scratch;
   for (const auto& ev : events) {
     if (ev.category != 5) continue;
     FlickKey key{ev.tick, map_lane(ev.lane)};
-    directional_scratch[key] = flick_scratch_from_directional(ev.type);
+    directional_scratch[key] =
+        DirectionalInfo{flick_scratch_from_directional(ev.type), map_width(ev.lane, ev.width)};
   }
 
-  // Taps.
+  // Taps. Damage (#1 type 4) marks intentional headless hold starts — collected
+  // for hold assembly, never kept as chart notes (WDS has no Damage type).
+  std::vector<SusDamageMarker> damage_markers;
   for (const auto& ev : events) {
     if (ev.category != 1) continue;
+    if (ev.type == kSusTapDamage) {
+      SusDamageMarker dmg;
+      dmg.tick = static_cast<float>(ev.tick);
+      dmg.lane = map_lane(ev.lane);
+      dmg.width = map_width(ev.lane, ev.width);
+      damage_markers.push_back(dmg);
+      continue;
+    }
     NotationNote note;
     note.id = next_id++;
     note.start_tick = static_cast<float>(ev.tick);
@@ -537,7 +635,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     FlickKey key{ev.tick, note.lane};
     if (const auto it = directional_scratch.find(key); it != directional_scratch.end()) {
       note.note_type = NoteType::Flick;
-      note.scratch_length = it->second;
+      note.scratch_length = it->second.scratch;
       directional_scratch.erase(it);
     } else if (note.note_type == NoteType::Flick) {
       note.scratch_length = 0;
@@ -546,15 +644,15 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
 
   // Remaining directionals without tap → standalone flicks.
-  for (const auto& [key, scratch] : directional_scratch) {
+  for (const auto& [key, info] : directional_scratch) {
     NotationNote note;
     note.id = next_id++;
     note.start_tick = static_cast<float>(key.tick);
     note.end_tick = note.start_tick;
     note.lane = key.lane;
-    note.width = 1;
+    note.width = info.width;
     note.note_type = NoteType::Flick;
-    note.scratch_length = scratch;
+    note.scratch_length = info.scratch;
     notes.push_back(note);
   }
 
@@ -571,59 +669,97 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
 
   for (auto& [key, group] : hold_groups) {
     std::sort(group.begin(), group.end(),
-              [](const RawEvent& a, const RawEvent& b) { return a.tick < b.tick; });
+              [](const RawEvent& a, const RawEvent& b) {
+                if (a.tick != b.tick) return a.tick < b.tick;
+                return a.type < b.type;
+              });
+
+    // SUS 2.7: same channel links points. After an end, a later start begins a new
+    // hold — pair start/end sequentially instead of keeping only the last of each.
     const RawEvent* start = nullptr;
-    const RawEvent* end = nullptr;
-    std::vector<const RawEvent*> mids;
+    std::vector<const RawEvent*> pending_mids;
+    auto emit_hold = [&](const RawEvent& end) {
+      if (start == nullptr || end.tick < start->tick) {
+        start = nullptr;
+        pending_mids.clear();
+        return;
+      }
+
+      const int start_lane = map_lane(start->lane);
+      const int start_width = map_width(start->lane, start->width);
+      const int end_lane = map_lane(end.lane);
+      const int end_right = std::min(11, end_lane + map_width(end.lane, end.width) - 1);
+
+      // #2 = Hold family, #3/#4 = ScratchHold family (even when end span == start).
+      // Critical tap fully covering the start → CriticalHold* body (金头), headless.
+      // Damage marker → intentional headless. Else fully covered → headless.
+      // Otherwise auto-generate a head via make_auto_hold_head.
+      const bool scratch = key.category != 2;
+      NotationNote body;
+      body.id = next_id++;
+      body.start_tick = static_cast<float>(start->tick);
+      body.end_tick = static_cast<float>(end.tick);
+      body.lane = start_lane;
+      body.width = start_width;
+      body.gimmick_type = GimmickType::None;
+      body.scratch_length = 0;
+
+      NotationNote cover_probe = body;
+      cover_probe.id = -1;
+      const bool critical_cover = hold_start_fully_covered_by_critical(cover_probe, notes);
+
+      if (scratch) {
+        body.note_type =
+            critical_cover ? NoteType::ScratchCriticalHold : NoteType::ScratchHold;
+        set_scratch_hold_end_lanes(body, end_lane, end_right);
+      } else {
+        body.note_type = critical_cover ? NoteType::CriticalHold : NoteType::Hold;
+      }
+
+      const bool damage_headless = std::any_of(
+          damage_markers.begin(), damage_markers.end(),
+          [&](const SusDamageMarker& d) { return matches_damage_marker(d, body); });
+      notes.push_back(body);
+
+      // Critical cover already provides the start judgment — stay headless.
+      if (!critical_cover && !damage_headless && !hold_start_fully_covered(body, notes)) {
+        ChartDocument doc;
+        doc.set_notes(notes);
+        if (auto head = make_auto_hold_head(doc, body)) {
+          head->id = next_id++;
+          notes.push_back(*head);
+        }
+      }
+
+      for (const RawEvent* mid : pending_mids) {
+        if (mid->tick <= start->tick || mid->tick >= end.tick) continue;
+        NotationNote star;
+        star.id = next_id++;
+        star.start_tick = static_cast<float>(mid->tick);
+        star.end_tick = star.start_tick;
+        star.lane = map_lane(mid->lane);
+        star.width = map_width(mid->lane, mid->width);
+        star.note_type = NoteType::Sound;
+        star.gimmick_type = GimmickType::None;
+        star.scratch_length = 0;
+        notes.push_back(star);
+      }
+
+      start = nullptr;
+      pending_mids.clear();
+    };
+
     for (const auto& ev : group) {
-      if (ev.type == 1) start = &ev;
-      else if (ev.type == 2) end = &ev;
-      else if (ev.type == 3 || ev.type == 5) mids.push_back(&ev);
-      // type 4 bezier control — skip
-    }
-    if (start == nullptr || end == nullptr) continue;
-    if (end->tick < start->tick) continue;
-
-    const bool slide = key.category != 2;
-    const int start_lane = map_lane(start->lane);
-    const int start_width = map_width(start->lane, start->width);
-    const int end_lane = map_lane(end->lane);
-    const int end_right = std::min(11, end_lane + map_width(end->lane, end->width) - 1);
-
-    NotationNote head;
-    head.id = next_id++;
-    head.start_tick = static_cast<float>(start->tick);
-    head.end_tick = static_cast<float>(end->tick);
-    head.lane = start_lane;
-    head.width = start_width;
-    head.note_type = NoteType::HoldStart;
-    head.gimmick_type = GimmickType::None;
-    head.scratch_length = 0;
-
-    NotationNote body = head;
-    body.id = next_id++;
-    if (slide && (end_lane != start_lane || end_right != start_lane + start_width - 1)) {
-      body.note_type = NoteType::ScratchHold;
-      set_scratch_hold_end_lanes(body, end_lane, end_right);
-      head.note_type = NoteType::ScratchHoldStart;
-    } else {
-      body.note_type = NoteType::Hold;
-    }
-    notes.push_back(head);
-    notes.push_back(body);
-
-    for (const RawEvent* mid : mids) {
-      if (mid->tick <= start->tick || mid->tick >= end->tick) continue;
-      NotationNote star;
-      star.id = next_id++;
-      star.start_tick = static_cast<float>(mid->tick);
-      star.end_tick = star.start_tick;
-      star.lane = map_lane(mid->lane);
-      star.width = map_width(mid->lane, mid->width);
-      star.note_type = NoteType::Sound;
-      star.gimmick_type = GimmickType::None;
-      star.scratch_length = 0;
-      notes.push_back(star);
+      if (ev.type == 1) {
+        start = &ev;
+        pending_mids.clear();
+      } else if (ev.type == 2) {
+        emit_hold(ev);
+      } else if (ev.type == 3) {
+        // Visible mid → WDS Sound star.
+        if (start != nullptr) pending_mids.push_back(&ev);
+      }
+      // type 4 bezier control / type 5 invisible mid — no WDS note
     }
   }
 
@@ -743,6 +879,17 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   emit_str("JACKET", meta.jacket_path);
   ss << "\n#REQUEST \"ticks_per_beat " << tpq << "\"\n\n";
 
+  // Deferred SUS data lines so #MEASUREBS can be emitted in measure order.
+  struct SusDataLine {
+    int measure = 0;
+    std::string suffix;  // e.g. "02", "08", "12", "20a"
+    std::string data;
+  };
+  std::vector<SusDataLine> data_lines;
+  auto push_data_line = [&](int meas, std::string suffix, std::string data) {
+    data_lines.push_back(SusDataLine{meas, std::move(suffix), std::move(data)});
+  };
+
   // #mmm02 measure lengths from the timing map (SUS beats = measure_ticks / tpq).
   {
     double prev_beats = -1.0;
@@ -750,10 +897,11 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       const double beats =
           static_cast<double>(measure_starts[i + 1] - measure_starts[i]) / static_cast<double>(tpq);
       if (i > 0 && std::abs(beats - prev_beats) < 1e-9) continue;
-      char buf[16];
-      std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(i % 1000));
-      ss.precision(4);
-      ss << '#' << buf << "02: " << beats << '\n';
+      std::ostringstream beats_ss;
+      beats_ss.setf(std::ios::fixed);
+      beats_ss.precision(4);
+      beats_ss << beats;
+      push_data_line(static_cast<int>(i), "02", beats_ss.str());
       prev_beats = beats;
     }
     if (!measure_starts.empty() && prev_beats < 0.0) {
@@ -761,10 +909,12 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       const TimingPoint& meter = timing_meter_at(timing, 0);
       const double beats =
           static_cast<double>(measure_length_ticks(meter, tpq)) / static_cast<double>(tpq);
-      ss.precision(4);
-      ss << "#00002: " << beats << '\n';
+      std::ostringstream beats_ss;
+      beats_ss.setf(std::ios::fixed);
+      beats_ss.precision(4);
+      beats_ss << beats;
+      push_data_line(0, "02", beats_ss.str());
     }
-    ss << '\n';
   }
 
   // BPM definitions from authored BPM points.
@@ -812,11 +962,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       data[static_cast<size_t>(slot) * 2] = base36_digit(ev.id / 36);
       data[static_cast<size_t>(slot) * 2 + 1] = base36_digit(ev.id % 36);
     }
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%03d", meas % 1000);
-    ss << '#' << buf << "08: " << data << '\n';
+    push_data_line(meas, "08", std::move(data));
   }
-  ss << '\n';
 
   // Channel allocator for holds.
   int next_channel = 0;
@@ -858,20 +1005,10 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   };
 
   // Index hold bodies by start for pairing with heads.
-  std::unordered_map<int32_t, const NotationNote*> hold_body_by_start_id;
-  for (const auto& n : chart.notes) {
-    if (n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
-        n.note_type == NoteType::ScratchHold || n.note_type == NoteType::ScratchCriticalHold ||
-        n.note_type == NoteType::NontailHold || n.note_type == NoteType::NontailCriticalHold ||
-        n.note_type == NoteType::NontailScratchHold ||
-        n.note_type == NoteType::NontailScratchCriticalHold) {
-      // Match by same start_tick+lane as a head later.
-      (void)n;
-    }
-  }
-
-  // Mid stars keyed under nearest hold channel — emit as type2 mid on same channel.
-  // Simpler: emit mid stars as tap-like Sound via hold channel after allocating holds.
+  auto notes_overlap = [](const NotationNote& a, const NotationNote& b) {
+    return a.lane <= b.end_lane() && b.lane <= a.end_lane();
+  };
+  auto same_tick = [](float a, float b) { return std::abs(a - b) < 0.5f; };
 
   struct HoldEmit {
     const NotationNote* head = nullptr;
@@ -882,6 +1019,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   std::vector<const NotationNote*> mids;
   std::vector<const NotationNote*> taps;
 
+  // Collect heads first so bodies that appear earlier in `notes` still pair.
   for (const auto& n : chart.notes) {
     if (n.note_type == NoteType::HoldStart || n.note_type == NoteType::CriticalHoldStart ||
         n.note_type == NoteType::ScratchHoldStart ||
@@ -889,76 +1027,125 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       HoldEmit h;
       h.head = &n;
       holds.push_back(h);
-    } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::SoundPurple ||
-               n.note_type == NoteType::HoldEighth) {
+    } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::SoundPurple) {
       mids.push_back(&n);
-    } else if (n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
-               n.note_type == NoteType::ScratchHold || n.note_type == NoteType::ScratchCriticalHold ||
-               n.note_type == NoteType::NontailHold || n.note_type == NoteType::NontailCriticalHold ||
-               n.note_type == NoteType::NontailScratchHold ||
-               n.note_type == NoteType::NontailScratchCriticalHold) {
-      // Attach to unmatched head with same start/lane.
-      for (auto& h : holds) {
-        if (h.body != nullptr || h.head == nullptr) continue;
-        if (h.head->start_tick == n.start_tick && h.head->lane == n.lane) {
-          h.body = &n;
-          break;
-        }
-      }
+    } else if (n.note_type == NoteType::HoldEighth) {
+      // Synthesized grid — never export (would become Sound stars on re-import).
     } else if (n.gimmick_type == GimmickType::None || !is_split_lane_gimmick(n.gimmick_type)) {
-      if (n.note_type != NoteType::None && n.note_type != NoteType::HiSpeed) {
+      // Nontail* bodies are hold ribbons (exported below), not taps — is_hold_with_tail
+      // intentionally excludes them for combo/sync, so exclude explicitly here.
+      if (n.note_type != NoteType::None && n.note_type != NoteType::HiSpeed &&
+          !is_hold_with_tail(n.note_type) && !is_nontail_hold_body(n.note_type)) {
         taps.push_back(&n);
       }
     }
   }
+  for (const auto& n : chart.notes) {
+    if (!(n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
+          n.note_type == NoteType::ScratchHold || n.note_type == NoteType::ScratchCriticalHold ||
+          n.note_type == NoteType::NontailHold || n.note_type == NoteType::NontailCriticalHold ||
+          n.note_type == NoteType::NontailScratchHold ||
+          n.note_type == NoteType::NontailScratchCriticalHold)) {
+      continue;
+    }
+    bool attached = false;
+    for (auto& h : holds) {
+      if (h.body != nullptr || h.head == nullptr) continue;
+      // Partial-width heads share start tick and overlap lanes (not necessarily lane==).
+      if (same_tick(h.head->start_tick, n.start_tick) && notes_overlap(*h.head, n)) {
+        h.body = &n;
+        attached = true;
+        break;
+      }
+    }
+    if (!attached) {
+      // Headless body still exports as a hold/slide using the body span.
+      HoldEmit h;
+      h.body = &n;
+      holds.push_back(h);
+    }
+  }
 
   for (auto& h : holds) {
-    if (h.head == nullptr) continue;
-    h.channel = alloc_channel();
-    const auto* body = h.body != nullptr ? h.body : h.head;
-    const int64_t t0 = static_cast<int64_t>(std::llround(h.head->start_tick));
-    const int64_t t1 = static_cast<int64_t>(std::llround(body->end_tick));
-    const int sl = sus_lane(h.head->lane);
-    const int w = std::clamp(h.head->width, 1, 35);
-    std::string suffix = "2";
-    suffix.push_back(base36_digit(sl));
-    suffix.push_back(base36_digit(h.channel));
-    place(suffix, t0, 1, w);
+    const NotationNote* body = h.body;
+    const NotationNote* head = h.head;
+    if (body == nullptr) continue;  // orphan head with no body — skip
+    const bool authored_headless = (head == nullptr);
+    if (head == nullptr) head = body;
 
-    int end_l = h.head->lane;
-    int end_w = h.head->width;
-    if (body->note_type == NoteType::ScratchHold ||
+    h.channel = alloc_channel();
+    const int64_t t0 = static_cast<int64_t>(std::llround(body->start_tick));
+    const int64_t t1 = static_cast<int64_t>(std::llround(body->end_tick));
+    if (t1 <= t0) continue;
+
+    // Hold/slide channel follows body ribbon geometry. Authored heads (including
+    // partial-width) only drive Critical judgment taps — using head width here
+    // would shrink the body on roundtrip (w=3 body + w=2 head → w=2 body).
+    const int channel_lane = body->lane;
+    const int channel_width = std::clamp(body->width, 1, 35);
+    const int sl = sus_lane(channel_lane);
+
+    int end_l = channel_lane;
+    int end_w = channel_width;
+    const bool scratch_body =
+        body->note_type == NoteType::ScratchHold ||
         body->note_type == NoteType::ScratchCriticalHold ||
         body->note_type == NoteType::NontailScratchHold ||
-        body->note_type == NoteType::NontailScratchCriticalHold) {
+        body->note_type == NoteType::NontailScratchCriticalHold;
+    if (scratch_body) {
       const auto range = get_scratch_end_lane_range(*body);
       end_l = range.first;
       end_w = std::max(1, range.second - range.first + 1);
     }
-    const int end_sl = sus_lane(end_l);
-    std::string end_suffix = "2";
-    // If end lane differs, use slide category 3.
-    if (end_l != h.head->lane || end_w != h.head->width) {
-      suffix = "3";
-      suffix.push_back(base36_digit(sl));
-      suffix.push_back(base36_digit(h.channel));
-      // Re-place start as slide
-      // (already placed as hold — also place slide start/end)
-      place(suffix, t0, 1, w);
-      end_suffix = "3";
-    }
-    end_suffix.push_back(base36_digit(end_sl));
+
+    // Hold family → #2; ScratchHold family → #3 even when end span equals start
+    // (otherwise purple/blue collapse on roundtrip).
+    const bool as_slide = scratch_body;
+    std::string suffix = as_slide ? "3" : "2";
+    suffix.push_back(base36_digit(sl));
+    suffix.push_back(base36_digit(h.channel));
+    place(suffix, t0, 1, channel_width);
+
+    std::string end_suffix = as_slide ? "3" : "2";
+    end_suffix.push_back(base36_digit(sus_lane(end_l)));
     end_suffix.push_back(base36_digit(h.channel));
     place(end_suffix, t1, 2, std::clamp(end_w, 1, 35));
 
+    // Critical Hold* → Critical tap + hold/slide channel (no separate HoldStart*).
+    const bool critical_hold =
+        (!authored_headless &&
+         (head->note_type == NoteType::CriticalHoldStart ||
+          head->note_type == NoteType::ScratchCriticalHoldStart)) ||
+        body->note_type == NoteType::CriticalHold ||
+        body->note_type == NoteType::ScratchCriticalHold ||
+        body->note_type == NoteType::NontailCriticalHold ||
+        body->note_type == NoteType::NontailScratchCriticalHold;
+    if (critical_hold) {
+      const int crit_lane = !authored_headless ? head->lane : body->lane;
+      const int crit_w =
+          std::clamp(!authored_headless ? head->width : body->width, 1, 35);
+      std::string crit_suffix = "1";
+      crit_suffix.push_back(base36_digit(sus_lane(crit_lane)));
+      place(crit_suffix, t0, kSusTapCritical, crit_w);
+    }
+
+    // Truly headless (authored without head, start not fully covered) → Damage
+    // marker of equal body lane/width. Fully covered / CriticalHold need no marker.
+    if (authored_headless && !critical_hold &&
+        !hold_start_fully_covered(*body, chart.notes)) {
+      std::string dmg_suffix = "1";
+      dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
+      place(dmg_suffix, t0, kSusTapDamage, std::clamp(body->width, 1, 35));
+    }
+
     for (const NotationNote* mid : mids) {
-      if (mid->start_tick <= h.head->start_tick || mid->start_tick >= body->end_tick) continue;
-      // Same lane band loosely.
-      if (mid->lane + mid->width <= h.head->lane ||
-          mid->lane >= h.head->lane + h.head->width) {
+      // HoldEighth is synthesized in-editor — never write as SUS mid (type 3 → Sound).
+      if (mid->note_type == NoteType::HoldEighth) continue;
+      if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
+      if (mid->lane + mid->width <= body->lane || mid->lane >= body->lane + body->width) {
         continue;
       }
-      std::string mid_suffix = suffix.substr(0, 1);
+      std::string mid_suffix = as_slide ? "3" : "2";
       mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
       mid_suffix.push_back(base36_digit(h.channel));
       place(mid_suffix, static_cast<int64_t>(std::llround(mid->start_tick)), 3,
@@ -973,7 +1160,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     if (n->note_type == NoteType::Flick) {
       std::string tap_suffix = "1";
       tap_suffix.push_back(base36_digit(sl));
-      place(tap_suffix, tick, 3, w);
+      place(tap_suffix, tick, kSusTapFlick, w);
       int dir = 1;  // up
       if (n->scratch_length < 0) dir = 3;
       else if (n->scratch_length > 0) dir = 4;
@@ -981,14 +1168,14 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       dir_suffix.push_back(base36_digit(sl));
       place(dir_suffix, tick, dir, w);
     } else {
-      const int type = (n->note_type == NoteType::Critical) ? 2 : 1;
+      const int type = (n->note_type == NoteType::Critical) ? kSusTapCritical : kSusTapNormal;
       std::string suffix = "1";
       suffix.push_back(base36_digit(sl));
       place(suffix, tick, type, w);
     }
   }
 
-  // Flush buckets to text.
+  // Flush buckets + deferred timing lines in measure order with #MEASUREBS.
   for (const auto& [suffix, by_meas] : buckets) {
     for (const auto& [meas, by_div] : by_meas) {
       if (by_div.empty()) continue;
@@ -1000,10 +1187,25 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
         data[static_cast<size_t>(slot) * 2] = base36_digit(cell.type);
         data[static_cast<size_t>(slot) * 2 + 1] = base36_digit(cell.width);
       }
-      char buf[16];
-      std::snprintf(buf, sizeof(buf), "%03d", meas % 1000);
-      ss << '#' << buf << suffix << ": " << data << '\n';
+      push_data_line(meas, suffix, std::move(data));
     }
+  }
+
+  std::sort(data_lines.begin(), data_lines.end(),
+            [](const SusDataLine& a, const SusDataLine& b) {
+              if (a.measure != b.measure) return a.measure < b.measure;
+              return a.suffix < b.suffix;
+            });
+  int measure_base = 0;
+  for (const auto& line : data_lines) {
+    const int base = (std::max(0, line.measure) / 1000) * 1000;
+    if (base != measure_base) {
+      ss << "#MEASUREBS " << base << '\n';
+      measure_base = base;
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%03d", line.measure - measure_base);
+    ss << '#' << buf << line.suffix << ": " << line.data << '\n';
   }
 
   out_text = ss.str();

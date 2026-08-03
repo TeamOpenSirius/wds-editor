@@ -7,13 +7,18 @@
 
   Language must stay 1033 to match wixl Template summary (x64;1033).
   Shortcut features are toggled via AddLocal/Remove ControlEvents (wixl lacks
-  Component/Feature Condition).
+  Component/Feature Condition), then re-applied in Execute by
+  ApplyShortcutFeatureStates (DLL CA) so MigrateFeatureStates cannot wipe them.
 
   Upgrades:
   - Same UpgradeCode + MajorUpgrade removes the previous product (single ARP entry).
   - HKLM InstallDir is remembered so UpdateDlg installs over the existing folder.
   - HKLM Create*Shortcut prefs are remembered so ShortcutsDlg defaults match the
     last install/update; the user can change them and the new choice is saved.
+
+  wixl does not honor Property/@Secure for SecureCustomProperties (and setting that
+  property in the .wxs crashes wixl). package-target.sh patches the Property table
+  after wixl so CREATE_* survive the UI→Execute handoff.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -114,6 +119,11 @@
     <CustomAction Id="PersistStartMenuShortcutOff"
                   Property="WDS_STARTMENU_SHORTCUT_PREF"
                   Value="0"/>
+    <!-- After MigrateFeatureStates: force Desktop/StartMenu features from CREATE_*. -->
+    <Binary Id="WdsMsiCa" SourceFile="$(var.SourceDir)/wds_msi_ca.dll"/>
+    <CustomAction Id="ApplyShortcutFeatureStates"
+                  BinaryKey="WdsMsiCa"
+                  DllEntry="ApplyShortcutFeatureStates"/>
 
     <UIRef Id="WdsUI"/>
 
@@ -150,6 +160,11 @@
       </Custom>
       <Custom Action="ApplyStartMenuPrefLegacyOff" After="ApplyStartMenuPrefFromReg">
         UILevel=2 AND NOT WDS_REG_STARTMENU_PREF AND WDS_PREVIOUS_INSTALL AND NOT WDS_REG_STARTMENU_LEGACY AND NOT Installed
+      </Custom>
+      <!-- Re-apply after MigrateFeatureStates so upgrade feature migration cannot
+           discard ShortcutsDlg AddLocal/Remove (or silent registry prefs). -->
+      <Custom Action="ApplyShortcutFeatureStates" After="MigrateFeatureStates">
+        NOT Installed
       </Custom>
       <Custom Action="PersistDesktopShortcutOn" Before="WriteRegistryValues">
         CREATE_DESKTOP_SHORTCUT="1"

@@ -13,6 +13,7 @@ Desktop.ini
 *.tmp
 .idea/
 .vscode/
+.cursor/
 *.user
 *.suo
 *.code-workspace

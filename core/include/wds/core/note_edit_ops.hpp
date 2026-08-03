@@ -31,6 +31,11 @@ NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& no
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold);
 bool recompute_hold_eighths(ChartDocument& doc);
 
+// Pure variant for folding eighths into an undoable SetNotesCommand before/after.
+std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote> notes,
+                                                       const NotationNote& hold,
+                                                       int32_t ticks_per_quarter);
+
 // Auto head for a hold body start: full body span if free; if other notes
 // (non-hold-body at start, or hold tails ending here) partially overlap,
 // only the single continuous free lane run inside the body. Multiple free

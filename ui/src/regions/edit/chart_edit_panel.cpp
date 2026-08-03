@@ -1027,14 +1027,17 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
   star.start_tick = tick;
   star.end_tick = tick;
   star.scratch_length = 0;
-  if (!engine_.execute_command(std::make_unique<wds::chart_editor::AddNotesCommand>(
-          std::vector<NotationNote>{star}, "Add hold star"))) {
+  star.id = wds::chart_editor::kAutoNoteId;
+  const auto before = engine_.document().notes();
+  auto after = before;
+  after.push_back(star);
+  after = wds::chart_editor::with_recomputed_hold_eighths(
+      std::move(after), *target, engine_.document().timing().ticks_per_quarter);
+  if (!engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+          before, std::move(after), "Add hold star"))) {
     return false;
   }
-  if (auto hold = engine_.document().find_note(target->id)) {
-    wds::chart_editor::recompute_hold_eighths(engine_.document(), *hold);
-    engine_.rebuild_snapshot();
-  }
+  engine_.rebuild_snapshot();
   return true;
 }
 
@@ -1190,6 +1193,33 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     n.id = wds::chart_editor::kAutoNoteId;
     after.push_back(n);
   }
+  // Fold HoldEighths into the same SetNotesCommand so undo/redo stays transactional.
+  {
+    std::optional<NotationNote> new_hold;
+    for (const auto& n : after) {
+      if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
+      if (std::abs(n.start_tick - hold_draft_.start_tick) > 0.1f) continue;
+      if (n.lane != hold_draft_.lane || n.width != hold_draft_.width) continue;
+      new_hold = n;
+      break;
+    }
+    if (new_hold) {
+      after = wds::chart_editor::with_recomputed_hold_eighths(
+          std::move(after), *new_hold, engine_.document().timing().ticks_per_quarter);
+    }
+  }
+  if (hold_chain_prev_id_ >= 0) {
+    std::optional<NotationNote> prev_hold;
+    for (const auto& n : after) {
+      if (n.id != hold_chain_prev_id_) continue;
+      prev_hold = n;
+      break;
+    }
+    if (prev_hold) {
+      after = wds::chart_editor::with_recomputed_hold_eighths(
+          std::move(after), *prev_hold, engine_.document().timing().ticks_per_quarter);
+    }
+  }
   if (!engine_.execute_command(
           std::make_unique<wds::chart_editor::SetNotesCommand>(before, after, "Place hold"))) {
     mode_ = Mode::Idle;
@@ -1209,14 +1239,6 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   }
   if (placed) {
     hold_chain_ids_.insert(placed->id);
-    // Head is decided above for the chain's first segment only — never auto-add on
-    // subsequent chained bodies (joint already has the previous hold's end).
-    wds::chart_editor::recompute_hold_eighths(engine_.document(), *placed);
-  }
-  if (hold_chain_prev_id_ >= 0) {
-    if (auto prev = engine_.document().find_note(hold_chain_prev_id_)) {
-      wds::chart_editor::recompute_hold_eighths(engine_.document(), *prev);
-    }
   }
   engine_.rebuild_snapshot();
   select_hold_chain();
@@ -1392,10 +1414,37 @@ void ChartEditPanel::finish_hold_adjust() {
   resize_chain_peer_id_ = -1;
   resize_chain_next_id_ = -1;
   finish_move();
-  for (const int32_t id : hold_ids) {
-    if (auto note = engine_.document().find_note(id)) {
-      wds::chart_editor::prune_hold_mid_stars(engine_.document(), *note);
-      wds::chart_editor::recompute_hold_eighths(engine_.document(), *note);
+  {
+    const auto before = engine_.document().notes();
+    auto after = before;
+    bool touched = false;
+    for (const int32_t id : hold_ids) {
+      std::optional<NotationNote> body;
+      for (const auto& n : after) {
+        if (n.id == id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
+          body = n;
+          break;
+        }
+      }
+      if (!body) continue;
+      wds::chart_editor::prune_hold_mid_stars(engine_.document(), *body);
+      after = engine_.document().notes();
+      body.reset();
+      for (const auto& n : after) {
+        if (n.id == id) {
+          body = n;
+          break;
+        }
+      }
+      if (!body) continue;
+      after = wds::chart_editor::with_recomputed_hold_eighths(
+          std::move(after), *body, engine_.document().timing().ticks_per_quarter);
+      touched = true;
+    }
+    if (touched) {
+      // prune_hold_mid_stars mutated outside history — fold its result + eighths together.
+      engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+          before, std::move(after), "Adjust hold eighths"));
     }
   }
   engine_.rebuild_snapshot();
@@ -1563,11 +1612,28 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
   for (const int32_t id : remove_ids) selected_.erase(id);
 
   // Converted hold bodies stay headless by default (unlike place-hold). Still refresh
-  // eighths for any body that remains / becomes a hold.
-  for (const auto& [id, after] : after_by_id) {
-    if (!wds::chart_editor::is_hold_with_tail(after.note_type)) continue;
-    if (auto note = engine_.document().find_note(id)) {
-      wds::chart_editor::recompute_hold_eighths(engine_.document(), *note);
+  // eighths for any body that remains / becomes a hold — inside one undoable command.
+  {
+    const auto before = engine_.document().notes();
+    auto after = before;
+    bool touched = false;
+    for (const auto& [id, converted] : after_by_id) {
+      if (!wds::chart_editor::is_hold_with_tail(converted.note_type)) continue;
+      std::optional<NotationNote> body;
+      for (const auto& n : after) {
+        if (n.id == id) {
+          body = n;
+          break;
+        }
+      }
+      if (!body) continue;
+      after = wds::chart_editor::with_recomputed_hold_eighths(
+          std::move(after), *body, engine_.document().timing().ticks_per_quarter);
+      touched = true;
+    }
+    if (touched) {
+      engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+          before, std::move(after), "Refresh hold eighths"));
     }
   }
   engine_.rebuild_snapshot();

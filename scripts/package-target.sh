@@ -537,14 +537,25 @@ make_win_msi() {
 
   make_win_msi_bmp_icon "$stage"
 
+  # Immediate CA DLL (embedded in Binary table; not installed as a product file).
+  local mingw_cc="${WDS_MINGW_CC:-${WDS_MINGW_TRIPLE}-gcc}"
+  command -v "${mingw_cc}" >/dev/null 2>&1 || die "MinGW CC (${mingw_cc}) required to build wds_msi_ca.dll"
+  echo "Building wds_msi_ca.dll with MinGW…"
+  "${mingw_cc}" -O2 -shared -s \
+    -o "${stage}/wds_msi_ca.dll" \
+    "${ROOT}/scripts/wds_msi_ca.c" \
+    "${ROOT}/scripts/wds_msi_ca.def" \
+    -lmsi || die "failed to build wds_msi_ca.dll"
+
   # Heat wants paths relative to --prefix; keep README for users browsing Program Files.
-  # Exclude packaging-only BMP ICO from the installed payload (Icon table embeds it).
+  # Exclude packaging-only BMP ICO / CA DLL from the installed payload.
   # Sort find output so harvest order (and Directory nesting) is deterministic.
   stage_base="$(basename "$stage")"
   stage_parent="$(dirname "$stage")"
   (
     cd "$stage_parent"
-    find "$stage_base" -type f ! -path '*/config/*' ! -name 'wds-msi.ico' | LC_ALL=C sort \
+    find "$stage_base" -type f ! -path '*/config/*' \
+        ! -name 'wds-msi.ico' ! -name 'wds_msi_ca.dll' | LC_ALL=C sort \
       | wixl-heat -p "${stage_base}/" \
           --directory-ref INSTALLDIR \
           --component-group ProductFiles \
@@ -687,6 +698,15 @@ PY
 
   [[ -f "$msi_path" ]] || die "wixl did not produce $msi_path"
 
+  # wixl ignores Property/@Secure and crashes if SecureCustomProperties is authored
+  # in the .wxs. Patch the built MSI so CREATE_* checkbox values reach elevated Execute
+  # (Persist + ApplyShortcutFeatureStates). Without this, Execute resets them to "1".
+  need_cmd msibuild
+  msibuild "$msi_path" -q \
+    "UPDATE Property SET Value='CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WIX_UPGRADE_DETECTED;WIX_SAME_VERSION_UPGRADE_DETECTED;WIX_DOWNGRADE_DETECTED' WHERE Property='SecureCustomProperties'" \
+    || die "msibuild failed to patch SecureCustomProperties"
+  echo "Patched SecureCustomProperties (CREATE_* UI→Execute)"
+
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
   # used to look like "missing BrowseDlg" when libmsi was not loadable.
@@ -732,6 +752,21 @@ PY
     die "MSI missing ApplyDesktopPrefFromReg custom action"
   grep -Fq 'PersistDesktopShortcutOn' <<<"${customs}" || \
     die "MSI missing PersistDesktopShortcutOn custom action"
+  grep -Fq 'ApplyShortcutFeatureStates' <<<"${customs}" || \
+    die "MSI missing ApplyShortcutFeatureStates custom action"
+  grep -Fq $'CREATE_DESKTOP_SHORTCUT' <<<"${props}" || \
+    die "MSI missing CREATE_DESKTOP_SHORTCUT property"
+  grep -Fq $'SecureCustomProperties' <<<"${props}" || \
+    die "MSI missing SecureCustomProperties"
+  grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+    die "SecureCustomProperties must include CREATE_DESKTOP_SHORTCUT (UI→Execute)"
+  grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+    die "SecureCustomProperties must include CREATE_STARTMENU_SHORTCUT (UI→Execute)"
+  local exe_seq=""
+  exe_seq="$(msiinfo_export "$msi_path" InstallExecuteSequence | tr -d '\r')" || \
+    die "msiinfo failed: InstallExecuteSequence"
+  grep -Fq 'ApplyShortcutFeatureStates' <<<"${exe_seq}" || \
+    die "MSI missing ApplyShortcutFeatureStates in InstallExecuteSequence"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
   grep -q 'FindDesktopShortcutPref' <<<"${regs}" || \
@@ -752,7 +787,7 @@ PY
   [[ -n "${dir_seq}" && "${dir_seq}" -ge 1000 ]] || \
     die "InstallDirDlg sequence ${dir_seq:-unset} is too early (want >= 1000)"
 
-  rm -f "${stage}/wds-msi.ico"
+  rm -f "${stage}/wds-msi.ico" "${stage}/wds_msi_ca.dll"
   rm -rf "$work"
   echo "Packaged: $msi_path"
 }
