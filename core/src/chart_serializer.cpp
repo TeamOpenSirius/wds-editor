@@ -19,8 +19,7 @@ bool is_known_note_type(int32_t raw) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Sound:
-    case NoteType::SoundPurple:
-    case NoteType::Scratch:
+    case NoteType::ScratchSound:
     case NoteType::Flick:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:

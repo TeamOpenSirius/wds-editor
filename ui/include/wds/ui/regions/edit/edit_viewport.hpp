@@ -104,7 +104,7 @@ class EditViewport {
   }
   float note_inset_px(int32_t /*width*/) const { return kNoteLaneGapPx; }
 
-  // Screen rect of a Sound / SoundPurple mid-star (square ~note_h, centered in lanes).
+  // Screen rect of a Sound / ScratchSound mid-star (square ~note_h, centered in lanes).
   wds::interaction::Rect mid_star_screen_rect(const wds::chart_editor::NotationNote& note) const {
     const float note_h = note_height_px();
     const float inset = note_inset_px(note.width);

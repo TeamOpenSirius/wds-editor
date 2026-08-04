@@ -14,10 +14,9 @@ inline wds::audio::HitSfxClip hit_sfx_clip_for_head(wds::chart_editor::NoteType 
     case NoteType::ScratchCriticalHoldStart:
       return wds::audio::HitSfxClip::Critical;
     case NoteType::Flick:
-    case NoteType::Scratch:
       return wds::audio::HitSfxClip::Scratch;
     case NoteType::Sound:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       return wds::audio::HitSfxClip::Sound;
     case NoteType::Normal:
     case NoteType::BlueTap:
@@ -67,7 +66,7 @@ inline wds::audio::HitSfxClip hit_sfx_clip_for_mid_star(
   using wds::chart_editor::NoteType;
   switch (type) {
     case NoteType::Sound:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       return wds::audio::HitSfxClip::Sound;
     default:
       return wds::audio::HitSfxClip::Count;

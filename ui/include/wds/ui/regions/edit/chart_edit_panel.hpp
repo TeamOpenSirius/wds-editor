@@ -192,7 +192,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
-  // Place a Sound / SoundPurple on an already-selected existing hold body.
+  // Place a Sound / ScratchSound on an already-selected existing hold body.
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);
   // Keep placement ghost in sync with hold_draft_ (zero length → Tap / Flick).
   void sync_hold_placement_ghost();

@@ -156,8 +156,8 @@ bool is_nontail_hold_body(NoteType type) noexcept;
 bool is_scratch_hold_body(NoteType type) noexcept;
 bool is_tap_family(NoteType type) noexcept;
 
-// Hold soft-judge notes (Sound / SoundPurple / HoldEighth). Not sync contributors.
-// Only Sound / SoundPurple are visible mid-stars; HoldEighth has no sprite in Sirius.
+// Hold soft-judge notes (Sound / ScratchSound / HoldEighth). Not sync contributors.
+// Only Sound / ScratchSound are visible mid-stars; HoldEighth has no sprite in Sirius.
 bool is_hold_mid_star(NoteType type) noexcept;
 
 // Sirius SyncLine: hold bodies / HoldEighth / Sound mid-stars do not contribute.
@@ -169,7 +169,7 @@ bool contributes_to_concurrent_at_end(NoteType type) noexcept;
 std::vector<ConcurrentLineNote> build_concurrent_lines(
     const std::vector<NotationNote>& notes, const MusicTiming& timing);
 
-// Hold body soft-judge times: chart mid-stars (HoldEighth / Sound / SoundPurple)
+// Hold body soft-judge times: chart mid-stars (HoldEighth / Sound / ScratchSound)
 // overlapping (head, tail), deduped. No synthetic eighth grid.
 void collect_hold_body_judge_times(const NotationNote& hold,
                                    const std::vector<NotationNote>& notes,
@@ -182,7 +182,7 @@ struct PreviewComboState {
 };
 
 // Auto-preview combo up to preview_time_ms (seek-safe). Hold soft judges come
-// from chart HoldEighth / Sound / SoundPurple only (absorbed once per hold).
+// from chart HoldEighth / Sound / ScratchSound only (absorbed once per hold).
 PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
                                         const MusicTiming& timing,
                                         int64_t preview_time_ms);

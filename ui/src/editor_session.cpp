@@ -739,7 +739,8 @@ bool EditorSession::import_official(const std::string& chart_path,
 
 bool EditorSession::import_sus(const std::string& path) {
   wds::chart_editor::SusChartMetadata meta;
-  if (!ok(engine().load_sus_from_file(path, &meta))) return false;
+  std::vector<std::string> warnings;
+  if (!ok(engine().load_sus_from_file(path, &meta, &warnings))) return false;
 
   project_path_.clear();
   offset_ms_ = engine().document().timing().offset_ms;
@@ -786,10 +787,19 @@ bool EditorSession::import_sus(const std::string& path) {
     return false;
   }
   preview_.reset_playback();
+  std::string msg;
   if (convert) {
-    status("已导入 SUS 并转换为可编辑工程（内存，未绑定文件）：" + path, StatusLevel::Info);
+    msg = "已导入 SUS 并转换为可编辑工程（内存，未绑定文件）：" + path;
   } else {
-    status("已导入 SUS（只读预览）：" + path, StatusLevel::Info);
+    msg = "已导入 SUS（只读预览）：" + path;
+  }
+  if (!warnings.empty()) {
+    msg += "（警告 " + std::to_string(warnings.size()) + "：" + warnings.front();
+    if (warnings.size() > 1) msg += " …";
+    msg += "）";
+    status(std::move(msg), StatusLevel::Warning);
+  } else {
+    status(std::move(msg), StatusLevel::Info);
   }
   return true;
 }

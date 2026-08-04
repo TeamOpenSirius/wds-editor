@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace wds::chart_editor {
 
@@ -89,7 +90,9 @@ class ChartEditorEngine {
 
   // Import SUS chart (metadata + notes). OfficialPreviewOnly.
   // out_meta receives WAVE / WAVEOFFSET / title when non-null.
-  SerializeResult load_sus_from_file(const std::string& path, SusChartMetadata* out_meta = nullptr);
+  // out_warnings receives lossy-import messages when non-null.
+  SerializeResult load_sus_from_file(const std::string& path, SusChartMetadata* out_meta = nullptr,
+                                     std::vector<std::string>* out_warnings = nullptr);
 
   // Auto-detect .wdschart vs official .csv vs .sus.
   SerializeResult load_auto_from_file(const std::string& path,

@@ -163,7 +163,7 @@ bool is_tap_family(NoteType type) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Sound:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
     case NoteType::BlueTap:
       return true;
     default:
@@ -175,7 +175,7 @@ bool is_hold_mid_star(NoteType type) noexcept {
   switch (type) {
     case NoteType::HoldEighth:
     case NoteType::Sound:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       return true;
     default:
       return false;
@@ -198,7 +198,6 @@ bool is_combo_head_note(const NotationNote& note) noexcept {
   switch (note.note_type) {
     case NoteType::Normal:
     case NoteType::Critical:
-    case NoteType::Scratch:
     case NoteType::Flick:
     case NoteType::BlueTap:
     case NoteType::HoldStart:
@@ -229,7 +228,7 @@ void collect_hold_body_judge_times(const NotationNote& hold,
   }
 
   // Sirius: soft body judges are chart mid-stars only (HoldEighth / Sound /
-  // SoundPurple). Do not synthesize eighths — HoldEighth already is that beat.
+  // ScratchSound). Do not synthesize eighths — HoldEighth already is that beat.
   std::vector<int64_t> times;
   for (const auto& note : notes) {
     if (!is_hold_mid_star(note.note_type)) {
@@ -310,12 +309,11 @@ PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
 
 bool contributes_to_concurrent_at_start(NoteType type) noexcept {
   // Mirrors sonolus-sirius-engine/levelData.cpp addSyncLine call sites.
-  // Hold mid-stars (HoldEighth / Sound / SoundPurple=ScratchSound) are excluded.
+  // Hold mid-stars (HoldEighth / Sound / ScratchSound) are excluded.
   switch (type) {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
-    case NoteType::Scratch:  // Sirius SoundPurple — flat scratch/flick family
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
     case NoteType::ScratchHoldStart:

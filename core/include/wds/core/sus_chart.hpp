@@ -9,28 +9,21 @@
 
 namespace wds::chart_editor {
 
-// Sliding Universal Score (SUS) v2.7 — text chart used by Ched / ChedPlus.
-// WDS maps a practical subset: metadata, BPM, measure length, taps (#1),
-// holds (#2), slides (#3/#4 ≈ hold), directionals (#5 → flick).
+// Sliding Universal Score (SUS) — Ched / ChedPlus authoring for World Dai Star (Sirius).
 //
-// Hold convention:
-// - #2 = Hold family, #3/#4 = ScratchHold family (including stationary purple holds).
-// - Export never writes HoldStart/ScratchHoldStart as separate taps — only the
-//   hold/slide channel. CriticalHold* additionally emits a Critical tap (金头).
-//   Truly headless bodies (no authored head, start not fully covered) get a
-//   Damage (#1 type 4) marker of equal lane/width; fully covered headless
-//   needs no Damage (covering notes may be Normal/Critical/Flick/etc.).
-// - Import: Critical fully covering start → CriticalHold*/ScratchCriticalHold*
-//   body (headless; Critical tap kept for judgment). Damage → intentional
-//   headless. Other full covers → headless. Otherwise auto-generate a head via
-//   make_auto_hold_head. HoldEighth is never written (would become Sound stars).
-//   Hold channel exports body lane/width (partial heads do not shrink the body).
-//   Scratch taps have no SUS type (export as Normal). Ched lane pad L→L+2 imports
-//   with offset 2 when data fits the 2..d window.
-//
-// 12-lane Ched charts commonly occupy SUS lanes 2..d; import auto-detects a
-// lane offset so notes land in editor lanes 0..11. Export writes lanes as
-// WDS+2 for Ched compatibility.
+// Ched ground truth (see sonolus-sirius-engine chart_edit + sus2txt):
+// - All Hold / ScratchHold ribbons are Slide #3 (Sirius does not parse #2).
+// - Blue Hold vs purple ScratchHold is distinguished by a paired Flick+Air at the
+//   slide end (#1 type 3 + #5). Air alone or Flick alone is illegal and ignored.
+// - Critical gold head = Critical tap (#1 type 2) covering the slide start.
+// - Damage (#1 type 4) at start → intentional headless; at end → Nontail (import
+//   may degrade to a tailed Hold and record a warning).
+// - Slide mid (#3 type 3) → Sound / ScratchSound by parent hold family.
+// - Mid paired Flick+Air on a slide → JumpScratch split into multiple ScratchHolds.
+// - #TIL01 = split-lane gimmick; #TIL00 HiSpeed is ignored (editor cannot author).
+// - Legacy #2 Hold channels from older WDS exports import as blue Hold.
+// - Ched 12-key pad: export L→L+2; import auto-detects offset 2 for the 2..d window.
+// - HoldEighth is never written (would become Sound stars on re-import).
 
 struct SusChartMetadata {
   std::string title;
@@ -50,6 +43,8 @@ struct SusChartMetadata {
 struct SusChartLoadResult {
   NotationChart chart;
   SusChartMetadata meta;
+  // Human-readable lossy-import notes (Nontail→tailed, ignored HiSpeed, orphans…).
+  std::vector<std::string> warnings;
 };
 
 struct SusChartSaveOptions {

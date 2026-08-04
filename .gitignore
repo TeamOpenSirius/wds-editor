@@ -40,6 +40,11 @@ compile_commands.json
 # Local tool checkouts dropped inside the repo
 /vcpkg/
 /VulkanSDK/
+/sonolus-sirius-engine/
+
+# Local-only chart migration helpers (not shipped with the editor)
+/tools/migrate_wdschart_scratch_to_flick.py
+/tools/
 
 # MSI Binary-table dumps (not build inputs; WixUI assets come from wixl-data)
 /Binary/

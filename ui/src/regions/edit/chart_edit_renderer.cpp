@@ -407,7 +407,7 @@ void ChartEditRenderer::paint_overlays(
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
 
     // Mid-stars: selection box matches the tight square hit / draw size.
-    if (note.note_type == NoteType::Sound || note.note_type == NoteType::SoundPurple) {
+    if (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) {
       auto star = viewport.mid_star_screen_rect(note);
       star = {star.x - kPad, star.y - kPad, star.w + kPad * 2.0f, star.h + kPad * 2.0f};
       if (star.bottom() < b.y || star.y > b.bottom()) continue;
@@ -536,7 +536,7 @@ void ChartEditRenderer::append_skinned_notes(
     for (const auto& note : notes) {
       if (!in_window(note)) continue;
       const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
-      const bool tick = note.note_type == NoteType::Sound || note.note_type == NoteType::SoundPurple;
+      const bool tick = note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound;
       const float base = tick ? depth_.mid_star : depth_.note;
       draw_skinned_note(batch, skin, viewport, note, alpha, layer_z(base, note.start_tick),
                         layer_z(depth_.flick_arrow, note.start_tick), fb_w, fb_h, screen,
@@ -572,7 +572,7 @@ void ChartEditRenderer::append_skinned_ghosts(
                         NoteDrawPass::HoldRibbons);
     };
     auto caps = [&] {
-      const bool tick = n.note_type == NoteType::Sound || n.note_type == NoteType::SoundPurple;
+      const bool tick = n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound;
       const float base = tick ? depth_.ghost_mid_star : depth_.ghost_note;
       draw_skinned_note(batch, skin, viewport, n, g.alpha, layer_z(base, n.start_tick),
                         layer_z(depth_.ghost_flick_arrow, n.start_tick), fb_w, fb_h, screen,

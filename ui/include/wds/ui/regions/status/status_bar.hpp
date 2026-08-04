@@ -8,6 +8,7 @@ namespace wds::ui {
 
 enum class StatusLevel {
   Info,
+  Warning,
   Error,
 };
 

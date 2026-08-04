@@ -38,7 +38,7 @@ float right_gutter_w() { return wds::interaction::theme::px(52.0f); }
 float measure_gutter_w() { return wds::interaction::theme::px(40.0f); }
 
 bool is_visible_mid_star(NoteType type) noexcept {
-  return type == NoteType::Sound || type == NoteType::SoundPurple;
+  return type == NoteType::Sound || type == NoteType::ScratchSound;
 }
 
 }  // namespace
@@ -966,7 +966,7 @@ void ChartEditPanel::add_hold_star_at(wds::interaction::Vec2 point) {
   if (mode_ != Mode::PlaceHoldBody) return;
   // Same lane span as the hold; the star sprite is drawn centered without stretch.
   NotationNote star;
-  star.note_type = hold_scratch_ ? NoteType::SoundPurple : NoteType::Sound;
+  star.note_type = hold_scratch_ ? NoteType::ScratchSound : NoteType::Sound;
   star.width = hold_draft_.width;
   star.lane = hold_draft_.lane;
   star.start_tick = static_cast<float>(viewport_.tick_at(point.y));
@@ -1021,7 +1021,7 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
   if (!target) return false;
 
   NotationNote star;
-  star.note_type = scratch_hold ? NoteType::SoundPurple : NoteType::Sound;
+  star.note_type = scratch_hold ? NoteType::ScratchSound : NoteType::Sound;
   star.lane = target->lane;
   star.width = target->width;
   star.start_tick = tick;

@@ -12,7 +12,7 @@ struct EditDrawDepthConfig {
   float judgeline = 0.40f;
   float hold_body = 0.50f;        // Hold connection ribbon
   float note = 0.70f;             // Hold heads/tails, taps, flicks
-  float mid_star = 0.75f;         // Sound / SoundPurple ticks
+  float mid_star = 0.75f;         // Sound / ScratchSound ticks
   float flick_arrow = 0.80f;      // Scratch / flick arrows on top of note body
   float ghost_hold_body = 0.85f;
   float ghost_note = 0.90f;

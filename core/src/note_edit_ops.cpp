@@ -32,7 +32,7 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
   for (float tick = hold.start_tick + static_cast<float>(step); tick < hold.end_tick;
        tick += static_cast<float>(step)) {
     const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
-      return (note.note_type == NoteType::Sound || note.note_type == NoteType::SoundPurple) &&
+      return (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) &&
              same_tick(note.start_tick, tick) && overlaps(note, hold);
     });
     if (!occupied) {
@@ -78,7 +78,7 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
 
   // scratch_length: flick/Scratch direction, ScratchHold end span, or split color.
   if (!split) {
-    if (target == NoteType::Flick || target == NoteType::Scratch) {
+    if (target == NoteType::Flick) {
       // ScratchHold stores ±width (or wider JumpScratch spans); collapse to flick ±1.
       if (was_scratch_hold) {
         if (note.scratch_length < 0) note.scratch_length = -1;
@@ -436,7 +436,7 @@ std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const Notat
 namespace {
 
 bool is_visible_hold_mid_star(NoteType type) noexcept {
-  return type == NoteType::Sound || type == NoteType::SoundPurple;
+  return type == NoteType::Sound || type == NoteType::ScratchSound;
 }
 
 bool attached_to_hold_span(const NotationNote& note, const NotationNote& hold) noexcept {

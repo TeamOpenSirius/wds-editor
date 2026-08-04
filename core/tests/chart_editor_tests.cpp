@@ -17,11 +17,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -660,7 +662,7 @@ void test_official_chart_import_and_roundtrip() {
   bool found_split = false;
   bool found_jump = false;
   bool found_flick = false;
-  bool found_scratch = false;
+  bool found_orphan_as_flick = false;
   for (const auto& n : notes) {
     if (n.note_type == NoteType::Critical && n.width == 4 && n.lane == 0) {
       found_critical = true;
@@ -680,21 +682,21 @@ void test_official_chart_import_and_roundtrip() {
       CHECK_EQ(static_cast<int>(n.note_type), static_cast<int>(NoteType::ScratchHold));
       CHECK_EQ(n.lane, 0);  // official lane 1
     }
-    if (n.note_type == NoteType::Flick) {
+    if (n.note_type == NoteType::Flick && n.width == 6) {
       found_flick = true;
       CHECK_EQ(n.lane, 3);  // official 4
-      CHECK_EQ(n.width, 6);
     }
-    if (n.note_type == NoteType::Scratch) {
-      found_scratch = true;
-      CHECK_EQ(n.lane, 3);  // official 4
+    // Official sample orphan type=40 (Sirius SoundPurple) → Flick.
+    if (n.note_type == NoteType::Flick && n.width == 3 && n.lane == 3) {
+      found_orphan_as_flick = true;
+      CHECK(std::abs(n.start_tick - 15.4237f * 480.0f) < 0.5f);
     }
   }
   CHECK(found_critical);
   CHECK(found_split);
   CHECK(found_jump);
   CHECK(found_flick);
-  CHECK(found_scratch);
+  CHECK(found_orphan_as_flick);
 
   const fs::path out_path = temp_chart_path("official_roundtrip.csv");
   const auto save = engine.export_official_to_file(out_path.string());
@@ -1078,6 +1080,155 @@ void test_official_csv_tempo_map_export() {
   // 480 ticks @120 BPM = 0.5s, then 480 ticks @240 BPM = 0.25s → 0.75s.
   const double start_sec = std::stod(text.substr(0, text.find(',')));
   CHECK(std::abs(start_sec - 0.75) < 1e-3);
+}
+
+// Sirius type 40 mid-scratch splits purple holds; HoldEighth/Split export match sus2txt.
+void test_official_sound_purple_split_and_row_semantics() {
+  // ScratchHold 1..3s lanes 1-3 width 3; mid SoundPurple at 2s with scratchLength=3.
+  const std::string csv =
+      "1.0,3.0,110,1,3,0,0\n"
+      "2.0,-1.0,40,1,3,0,3\n"
+      "1.5,-1.0,31,1,3,0,0\n"
+      "1.25,-1.0,900,1,3,0,0\n"
+      "0.0,4.0,0,-1,0,12,42\n";
+
+  NotationChart chart;
+  OfficialChartLoadOptions load_opt;
+  load_opt.convert_lane_to_zero_based = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart, load_opt).error),
+           static_cast<int>(SerializeError::Ok));
+
+  int scratch_holds = 0;
+  int jump = 0;
+  int stars = 0;
+  int eighths = 0;
+  int type40 = 0;
+  for (const auto& n : chart.notes) {
+    if (static_cast<int32_t>(n.note_type) == 40) ++type40;
+    if (n.note_type == NoteType::ScratchHold) {
+      ++scratch_holds;
+      if (n.gimmick_type == GimmickType::JumpScratch) {
+        ++jump;
+        CHECK_EQ(n.scratch_length, 3);
+        CHECK(std::abs(n.end_tick - 2.0f * 480.0f) < 0.5f);
+      }
+    }
+    if (n.note_type == NoteType::ScratchSound) ++stars;
+    if (n.note_type == NoteType::HoldEighth) ++eighths;
+  }
+  CHECK_EQ(type40, 0);
+  CHECK_EQ(scratch_holds, 2);
+  CHECK_EQ(jump, 1);
+  CHECK_EQ(stars, 1);
+  CHECK_EQ(eighths, 1);
+
+  // Export: HoldEighth endTime=-1; Split leftLane=-1; JumpScratch name when scratch≠0.
+  NotationChart export_chart;
+  export_chart.timing.bpm = 60.0;
+  export_chart.timing.ticks_per_quarter = 480;
+  {
+    NotationNote eighth;
+    eighth.id = 0;
+    eighth.start_tick = 480.0f;
+    eighth.end_tick = 480.0f;
+    eighth.note_type = NoteType::HoldEighth;
+    eighth.lane = 0;
+    eighth.width = 1;
+    export_chart.notes.push_back(eighth);
+
+    NotationNote split;
+    split.id = 1;
+    split.start_tick = 0.0f;
+    split.end_tick = 960.0f;
+    split.note_type = NoteType::None;
+    split.lane = 0;
+    split.width = 0;
+    split.gimmick_type = GimmickType::Split2;
+    split.scratch_length = 7;
+    export_chart.notes.push_back(split);
+
+    NotationNote body;
+    body.id = 2;
+    body.start_tick = 0.0f;
+    body.end_tick = 480.0f;
+    body.note_type = NoteType::ScratchHold;
+    body.lane = 1;
+    body.width = 2;
+    body.gimmick_type = GimmickType::None;
+    body.scratch_length = 2;  // same-track ±width → still JumpScratch on export
+    export_chart.notes.push_back(body);
+  }
+
+  std::string out;
+  OfficialChartSaveOptions save_opt;
+  save_opt.use_gimmick_names = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(export_chart, out, save_opt).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(out.find(",900,") != std::string::npos);
+  CHECK(out.find("-1.0,900,") != std::string::npos || out.find("-1,900,") != std::string::npos);
+  // HoldEighth line should use -1.0 endTime (writes_end false).
+  {
+    bool eighth_ok = false;
+    for (const auto& line : [&] {
+      std::vector<std::string> lines;
+      std::string cur;
+      for (char c : out) {
+        if (c == '\n') {
+          lines.push_back(cur);
+          cur.clear();
+        } else {
+          cur.push_back(c);
+        }
+      }
+      if (!cur.empty()) lines.push_back(cur);
+      return lines;
+    }()) {
+      if (line.find(",900,") == std::string::npos) continue;
+      // start,end,type,...
+      const auto c1 = line.find(',');
+      const auto c2 = line.find(',', c1 + 1);
+      CHECK(c1 != std::string::npos && c2 != std::string::npos);
+      const std::string end_field = line.substr(c1 + 1, c2 - c1 - 1);
+      CHECK(end_field.rfind("-1", 0) == 0);
+      eighth_ok = true;
+    }
+    CHECK(eighth_ok);
+  }
+  CHECK(out.find("-1,0,12,") != std::string::npos || out.find("-1,0,Split2,") != std::string::npos);
+  CHECK(out.find("JumpScratch,2") != std::string::npos);
+}
+
+void test_migrate_wdschart_scratch_to_flick_script() {
+  const fs::path script = fs::path(__FILE__).parent_path().parent_path().parent_path() /
+                          "tools" / "migrate_wdschart_scratch_to_flick.py";
+  std::error_code ec;
+  if (!fs::is_regular_file(script, ec) || ec) {
+    return;  // optional if tree layout differs
+  }
+
+  const fs::path src = temp_chart_path("legacy_scratch.wdschart");
+  const fs::path dst = temp_chart_path("legacy_scratch.migrated.wdschart");
+  {
+    std::ofstream out(src);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 120 4 4 3\nNOTES 2\n"
+           "N 0 0 0 10 0 1 0 0\n"
+           "N 1 480 480 40 2 1 0 0\n"
+           "CONCURRENT 0\nEND\n";
+  }
+
+  const std::string cmd = "python3 \"" + script.string() + "\" \"" + src.string() + "\" -o \"" +
+                          dst.string() + "\"";
+  CHECK_EQ(std::system(cmd.c_str()), 0);
+
+  NotationChart chart;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(dst.string(), chart).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(chart.notes.size()), 2);
+  CHECK(chart.notes[1].note_type == NoteType::Flick);
+
+  NotationChart rejected;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(src.string(), rejected).error),
+           static_cast<int>(SerializeError::ParseError));
 }
 
 void test_save_failure_preserves_note_ids() {
@@ -1931,13 +2082,14 @@ void test_sus_slide_export_not_orphan_hold_start() {
   CHECK_EQ(plain_hold, 0);
 }
 
-// Standalone directional must keep SUS width (not force width=1).
+// Standalone Flick must be paired Flick (#1 type3) + Air (#5); orphan Air is ignored.
 void test_sus_standalone_directional_keeps_width() {
   const char* sus =
       "#TITLE \"dir\"\n"
       "#BPM01: 120.0\n"
       "#00008: 01\n"
-      "#00052: 14\n";  // lane 2, type up, width 4 at slot 0
+      "#00012: 34\n"   // Flick type 3, width 4 at lane 2
+      "#00052: 14\n";  // Air up, width 4
 
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
@@ -1947,18 +2099,33 @@ void test_sus_standalone_directional_keeps_width() {
     if (n.note_type == NoteType::Flick) flick = &n;
   }
   CHECK(flick != nullptr);
+  if (flick == nullptr) return;
   CHECK_EQ(flick->width, 4);
   CHECK_EQ(flick->scratch_length, 0);  // up
 }
 
-// Tap + directional at same tick/lane → flick with tap width.
+// Orphan Air alone must not become a Flick.
+void test_sus_orphan_air_ignored() {
+  const char* sus =
+      "#TITLE \"orphan\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00052: 14\n";
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 0);
+  CHECK(!loaded.warnings.empty());
+}
+
+// Flick (#1 type3) + Air at same tick/lane → flick with Air direction.
 void test_sus_tap_plus_directional_becomes_flick() {
   const char* sus =
       "#TITLE \"tapdir\"\n"
       "#BPM01: 120.0\n"
       "#00008: 01\n"
-      "#00012: 13\n"   // tap width 3
-      "#00052: 43\n";  // right-up directional width 3
+      "#00012: 33\n"   // Flick type 3, width 3
+      "#00052: 43\n";  // right-up Air width 3
 
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
@@ -1967,6 +2134,221 @@ void test_sus_tap_plus_directional_becomes_flick() {
   CHECK_EQ(static_cast<int>(loaded.chart.notes[0].note_type), static_cast<int>(NoteType::Flick));
   CHECK_EQ(loaded.chart.notes[0].width, 3);
   CHECK_EQ(loaded.chart.notes[0].scratch_length, 1);
+}
+
+// Ched: Slide #3 without end Flick+Air → blue Hold; with pair → ScratchHold.
+void test_sus_ched_slide_air_distinguishes_hold_family() {
+  const char* blue =
+      "#TITLE \"blue\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00032a: 1222\n";  // Slide start@0 end@half
+  SusChartLoadResult blue_loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(blue, blue_loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(count_holds_with_tail(blue_loaded.chart), 1);
+  CHECK_EQ(static_cast<int>(blue_loaded.chart.notes[0].note_type),
+           static_cast<int>(NoteType::Hold));
+
+  const char* purple2 =
+      "#TITLE \"purple\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00032a: 12002200\n"
+      "#00012: 00003200\n"
+      "#00052: 00001200\n";
+  SusChartLoadResult purple_loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(purple2, purple_loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int scratch = 0;
+  for (const auto& n : purple_loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) ++scratch;
+  }
+  CHECK_EQ(scratch, 1);
+}
+
+// Export: blue Hold is #3 without end Flick/Air; purple writes paired Flick+Air.
+void test_sus_ched_export_slide_and_end_pair() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  NotationNote blue = make_tap(0.0f, 0);
+  blue.id = 0;
+  blue.width = 1;
+  blue.end_tick = 960.0f;
+  blue.note_type = NoteType::Hold;
+  NotationNote head = make_tap(0.0f, 0);
+  head.id = 1;
+  head.width = 1;
+  head.end_tick = 0.0f;
+  head.note_type = NoteType::HoldStart;
+  NotationNote purple = make_tap(0.0f, 2);
+  purple.id = 2;
+  purple.width = 1;
+  purple.end_tick = 960.0f;
+  purple.note_type = NoteType::ScratchHold;
+  purple.scratch_length = 0;
+  NotationNote phead = make_tap(0.0f, 2);
+  phead.id = 3;
+  phead.width = 1;
+  phead.end_tick = 0.0f;
+  phead.note_type = NoteType::ScratchHoldStart;
+  chart.notes = {blue, head, purple, phead};
+
+  SusChartSaveOptions options;
+  options.ched_lane_padding = false;
+  std::string text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(text.find("#00020") == std::string::npos);  // no Hold #2 channel
+  CHECK(text.find("#00030") != std::string::npos);  // Slide #3
+  // Purple end at tick 960 → measure 0 half → Flick+Air present
+  CHECK(text.find("#00012:") != std::string::npos);
+  CHECK(text.find("#00052:") != std::string::npos);
+
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int holds = 0, scratches = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::Hold) ++holds;
+    if (n.note_type == NoteType::ScratchHold) ++scratches;
+  }
+  CHECK_EQ(holds, 1);
+  CHECK_EQ(scratches, 1);
+}
+
+// Mid Flick+Air on a purple slide splits into JumpScratch ScratchHold segments.
+void test_sus_ched_mid_flick_splits_jump_scratch() {
+  const char* sus =
+      "#TITLE \"jump\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00032a: 120032002200\n"  // start@0, mid@2, end@4 of 6 slots
+      "#00012: 000032000032\n"  // Flick at mid and end
+      "#00052: 000012000012\n"; // Air up at mid and end
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int scratch_bodies = 0;
+  int jump = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) {
+      ++scratch_bodies;
+      if (n.gimmick_type == GimmickType::JumpScratch) ++jump;
+    }
+  }
+  CHECK_EQ(scratch_bodies, 2);
+  CHECK(jump >= 1);
+}
+
+// Split gimmick ↔ #TIL01.
+void test_sus_til01_split_roundtrip() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  NotationNote split;
+  split.id = 0;
+  split.start_tick = 0.0f;
+  split.end_tick = 1920.0f;
+  split.lane = 0;
+  split.width = 12;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.scratch_length = 2;
+  chart.notes.push_back(split);
+
+  SusChartSaveOptions options;
+  options.ched_lane_padding = true;
+  std::string text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(text.find("#TIL01") != std::string::npos);
+
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int splits = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (is_split_lane_gimmick(n.gimmick_type)) {
+      ++splits;
+      CHECK_EQ(get_split_count(n.gimmick_type), 3);
+      CHECK_EQ(n.scratch_length, 2);
+    }
+  }
+  CHECK_EQ(splits, 1);
+}
+
+// .wdschart export → import must preserve note/timing semantics.
+void test_wdschart_export_import_preserves_chart() {
+  NotationChart chart;
+  chart.timing.bpm = 150.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.offset_ms = 0;
+  chart.timing.points = {TimingPoint{0, 150.0, 4, 4, true, true},
+                         TimingPoint{1920, 180.0, 3, 4, true, true}};
+
+  auto add = [&](NoteType type, float start, float end, int32_t lane, int32_t width,
+                 GimmickType g = GimmickType::None, int32_t scratch = 0) {
+    NotationNote n;
+    n.id = static_cast<int32_t>(chart.notes.size());
+    n.start_tick = start;
+    n.end_tick = end;
+    n.lane = lane;
+    n.width = width;
+    n.note_type = type;
+    n.gimmick_type = g;
+    n.scratch_length = scratch;
+    chart.notes.push_back(n);
+  };
+  add(NoteType::Normal, 0.0f, 0.0f, 0, 1);
+  add(NoteType::Critical, 240.0f, 240.0f, 1, 2);
+  add(NoteType::Flick, 480.0f, 480.0f, 3, 1, GimmickType::None, -1);
+  add(NoteType::HoldStart, 960.0f, 960.0f, 2, 2);
+  add(NoteType::Hold, 960.0f, 1920.0f, 2, 2);
+  add(NoteType::Sound, 1440.0f, 1440.0f, 2, 1);
+  add(NoteType::ScratchHoldStart, 1920.0f, 1920.0f, 5, 1);
+  add(NoteType::ScratchHold, 1920.0f, 2880.0f, 5, 1, GimmickType::JumpScratch, 3);
+  add(NoteType::ScratchSound, 2400.0f, 2400.0f, 5, 1);
+  add(NoteType::None, 0.0f, 3840.0f, 0, 12, GimmickType::Split2, 1);
+
+  chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
+
+  const fs::path path = temp_chart_path("preserve_roundtrip.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(chart, path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+
+  CHECK_EQ(static_cast<int>(loaded.notes.size()), static_cast<int>(chart.notes.size()));
+  CHECK(std::abs(loaded.timing.bpm - chart.timing.bpm) < 1e-6);
+  CHECK_EQ(loaded.timing.ticks_per_quarter, chart.timing.ticks_per_quarter);
+
+  auto key = [](const NotationNote& n) {
+    return std::tuple{n.start_tick, n.end_tick, n.lane, n.width,
+                      static_cast<int32_t>(n.note_type), static_cast<int32_t>(n.gimmick_type),
+                      n.scratch_length};
+  };
+  std::vector<NotationNote> a = chart.notes;
+  std::vector<NotationNote> b = loaded.notes;
+  std::sort(a.begin(), a.end(), [&](const NotationNote& x, const NotationNote& y) {
+    return key(x) < key(y);
+  });
+  std::sort(b.begin(), b.end(), [&](const NotationNote& x, const NotationNote& y) {
+    return key(x) < key(y);
+  });
+  for (size_t i = 0; i < a.size(); ++i) {
+    CHECK(std::abs(a[i].start_tick - b[i].start_tick) < 0.5f);
+    CHECK(std::abs(a[i].end_tick - b[i].end_tick) < 0.5f);
+    CHECK_EQ(a[i].lane, b[i].lane);
+    CHECK_EQ(a[i].width, b[i].width);
+    CHECK_EQ(static_cast<int>(a[i].note_type), static_cast<int>(b[i].note_type));
+    CHECK_EQ(static_cast<int>(a[i].gimmick_type), static_cast<int>(b[i].gimmick_type));
+    CHECK_EQ(a[i].scratch_length, b[i].scratch_length);
+  }
 }
 
 // Slide invisible mid (type 5) must not become a visible Sound star.
@@ -2191,7 +2573,7 @@ void test_sus_roundtrip_hold_families_and_lanes() {
     if (n.note_type == NoteType::CriticalHold || n.note_type == NoteType::ScratchCriticalHold)
       ++crit_bodies;
     if (is_hold_head_note(n) && std::abs(n.start_tick - 960.0f) < 0.5f) ++heads_at_960;
-    if (n.note_type == NoteType::Sound || n.note_type == NoteType::SoundPurple) ++sounds;
+    if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) ++sounds;
     if (is_hold_with_tail(n.note_type) && n.lane == 7) gold_lane = n.lane;
   }
   // Headless: Hold body at lane 3 with no paired head.
@@ -2314,7 +2696,7 @@ NotationNote make_head(NoteType type, int32_t id, float tick, int32_t lane, int3
 }  // namespace
 
 // Comprehensive SUS export→import covering known edge cases and SUS limitations
-// (Scratch→Normal, SoundPurple→Sound, Nontail→tailed Hold, partial head→full auto head).
+// (legacy Scratch no longer exists; Nontail→tailed Hold, partial head→full auto head).
 void test_sus_comprehensive_roundtrip_all_cases() {
   NotationChart chart;
   chart.timing.bpm = 185.0;
@@ -2347,7 +2729,8 @@ void test_sus_comprehensive_roundtrip_all_cases() {
     f.scratch_length = 1;  // right
     chart.notes.push_back(f);
   }
-  chart.notes.push_back(make_body(NoteType::Scratch, nid(), 1200.0f, 0.0f, 9, 1));
+  // Extra Normal where legacy Scratch(40) used to sit (lane 9 @ 1200).
+  chart.notes.push_back(make_body(NoteType::Normal, nid(), 1200.0f, 0.0f, 9, 1));
 
   // Hold + authored head
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 1440.0f, 0, 2));
@@ -2426,10 +2809,10 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680.0f, 0, 1));
   chart.notes.push_back(make_body(NoteType::NontailHold, nid(), 7680.0f, 8640.0f, 0, 1));
 
-  // SoundPurple mid (imports as Sound)
+  // ScratchSound mid (imports as Sound)
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680.0f, 2, 1));
   chart.notes.push_back(make_body(NoteType::Hold, nid(), 7680.0f, 8640.0f, 2, 1));
-  chart.notes.push_back(make_body(NoteType::SoundPurple, nid(), 8160.0f, 0.0f, 2, 1));
+  chart.notes.push_back(make_body(NoteType::ScratchSound, nid(), 8160.0f, 0.0f, 2, 1));
 
   // Edge lanes + wide tap under ched padding
   chart.notes.push_back(make_body(NoteType::Normal, nid(), 8640.0f, 0.0f, 0, 4));
@@ -2474,22 +2857,20 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   CHECK(count_type(loaded.chart, NoteType::ScratchCriticalHold) >= 1);
   CHECK(count_type(loaded.chart, NoteType::CriticalHold) >= 1);
   CHECK(count_type(loaded.chart, NoteType::Flick) >= 1);
-  // SUS has no Scratch tap type — exports as Normal.
-  CHECK_EQ(count_type(loaded.chart, NoteType::Scratch), 0);
   {
-    bool scratch_became_normal = false;
+    bool lane9_normal = false;
     for (const auto& n : loaded.chart.notes) {
       if (n.note_type == NoteType::Normal && std::abs(n.start_tick - 1200.0f) < 0.5f &&
           n.lane == 9) {
-        scratch_became_normal = true;
+        lane9_normal = true;
       }
     }
-    CHECK(scratch_became_normal);
+    CHECK(lane9_normal);
   }
   CHECK(count_type(loaded.chart, NoteType::Sound) >= 1);
   CHECK_EQ(count_type(loaded.chart, NoteType::HoldEighth), 0);
-  // SoundPurple mid becomes Sound; Nontail becomes tailed Hold.
-  CHECK_EQ(count_type(loaded.chart, NoteType::SoundPurple), 0);
+  // ScratchSound on a blue Hold has no Ched encoding → imports as Sound; Nontail → tailed.
+  CHECK_EQ(count_type(loaded.chart, NoteType::ScratchSound), 0);
   CHECK_EQ(count_type(loaded.chart, NoteType::NontailHold), 0);
 
   // High lanes stay in WDS space under ched padding
@@ -2707,6 +3088,8 @@ int main() {
   test_timing_bpm_meter_split_and_prune();
   test_truncated_wdschart_rejected();
   test_official_csv_tempo_map_export();
+  test_official_sound_purple_split_and_row_semantics();
+  test_migrate_wdschart_scratch_to_flick_script();
   test_save_failure_preserves_note_ids();
   test_sus_meter_and_mid_measure_bpm_roundtrip();
   test_chart_session_preserves_per_chart_history();
@@ -2726,7 +3109,13 @@ int main() {
   test_sus_hold_mid_star_roundtrip();
   test_sus_slide_export_not_orphan_hold_start();
   test_sus_standalone_directional_keeps_width();
+  test_sus_orphan_air_ignored();
   test_sus_tap_plus_directional_becomes_flick();
+  test_sus_ched_slide_air_distinguishes_hold_family();
+  test_sus_ched_export_slide_and_end_pair();
+  test_sus_ched_mid_flick_splits_jump_scratch();
+  test_sus_til01_split_roundtrip();
+  test_wdschart_export_import_preserves_chart();
   test_sus_slide_invisible_mid_not_sound();
   test_sus_fractional_measure_length();
   test_sus_measurebs_offset();

@@ -153,7 +153,8 @@ SerializeResult ChartEditorEngine::load_official_from_file(const std::string& ch
 }
 
 SerializeResult ChartEditorEngine::load_sus_from_file(const std::string& path,
-                                                      SusChartMetadata* out_meta) {
+                                                      SusChartMetadata* out_meta,
+                                                      std::vector<std::string>* out_warnings) {
   SusChartLoadResult loaded;
   const auto result = SusChartFormat::load_file(path, loaded);
   if (result.error != SerializeError::Ok) {
@@ -165,6 +166,9 @@ SerializeResult ChartEditorEngine::load_sus_from_file(const std::string& path,
   publish_snapshot();
   if (out_meta != nullptr) {
     *out_meta = std::move(loaded.meta);
+  }
+  if (out_warnings != nullptr) {
+    *out_warnings = std::move(loaded.warnings);
   }
   return result;
 }

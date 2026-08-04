@@ -113,13 +113,12 @@ EffectTint tint_for(NoteType type) {
     case NoteType::NontailCriticalHold:
     case NoteType::BlueTap:
       return {0.25f, 0.85f, 1.0f};  // blue hold / tap
-    case NoteType::Scratch:
     case NoteType::ScratchHold:
     case NoteType::ScratchCriticalHold:
     case NoteType::NontailScratchHold:
     case NoteType::NontailScratchCriticalHold:
     case NoteType::Flick:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       return {0.85f, 0.35f, 1.0f};  // purple flick / scratch-hold end
     case NoteType::Sound:
       return {0.35f, 0.95f, 0.55f};  // green tick
@@ -491,7 +490,7 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
     if (note->visual_state == PreviewNoteVisualState::Holding) {
       continue;
     }
-    // Mid-stars: Sound / SoundPurple are tick-only; HoldEighth has no sprite.
+    // Mid-stars: Sound / ScratchSound are tick-only; HoldEighth has no sprite.
     if (is_hold_mid_star(note->note_type)) {
       continue;
     }
@@ -809,7 +808,7 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
     // Head / tap: exclude hold bodies and mid-stars (stars use soft body style).
     if (!hold_body && !mid_star && !is_split_lane_gimmick(note.gimmick_type)) {
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
-          note.note_type == NoteType::Critical || note.note_type == NoteType::Scratch ||
+          note.note_type == NoteType::Critical ||
           note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
         const double age = now - static_cast<double>(note.start_ms) / 1000.0;
         if (age >= 0.0 && age < duration_d) {
@@ -1042,7 +1041,7 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     // Official HoldStart* paired with a duration body: body emits the start hit.
     if (!hold_body && !mid_star && !is_split_lane_gimmick(note.gimmick_type)) {
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
-          note.note_type == NoteType::Critical || note.note_type == NoteType::Scratch ||
+          note.note_type == NoteType::Critical ||
           note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
         const bool paired = is_hold_start(note.note_type) &&
                             lookup.duration_hold_heads.count(note_span_key(

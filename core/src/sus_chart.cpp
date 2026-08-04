@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <map>
 #include <numeric>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -199,6 +201,33 @@ int32_t flick_scratch_from_directional(int type) {
   }
 }
 
+// Sirius ScratchType from Air on body [body_l, body_r] vs Air span [air_l, air_r].
+int32_t scratch_length_from_air_span(int air_type, int body_l, int body_r, int air_l, int air_r) {
+  if (air_l == body_l && air_r == body_r) {
+    if (air_type == 3) return -(body_r - body_l + 1);
+    if (air_type == 4) return (body_r - body_l + 1);
+    return 0;
+  }
+  if (air_r == body_r && air_l <= body_l) return air_l - body_r - 1;
+  if (air_l == body_l && air_r >= body_r) return air_r - body_l + 1;
+  // Fallback: prefer Air direction with Air width.
+  if (air_type == 3) return -(air_r - air_l + 1);
+  if (air_type == 4) return (air_r - air_l + 1);
+  return 0;
+}
+
+int air_type_from_scratch_length(int32_t scratch_length) {
+  if (scratch_length < 0) return 3;
+  if (scratch_length > 0) return 4;
+  return 1;
+}
+
+void push_unique_warning(std::vector<std::string>& warnings, std::string msg) {
+  if (std::find(warnings.begin(), warnings.end(), msg) == warnings.end()) {
+    warnings.push_back(std::move(msg));
+  }
+}
+
 }  // namespace
 
 bool SusChartFormat::looks_like_sus_path(const std::string& path) {
@@ -244,6 +273,17 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   };
   std::vector<BpmChange> bpm_changes;
   std::vector<RawEvent> events;
+  std::vector<std::string>& warnings = out.warnings;
+  warnings.clear();
+
+  struct TilSplitPoint {
+    int measure = 0;
+    int subtick = 0;  // 0..1919 style fraction within measure
+    int lines = 0;    // signed split count
+    int types = 0;    // color id
+  };
+  std::vector<TilSplitPoint> til_splits;
+  bool saw_hispeed_til = false;
 
   int measure_base = 0;
   std::istringstream stream(text);
@@ -336,11 +376,56 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       if (id >= 0 && parse_double(data, bpm) && bpm > 0.0) bpm_defs[id] = bpm;
       continue;
     }
-    // Ignore TIL / HISPEED / ATTRIBUTE blocks for now.
-    if (header_l.rfind("til", 0) == 0 || header_l == "hispeed" || header_l == "nospeed" ||
-        header_l.rfind("atr", 0) == 0 || header_l == "attribute" || header_l == "noattribute" ||
-        header_l == "noattirbute" || header_l == "measurehs" || header_l == "genre" ||
-        header_l == "background" || header_l == "movie" || header_l == "movieoffset") {
+    // #TIL00 HiSpeed (ignored — editor cannot author). #TIL01 split lines.
+    if (header_l.rfind("til", 0) == 0) {
+      const std::string til_id = header_l.size() >= 5 ? header_l.substr(3, 2) : "";
+      if (til_id == "00") {
+        saw_hispeed_til = true;
+        continue;
+      }
+      if (til_id == "01") {
+        std::string body = trim_copy(data);
+        if (body.size() >= 2 && body.front() == '"' && body.back() == '"') {
+          body = body.substr(1, body.size() - 2);
+        }
+        if (body.empty()) continue;
+        // Entries: measure'tick:lines.types separated by ", "
+        std::string entry;
+        std::istringstream es(body);
+        while (std::getline(es, entry, ',')) {
+          entry = trim_copy(entry);
+          if (entry.empty()) continue;
+          const size_t colon = entry.find(':');
+          if (colon == std::string::npos) continue;
+          const std::string beat = trim_copy(entry.substr(0, colon));
+          const std::string type = trim_copy(entry.substr(colon + 1));
+          const size_t q = beat.find('\'');
+          if (q == std::string::npos) continue;
+          int measure = 0;
+          int subtick = 0;
+          if (!parse_int(beat.substr(0, q), measure)) continue;
+          parse_int(beat.substr(q + 1), subtick);
+          const size_t dot = type.find('.');
+          if (dot == std::string::npos) continue;
+          int lines = 0;
+          int types = 0;
+          if (!parse_int(type.substr(0, dot), lines)) continue;
+          parse_int(type.substr(dot + 1), types);
+          TilSplitPoint p;
+          p.measure = measure + measure_base;
+          p.subtick = std::clamp(subtick, 0, 1919);
+          p.lines = lines;
+          p.types = types;
+          til_splits.push_back(p);
+        }
+        continue;
+      }
+      continue;
+    }
+    if (header_l == "hispeed" || header_l == "nospeed" || header_l.rfind("atr", 0) == 0 ||
+        header_l == "attribute" || header_l == "noattribute" || header_l == "noattirbute" ||
+        header_l == "measurehs" || header_l == "genre" || header_l == "background" ||
+        header_l == "movie" || header_l == "movieoffset") {
       continue;
     }
 
@@ -590,7 +675,16 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   std::vector<NotationNote> notes;
   int32_t next_id = 0;
 
-  // Directionals first → flick map by tick+lane (keep width for standalone flicks).
+  // Paired Flick (#1 type3) + Air (#5) at same tick+lane. Orphans are ignored.
+  struct FlickPair {
+    int64_t tick = 0;
+    int lane = 0;
+    int width = 1;
+    int air_type = 1;
+    int air_lane = 0;
+    int air_width = 1;
+    bool consumed = false;
+  };
   struct FlickKey {
     int64_t tick;
     int lane;
@@ -598,21 +692,70 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       return tick < o.tick || (tick == o.tick && lane < o.lane);
     }
   };
-  struct DirectionalInfo {
-    int32_t scratch = 0;
-    int width = 1;
-  };
-  std::map<FlickKey, DirectionalInfo> directional_scratch;
+
+  std::map<FlickKey, const RawEvent*> air_by_key;
+  std::map<FlickKey, const RawEvent*> flick_tap_by_key;
   for (const auto& ev : events) {
-    if (ev.category != 5) continue;
-    FlickKey key{ev.tick, map_lane(ev.lane)};
-    directional_scratch[key] =
-        DirectionalInfo{flick_scratch_from_directional(ev.type), map_width(ev.lane, ev.width)};
+    if (ev.category == 5) {
+      air_by_key[{ev.tick, map_lane(ev.lane)}] = &ev;
+    } else if (ev.category == 1 && ev.type == kSusTapFlick) {
+      flick_tap_by_key[{ev.tick, map_lane(ev.lane)}] = &ev;
+    }
   }
 
-  // Taps. Damage (#1 type 4) marks intentional headless hold starts — collected
-  // for hold assembly, never kept as chart notes (WDS has no Damage type).
+  std::vector<FlickPair> flick_pairs;
+  std::set<FlickKey> paired_keys;
+  for (const auto& [key, flick_ev] : flick_tap_by_key) {
+    const auto air_it = air_by_key.find(key);
+    if (air_it == air_by_key.end()) {
+      push_unique_warning(warnings, "忽略未成对的 Flick（缺少 Air）");
+      continue;
+    }
+    FlickPair pair;
+    pair.tick = key.tick;
+    pair.lane = key.lane;
+    pair.width = map_width(flick_ev->lane, flick_ev->width);
+    pair.air_type = air_it->second->type;
+    pair.air_lane = map_lane(air_it->second->lane);
+    pair.air_width = map_width(air_it->second->lane, air_it->second->width);
+    flick_pairs.push_back(pair);
+    paired_keys.insert(key);
+  }
+  for (const auto& [key, air_ev] : air_by_key) {
+    (void)air_ev;
+    if (paired_keys.count(key) == 0) {
+      push_unique_warning(warnings, "忽略未成对的 Air（缺少 Flick）");
+    }
+  }
+
+  auto find_pair_at = [&](int64_t tick, int lane, int width) -> FlickPair* {
+    FlickPair* best = nullptr;
+    for (auto& p : flick_pairs) {
+      if (p.consumed) continue;
+      if (p.tick != tick) continue;
+      // Overlap body [lane, lane+width) with pair lane span.
+      const int pair_r = p.lane + p.width - 1;
+      const int body_r = lane + width - 1;
+      if (p.lane <= body_r && lane <= pair_r) {
+        if (best == nullptr || p.lane == lane) best = &p;
+      }
+    }
+    // Also match Air span that may extend beyond body (JumpScratch cover).
+    for (auto& p : flick_pairs) {
+      if (p.consumed) continue;
+      if (p.tick != tick) continue;
+      const int air_r = p.air_lane + p.air_width - 1;
+      const int body_r = lane + width - 1;
+      if (p.air_lane <= body_r && lane <= air_r) {
+        if (best == nullptr || p.air_lane == lane) best = &p;
+      }
+    }
+    return best;
+  };
+
+  // Taps except Flick (handled via pairs) and Damage markers.
   std::vector<SusDamageMarker> damage_markers;
+  std::vector<SusDamageMarker> damage_end_markers;
   for (const auto& ev : events) {
     if (ev.category != 1) continue;
     if (ev.type == kSusTapDamage) {
@@ -621,108 +764,101 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       dmg.lane = map_lane(ev.lane);
       dmg.width = map_width(ev.lane, ev.width);
       damage_markers.push_back(dmg);
+      damage_end_markers.push_back(dmg);  // end match checked against hold ends
       continue;
     }
-    NotationNote note;
-    note.id = next_id++;
-    note.start_tick = static_cast<float>(ev.tick);
-    note.end_tick = note.start_tick;
-    note.lane = map_lane(ev.lane);
-    note.width = map_width(ev.lane, ev.width);
-    note.note_type = tap_type_from_sus(ev.type);
-    note.gimmick_type = GimmickType::None;
-    note.scratch_length = 0;
-    FlickKey key{ev.tick, note.lane};
-    if (const auto it = directional_scratch.find(key); it != directional_scratch.end()) {
-      note.note_type = NoteType::Flick;
-      note.scratch_length = it->second.scratch;
-      directional_scratch.erase(it);
-    } else if (note.note_type == NoteType::Flick) {
+    if (ev.type == kSusTapFlick) continue;  // only via pairs
+    if (ev.type == kSusTapNormal || ev.type == kSusTapCritical) {
+      NotationNote note;
+      note.id = next_id++;
+      note.start_tick = static_cast<float>(ev.tick);
+      note.end_tick = note.start_tick;
+      note.lane = map_lane(ev.lane);
+      note.width = map_width(ev.lane, ev.width);
+      note.note_type = tap_type_from_sus(ev.type);
+      note.gimmick_type = GimmickType::None;
       note.scratch_length = 0;
+      notes.push_back(note);
     }
-    notes.push_back(note);
   }
 
-  // Remaining directionals without tap → standalone flicks.
-  for (const auto& [key, info] : directional_scratch) {
-    NotationNote note;
-    note.id = next_id++;
-    note.start_tick = static_cast<float>(key.tick);
-    note.end_tick = note.start_tick;
-    note.lane = key.lane;
-    note.width = info.width;
-    note.note_type = NoteType::Flick;
-    note.scratch_length = info.scratch;
-    notes.push_back(note);
-  }
-
-  // Holds / slides.
+  // Holds / slides. #2 legacy → blue Hold; #3/#4 → Slide, purple iff end Flick+Air pair.
   std::map<HoldKey, std::vector<RawEvent>> hold_groups;
   for (const auto& ev : events) {
     if (ev.category != 2 && ev.category != 3 && ev.category != 4) continue;
     HoldKey key;
-    key.category = ev.category == 2 ? 2 : 3;  // treat 3/4 as slide family
+    key.category = ev.category == 2 ? 2 : 3;
     key.channel = ev.channel;
     key.lane = (ev.category == 2) ? ev.lane : -1;
     hold_groups[key].push_back(ev);
   }
 
   for (auto& [key, group] : hold_groups) {
-    std::sort(group.begin(), group.end(),
-              [](const RawEvent& a, const RawEvent& b) {
-                if (a.tick != b.tick) return a.tick < b.tick;
-                return a.type < b.type;
-              });
+    std::sort(group.begin(), group.end(), [](const RawEvent& a, const RawEvent& b) {
+      if (a.tick != b.tick) return a.tick < b.tick;
+      return a.type < b.type;
+    });
 
-    // SUS 2.7: same channel links points. After an end, a later start begins a new
-    // hold — pair start/end sequentially instead of keeping only the last of each.
     const RawEvent* start = nullptr;
     std::vector<const RawEvent*> pending_mids;
-    auto emit_hold = [&](const RawEvent& end) {
-      if (start == nullptr || end.tick < start->tick) {
-        start = nullptr;
-        pending_mids.clear();
-        return;
-      }
+    const bool legacy_hold_channel = key.category == 2;
 
-      const int start_lane = map_lane(start->lane);
-      const int start_width = map_width(start->lane, start->width);
-      const int end_lane = map_lane(end.lane);
-      const int end_right = std::min(11, end_lane + map_width(end.lane, end.width) - 1);
-
-      // #2 = Hold family, #3/#4 = ScratchHold family (even when end span == start).
-      // Critical tap fully covering the start → CriticalHold* body (金头), headless.
-      // Damage marker → intentional headless. Else fully covered → headless.
-      // Otherwise auto-generate a head via make_auto_hold_head.
-      const bool scratch = key.category != 2;
+    auto emit_hold_segment = [&](int64_t t0, int64_t t1, int body_lane, int body_width,
+                                 bool scratch, bool jump_scratch, int32_t scratch_len,
+                                 const std::vector<const RawEvent*>& mids_in_range,
+                                 bool is_first_segment) {
       NotationNote body;
       body.id = next_id++;
-      body.start_tick = static_cast<float>(start->tick);
-      body.end_tick = static_cast<float>(end.tick);
-      body.lane = start_lane;
-      body.width = start_width;
-      body.gimmick_type = GimmickType::None;
-      body.scratch_length = 0;
+      body.start_tick = static_cast<float>(t0);
+      body.end_tick = static_cast<float>(t1);
+      body.lane = body_lane;
+      body.width = body_width;
+      body.gimmick_type = jump_scratch ? GimmickType::JumpScratch : GimmickType::None;
+      body.scratch_length = scratch ? scratch_len : 0;
 
       NotationNote cover_probe = body;
       cover_probe.id = -1;
-      const bool critical_cover = hold_start_fully_covered_by_critical(cover_probe, notes);
+      const bool critical_cover =
+          is_first_segment && hold_start_fully_covered_by_critical(cover_probe, notes);
 
       if (scratch) {
         body.note_type =
             critical_cover ? NoteType::ScratchCriticalHold : NoteType::ScratchHold;
-        set_scratch_hold_end_lanes(body, end_lane, end_right);
+        if (scratch_len != 0) {
+          // scratch_length already Sirius-encoded from Air.
+        } else {
+          set_scratch_hold_end_lanes(body, body_lane, body_lane + body_width - 1);
+          body.scratch_length = 0;
+        }
       } else {
         body.note_type = critical_cover ? NoteType::CriticalHold : NoteType::Hold;
       }
 
-      const bool damage_headless = std::any_of(
-          damage_markers.begin(), damage_markers.end(),
-          [&](const SusDamageMarker& d) { return matches_damage_marker(d, body); });
+      SusDamageMarker start_probe;
+      start_probe.tick = static_cast<float>(t0);
+      start_probe.lane = body_lane;
+      start_probe.width = body_width;
+      const bool damage_headless =
+          is_first_segment &&
+          std::any_of(damage_markers.begin(), damage_markers.end(),
+                      [&](const SusDamageMarker& d) {
+                        return matches_damage_marker(d, body);
+                      });
+
+      // End Damage → Nontail degraded to tailed hold.
+      const bool end_damage = std::any_of(
+          damage_end_markers.begin(), damage_end_markers.end(), [&](const SusDamageMarker& d) {
+            return same_tick_f(d.tick, static_cast<float>(t1)) && d.lane == body_lane &&
+                   d.width == body_width;
+          });
+      if (end_damage) {
+        push_unique_warning(warnings, "无尾 Hold（终点 Damage）已转为有尾 Hold");
+      }
+
       notes.push_back(body);
 
-      // Critical cover already provides the start judgment — stay headless.
-      if (!critical_cover && !damage_headless && !hold_start_fully_covered(body, notes)) {
+      if (is_first_segment && !critical_cover && !damage_headless &&
+          !hold_start_fully_covered(body, notes)) {
         ChartDocument doc;
         doc.set_notes(notes);
         if (auto head = make_auto_hold_head(doc, body)) {
@@ -731,18 +867,104 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         }
       }
 
-      for (const RawEvent* mid : pending_mids) {
-        if (mid->tick <= start->tick || mid->tick >= end.tick) continue;
+      for (const RawEvent* mid : mids_in_range) {
+        if (mid->tick <= t0 || mid->tick >= t1) continue;
         NotationNote star;
         star.id = next_id++;
         star.start_tick = static_cast<float>(mid->tick);
         star.end_tick = star.start_tick;
         star.lane = map_lane(mid->lane);
         star.width = map_width(mid->lane, mid->width);
-        star.note_type = NoteType::Sound;
+        star.note_type = scratch ? NoteType::ScratchSound : NoteType::Sound;
         star.gimmick_type = GimmickType::None;
         star.scratch_length = 0;
         notes.push_back(star);
+      }
+    };
+
+    auto emit_hold = [&](const RawEvent& end) {
+      if (start == nullptr || end.tick < start->tick) {
+        start = nullptr;
+        pending_mids.clear();
+        return;
+      }
+
+      const int body_lane = map_lane(start->lane);
+      const int body_width = map_width(start->lane, start->width);
+      const int64_t t_start = start->tick;
+      const int64_t t_end = end.tick;
+
+      FlickPair* end_pair =
+          legacy_hold_channel ? nullptr : find_pair_at(t_end, body_lane, body_width);
+      const bool scratch_family = !legacy_hold_channel && end_pair != nullptr;
+
+      // Split points: mid ticks with paired Flick+Air.
+      struct Cut {
+        int64_t tick;
+        FlickPair* pair;
+      };
+      std::vector<Cut> cuts;
+      if (scratch_family || !legacy_hold_channel) {
+        for (const RawEvent* mid : pending_mids) {
+          if (mid->tick <= t_start || mid->tick >= t_end) continue;
+          FlickPair* mid_pair = find_pair_at(mid->tick, body_lane, body_width);
+          if (mid_pair != nullptr) cuts.push_back({mid->tick, mid_pair});
+        }
+        std::sort(cuts.begin(), cuts.end(),
+                  [](const Cut& a, const Cut& b) { return a.tick < b.tick; });
+      }
+
+      if (!cuts.empty()) {
+        // Mid Flick+Air → multi-segment JumpScratch ScratchHolds.
+        int64_t seg_t0 = t_start;
+        bool first = true;
+        for (const Cut& cut : cuts) {
+          const int body_r = body_lane + body_width - 1;
+          const int32_t sl = scratch_length_from_air_span(
+              cut.pair->air_type, body_lane, body_r, cut.pair->air_lane,
+              cut.pair->air_lane + cut.pair->air_width - 1);
+          cut.pair->consumed = true;
+          std::vector<const RawEvent*> seg_mids;
+          for (const RawEvent* mid : pending_mids) {
+            if (mid->tick > seg_t0 && mid->tick < cut.tick) seg_mids.push_back(mid);
+          }
+          emit_hold_segment(seg_t0, cut.tick, body_lane, body_width, /*scratch=*/true,
+                            /*jump=*/true, sl, seg_mids, first);
+          first = false;
+          seg_t0 = cut.tick;
+        }
+        int32_t end_sl = 0;
+        bool end_jump = false;
+        if (end_pair != nullptr) {
+          const int body_r = body_lane + body_width - 1;
+          end_sl = scratch_length_from_air_span(
+              end_pair->air_type, body_lane, body_r, end_pair->air_lane,
+              end_pair->air_lane + end_pair->air_width - 1);
+          end_pair->consumed = true;
+          end_jump = (end_pair->air_lane != body_lane || end_pair->air_width != body_width);
+        }
+        std::vector<const RawEvent*> seg_mids;
+        for (const RawEvent* mid : pending_mids) {
+          if (mid->tick > seg_t0 && mid->tick < t_end) seg_mids.push_back(mid);
+        }
+        const bool last_scratch = scratch_family || !cuts.empty();
+        emit_hold_segment(seg_t0, t_end, body_lane, body_width, last_scratch, end_jump,
+                          end_sl, seg_mids, first);
+      } else {
+        int32_t scratch_len = 0;
+        bool jump = false;
+        if (end_pair != nullptr) {
+          const int body_r = body_lane + body_width - 1;
+          scratch_len = scratch_length_from_air_span(
+              end_pair->air_type, body_lane, body_r, end_pair->air_lane,
+              end_pair->air_lane + end_pair->air_width - 1);
+          end_pair->consumed = true;
+          if (end_pair->air_lane != body_lane || end_pair->air_width != body_width) {
+            jump = true;
+          }
+        }
+        emit_hold_segment(t_start, t_end, body_lane, body_width, scratch_family, jump,
+                          scratch_len, pending_mids, /*first=*/true);
       }
 
       start = nullptr;
@@ -756,10 +978,75 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       } else if (ev.type == 2) {
         emit_hold(ev);
       } else if (ev.type == 3) {
-        // Visible mid → WDS Sound star.
         if (start != nullptr) pending_mids.push_back(&ev);
       }
-      // type 4 bezier control / type 5 invisible mid — no WDS note
+    }
+  }
+
+  // Remaining unconsumed Flick+Air pairs → standalone Flicks (±1 direction).
+  for (auto& p : flick_pairs) {
+    if (p.consumed) continue;
+    NotationNote note;
+    note.id = next_id++;
+    note.start_tick = static_cast<float>(p.tick);
+    note.end_tick = note.start_tick;
+    note.lane = p.lane;
+    note.width = p.width;
+    note.note_type = NoteType::Flick;
+    note.gimmick_type = GimmickType::None;
+    note.scratch_length = flick_scratch_from_directional(p.air_type);
+    notes.push_back(note);
+    p.consumed = true;
+  }
+
+  // #TIL01 → split-lane gimmick notes (pair +lines start with -lines end).
+  if (saw_hispeed_til) {
+    push_unique_warning(warnings, "已忽略 #TIL00 HiSpeed（编辑器暂不支持）");
+  }
+  {
+    struct OpenSplit {
+      int lines = 0;
+      int types = 0;
+      int64_t tick = 0;
+    };
+    std::vector<OpenSplit> open;
+    auto til_tick = [&](const TilSplitPoint& p) -> int64_t {
+      const int64_t mstart = measure_start_tick(p.measure);
+      double beats = 4.0;
+      for (const auto& [mm, len] : measure_lengths) {
+        if (mm > p.measure) break;
+        beats = len;
+      }
+      const int64_t mlen = static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+      return mstart + mlen * p.subtick / 1920;
+    };
+    std::sort(til_splits.begin(), til_splits.end(), [&](const TilSplitPoint& a,
+                                                       const TilSplitPoint& b) {
+      return til_tick(a) < til_tick(b);
+    });
+    for (const auto& p : til_splits) {
+      const int64_t tick = til_tick(p);
+      if (p.lines > 0) {
+        open.push_back({p.lines, p.types, tick});
+      } else if (p.lines < 0) {
+        const int want = -p.lines;
+        for (auto it = open.begin(); it != open.end(); ++it) {
+          if (it->lines == want && it->types == p.types) {
+            NotationNote split;
+            split.id = next_id++;
+            split.start_tick = static_cast<float>(it->tick);
+            split.end_tick = static_cast<float>(tick);
+            split.lane = 0;
+            split.width = 12;
+            split.note_type = NoteType::None;
+            split.gimmick_type = split_gimmick_for_count(want);
+            split.scratch_length = p.types;
+            notes.push_back(split);
+            open.erase(it);
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -1027,7 +1314,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       HoldEmit h;
       h.head = &n;
       holds.push_back(h);
-    } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::SoundPurple) {
+    } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) {
       mids.push_back(&n);
     } else if (n.note_type == NoteType::HoldEighth) {
       // Synthesized grid — never export (would become Sound stars on re-import).
@@ -1078,40 +1365,28 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     const int64_t t1 = static_cast<int64_t>(std::llround(body->end_tick));
     if (t1 <= t0) continue;
 
-    // Hold/slide channel follows body ribbon geometry. Authored heads (including
-    // partial-width) only drive Critical judgment taps — using head width here
-    // would shrink the body on roundtrip (w=3 body + w=2 head → w=2 body).
+    // Ched: all holds are Slide #3 with body geometry on both ends.
     const int channel_lane = body->lane;
     const int channel_width = std::clamp(body->width, 1, 35);
     const int sl = sus_lane(channel_lane);
 
-    int end_l = channel_lane;
-    int end_w = channel_width;
     const bool scratch_body =
         body->note_type == NoteType::ScratchHold ||
         body->note_type == NoteType::ScratchCriticalHold ||
         body->note_type == NoteType::NontailScratchHold ||
         body->note_type == NoteType::NontailScratchCriticalHold;
-    if (scratch_body) {
-      const auto range = get_scratch_end_lane_range(*body);
-      end_l = range.first;
-      end_w = std::max(1, range.second - range.first + 1);
-    }
 
-    // Hold family → #2; ScratchHold family → #3 even when end span equals start
-    // (otherwise purple/blue collapse on roundtrip).
-    const bool as_slide = scratch_body;
-    std::string suffix = as_slide ? "3" : "2";
+    std::string suffix = "3";
     suffix.push_back(base36_digit(sl));
     suffix.push_back(base36_digit(h.channel));
     place(suffix, t0, 1, channel_width);
 
-    std::string end_suffix = as_slide ? "3" : "2";
-    end_suffix.push_back(base36_digit(sus_lane(end_l)));
+    std::string end_suffix = "3";
+    end_suffix.push_back(base36_digit(sl));
     end_suffix.push_back(base36_digit(h.channel));
-    place(end_suffix, t1, 2, std::clamp(end_w, 1, 35));
+    place(end_suffix, t1, 2, channel_width);
 
-    // Critical Hold* → Critical tap + hold/slide channel (no separate HoldStart*).
+    // Critical Hold* → Critical tap + slide channel (no separate HoldStart*).
     const bool critical_hold =
         (!authored_headless &&
          (head->note_type == NoteType::CriticalHoldStart ||
@@ -1138,14 +1413,27 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       place(dmg_suffix, t0, kSusTapDamage, std::clamp(body->width, 1, 35));
     }
 
+    // Purple tail: paired Flick (#1 type3) + Air (#5) at end (required by Ched).
+    if (scratch_body) {
+      const auto cover = get_scratch_end_lane_range(*body);
+      const int cover_l = cover.first;
+      const int cover_w = std::max(1, cover.second - cover.first + 1);
+      const int air_dir = air_type_from_scratch_length(body->scratch_length);
+      std::string flick_suffix = "1";
+      flick_suffix.push_back(base36_digit(sus_lane(cover_l)));
+      place(flick_suffix, t1, kSusTapFlick, cover_w);
+      std::string air_suffix = "5";
+      air_suffix.push_back(base36_digit(sus_lane(cover_l)));
+      place(air_suffix, t1, air_dir, cover_w);
+    }
+
     for (const NotationNote* mid : mids) {
-      // HoldEighth is synthesized in-editor — never write as SUS mid (type 3 → Sound).
       if (mid->note_type == NoteType::HoldEighth) continue;
       if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
       if (mid->lane + mid->width <= body->lane || mid->lane >= body->lane + body->width) {
         continue;
       }
-      std::string mid_suffix = as_slide ? "3" : "2";
+      std::string mid_suffix = "3";
       mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
       mid_suffix.push_back(base36_digit(h.channel));
       place(mid_suffix, static_cast<int64_t>(std::llround(mid->start_tick)), 3,
@@ -1172,6 +1460,34 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       std::string suffix = "1";
       suffix.push_back(base36_digit(sl));
       place(suffix, tick, type, w);
+    }
+  }
+
+  // #TIL01 split-lane gimmicks.
+  {
+    std::vector<std::string> til_entries;
+    auto fmt_til = [&](int64_t tick, int lines, int types) {
+      const auto loc = locate_tick(tick);
+      const int sub = static_cast<int>(
+          std::clamp<int64_t>((loc.local * 1920 + loc.measure_len / 2) / loc.measure_len, 0, 1919));
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), "%d'%04d:%02d.%05d", loc.measure, sub, lines, types);
+      til_entries.push_back(buf);
+    };
+    for (const auto& n : chart.notes) {
+      if (!is_split_lane_gimmick(n.gimmick_type)) continue;
+      const int lines = std::clamp(get_split_count(n.gimmick_type), 1, 6);
+      const int types = std::max(0, n.scratch_length);
+      fmt_til(static_cast<int64_t>(std::llround(n.start_tick)), lines, types);
+      fmt_til(static_cast<int64_t>(std::llround(n.end_tick)), -lines, types);
+    }
+    if (!til_entries.empty()) {
+      ss << "#TIL01 \"";
+      for (size_t i = 0; i < til_entries.size(); ++i) {
+        if (i) ss << ", ";
+        ss << til_entries[i];
+      }
+      ss << "\"\n\n";
     }
   }
 
