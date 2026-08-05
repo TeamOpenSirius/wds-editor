@@ -101,7 +101,7 @@ void PreviewConcurrentLineInstance::assign(const PreviewConcurrentLineInstance& 
 
 uint64_t PreviewSnapshot::concurrent_line_key(int64_t milliseconds,
                                               int32_t start_lane) noexcept {
-  return (static_cast<uint64_t>(milliseconds) << 16) ^
+  return (static_cast<uint64_t>(milliseconds) << 32) |
          static_cast<uint64_t>(static_cast<uint32_t>(start_lane));
 }
 

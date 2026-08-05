@@ -686,7 +686,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
 
   const float unit = geometry_.content_unit();
   const float w = geometry_.lane_width(lane, p);
-  const float w_ref = geometry_.lane_width(lane, 1.0f);
+  const float w_ref = std::max(geometry_.lane_width(lane, 1.0f), 1e-6f);
   const float multiplier = w / w_ref;
   const Vec2 c1 = geometry_.lane_position(lane, p);
   const Vec2 c2 = geometry_.lane_position(end_lane, p);
@@ -982,7 +982,8 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     if (clip == wds::audio::HitSfxClip::Count) {
       return;
     }
-    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(note_id)) << 2) | kind;
+    const uint64_t key = (static_cast<uint64_t>(snapshot.revision) << 32) |
+                         (static_cast<uint64_t>(static_cast<uint32_t>(note_id)) << 2) | kind;
     const int64_t when_ms = music_clock ? transport_hit_ms(hit_ms) : hit_ms;
     const int64_t when_us = when_ms * 1000;
 
@@ -1102,6 +1103,11 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
   const uint64_t pos_gen = hit_sfx_.position_generation();
   const bool control_event = pos_gen != sfx_position_generation_;
   const bool pause_edge = !playing && sfx_was_playing_;
+  const bool revision_changed = snapshot.revision != sfx_document_revision_;
+  if (revision_changed) {
+    hit_sfx_played_.clear();
+    sfx_document_revision_ = snapshot.revision;
+  }
 
   if (control_event || pause_edge) {
     release_sfx_clock_control(snapshot, raw_us, playing);

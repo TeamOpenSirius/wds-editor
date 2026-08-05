@@ -14,7 +14,7 @@ bool HitSfxPlayer::has_music() const noexcept {
 }
 
 int64_t HitSfxPlayer::music_position_ms() const noexcept {
-  return wds::common::us_to_ms_round(music_position());
+  return wds::common::us_to_ms_floor(music_position());
 }
 
 wds::common::Microseconds HitSfxPlayer::music_position() const noexcept {

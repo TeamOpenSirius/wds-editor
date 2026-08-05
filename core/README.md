@@ -103,7 +103,7 @@ snapshot.clear_keep_capacity();
 | 头文件 | 作用 |
 |--------|------|
 | `notation.hpp` / `types.hpp` | 谱面与音符类型 |
-| `official_chart.hpp` / `sus_chart.hpp` | 官方 CSV / SUS 相关 |
+| `official_chart.hpp` / `sus_chart.hpp` | 官方 CSV / SUS 相关（仅保证 Ched 12 键窗口子集；lane offset 为有意设计） |
 | `project.hpp` / `chart_session.hpp` | 工程与会话 |
 | `edit_history.hpp` / `note_edit_ops.hpp` / `edit_grid.hpp` | 撤销与编辑操作 |
 | `chart_serializer.hpp` | 读写盘 |

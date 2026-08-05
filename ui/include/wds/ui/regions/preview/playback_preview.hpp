@@ -151,6 +151,7 @@ class PlaybackPreviewView {
   int64_t sfx_mono_us_ = -1;
   // AudioEngine::position_generation() — seek / scrub / play set_position.
   uint64_t sfx_position_generation_ = std::numeric_limits<uint64_t>::max();
+  uint64_t sfx_document_revision_ = std::numeric_limits<uint64_t>::max();
   bool sfx_was_playing_ = false;
   std::unordered_set<uint64_t> hit_sfx_played_;
 };

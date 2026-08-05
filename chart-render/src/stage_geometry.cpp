@@ -208,10 +208,11 @@ Quad StageGeometry::stage_quad() const {
 
 Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) const {
   const float unit = content_unit();
-  const float w_ref = lane_width(lane, 1.0f);
+  const float w_ref = std::max(lane_width(lane, 1.0f), 1e-6f);
   const float w = lane_width(lane, percent);
+  const float stage_h = std::max(stage_.h, 1e-6f);
   // note_height is authored in full-screen half-height units (=1); scale with content.
-  const float multiplier = config_.note_height * unit * 0.5f / stage_.h * w / w_ref;
+  const float multiplier = config_.note_height * unit * 0.5f / stage_h * w / w_ref;
 
   const Vec2 c1 = lane_position(lane, percent - multiplier);
   const Vec2 c2 = lane_position(lane, percent + multiplier);

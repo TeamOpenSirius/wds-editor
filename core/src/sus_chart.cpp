@@ -125,7 +125,7 @@ NoteType tap_type_from_sus(int type) {
   }
 }
 
-bool same_tick_f(float a, float b) { return std::abs(a - b) < 0.5f; }
+bool same_tick_i(int32_t a, int32_t b) { return a == b; }
 
 // Start lanes fully occupied by non-hold-body notes (or other hold tails ending
 // here). Other hold bodies that merely start here are ignored — same occupancy
@@ -144,7 +144,7 @@ bool hold_start_fully_covered(const NotationNote& hold,
   for (const auto& note : notes) {
     if (note.id == hold.id) continue;
     if (is_hold_with_tail(note.note_type)) {
-      if (!same_tick_f(note.end_tick, hold.start_tick)) continue;
+      if (!same_tick_i(note.end_tick, hold.start_tick)) continue;
       if (is_scratch_hold_body(note.note_type)) {
         const auto [tail_lo, tail_hi] = get_scratch_end_lane_range(note);
         mark_range(occupied, tail_lo, tail_hi);
@@ -153,20 +153,20 @@ bool hold_start_fully_covered(const NotationNote& hold,
       }
       continue;
     }
-    if (!same_tick_f(note.start_tick, hold.start_tick)) continue;
+    if (!same_tick_i(note.start_tick, hold.start_tick)) continue;
     mark_range(occupied, note.lane, note.end_lane());
   }
   return std::all_of(occupied.begin(), occupied.end(), [](char c) { return c != 0; });
 }
 
 struct SusDamageMarker {
-  float tick = 0.0f;
+  int32_t tick = 0;
   int32_t lane = 0;
   int32_t width = 1;
 };
 
 bool matches_damage_marker(const SusDamageMarker& dmg, const NotationNote& hold) {
-  return same_tick_f(dmg.tick, hold.start_tick) && dmg.lane == hold.lane &&
+  return same_tick_i(dmg.tick, hold.start_tick) && dmg.lane == hold.lane &&
          dmg.width == hold.width;
 }
 
@@ -177,7 +177,7 @@ bool hold_start_fully_covered_by_critical(const NotationNote& hold,
   std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
   for (const auto& note : notes) {
     if (note.note_type != NoteType::Critical) continue;
-    if (!same_tick_f(note.start_tick, hold.start_tick)) continue;
+    if (!same_tick_i(note.start_tick, hold.start_tick)) continue;
     const int32_t lo = std::max(note.lane, hold.lane);
     const int32_t hi = std::min(note.end_lane(), hold.end_lane());
     for (int32_t lane = lo; lane <= hi; ++lane) {
@@ -646,6 +646,11 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
   normalize_timing_points(chart.timing);
 
+  // Lane offset: intentional Ched-SUS-only heuristic (not a general SUS importer).
+  // Supported subset: charts written by Ched / WDS↔Ched 12-key window (typically
+  // lanes 2..d with padding offset=2). Non-Ched layouts (bare 0–11, arbitrary
+  // 16-column pads, other toolchains) are out of scope by design — do not "fix"
+  // offset=2 for those. If round-trip with Ched matches, behavior is correct.
   // Lane offset: WDS export with ched_lane_padding writes L → L+2 (Ched 12-key
   // window 2..d). Prefer offset 2 whenever data fits that window so right-side
   // notes (e.g. WDS lane 7 → SUS 9) do not import as lane 9 with offset 0.
@@ -760,7 +765,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     if (ev.category != 1) continue;
     if (ev.type == kSusTapDamage) {
       SusDamageMarker dmg;
-      dmg.tick = static_cast<float>(ev.tick);
+      dmg.tick = static_cast<int32_t>(ev.tick);
       dmg.lane = map_lane(ev.lane);
       dmg.width = map_width(ev.lane, ev.width);
       damage_markers.push_back(dmg);
@@ -771,7 +776,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     if (ev.type == kSusTapNormal || ev.type == kSusTapCritical) {
       NotationNote note;
       note.id = next_id++;
-      note.start_tick = static_cast<float>(ev.tick);
+      note.start_tick = static_cast<int32_t>(ev.tick);
       note.end_tick = note.start_tick;
       note.lane = map_lane(ev.lane);
       note.width = map_width(ev.lane, ev.width);
@@ -809,8 +814,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
                                  bool is_first_segment) {
       NotationNote body;
       body.id = next_id++;
-      body.start_tick = static_cast<float>(t0);
-      body.end_tick = static_cast<float>(t1);
+      body.start_tick = static_cast<int32_t>(t0);
+      body.end_tick = static_cast<int32_t>(t1);
       body.lane = body_lane;
       body.width = body_width;
       body.gimmick_type = jump_scratch ? GimmickType::JumpScratch : GimmickType::None;
@@ -835,7 +840,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       }
 
       SusDamageMarker start_probe;
-      start_probe.tick = static_cast<float>(t0);
+      start_probe.tick = static_cast<int32_t>(t0);
       start_probe.lane = body_lane;
       start_probe.width = body_width;
       const bool damage_headless =
@@ -848,7 +853,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       // End Damage → Nontail degraded to tailed hold.
       const bool end_damage = std::any_of(
           damage_end_markers.begin(), damage_end_markers.end(), [&](const SusDamageMarker& d) {
-            return same_tick_f(d.tick, static_cast<float>(t1)) && d.lane == body_lane &&
+            return same_tick_i(d.tick, static_cast<int32_t>(t1)) && d.lane == body_lane &&
                    d.width == body_width;
           });
       if (end_damage) {
@@ -871,7 +876,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         if (mid->tick <= t0 || mid->tick >= t1) continue;
         NotationNote star;
         star.id = next_id++;
-        star.start_tick = static_cast<float>(mid->tick);
+        star.start_tick = static_cast<int32_t>(mid->tick);
         star.end_tick = star.start_tick;
         star.lane = map_lane(mid->lane);
         star.width = map_width(mid->lane, mid->width);
@@ -988,7 +993,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     if (p.consumed) continue;
     NotationNote note;
     note.id = next_id++;
-    note.start_tick = static_cast<float>(p.tick);
+    note.start_tick = static_cast<int32_t>(p.tick);
     note.end_tick = note.start_tick;
     note.lane = p.lane;
     note.width = p.width;
@@ -1034,8 +1039,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
           if (it->lines == want && it->types == p.types) {
             NotationNote split;
             split.id = next_id++;
-            split.start_tick = static_cast<float>(it->tick);
-            split.end_tick = static_cast<float>(tick);
+            split.start_tick = static_cast<int32_t>(it->tick);
+            split.end_tick = static_cast<int32_t>(tick);
             split.lane = 0;
             split.width = 12;
             split.note_type = NoteType::None;
@@ -1088,8 +1093,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     max_tick = std::max(max_tick, static_cast<int64_t>(p.tick));
   }
   for (const auto& n : chart.notes) {
-    max_tick = std::max(max_tick, static_cast<int64_t>(std::llround(n.start_tick)));
-    max_tick = std::max(max_tick, static_cast<int64_t>(std::llround(n.end_tick)));
+    max_tick = std::max(max_tick, static_cast<int64_t>(n.start_tick));
+    max_tick = std::max(max_tick, static_cast<int64_t>(n.end_tick));
   }
   std::vector<int32_t> measure_starts = measure_ticks_in_range(0, static_cast<int32_t>(max_tick), timing);
   if (measure_starts.empty()) measure_starts.push_back(0);
@@ -1295,7 +1300,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   auto notes_overlap = [](const NotationNote& a, const NotationNote& b) {
     return a.lane <= b.end_lane() && b.lane <= a.end_lane();
   };
-  auto same_tick = [](float a, float b) { return std::abs(a - b) < 0.5f; };
+  auto same_tick = [](int32_t a, int32_t b) { return a == b; };
 
   struct HoldEmit {
     const NotationNote* head = nullptr;
@@ -1361,8 +1366,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     if (head == nullptr) head = body;
 
     h.channel = alloc_channel();
-    const int64_t t0 = static_cast<int64_t>(std::llround(body->start_tick));
-    const int64_t t1 = static_cast<int64_t>(std::llround(body->end_tick));
+    const int64_t t0 = static_cast<int64_t>(body->start_tick);
+    const int64_t t1 = static_cast<int64_t>(body->end_tick);
     if (t1 <= t0) continue;
 
     // Ched: all holds are Slide #3 with body geometry on both ends.
@@ -1436,13 +1441,13 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       std::string mid_suffix = "3";
       mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
       mid_suffix.push_back(base36_digit(h.channel));
-      place(mid_suffix, static_cast<int64_t>(std::llround(mid->start_tick)), 3,
+      place(mid_suffix, static_cast<int64_t>(mid->start_tick), 3,
             std::clamp(mid->width, 1, 35));
     }
   }
 
   for (const NotationNote* n : taps) {
-    const int64_t tick = static_cast<int64_t>(std::llround(n->start_tick));
+    const int64_t tick = static_cast<int64_t>(n->start_tick);
     const int sl = sus_lane(n->lane);
     const int w = std::clamp(n->width, 1, 35);
     if (n->note_type == NoteType::Flick) {
@@ -1478,8 +1483,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       if (!is_split_lane_gimmick(n.gimmick_type)) continue;
       const int lines = std::clamp(get_split_count(n.gimmick_type), 1, 6);
       const int types = std::max(0, n.scratch_length);
-      fmt_til(static_cast<int64_t>(std::llround(n.start_tick)), lines, types);
-      fmt_til(static_cast<int64_t>(std::llround(n.end_tick)), -lines, types);
+      fmt_til(static_cast<int64_t>(n.start_tick), lines, types);
+      fmt_til(static_cast<int64_t>(n.end_tick), -lines, types);
     }
     if (!til_entries.empty()) {
       ss << "#TIL01 \"";

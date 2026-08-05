@@ -307,6 +307,10 @@ void AudioEngine::shutdown() {
     return;
   }
 
+  // Invalidate in-flight BASS POS callbacks before freeing samples / impl_.
+  shutting_down_.store(true, std::memory_order_release);
+  sfx_epoch_.fetch_add(1, std::memory_order_acq_rel);
+  clear_scheduled_sfx();
   stop_all_sfx();
 
   if (impl_->keep_alive != 0) {
@@ -323,6 +327,11 @@ void AudioEngine::shutdown() {
   music_ = 0;
   music_playing_ = false;
   music_base_freq_ = 0.0f;
+
+  {
+    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    impl_->pending_syncs.clear();
+  }
 
   for (auto& sample : impl_->samples) {
     if (sample != 0) {
@@ -342,6 +351,7 @@ void AudioEngine::shutdown() {
   impl_ = nullptr;
   ready_ = false;
   sfx_ready_ = false;
+  shutting_down_.store(false, std::memory_order_release);
 }
 
 wds::common::Microseconds AudioEngine::position() const {
@@ -522,7 +532,8 @@ std::uint64_t AudioEngine::align_music_bytes(std::uint64_t bytes) const noexcept
 }
 
 bool AudioEngine::play_sfx_internal(HitSfxClip clip, bool lock_music) {
-  if (!sfx_ready_ || impl_ == nullptr || clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
+  if (shutting_down_.load(std::memory_order_acquire) || !sfx_ready_ || impl_ == nullptr ||
+      clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
     return false;
   }
   const size_t idx = static_cast<size_t>(clip);
@@ -583,12 +594,15 @@ void AudioEngine::cache_music_format() {
 }
 
 void AudioEngine::handle_sfx_sync(unsigned long long sync_handle) {
-  if (impl_ == nullptr) {
+  if (shutting_down_.load(std::memory_order_acquire) || impl_ == nullptr) {
     return;
   }
   HitSfxClip clip = HitSfxClip::Count;
   {
     std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    if (shutting_down_.load(std::memory_order_acquire) || impl_ == nullptr) {
+      return;
+    }
     auto& syncs = impl_->pending_syncs;
     for (size_t i = 0; i < syncs.size(); ++i) {
       if (static_cast<unsigned long long>(syncs[i].handle) == sync_handle) {
@@ -598,7 +612,8 @@ void AudioEngine::handle_sfx_sync(unsigned long long sync_handle) {
       }
     }
   }
-  if (clip != HitSfxClip::Count) {
+  if (clip != HitSfxClip::Count && !shutting_down_.load(std::memory_order_acquire) &&
+      impl_ != nullptr) {
     play_sfx_internal(clip, /*lock_music=*/false);
   }
 }

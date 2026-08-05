@@ -79,14 +79,14 @@ bool parse_int(const std::string& text, int32_t& out) {
   }
 }
 
-float seconds_to_tick(double seconds, const MusicTiming& timing) {
+int32_t seconds_to_tick(double seconds, const MusicTiming& timing) {
   // Official CSV seconds are chart-local (DelaySeconds lives in music_config).
   MusicTiming local = timing;
   local.offset_ms = 0;
   return milliseconds_to_tick(static_cast<int64_t>(std::llround(seconds * 1000.0)), local);
 }
 
-double tick_to_seconds(float tick, const MusicTiming& timing) {
+double tick_to_seconds(int32_t tick, const MusicTiming& timing) {
   // Integrate BPM changes; exclude project-level chart delay (music_config DelaySeconds).
   MusicTiming local = timing;
   local.offset_ms = 0;
@@ -162,12 +162,12 @@ bool lanes_overlap_notes(const NotationNote& a, const NotationNote& b) noexcept 
 void apply_sound_purple_cuts(std::vector<NotationNote>& notes, int32_t& next_id,
                              const std::vector<NotationNote>& cuts) {
   for (const auto& cut : cuts) {
-    const float cut_tick = cut.start_tick;
+    const int32_t cut_tick = cut.start_tick;
     int best = -1;
     for (int i = 0; i < static_cast<int>(notes.size()); ++i) {
       const auto& n = notes[static_cast<size_t>(i)];
       if (!is_scratch_hold_body(n.note_type)) continue;
-      if (!(cut_tick > n.start_tick + 0.5f && cut_tick < n.end_tick - 0.5f)) continue;
+      if (!(cut_tick > n.start_tick && cut_tick < n.end_tick)) continue;
       if (!lanes_overlap_notes(n, cut)) continue;
       best = i;
       break;

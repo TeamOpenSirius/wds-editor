@@ -249,6 +249,12 @@ void IconButton::on_pointer_up(const PointerUpEvent& event) {
 }
 
 void IconButton::on_click(const ClickEvent& event) {
-  if (enabled_ && event.button == PointerButton::Left && on_click_) on_click_();
+  if (!enabled_ || event.button != PointerButton::Left || !on_click_) {
+    return;
+  }
+  if (!absolute_bounds().contains(event.position)) {
+    return;
+  }
+  on_click_();
 }
 }  // namespace wds::interaction

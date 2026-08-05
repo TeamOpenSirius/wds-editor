@@ -433,9 +433,9 @@ void ChartEditRenderer::paint_overlays(
       }
     }
 
-    const float y0 = viewport.y_at(static_cast<float>(note.start_tick));
+    const float y0 = viewport.y_at(note.start_tick);
     const float y1 =
-        note.end_tick > note.start_tick ? viewport.y_at(static_cast<float>(note.end_tick)) : y0;
+        note.end_tick > note.start_tick ? viewport.y_at(note.end_tick) : y0;
     const float cap = note_h * 0.55f + kPad;
     float top = std::min(y0, y1) - cap;
     float bottom = std::max(y0, y1) + cap;

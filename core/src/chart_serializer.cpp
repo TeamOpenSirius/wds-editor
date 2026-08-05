@@ -6,6 +6,7 @@
 #include <wds/core/timing_map.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <unordered_set>
 
@@ -188,7 +189,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       int32_t note_type_raw = 0;
       int32_t gimmick_raw = 0;
 
-      file >> note.id >> note.start_tick >> note.end_tick >> note_type_raw >> note.lane >>
+      double start_tick_raw = 0.0;
+      double end_tick_raw = 0.0;
+      file >> note.id >> start_tick_raw >> end_tick_raw >> note_type_raw >> note.lane >>
           note.width >> gimmick_raw >> note.scratch_length;
 
       if (!file) {
@@ -216,9 +219,11 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       if (note.lane < 0 || note.width < 0 || note.lane + note.width > 12) {
         return {SerializeError::ParseError, "note lane/width out of range"};
       }
-      if (note.start_tick < 0.0f || note.end_tick < 0.0f) {
+      if (start_tick_raw < 0.0 || end_tick_raw < 0.0) {
         return {SerializeError::ParseError, "note tick out of range"};
       }
+      note.start_tick = static_cast<int32_t>(std::llround(start_tick_raw));
+      note.end_tick = static_cast<int32_t>(std::llround(end_tick_raw));
       if (note.id >= 0 && !seen_ids.insert(note.id).second) {
         return {SerializeError::ParseError, "duplicate note id"};
       }

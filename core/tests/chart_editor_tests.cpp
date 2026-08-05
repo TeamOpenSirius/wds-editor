@@ -31,7 +31,7 @@ namespace {
 using namespace wds::chart_editor;
 namespace fs = std::filesystem;
 
-NotationNote make_tap(float start_tick, int32_t lane) {
+NotationNote make_tap(int32_t start_tick, int32_t lane) {
   NotationNote note;
   note.start_tick = start_tick;
   note.lane = lane;
@@ -62,9 +62,9 @@ fs::path temp_chart_path(const char* name) {
 
 void test_auto_note_id_starts_at_zero() {
   ChartDocument doc;
-  const int32_t a = doc.add_note(make_tap(0.0f, 0));
-  const int32_t b = doc.add_note(make_tap(480.0f, 1));
-  const int32_t c = doc.add_note(make_tap(960.0f, 2));
+  const int32_t a = doc.add_note(make_tap(0, 0));
+  const int32_t b = doc.add_note(make_tap(480, 1));
+  const int32_t c = doc.add_note(make_tap(960, 2));
 
   CHECK_EQ(a, 0);
   CHECK_EQ(b, 1);
@@ -76,39 +76,39 @@ void test_auto_note_id_starts_at_zero() {
 void test_concurrent_lines_multi_press_only() {
   ChartDocument doc;
   // Lone taps at different times → no sync line.
-  doc.add_note(make_tap(0.0f, 0));
-  doc.add_note(make_tap(480.0f, 1));
+  doc.add_note(make_tap(0, 0));
+  doc.add_note(make_tap(480, 1));
   CHECK_EQ(static_cast<int32_t>(doc.concurrent_lines().size()), 0);
 
   // Second note at the same tick → multi-press sync line.
-  doc.add_note(make_tap(0.0f, 4));
+  doc.add_note(make_tap(0, 4));
   CHECK_EQ(static_cast<int32_t>(doc.concurrent_lines().size()), 1);
   CHECK_EQ(doc.concurrent_lines()[0].start_lane, 0);
   CHECK_EQ(doc.concurrent_lines()[0].width, 5);  // lanes 0..4
 
   // Hold body / eighth / mid-star must not create or join sync lines by themselves.
   ChartDocument hold_doc;
-  NotationNote body = make_tap(0.0f, 2);
+  NotationNote body = make_tap(0, 2);
   body.note_type = NoteType::Hold;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   hold_doc.add_note(body);
-  NotationNote eighth = make_tap(480.0f, 2);
+  NotationNote eighth = make_tap(480, 2);
   eighth.note_type = NoteType::HoldEighth;
   hold_doc.add_note(eighth);
-  NotationNote star = make_tap(240.0f, 2);
+  NotationNote star = make_tap(240, 2);
   star.note_type = NoteType::Sound;
   hold_doc.add_note(star);
   CHECK_EQ(static_cast<int32_t>(hold_doc.concurrent_lines().size()), 0);
 
   // Hold tail + tap at the same end time → sync line (tail is a hit, not body/star).
-  NotationNote tap_at_end = make_tap(960.0f, 6);
+  NotationNote tap_at_end = make_tap(960, 6);
   hold_doc.add_note(tap_at_end);
   CHECK_EQ(static_cast<int32_t>(hold_doc.concurrent_lines().size()), 1);
 }
 
 void test_explicit_note_id_zero() {
   ChartDocument doc;
-  NotationNote note = make_tap(120.0f, 3);
+  NotationNote note = make_tap(120, 3);
   note.id = 0;
   const int32_t id = doc.add_note(note);
 
@@ -123,12 +123,12 @@ void test_explicit_note_id_zero() {
 void test_normalize_for_save_reassigns_zero_based() {
   ChartDocument doc;
 
-  NotationNote late = make_tap(960.0f, 2);
+  NotationNote late = make_tap(960, 2);
   late.id = 99;
-  NotationNote early = make_tap(0.0f, 0);
+  NotationNote early = make_tap(0, 0);
   early.id = 42;
-  NotationNote mid = make_tap(480.0f, 1);
-  mid.end_tick = 960.0f;
+  NotationNote mid = make_tap(480, 1);
+  mid.end_tick = 960;
   mid.id = 7;
 
   doc.set_notes({late, early, mid});
@@ -136,9 +136,9 @@ void test_normalize_for_save_reassigns_zero_based() {
 
   const auto& notes = doc.notes();
   CHECK_EQ(static_cast<int32_t>(notes.size()), 3);
-  CHECK_EQ(notes[0].start_tick, 0.0f);
-  CHECK_EQ(notes[1].start_tick, 480.0f);
-  CHECK_EQ(notes[2].start_tick, 960.0f);
+  CHECK_EQ(notes[0].start_tick, 0);
+  CHECK_EQ(notes[1].start_tick, 480);
+  CHECK_EQ(notes[2].start_tick, 960);
   CHECK_EQ(notes[0].id, 0);
   CHECK_EQ(notes[1].id, 1);
   CHECK_EQ(notes[2].id, 2);
@@ -148,13 +148,13 @@ void test_normalize_for_save_reassigns_zero_based() {
 void test_save_reload_normalizes_and_reloads() {
   ChartEditorEngine engine;
 
-  NotationNote split = make_tap(0.0f, 0);
-  split.end_tick = 1920.0f;
+  NotationNote split = make_tap(0, 0);
+  split.end_tick = 1920;
   split.width = 6;
   split.gimmick_type = GimmickType::Split3;
   engine.add_note(split);
 
-  NotationNote tap = make_tap(480.0f, 2);
+  NotationNote tap = make_tap(480, 2);
   engine.add_note(tap);
 
   const fs::path path = temp_chart_path("save_reload.wdschart");
@@ -166,8 +166,8 @@ void test_save_reload_normalizes_and_reloads() {
   CHECK_EQ(static_cast<int32_t>(notes.size()), 2);
   CHECK_EQ(notes[0].id, 0);
   CHECK_EQ(notes[1].id, 1);
-  CHECK_EQ(notes[0].start_tick, 0.0f);
-  CHECK_EQ(notes[1].start_tick, 480.0f);
+  CHECK_EQ(notes[0].start_tick, 0);
+  CHECK_EQ(notes[1].start_tick, 480);
 
   ChartEditorEngine reloaded;
   const auto load = reloaded.load_from_file(path.string());
@@ -194,10 +194,12 @@ void test_load_fixture_normalized_chart() {
   CHECK(n0.has_value());
   CHECK(n1.has_value());
   CHECK(n2.has_value());
-  CHECK_EQ(n0->start_tick, 0.0f);
-  CHECK_EQ(n1->start_tick, 480.0f);
+  CHECK_EQ(n0->start_tick, 0);
+  CHECK_EQ(n1->start_tick, 480);
   CHECK_EQ(n2->gimmick_type, GimmickType::Split3);
-  CHECK_EQ(static_cast<int32_t>(engine.document().concurrent_lines().size()), 1);
+  // load_from_chart rebuilds concurrent lines from notes (file CONCURRENT may be stale).
+  // Fixture has one Normal + Split at tick 0 → no multi-press concurrent line.
+  CHECK_EQ(static_cast<int32_t>(engine.document().concurrent_lines().size()), 0);
 }
 
 void test_start_ms_avl_index_range_query() {
@@ -236,9 +238,9 @@ void test_start_ms_avl_index_range_query() {
 
 void test_chart_note_index_candidates() {
   ChartDocument doc;
-  doc.add_note(make_tap(0.0f, 0));
-  doc.add_note(make_tap(480.0f, 1));
-  doc.add_note(make_tap(960.0f, 2));
+  doc.add_note(make_tap(0, 0));
+  doc.add_note(make_tap(480, 1));
+  doc.add_note(make_tap(960, 2));
 
   // start_ms ≈ 0, 500, 1000 at default 120 BPM / 480 TPQ
   std::vector<int32_t> candidates;
@@ -252,9 +254,9 @@ void test_chart_note_index_candidates() {
 
 void test_remove_note_keeps_zero_based_ids() {
   ChartDocument doc;
-  doc.add_note(make_tap(0.0f, 0));
-  doc.add_note(make_tap(480.0f, 1));
-  doc.add_note(make_tap(960.0f, 2));
+  doc.add_note(make_tap(0, 0));
+  doc.add_note(make_tap(480, 1));
+  doc.add_note(make_tap(960, 2));
 
   CHECK(doc.remove_note(1));
   CHECK(!doc.find_note(1).has_value());
@@ -334,7 +336,7 @@ void test_snapshot_incremental_tick() {
   engine.document().set_timing(timing);
 
   for (int i = 0; i < 8; ++i) {
-    engine.add_note(make_tap(static_cast<float>(i * 480), i % 6));
+    engine.add_note(make_tap(i * 480, i % 6));
   }
 
   // Large scrub forces FullRebuild; small tick should then IncrementalPatch.
@@ -366,12 +368,12 @@ void test_snapshot_aux_objects_incremental() {
   timing.ticks_per_quarter = 480;
   engine.document().set_timing(timing);
 
-  NotationNote split = make_tap(0.0f, 0);
-  split.end_tick = 1920.0f;
+  NotationNote split = make_tap(0, 0);
+  split.end_tick = 1920;
   split.width = 6;
   split.gimmick_type = GimmickType::Split3;
   engine.add_note(split);
-  engine.add_note(make_tap(480.0f, 2));
+  engine.add_note(make_tap(480, 2));
 
   ConcurrentLineNote line;
   line.milliseconds = 500;
@@ -421,9 +423,9 @@ void test_snapshot_large_seek_full_rebuild() {
   timing.bpm = 120.0;
   timing.ticks_per_quarter = 480;
   engine.document().set_timing(timing);
-  engine.add_note(make_tap(0.0f, 0));
-  engine.add_note(make_tap(480.0f, 1));
-  engine.add_note(make_tap(960.0f, 2));
+  engine.add_note(make_tap(0, 0));
+  engine.add_note(make_tap(480, 1));
+  engine.add_note(make_tap(960, 2));
 
   engine.seek(0);
   engine.tick(16);
@@ -567,22 +569,22 @@ void test_hold_start_visible_with_zero_end_tick() {
   engine.set_preview_config(cfg);
 
   NotationNote hs;
-  hs.start_tick = 480.0f;  // 1s @ BPM 60
-  hs.end_tick = 0.0f;      // buggy legacy / pre-fix import shape
+  hs.start_tick = 480;  // 1s @ BPM 60
+  hs.end_tick = 0;      // buggy legacy / pre-fix import shape
   hs.lane = 0;
   hs.width = 3;
   hs.note_type = NoteType::HoldStart;
   engine.add_note(hs);
 
   NotationNote body;
-  body.start_tick = 480.0f;
-  body.end_tick = 960.0f;
+  body.start_tick = 480;
+  body.end_tick = 960;
   body.lane = 0;
   body.width = 3;
   body.note_type = NoteType::Hold;
   engine.add_note(body);
 
-  const int64_t start_ms = tick_to_milliseconds(480.0f, timing);
+  const int64_t start_ms = tick_to_milliseconds(480, timing);
   CHECK_EQ(start_ms, 3019 + 1000);
 
   // Mid-approach: head must be visible (Approaching), not expired against end_ms=offset.
@@ -666,9 +668,13 @@ void test_official_chart_import_and_roundtrip() {
   for (const auto& n : notes) {
     if (n.note_type == NoteType::Critical && n.width == 4 && n.lane == 0) {
       found_critical = true;
-      CHECK(std::abs(n.start_tick - 1.0169f * 480.0f) < 0.5f);
+      // seconds → ms (llround) → tick (llround); not plain seconds*tpq.
+      MusicTiming local = timing;
+      local.offset_ms = 0;
+      CHECK_EQ(n.start_tick,
+               milliseconds_to_tick(static_cast<int64_t>(std::llround(1.0169 * 1000.0)), local));
       // Instantaneous official rows: end_tick == start_tick (not 0).
-      CHECK(std::abs(n.end_tick - n.start_tick) < 0.5f);
+      CHECK_EQ(n.end_tick, n.start_tick);
     }
     if (n.note_type == NoteType::None && n.gimmick_type == GimmickType::Split3) {
       found_split = true;
@@ -689,7 +695,10 @@ void test_official_chart_import_and_roundtrip() {
     // Official sample orphan type=40 (Sirius SoundPurple) → Flick.
     if (n.note_type == NoteType::Flick && n.width == 3 && n.lane == 3) {
       found_orphan_as_flick = true;
-      CHECK(std::abs(n.start_tick - 15.4237f * 480.0f) < 0.5f);
+      MusicTiming local = timing;
+      local.offset_ms = 0;
+      CHECK_EQ(n.start_tick,
+               milliseconds_to_tick(static_cast<int64_t>(std::llround(15.4237 * 1000.0)), local));
     }
   }
   CHECK(found_critical);
@@ -704,7 +713,7 @@ void test_official_chart_import_and_roundtrip() {
   CHECK(engine.is_read_only());
 
   // Official import is preview-only: mutations and .wdschart save are rejected.
-  CHECK_EQ(engine.add_note(make_tap(100.0f, 1)), -1);
+  CHECK_EQ(engine.add_note(make_tap(100, 1)), -1);
   CHECK(!engine.remove_note(0));
   CHECK_EQ(static_cast<int>(engine.save_to_file(temp_chart_path("should_fail.wdschart").string()).error),
            static_cast<int>(SerializeError::ReadOnly));
@@ -782,7 +791,7 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   }
 
   ChartEditorEngine engine;
-  NotationNote tap = make_tap(0.0f, 1);
+  NotationNote tap = make_tap(0, 1);
   engine.add_note(tap);
   MusicTiming timing = engine.document().timing();
   timing.offset_ms = 1500;
@@ -871,19 +880,19 @@ void test_edit_grid_and_note_operations() {
     CHECK_EQ(snap_tick(static_cast<float>((6 * 480) / 7), odd), (6 * 480) / 7);
   }
 
-  NotationNote tap = make_tap(480.0f, 3);
+  NotationNote tap = make_tap(480, 3);
   tap.width = 2;
   const NotationNote hold = convert_note_type(tap, NoteType::Hold, 480);
   CHECK_EQ(static_cast<int>(hold.note_type), static_cast<int>(NoteType::Hold));
-  CHECK_EQ(hold.end_tick, 960.0f);
+  CHECK_EQ(hold.end_tick, 960);
   const NotationNote restored = convert_note_type(hold, NoteType::Flick, 480);
   CHECK_EQ(static_cast<int>(restored.note_type), static_cast<int>(NoteType::Flick));
   CHECK_EQ(restored.end_tick, restored.start_tick);
 
   // ScratchHold → Flick must leave the hold family and clear ScratchHold-only fields.
-  NotationNote scratch_body = make_tap(480.0f, 3);
+  NotationNote scratch_body = make_tap(480, 3);
   scratch_body.width = 2;
-  scratch_body.end_tick = 960.0f;
+  scratch_body.end_tick = 960;
   scratch_body.note_type = NoteType::ScratchHold;
   scratch_body.scratch_length = 4;
   scratch_body.gimmick_type = GimmickType::JumpScratch;
@@ -1067,7 +1076,7 @@ void test_official_csv_tempo_map_export() {
       TimingPoint{0, 120.0, 4, 4, true, true},
       TimingPoint{480, 240.0, 4, 4, true, false},
   };
-  NotationNote note = make_tap(960.0f, 0);
+  NotationNote note = make_tap(960, 0);
   note.id = 0;
   chart.notes.push_back(note);
 
@@ -1110,7 +1119,7 @@ void test_official_sound_purple_split_and_row_semantics() {
       if (n.gimmick_type == GimmickType::JumpScratch) {
         ++jump;
         CHECK_EQ(n.scratch_length, 3);
-        CHECK(std::abs(n.end_tick - 2.0f * 480.0f) < 0.5f);
+        CHECK_EQ(n.end_tick, 960);
       }
     }
     if (n.note_type == NoteType::ScratchSound) ++stars;
@@ -1129,8 +1138,8 @@ void test_official_sound_purple_split_and_row_semantics() {
   {
     NotationNote eighth;
     eighth.id = 0;
-    eighth.start_tick = 480.0f;
-    eighth.end_tick = 480.0f;
+    eighth.start_tick = 480;
+    eighth.end_tick = 480;
     eighth.note_type = NoteType::HoldEighth;
     eighth.lane = 0;
     eighth.width = 1;
@@ -1138,8 +1147,8 @@ void test_official_sound_purple_split_and_row_semantics() {
 
     NotationNote split;
     split.id = 1;
-    split.start_tick = 0.0f;
-    split.end_tick = 960.0f;
+    split.start_tick = 0;
+    split.end_tick = 960;
     split.note_type = NoteType::None;
     split.lane = 0;
     split.width = 0;
@@ -1149,8 +1158,8 @@ void test_official_sound_purple_split_and_row_semantics() {
 
     NotationNote body;
     body.id = 2;
-    body.start_tick = 0.0f;
-    body.end_tick = 480.0f;
+    body.start_tick = 0;
+    body.end_tick = 480;
     body.note_type = NoteType::ScratchHold;
     body.lane = 1;
     body.width = 2;
@@ -1233,13 +1242,13 @@ void test_migrate_wdschart_scratch_to_flick_script() {
 
 void test_save_failure_preserves_note_ids() {
   ChartEditorEngine engine;
-  NotationNote late = make_tap(960.0f, 2);
+  NotationNote late = make_tap(960, 2);
   late.id = 99;
-  NotationNote early = make_tap(0.0f, 0);
+  NotationNote early = make_tap(0, 0);
   early.id = 42;
   CHECK(engine.document().set_notes({late, early}));
   CHECK(engine.execute_command(
-      std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(480.0f, 1)})));
+      std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(480, 1)})));
   CHECK(engine.history().can_undo());
   CHECK(engine.document().find_note(99).has_value());
   CHECK(engine.document().find_note(42).has_value());
@@ -1270,7 +1279,7 @@ void test_sus_meter_and_mid_measure_bpm_roundtrip() {
       TimingPoint{0, 120.0, 3, 4, true, true},
       TimingPoint{720, 180.0, 3, 4, true, false},
   };
-  NotationNote tap = make_tap(0.0f, 1);
+  NotationNote tap = make_tap(0, 1);
   tap.id = 0;
   chart.notes.push_back(tap);
 
@@ -1312,7 +1321,7 @@ void test_chart_session_preserves_per_chart_history() {
   ChartSession session;  // starts with one empty chart
   ChartDocument* doc_a = session.document();
   CHECK(doc_a != nullptr);
-  NotationNote tap = make_tap(0.0f, 0);
+  NotationNote tap = make_tap(0, 0);
   tap.id = 7;
   CHECK(session.history()->execute(std::make_unique<AddNotesCommand>(std::vector<NotationNote>{tap}),
                                    *doc_a));
@@ -1687,9 +1696,9 @@ void test_sus_hold_auto_generates_head_when_uncovered() {
 void test_hold_eighths_outside_history_undo_redo() {
   ChartDocument doc;
   EditHistory history;
-  NotationNote hold = make_tap(0.0f, 2);
+  NotationNote hold = make_tap(0, 2);
   hold.width = 2;
-  hold.end_tick = 960.0f;
+  hold.end_tick = 960;
   hold.note_type = NoteType::Hold;
 
   // Anti-pattern: AddNotes then recompute outside history leaves orphans.
@@ -1762,40 +1771,39 @@ void test_composite_undo_rolls_back_on_partial_failure() {
   CHECK_EQ(counter, 3);
 }
 
-// paired_hold_head_for must use ±0.5 tick tolerance (same as make_auto_hold_head).
+// paired_hold_head_for matches exact integer ticks (notes are grid-snapped).
 void test_paired_hold_head_tolerates_subtick_drift() {
   ChartDocument doc;
-  NotationNote body = make_tap(480.0f, 2);
+  NotationNote body = make_tap(480, 2);
   body.id = 1;
   body.width = 2;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   body.note_type = NoteType::Hold;
   CHECK(doc.add_note(body) == 1);
 
-  NotationNote head = make_tap(480.25f, 2);
+  NotationNote head = make_tap(480, 2);
   head.id = 2;
   head.width = 2;
-  head.end_tick = 480.25f;
+  head.end_tick = 480;
   head.note_type = NoteType::HoldStart;
   CHECK(doc.add_note(head) == 2);
 
   auto paired = paired_hold_head_for(doc, *doc.find_note(1));
-  CHECK(std::abs(480.25f - 480.0f) < 0.5f);
   CHECK(paired.has_value());
   CHECK_EQ(paired->id, 2);
 }
 
-// recompute_hold_eighths must treat mid-stars with same_tick (±0.5), not exact ==.
+// Mid-star on an exact subdivision tick suppresses the eighth at that tick.
 void test_recompute_hold_eighths_respects_fractional_star() {
   ChartDocument doc;
-  NotationNote hold = make_tap(0.0f, 2);
+  NotationNote hold = make_tap(0, 2);
   hold.id = 1;
   hold.width = 2;
-  hold.end_tick = 960.0f;
+  hold.end_tick = 960;
   hold.note_type = NoteType::Hold;
   CHECK(doc.add_note(hold) == 1);
 
-  NotationNote star = make_tap(240.1f, 2);
+  NotationNote star = make_tap(240, 2);
   star.id = 2;
   star.width = 2;
   star.end_tick = star.start_tick;
@@ -1807,7 +1815,7 @@ void test_recompute_hold_eighths_respects_fractional_star() {
   int sound_count = 0;
   for (const auto& n : doc.notes()) {
     if (n.note_type == NoteType::Sound) ++sound_count;
-    if (n.note_type == NoteType::HoldEighth && std::abs(n.start_tick - star.start_tick) < 0.5f) {
+    if (n.note_type == NoteType::HoldEighth && n.start_tick == star.start_tick) {
       ++eighth_on_star;
     }
   }
@@ -1868,8 +1876,8 @@ void test_sus_cross_measure_hold_at_bar_head() {
   }
   CHECK(body != nullptr);
   CHECK_EQ(hold_starts, 1);
-  CHECK_EQ(body->start_tick, 0.0f);
-  CHECK_EQ(body->end_tick, 1920.0f);
+  CHECK_EQ(body->start_tick, 0);
+  CHECK_EQ(body->end_tick, 1920);
 }
 
 // Spec example hold `#00020a: 14002400`.
@@ -1889,8 +1897,8 @@ void test_sus_spec_example_hold_14002400() {
   }
   CHECK(body != nullptr);
   CHECK_EQ(body->width, 4);
-  CHECK_EQ(body->start_tick, 0.0f);
-  CHECK_EQ(body->end_tick, 960.0f);
+  CHECK_EQ(body->start_tick, 0);
+  CHECK_EQ(body->end_tick, 960);
 }
 
 // Export must emit headless hold bodies with a Damage marker (no authored HoldStart).
@@ -1899,10 +1907,10 @@ void test_sus_export_headless_hold_body() {
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
-  NotationNote body = make_tap(0.0f, 2);
+  NotationNote body = make_tap(0, 2);
   body.id = 0;
   body.width = 2;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   body.note_type = NoteType::Hold;
   chart.notes.push_back(body);
 
@@ -1933,7 +1941,7 @@ void test_sus_export_headless_hold_body() {
   int taps = 0;
   bool found = false;
   for (const auto& n : roundtrip.chart.notes) {
-    if (is_hold_with_tail(n.note_type) && std::abs(n.end_tick - 960.0f) < 1.0f) found = true;
+    if (is_hold_with_tail(n.note_type) && n.end_tick == 960) found = true;
     if (n.note_type == NoteType::Normal || n.note_type == NoteType::Critical) ++taps;
   }
   CHECK(found);
@@ -1946,14 +1954,14 @@ void test_sus_export_covered_hold_skips_damage() {
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
-  NotationNote tap = make_tap(0.0f, 2);
+  NotationNote tap = make_tap(0, 2);
   tap.id = 0;
   tap.width = 2;
   tap.note_type = NoteType::Normal;
-  NotationNote body = make_tap(0.0f, 2);
+  NotationNote body = make_tap(0, 2);
   body.id = 1;
   body.width = 2;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   body.note_type = NoteType::Hold;
   chart.notes = {tap, body};
 
@@ -1992,15 +2000,15 @@ void test_sus_export_partial_hold_head_pairs_body() {
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
 
-  NotationNote body = make_tap(0.0f, 2);
+  NotationNote body = make_tap(0, 2);
   body.id = 0;
   body.width = 4;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   body.note_type = NoteType::Hold;
-  NotationNote head = make_tap(0.0f, 4);
+  NotationNote head = make_tap(0, 4);
   head.id = 1;
   head.width = 2;
-  head.end_tick = 0.0f;
+  head.end_tick = 0;
   head.note_type = NoteType::HoldStart;
   chart.notes = {body, head};
 
@@ -2013,11 +2021,11 @@ void test_sus_export_partial_hold_head_pairs_body() {
   SusChartLoadResult roundtrip;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, roundtrip).error),
            static_cast<int>(SerializeError::Ok));
-  float body_end = -1.0f;
+  int32_t body_end = -1;
   for (const auto& n : roundtrip.chart.notes) {
     if (is_hold_with_tail(n.note_type)) body_end = n.end_tick;
   }
-  CHECK(std::abs(body_end - 960.0f) < 1.0f);
+  CHECK_EQ(body_end, 960);
 }
 
 // Mid-star (type 3) inside hold.
@@ -2033,7 +2041,7 @@ void test_sus_hold_mid_star_roundtrip() {
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
            static_cast<int>(SerializeError::Ok));
   int sounds = 0;
-  float star_tick = -1.0f;
+  int32_t star_tick = -1;
   for (const auto& n : loaded.chart.notes) {
     if (n.note_type == NoteType::Sound) {
       ++sounds;
@@ -2041,7 +2049,7 @@ void test_sus_hold_mid_star_roundtrip() {
     }
   }
   CHECK_EQ(sounds, 1);
-  CHECK(std::abs(star_tick - 960.0f) < 1.0f);
+  CHECK_EQ(star_tick, 960);
 }
 
 // Slide with different end lane → ScratchHold; no extra plain Hold.
@@ -2050,16 +2058,16 @@ void test_sus_slide_export_not_orphan_hold_start() {
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
-  NotationNote body = make_tap(0.0f, 2);
+  NotationNote body = make_tap(0, 2);
   body.id = 0;
   body.width = 2;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   body.note_type = NoteType::ScratchHold;
   set_scratch_hold_end_lanes(body, 4, 5);
-  NotationNote head = make_tap(0.0f, 2);
+  NotationNote head = make_tap(0, 2);
   head.id = 1;
   head.width = 2;
-  head.end_tick = 0.0f;
+  head.end_tick = 0;
   head.note_type = NoteType::ScratchHoldStart;
   chart.notes = {body, head};
 
@@ -2173,26 +2181,26 @@ void test_sus_ched_export_slide_and_end_pair() {
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
-  NotationNote blue = make_tap(0.0f, 0);
+  NotationNote blue = make_tap(0, 0);
   blue.id = 0;
   blue.width = 1;
-  blue.end_tick = 960.0f;
+  blue.end_tick = 960;
   blue.note_type = NoteType::Hold;
-  NotationNote head = make_tap(0.0f, 0);
+  NotationNote head = make_tap(0, 0);
   head.id = 1;
   head.width = 1;
-  head.end_tick = 0.0f;
+  head.end_tick = 0;
   head.note_type = NoteType::HoldStart;
-  NotationNote purple = make_tap(0.0f, 2);
+  NotationNote purple = make_tap(0, 2);
   purple.id = 2;
   purple.width = 1;
-  purple.end_tick = 960.0f;
+  purple.end_tick = 960;
   purple.note_type = NoteType::ScratchHold;
   purple.scratch_length = 0;
-  NotationNote phead = make_tap(0.0f, 2);
+  NotationNote phead = make_tap(0, 2);
   phead.id = 3;
   phead.width = 1;
-  phead.end_tick = 0.0f;
+  phead.end_tick = 0;
   phead.note_type = NoteType::ScratchHoldStart;
   chart.notes = {blue, head, purple, phead};
 
@@ -2251,8 +2259,8 @@ void test_sus_til01_split_roundtrip() {
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
   NotationNote split;
   split.id = 0;
-  split.start_tick = 0.0f;
-  split.end_tick = 1920.0f;
+  split.start_tick = 0;
+  split.end_tick = 1920;
   split.lane = 0;
   split.width = 12;
   split.note_type = NoteType::None;
@@ -2290,7 +2298,7 @@ void test_wdschart_export_import_preserves_chart() {
   chart.timing.points = {TimingPoint{0, 150.0, 4, 4, true, true},
                          TimingPoint{1920, 180.0, 3, 4, true, true}};
 
-  auto add = [&](NoteType type, float start, float end, int32_t lane, int32_t width,
+  auto add = [&](NoteType type, int32_t start, int32_t end, int32_t lane, int32_t width,
                  GimmickType g = GimmickType::None, int32_t scratch = 0) {
     NotationNote n;
     n.id = static_cast<int32_t>(chart.notes.size());
@@ -2303,16 +2311,16 @@ void test_wdschart_export_import_preserves_chart() {
     n.scratch_length = scratch;
     chart.notes.push_back(n);
   };
-  add(NoteType::Normal, 0.0f, 0.0f, 0, 1);
-  add(NoteType::Critical, 240.0f, 240.0f, 1, 2);
-  add(NoteType::Flick, 480.0f, 480.0f, 3, 1, GimmickType::None, -1);
-  add(NoteType::HoldStart, 960.0f, 960.0f, 2, 2);
-  add(NoteType::Hold, 960.0f, 1920.0f, 2, 2);
-  add(NoteType::Sound, 1440.0f, 1440.0f, 2, 1);
-  add(NoteType::ScratchHoldStart, 1920.0f, 1920.0f, 5, 1);
-  add(NoteType::ScratchHold, 1920.0f, 2880.0f, 5, 1, GimmickType::JumpScratch, 3);
-  add(NoteType::ScratchSound, 2400.0f, 2400.0f, 5, 1);
-  add(NoteType::None, 0.0f, 3840.0f, 0, 12, GimmickType::Split2, 1);
+  add(NoteType::Normal, 0, 0, 0, 1);
+  add(NoteType::Critical, 240, 240, 1, 2);
+  add(NoteType::Flick, 480, 480, 3, 1, GimmickType::None, -1);
+  add(NoteType::HoldStart, 960, 960, 2, 2);
+  add(NoteType::Hold, 960, 1920, 2, 2);
+  add(NoteType::Sound, 1440, 1440, 2, 1);
+  add(NoteType::ScratchHoldStart, 1920, 1920, 5, 1);
+  add(NoteType::ScratchHold, 1920, 2880, 5, 1, GimmickType::JumpScratch, 3);
+  add(NoteType::ScratchSound, 2400, 2400, 5, 1);
+  add(NoteType::None, 0, 3840, 0, 12, GimmickType::Split2, 1);
 
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
 
@@ -2341,8 +2349,8 @@ void test_wdschart_export_import_preserves_chart() {
     return key(x) < key(y);
   });
   for (size_t i = 0; i < a.size(); ++i) {
-    CHECK(std::abs(a[i].start_tick - b[i].start_tick) < 0.5f);
-    CHECK(std::abs(a[i].end_tick - b[i].end_tick) < 0.5f);
+    CHECK_EQ(a[i].start_tick, b[i].start_tick);
+    CHECK_EQ(a[i].end_tick, b[i].end_tick);
     CHECK_EQ(a[i].lane, b[i].lane);
     CHECK_EQ(a[i].width, b[i].width);
     CHECK_EQ(static_cast<int>(a[i].note_type), static_cast<int>(b[i].note_type));
@@ -2386,12 +2394,12 @@ void test_sus_fractional_measure_length() {
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
            static_cast<int>(SerializeError::Ok));
-  float second = -1.0f;
+  int32_t second = -1;
   for (const auto& n : loaded.chart.notes) {
-    if (n.start_tick > 0.0f) second = n.start_tick;
+    if (n.start_tick > 0) second = n.start_tick;
   }
   // 3.5 beats * 480 tpq = 1680 ticks
-  CHECK(std::abs(second - 1680.0f) < 1.0f);
+  CHECK_EQ(second, 1680);
   // Timing meter should preserve the half-beat (7/8), not round to 4/4.
   CHECK_EQ(loaded.chart.timing.points[0].numerator, 7);
   CHECK_EQ(loaded.chart.timing.points[0].denominator, 8);
@@ -2411,7 +2419,7 @@ void test_sus_measurebs_offset() {
            static_cast<int>(SerializeError::Ok));
   CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
   // 1000 bars of 4 beats * 480 = 1_920_000
-  CHECK(std::abs(loaded.chart.notes[0].start_tick - 1920000.0f) < 1.0f);
+  CHECK(loaded.chart.notes[0].start_tick == 1920000);
 }
 
 // WAVEOFFSET seconds → chart offset_ms; export restores seconds.
@@ -2445,7 +2453,7 @@ void test_sus_critical_tap_roundtrip() {
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
-  NotationNote tap = make_tap(0.0f, 1);
+  NotationNote tap = make_tap(0, 1);
   tap.id = 0;
   tap.width = 2;
   tap.note_type = NoteType::Critical;
@@ -2484,7 +2492,7 @@ void test_sus_measurebs_export_roundtrip() {
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
-  NotationNote tap = make_tap(1920000.0f, 0);  // measure 1000 @ 4/4
+  NotationNote tap = make_tap(1920000, 0);  // measure 1000 @ 4/4
   tap.id = 0;
   tap.width = 1;
   chart.notes.push_back(tap);
@@ -2500,7 +2508,7 @@ void test_sus_measurebs_export_roundtrip() {
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
            static_cast<int>(SerializeError::Ok));
   CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
-  CHECK(std::abs(loaded.chart.notes[0].start_tick - 1920000.0f) < 1.0f);
+  CHECK(loaded.chart.notes[0].start_tick == 1920000);
 }
 
 
@@ -2513,42 +2521,42 @@ void test_sus_roundtrip_hold_families_and_lanes() {
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
 
   // Purple ScratchHold lanes 0-1 (same end span — must still roundtrip as scratch).
-  NotationNote scratch_head = make_tap(0.0f, 0);
+  NotationNote scratch_head = make_tap(0, 0);
   scratch_head.id = 0;
   scratch_head.width = 2;
-  scratch_head.end_tick = 0.0f;
+  scratch_head.end_tick = 0;
   scratch_head.note_type = NoteType::ScratchHoldStart;
-  NotationNote scratch_body = make_tap(0.0f, 0);
+  NotationNote scratch_body = make_tap(0, 0);
   scratch_body.id = 1;
   scratch_body.width = 2;
-  scratch_body.end_tick = 960.0f;
+  scratch_body.end_tick = 960;
   scratch_body.note_type = NoteType::ScratchHold;
   scratch_body.scratch_length = 0;
 
   // Headless Hold lanes 3-4.
-  NotationNote headless = make_tap(0.0f, 3);
+  NotationNote headless = make_tap(0, 3);
   headless.id = 2;
   headless.width = 2;
-  headless.end_tick = 960.0f;
+  headless.end_tick = 960;
   headless.note_type = NoteType::Hold;
 
   // CriticalHold (gold) lanes 7-8 — reproduces [7,9)-style ched pad shift.
-  NotationNote gold_head = make_tap(0.0f, 7);
+  NotationNote gold_head = make_tap(0, 7);
   gold_head.id = 3;
   gold_head.width = 2;
-  gold_head.end_tick = 0.0f;
+  gold_head.end_tick = 0;
   gold_head.note_type = NoteType::CriticalHoldStart;
-  NotationNote gold_body = make_tap(0.0f, 7);
+  NotationNote gold_body = make_tap(0, 7);
   gold_body.id = 4;
   gold_body.width = 2;
-  gold_body.end_tick = 960.0f;
+  gold_body.end_tick = 960;
   gold_body.note_type = NoteType::CriticalHold;
 
   // HoldEighth inside gold body — must not become Sound after roundtrip.
-  NotationNote eighth = make_tap(480.0f, 7);
+  NotationNote eighth = make_tap(480, 7);
   eighth.id = 5;
   eighth.width = 2;
-  eighth.end_tick = 480.0f;
+  eighth.end_tick = 480;
   eighth.note_type = NoteType::HoldEighth;
 
   chart.notes = {scratch_head, scratch_body, headless, gold_head, gold_body, eighth};
@@ -2572,7 +2580,7 @@ void test_sus_roundtrip_hold_families_and_lanes() {
     if (n.note_type == NoteType::Hold) ++hold_bodies;
     if (n.note_type == NoteType::CriticalHold || n.note_type == NoteType::ScratchCriticalHold)
       ++crit_bodies;
-    if (is_hold_head_note(n) && std::abs(n.start_tick - 960.0f) < 0.5f) ++heads_at_960;
+    if (is_hold_head_note(n) && n.start_tick == 960) ++heads_at_960;
     if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) ++sounds;
     if (is_hold_with_tail(n.note_type) && n.lane == 7) gold_lane = n.lane;
   }
@@ -2605,15 +2613,15 @@ void test_sus_critical_hold_exports_as_critical_plus_hold() {
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
 
-  NotationNote head = make_tap(0.0f, 2);
+  NotationNote head = make_tap(0, 2);
   head.id = 0;
   head.width = 2;
-  head.end_tick = 0.0f;
+  head.end_tick = 0;
   head.note_type = NoteType::CriticalHoldStart;
-  NotationNote body = make_tap(0.0f, 2);
+  NotationNote body = make_tap(0, 2);
   body.id = 1;
   body.width = 2;
-  body.end_tick = 960.0f;
+  body.end_tick = 960;
   body.note_type = NoteType::CriticalHold;
   chart.notes = {head, body};
 
@@ -2675,7 +2683,7 @@ void test_sus_critical_plus_hold_imports_headless() {
 
 // Helpers for comprehensive SUS roundtrip coverage.
 namespace {
-NotationNote make_body(NoteType type, int32_t id, float start, float end, int32_t lane,
+NotationNote make_body(NoteType type, int32_t id, int32_t start, int32_t end, int32_t lane,
                        int32_t width) {
   NotationNote n = make_tap(start, lane);
   n.id = id;
@@ -2685,11 +2693,11 @@ NotationNote make_body(NoteType type, int32_t id, float start, float end, int32_
   return n;
 }
 
-NotationNote make_head(NoteType type, int32_t id, float tick, int32_t lane, int32_t width) {
+NotationNote make_head(NoteType type, int32_t id, int32_t tick, int32_t lane, int32_t width) {
   NotationNote n = make_tap(tick, lane);
   n.id = id;
   n.width = width;
-  n.end_tick = 0.0f;
+  n.end_tick = 0;
   n.note_type = type;
   return n;
 }
@@ -2712,121 +2720,121 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   auto nid = [&]() { return next_id++; };
 
   // --- taps ---
-  chart.notes.push_back(make_body(NoteType::Normal, nid(), 0.0f, 0.0f, 0, 1));
-  chart.notes.push_back(make_body(NoteType::Critical, nid(), 240.0f, 0.0f, 2, 2));
+  chart.notes.push_back(make_body(NoteType::Normal, nid(), 0, 0, 0, 1));
+  chart.notes.push_back(make_body(NoteType::Critical, nid(), 240, 0, 2, 2));
   {
-    NotationNote f = make_body(NoteType::Flick, nid(), 480.0f, 0.0f, 4, 1);
+    NotationNote f = make_body(NoteType::Flick, nid(), 480, 0, 4, 1);
     f.scratch_length = 0;  // up
     chart.notes.push_back(f);
   }
   {
-    NotationNote f = make_body(NoteType::Flick, nid(), 720.0f, 0.0f, 5, 2);
+    NotationNote f = make_body(NoteType::Flick, nid(), 720, 0, 5, 2);
     f.scratch_length = -1;  // left
     chart.notes.push_back(f);
   }
   {
-    NotationNote f = make_body(NoteType::Flick, nid(), 960.0f, 0.0f, 7, 1);
+    NotationNote f = make_body(NoteType::Flick, nid(), 960, 0, 7, 1);
     f.scratch_length = 1;  // right
     chart.notes.push_back(f);
   }
   // Extra Normal where legacy Scratch(40) used to sit (lane 9 @ 1200).
-  chart.notes.push_back(make_body(NoteType::Normal, nid(), 1200.0f, 0.0f, 9, 1));
+  chart.notes.push_back(make_body(NoteType::Normal, nid(), 1200, 0, 9, 1));
 
   // Hold + authored head
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 1440.0f, 0, 2));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1440.0f, 2400.0f, 0, 2));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 1440, 0, 2));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1440, 2400, 0, 2));
 
   // Headless Hold (no cover → Damage)
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1440.0f, 2400.0f, 3, 2));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1440, 2400, 3, 2));
 
   // Covered Hold by Normal
-  chart.notes.push_back(make_body(NoteType::Normal, nid(), 1440.0f, 0.0f, 6, 2));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1440.0f, 2400.0f, 6, 2));
+  chart.notes.push_back(make_body(NoteType::Normal, nid(), 1440, 0, 6, 2));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1440, 2400, 6, 2));
 
   // Covered Hold by Flick
   {
-    NotationNote f = make_body(NoteType::Flick, nid(), 1680.0f, 0.0f, 8, 1);
+    NotationNote f = make_body(NoteType::Flick, nid(), 1680, 0, 8, 1);
     f.scratch_length = 0;
     chart.notes.push_back(f);
   }
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1680.0f, 2640.0f, 8, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1680, 2640, 8, 1));
 
   // CriticalHold authored (exports Critical + hold; import CriticalHold headless)
-  chart.notes.push_back(make_head(NoteType::CriticalHoldStart, nid(), 2880.0f, 0, 2));
-  chart.notes.push_back(make_body(NoteType::CriticalHold, nid(), 2880.0f, 3840.0f, 0, 2));
+  chart.notes.push_back(make_head(NoteType::CriticalHoldStart, nid(), 2880, 0, 2));
+  chart.notes.push_back(make_body(NoteType::CriticalHold, nid(), 2880, 3840, 0, 2));
 
   // Critical fully covering CriticalHold → headless CriticalHold; Critical tap kept
-  chart.notes.push_back(make_body(NoteType::Critical, nid(), 2880.0f, 0.0f, 3, 2));
-  chart.notes.push_back(make_body(NoteType::CriticalHold, nid(), 2880.0f, 3840.0f, 3, 2));
+  chart.notes.push_back(make_body(NoteType::Critical, nid(), 2880, 0, 3, 2));
+  chart.notes.push_back(make_body(NoteType::CriticalHold, nid(), 2880, 3840, 3, 2));
 
   // ScratchHold stationary + authored head
-  chart.notes.push_back(make_head(NoteType::ScratchHoldStart, nid(), 2880.0f, 5, 1));
+  chart.notes.push_back(make_head(NoteType::ScratchHoldStart, nid(), 2880, 5, 1));
   {
-    NotationNote body = make_body(NoteType::ScratchHold, nid(), 2880.0f, 3840.0f, 5, 1);
+    NotationNote body = make_body(NoteType::ScratchHold, nid(), 2880, 3840, 5, 1);
     body.scratch_length = 0;
     chart.notes.push_back(body);
   }
 
   // ScratchHold moving end lane
   {
-    NotationNote body = make_body(NoteType::ScratchHold, nid(), 2880.0f, 3840.0f, 7, 1);
+    NotationNote body = make_body(NoteType::ScratchHold, nid(), 2880, 3840, 7, 1);
     set_scratch_hold_end_lanes(body, 9, 9);
     chart.notes.push_back(body);
   }
 
   // ScratchCriticalHold
-  chart.notes.push_back(make_head(NoteType::ScratchCriticalHoldStart, nid(), 2880.0f, 10, 1));
+  chart.notes.push_back(make_head(NoteType::ScratchCriticalHoldStart, nid(), 2880, 10, 1));
   {
     NotationNote body =
-        make_body(NoteType::ScratchCriticalHold, nid(), 2880.0f, 3840.0f, 10, 1);
+        make_body(NoteType::ScratchCriticalHold, nid(), 2880, 3840, 10, 1);
     body.scratch_length = 0;
     chart.notes.push_back(body);
   }
 
   // Sound mid on Hold
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 4320.0f, 0, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 4320.0f, 5280.0f, 0, 1));
-  chart.notes.push_back(make_body(NoteType::Sound, nid(), 4800.0f, 0.0f, 0, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 4320, 0, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 4320, 5280, 0, 1));
+  chart.notes.push_back(make_body(NoteType::Sound, nid(), 4800, 0, 0, 1));
 
   // HoldEighth must not become Sound
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 4320.0f, 2, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 4320.0f, 5280.0f, 2, 1));
-  chart.notes.push_back(make_body(NoteType::HoldEighth, nid(), 4800.0f, 4800.0f, 2, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 4320, 2, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 4320, 5280, 2, 1));
+  chart.notes.push_back(make_body(NoteType::HoldEighth, nid(), 4800, 4800, 2, 1));
 
   // High lanes for ched padding
-  chart.notes.push_back(make_body(NoteType::Normal, nid(), 5760.0f, 0.0f, 7, 2));
-  chart.notes.push_back(make_body(NoteType::Critical, nid(), 6000.0f, 0.0f, 9, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 5760.0f, 6720.0f, 8, 2));
+  chart.notes.push_back(make_body(NoteType::Normal, nid(), 5760, 0, 7, 2));
+  chart.notes.push_back(make_body(NoteType::Critical, nid(), 6000, 0, 9, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 5760, 6720, 8, 2));
 
   // Cross-measure long hold
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 0.0f, 3840.0f, 4, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 0, 3840, 4, 1));
 
   // Partial-width authored head
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 6720.0f, 5, 2));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 6720.0f, 7680.0f, 5, 3));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 6720, 5, 2));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 6720, 7680, 5, 3));
 
   // NontailHold (SUS has no nontail bit → imports as tailed Hold)
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680.0f, 0, 1));
-  chart.notes.push_back(make_body(NoteType::NontailHold, nid(), 7680.0f, 8640.0f, 0, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680, 0, 1));
+  chart.notes.push_back(make_body(NoteType::NontailHold, nid(), 7680, 8640, 0, 1));
 
   // ScratchSound mid (imports as Sound)
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680.0f, 2, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 7680.0f, 8640.0f, 2, 1));
-  chart.notes.push_back(make_body(NoteType::ScratchSound, nid(), 8160.0f, 0.0f, 2, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680, 2, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 7680, 8640, 2, 1));
+  chart.notes.push_back(make_body(NoteType::ScratchSound, nid(), 8160, 0, 2, 1));
 
   // Edge lanes + wide tap under ched padding
-  chart.notes.push_back(make_body(NoteType::Normal, nid(), 8640.0f, 0.0f, 0, 4));
-  chart.notes.push_back(make_body(NoteType::Critical, nid(), 8640.0f, 0.0f, 11, 1));
+  chart.notes.push_back(make_body(NoteType::Normal, nid(), 8640, 0, 0, 4));
+  chart.notes.push_back(make_body(NoteType::Critical, nid(), 8640, 0, 11, 1));
 
   // Two simultaneous Hold bodies (different lanes / channels)
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 9600.0f, 1, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 9600.0f, 10560.0f, 1, 1));
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 9600.0f, 3, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 9600.0f, 10560.0f, 3, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 9600, 1, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 9600, 10560, 1, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 9600, 3, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 9600, 10560, 3, 1));
 
   // Hold ending exactly on measure boundary
-  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 1920.0f, 11, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1920.0f, 3840.0f, 11, 1));
+  chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 1920, 11, 1));
+  chart.notes.push_back(make_body(NoteType::Hold, nid(), 1920, 3840, 11, 1));
 
   SusChartSaveOptions options;
   options.ched_lane_padding = true;
@@ -2860,7 +2868,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   {
     bool lane9_normal = false;
     for (const auto& n : loaded.chart.notes) {
-      if (n.note_type == NoteType::Normal && std::abs(n.start_tick - 1200.0f) < 0.5f &&
+      if (n.note_type == NoteType::Normal && n.start_tick == 1200 &&
           n.lane == 9) {
         lane9_normal = true;
       }
@@ -2878,11 +2886,11 @@ void test_sus_comprehensive_roundtrip_all_cases() {
     bool found_lane7 = false;
     bool found_lane9 = false;
     for (const auto& n : loaded.chart.notes) {
-      if (n.note_type == NoteType::Normal && std::abs(n.start_tick - 5760.0f) < 0.5f &&
+      if (n.note_type == NoteType::Normal && n.start_tick == 5760 &&
           n.lane == 7 && n.width == 2) {
         found_lane7 = true;
       }
-      if (n.note_type == NoteType::Critical && std::abs(n.start_tick - 6000.0f) < 0.5f &&
+      if (n.note_type == NoteType::Critical && n.start_tick == 6000 &&
           n.lane == 9) {
         found_lane9 = true;
       }
@@ -2895,7 +2903,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   {
     const NotationNote* sh = nullptr;
     for (const auto& n : loaded.chart.notes) {
-      if (n.note_type == NoteType::ScratchHold && std::abs(n.start_tick - 2880.0f) < 0.5f &&
+      if (n.note_type == NoteType::ScratchHold && n.start_tick == 2880 &&
           n.lane == 5) {
         sh = &n;
         break;
@@ -2912,7 +2920,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
     bool has_body = false;
     bool has_head = false;
     for (const auto& n : loaded.chart.notes) {
-      if (std::abs(n.start_tick - 1440.0f) > 0.5f || n.lane != 3) continue;
+      if (n.start_tick != 1440 || n.lane != 3) continue;
       if (n.note_type == NoteType::Hold) {
         has_body = true;
         has_head = paired_hold_head_for(doc, n).has_value();
@@ -2928,7 +2936,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
     bool has_crit_head = false;
     bool has_crit_tap = false;
     for (const auto& n : loaded.chart.notes) {
-      if (std::abs(n.start_tick - 2880.0f) > 0.5f || n.lane != 3) continue;
+      if (n.start_tick != 2880 || n.lane != 3) continue;
       if (n.note_type == NoteType::CriticalHold) has_crit_hold = true;
       if (n.note_type == NoteType::CriticalHoldStart) has_crit_head = true;
       if (n.note_type == NoteType::Critical) has_crit_tap = true;
@@ -2942,7 +2950,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   {
     int body_w = -1;
     for (const auto& n : loaded.chart.notes) {
-      if (n.note_type == NoteType::Hold && std::abs(n.start_tick - 6720.0f) < 0.5f &&
+      if (n.note_type == NoteType::Hold && n.start_tick == 6720 &&
           n.lane == 5) {
         body_w = n.width;
       }
@@ -2954,7 +2962,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   {
     const NotationNote* moving = nullptr;
     for (const auto& n : loaded.chart.notes) {
-      if (n.note_type == NoteType::ScratchHold && std::abs(n.start_tick - 2880.0f) < 0.5f &&
+      if (n.note_type == NoteType::ScratchHold && n.start_tick == 2880 &&
           n.lane == 7) {
         moving = &n;
         break;
@@ -2973,7 +2981,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   {
     bool found = false;
     for (const auto& n : loaded.chart.notes) {
-      if (n.note_type == NoteType::Critical && std::abs(n.start_tick - 8640.0f) < 0.5f &&
+      if (n.note_type == NoteType::Critical && n.start_tick == 8640 &&
           n.lane == 11) {
         found = true;
       }
@@ -2999,10 +3007,10 @@ void test_timing_tick_ms_roundtrip_multi_bpm() {
   };
   normalize_timing_points(timing);
 
-  NotationNote a = make_tap(0.0f, 0);
-  NotationNote b = make_tap(480.0f, 0);
-  NotationNote c = make_tap(960.0f, 0);
-  NotationNote d = make_tap(1440.0f, 0);
+  NotationNote a = make_tap(0, 0);
+  NotationNote b = make_tap(480, 0);
+  NotationNote c = make_tap(960, 0);
+  NotationNote d = make_tap(1440, 0);
 
   // offset 1000: tick0→1000ms; +480@120BPM→500ms → 1500; +480@240→250ms → 1750;
   // +480@60→1000ms → 2750.

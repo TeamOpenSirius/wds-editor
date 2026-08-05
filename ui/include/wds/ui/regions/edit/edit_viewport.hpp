@@ -60,12 +60,12 @@ class EditViewport {
 
   int32_t tick_at(float y) const {
     const float ms = ms_at_y(y);
-    const float raw = wds::chart_editor::milliseconds_to_tick(
+    const int32_t raw = wds::chart_editor::milliseconds_to_tick(
         static_cast<int64_t>(std::llround(std::max(0.0f, ms))), timing_);
-    return wds::chart_editor::snap_tick(std::max(0.0f, raw), grid_);
+    return wds::chart_editor::snap_tick(static_cast<float>(std::max(0, raw)), grid_);
   }
 
-  float y_at(float tick) const {
+  float y_at(int32_t tick) const {
     return y_at_ms(static_cast<float>(wds::chart_editor::tick_to_milliseconds(tick, timing_)));
   }
 
@@ -74,10 +74,10 @@ class EditViewport {
     const float vis = static_cast<float>(visible_ms());
     const float ms_lo = std::max(0.0f, scroll_ms_);
     const float ms_hi = std::max(ms_lo, scroll_ms_ + vis);
-    const int32_t start = static_cast<int32_t>(std::floor(wds::chart_editor::milliseconds_to_tick(
-        static_cast<int64_t>(std::llround(ms_lo)), timing_)));
-    const int32_t end = static_cast<int32_t>(std::ceil(wds::chart_editor::milliseconds_to_tick(
-        static_cast<int64_t>(std::llround(ms_hi)), timing_)));
+    const int32_t start = wds::chart_editor::milliseconds_to_tick(
+        static_cast<int64_t>(std::llround(ms_lo)), timing_);
+    const int32_t end = wds::chart_editor::milliseconds_to_tick(
+        static_cast<int64_t>(std::llround(ms_hi)), timing_);
     return {std::max(0, start), std::max(std::max(0, start), end)};
   }
 
@@ -130,7 +130,7 @@ class EditViewport {
     set_scroll_ms(scroll_ms_for_playhead(static_cast<float>(std::max(0.0, now_ms))));
   }
 
-  void sync_scroll_to_playhead(float now_tick) {
+  void sync_scroll_to_playhead(int32_t now_tick) {
     sync_scroll_to_playhead_ms(static_cast<double>(
         wds::chart_editor::tick_to_milliseconds(now_tick, timing_)));
   }

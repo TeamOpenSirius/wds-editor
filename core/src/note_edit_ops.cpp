@@ -15,7 +15,7 @@ bool overlaps(const NotationNote& a, const NotationNote& b) {
   return a.lane <= b.end_lane() && b.lane <= a.end_lane();
 }
 
-bool same_tick(float a, float b) noexcept { return std::abs(a - b) < 0.5f; }
+bool same_tick(int32_t a, int32_t b) noexcept { return a == b; }
 
 std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<NotationNote> notes,
                                                             const NotationNote& hold,
@@ -29,8 +29,7 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
                              }),
               notes.end());
   const int32_t step = std::max(1, ticks_per_quarter / 2);
-  for (float tick = hold.start_tick + static_cast<float>(step); tick < hold.end_tick;
-       tick += static_cast<float>(step)) {
+  for (int32_t tick = hold.start_tick + step; tick < hold.end_tick; tick += step) {
     const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
       return (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) &&
              same_tick(note.start_tick, tick) && overlaps(note, hold);
@@ -64,7 +63,7 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
   const bool split = is_split_lane_gimmick(note.gimmick_type);
 
   if (!was_hold && target_hold) {
-    note.end_tick = note.start_tick + static_cast<float>(std::max(1, ticks_per_quarter));
+    note.end_tick = note.start_tick + std::max(1, ticks_per_quarter);
   } else if (was_hold && !target_hold) {
     note.end_tick = note.start_tick;
   }
@@ -113,7 +112,9 @@ void mirror_scratch_direction(NotationNote& note) noexcept {
 
 void mirror_notes(std::vector<NotationNote>& notes, int32_t lane_count) {
   for (auto& note : notes) {
-    note.lane = lane_count - note.lane - note.width;
+    const int32_t w = std::max(1, note.width);
+    note.lane = std::clamp(lane_count - note.lane - w, 0, std::max(0, lane_count - w));
+    note.width = w;
     mirror_scratch_direction(note);
   }
 }
@@ -135,11 +136,11 @@ void mirror_notes_about_center(std::vector<NotationNote>& notes) {
 bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick) {
   for (const auto& note : notes)
     if (note.start_tick + delta_tick < 0 ||
-        (note.end_tick > 0.0f && note.end_tick + delta_tick < 0))
+        (note.end_tick > 0 && note.end_tick + delta_tick < 0))
       return false;
   for (auto& note : notes) {
     note.start_tick += delta_tick;
-    if (note.end_tick > 0.0f) note.end_tick += delta_tick;
+    if (note.end_tick > 0) note.end_tick += delta_tick;
   }
   return true;
 }
@@ -473,7 +474,7 @@ std::optional<NotationNote> parent_hold_for(const ChartDocument& doc, const Nota
 
 namespace {
 
-bool same_chain_tick(float a, float b) noexcept { return std::abs(a - b) < 0.5f; }
+bool same_chain_tick(int32_t a, int32_t b) noexcept { return a == b; }
 
 // Prev's JumpScratch must cover the union of both bodies (may be wider on one side).
 bool scratch_chain_lanes_connected(const NotationNote& prev, const NotationNote& next) noexcept {
@@ -537,16 +538,21 @@ bool prune_hold_mid_stars(ChartDocument& doc, const NotationNote& hold) {
 std::vector<NotationNote> paste_notes_aligned(const std::vector<NotationNote>& clipboard,
                                               int32_t anchor_tick, const EditGridConfig& grid) {
   if (clipboard.empty()) return {};
-  const float earliest = std::min_element(clipboard.begin(), clipboard.end(),
-                                         [](const auto& a, const auto& b) {
-                                           return a.start_tick < b.start_tick;
-                                         })->start_tick;
-  const int32_t snapped_anchor = snap_tick(static_cast<float>(anchor_tick), grid);
+  const int32_t earliest = std::min_element(clipboard.begin(), clipboard.end(),
+                                            [](const auto& a, const auto& b) {
+                                              return a.start_tick < b.start_tick;
+                                            })
+                               ->start_tick;
+  int32_t snapped_anchor = snap_tick(static_cast<float>(anchor_tick), grid);
+  // Keep all pasted notes at non-negative ticks.
+  if (snapped_anchor < earliest) {
+    snapped_anchor = earliest;
+  }
   std::vector<NotationNote> result = clipboard;
   for (auto& note : result) {
     note.id = kAutoNoteId;
     note.start_tick += snapped_anchor - earliest;
-    if (note.end_tick > 0.0f) note.end_tick += snapped_anchor - earliest;
+    if (note.end_tick > 0) note.end_tick += snapped_anchor - earliest;
   }
   return result;
 }

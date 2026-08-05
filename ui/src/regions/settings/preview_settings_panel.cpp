@@ -141,6 +141,13 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
   seek->set_range(0.0f, 1.0f);
   seek->on_change([this](float fraction) {
     int64_t duration = preview_.transport().audio().duration_ms();
+    if (duration <= 0) {
+      duration = 1;
+      for (const auto& n : preview_.engine().document().notes()) {
+        duration = std::max(duration, n.end_ms(preview_.engine().document().timing()) + 1);
+        duration = std::max(duration, n.start_ms(preview_.engine().document().timing()) + 1);
+      }
+    }
     duration = std::max<int64_t>(duration, 1);
     preview_.transport().request_seek_ms(static_cast<int64_t>(fraction * duration));
   });
@@ -368,14 +375,6 @@ void PreviewSettingsPanel::paint(wds::interaction::UiPainter& painter) const {
   painter.fill_rect({b.x + pad, b.bottom() - 1.0f, std::max(1.0f, b.w - pad * 2.0f), 1.0f},
                     th::kOutline);
 
-  int64_t duration = preview_.transport().audio().duration_ms();
-  if (duration <= 0) duration = 1;
-  const float frac = std::clamp(
-      static_cast<float>(preview_.transport().committed_ms()) / static_cast<float>(duration),
-      0.0f, 1.0f);
-  static_cast<wds::interaction::Slider*>(seek_slider_)->set_value(frac);
-  sync_from_state();
-
   speed_minus_->paint(painter);
   speed_plus_->paint(painter);
   seek_slider_->paint(painter);
@@ -387,6 +386,26 @@ void PreviewSettingsPanel::paint(wds::interaction::UiPainter& painter) const {
   rate_combo_->paint(painter);
 }
 
-void PreviewSettingsPanel::update(float delta_seconds) { Widget::update(delta_seconds); }
+void PreviewSettingsPanel::update(float delta_seconds) {
+  Widget::update(delta_seconds);
+  auto* slider = static_cast<wds::interaction::Slider*>(seek_slider_);
+  if (slider == nullptr || slider->is_dragging()) {
+    return;
+  }
+  int64_t duration = preview_.transport().audio().duration_ms();
+  if (duration <= 0) {
+    duration = 1;
+    for (const auto& n : preview_.engine().document().notes()) {
+      duration = std::max(duration, n.end_ms(preview_.engine().document().timing()) + 1);
+      duration = std::max(duration, n.start_ms(preview_.engine().document().timing()) + 1);
+    }
+  }
+  duration = std::max<int64_t>(duration, 1);
+  const float frac = std::clamp(
+      static_cast<float>(preview_.transport().committed_ms()) / static_cast<float>(duration), 0.0f,
+      1.0f);
+  slider->set_value(frac);
+  sync_from_state();
+}
 
 }  // namespace wds::ui

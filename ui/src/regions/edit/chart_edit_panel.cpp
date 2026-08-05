@@ -194,8 +194,8 @@ void ChartEditPanel::apply_placement_lane_width(wds::interaction::Vec2 point, in
     const int32_t tick = viewport_.tick_at(point.y);
     for (const auto& note : engine_.document().notes()) {
       if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-      const int32_t start = static_cast<int32_t>(note.start_tick);
-      const int32_t end = std::max(start, static_cast<int32_t>(note.end_tick));
+      const int32_t start = note.start_tick;
+      const int32_t end = std::max(start, note.end_tick);
       // Steady range only (exclude fade in/out).
       if (tick >= start && tick <= end) {
         const int32_t probe = viewport_.lane_at(point.x, 1);
@@ -220,7 +220,7 @@ int ChartEditPanel::effective_placement_width(wds::interaction::Vec2 point) cons
 NotationNote ChartEditPanel::make_base_note(wds::interaction::Vec2 point) const {
   sync_viewport();
   NotationNote note;
-  note.start_tick = static_cast<float>(viewport_.tick_at(point.y));
+  note.start_tick = viewport_.tick_at(point.y);
   note.end_tick = note.start_tick;
   apply_placement_lane_width(point, note.lane, note.width);
   note.note_type = NoteType::Normal;
@@ -542,7 +542,7 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         ghost_.note.note_type = NoteType::Hold;
         // Upward only: end cannot go earlier than the press tick.
         ghost_.note.end_tick =
-            std::max(ghost_.note.start_tick, static_cast<float>(viewport_.tick_at(point.y)));
+            std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
         break;
       case PlaceIntent::Flick:
         ghost_.note.note_type = NoteType::Flick;
@@ -558,7 +558,7 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
       case PlaceIntent::ScratchHoldBody:
         ghost_.note.note_type = NoteType::ScratchHold;
         ghost_.note.end_tick =
-            std::max(ghost_.note.start_tick, static_cast<float>(viewport_.tick_at(point.y)));
+            std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
         break;
       case PlaceIntent::None:
         // Non-place swipe (e.g. Down): keep the button's resting place type.
@@ -645,7 +645,7 @@ void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
 }
 
 void ChartEditPanel::clear_hold_chain_state() {
-  hold_chain_start_tick_ = 0.0f;
+  hold_chain_start_tick_ = 0;
   hold_chain_prev_id_ = -1;
   hold_chain_prev_body_ = {};
   hold_chain_ids_.clear();
@@ -907,7 +907,7 @@ void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*poin
   hold_draft_.note_type = scratch ? NoteType::ScratchHold : NoteType::Hold;
   // Upward only from the press tick; length follows current pointer (may be zero).
   hold_draft_.end_tick =
-      std::max(hold_draft_.start_tick, static_cast<float>(viewport_.tick_at(pointer_.y)));
+      std::max(hold_draft_.start_tick, viewport_.tick_at(pointer_.y));
   hold_stars_.clear();
   clear_hold_chain_state();
   hold_chain_start_tick_ = hold_draft_.start_tick;
@@ -918,7 +918,7 @@ void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*poin
 }
 
 void ChartEditPanel::sync_hold_placement_ghost() {
-  const float min_end = hold_draft_.start_tick + static_cast<float>(min_hold_duration_ticks());
+  const int32_t min_end = hold_draft_.start_tick + min_hold_duration_ticks();
   // Chained next segment starts as a flick-tail adjuster only: no body until the
   // pointer pulls a vertical height. Hide the draft ghost in that mode.
   if (hold_draft_.end_tick < min_end && hold_chain_prev_id_ >= 0) {
@@ -938,8 +938,8 @@ void ChartEditPanel::sync_hold_placement_ghost() {
 }
 
 void ChartEditPanel::sync_hold_draft_to_pointer() {
-  const float start = hold_draft_.start_tick;
-  const float cur = static_cast<float>(viewport_.tick_at(pointer_.y));
+  const int32_t start = hold_draft_.start_tick;
+  const int32_t cur = viewport_.tick_at(pointer_.y);
   // Upward only: end may grow later in time, never earlier than the head.
   hold_draft_.start_tick = start;
   hold_draft_.end_tick = std::max(start, cur);
@@ -969,12 +969,12 @@ void ChartEditPanel::add_hold_star_at(wds::interaction::Vec2 point) {
   star.note_type = hold_scratch_ ? NoteType::ScratchSound : NoteType::Sound;
   star.width = hold_draft_.width;
   star.lane = hold_draft_.lane;
-  star.start_tick = static_cast<float>(viewport_.tick_at(point.y));
+  star.start_tick = viewport_.tick_at(point.y);
   star.end_tick = star.start_tick;
   star.scratch_length = 0;
   GhostNote g{star, true};
-  const float head = std::min(hold_draft_.start_tick, hold_draft_.end_tick);
-  const float tail = std::max(hold_draft_.start_tick, hold_draft_.end_tick);
+  const int32_t head = std::min(hold_draft_.start_tick, hold_draft_.end_tick);
+  const int32_t tail = std::max(hold_draft_.start_tick, hold_draft_.end_tick);
   g.visible = star.start_tick > head && star.start_tick < tail;
   hold_stars_.push_back(g);
 }
@@ -983,7 +983,7 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
   if (!engine_.is_editable() || selected_.empty()) return false;
   sync_viewport();
   if (!playfield_.contains(point)) return false;
-  const float tick = static_cast<float>(viewport_.tick_at(point.y));
+  const int32_t tick = viewport_.tick_at(point.y);
   const int32_t lane = viewport_.lane_at(point.x, 1);
   std::optional<NotationNote> target;
   for (const int32_t id : selected_) {
@@ -1112,7 +1112,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // Below-minimum length: first segment degrades to Tap / Flick. Chained next with no
   // vertical pull is flick-tail-only — finish commits the previous end cover;
   // another chain click is ignored until a body height exists.
-  if (hold_draft_.end_tick < hold_draft_.start_tick + static_cast<float>(min_dur)) {
+  if (hold_draft_.end_tick < hold_draft_.start_tick + min_dur) {
     if (hold_chain_prev_id_ >= 0) {
       if (chain_next) return;
       commit_hold_chain_prev_cover();
@@ -1198,7 +1198,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     std::optional<NotationNote> new_hold;
     for (const auto& n : after) {
       if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
-      if (std::abs(n.start_tick - hold_draft_.start_tick) > 0.1f) continue;
+      if (n.start_tick != hold_draft_.start_tick) continue;
       if (n.lane != hold_draft_.lane || n.width != hold_draft_.width) continue;
       new_hold = n;
       break;
@@ -1232,7 +1232,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   for (auto it = engine_.document().notes().rbegin(); it != engine_.document().notes().rend();
        ++it) {
     if (!wds::chart_editor::is_hold_with_tail(it->note_type)) continue;
-    if (std::abs(it->start_tick - hold_draft_.start_tick) > 0.1f) continue;
+    if (it->start_tick != hold_draft_.start_tick) continue;
     if (it->lane != hold_draft_.lane || it->width != hold_draft_.width) continue;
     placed = *it;
     break;
@@ -1304,7 +1304,7 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
       break;
     case PlaceIntent::HoldBody: {
       begin_hold_body(false, anchor);
-      const float end = static_cast<float>(viewport_.tick_at(event.position.y));
+      const int32_t end = viewport_.tick_at(event.position.y);
       hold_draft_.end_tick = std::max(hold_draft_.start_tick, end);
       finish_hold_body(false);
       break;
@@ -1320,7 +1320,7 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
       break;
     case PlaceIntent::ScratchHoldBody: {
       begin_hold_body(true, anchor);
-      const float end = static_cast<float>(viewport_.tick_at(event.position.y));
+      const int32_t end = viewport_.tick_at(event.position.y);
       hold_draft_.end_tick = std::max(hold_draft_.start_tick, end);
       finish_hold_body(false);
       break;
@@ -1343,8 +1343,8 @@ wds::interaction::Rect ChartEditPanel::marquee_screen_rect(wds::interaction::Vec
   const int32_t l_hi = std::max(l0, l1);
   // Later ticks are toward the top (smaller y). May extend past the visible panel
   // when the anchor tick was scrolled out of view.
-  const float y_top = viewport_.y_at(static_cast<float>(t_hi));
-  const float y_bot = viewport_.y_at(static_cast<float>(t_lo));
+  const float y_top = viewport_.y_at(t_hi);
+  const float y_bot = viewport_.y_at(t_lo);
   const float x0 = viewport_.x_at(l_lo);
   const float x1 = viewport_.x_at(l_hi + 1);
   return {x0, y_top, std::max(0.0f, x1 - x0), std::max(0.0f, y_bot - y_top)};
@@ -2186,7 +2186,7 @@ void ChartEditPanel::open_split_picker_for_edit(int32_t note_id) {
   if (!note || !wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) return;
   split_picker_open_ = true;
   split_picker_edit_id_ = note_id;
-  split_picker_tick_ = static_cast<int32_t>(note->start_tick);
+  split_picker_tick_ = note->start_tick;
   split_picker_count_ = std::clamp(wds::chart_editor::get_split_count(note->gimmick_type), 1, 6);
   split_picker_color_id_ = note->scratch_length;
   scroll_split_picker_to_color(split_picker_color_id_);
@@ -2225,8 +2225,8 @@ void ChartEditPanel::confirm_split_picker() {
   note.note_type = NoteType::None;
   note.gimmick_type = wds::chart_editor::split_gimmick_for_count(split_picker_count_);
   note.scratch_length = split_picker_color_id_;
-  note.start_tick = static_cast<float>(split_picker_tick_);
-  note.end_tick = note.start_tick + static_cast<float>(tpq);
+  note.start_tick = split_picker_tick_;
+  note.end_tick = note.start_tick + tpq;
   note.lane = 0;
   note.width = 12;
   commit_notes({note}, "Add split");
@@ -2946,11 +2946,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       if (note) {
         NotationNote updated = *note;
         if (drag_split_is_end_) {
-          updated.end_tick = static_cast<float>(
-              std::max(static_cast<int32_t>(updated.start_tick) + min_dur, tick));
+          updated.end_tick = std::max(updated.start_tick + min_dur, tick);
         } else {
-          updated.start_tick = static_cast<float>(
-              std::min(tick, static_cast<int32_t>(updated.end_tick) - min_dur));
+          updated.start_tick = std::min(tick, updated.end_tick - min_dur);
         }
         engine_.document().update_note(drag_split_note_id_, updated);
         engine_.rebuild_snapshot();
@@ -2990,12 +2988,13 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       NotationNote n = orig;
       // Snap onto the current subdivision grid, then apply the cursor's grid delta.
       // (orig + d_tick alone preserves off-grid offsets and never lands on division lines.)
-      const float duration =
-          orig.end_tick > orig.start_tick ? (orig.end_tick - orig.start_tick) : 0.0f;
+      const int32_t duration =
+          orig.end_tick > orig.start_tick ? (orig.end_tick - orig.start_tick) : 0;
       const int32_t new_start = std::max(
-          0, wds::chart_editor::snap_tick(orig.start_tick, viewport_.grid()) + d_tick);
-      n.start_tick = static_cast<float>(new_start);
-      n.end_tick = duration > 0.0f ? n.start_tick + duration : n.start_tick;
+          0, wds::chart_editor::snap_tick(static_cast<float>(orig.start_tick), viewport_.grid()) +
+                 d_tick);
+      n.start_tick = new_start;
+      n.end_tick = duration > 0 ? n.start_tick + duration : n.start_tick;
       n.lane = orig.lane + d_lane;
       next[id] = n;
     }
@@ -3023,8 +3022,8 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       if (parent) {
         n.lane = parent->lane;
         n.width = parent->width;
-        const float lo = parent->start_tick + 1.0f;
-        const float hi = parent->end_tick - 1.0f;
+        const int32_t lo = parent->start_tick + 1;
+        const int32_t hi = parent->end_tick - 1;
         if (lo < hi) {
           n.start_tick = std::clamp(n.start_tick, lo, hi);
           n.end_tick = n.start_tick;
@@ -3187,7 +3186,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         if (!wds::chart_editor::is_scratch_hold_body(n.note_type) || n.id == body.id) {
           return false;
         }
-        if (std::abs(n.start_tick - body.end_tick) >= 0.5f) return false;
+        if (n.start_tick != body.end_tick) return false;
         if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) return false;
         return true;
       };
@@ -3217,7 +3216,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         if (!wds::chart_editor::is_scratch_hold_body(n.note_type) || n.id == body.id) {
           return false;
         }
-        if (std::abs(n.end_tick - body.start_tick) >= 0.5f) return false;
+        if (n.end_tick != body.start_tick) return false;
         return true;  // prev may own a head
       };
       for (auto& [id, n] : working) {
@@ -3917,13 +3916,13 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         NotationNote n = orig;
         n.lane = parent->lane;
         n.width = parent->width;
-        const float lo = parent->start_tick + 1.0f;
-        const float hi = parent->end_tick - 1.0f;
+        const int32_t lo = parent->start_tick + 1;
+        const int32_t hi = parent->end_tick - 1;
         if (lo < hi) {
           n.start_tick = std::clamp(orig.start_tick, lo, hi);
           // Prefer preserving relative offset when the whole span shifts.
           if (auto hold_orig = drag_originals_.find(parent->id); hold_orig != drag_originals_.end()) {
-            const float delta = parent->start_tick - hold_orig->second.start_tick;
+            const int32_t delta = parent->start_tick - hold_orig->second.start_tick;
             n.start_tick = std::clamp(orig.start_tick + delta, lo, hi);
           }
           n.end_tick = n.start_tick;
@@ -3948,24 +3947,24 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
           if (!wds::chart_editor::is_scratch_hold_body(n.note_type) || n.id == anchor_orig.id) {
             continue;
           }
-          if (std::abs(n.start_tick - anchor_orig.end_tick) >= 0.5f) continue;
+          if (n.start_tick != anchor_orig.end_tick) continue;
           if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) continue;
           next_orig = &n;
           break;
         }
       }
       if (next_orig) {
-        hi = static_cast<int32_t>(next_orig->end_tick) - min_dur;
+        hi = next_orig->end_tick - min_dur;
       }
       if (lo > hi) return;
       const int32_t joint = std::clamp(tick, lo, hi);
 
       NotationNote prev_n = anchor_orig;
-      prev_n.end_tick = static_cast<float>(joint);
+      prev_n.end_tick = joint;
       engine_.document().update_note(prev_n.id, prev_n);
       if (next_orig) {
         NotationNote next_n = *next_orig;
-        next_n.start_tick = static_cast<float>(joint);
+        next_n.start_tick = joint;
         engine_.document().update_note(next_n.id, next_n);
       }
       sync_attached_to_live_holds();
@@ -3973,7 +3972,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       return;
     }
 
-    float new_start = -1.0f;
+    int32_t new_start = -1;
     for (const auto& [id, orig] : drag_originals_) {
       NotationNote n = orig;
       if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
@@ -3983,17 +3982,15 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         continue;
       }
       if (adjust_end_) {
-        n.end_tick = static_cast<float>(
-            std::max(static_cast<int32_t>(n.start_tick) + min_dur, tick));
+        n.end_tick = std::max(n.start_tick + min_dur, tick);
       } else {
-        n.start_tick = static_cast<float>(
-            std::min(tick, static_cast<int32_t>(n.end_tick) - min_dur));
+        n.start_tick = std::min(tick, n.end_tick - min_dur);
         new_start = n.start_tick;
       }
       engine_.document().update_note(id, n);
     }
     // Paired head follows hold start when the start edge is dragged.
-    if (!adjust_end_ && new_start >= 0.0f) {
+    if (!adjust_end_ && new_start >= 0) {
       for (const auto& [id, orig] : drag_originals_) {
         if (!wds::chart_editor::is_hold_head_note(orig)) continue;
         NotationNote n = orig;
@@ -4012,11 +4009,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     if (!note) return;
     NotationNote updated = *note;
     if (drag_split_is_end_) {
-      updated.end_tick = static_cast<float>(
-          std::max(static_cast<int32_t>(updated.start_tick) + min_dur, tick));
+      updated.end_tick = std::max(updated.start_tick + min_dur, tick);
     } else {
-      updated.start_tick = static_cast<float>(
-          std::min(tick, static_cast<int32_t>(updated.end_tick) - min_dur));
+      updated.start_tick = std::min(tick, updated.end_tick - min_dur);
     }
     engine_.document().update_note(drag_split_note_id_, updated);
     engine_.rebuild_snapshot();

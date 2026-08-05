@@ -44,9 +44,10 @@ struct MusicTiming {
 // Official CSV uses seconds + 1-based lane; wdschart keeps ticks + 0-based lane.
 struct NotationNote {
   int32_t id = kAutoNoteId;
-  float start_tick = 0.0f;
+  // Integer ticks only (grid-snapped). Never fractional.
+  int32_t start_tick = 0;
   // 0 = no duration (official endTime -1). Hold body / split use end_tick >= start_tick.
-  float end_tick = 0.0f;
+  int32_t end_tick = 0;
   NoteType note_type = NoteType::Normal;
   int32_t lane = 0;   // 0-based (official leftLane is 1-based)
   int32_t width = 1;  // official laneLength
@@ -124,13 +125,20 @@ class ChartDocument {
 
   int32_t next_note_id() const;
 
+  // Bumped on every note/timing mutation (including update_note). Preview lookup
+  // caches key off this so UI paths that skip engine.bump_revision stay correct.
+  uint64_t content_generation() const noexcept { return content_generation_; }
+
  private:
   void sort_notes_for_display();
   static bool compare_notes_for_save(const NotationNote& a, const NotationNote& b) noexcept;
   static void normalize_notes_inplace(std::vector<NotationNote>& notes);
   void rebuild_id_index();
   void rebuild_index();
-  void mark_dirty() noexcept { is_dirty_ = true; }
+  void mark_dirty() noexcept {
+    is_dirty_ = true;
+    ++content_generation_;
+  }
 
   MusicTiming timing_;
   std::vector<NotationNote> notes_;
@@ -139,11 +147,13 @@ class ChartDocument {
   ChartNoteIndex index_;
   int32_t next_id_ = 0;
   bool is_dirty_ = false;
+  uint64_t content_generation_ = 0;
   ChartEditMode edit_mode_ = ChartEditMode::Editable;
 };
 
-int64_t tick_to_milliseconds(float tick, const MusicTiming& timing);
-float milliseconds_to_tick(int64_t ms, const MusicTiming& timing);
+int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing);
+// Rounded to nearest integer tick (notes are always integer-tick).
+int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing);
 
 bool is_hold_family(NoteType type) noexcept;
 bool is_hold_start(NoteType type) noexcept;

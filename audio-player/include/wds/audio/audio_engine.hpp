@@ -4,6 +4,7 @@
 
 #include <wds/common/time.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -32,15 +33,15 @@ class AudioEngine {
 
   // --- position ---
   wds::common::Microseconds position() const;
-  int64_t position_ms() const noexcept { return wds::common::us_to_ms_round(position()); }
+  int64_t position_ms() const noexcept { return wds::common::us_to_ms_floor(position()); }
   // Decoder/mixer clock. POS syncs are driven by rendering — if decode has already
   // passed a hit byte, ChannelSetSync will never fire (must play immediately).
   wds::common::Microseconds decode_position() const;
   int64_t decode_position_ms() const noexcept {
-    return wds::common::us_to_ms_round(decode_position());
+    return wds::common::us_to_ms_floor(decode_position());
   }
   wds::common::Microseconds duration() const;
-  int64_t duration_ms() const noexcept { return wds::common::us_to_ms_round(duration()); }
+  int64_t duration_ms() const noexcept { return wds::common::us_to_ms_floor(duration()); }
   bool set_position(wds::common::Microseconds time);
   bool set_position_ms(int64_t time_ms) { return set_position(wds::common::ms_to_us(time_ms)); }
   // Bumps on set_position and begin_timeline_control (seek / scrub / play resync).
@@ -117,6 +118,8 @@ class AudioEngine {
   float playback_rate_ = 1.0f;
   float music_base_freq_ = 0.0f;
   uint64_t position_generation_ = 0;
+  std::atomic<uint64_t> sfx_epoch_{0};
+  std::atomic<bool> shutting_down_{false};
 };
 
 }  // namespace wds::audio

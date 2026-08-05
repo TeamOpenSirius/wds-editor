@@ -13,7 +13,7 @@ int main() {
   });
 
   NotationNote tap;
-  tap.start_tick = 480.0f;
+  tap.start_tick = 480;
   tap.lane = 2;
   tap.width = 1;
   tap.note_type = NoteType::Normal;
@@ -21,8 +21,8 @@ int main() {
   std::printf("added tap id=%d\n", tap_id);
 
   NotationNote split;
-  split.start_tick = 0.0f;
-  split.end_tick = 1920.0f;
+  split.start_tick = 0;
+  split.end_tick = 1920;
   split.lane = 0;
   split.width = 6;
   split.gimmick_type = GimmickType::Split3;
@@ -47,7 +47,7 @@ int main() {
   std::printf("saved chart with %zu notes, ids 0..%zu\n", engine.document().notes().size(),
               engine.document().notes().empty() ? 0 : engine.document().notes().size() - 1);
   for (const auto& note : engine.document().notes()) {
-    std::printf("  note id=%d start_tick=%.0f lane=%d gimmick=%d\n", note.id, note.start_tick,
+    std::printf("  note id=%d start_tick=%d lane=%d gimmick=%d\n", note.id, note.start_tick,
                 note.lane, static_cast<int>(note.gimmick_type));
   }
 

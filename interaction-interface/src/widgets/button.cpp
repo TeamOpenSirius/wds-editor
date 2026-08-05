@@ -87,6 +87,10 @@ void Button::on_click(const ClickEvent& event) {
   if (!enabled_ || event.button != PointerButton::Left) {
     return;
   }
+  // Cancel click when the pointer was released outside the button.
+  if (!pointer_inside_ && !absolute_bounds().contains(event.position)) {
+    return;
+  }
   if (on_click_) {
     on_click_();
   }

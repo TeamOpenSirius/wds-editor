@@ -521,7 +521,13 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   if (auto* edit = edit_panel()) {
     // Edit visible window for preview lead-in time mapping (not CHART_DELAY_MS).
     session_->engine().set_preview_lead_in_visible_ms(edit->viewport().visible_ms());
-    edit->sync_to_timeline_ms(session_->engine().timeline_us() / 1000.0);
+    double sync_ms = session_->engine().timeline_us() / 1000.0;
+    if (chart_preview_ != nullptr &&
+        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
+      // Match preview present clock (committed + one display-frame lead).
+      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
+    }
+    edit->sync_to_timeline_ms(sync_ms);
   }
   last_update_sync_us_ = phase_us(t0);
 
@@ -545,7 +551,12 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
   if (auto* edit = edit_panel()) {
     // Final scroll sample for this frame (post-transport tick), then re-snap
     // placement ghosts to the stationary pointer under the new viewport.
-    edit->sync_to_timeline_ms(session_->engine().timeline_us() / 1000.0);
+    double sync_ms = session_->engine().timeline_us() / 1000.0;
+    if (chart_preview_ != nullptr &&
+        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
+      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
+    }
+    edit->sync_to_timeline_ms(sync_ms);
     edit->resync_pointer_overlays();
   }
   wds::interaction::UiPainter painter;

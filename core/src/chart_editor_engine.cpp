@@ -183,6 +183,9 @@ SerializeResult ChartEditorEngine::load_auto_from_file(const std::string& path,
   }
 
   document_.load_from_chart(chart, mode);
+  if (mode == ChartEditMode::Editable) {
+    repair_legacy_hold_heads(document_);
+  }
   history_.clear();
   bump_revision();
   publish_snapshot();
@@ -316,9 +319,11 @@ const PreviewSnapshot& ChartEditorEngine::publish_snapshot() {
   const int64_t visual_us =
       EditLeadIn::preview_chart_us(clock_us, preview_lead_in_visible_ms_);
   const int64_t preview_ms = visual_us / 1000;
+  // content_generation invalidates note-lookup on document mutate without engine.bump_revision.
+  const uint64_t snapshot_rev = document_.content_generation();
   snapshot_builder_.rebuild_or_update(snapshot_, document_.notes(), document_.timing(),
                                       document_.concurrent_lines(), document_.index(),
-                                      preview_ms, clock_.playback_state(), revision_);
+                                      preview_ms, clock_.playback_state(), snapshot_rev);
   snapshot_.timeline_ms = preview_ms;
   snapshot_.timeline_us = visual_us;
   if (snapshot_callback_) {

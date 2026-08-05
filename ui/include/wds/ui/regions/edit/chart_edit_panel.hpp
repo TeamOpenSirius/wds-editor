@@ -338,7 +338,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool hold_scratch_ = false;
   wds::chart_editor::NotationNote hold_draft_{};
   // Continuous hold chain: select all segments; cover previous tail with next body.
-  float hold_chain_start_tick_ = 0.0f;
+  int32_t hold_chain_start_tick_ = 0;
   int32_t hold_chain_prev_id_ = -1;
   wds::chart_editor::NotationNote hold_chain_prev_body_{};
   std::unordered_set<int32_t> hold_chain_ids_;

@@ -471,6 +471,10 @@ bool VulkanRenderer::Impl::create_depth_resources() {
 }
 
 bool VulkanRenderer::Impl::create_color_msaa_resources() {
+  if (msaa_samples == VK_SAMPLE_COUNT_1_BIT) {
+    // 1× path writes color directly to the swapchain image (no MSAA target).
+    return true;
+  }
   VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   image_info.imageType = VK_IMAGE_TYPE_2D;
   image_info.extent = {swapchain_extent.width, swapchain_extent.height, 1};
@@ -510,16 +514,25 @@ bool VulkanRenderer::Impl::create_color_msaa_resources() {
 bool VulkanRenderer::Impl::create_framebuffers() {
   framebuffers.resize(swapchain_views.size());
   for (size_t i = 0; i < swapchain_views.size(); ++i) {
-    std::array<VkImageView, 3> attachments = {color_msaa_view, depth_view, swapchain_views[i]};
     VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     info.renderPass = render_pass;
-    info.attachmentCount = static_cast<uint32_t>(attachments.size());
-    info.pAttachments = attachments.data();
     info.width = swapchain_extent.width;
     info.height = swapchain_extent.height;
     info.layers = 1;
-    if (vkCreateFramebuffer(device, &info, nullptr, &framebuffers[i]) != VK_SUCCESS) {
-      return false;
+    if (msaa_samples == VK_SAMPLE_COUNT_1_BIT) {
+      std::array<VkImageView, 2> attachments = {swapchain_views[i], depth_view};
+      info.attachmentCount = static_cast<uint32_t>(attachments.size());
+      info.pAttachments = attachments.data();
+      if (vkCreateFramebuffer(device, &info, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+        return false;
+      }
+    } else {
+      std::array<VkImageView, 3> attachments = {color_msaa_view, depth_view, swapchain_views[i]};
+      info.attachmentCount = static_cast<uint32_t>(attachments.size());
+      info.pAttachments = attachments.data();
+      if (vkCreateFramebuffer(device, &info, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+        return false;
+      }
     }
   }
   return true;
@@ -692,11 +705,56 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     return false;
   }
 
-  // Retire the old swapchain and dependent views/framebuffers only after success.
-  cleanup_swapchain_resources_keep_handle();
-  if (old_swapchain) {
-    vkDestroySwapchainKHR(device, old_swapchain, nullptr);
-  }
+  // Keep previous swapchain resources alive until the new chain is fully wired.
+  const VkFormat prev_format = swapchain_format;
+  const VkExtent2D prev_extent = swapchain_extent;
+  std::vector<VkImageView> old_views = std::move(swapchain_views);
+  std::vector<VkFramebuffer> old_framebuffers = std::move(framebuffers);
+  std::vector<VkImage> old_images = std::move(swapchain_images);
+  std::vector<VkFence> old_images_in_flight = std::move(images_in_flight);
+  const VkImageView old_color_view = color_msaa_view;
+  const VkImage old_color_image = color_msaa_image;
+  const VkDeviceMemory old_color_memory = color_msaa_memory;
+  const VkImageView old_depth_view = depth_view;
+  const VkImage old_depth_image = depth_image;
+  const VkDeviceMemory old_depth_memory = depth_memory;
+  color_msaa_view = VK_NULL_HANDLE;
+  color_msaa_image = VK_NULL_HANDLE;
+  color_msaa_memory = VK_NULL_HANDLE;
+  depth_view = VK_NULL_HANDLE;
+  depth_image = VK_NULL_HANDLE;
+  depth_memory = VK_NULL_HANDLE;
+
+  auto restore_previous = [&]() {
+    for (auto fb : framebuffers) {
+      if (fb) vkDestroyFramebuffer(device, fb, nullptr);
+    }
+    framebuffers.clear();
+    for (auto view : swapchain_views) {
+      if (view) vkDestroyImageView(device, view, nullptr);
+    }
+    if (color_msaa_view) vkDestroyImageView(device, color_msaa_view, nullptr);
+    if (color_msaa_image) vkDestroyImage(device, color_msaa_image, nullptr);
+    if (color_msaa_memory) vkFreeMemory(device, color_msaa_memory, nullptr);
+    if (depth_view) vkDestroyImageView(device, depth_view, nullptr);
+    if (depth_image) vkDestroyImage(device, depth_image, nullptr);
+    if (depth_memory) vkFreeMemory(device, depth_memory, nullptr);
+    color_msaa_view = old_color_view;
+    color_msaa_image = old_color_image;
+    color_msaa_memory = old_color_memory;
+    depth_view = old_depth_view;
+    depth_image = old_depth_image;
+    depth_memory = old_depth_memory;
+    swapchain_views = std::move(old_views);
+    framebuffers = std::move(old_framebuffers);
+    swapchain_images = std::move(old_images);
+    images_in_flight = std::move(old_images_in_flight);
+    vkDestroySwapchainKHR(device, new_swapchain, nullptr);
+    swapchain = old_swapchain;
+    swapchain_format = prev_format;
+    swapchain_extent = prev_extent;
+  };
+
   swapchain = new_swapchain;
   swapchain_format = chosen.format;
   swapchain_extent = new_extent;
@@ -734,6 +792,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
           image_count, kMaxFramesInFlight, caps.minImageCount, caps.maxImageCount);
 
   swapchain_views.resize(swapchain_images.size());
+  bool ok = true;
   for (size_t i = 0; i < swapchain_images.size(); ++i) {
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     view.image = swapchain_images[i];
@@ -743,17 +802,36 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     view.subresourceRange.levelCount = 1;
     view.subresourceRange.layerCount = 1;
     if (vkCreateImageView(device, &view, nullptr, &swapchain_views[i]) != VK_SUCCESS) {
-      return false;
+      ok = false;
+      break;
     }
   }
+  if (ok) ok = create_color_msaa_resources();
+  if (ok) ok = create_depth_resources();
+  if (ok) ok = create_framebuffers();
+  if (!ok) {
+    restore_previous();
+    WDS_LOG("create_swapchain: dependent setup failed; kept previous swapchain\n");
+    return false;
+  }
 
-  if (!create_color_msaa_resources()) {
-    return false;
+  // Success — retire previous dependent resources and swapchain handle.
+  for (auto fb : old_framebuffers) {
+    if (fb) vkDestroyFramebuffer(device, fb, nullptr);
   }
-  if (!create_depth_resources()) {
-    return false;
+  for (auto view : old_views) {
+    if (view) vkDestroyImageView(device, view, nullptr);
   }
-  return create_framebuffers();
+  if (old_color_view) vkDestroyImageView(device, old_color_view, nullptr);
+  if (old_color_image) vkDestroyImage(device, old_color_image, nullptr);
+  if (old_color_memory) vkFreeMemory(device, old_color_memory, nullptr);
+  if (old_depth_view) vkDestroyImageView(device, old_depth_view, nullptr);
+  if (old_depth_image) vkDestroyImage(device, old_depth_image, nullptr);
+  if (old_depth_memory) vkFreeMemory(device, old_depth_memory, nullptr);
+  if (old_swapchain) {
+    vkDestroySwapchainKHR(device, old_swapchain, nullptr);
+  }
+  return true;
 }
 
 bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t bytes) {
@@ -970,16 +1048,12 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   }
 
   VkAttachmentDescription color{};
-  color.format = VK_FORMAT_B8G8R8A8_UNORM;  // updated after swapchain if needed
+  color.format = swapchain_format;
   color.samples = msaa_samples;
   color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // resolved into swapchain
   color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
   color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-  color.format = swapchain_format;
 
   VkAttachmentDescription depth{};
   depth.format = depth_format;
@@ -991,24 +1065,12 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-  VkAttachmentDescription resolve{};
-  resolve.format = swapchain_format;
-  resolve.samples = VK_SAMPLE_COUNT_1_BIT;
-  resolve.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  resolve.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  resolve.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  resolve.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  resolve.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  resolve.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
   VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkAttachmentReference depth_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-  VkAttachmentReference resolve_ref{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription subpass{};
   subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   subpass.colorAttachmentCount = 1;
   subpass.pColorAttachments = &color_ref;
-  subpass.pResolveAttachments = &resolve_ref;
   subpass.pDepthStencilAttachment = &depth_ref;
 
   VkSubpassDependency dep{};
@@ -1021,14 +1083,40 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   dep.dstAccessMask =
       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-  std::array<VkAttachmentDescription, 3> attachments = {color, depth, resolve};
   VkRenderPassCreateInfo rp_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-  rp_info.attachmentCount = static_cast<uint32_t>(attachments.size());
-  rp_info.pAttachments = attachments.data();
   rp_info.subpassCount = 1;
   rp_info.pSubpasses = &subpass;
   rp_info.dependencyCount = 1;
   rp_info.pDependencies = &dep;
+
+  VkAttachmentDescription resolve{};
+  VkAttachmentReference resolve_ref{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  std::array<VkAttachmentDescription, 3> attachments_msaa{};
+  std::array<VkAttachmentDescription, 2> attachments_1x{};
+  if (msaa_samples == VK_SAMPLE_COUNT_1_BIT) {
+    // Direct-to-swapchain color + depth (no resolve attachment).
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments_1x = {color, depth};
+    subpass.pResolveAttachments = nullptr;
+    rp_info.attachmentCount = static_cast<uint32_t>(attachments_1x.size());
+    rp_info.pAttachments = attachments_1x.data();
+  } else {
+    color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // resolved into swapchain
+    color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    resolve.format = swapchain_format;
+    resolve.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolve.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolve.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    resolve.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolve.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    resolve.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resolve.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments_msaa = {color, depth, resolve};
+    subpass.pResolveAttachments = &resolve_ref;
+    rp_info.attachmentCount = static_cast<uint32_t>(attachments_msaa.size());
+    rp_info.pAttachments = attachments_msaa.data();
+  }
   if (vkCreateRenderPass(device, &rp_info, nullptr, &render_pass) != VK_SUCCESS) {
     return false;
   }
@@ -1467,47 +1555,57 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
 }
 
 void VulkanRenderer::destroy() {
-  if (!impl_ || impl_->device == VK_NULL_HANDLE) {
+  if (!impl_) {
     ready_ = false;
-    if (impl_) {
-      *impl_ = Impl{};
-    }
     return;
   }
-  // Stop accepting new work immediately so teardown races cannot present.
   ready_ = false;
-  vkDeviceWaitIdle(impl_->device);
 
-  for (size_t i = 1; i < impl_->textures.size(); ++i) {
-    destroy_texture(static_cast<TextureId>(i));
+  if (impl_->device != VK_NULL_HANDLE) {
+    vkDeviceWaitIdle(impl_->device);
+
+    for (size_t i = 1; i < impl_->textures.size(); ++i) {
+      destroy_texture(static_cast<TextureId>(i));
+    }
+    impl_->textures.clear();
+
+    impl_->destroy_frame_vertices();
+
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+      if (impl_->image_available[i])
+        vkDestroySemaphore(impl_->device, impl_->image_available[i], nullptr);
+      if (impl_->render_finished[i])
+        vkDestroySemaphore(impl_->device, impl_->render_finished[i], nullptr);
+      if (impl_->in_flight[i]) vkDestroyFence(impl_->device, impl_->in_flight[i], nullptr);
+    }
+    if (impl_->upload_fence) {
+      vkDestroyFence(impl_->device, impl_->upload_fence, nullptr);
+      impl_->upload_fence = VK_NULL_HANDLE;
+    }
+
+    impl_->cleanup_swapchain();
+    if (impl_->pipeline) vkDestroyPipeline(impl_->device, impl_->pipeline, nullptr);
+    if (impl_->pipeline_additive) vkDestroyPipeline(impl_->device, impl_->pipeline_additive, nullptr);
+    if (impl_->pipeline_layout) vkDestroyPipelineLayout(impl_->device, impl_->pipeline_layout, nullptr);
+    if (impl_->render_pass) vkDestroyRenderPass(impl_->device, impl_->render_pass, nullptr);
+    if (impl_->sampler) vkDestroySampler(impl_->device, impl_->sampler, nullptr);
+    if (impl_->descriptor_pool) vkDestroyDescriptorPool(impl_->device, impl_->descriptor_pool, nullptr);
+    if (impl_->descriptor_layout)
+      vkDestroyDescriptorSetLayout(impl_->device, impl_->descriptor_layout, nullptr);
+    if (impl_->command_pool) vkDestroyCommandPool(impl_->device, impl_->command_pool, nullptr);
+    vkDestroyDevice(impl_->device, nullptr);
+    impl_->device = VK_NULL_HANDLE;
   }
-  impl_->textures.clear();
 
-  impl_->destroy_frame_vertices();
-
-  for (int i = 0; i < kMaxFramesInFlight; ++i) {
-    if (impl_->image_available[i]) vkDestroySemaphore(impl_->device, impl_->image_available[i], nullptr);
-    if (impl_->render_finished[i]) vkDestroySemaphore(impl_->device, impl_->render_finished[i], nullptr);
-    if (impl_->in_flight[i]) vkDestroyFence(impl_->device, impl_->in_flight[i], nullptr);
+  // Half-init path (instance/surface without device) must still free WSI objects.
+  if (impl_->surface && impl_->instance) {
+    vkDestroySurfaceKHR(impl_->instance, impl_->surface, nullptr);
+    impl_->surface = VK_NULL_HANDLE;
   }
-  if (impl_->upload_fence) {
-    vkDestroyFence(impl_->device, impl_->upload_fence, nullptr);
-    impl_->upload_fence = VK_NULL_HANDLE;
+  if (impl_->instance) {
+    vkDestroyInstance(impl_->instance, nullptr);
+    impl_->instance = VK_NULL_HANDLE;
   }
-
-  impl_->cleanup_swapchain();
-  if (impl_->pipeline) vkDestroyPipeline(impl_->device, impl_->pipeline, nullptr);
-  if (impl_->pipeline_additive) vkDestroyPipeline(impl_->device, impl_->pipeline_additive, nullptr);
-  if (impl_->pipeline_layout) vkDestroyPipelineLayout(impl_->device, impl_->pipeline_layout, nullptr);
-  if (impl_->render_pass) vkDestroyRenderPass(impl_->device, impl_->render_pass, nullptr);
-  if (impl_->sampler) vkDestroySampler(impl_->device, impl_->sampler, nullptr);
-  if (impl_->descriptor_pool) vkDestroyDescriptorPool(impl_->device, impl_->descriptor_pool, nullptr);
-  if (impl_->descriptor_layout)
-    vkDestroyDescriptorSetLayout(impl_->device, impl_->descriptor_layout, nullptr);
-  if (impl_->command_pool) vkDestroyCommandPool(impl_->device, impl_->command_pool, nullptr);
-  if (impl_->device) vkDestroyDevice(impl_->device, nullptr);
-  if (impl_->surface) vkDestroySurfaceKHR(impl_->instance, impl_->surface, nullptr);
-  if (impl_->instance) vkDestroyInstance(impl_->instance, nullptr);
 
   *impl_ = Impl{};
   ready_ = false;
@@ -1643,6 +1741,10 @@ void VulkanRenderer::destroy_texture(TextureId id) {
   if (!tex.alive) {
     return;
   }
+  // Ensure in-flight descriptor/image use is complete before free.
+  if (ready_ && impl_->device != VK_NULL_HANDLE) {
+    vkDeviceWaitIdle(impl_->device);
+  }
   if (tex.descriptor) {
     vkFreeDescriptorSets(impl_->device, impl_->descriptor_pool, 1, &tex.descriptor);
   }
@@ -1723,6 +1825,14 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   const size_t total_verts = batch.vertex_count() + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
+    // Acquire already signaled image_available[frame]; drain it before returning.
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    drain.waitSemaphoreCount = 1;
+    drain.pWaitSemaphores = &impl_->image_available[frame];
+    drain.pWaitDstStageMask = &wait_stage;
+    vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
+    vkQueueWaitIdle(impl_->graphics_queue);
     return false;
   }
 
@@ -1851,6 +1961,14 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   submit.pSignalSemaphores = &impl_->render_finished[frame];
   const auto submit_t0 = clock::now();
   if (vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]) != VK_SUCCESS) {
+    // Submit failed after acquire signaled image_available; drain so the slot is reusable.
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    drain.waitSemaphoreCount = 1;
+    drain.pWaitSemaphores = &impl_->image_available[frame];
+    drain.pWaitDstStageMask = &wait_stage;
+    vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
+    vkQueueWaitIdle(impl_->graphics_queue);
     return false;
   }
   impl_->images_in_flight[image_index] = impl_->in_flight[frame];
