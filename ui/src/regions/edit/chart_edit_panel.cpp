@@ -4117,10 +4117,11 @@ void ChartEditPanel::on_scroll(const wds::interaction::ScrollEvent& event) {
   if (!absolute_bounds().contains(event.position)) return;
   active_mods_ = event.mods;
 
-  // Fixed gesture: Shift+wheel adjusts visible range (not in shortcut settings).
-  // Default: scroll up shrinks the window (zoom in). Independent of global
-  // invert_scroll_wheel — undo that adapter flip, then apply the dedicated flag.
-  if (event.mods.shift) {
+  // Fixed gesture: Ctrl+wheel (Cmd+wheel on macOS) adjusts visible range
+  // (not in shortcut settings). Default: scroll up shrinks the window (zoom in).
+  // Independent of global invert_scroll_wheel — undo that adapter flip, then
+  // apply the dedicated flag.
+  if (wds::interaction::is_primary_modifier(event.mods)) {
     if (std::abs(event.delta_y) < 1e-6f) return;
     float dy = event.delta_y;
     if (wds::interaction::invert_scroll_wheel()) {
