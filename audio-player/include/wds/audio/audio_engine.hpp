@@ -4,7 +4,9 @@
 
 #include <wds/common/time.hpp>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace wds::audio {
@@ -28,21 +30,13 @@ class AudioEngine {
 
   bool ready() const noexcept { return ready_; }
   bool has_music() const noexcept { return music_ != 0; }
-  bool sfx_ready() const noexcept { return sfx_ready_; }
+  bool sfx_ready() const noexcept { return sfx_ready_.load(std::memory_order_acquire); }
 
   // --- position ---
   wds::common::Microseconds position() const;
-  int64_t position_ms() const noexcept { return wds::common::us_to_ms_round(position()); }
-  // Decoder/mixer clock. POS syncs are driven by rendering — if decode has already
-  // passed a hit byte, ChannelSetSync will never fire (must play immediately).
-  wds::common::Microseconds decode_position() const;
-  int64_t decode_position_ms() const noexcept {
-    return wds::common::us_to_ms_round(decode_position());
-  }
   wds::common::Microseconds duration() const;
-  int64_t duration_ms() const noexcept { return wds::common::us_to_ms_round(duration()); }
+  int64_t duration_ms() const noexcept { return wds::common::us_to_ms_floor(duration()); }
   bool set_position(wds::common::Microseconds time);
-  bool set_position_ms(int64_t time_ms) { return set_position(wds::common::ms_to_us(time_ms)); }
   // Bumps on set_position and begin_timeline_control (seek / scrub / play resync).
   // UI uses this instead of inferring seeks from BASS playtime regressions.
   uint64_t position_generation() const noexcept { return position_generation_; }
@@ -53,8 +47,6 @@ class AudioEngine {
   // --- music ---
   void play_music();
   void pause_music();
-  // Intent flag set by play_music/pause_music (not raw device state).
-  bool music_active() const noexcept { return music_playing_; }
   // True when the BASS music channel is currently outputting (PLAYING).
   bool stream_playing() const noexcept;
   // True when the stream has stopped (natural end or never started).
@@ -70,7 +62,6 @@ class AudioEngine {
   // hits. Falls back to immediate play when there is no music.
   // Returns false if the hit could not be armed or played (caller may retry).
   bool schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at);
-  bool schedule_sfx_after(HitSfxClip clip, wds::common::Microseconds delay);
   void clear_scheduled_sfx();
   void set_hold_looping(bool enabled);
   // Stop currently audible sample voices (one-shots / Hold). Pending music
@@ -79,19 +70,14 @@ class AudioEngine {
   void stop_all_sfx();
 
   // --- volume (0..1) ---
-  void set_master_gain(float gain);
   void set_music_gain(float gain);
   void set_sfx_gain(float gain);
-  float master_gain() const noexcept { return master_gain_; }
-  float music_gain() const noexcept { return music_gain_; }
-  float sfx_gain() const noexcept { return sfx_gain_; }
 
   // Playback rate for BGM only (pitch scales with rate via BASS_ATTRIB_FREQ). SFX stay at 1x.
   void set_playback_rate(float rate);
-  float playback_rate() const noexcept { return playback_rate_; }
 
   // BASS mixtime/playtime sync entry — not for UI callers.
-  void handle_sfx_sync(unsigned long long sync_handle);
+  void handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip);
 
  private:
   void apply_music_volume();
@@ -101,22 +87,23 @@ class AudioEngine {
   float effective_sfx_volume() const noexcept;
   void ensure_keep_alive();
   void pause_keep_alive();
-  bool play_sfx_internal(HitSfxClip clip, bool lock_music);
+  bool play_sfx_internal(HitSfxClip clip);
   void cache_music_format();
   std::uint64_t align_music_bytes(std::uint64_t bytes) const noexcept;
 
   struct Impl;
-  Impl* impl_ = nullptr;
+  // shared_ptr so in-flight BASS SYNCPROCs can keep Impl alive across shutdown.
+  std::shared_ptr<Impl> impl_;
   bool ready_ = false;
-  bool sfx_ready_ = false;
-  bool music_playing_ = false;
+  std::atomic<bool> sfx_ready_{false};
+  std::atomic<bool> music_playing_{false};
   unsigned long long music_ = 0;  // HSTREAM as opaque
-  float master_gain_ = 1.0f;
-  float music_gain_ = 1.0f;
-  float sfx_gain_ = 1.0f;
+  std::atomic<float> music_gain_{1.0f};
+  std::atomic<float> sfx_gain_{1.0f};
   float playback_rate_ = 1.0f;
   float music_base_freq_ = 0.0f;
   uint64_t position_generation_ = 0;
+  std::atomic<bool> shutting_down_{false};
 };
 
 }  // namespace wds::audio

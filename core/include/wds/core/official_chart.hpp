@@ -15,9 +15,11 @@ namespace wds::chart_editor {
 //   startTime     — note/gimmick start in music seconds (beat≡second at BPM 60)
 //   endTime       — hold/split end in seconds; -1 = instantaneous (no duration)
 //   type          — AppConst.NoteType (10/20/80/100/900/…); 0 = gimmick-only (split);
-//                   -1 = HiSpeed (endTime holds speed value; not stored in NotationNote)
-//   leftLane      — leftmost lane, official 1..12 (0 on pure gimmick rows)
-//   laneLength    — width in lanes
+//                   -1 = HiSpeed (endTime holds speed value; not stored in NotationNote);
+//                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
+//                   editor imports as JumpScratch split / orphan Flick — never stored as 40)
+//   leftLane      — leftmost lane, official 1..12; split rows use -1
+//   laneLength    — width in lanes; split rows use 0
 //   gimmickType   — numeric GimmickType, or "JumpScratch" / "OneDirection"
 //   scratchLength — flick/scratch span (signed); split color; JumpScratch target span
 //                   → stored as NotationNote::scratch_length

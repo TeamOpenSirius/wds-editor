@@ -13,7 +13,12 @@
   Notes for wixl 0.103:
   - PathEdit without Indirect (Indirect is ignored / unstable in wixl)
   - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
-  - Shortcut toggles via Remove ControlEvents (no Component/Feature Condition)
+  - Shortcut toggles via AddLocal/Remove ControlEvents (no Component/Feature Condition)
+  - Execute re-applies CREATE_* via ApplyShortcutFeatureStates after MigrateFeatureStates
+    (otherwise upgrade migration discards the dialog selection)
+  - Conditions use CREATE_*="1" so registry-loaded "0" stays unchecked / removed
+  - Defaults on update come from HKLM Create*Shortcut (see win-msi-product.wxs)
+  - CREATE_* are patched into SecureCustomProperties after wixl (see package-target.sh)
   - ASCII UI strings only (MSI codepage 1252)
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -151,10 +156,18 @@
                    Condition="WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR WDS_PREVIOUS_INSTALL"/>
         </Control>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
-          <!-- Unchecked boxes clear the property; Remove skips those features. -->
-          <Publish Event="Remove" Value="DesktopFeature" Order="1" Condition="NOT CREATE_DESKTOP_SHORTCUT"/>
-          <Publish Event="Remove" Value="StartMenuFeature" Order="2" Condition="NOT CREATE_STARTMENU_SHORTCUT"/>
-          <Publish Event="EndDialog" Value="Return" Order="3">1</Publish>
+          <!-- AddLocal overrides MigrateFeatureStates on upgrade; Remove skips unchecked.
+               wixl only honors Condition= attribute (not Publish element body).
+               Compare to "1" so a registry-loaded "0" is treated as unchecked. -->
+          <Publish Event="AddLocal" Value="DesktopFeature" Order="1"
+                   Condition="CREATE_DESKTOP_SHORTCUT=&quot;1&quot;"/>
+          <Publish Event="Remove" Value="DesktopFeature" Order="2"
+                   Condition="NOT CREATE_DESKTOP_SHORTCUT=&quot;1&quot;"/>
+          <Publish Event="AddLocal" Value="StartMenuFeature" Order="3"
+                   Condition="CREATE_STARTMENU_SHORTCUT=&quot;1&quot;"/>
+          <Publish Event="Remove" Value="StartMenuFeature" Order="4"
+                   Condition="NOT CREATE_STARTMENU_SHORTCUT=&quot;1&quot;"/>
+          <Publish Event="EndDialog" Value="Return" Order="5">1</Publish>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>

@@ -23,7 +23,9 @@ void StatusBar::paint(wds::interaction::UiPainter& painter) const {
   if (text_.empty()) return;
 
   const float pad = th::kUiPad;
-  const auto color = (level_ == StatusLevel::Error) ? th::kError : th::kOnSurfaceMuted;
+  const auto color = (level_ == StatusLevel::Error)     ? th::kError
+                     : (level_ == StatusLevel::Warning) ? th::kWarning
+                                                        : th::kOnSurfaceMuted;
   painter.label({b.x + pad, b.y, b.w - pad * 2.0f, b.h}, text_, color, 0.92f, false, 0.0f,
                 /*left_align=*/true);
 }

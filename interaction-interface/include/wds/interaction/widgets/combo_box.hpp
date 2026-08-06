@@ -36,6 +36,8 @@ class ComboBox : public Widget {
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
+  // Editable fields always capture; dropdown-only captures while the menu is open.
+  bool captures_keys() const override { return visible() && (!dropdown_only_ || open_); }
 
   void update(float delta_seconds) override;
   void paint(UiPainter& painter) const override;

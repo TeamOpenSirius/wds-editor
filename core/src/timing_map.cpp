@@ -124,6 +124,14 @@ int32_t subdivision_length_ticks(const TimingPoint& point, int32_t ticks_per_qua
   return std::max(1, beat / subdivs);
 }
 
+int32_t subdivision_offset_ticks(int32_t beat_length, int32_t subdivisions_per_beat,
+                                 int32_t index) noexcept {
+  const int32_t beat = std::max(1, beat_length);
+  const int32_t subdivs = std::max(1, subdivisions_per_beat);
+  const int32_t i = std::clamp(index, 0, subdivs);
+  return static_cast<int32_t>((static_cast<int64_t>(i) * beat) / subdivs);
+}
+
 int32_t snap_to_subdivision(int32_t tick, const MusicTiming& timing,
                             int32_t subdivisions_per_beat) noexcept {
   if (timing.points.empty()) return std::max(0, tick);
@@ -136,14 +144,63 @@ int32_t snap_to_subdivision(int32_t tick, const MusicTiming& timing,
       break;
     }
   }
-  const int32_t step = subdivision_length_ticks(p, tpq, subdivisions_per_beat);
+  const int32_t beat = beat_length_ticks(p, tpq);
+  const int32_t subdivs = std::max(1, subdivisions_per_beat);
   const int32_t rel = std::max(0, tick - p.tick);
-  const int32_t n = (rel + step / 2) / step;
-  int32_t snapped = p.tick + n * step;
+  const int32_t beat_start = p.tick + (rel / beat) * beat;
+  if (beat_start >= seg_end && seg_end > p.tick) {
+    return std::max(0, seg_end);
+  }
+  const int32_t within = std::max(0, tick - beat_start);
+  const int32_t i = static_cast<int32_t>(
+      (static_cast<int64_t>(within) * subdivs + beat / 2) / beat);
+  int32_t snapped = beat_start + subdivision_offset_ticks(beat, subdivs, std::min(i, subdivs));
   if (snapped >= seg_end && seg_end > p.tick) {
     snapped = seg_end;
   }
   return std::max(0, snapped);
+}
+
+std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_tick,
+                                                const MusicTiming& timing,
+                                                int32_t subdivisions_per_beat) {
+  std::vector<int32_t> out;
+  if (end_tick < start_tick || timing.points.empty()) return out;
+  const int32_t tpq = std::max(1, timing.ticks_per_quarter);
+  const int32_t subdivs = std::max(1, subdivisions_per_beat);
+
+  std::vector<const TimingPoint*> meters;
+  meters.reserve(timing.points.size());
+  for (const auto& p : timing.points) {
+    if (p.has_meter) meters.push_back(&p);
+  }
+  if (meters.empty()) return out;
+
+  for (size_t mi = 0; mi < meters.size(); ++mi) {
+    const auto& p = *meters[mi];
+    const int32_t seg_end =
+        (mi + 1 < meters.size()) ? meters[mi + 1]->tick : end_tick + 1;
+    const int32_t beat = beat_length_ticks(p, tpq);
+    int32_t beat_start = p.tick;
+    if (beat_start < start_tick) {
+      const int32_t delta = start_tick - beat_start;
+      beat_start += (delta / beat) * beat;  // floor onto beat containing start
+      if (beat_start < p.tick) beat_start = p.tick;
+    }
+    for (int64_t beat_i = beat_start; beat_i < seg_end && beat_i <= end_tick;
+         beat_i += beat) {
+      for (int32_t i = 0; i <= subdivs; ++i) {
+        const int64_t t64 =
+            beat_i + static_cast<int64_t>(subdivision_offset_ticks(beat, subdivs, i));
+        if (t64 > end_tick || t64 >= seg_end) break;
+        if (t64 >= start_tick) {
+          const int32_t t = static_cast<int32_t>(t64);
+          if (out.empty() || out.back() != t) out.push_back(t);
+        }
+      }
+    }
+  }
+  return out;
 }
 
 const TimingPoint& timing_point_at(const MusicTiming& timing, int32_t tick) noexcept {
@@ -199,8 +256,8 @@ std::vector<int32_t> ticks_from_meter_segments(int32_t start_tick, int32_t end_t
       const int32_t delta = start_tick - t;
       t += ((delta + step - 1) / step) * step;
     }
-    for (; t < seg_end && t <= end_tick; t += step) {
-      if (t >= start_tick) out.push_back(t);
+    for (int64_t t64 = t; t64 < seg_end && t64 <= end_tick; t64 += step) {
+      if (t64 >= start_tick) out.push_back(static_cast<int32_t>(t64));
     }
   }
   return out;

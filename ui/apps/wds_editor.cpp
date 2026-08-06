@@ -369,6 +369,14 @@ int run_editor(int argc, char** argv) {
       edit->sync_global_pointer(input.pointer_logical());
     }
 #if WDS_ENABLE_LOGGING
+    const auto tick_t0 = clock::now();
+#endif
+    ui.chart_preview().tick(delta_us);
+#if WDS_ENABLE_LOGGING
+    const int64_t tick_us = elapsed_us(tick_t0);
+#endif
+
+#if WDS_ENABLE_LOGGING
     const auto update_t0 = clock::now();
 #endif
     ui.update(delta_seconds, events);
@@ -382,15 +390,6 @@ int run_editor(int argc, char** argv) {
       prepare_close_teardown();
       break;
     }
-
-#if WDS_ENABLE_LOGGING
-    const auto tick_t0 = clock::now();
-#endif
-    ui.chart_preview().tick(delta_us);
-#if WDS_ENABLE_LOGGING
-    const int64_t tick_us = elapsed_us(tick_t0);
-#endif
-
     if (fb_w > 0 && fb_h > 0) {
       if (auto* edit = ui.edit_panel()) {
         edit->sync_global_pointer(input.pointer_logical());

@@ -5,6 +5,10 @@ namespace wds::interaction {
 
 bool ShortcutNamespace::bind(ShortcutChord chord, ShortcutAction action) {
   chord.mods = normalize_primary(chord.mods);
+  // Cleared shortcuts use Unknown — skip so they neither fire nor collide in the map.
+  if (chord.key == KeyCode::Unknown) {
+    return false;
+  }
   if (bindings_.find(chord) != bindings_.end()) {
     return false;
   }
@@ -16,14 +20,13 @@ bool ShortcutNamespace::bind_primary(KeyCode key, ShortcutAction action, bool sh
   return bind(chord_primary(key, shift), std::move(action));
 }
 
-void ShortcutNamespace::unbind(ShortcutChord chord) {
-  chord.mods = normalize_primary(chord.mods);
-  bindings_.erase(chord);
-}
-
 void ShortcutNamespace::clear() noexcept { bindings_.clear(); }
 
 bool ShortcutNamespace::dispatch(const KeyDownEvent& event) const {
+  // Ignore OS key-repeat for bound actions (play/pause, save, undo, …).
+  if (event.repeat) {
+    return false;
+  }
   const ShortcutChord chord{event.key, normalize_primary(event.mods)};
   const auto it = bindings_.find(chord);
   if (it == bindings_.end() || !it->second) {
@@ -31,12 +34,6 @@ bool ShortcutNamespace::dispatch(const KeyDownEvent& event) const {
   }
   it->second();
   return true;
-}
-
-bool ShortcutNamespace::has(const ShortcutChord& chord) const {
-  ShortcutChord normalized = chord;
-  normalized.mods = normalize_primary(normalized.mods);
-  return bindings_.find(normalized) != bindings_.end();
 }
 
 ShortcutNamespace& ShortcutManager::namespace_for(const std::string& name) {

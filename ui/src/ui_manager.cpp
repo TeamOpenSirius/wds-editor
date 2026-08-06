@@ -36,6 +36,12 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // Child order: toolbar → settings → edit → status → dialogs (topmost).
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
+  edit->set_visible_range_changed_handler([this] {
+    if (auto* toolbar_panel = this->toolbar_panel()) {
+      toolbar_panel->sync_visible_range_field();
+    }
+    save_ui_config();
+  });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
   auto status = std::make_unique<StatusBar>();
@@ -58,6 +64,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
     cfg.sus_auto_convert = session_->sus_auto_convert();
     cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
+    cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
     cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
     cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
     cfg.shortcuts_initialized = true;
@@ -179,6 +186,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       session_->set_sus_auto_convert(cfg.sus_auto_convert);
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
+      wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
       if (cfg.shortcuts_initialized) {
         wds::interaction::set_editor_shortcuts(cfg.shortcuts);
@@ -216,6 +224,7 @@ void UiManager::bind_editor_shortcuts() {
   using wds::interaction::chord_pause_playback;
   using wds::interaction::chord_toggle_fullscreen;
   using wds::interaction::chord_toggle_playback;
+  using wds::interaction::chord_toggle_sfx_mute;
   using wds::interaction::chord_playback_rate_slot;
   using wds::interaction::chord_undo;
   using wds::interaction::chord_width_slot;
@@ -308,6 +317,13 @@ void UiManager::bind_editor_shortcuts() {
       if (auto* settings = settings_panel()) settings->set_playback_rate(*rate);
     });
   }
+  editor.bind(chord_toggle_sfx_mute(), [this] {
+    if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
+    if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
+    if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
+    if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
+    if (auto* settings = settings_panel()) settings->toggle_sfx_mute();
+  });
 }
 
 UiManager::~UiManager() = default;
@@ -425,6 +441,7 @@ void UiManager::load_ui_config() {
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
+  wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
   if (cfg.shortcuts_initialized) {
     wds::interaction::set_editor_shortcuts(cfg.shortcuts);
@@ -444,6 +461,7 @@ void UiManager::save_ui_config() {
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
+  cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
@@ -513,7 +531,13 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   if (auto* edit = edit_panel()) {
     // Edit visible window for preview lead-in time mapping (not CHART_DELAY_MS).
     session_->engine().set_preview_lead_in_visible_ms(edit->viewport().visible_ms());
-    edit->sync_to_timeline_ms(session_->engine().timeline_us() / 1000.0);
+    double sync_ms = session_->engine().timeline_us() / 1000.0;
+    if (chart_preview_ != nullptr &&
+        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
+      // Match preview present clock (committed + one display-frame lead).
+      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
+    }
+    edit->sync_to_timeline_ms(sync_ms);
   }
   last_update_sync_us_ = phase_us(t0);
 
@@ -537,7 +561,12 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
   if (auto* edit = edit_panel()) {
     // Final scroll sample for this frame (post-transport tick), then re-snap
     // placement ghosts to the stationary pointer under the new viewport.
-    edit->sync_to_timeline_ms(session_->engine().timeline_us() / 1000.0);
+    double sync_ms = session_->engine().timeline_us() / 1000.0;
+    if (chart_preview_ != nullptr &&
+        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
+      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
+    }
+    edit->sync_to_timeline_ms(sync_ms);
     edit->resync_pointer_overlays();
   }
   wds::interaction::UiPainter painter;

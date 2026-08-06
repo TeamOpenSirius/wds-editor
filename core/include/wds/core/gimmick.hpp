@@ -33,8 +33,9 @@ std::pair<int32_t, int32_t> get_scratch_end_lane_range(const NotationNote& note)
 std::pair<int32_t, int32_t> get_jump_scratch_lane_range(const NotationNote& note) noexcept;
 
 // Encode ScratchHold end lanes into scratch_length. End is clamped to fully cover
-// the body. Equal span → 0 (bidirectional); one-sided extension → signed span.
-// Both-sides-wider-than-body is NOT supported by Sirius (falls back to the larger side).
+// the body. Equal span → 0 (call apply_scratch_chain_joint_direction for joint
+// 0 / ±width arrows); one-sided extension → signed span. Both-sides-wider-than-body
+// is NOT supported by Sirius (falls back to the larger side).
 void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t end_right) noexcept;
 
 // True when [cover_left, cover_right] (after forcing body cover) extends the body on

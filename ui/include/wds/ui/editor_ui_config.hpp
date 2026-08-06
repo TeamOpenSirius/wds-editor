@@ -28,9 +28,12 @@ struct EditorUiConfig {
   bool mute_hold_body_sfx = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
-  // When true, mouse-wheel / trackpad scroll deltas are negated.
+  // When true, negate timeline-scrub wheel deltas (not Shift+wheel visible range).
   bool invert_scroll_wheel = false;
-  // Multiplier for edit-panel wheel timeline scrub.
+  // When true, invert Shift+wheel visible-range adjust direction.
+  // Independent of invert_scroll_wheel (timeline scrub).
+  bool invert_visible_range_scroll = false;
+  // Multiplier for edit-panel timeline scrub only (not Shift+wheel visible range).
   // At visible_hectoms=20, 1x = 100ms/notch (scales proportionally with range).
   // Legacy hardcoded scrub was 50ms/notch at range 20 (= 0.5x). Default is 1x.
   float scroll_wheel_speed = 1.0f;

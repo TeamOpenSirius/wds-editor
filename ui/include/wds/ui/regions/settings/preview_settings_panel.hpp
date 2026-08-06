@@ -24,6 +24,8 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
 
   // Preset playback rate (e.g. F1–F4 → 0.25x–1x). Updates transport + rate combo.
   void set_playback_rate(float rate);
+  // Toggle SFX mute (default hotkey X). Persists via on_persist_.
+  void toggle_sfx_mute();
 
  private:
   void apply_music_gain();

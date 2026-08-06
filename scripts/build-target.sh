@@ -64,14 +64,35 @@ EOF
 }
 
 # If env.local / WDS_VCPKG_ROOT provided prefix paths, inject them unless already on CLI.
+# Also force product layers ON: a prior core-only configure (e.g. -DWDS_BUILD_RENDERER=OFF)
+# leaves those keys OFF in CMakeCache; cmake option() defaults do not override cache, so
+# cmake --build silently skips ui/ and package-target would ship a stale wds_editor.exe.
 apply_win_env_cmake_defaults() {
-  local a has_prefix=0 has_vulkan=0
+  local a
+  local has_prefix=0 has_vulkan=0
+  local has_ui=0 has_renderer=0 has_audio=0 has_interaction=0
   for a in ${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}; do
     case "$a" in
       *CMAKE_PREFIX_PATH*) has_prefix=1 ;;
       *Vulkan_LIBRARY*) has_vulkan=1 ;;
+      *WDS_BUILD_UI=*) has_ui=1 ;;
+      *WDS_BUILD_RENDERER=*) has_renderer=1 ;;
+      *WDS_BUILD_AUDIO=*) has_audio=1 ;;
+      *WDS_BUILD_INTERACTION=*) has_interaction=1 ;;
     esac
   done
+  if [[ "${has_ui}" -eq 0 ]]; then
+    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_UI=ON")
+  fi
+  if [[ "${has_renderer}" -eq 0 ]]; then
+    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_RENDERER=ON")
+  fi
+  if [[ "${has_audio}" -eq 0 ]]; then
+    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_AUDIO=ON")
+  fi
+  if [[ "${has_interaction}" -eq 0 ]]; then
+    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_INTERACTION=ON")
+  fi
   if [[ "${has_prefix}" -eq 0 && -n "${WDS_CMAKE_PREFIX_PATH:-}" ]]; then
     EXTRA_CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${WDS_CMAKE_PREFIX_PATH}")
   fi

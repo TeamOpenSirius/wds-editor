@@ -31,6 +31,11 @@ NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& no
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold);
 bool recompute_hold_eighths(ChartDocument& doc);
 
+// Pure variant for folding eighths into an undoable SetNotesCommand before/after.
+std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote> notes,
+                                                       const NotationNote& hold,
+                                                       int32_t ticks_per_quarter);
+
 // Auto head for a hold body start: full body span if free; if other notes
 // (non-hold-body at start, or hold tails ending here) partially overlap,
 // only the single continuous free lane run inside the body. Multiple free
@@ -57,7 +62,7 @@ std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
 // HoldEighth notes that sit on the same lanes inside (start, end) of `hold`.
 std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const NotationNote& hold);
 
-// HoldEighth + visible mid-stars (Sound / SoundPurple) attached to a hold body.
+// HoldEighth + visible mid-stars (Sound / ScratchSound) attached to a hold body.
 // Does NOT include the paired hold head — heads sync on edit but delete independently.
 std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
                                                   const NotationNote& hold);
@@ -73,7 +78,7 @@ std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
 std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body);
 
-// Drop Sound / SoundPurple mid-stars that left the hold's open time span / lanes.
+// Drop Sound / ScratchSound mid-stars that left the hold's open time span / lanes.
 bool prune_hold_mid_stars(ChartDocument& doc, const NotationNote& hold);
 
 // Returns copies shifted so the earliest source note starts at snapped anchor_tick.

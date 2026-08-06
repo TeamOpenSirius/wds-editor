@@ -56,7 +56,6 @@ inline NoteSprites sprites_for(const wds::renderer::SkinCatalog& skin,
       s.right = skin.note_yellow_right;
       s.connection = skin.hold_connection_purple;
       break;
-    case NoteType::Scratch:
     case NoteType::ScratchHold:
     case NoteType::ScratchCriticalHold:
     case NoteType::NontailScratchHold:
@@ -72,7 +71,7 @@ inline NoteSprites sprites_for(const wds::renderer::SkinCatalog& skin,
       s.tick = skin.tick_blue;
       s.is_tick = true;
       break;
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       s.tick = skin.tick_purple;
       s.is_tick = true;
       break;

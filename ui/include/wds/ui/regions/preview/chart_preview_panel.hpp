@@ -67,6 +67,9 @@ class ChartPreviewPanel {
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
   void reset_playback();
 
+  // One display-frame lead (µs). Used by edit scroll sync while playing and by render().
+  int64_t display_frame_lead_us() const noexcept;
+
  private:
   bool finish_initialize(GLFWwindow* window, const wds::renderer::PreviewVisualConfig& visual,
                          const std::string& ui_font_path);
@@ -75,9 +78,6 @@ class ChartPreviewPanel {
   bool bake_ui_font(float bake_px);
   void warm_ui_font_glyphs();
   bool ensure_ui_font_scale();
-  // One display-frame lead (µs) applied in render() only (once per present).
-  // Independent of playback rate; falls back to 60 Hz when refresh rate is unknown.
-  int64_t display_frame_lead_us() const noexcept;
 
   std::string last_init_error_;
   PlaybackPreviewView preview_;

@@ -77,6 +77,9 @@ bool set_width_slot_values(const std::array<int, 6>& values) noexcept;  // each 
 // When true, GlfwInputAdapter negates scroll deltas before enqueue.
 bool invert_scroll_wheel() noexcept;
 void set_invert_scroll_wheel(bool enabled) noexcept;
+// When true, invert Shift+wheel visible-range direction (independent of invert_scroll_wheel).
+bool invert_visible_range_scroll() noexcept;
+void set_invert_visible_range_scroll(bool enabled) noexcept;
 // Edit-panel wheel timeline scrub multiplier (at visible range 20, 1x ≈ 100ms/notch).
 float scroll_wheel_speed() noexcept;
 void set_scroll_wheel_speed(float speed) noexcept;
@@ -108,5 +111,7 @@ ShortcutChord chord_width_slot(int slot_index) noexcept;  // 0..5
 // Playback rate presets: F1–F4 → 0.25x / 0.5x / 0.75x / 1x.
 ShortcutChord chord_playback_rate_slot(int slot_index) noexcept;  // 0..3
 std::optional<float> playback_rate_for_slot(int slot_index) noexcept;
+// Default X — toggle SFX mute on the preview settings panel.
+ShortcutChord chord_toggle_sfx_mute() noexcept;
 
 }  // namespace wds::interaction

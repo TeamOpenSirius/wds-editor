@@ -123,6 +123,11 @@ bool& invert_scroll_storage() noexcept {
   return invert;
 }
 
+bool& invert_visible_range_scroll_storage() noexcept {
+  static bool invert = false;
+  return invert;
+}
+
 float& scroll_wheel_speed_storage() noexcept {
   static float speed = 1.0f;
   return speed;
@@ -145,6 +150,12 @@ bool set_width_slot_values(const std::array<int, 6>& values) noexcept {
 bool invert_scroll_wheel() noexcept { return invert_scroll_storage(); }
 
 void set_invert_scroll_wheel(bool enabled) noexcept { invert_scroll_storage() = enabled; }
+
+bool invert_visible_range_scroll() noexcept { return invert_visible_range_scroll_storage(); }
+
+void set_invert_visible_range_scroll(bool enabled) noexcept {
+  invert_visible_range_scroll_storage() = enabled;
+}
 
 float scroll_wheel_speed() noexcept { return scroll_wheel_speed_storage(); }
 
@@ -237,6 +248,10 @@ std::optional<float> playback_rate_for_slot(int slot_index) noexcept {
   static constexpr float kRates[4] = {0.25f, 0.5f, 0.75f, 1.0f};
   if (slot_index < 0 || slot_index > 3) return std::nullopt;
   return kRates[slot_index];
+}
+
+ShortcutChord chord_toggle_sfx_mute() noexcept {
+  return editor_shortcut(EditorShortcut::ToggleSfxMute);
 }
 
 }  // namespace wds::interaction

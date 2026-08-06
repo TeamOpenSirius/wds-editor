@@ -17,8 +17,20 @@ bool CompositeCommand::execute(ChartDocument& doc) {
   return true;
 }
 bool CompositeCommand::undo(ChartDocument& doc) {
-  for (size_t i = commands_.size(); i > 0; --i)
-    if (!commands_[i - 1]->undo(doc)) return false;
+  // Mirror execute(): on partial failure, re-apply already-undone children so the
+  // document never stays half-rolled-back while EditHistory keeps the command.
+  size_t undone = 0;
+  for (; undone < commands_.size(); ++undone) {
+    const size_t idx = commands_.size() - 1 - undone;
+    if (!commands_[idx]->undo(doc)) {
+      while (undone > 0) {
+        --undone;
+        const size_t redo_idx = commands_.size() - 1 - undone;
+        commands_[redo_idx]->execute(doc);
+      }
+      return false;
+    }
+  }
   return true;
 }
 std::string CompositeCommand::label() const { return label_; }

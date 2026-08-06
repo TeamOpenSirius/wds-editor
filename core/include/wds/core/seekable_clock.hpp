@@ -30,8 +30,6 @@ class SeekableClock {
 
   void seek(int64_t time_ms) { timeline_.seek_ms(time_ms); }
   void play() { timeline_.play(); }
-  void pause() { timeline_.pause(); }
-  void toggle_playback() { timeline_.toggle_playback(); }
 
   // Advance time when playing. No-op while paused.
   void tick(int64_t delta_ms) { timeline_.tick_ms(delta_ms); }

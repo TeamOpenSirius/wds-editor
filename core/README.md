@@ -103,13 +103,13 @@ snapshot.clear_keep_capacity();
 | 头文件 | 作用 |
 |--------|------|
 | `notation.hpp` / `types.hpp` | 谱面与音符类型 |
-| `official_chart.hpp` / `sus_chart.hpp` | 官方 CSV / SUS 相关 |
+| `official_chart.hpp` / `sus_chart.hpp` | 官方 CSV / SUS 相关（仅保证 Ched 12 键窗口子集；lane offset 为有意设计） |
 | `project.hpp` / `chart_session.hpp` | 工程与会话 |
 | `edit_history.hpp` / `note_edit_ops.hpp` / `edit_grid.hpp` | 撤销与编辑操作 |
 | `chart_serializer.hpp` | 读写盘 |
 | `preview_config.hpp` | 预览阈值 |
 
-音符 id：`kAutoNoteId = -1` 自动分配；规范化保存后为 `0..N-1`。
+音符 id：`kAutoNoteId = -1` 自动分配。写入 `.wdschart` 时对**副本**规范化为 `0..N-1`；内存会话 id 保持稳定（可稀疏），重新加载文件后才是稠密 id。
 
 ## 与 Unity 原版映射（摘要）
 

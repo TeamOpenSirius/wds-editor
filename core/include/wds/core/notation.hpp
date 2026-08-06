@@ -44,9 +44,10 @@ struct MusicTiming {
 // Official CSV uses seconds + 1-based lane; wdschart keeps ticks + 0-based lane.
 struct NotationNote {
   int32_t id = kAutoNoteId;
-  float start_tick = 0.0f;
+  // Integer ticks only (grid-snapped). Never fractional.
+  int32_t start_tick = 0;
   // 0 = no duration (official endTime -1). Hold body / split use end_tick >= start_tick.
-  float end_tick = 0.0f;
+  int32_t end_tick = 0;
   NoteType note_type = NoteType::Normal;
   int32_t lane = 0;   // 0-based (official leftLane is 1-based)
   int32_t width = 1;  // official laneLength
@@ -124,13 +125,20 @@ class ChartDocument {
 
   int32_t next_note_id() const;
 
+  // Bumped on every note/timing mutation (including update_note). Preview
+  // snapshot / note-lookup caches key off this.
+  uint64_t content_generation() const noexcept { return content_generation_; }
+
  private:
   void sort_notes_for_display();
   static bool compare_notes_for_save(const NotationNote& a, const NotationNote& b) noexcept;
   static void normalize_notes_inplace(std::vector<NotationNote>& notes);
   void rebuild_id_index();
   void rebuild_index();
-  void mark_dirty() noexcept { is_dirty_ = true; }
+  void mark_dirty() noexcept {
+    is_dirty_ = true;
+    ++content_generation_;
+  }
 
   MusicTiming timing_;
   std::vector<NotationNote> notes_;
@@ -139,11 +147,13 @@ class ChartDocument {
   ChartNoteIndex index_;
   int32_t next_id_ = 0;
   bool is_dirty_ = false;
+  uint64_t content_generation_ = 0;
   ChartEditMode edit_mode_ = ChartEditMode::Editable;
 };
 
-int64_t tick_to_milliseconds(float tick, const MusicTiming& timing);
-float milliseconds_to_tick(int64_t ms, const MusicTiming& timing);
+int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing);
+// Rounded to nearest integer tick (notes are always integer-tick).
+int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing);
 
 bool is_hold_family(NoteType type) noexcept;
 bool is_hold_start(NoteType type) noexcept;
@@ -156,8 +166,8 @@ bool is_nontail_hold_body(NoteType type) noexcept;
 bool is_scratch_hold_body(NoteType type) noexcept;
 bool is_tap_family(NoteType type) noexcept;
 
-// Hold soft-judge notes (Sound / SoundPurple / HoldEighth). Not sync contributors.
-// Only Sound / SoundPurple are visible mid-stars; HoldEighth has no sprite in Sirius.
+// Hold soft-judge notes (Sound / ScratchSound / HoldEighth). Not sync contributors.
+// Only Sound / ScratchSound are visible mid-stars; HoldEighth has no sprite in Sirius.
 bool is_hold_mid_star(NoteType type) noexcept;
 
 // Sirius SyncLine: hold bodies / HoldEighth / Sound mid-stars do not contribute.
@@ -169,7 +179,7 @@ bool contributes_to_concurrent_at_end(NoteType type) noexcept;
 std::vector<ConcurrentLineNote> build_concurrent_lines(
     const std::vector<NotationNote>& notes, const MusicTiming& timing);
 
-// Hold body soft-judge times: chart mid-stars (HoldEighth / Sound / SoundPurple)
+// Hold body soft-judge times: chart mid-stars (HoldEighth / Sound / ScratchSound)
 // overlapping (head, tail), deduped. No synthetic eighth grid.
 void collect_hold_body_judge_times(const NotationNote& hold,
                                    const std::vector<NotationNote>& notes,
@@ -182,7 +192,7 @@ struct PreviewComboState {
 };
 
 // Auto-preview combo up to preview_time_ms (seek-safe). Hold soft judges come
-// from chart HoldEighth / Sound / SoundPurple only (absorbed once per hold).
+// from chart HoldEighth / Sound / ScratchSound only (absorbed once per hold).
 PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
                                         const MusicTiming& timing,
                                         int64_t preview_time_ms);

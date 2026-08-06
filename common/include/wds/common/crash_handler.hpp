@@ -10,7 +10,9 @@ namespace wds::common {
 //   Windows: %LOCALAPPDATA%\WDS\logs\
 //   macOS:   ~/Library/Application Support/WDS/logs/
 //   Linux:   $XDG_STATE_HOME/WDS/logs or ~/.local/share/WDS/logs/
-// and a native error dialog is shown when possible.
+// Native error dialogs are shown for non-signal fatals only.
+// POSIX signal handlers use only async-signal-safe calls (prebuilt log path,
+// write/open/close/backtrace_symbols_fd); no dialogs or heap allocation.
 void install_crash_handlers();
 
 // Log + dialog for recoverable entry-point failures (uncaught C++ exceptions).

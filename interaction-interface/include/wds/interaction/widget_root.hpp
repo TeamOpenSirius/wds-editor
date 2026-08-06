@@ -15,6 +15,8 @@ class WidgetRoot : public Widget {
  public:
   WidgetRoot();
 
+  WidgetRoot* as_root() noexcept override { return this; }
+
   void set_bounds(const Rect& bounds) { bounds_ = bounds; }
 
   void process_frame(float delta_seconds, const std::vector<InputEvent>& events,
@@ -26,6 +28,8 @@ class WidgetRoot : public Widget {
   Widget* focused_widget() noexcept { return focused_; }
   void set_focus(Widget* widget);
   void clear_focus();
+  // Clear focus only when `widget` is the current focused widget.
+  void clear_focus_if(Widget* widget);
 
   const std::string& active_tooltip() const noexcept { return active_tooltip_; }
 

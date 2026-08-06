@@ -52,6 +52,12 @@ void ChartNoteIndex::on_note_removed(const NotationNote& note, const MusicTiming
   if (is_split_lane_gimmick(note.gimmick_type)) {
     split_lane_by_start_ms_.erase(start_ms, note.id);
   }
+
+  const int64_t span = std::max<int64_t>(0, note.end_ms(timing) - note.start_ms(timing));
+  if (span > 0 && span >= max_hold_span_ms_) {
+    // Max may now be stale; ChartDocument rebuilds when this is zeroed.
+    max_hold_span_ms_ = 0;
+  }
 }
 
 void ChartNoteIndex::on_note_updated(const NotationNote& old_note, const NotationNote& new_note,
@@ -71,7 +77,15 @@ void ChartNoteIndex::on_note_updated(const NotationNote& old_note, const Notatio
     split_lane_by_start_ms_.insert(new_ms, new_note.id);
   }
 
-  update_hold_span(new_note, timing);
+  const int64_t old_span =
+      std::max<int64_t>(0, old_note.end_ms(timing) - old_note.start_ms(timing));
+  const int64_t new_span =
+      std::max<int64_t>(0, new_note.end_ms(timing) - new_note.start_ms(timing));
+  if (old_span >= max_hold_span_ms_ && new_span < old_span) {
+    max_hold_span_ms_ = 0;
+  } else {
+    update_hold_span(new_note, timing);
+  }
 }
 
 void ChartNoteIndex::insert_id(int32_t note_id, int64_t start_ms) {

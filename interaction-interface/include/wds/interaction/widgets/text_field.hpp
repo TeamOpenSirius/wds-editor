@@ -27,6 +27,8 @@ class TextField : public Widget {
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
+  // Suppress global editor chords (Space play/pause, Q/W width slots, …) while typing.
+  bool captures_keys() const override { return visible(); }
 
   void paint(UiPainter& painter) const override;
   // Same as paint(), with an explicit base z (modal dialogs need z above the panel).

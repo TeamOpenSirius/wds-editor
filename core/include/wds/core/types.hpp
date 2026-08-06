@@ -15,8 +15,9 @@ enum class NoteType : int32_t {
   Normal = 10,
   Critical = 20,
   Sound = 30,
-  SoundPurple = 31,
-  Scratch = 40,
+  ScratchSound = 31,  // Purple hold mid-star (Sirius ScratchSound)
+  // Sirius CSV type 40 = SoundPurple (mid-hold scratch) — interchange only;
+  // editor imports as JumpScratch segments / Flick. Do not author type 40.
   Flick = 50,
   HoldStart = 80,
   CriticalHoldStart = 81,

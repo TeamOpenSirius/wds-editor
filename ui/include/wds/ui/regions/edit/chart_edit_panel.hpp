@@ -12,7 +12,9 @@
 #include <wds/renderer/draw_batch.hpp>
 #include <wds/renderer/skin_catalog.hpp>
 
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -32,6 +34,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_grid(wds::chart_editor::EditGridConfig grid);
   // Seek transport so edit scroll stays locked to preview playhead.
   void set_seek_ms(std::function<void(int64_t)> seek) { seek_ms_ = std::move(seek); }
+  // Fired after Shift+wheel changes visible_hectoms (sync toolbar + persist).
+  void set_visible_range_changed_handler(std::function<void()> handler) {
+    on_visible_range_changed_ = std::move(handler);
+  }
   void set_cursor_setter(std::function<void(wds::interaction::CursorKind)> setter) {
     cursor_setter_ = std::move(setter);
   }
@@ -91,6 +97,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool delete_note_at(wds::interaction::Vec2 point);
 
   bool wants_focus() const override { return true; }
+  // Timing / split modals own the keyboard so Space/Delete/arrows do not hit global chords.
+  bool captures_keys() const override { return has_modal_popup(); }
 
   void update(float delta_seconds) override;
   void paint(wds::interaction::UiPainter& painter) const override;
@@ -188,7 +196,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
-  // Place a Sound / SoundPurple on an already-selected existing hold body.
+  // Place a Sound / ScratchSound on an already-selected existing hold body.
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);
   // Keep placement ghost in sync with hold_draft_ (zero length → Tap / Flick).
   void sync_hold_placement_ghost();
@@ -247,6 +255,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable wds::interaction::Rect timing_num_field_{};
   mutable wds::interaction::Rect timing_den_field_{};
   std::function<void(int64_t)> seek_ms_;
+  std::function<void()> on_visible_range_changed_;
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
   std::unordered_set<int32_t> selected_;
@@ -317,6 +326,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t resize_chain_peer_id_ = -1;   // prev when editing body; next when editing end
   int32_t resize_chain_next_id_ = -1;   // next body for cover validation while editing body
   bool adjust_end_ = true;
+  // Last geometry committed during ResizeWidth — skip recompute while the pointer holds still.
+  int32_t resize_applied_end_l_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_end_r_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_body_lane_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_body_width_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_peer_lane_ = std::numeric_limits<int32_t>::min();
+  int32_t resize_applied_peer_width_ = std::numeric_limits<int32_t>::min();
   std::unordered_map<int32_t, wds::chart_editor::NotationNote> drag_originals_;
   wds::interaction::Vec2 drag_start_pos_{};
   // MoveSelection: tick/lane at pointer-down (grab offset), not note origin.
@@ -327,7 +343,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool hold_scratch_ = false;
   wds::chart_editor::NotationNote hold_draft_{};
   // Continuous hold chain: select all segments; cover previous tail with next body.
-  float hold_chain_start_tick_ = 0.0f;
+  int32_t hold_chain_start_tick_ = 0;
   int32_t hold_chain_prev_id_ = -1;
   wds::chart_editor::NotationNote hold_chain_prev_body_{};
   std::unordered_set<int32_t> hold_chain_ids_;

@@ -59,8 +59,7 @@ transport.start_pending_music();            // 武装 SFX 后再真正出声
 
 ### `AudioEngine`
 
-- `set_master_gain` / `set_music_gain` / `set_sfx_gain`（0..1）  
-- 有效输出 ≈ `master * bus`
+- `set_music_gain` / `set_sfx_gain`（0..1）
 
 ### `HitSfxPlayer`
 

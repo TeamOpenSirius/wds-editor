@@ -327,9 +327,25 @@ mingw_dll() {
 
 package_win() {
   local build_dir="$1"
+  local cache="${build_dir}/CMakeCache.txt"
+  if [[ -f "$cache" ]]; then
+    # Stale core-only caches (WDS_BUILD_UI=OFF) leave an old wds_editor.exe on disk;
+    # packaging would still succeed and produce a "new" MSI with old behavior.
+    if grep -Eq '^WDS_BUILD_UI:BOOL=OFF$' "$cache"; then
+      die "build dir has WDS_BUILD_UI=OFF (${cache}); reconfigure with UI enabled, e.g. ./scripts/build-target.sh win-x86_64 (or delete ${build_dir})"
+    fi
+  fi
   local demo=""
   demo="$(resolve_editor_bin "$build_dir" ".exe")" || \
     die "missing wds_editor.exe (build ui first)"
+  # Prefer the CMake target output under ui/; refuse packaging a lone leftover exe
+  # when the ui/ target directory is no longer part of the build.
+  if [[ ! -f "${build_dir}/ui/CMakeFiles/wds_editor.dir/DependInfo.cmake" && \
+        ! -f "${build_dir}/ui/CMakeFiles/wds_editor.dir/compiler_depend.ts" ]]; then
+    if [[ ! -d "${build_dir}/ui/CMakeFiles/wds_editor.dir" ]]; then
+      die "wds_editor CMake target missing under ${build_dir}/ui (UI not built); delete build dir or force -DWDS_BUILD_UI=ON"
+    fi
+  fi
   local example="${build_dir}/core/wds_core_example.exe"
 
   need_cmd curl
@@ -537,14 +553,25 @@ make_win_msi() {
 
   make_win_msi_bmp_icon "$stage"
 
+  # Immediate CA DLL (embedded in Binary table; not installed as a product file).
+  local mingw_cc="${WDS_MINGW_CC:-${WDS_MINGW_TRIPLE}-gcc}"
+  command -v "${mingw_cc}" >/dev/null 2>&1 || die "MinGW CC (${mingw_cc}) required to build wds_msi_ca.dll"
+  echo "Building wds_msi_ca.dll with MinGW…"
+  "${mingw_cc}" -O2 -shared -s \
+    -o "${stage}/wds_msi_ca.dll" \
+    "${ROOT}/scripts/wds_msi_ca.c" \
+    "${ROOT}/scripts/wds_msi_ca.def" \
+    -lmsi || die "failed to build wds_msi_ca.dll"
+
   # Heat wants paths relative to --prefix; keep README for users browsing Program Files.
-  # Exclude packaging-only BMP ICO from the installed payload (Icon table embeds it).
+  # Exclude packaging-only BMP ICO / CA DLL from the installed payload.
   # Sort find output so harvest order (and Directory nesting) is deterministic.
   stage_base="$(basename "$stage")"
   stage_parent="$(dirname "$stage")"
   (
     cd "$stage_parent"
-    find "$stage_base" -type f ! -path '*/config/*' ! -name 'wds-msi.ico' | LC_ALL=C sort \
+    find "$stage_base" -type f ! -path '*/config/*' \
+        ! -name 'wds-msi.ico' ! -name 'wds_msi_ca.dll' | LC_ALL=C sort \
       | wixl-heat -p "${stage_base}/" \
           --directory-ref INSTALLDIR \
           --component-group ProductFiles \
@@ -687,6 +714,15 @@ PY
 
   [[ -f "$msi_path" ]] || die "wixl did not produce $msi_path"
 
+  # wixl ignores Property/@Secure and crashes if SecureCustomProperties is authored
+  # in the .wxs. Patch the built MSI so CREATE_* checkbox values reach elevated Execute
+  # (Persist + ApplyShortcutFeatureStates). Without this, Execute resets them to "1".
+  need_cmd msibuild
+  msibuild "$msi_path" -q \
+    "UPDATE Property SET Value='CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WIX_UPGRADE_DETECTED;WIX_SAME_VERSION_UPGRADE_DETECTED;WIX_DOWNGRADE_DETECTED' WHERE Property='SecureCustomProperties'" \
+    || die "msibuild failed to patch SecureCustomProperties"
+  echo "Patched SecureCustomProperties (CREATE_* UI→Execute)"
+
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
   # used to look like "missing BrowseDlg" when libmsi was not loadable.
@@ -703,42 +739,71 @@ PY
   regs="$(msiinfo_export "$msi_path" RegLocator | tr -d '\r')" || die "msiinfo failed: RegLocator"
   upgrades="$(msiinfo_export "$msi_path" Upgrade | tr -d '\r')" || die "msiinfo failed: Upgrade"
 
-  echo "${ui_seq}" | grep -q 'WelcomeEulaDlg' && \
+  # Use <<< (not echo|grep): with pipefail, grep -q exiting early SIGPIPEs echo and
+  # falsely trips `|| die` (seen as "MSI File table missing wds_editor.exe").
+  grep -q 'WelcomeEulaDlg' <<<"${ui_seq}" && \
     die "MSI still schedules WelcomeEulaDlg; refusing broken UI"
-  echo "${ui_seq}" | grep -q 'InstallDirDlg' || \
+  grep -q 'InstallDirDlg' <<<"${ui_seq}" || \
     die "MSI missing InstallDirDlg in InstallUISequence"
-  echo "${ui_seq}" | grep -q 'UpdateDlg' || \
+  grep -q 'UpdateDlg' <<<"${ui_seq}" || \
     die "MSI missing UpdateDlg in InstallUISequence"
-  echo "${props}" | grep -q $'ProductLanguage\t1033' || \
+  grep -q $'ProductLanguage\t1033' <<<"${props}" || \
     die "MSI ProductLanguage is not 1033 (UI language mismatch risk)"
-  echo "${events}" | grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT' || \
+  grep -Fq $'AddLocal\tDesktopFeature\tCREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
+    die "MSI missing conditional AddLocal for DesktopFeature"
+  grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing conditional Remove for DesktopFeature"
-  echo "${events}" | grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT' || \
+  grep -Fq $'AddLocal\tStartMenuFeature\tCREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
+    die "MSI missing conditional AddLocal for StartMenuFeature"
+  grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing conditional Remove for StartMenuFeature"
-  echo "${features}" | grep -q 'DesktopFeature' || die "MSI missing DesktopFeature"
-  echo "${features}" | grep -q 'StartMenuFeature' || die "MSI missing StartMenuFeature"
-  echo "${dialogs}" | grep -q 'BrowseDlg' || die "MSI missing BrowseDlg"
-  echo "${customs}" | grep -Fq 'SetInstallDirFromBrowse' || \
+  grep -q 'DesktopFeature' <<<"${features}" || die "MSI missing DesktopFeature"
+  grep -q 'StartMenuFeature' <<<"${features}" || die "MSI missing StartMenuFeature"
+  grep -q 'BrowseDlg' <<<"${dialogs}" || die "MSI missing BrowseDlg"
+  grep -Fq 'SetInstallDirFromBrowse' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromBrowse custom action"
-  echo "${customs}" | grep -Fq 'SetInstallDirFromPrevious' || \
+  grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
-  echo "${regs}" | grep -q 'FindWdsInstallDir' || \
+  grep -Fq 'ApplyDesktopPrefFromReg' <<<"${customs}" || \
+    die "MSI missing ApplyDesktopPrefFromReg custom action"
+  grep -Fq 'PersistDesktopShortcutOn' <<<"${customs}" || \
+    die "MSI missing PersistDesktopShortcutOn custom action"
+  grep -Fq 'ApplyShortcutFeatureStates' <<<"${customs}" || \
+    die "MSI missing ApplyShortcutFeatureStates custom action"
+  grep -Fq $'CREATE_DESKTOP_SHORTCUT' <<<"${props}" || \
+    die "MSI missing CREATE_DESKTOP_SHORTCUT property"
+  grep -Fq $'SecureCustomProperties' <<<"${props}" || \
+    die "MSI missing SecureCustomProperties"
+  grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+    die "SecureCustomProperties must include CREATE_DESKTOP_SHORTCUT (UI→Execute)"
+  grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+    die "SecureCustomProperties must include CREATE_STARTMENU_SHORTCUT (UI→Execute)"
+  local exe_seq=""
+  exe_seq="$(msiinfo_export "$msi_path" InstallExecuteSequence | tr -d '\r')" || \
+    die "msiinfo failed: InstallExecuteSequence"
+  grep -Fq 'ApplyShortcutFeatureStates' <<<"${exe_seq}" || \
+    die "MSI missing ApplyShortcutFeatureStates in InstallExecuteSequence"
+  grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
-  echo "${upgrades}" | grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' || \
+  grep -q 'FindDesktopShortcutPref' <<<"${regs}" || \
+    die "MSI missing FindDesktopShortcutPref registry search"
+  grep -q 'FindStartMenuShortcutPref' <<<"${regs}" || \
+    die "MSI missing FindStartMenuShortcutPref registry search"
+  grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing MajorUpgrade Upgrade table entry"
   # Runtime DLLs must be in the File table (merged into the exe component at harvest).
   local files_tbl=""
   files_tbl="$(msiinfo_export "$msi_path" File | tr -d '\r')" || die "msiinfo failed: File"
-  echo "${files_tbl}" | grep -Fq 'bass.dll' || die "MSI File table missing bass.dll"
-  echo "${files_tbl}" | grep -Fq 'vulkan-1.dll' || die "MSI File table missing vulkan-1.dll"
-  echo "${files_tbl}" | grep -Fq 'wds_editor.exe' || die "MSI File table missing wds_editor.exe"
+  grep -Fq 'bass.dll' <<<"${files_tbl}" || die "MSI File table missing bass.dll"
+  grep -Fq 'vulkan-1.dll' <<<"${files_tbl}" || die "MSI File table missing vulkan-1.dll"
+  grep -Fq 'wds_editor.exe' <<<"${files_tbl}" || die "MSI File table missing wds_editor.exe"
   # InstallDirDlg must run after FindRelatedProducts / costing (not sequence 1).
   local dir_seq
-  dir_seq="$(echo "${ui_seq}" | awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}')"
+  dir_seq="$(awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}' <<<"${ui_seq}")"
   [[ -n "${dir_seq}" && "${dir_seq}" -ge 1000 ]] || \
     die "InstallDirDlg sequence ${dir_seq:-unset} is too early (want >= 1000)"
 
-  rm -f "${stage}/wds-msi.ico"
+  rm -f "${stage}/wds-msi.ico" "${stage}/wds_msi_ca.dll"
   rm -rf "$work"
   echo "Packaged: $msi_path"
 }

@@ -59,7 +59,7 @@ Widget* hit = root.widget_at(point);
 
 ### `ShortcutManager`
 
-按 namespace 绑定和弦（如 `preview`、`edit`）：
+按 namespace 绑定快捷操作（如 `preview`、`edit`）：
 
 ```cpp
 shortcuts.bind("preview", chord, "toggle_play");

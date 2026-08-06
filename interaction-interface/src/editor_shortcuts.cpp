@@ -156,6 +156,8 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "playback_rate_2";
     case EditorShortcut::PlaybackRate3:
       return "playback_rate_3";
+    case EditorShortcut::ToggleSfxMute:
+      return "toggle_sfx_mute";
     case EditorShortcut::Count:
       break;
   }
@@ -217,6 +219,8 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "播放速度 0.75x";
     case EditorShortcut::PlaybackRate3:
       return "播放速度 1x";
+    case EditorShortcut::ToggleSfxMute:
+      return "音效静音";
     case EditorShortcut::Count:
       break;
   }
@@ -280,6 +284,8 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return {KeyCode::F3, {}};
     case EditorShortcut::PlaybackRate3:
       return {KeyCode::F4, {}};
+    case EditorShortcut::ToggleSfxMute:
+      return {static_cast<KeyCode>('X'), {}};
     case EditorShortcut::Count:
       break;
   }

@@ -23,6 +23,12 @@ void WidgetRoot::set_focus(Widget* widget) {
 
 void WidgetRoot::clear_focus() { set_focus(nullptr); }
 
+void WidgetRoot::clear_focus_if(Widget* widget) {
+  if (focused_ == widget) {
+    clear_focus();
+  }
+}
+
 Widget* WidgetRoot::hit_test(Vec2 point) {
   if (!visible_) {
     return nullptr;
@@ -58,13 +64,19 @@ void WidgetRoot::update_hover(Vec2 point) {
       hover_->set_visual_state(WidgetState::Hovered);
     }
   }
-  active_tooltip_ = (hover_ != nullptr && !hover_->tooltip().empty()) ? hover_->tooltip() : "";
+  active_tooltip_ = (hover_ != nullptr && hover_->visible() && !hover_->tooltip().empty())
+                        ? hover_->tooltip()
+                        : "";
 }
 
 void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortcuts) {
+  if (focused_ != nullptr && !focused_->visible()) {
+    clear_focus();
+  }
   if (std::holds_alternative<KeyDownEvent>(event) && shortcuts != nullptr) {
     // Focused shortcut/text capture widgets must see keys before global chords.
-    const bool capture_keys = focused_ != nullptr && focused_->captures_keys();
+    const bool capture_keys =
+        focused_ != nullptr && focused_->visible() && focused_->captures_keys();
     if (!capture_keys && shortcuts->dispatch(std::get<KeyDownEvent>(event))) {
       return;
     }
@@ -185,6 +197,13 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
 
 void WidgetRoot::process_frame(float delta_seconds, const std::vector<InputEvent>& events,
                                ShortcutManager* shortcuts) {
+  if (focused_ != nullptr && !focused_->visible()) {
+    clear_focus();
+  }
+  if (hover_ != nullptr && !hover_->visible()) {
+    hover_ = nullptr;
+    active_tooltip_.clear();
+  }
   for (const auto& event : events) {
     dispatch_event(event, shortcuts);
   }
@@ -201,7 +220,8 @@ void WidgetRoot::paint(UiPainter& painter) const {
   // skinned note sprites (UiPainter rects would otherwise lose to later sprites).
   Widget::paint(painter);
 
-  if (!active_tooltip_.empty() && hover_ != nullptr && !hover_->paints_inline_tooltip()) {
+  if (!active_tooltip_.empty() && hover_ != nullptr && hover_->visible() &&
+      !hover_->paints_inline_tooltip()) {
     const float tip_px = theme::kFontSizeTooltip;
     const Vec2 text_size = painter.measure_text(active_tooltip_, tip_px);
     const float tip_h = tip_px + 14.0f;

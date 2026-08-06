@@ -7,10 +7,11 @@
 #include <limits>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace wds::chart_editor {
 
-int64_t tick_to_milliseconds(float tick, const MusicTiming& timing) {
+int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing) {
   MusicTiming t = timing;
   normalize_timing_points(t);
   if (t.ticks_per_quarter <= 0 || t.points.empty()) {
@@ -18,45 +19,45 @@ int64_t tick_to_milliseconds(float tick, const MusicTiming& timing) {
   }
   const double tpq = static_cast<double>(t.ticks_per_quarter);
   double ms = static_cast<double>(t.offset_ms);
-  const float target = std::max(0.0f, tick);
+  const int32_t target = std::max(0, tick);
   for (size_t i = 0; i < t.points.size(); ++i) {
-    const float t0 = static_cast<float>(t.points[i].tick);
-    const float t1 = (i + 1 < t.points.size()) ? static_cast<float>(t.points[i + 1].tick)
-                                               : std::numeric_limits<float>::infinity();
+    const int32_t t0 = t.points[i].tick;
+    const bool last = (i + 1 >= t.points.size());
+    const int32_t t1 = last ? std::numeric_limits<int32_t>::max() : t.points[i + 1].tick;
     if (target <= t0) break;
-    const float use = std::min(target, t1);
+    const int32_t use = last ? target : std::min(target, t1);
     const double bpm = t.points[i].bpm > 0.0 ? t.points[i].bpm : 120.0;
-    ms += (use - t0) * (60000.0 / (bpm * tpq));
-    if (target <= t1) break;
+    ms += static_cast<double>(use - t0) * (60000.0 / (bpm * tpq));
+    if (!last && target <= t1) break;
   }
   return static_cast<int64_t>(std::llround(ms));
 }
 
-float milliseconds_to_tick(int64_t ms, const MusicTiming& timing) {
+int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing) {
   MusicTiming t = timing;
   normalize_timing_points(t);
   if (t.ticks_per_quarter <= 0 || t.points.empty()) {
-    return 0.0f;
+    return 0;
   }
   const double tpq = static_cast<double>(t.ticks_per_quarter);
   double remain = static_cast<double>(ms - t.offset_ms);
-  if (remain <= 0.0) return 0.0f;
+  if (remain <= 0.0) return 0;
   for (size_t i = 0; i < t.points.size(); ++i) {
-    const float t0 = static_cast<float>(t.points[i].tick);
-    const float t1 = (i + 1 < t.points.size()) ? static_cast<float>(t.points[i + 1].tick)
-                                               : std::numeric_limits<float>::infinity();
+    const int32_t t0 = t.points[i].tick;
+    const bool last = (i + 1 >= t.points.size());
+    const int32_t t1 = last ? std::numeric_limits<int32_t>::max() : t.points[i + 1].tick;
     const double bpm = t.points[i].bpm > 0.0 ? t.points[i].bpm : 120.0;
     const double ms_per_tick = 60000.0 / (bpm * tpq);
-    if (!std::isfinite(t1)) {
-      return static_cast<float>(t0 + remain / ms_per_tick);
+    if (last) {
+      return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(t0) + remain / ms_per_tick)));
     }
-    const double seg_ms = (t1 - t0) * ms_per_tick;
+    const double seg_ms = static_cast<double>(t1 - t0) * ms_per_tick;
     if (remain <= seg_ms) {
-      return static_cast<float>(t0 + remain / ms_per_tick);
+      return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(t0) + remain / ms_per_tick)));
     }
     remain -= seg_ms;
   }
-  return static_cast<float>(t.points.back().tick);
+  return std::max(0, t.points.back().tick);
 }
 
 int64_t NotationNote::start_ms(const MusicTiming& timing) const {
@@ -66,7 +67,7 @@ int64_t NotationNote::start_ms(const MusicTiming& timing) const {
 int64_t NotationNote::end_ms(const MusicTiming& timing) const {
   // Instantaneous notes (official endTime -1 → end_tick 0, or end <= start):
   // use start as end so hold heads / taps never expire against a bogus early end_ms.
-  if (end_tick <= 0.0f || end_tick < start_tick) {
+  if (end_tick <= 0 || end_tick < start_tick) {
     return start_ms(timing);
   }
   return tick_to_milliseconds(end_tick, timing);
@@ -163,7 +164,7 @@ bool is_tap_family(NoteType type) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Sound:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
     case NoteType::BlueTap:
       return true;
     default:
@@ -175,7 +176,7 @@ bool is_hold_mid_star(NoteType type) noexcept {
   switch (type) {
     case NoteType::HoldEighth:
     case NoteType::Sound:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       return true;
     default:
       return false;
@@ -198,7 +199,6 @@ bool is_combo_head_note(const NotationNote& note) noexcept {
   switch (note.note_type) {
     case NoteType::Normal:
     case NoteType::Critical:
-    case NoteType::Scratch:
     case NoteType::Flick:
     case NoteType::BlueTap:
     case NoteType::HoldStart:
@@ -229,7 +229,7 @@ void collect_hold_body_judge_times(const NotationNote& hold,
   }
 
   // Sirius: soft body judges are chart mid-stars only (HoldEighth / Sound /
-  // SoundPurple). Do not synthesize eighths — HoldEighth already is that beat.
+  // ScratchSound). Do not synthesize eighths — HoldEighth already is that beat.
   std::vector<int64_t> times;
   for (const auto& note : notes) {
     if (!is_hold_mid_star(note.note_type)) {
@@ -310,12 +310,11 @@ PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
 
 bool contributes_to_concurrent_at_start(NoteType type) noexcept {
   // Mirrors sonolus-sirius-engine/levelData.cpp addSyncLine call sites.
-  // Hold mid-stars (HoldEighth / Sound / SoundPurple=ScratchSound) are excluded.
+  // Hold mid-stars (HoldEighth / Sound / ScratchSound) are excluded.
   switch (type) {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
-    case NoteType::Scratch:  // Sirius SoundPurple — flat scratch/flick family
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
     case NoteType::ScratchHoldStart:
@@ -414,8 +413,9 @@ bool ChartDocument::set_offset_ms(int64_t offset_ms) {
   timing_.offset_ms = offset_ms;
   rebuild_index();
   rebuild_concurrent_lines();
+  ++content_generation_;
   if (!is_read_only()) {
-    mark_dirty();
+    is_dirty_ = true;
   }
   return true;
 }
@@ -427,6 +427,9 @@ int32_t ChartDocument::add_note(NotationNote note) {
   if (note.id < 0) {
     note.id = next_id_++;
   } else {
+    if (id_to_index_.find(note.id) != id_to_index_.end()) {
+      return -1;  // explicit id already present
+    }
     next_id_ = std::max(next_id_, note.id + 1);
   }
 
@@ -456,6 +459,9 @@ bool ChartDocument::update_note(int32_t id, const NotationNote& note) {
   notes_[it->second] = updated;
   sort_notes_for_display();
   rebuild_id_index();
+  if (index_.max_hold_span_ms() == 0) {
+    rebuild_index();
+  }
   rebuild_concurrent_lines();
   mark_dirty();
   return true;
@@ -475,6 +481,9 @@ bool ChartDocument::remove_note(int32_t id) {
   notes_.erase(notes_.begin() + static_cast<std::ptrdiff_t>(it->second));
   sort_notes_for_display();
   rebuild_id_index();
+  if (index_.max_hold_span_ms() == 0) {
+    rebuild_index();
+  }
   rebuild_concurrent_lines();
   mark_dirty();
   return true;
@@ -491,6 +500,14 @@ std::optional<NotationNote> ChartDocument::find_note(int32_t id) const {
 bool ChartDocument::set_notes(std::vector<NotationNote> notes) {
   if (is_read_only()) {
     return false;
+  }
+  std::unordered_set<int32_t> seen;
+  seen.reserve(notes.size());
+  for (const auto& note : notes) {
+    if (note.id < 0) continue;
+    if (!seen.insert(note.id).second) {
+      return false;  // duplicate explicit id
+    }
   }
   notes_ = std::move(notes);
   for (auto& note : notes_) {
@@ -566,7 +583,9 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
   sort_notes_for_display();
   rebuild_id_index();
   rebuild_index();
+  rebuild_concurrent_lines();
   is_dirty_ = false;
+  ++content_generation_;
 }
 
 bool ChartDocument::normalize_for_save() {

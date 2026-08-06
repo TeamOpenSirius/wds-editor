@@ -17,6 +17,7 @@ inline constexpr Color kOnSurface{0.90f, 0.89f, 0.93f, 1.0f};
 inline constexpr Color kOnSurfaceMuted{0.70f, 0.69f, 0.74f, 1.0f};
 inline constexpr Color kOutline{0.38f, 0.38f, 0.42f, 1.0f};
 inline constexpr Color kError{0.96f, 0.45f, 0.45f, 1.0f};
+inline constexpr Color kWarning{0.96f, 0.78f, 0.35f, 1.0f};
 inline constexpr Color kHoverOverlay{1.0f, 1.0f, 1.0f, 0.08f};
 inline constexpr Color kPressedOverlay{1.0f, 1.0f, 1.0f, 0.14f};
 

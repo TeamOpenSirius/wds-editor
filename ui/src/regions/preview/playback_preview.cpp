@@ -113,13 +113,12 @@ EffectTint tint_for(NoteType type) {
     case NoteType::NontailCriticalHold:
     case NoteType::BlueTap:
       return {0.25f, 0.85f, 1.0f};  // blue hold / tap
-    case NoteType::Scratch:
     case NoteType::ScratchHold:
     case NoteType::ScratchCriticalHold:
     case NoteType::NontailScratchHold:
     case NoteType::NontailScratchCriticalHold:
     case NoteType::Flick:
-    case NoteType::SoundPurple:
+    case NoteType::ScratchSound:
       return {0.85f, 0.35f, 1.0f};  // purple flick / scratch-hold end
     case NoteType::Sound:
       return {0.35f, 0.95f, 0.55f};  // green tick
@@ -491,7 +490,7 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
     if (note->visual_state == PreviewNoteVisualState::Holding) {
       continue;
     }
-    // Mid-stars: Sound / SoundPurple are tick-only; HoldEighth has no sprite.
+    // Mid-stars: Sound / ScratchSound are tick-only; HoldEighth has no sprite.
     if (is_hold_mid_star(note->note_type)) {
       continue;
     }
@@ -687,7 +686,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
 
   const float unit = geometry_.content_unit();
   const float w = geometry_.lane_width(lane, p);
-  const float w_ref = geometry_.lane_width(lane, 1.0f);
+  const float w_ref = std::max(geometry_.lane_width(lane, 1.0f), 1e-6f);
   const float multiplier = w / w_ref;
   const Vec2 c1 = geometry_.lane_position(lane, p);
   const Vec2 c2 = geometry_.lane_position(end_lane, p);
@@ -809,7 +808,7 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
     // Head / tap: exclude hold bodies and mid-stars (stars use soft body style).
     if (!hold_body && !mid_star && !is_split_lane_gimmick(note.gimmick_type)) {
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
-          note.note_type == NoteType::Critical || note.note_type == NoteType::Scratch ||
+          note.note_type == NoteType::Critical ||
           note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
         const double age = now - static_cast<double>(note.start_ms) / 1000.0;
         if (age >= 0.0 && age < duration_d) {
@@ -983,7 +982,8 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     if (clip == wds::audio::HitSfxClip::Count) {
       return;
     }
-    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(note_id)) << 2) | kind;
+    const uint64_t key = (static_cast<uint64_t>(snapshot.revision) << 32) |
+                         (static_cast<uint64_t>(static_cast<uint32_t>(note_id)) << 2) | kind;
     const int64_t when_ms = music_clock ? transport_hit_ms(hit_ms) : hit_ms;
     const int64_t when_us = when_ms * 1000;
 
@@ -1042,7 +1042,7 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     // Official HoldStart* paired with a duration body: body emits the start hit.
     if (!hold_body && !mid_star && !is_split_lane_gimmick(note.gimmick_type)) {
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
-          note.note_type == NoteType::Critical || note.note_type == NoteType::Scratch ||
+          note.note_type == NoteType::Critical ||
           note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
         const bool paired = is_hold_start(note.note_type) &&
                             lookup.duration_hold_heads.count(note_span_key(
@@ -1103,6 +1103,11 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
   const uint64_t pos_gen = hit_sfx_.position_generation();
   const bool control_event = pos_gen != sfx_position_generation_;
   const bool pause_edge = !playing && sfx_was_playing_;
+  const bool revision_changed = snapshot.revision != sfx_document_revision_;
+  if (revision_changed) {
+    hit_sfx_played_.clear();
+    sfx_document_revision_ = snapshot.revision;
+  }
 
   if (control_event || pause_edge) {
     release_sfx_clock_control(snapshot, raw_us, playing);

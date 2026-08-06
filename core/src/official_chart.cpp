@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -79,14 +80,14 @@ bool parse_int(const std::string& text, int32_t& out) {
   }
 }
 
-float seconds_to_tick(double seconds, const MusicTiming& timing) {
+int32_t seconds_to_tick(double seconds, const MusicTiming& timing) {
   // Official CSV seconds are chart-local (DelaySeconds lives in music_config).
   MusicTiming local = timing;
   local.offset_ms = 0;
   return milliseconds_to_tick(static_cast<int64_t>(std::llround(seconds * 1000.0)), local);
 }
 
-double tick_to_seconds(float tick, const MusicTiming& timing) {
+double tick_to_seconds(int32_t tick, const MusicTiming& timing) {
   // Integrate BPM changes; exclude project-level chart delay (music_config DelaySeconds).
   MusicTiming local = timing;
   local.offset_ms = 0;
@@ -149,6 +150,55 @@ bool path_ends_with_ci(const std::string& path, const std::string& suffix) {
     }
   }
   return true;
+}
+
+constexpr int32_t kSiriusSoundPurpleType = 40;
+
+bool lanes_overlap_notes(const NotationNote& a, const NotationNote& b) noexcept {
+  return a.lane <= b.end_lane() && b.lane <= a.end_lane();
+}
+
+// Sirius CSV type 40 (SoundPurple): mid-hold scratch → JumpScratch segments.
+// Orphans (no purple hold span) become Flick.
+void apply_sound_purple_cuts(std::vector<NotationNote>& notes, int32_t& next_id,
+                             const std::vector<NotationNote>& cuts) {
+  for (const auto& cut : cuts) {
+    const int32_t cut_tick = cut.start_tick;
+    int best = -1;
+    for (int i = 0; i < static_cast<int>(notes.size()); ++i) {
+      const auto& n = notes[static_cast<size_t>(i)];
+      if (!is_scratch_hold_body(n.note_type)) continue;
+      if (!(cut_tick > n.start_tick && cut_tick < n.end_tick)) continue;
+      if (!lanes_overlap_notes(n, cut)) continue;
+      best = i;
+      break;
+    }
+    if (best < 0) {
+      NotationNote flick = cut;
+      flick.id = next_id++;
+      flick.end_tick = flick.start_tick;
+      flick.note_type = NoteType::Flick;
+      flick.gimmick_type = GimmickType::None;
+      if (flick.scratch_length != 0 && std::abs(flick.scratch_length) > 1) {
+        flick.scratch_length = (flick.scratch_length < 0) ? -1 : 1;
+      }
+      notes.push_back(flick);
+      continue;
+    }
+
+    NotationNote& body = notes[static_cast<size_t>(best)];
+    NotationNote first = body;
+    first.end_tick = cut_tick;
+    first.gimmick_type = GimmickType::JumpScratch;
+    first.scratch_length = cut.scratch_length;
+
+    NotationNote second = body;
+    second.id = next_id++;
+    second.start_tick = cut_tick;
+
+    body = first;
+    notes.push_back(second);
+  }
 }
 
 }  // namespace
@@ -215,6 +265,7 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
   chart.notes.reserve(lines.size());
 
   int32_t next_id = 0;
+  std::vector<NotationNote> sound_purple_cuts;
   size_t line_no = 0;
   for (const auto& raw_line : lines) {
     ++line_no;
@@ -244,6 +295,25 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has invalid numeric fields"};
     }
+    if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec < 0.0 ||
+        start_sec > 1.0e7 || end_sec > 1.0e7) {
+      return {SerializeError::ParseError,
+              "official chart: line " + std::to_string(line_no) + " has out-of-range time"};
+    }
+    if (lane_length < 0 || lane_length > 12) {
+      return {SerializeError::ParseError,
+              "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
+    }
+    // Official leftLane is often 1-based; validate the eventual 0-based span.
+    if (left_lane > 0) {
+      const int64_t zero_based =
+          options.convert_lane_to_zero_based ? static_cast<int64_t>(left_lane) - 1
+                                            : static_cast<int64_t>(left_lane);
+      if (zero_based + static_cast<int64_t>(lane_length) > 12) {
+        return {SerializeError::ParseError,
+                "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
+      }
+    }
 
     GimmickType gimmick = GimmickType::None;
     if (!parse_gimmick_token(cols[5], gimmick)) {
@@ -270,19 +340,43 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     } else {
       note.end_tick = seconds_to_tick(end_sec, chart.timing);
     }
-    note.note_type = static_cast<NoteType>(type_raw);
     note.width = std::max(0, lane_length);
     note.gimmick_type = gimmick;
     note.scratch_length = scratch_length;
 
-    if (options.convert_lane_to_zero_based && left_lane > 0) {
+    // Split placeholders: official leftLane=-1 (or 0), laneLength=0 — keep off playable lanes.
+    const bool split_placeholder =
+        is_split_lane_gimmick(gimmick) ||
+        (type_raw == 0 && (left_lane < 0 || (left_lane == 0 && lane_length == 0)));
+    if (split_placeholder && left_lane <= 0) {
+      note.lane = 0;
+      note.width = 0;
+      note.note_type = NoteType::None;
+    } else if (options.convert_lane_to_zero_based && left_lane > 0) {
       note.lane = left_lane - 1;
     } else {
       note.lane = left_lane;
     }
 
+    // Sirius SoundPurple (40): defer — split purple holds / orphan → Flick.
+    if (type_raw == kSiriusSoundPurpleType) {
+      note.note_type = NoteType::Flick;  // placeholder type until apply
+      sound_purple_cuts.push_back(note);
+      // Reclaim id; apply assigns fresh ids.
+      --next_id;
+      continue;
+    }
+
+    note.note_type = static_cast<NoteType>(type_raw);
     chart.notes.push_back(note);
   }
+
+  // Sort cuts by tick so multi-cut holds split stably left-to-right in time.
+  std::sort(sound_purple_cuts.begin(), sound_purple_cuts.end(),
+            [](const NotationNote& a, const NotationNote& b) {
+              return a.start_tick < b.start_tick;
+            });
+  apply_sound_purple_cuts(chart.notes, next_id, sound_purple_cuts);
 
   // Sync lines are derived the same way as editor charts.
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
@@ -327,21 +421,30 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
   for (const auto& note : chart.notes) {
     const double start_sec = tick_to_seconds(note.start_tick, chart.timing);
 
-    // Official rule: hold body / split / type None write endTime (may equal start);
-    // tap / hold-start / mid-star / flick write -1.
-    const bool writes_end = is_hold_body(note.note_type) ||
-                            is_split_lane_gimmick(note.gimmick_type) ||
-                            note.note_type == NoteType::None;
+    // Official: hold body / split write endTime; taps / heads / mid-stars / HoldEighth → -1.
+    const bool writes_end =
+        (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) ||
+        is_split_lane_gimmick(note.gimmick_type) || note.note_type == NoteType::None;
     const double end_sec =
         writes_end ? tick_to_seconds(note.end_tick, chart.timing) : -1.0;
 
-    // Pure gimmick placeholders stay at official lane 0; playable notes are 1-based.
-    const bool placeholder_lane =
-        note.lane == 0 && note.width == 0 &&
-        (is_split_lane_gimmick(note.gimmick_type) || note.note_type == NoteType::None);
+    const bool split_row =
+        is_split_lane_gimmick(note.gimmick_type) || note.note_type == NoteType::None;
     int32_t lane = note.lane;
-    if (options.convert_lane_to_one_based && !placeholder_lane) {
+    int32_t width = note.width;
+    if (split_row && note.lane == 0 && note.width == 0) {
+      // sus2txt: leftLane=-1, laneLength=0
+      lane = -1;
+      width = 0;
+    } else if (options.convert_lane_to_one_based) {
       lane = note.lane + 1;
+    }
+
+    GimmickType gimmick = note.gimmick_type;
+    // sus2txt: any ScratchHold with non-zero scratchLength uses JumpScratch name.
+    if (is_scratch_hold_body(note.note_type) && note.scratch_length != 0 &&
+        gimmick == GimmickType::None) {
+      gimmick = GimmickType::JumpScratch;
     }
 
     ss << start_sec << ',';
@@ -350,8 +453,8 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     } else {
       ss << end_sec;
     }
-    ss << ',' << static_cast<int32_t>(note.note_type) << ',' << lane << ',' << note.width << ','
-       << format_gimmick(note.gimmick_type, options.use_gimmick_names) << ',' << note.scratch_length
+    ss << ',' << static_cast<int32_t>(note.note_type) << ',' << lane << ',' << width << ','
+       << format_gimmick(gimmick, options.use_gimmick_names) << ',' << note.scratch_length
        << '\n';
   }
 

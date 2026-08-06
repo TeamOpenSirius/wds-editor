@@ -31,6 +31,12 @@ constexpr std::size_t kPathCap = 1024;
 constexpr std::size_t kMsgCap = 4096;
 
 char g_log_dir[kPathCap] = {};
+// Prebuilt at install time so the signal path never formats paths (not AS-safe).
+char g_signal_crash_path[kPathCap] = {};
+constexpr char kSignalCrashHeader[] =
+    "WDS Editor crash report\n"
+    "kind: signal\n"
+    "detail: ";
 std::atomic_flag g_handling = ATOMIC_FLAG_INIT;
 std::mutex g_report_mu;
 
@@ -308,7 +314,8 @@ void build_user_message(char* out, std::size_t cap, const char* kind, const char
   }
 }
 
-void handle_crash(const char* kind, const char* detail, bool from_signal) {
+// Non-signal path only: may use heap, snprintf, mkdir, dialogs.
+void handle_crash(const char* kind, const char* detail) {
   if (g_handling.test_and_set(std::memory_order_acq_rel)) {
     // Nested crash — bail hard.
 #if defined(_WIN32)
@@ -318,6 +325,7 @@ void handle_crash(const char* kind, const char* detail, bool from_signal) {
 #endif
   }
 
+  // Log dir is created at install; retry here for late permission fixes.
   ensure_log_dir();
   char stamp[32];
   format_timestamp(stamp, sizeof(stamp));
@@ -328,17 +336,62 @@ void handle_crash(const char* kind, const char* detail, bool from_signal) {
   char msg[kMsgCap];
   build_user_message(msg, sizeof(msg), kind, detail, path, wrote);
 
-  // Always mirror to stderr when possible (may not be async-safe; skip in signal).
-  if (!from_signal) {
-    std::fprintf(stderr, "[wds] FATAL %s: %s\n", kind != nullptr ? kind : "?",
-                 detail != nullptr ? detail : "");
-    if (wrote) {
-      std::fprintf(stderr, "[wds] crash log: %s\n", path);
-    }
+  std::fprintf(stderr, "[wds] FATAL %s: %s\n", kind != nullptr ? kind : "?",
+               detail != nullptr ? detail : "");
+  if (wrote) {
+    std::fprintf(stderr, "[wds] crash log: %s\n", path);
   }
 
   show_crash_dialog("WDS Editor — 致命错误", msg);
 }
+
+#if !defined(_WIN32)
+// Async-signal-safe helpers. Only call open/write/close/backtrace_symbols_fd/_exit.
+// Safe set: write, open, close, backtrace_symbols_fd, signal, raise, _exit.
+void asafe_write(int fd, const char* data, std::size_t n) {
+  if (fd < 0 || data == nullptr || n == 0) return;
+  (void)::write(fd, data, n);
+}
+
+void asafe_write_cstr(int fd, const char* s) {
+  if (fd < 0 || s == nullptr) return;
+  std::size_t n = 0;
+  while (s[n] != '\0' && n < kMsgCap) {
+    ++n;
+  }
+  asafe_write(fd, s, n);
+}
+
+// Signal path: preallocated path + static headers only — no snprintf/malloc/dialog.
+void handle_crash_from_signal(int sig, const char* kind) {
+  if (g_handling.test_and_set(std::memory_order_acq_rel)) {
+    ::_exit(1);
+  }
+
+  // File-scope literals only — avoid function-local static init in signal context.
+  asafe_write(STDERR_FILENO, "[wds] FATAL signal: ", 20);
+  asafe_write_cstr(STDERR_FILENO, kind != nullptr ? kind : "signal");
+  asafe_write(STDERR_FILENO, "\n", 1);
+  if (g_signal_crash_path[0] != '\0') {
+    asafe_write(STDERR_FILENO, "[wds] crash log: ", 17);
+    asafe_write_cstr(STDERR_FILENO, g_signal_crash_path);
+    asafe_write(STDERR_FILENO, "\n", 1);
+  }
+
+  if (g_signal_crash_path[0] != '\0') {
+    const int fd = ::open(g_signal_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+      asafe_write(fd, kSignalCrashHeader, sizeof(kSignalCrashHeader) - 1);
+      asafe_write_cstr(fd, kind != nullptr ? kind : "signal");
+      asafe_write(fd, "\n--- stack ---\n", 15);
+      append_stack_posix(fd);
+      ::close(fd);
+    }
+  }
+
+  (void)sig;  // re-raise done by caller
+}
+#endif
 
 #if defined(_WIN32)
 const char* exception_name(DWORD code) {
@@ -362,7 +415,7 @@ LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* info) {
       info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
   std::snprintf(detail, sizeof(detail), "%s (0x%08lX)", exception_name(code),
                 static_cast<unsigned long>(code));
-  handle_crash("Windows 异常", detail, /*from_signal=*/false);
+  handle_crash("Windows 异常", detail);
   return EXCEPTION_EXECUTE_HANDLER;
 }
 #else
@@ -386,9 +439,8 @@ const char* signal_name(int sig) {
 }
 
 void fatal_signal_handler(int sig) {
-  char detail[64];
-  std::snprintf(detail, sizeof(detail), "signal %d", sig);
-  handle_crash(signal_name(sig), detail, /*from_signal=*/true);
+  // Must stay async-signal-safe: no snprintf, malloc, locale, or UI dialogs.
+  handle_crash_from_signal(sig, signal_name(sig));
   // Restore default and re-raise so the OS records the real crash status.
   ::signal(sig, SIG_DFL);
   ::raise(sig);
@@ -410,7 +462,7 @@ void terminate_handler() {
   } catch (...) {
     detail = "exception while inspecting terminate state";
   }
-  handle_crash("未捕获的 C++ 异常 / terminate", detail, /*from_signal=*/false);
+  handle_crash("未捕获的 C++ 异常 / terminate", detail);
 #if defined(_WIN32)
   ::TerminateProcess(::GetCurrentProcess(), 1);
 #else
@@ -425,6 +477,10 @@ void install_crash_handlers() {
   std::call_once(once, [] {
     resolve_log_dir();
     ensure_log_dir();
+#if !defined(_WIN32)
+    // Fixed path for signal crashes (no timestamp formatting in the handler).
+    make_crash_path(g_signal_crash_path, sizeof(g_signal_crash_path), "signal");
+#endif
 
     std::set_terminate(terminate_handler);
 
@@ -453,8 +509,7 @@ void install_crash_handlers() {
 
 void report_fatal(const char* kind, const char* detail) {
   std::lock_guard<std::mutex> lock(g_report_mu);
-  handle_crash(kind != nullptr ? kind : "fatal", detail != nullptr ? detail : "",
-               /*from_signal=*/false);
+  handle_crash(kind != nullptr ? kind : "fatal", detail != nullptr ? detail : "");
 }
 
 }  // namespace wds::common

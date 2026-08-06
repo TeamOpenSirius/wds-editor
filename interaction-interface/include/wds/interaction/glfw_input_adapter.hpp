@@ -44,13 +44,18 @@ class GlfwInputAdapter {
   static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
   static void char_callback(GLFWwindow* window, unsigned int codepoint);
 
+  struct ClickTrack {
+    double last_click_time = 0.0;
+    Vec2 last_click_pos{};
+    int click_count = 0;
+  };
+
   GLFWwindow* window_ = nullptr;
   InputQueue queue_;
   Modifiers mods_;
   Vec2 pointer_{};  // logical / window pixels
-  double last_click_time_ = 0.0;
-  Vec2 last_click_pos_{};
-  int click_count_ = 0;
+  // Per-button double-click state (left/right/middle) — do not share across keys.
+  ClickTrack click_track_[3]{};
   CursorKind cursor_ = CursorKind::Default;
   void* cursor_ew_ = nullptr;  // GLFWcursor*
   void* cursor_ns_ = nullptr;

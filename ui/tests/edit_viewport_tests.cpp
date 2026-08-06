@@ -41,15 +41,15 @@ int main() {
   assert(viewport.tick_at(240) == 240);
 
   // Playhead at tick 480 (500 ms) sits on the judgment line.
-  viewport.sync_scroll_to_playhead(480.0f);
-  assert(std::abs(viewport.y_at(480.0f) - viewport.judgeline_y()) < 0.01f);
+  viewport.sync_scroll_to_playhead(480);
+  assert(std::abs(viewport.y_at(480) - viewport.judgeline_y()) < 0.01f);
   assert(std::abs(viewport.judgeline_y() - 216.0f) < 0.01f);
 
   // At chart start: tick 0 sits on the judgeline; blank is below the line.
-  viewport.sync_scroll_to_playhead(0.0f);
+  viewport.sync_scroll_to_playhead(0);
   assert(viewport.scroll_ms() < 0.0f);
   assert(std::abs(viewport.scroll_ms() - viewport.min_scroll_ms()) < 0.01f);
-  assert(std::abs(viewport.y_at(0.0f) - viewport.judgeline_y()) < 0.01f);
+  assert(std::abs(viewport.y_at(0) - viewport.judgeline_y()) < 0.01f);
   viewport.set_scroll_ms(viewport.min_scroll_ms() - 1000.0f);
   assert(std::abs(viewport.scroll_ms() - viewport.min_scroll_ms()) < 0.01f);
   assert(viewport.tick_at(240) == 0);
@@ -72,11 +72,11 @@ int main() {
 
   // Higher BPM packs the same tick gaps denser (less vertical px per tick).
   viewport.set_scroll_ms(0.0f);
-  const float y_gap_120 = std::abs(viewport.y_at(480.0f) - viewport.y_at(0.0f));
+  const float y_gap_120 = std::abs(viewport.y_at(480) - viewport.y_at(0));
   timing.bpm = 240.0;
   timing.points = {{0, 240.0, 4, 4}};
   viewport.set_timing(timing);
-  const float y_gap_240 = std::abs(viewport.y_at(480.0f) - viewport.y_at(0.0f));
+  const float y_gap_240 = std::abs(viewport.y_at(480) - viewport.y_at(0));
   assert(y_gap_240 < y_gap_120 * 0.55f);
   assert(y_gap_240 > y_gap_120 * 0.45f);
 }

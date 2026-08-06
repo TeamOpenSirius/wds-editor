@@ -8,9 +8,11 @@
 #include "wds/interaction/widget_root.hpp"
 #include "wds/interaction/widgets/button.hpp"
 #include "wds/interaction/widgets/checkbox.hpp"
+#include "wds/interaction/widgets/combo_box.hpp"
 #include "wds/interaction/widgets/shortcut_field.hpp"
 #include "wds/interaction/widgets/slider.hpp"
 #include "wds/interaction/widgets/stepper.hpp"
+#include "wds/interaction/widgets/text_field.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -306,7 +308,7 @@ int main() {
     reset_editor_shortcuts();
   }
 
-  // ShortcutField: commit, conflict revert, forbidden reject, blur revert, captures_keys.
+  // ShortcutField: commit, allow duplicate temporarily, forbidden reject, clear, blur.
   {
     ShortcutField field;
     field.set_bounds({0, 0, 120, 28});
@@ -314,7 +316,6 @@ int main() {
     int changes = 0;
     field.on_change([&](const ShortcutChord&) { ++changes; });
     const ShortcutChord blocked = chord_primary(static_cast<KeyCode>('C'));
-    field.set_conflict_checker([&](const ShortcutChord& c) { return c == blocked; });
 
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     expect(field.visual_state() == WidgetState::Focused, "shortcut field focuses");
@@ -334,20 +335,26 @@ int main() {
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     const int changes_before = changes;
     field.on_key_down(KeyDownEvent{blocked.key, blocked.mods, false});
-    expect(field.chord().key == static_cast<KeyCode>('X'), "conflict keeps old chord");
-    expect(changes == changes_before, "conflict does not fire on_change");
-    expect(field.visual_state() == WidgetState::Focused, "conflict stays focused");
+    expect(field.chord().key == blocked.key, "duplicate chord is allowed temporarily");
+    expect(changes == changes_before + 1, "duplicate still fires on_change");
+    field.set_conflict_highlight(true);
+    expect(field.conflict_highlight(), "parent can mark conflict highlight");
 
+    field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     field.on_key_down(KeyDownEvent{KeyCode::Num3, {}, false});
-    expect(field.chord().key == static_cast<KeyCode>('X'), "digit rejected");
+    expect(field.chord().key == blocked.key, "digit rejected");
 
     field.on_key_down(KeyDownEvent{KeyCode::Escape, {}, false});
     expect(field.visual_state() == WidgetState::Normal, "escape cancels capture");
 
+    field.clear_chord();
+    expect(field.chord().key == KeyCode::Unknown, "clear empties chord");
+    expect(changes == changes_before + 2, "clear fires on_change");
+
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     field.on_key_down(KeyDownEvent{KeyCode::Unknown, shift, false});
     field.on_blur();
-    expect(field.chord().key == static_cast<KeyCode>('X'), "blur reverts draft mods");
+    expect(field.chord().key == KeyCode::Unknown, "blur reverts draft mods");
     expect(!field.captures_keys(), "blur clears captures_keys");
   }
 
@@ -374,12 +381,115 @@ int main() {
     expect(raw->chord().key == static_cast<KeyCode>('K'), "field consumed K");
   }
 
+  // Focused TextField must suppress global chords (e.g. Space play/pause) while typing.
+  {
+    WidgetRoot root3;
+    root3.set_bounds({0, 0, 400, 400});
+    auto tf = std::make_unique<TextField>();
+    auto* raw = tf.get();
+    raw->set_bounds({10, 10, 120, 28});
+    root3.add_child(std::move(tf));
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int fired = 0;
+    ns.bind({KeyCode::Space, {}}, [&] { ++fired; });
+    mgr.set_active_namespace("editor");
+
+    root3.process_frame(0.016f, {PointerDownEvent{{20, 20}, PointerButton::Left, {}}});
+    expect(root3.focused_widget() == raw, "root focuses text field");
+    expect(raw->captures_keys(), "text field captures keys while focused");
+    root3.process_frame(0.016f, {KeyDownEvent{KeyCode::Space, {}, false}}, &mgr);
+    expect(fired == 0, "Space shortcut suppressed while typing");
+    root3.process_frame(0.016f, {TextInputEvent{" "}}, &mgr);
+    expect(raw->text() == " ", "space still inserts into text field");
+  }
+
+  // Editable ComboBox captures; dropdown-only only while menu open.
+  {
+    ComboBox editable;
+    expect(editable.captures_keys(), "editable combo captures keys");
+    ComboBox menu_only;
+    menu_only.set_dropdown_only(true);
+    expect(!menu_only.captures_keys(), "closed dropdown-only does not capture");
+  }
+
   {
     ShortcutNamespace ns;
     expect(ns.bind({KeyCode::Space, {}}, [] {}), "clear-test bind");
     ns.clear();
     expect(ns.size() == 0, "namespace clear empties bindings");
     expect(ns.bind({KeyCode::Space, {}}, [] {}), "bind after clear");
+  }
+
+  // M14: OS key-repeat must not fire bound toggle/command actions.
+  {
+    ShortcutNamespace ns;
+    int fired = 0;
+    expect(ns.bind({KeyCode::Space, {}}, [&] { ++fired; }), "bind space for repeat test");
+    expect(!ns.dispatch(KeyDownEvent{KeyCode::Space, {}, true}), "repeat dispatch ignored");
+    expect(fired == 0, "repeat does not fire action");
+    expect(ns.dispatch(KeyDownEvent{KeyCode::Space, {}, false}), "non-repeat dispatch ok");
+    expect(fired == 1, "non-repeat fires once");
+  }
+
+  // M15: Backspace deletes a full UTF-8 codepoint (CJK).
+  {
+    TextField field;
+    field.set_text("");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_text_input(TextInputEvent{"测"});
+    expect(field.text() == "测", "text field accepts CJK");
+    field.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    expect(field.text().empty(), "backspace removes full CJK codepoint");
+  }
+  {
+    ComboBox box;
+    box.set_dropdown_only(false);
+    box.set_text("测");
+    box.set_visual_state(WidgetState::Focused);
+    expect(box.text() == "测", "combo set_text keeps CJK");
+    box.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    expect(box.text().empty(), "combo backspace removes full CJK codepoint");
+  }
+
+  // m22: hidden widgets must not keep an active tooltip.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto btn = std::make_unique<Button>();
+    auto* raw = btn.get();
+    raw->set_bounds({10, 10, 80, 28});
+    raw->set_tooltip("tip");
+    root.add_child(std::move(btn));
+    root.process_frame(0.016f, {PointerMoveEvent{{20, 20}, {}}});
+    expect(root.active_tooltip() == "tip", "hover shows tooltip");
+    raw->set_visible(false);
+    root.process_frame(0.016f, {});
+    expect(root.active_tooltip().empty(), "hidden widget clears tooltip");
+  }
+
+  // m23: hiding a focused TextField restores global shortcuts.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto tf = std::make_unique<TextField>();
+    auto* raw = tf.get();
+    raw->set_bounds({10, 10, 120, 28});
+    root.add_child(std::move(tf));
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int fired = 0;
+    ns.bind({KeyCode::Space, {}}, [&] { ++fired; });
+    mgr.set_active_namespace("editor");
+
+    root.process_frame(0.016f, {PointerDownEvent{{20, 20}, PointerButton::Left, {}}});
+    expect(root.focused_widget() == raw, "text field focused");
+    raw->set_visible(false);
+    expect(root.focused_widget() == nullptr, "hide clears focus");
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Space, {}, false}}, &mgr);
+    expect(fired == 1, "Space shortcut works after hide");
   }
 
   return failures == 0 ? 0 : 1;

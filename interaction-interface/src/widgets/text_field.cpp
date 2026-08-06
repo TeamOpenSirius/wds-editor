@@ -6,6 +6,19 @@
 #include <algorithm>
 
 namespace wds::interaction {
+namespace {
+
+void pop_utf8_codepoint(std::string& text) {
+  if (text.empty()) return;
+  size_t i = text.size();
+  // Skip UTF-8 continuation bytes (10xxxxxx), keep the leading byte.
+  do {
+    --i;
+  } while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80);
+  text.erase(i);
+}
+
+}  // namespace
 
 TextField::TextField(std::string placeholder) : placeholder_(std::move(placeholder)) {}
 
@@ -93,7 +106,7 @@ void TextField::on_key_down(const KeyDownEvent& event) {
     return;
   }
   if (event.key == KeyCode::Backspace && !text_.empty()) {
-    text_.pop_back();
+    pop_utf8_codepoint(text_);
     reset_caret_blink();
     if (on_change_) {
       on_change_(text_);

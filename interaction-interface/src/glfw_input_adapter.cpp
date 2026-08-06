@@ -27,6 +27,31 @@ Modifiers from_glfw_mods(int mods) {
   return m;
 }
 
+Modifiers mods_from_glfw_keys(GLFWwindow* window) {
+  Modifiers m;
+  m.shift = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+  m.control = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+              glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+  m.alt = glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
+  m.super = glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS;
+  return m;
+}
+
+int click_track_index(PointerButton button) noexcept {
+  switch (button) {
+    case PointerButton::Right:
+      return 1;
+    case PointerButton::Middle:
+      return 2;
+    case PointerButton::Left:
+    default:
+      return 0;
+  }
+}
+
 KeyCode from_glfw_key(int key) {
   if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9) {
     return static_cast<KeyCode>(static_cast<int>(KeyCode::Num0) + (key - GLFW_KEY_0));
@@ -195,19 +220,20 @@ void GlfwInputAdapter::mouse_button_callback(GLFWwindow* window, int button, int
     const double now = glfwGetTime();
     // Fixed slop in logical pixels (matches layout space on all DPI).
     constexpr float kClickSlopLogical = 6.0f;
+    ClickTrack& track = self->click_track_[click_track_index(pb)];
     const bool double_click =
-        (now - self->last_click_time_) < 0.35 &&
-        std::hypot(self->pointer_.x - self->last_click_pos_.x,
-                   self->pointer_.y - self->last_click_pos_.y) < kClickSlopLogical;
+        (now - track.last_click_time) < 0.35 &&
+        std::hypot(self->pointer_.x - track.last_click_pos.x,
+                   self->pointer_.y - track.last_click_pos.y) < kClickSlopLogical;
     if (double_click) {
-      self->click_count_ = 2;
+      track.click_count = 2;
       self->queue_.push(DoubleClickEvent{self->pointer_, pb, self->mods_});
     } else {
-      self->click_count_ = 1;
+      track.click_count = 1;
     }
-    self->queue_.push(ClickEvent{self->pointer_, pb, self->mods_, self->click_count_});
-    self->last_click_time_ = now;
-    self->last_click_pos_ = self->pointer_;
+    self->queue_.push(ClickEvent{self->pointer_, pb, self->mods_, track.click_count});
+    track.last_click_time = now;
+    track.last_click_pos = self->pointer_;
   }
 }
 
@@ -220,6 +246,8 @@ void GlfwInputAdapter::scroll_callback(GLFWwindow* window, double xoffset, doubl
   double cy = 0.0;
   glfwGetCursorPos(window, &cx, &cy);
   self->pointer_ = to_logical(cx, cy);
+  // Scroll callbacks do not carry modifier bits — sample keys so Shift+wheel etc. work.
+  self->mods_ = mods_from_glfw_keys(window);
   float dx = static_cast<float>(xoffset);
   float dy = static_cast<float>(yoffset);
   if (invert_scroll_wheel()) {

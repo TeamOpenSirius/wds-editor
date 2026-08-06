@@ -62,7 +62,11 @@ void StartMsAvlIndex::IdList::push(int32_t id) {
   }
 
   if (heap_count == 0) {
-    heap_ids = new int32_t[8];
+    if (heap_ids != nullptr) {
+      // Reuse previous heap allocation after remove emptied it.
+    } else {
+      heap_ids = new int32_t[8];
+    }
     std::memcpy(heap_ids, inline_ids, sizeof(inline_ids));
     heap_count = 4;
     inline_count = 0;

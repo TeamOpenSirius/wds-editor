@@ -6,11 +6,18 @@
 #include <wds/core/timing_map.hpp>
 
 #include <algorithm>
+#include <climits>
+#include <cmath>
+#include <cstdint>
+#include <locale>
 #include <sstream>
 #include <unordered_set>
 
 namespace wds::chart_editor {
 namespace {
+
+constexpr std::size_t kMaxSerializedCount = 1'000'000;
+constexpr double kMaxTickRaw = static_cast<double>(INT32_MAX);
 
 bool is_known_note_type(int32_t raw) noexcept {
   switch (static_cast<NoteType>(raw)) {
@@ -19,8 +26,7 @@ bool is_known_note_type(int32_t raw) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Sound:
-    case NoteType::SoundPurple:
-    case NoteType::Scratch:
+    case NoteType::ScratchSound:
     case NoteType::Flick:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
@@ -116,6 +122,8 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   const std::string bytes = read_text_file(path, io_status);
   if (io_status.error != SerializeError::Ok) return io_status;
   std::istringstream file(bytes);
+  // Locale-independent decimals (avoid ',' decimal locales misparsing BPM/ticks).
+  file.imbue(std::locale::classic());
 
   std::string magic;
   int32_t version = 0;
@@ -151,6 +159,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     } else if (key == "TIMING") {
       file >> timing_count;
       if (!file) return {SerializeError::ParseError, "malformed TIMING count"};
+      if (timing_count > kMaxSerializedCount) {
+        return {SerializeError::ParseError, "TIMING count exceeds limit"};
+      }
       saw_timing = true;
       chart.timing.points.clear();
       chart.timing.points.reserve(timing_count);
@@ -182,6 +193,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     } else if (key == "NOTES") {
       file >> note_count;
       if (!file) return {SerializeError::ParseError, "malformed NOTES count"};
+      if (note_count > kMaxSerializedCount) {
+        return {SerializeError::ParseError, "NOTES count exceeds limit"};
+      }
       saw_notes = true;
       chart.notes.reserve(note_count);
     } else if (key == "N") {
@@ -189,7 +203,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       int32_t note_type_raw = 0;
       int32_t gimmick_raw = 0;
 
-      file >> note.id >> note.start_tick >> note.end_tick >> note_type_raw >> note.lane >>
+      double start_tick_raw = 0.0;
+      double end_tick_raw = 0.0;
+      file >> note.id >> start_tick_raw >> end_tick_raw >> note_type_raw >> note.lane >>
           note.width >> gimmick_raw >> note.scratch_length;
 
       if (!file) {
@@ -214,12 +230,16 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       if (!is_known_gimmick(gimmick_raw)) {
         return {SerializeError::ParseError, "unknown gimmick type"};
       }
-      if (note.lane < 0 || note.width < 0 || note.lane + note.width > 12) {
+      if (note.lane < 0 || note.width < 0 || note.width > 12 ||
+          static_cast<int64_t>(note.lane) + static_cast<int64_t>(note.width) > 12) {
         return {SerializeError::ParseError, "note lane/width out of range"};
       }
-      if (note.start_tick < 0.0f || note.end_tick < 0.0f) {
+      if (!std::isfinite(start_tick_raw) || !std::isfinite(end_tick_raw) || start_tick_raw < 0.0 ||
+          end_tick_raw < 0.0 || start_tick_raw > kMaxTickRaw || end_tick_raw > kMaxTickRaw) {
         return {SerializeError::ParseError, "note tick out of range"};
       }
+      note.start_tick = static_cast<int32_t>(std::llround(start_tick_raw));
+      note.end_tick = static_cast<int32_t>(std::llround(end_tick_raw));
       if (note.id >= 0 && !seen_ids.insert(note.id).second) {
         return {SerializeError::ParseError, "duplicate note id"};
       }
@@ -230,6 +250,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     } else if (key == "CONCURRENT") {
       file >> concurrent_count;
       if (!file) return {SerializeError::ParseError, "malformed CONCURRENT count"};
+      if (concurrent_count > kMaxSerializedCount) {
+        return {SerializeError::ParseError, "CONCURRENT count exceeds limit"};
+      }
       saw_concurrent = true;
       chart.concurrent_lines.reserve(concurrent_count);
     } else if (key == "C") {
@@ -238,7 +261,8 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       if (!file) {
         return {SerializeError::ParseError, "malformed concurrent line record"};
       }
-      if (line.start_lane < 0 || line.width < 0 || line.start_lane + line.width > 12) {
+      if (line.start_lane < 0 || line.width < 0 || line.width > 12 ||
+          static_cast<int64_t>(line.start_lane) + static_cast<int64_t>(line.width) > 12) {
         return {SerializeError::ParseError, "concurrent lane/width out of range"};
       }
       chart.concurrent_lines.push_back(line);
