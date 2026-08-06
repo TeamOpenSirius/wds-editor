@@ -327,9 +327,25 @@ mingw_dll() {
 
 package_win() {
   local build_dir="$1"
+  local cache="${build_dir}/CMakeCache.txt"
+  if [[ -f "$cache" ]]; then
+    # Stale core-only caches (WDS_BUILD_UI=OFF) leave an old wds_editor.exe on disk;
+    # packaging would still succeed and produce a "new" MSI with old behavior.
+    if grep -Eq '^WDS_BUILD_UI:BOOL=OFF$' "$cache"; then
+      die "build dir has WDS_BUILD_UI=OFF (${cache}); reconfigure with UI enabled, e.g. ./scripts/build-target.sh win-x86_64 (or delete ${build_dir})"
+    fi
+  fi
   local demo=""
   demo="$(resolve_editor_bin "$build_dir" ".exe")" || \
     die "missing wds_editor.exe (build ui first)"
+  # Prefer the CMake target output under ui/; refuse packaging a lone leftover exe
+  # when the ui/ target directory is no longer part of the build.
+  if [[ ! -f "${build_dir}/ui/CMakeFiles/wds_editor.dir/DependInfo.cmake" && \
+        ! -f "${build_dir}/ui/CMakeFiles/wds_editor.dir/compiler_depend.ts" ]]; then
+    if [[ ! -d "${build_dir}/ui/CMakeFiles/wds_editor.dir" ]]; then
+      die "wds_editor CMake target missing under ${build_dir}/ui (UI not built); delete build dir or force -DWDS_BUILD_UI=ON"
+    fi
+  fi
   local example="${build_dir}/core/wds_core_example.exe"
 
   need_cmd curl
