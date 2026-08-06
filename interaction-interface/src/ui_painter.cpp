@@ -224,8 +224,6 @@ void UiPainter::clear() noexcept {
 
 void UiPainter::reserve_rects(std::size_t n) { rects_.reserve(rects_.size() + n); }
 
-void UiPainter::reserve_sprites(std::size_t n) { sprites_.reserve(sprites_.size() + n); }
-
 void UiPainter::fill_rect(const Rect& bounds, const Color& color, float corner_radius, float z) {
   rects_.push_back({bounds, color, corner_radius, z});
 }

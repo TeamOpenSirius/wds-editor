@@ -109,7 +109,7 @@ snapshot.clear_keep_capacity();
 | `chart_serializer.hpp` | 读写盘 |
 | `preview_config.hpp` | 预览阈值 |
 
-音符 id：`kAutoNoteId = -1` 自动分配；规范化保存后为 `0..N-1`。
+音符 id：`kAutoNoteId = -1` 自动分配。写入 `.wdschart` 时对**副本**规范化为 `0..N-1`；内存会话 id 保持稳定（可稀疏），重新加载文件后才是稠密 id。
 
 ## 与 Unity 原版映射（摘要）
 

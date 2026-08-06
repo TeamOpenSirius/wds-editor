@@ -37,7 +37,6 @@ class HitSfxPlayer {
   bool ready() const noexcept;
   bool has_music() const noexcept;
   // Audible music-stream playtime (0 when no music). Not the decode frontier.
-  int64_t music_position_ms() const noexcept;
   wds::common::Microseconds music_position() const noexcept;
   // Increments on set_position / begin_timeline_control (seek / scrub / play).
   uint64_t position_generation() const noexcept;
@@ -46,9 +45,6 @@ class HitSfxPlayer {
   bool play(HitSfxClip clip);
   // Absolute music-stream time. Armed via BASS_SYNC_POS → 1× ChannelPlay.
   bool schedule_at(HitSfxClip clip, wds::common::Microseconds music_time);
-  // Relative to the live music clock: fires after `delay` of stream time.
-  bool schedule_after(HitSfxClip clip, wds::common::Microseconds delay);
-  void clear_scheduled();
   // Drop pending syncs and cut audible one-shots / Hold (pause, seek, scrub).
   void stop_all();
   void set_hold_looping(bool enabled);

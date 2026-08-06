@@ -13,10 +13,6 @@ bool HitSfxPlayer::has_music() const noexcept {
   return audio_ != nullptr && audio_->has_music();
 }
 
-int64_t HitSfxPlayer::music_position_ms() const noexcept {
-  return wds::common::us_to_ms_floor(music_position());
-}
-
 wds::common::Microseconds HitSfxPlayer::music_position() const noexcept {
   if (audio_ == nullptr || !audio_->has_music()) {
     return wds::common::Microseconds{0};
@@ -44,20 +40,6 @@ bool HitSfxPlayer::schedule_at(HitSfxClip clip, wds::common::Microseconds music_
     return false;
   }
   return audio_->schedule_sfx_at(clip, music_time);
-}
-
-bool HitSfxPlayer::schedule_after(HitSfxClip clip, wds::common::Microseconds delay) {
-  if (audio_ == nullptr) {
-    return false;
-  }
-  return audio_->schedule_sfx_after(clip, delay);
-}
-
-void HitSfxPlayer::clear_scheduled() {
-  if (audio_ == nullptr) {
-    return;
-  }
-  audio_->clear_scheduled_sfx();
 }
 
 void HitSfxPlayer::stop_all() {

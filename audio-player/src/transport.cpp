@@ -44,21 +44,6 @@ void Transport::request_pause() {
   pending_play_ = false;
 }
 
-void Transport::request_toggle() {
-  bool will_play = playing_;
-  if (pending_play_) {
-    will_play = true;
-  }
-  if (pending_pause_) {
-    will_play = false;
-  }
-  if (will_play) {
-    request_pause();
-  } else {
-    request_play();
-  }
-}
-
 void Transport::request_seek_ms(int64_t time_ms) {
   pending_seek_ = true;
   pending_seek_time_ = wds::common::ms_to_us(std::max<int64_t>(0, time_ms));
@@ -187,7 +172,9 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
           playing_ = false;
           audio_.pause_music();
         } else {
-          // Failed start or unexpected stop mid-track: retry.
+          // Failed start or unexpected stop mid-track: re-seek then retry so
+          // play_music is not a no-op when the channel already passed the cursor.
+          audio_.set_position(committed_position_);
           audio_.play_music();
         }
       }
@@ -203,6 +190,11 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     }
 
     if (want_pause) {
+      // Snap committed clock to BASS before pause so resume does not jump back
+      // to a lagging filtered position.
+      if (audio_.has_music()) {
+        committed_position_ = clamp_time(audio_.position());
+      }
       audio_.pause_music();
       // Silence hits + bump control generation so UI releases its monotonic SFX clock.
       audio_.begin_timeline_control();
@@ -214,6 +206,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     } else if (playing_ && !music_start_pending_ && audio_.has_music() &&
                !audio_.stream_playing() && !audio_.stream_stopped()) {
       // Recover stalled channel while still intending to play (and already audible).
+      audio_.set_position(committed_position_);
       audio_.play_music();
     }
   } else {

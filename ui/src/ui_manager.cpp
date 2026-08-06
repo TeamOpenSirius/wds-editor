@@ -36,6 +36,12 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // Child order: toolbar → settings → edit → status → dialogs (topmost).
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
+  edit->set_visible_range_changed_handler([this] {
+    if (auto* toolbar_panel = this->toolbar_panel()) {
+      toolbar_panel->sync_visible_range_field();
+    }
+    save_ui_config();
+  });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
   auto status = std::make_unique<StatusBar>();
@@ -58,6 +64,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
     cfg.sus_auto_convert = session_->sus_auto_convert();
     cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
+    cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
     cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
     cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
     cfg.shortcuts_initialized = true;
@@ -179,6 +186,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       session_->set_sus_auto_convert(cfg.sus_auto_convert);
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
+      wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
       if (cfg.shortcuts_initialized) {
         wds::interaction::set_editor_shortcuts(cfg.shortcuts);
@@ -433,6 +441,7 @@ void UiManager::load_ui_config() {
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
+  wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
   if (cfg.shortcuts_initialized) {
     wds::interaction::set_editor_shortcuts(cfg.shortcuts);
@@ -452,6 +461,7 @@ void UiManager::save_ui_config() {
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
+  cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;

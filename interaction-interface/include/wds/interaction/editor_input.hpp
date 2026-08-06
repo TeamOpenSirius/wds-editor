@@ -77,6 +77,9 @@ bool set_width_slot_values(const std::array<int, 6>& values) noexcept;  // each 
 // When true, GlfwInputAdapter negates scroll deltas before enqueue.
 bool invert_scroll_wheel() noexcept;
 void set_invert_scroll_wheel(bool enabled) noexcept;
+// When true, invert Shift+wheel visible-range direction (independent of invert_scroll_wheel).
+bool invert_visible_range_scroll() noexcept;
+void set_invert_visible_range_scroll(bool enabled) noexcept;
 // Edit-panel wheel timeline scrub multiplier (at visible range 20, 1x ≈ 100ms/notch).
 float scroll_wheel_speed() noexcept;
 void set_scroll_wheel_speed(float speed) noexcept;

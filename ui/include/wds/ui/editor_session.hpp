@@ -93,6 +93,9 @@ class EditorSession {
   };
 
   void status(std::string text, StatusLevel level);
+  // Sync active chart snapshot into its slot (does not touch undo history).
+  void sync_active_chart();
+  // sync_active_chart + move engine history into the slot (chart switch only).
   void stash_active();
   bool activate_chart(std::size_t index);
   void apply_chart_delay();

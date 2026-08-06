@@ -26,9 +26,7 @@ class Transport {
 
   void request_play();
   void request_pause();
-  void request_toggle();
   void request_seek_ms(int64_t time_ms);
-  void request_seek(wds::common::Microseconds time) { request_seek_ms(wds::common::us_to_ms_floor(time)); }
   // Chart delay (MusicTiming::offset_ms): how much later the chart starts than the
   // music. Note hit times already include this (tick0 → offset). Transport keeps
   // the value for UI; the playhead stays 1:1 with the music stream (music t=0 at
@@ -39,7 +37,6 @@ class Transport {
   // Preview clock rate (and BGM rate). Hit SFX locks to BASS music POS (1× samples);
   // the committed note timeline must stay phase-locked to that same music clock.
   void set_playback_rate(float rate);
-  float playback_rate() const noexcept { return playback_rate_; }
 
   // Apply queued intents, advance committed timeline, drive music when present.
   // wall_delta_us is real frame elapsed time when Playing.
@@ -57,7 +54,6 @@ class Transport {
 
   // Begin audible BGM after hit-SFX schedules have been armed for this play request.
   void start_pending_music();
-  bool music_start_pending() const noexcept { return music_start_pending_; }
 
   wds::common::TimelineSnapshot committed_snapshot() const noexcept;
   wds::common::Microseconds committed_position() const noexcept { return committed_position_; }

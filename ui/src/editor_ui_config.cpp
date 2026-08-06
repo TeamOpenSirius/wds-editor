@@ -94,6 +94,9 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "invert_scroll_wheel") {
     bool v = cfg.invert_scroll_wheel;
     if (parse_bool(value, v)) cfg.invert_scroll_wheel = v;
+  } else if (key == "invert_visible_range_scroll") {
+    bool v = cfg.invert_visible_range_scroll;
+    if (parse_bool(value, v)) cfg.invert_visible_range_scroll = v;
   } else if (key == "scroll_wheel_speed") {
     double v = cfg.scroll_wheel_speed;
     if (parse_double(value, v)) {
@@ -262,6 +265,7 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "mute_hold_body_sfx: " << emit_bool(cfg.mute_hold_body_sfx) << '\n'
       << "sus_auto_convert: " << emit_bool(cfg.sus_auto_convert) << '\n'
       << "invert_scroll_wheel: " << emit_bool(cfg.invert_scroll_wheel) << '\n'
+      << "invert_visible_range_scroll: " << emit_bool(cfg.invert_visible_range_scroll) << '\n'
       << "scroll_wheel_speed: " << scroll_speed << '\n'
       << "width_slot_0: " << cfg.width_slots[0] << '\n'
       << "width_slot_1: " << cfg.width_slots[1] << '\n'

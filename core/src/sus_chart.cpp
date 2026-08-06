@@ -367,7 +367,11 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     }
     if (header_l == "measurebs") {
       int base = 0;
-      if (parse_int(data, base)) measure_base = base;
+      // Cap absolute measure indices so measure_start_tick cannot DoS on import.
+      constexpr int kMaxMeasureBase = 100000;
+      if (parse_int(data, base) && base >= 0 && base <= kMaxMeasureBase) {
+        measure_base = base;
+      }
       continue;
     }
     if (header_l.rfind("bpm", 0) == 0 && header.size() >= 5) {
@@ -525,25 +529,41 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     }
   }
 
-  // Pass 2: resolve measure → absolute ticks.
-  auto measure_start_tick = [&](int measure) -> int64_t {
-    int64_t tick = 0;
+  // Pass 2: resolve measure → absolute ticks via prefix sums (O(1) query).
+  constexpr int kMaxMeasureIndex = 200000;
+  int max_measure_needed = 0;
+  for (const auto& ev : events) {
+    max_measure_needed =
+        std::max(max_measure_needed, static_cast<int>(ev.tick >> 32));
+  }
+  for (const auto& ch : bpm_changes) {
+    max_measure_needed =
+        std::max(max_measure_needed, static_cast<int>(ch.tick >> 32));
+  }
+  for (const auto& p : til_splits) {
+    max_measure_needed = std::max(max_measure_needed, p.measure);
+  }
+  if (max_measure_needed > kMaxMeasureIndex) {
+    return {SerializeError::ParseError, "SUS measure index exceeds limit"};
+  }
+  std::vector<int64_t> measure_starts(static_cast<size_t>(max_measure_needed) + 2, 0);
+  for (int m = 0; m <= max_measure_needed; ++m) {
     double beats = 4.0;
-    auto it = measure_lengths.begin();
-    for (int m = 0; m < measure; ++m) {
-      while (it != measure_lengths.end() && it->first <= m) {
-        beats = it->second;
-        ++it;
-      }
-      // re-walk lengths properly
-      beats = 4.0;
-      for (const auto& [mm, len] : measure_lengths) {
-        if (mm > m) break;
-        beats = len;
-      }
-      tick += static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+    auto it = measure_lengths.upper_bound(m);
+    if (it != measure_lengths.begin()) {
+      --it;
+      beats = it->second;
     }
-    return tick;
+    measure_starts[static_cast<size_t>(m) + 1] =
+        measure_starts[static_cast<size_t>(m)] +
+        static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+  }
+  auto measure_start_tick = [&](int measure) -> int64_t {
+    if (measure <= 0) return 0;
+    if (measure > max_measure_needed + 1) {
+      return measure_starts.back();
+    }
+    return measure_starts[static_cast<size_t>(measure)];
   };
 
   auto decode_packed = [&](int64_t packed, int64_t& out_tick) {
@@ -1276,24 +1296,67 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   auto place = [&](const std::string& suffix, int64_t tick, int type, int width) {
     const int meas = measure_of(tick);
     int div = needed_div(tick);
-    // Raise existing division if needed.
     auto& by_div = buckets[suffix][meas];
+
+    auto remap_to = [&](int from_div, int to_div, std::map<int, Cell>& out) -> bool {
+      out.clear();
+      for (const auto& [idx, cell] : by_div[from_div]) {
+        const int new_idx = idx * to_div / from_div;
+        if (!out.emplace(new_idx, cell).second) {
+          return false;  // two source slots collapsed — not injective
+        }
+      }
+      return out.size() == by_div[from_div].size();
+    };
+
     if (!by_div.empty()) {
       const int existing = by_div.begin()->first;
-      const int lcm = existing / static_cast<int>(std::gcd(existing, div)) * div;
-      div = std::min(192, lcm);
-      if (div != existing) {
-        // Remap old slots into new division.
-        std::map<int, Cell> remapped;
-        for (const auto& [idx, cell] : by_div[existing]) {
-          remapped[idx * div / existing] = cell;
+      int candidate =
+          std::min(192, existing / static_cast<int>(std::gcd(existing, div)) * div);
+      // Grow candidate until old slots remap injectively (handles clamp-to-192 cases).
+      std::map<int, Cell> remapped;
+      bool remapped_ok = false;
+      for (int try_div = candidate; try_div <= 192; ++try_div) {
+        // Prefer multiples of existing so idx * try / existing stays exact.
+        if (try_div != existing && try_div % existing != 0) continue;
+        if (try_div == existing || remap_to(existing, try_div, remapped)) {
+          div = try_div;
+          remapped_ok = true;
+          break;
         }
+      }
+      if (remapped_ok && div != existing) {
         by_div.clear();
         by_div[div] = std::move(remapped);
+      } else if (!remapped_ok) {
+        div = existing;  // keep prior grid; may still place if slot free
       }
     }
-    const int slot = slot_of(tick, div);
-    by_div[div][slot] = Cell{type, width};
+
+    int slot = slot_of(tick, div);
+    // Never silently overwrite an occupied slot — try larger divisions first.
+    if (by_div[div].count(slot) != 0) {
+      bool placed = false;
+      for (int try_div = div + 1; try_div <= 192; ++try_div) {
+        if (try_div % div != 0) continue;
+        std::map<int, Cell> remapped;
+        if (!remap_to(div, try_div, remapped)) continue;
+        const int try_slot = slot_of(tick, try_div);
+        if (remapped.count(try_slot) != 0) continue;
+        remapped.emplace(try_slot, Cell{type, width});
+        by_div.clear();
+        by_div[try_div] = std::move(remapped);
+        placed = true;
+        break;
+      }
+      if (!placed) {
+        // Last resort: keep existing cell (do not drop prior note).
+        // serialize() has no warning channel — prefer preserving older slots.
+        return;
+      }
+    } else {
+      by_div[div][slot] = Cell{type, width};
+    }
   };
 
   // Index hold bodies by start for pairing with heads.

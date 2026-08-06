@@ -10,6 +10,15 @@
 namespace wds::interaction {
 namespace {
 
+void pop_utf8_codepoint(std::string& text) {
+  if (text.empty()) return;
+  size_t i = text.size();
+  do {
+    --i;
+  } while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80);
+  text.erase(i);
+}
+
 float chevron_slot_w() noexcept { return std::max(18.0f, theme::px(11.0f)); }
 
 void paint_chevron(UiPainter& painter, const Rect& abs, bool open, float z = 0.9f) {
@@ -253,7 +262,7 @@ void ComboBox::on_key_down(const KeyDownEvent& event) {
     return;
   }
   if (event.key == KeyCode::Backspace && !text_.empty()) {
-    text_.pop_back();
+    pop_utf8_codepoint(text_);
     reset_caret_blink();
   }
 }

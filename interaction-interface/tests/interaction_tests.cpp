@@ -422,5 +422,75 @@ int main() {
     expect(ns.bind({KeyCode::Space, {}}, [] {}), "bind after clear");
   }
 
+  // M14: OS key-repeat must not fire bound toggle/command actions.
+  {
+    ShortcutNamespace ns;
+    int fired = 0;
+    expect(ns.bind({KeyCode::Space, {}}, [&] { ++fired; }), "bind space for repeat test");
+    expect(!ns.dispatch(KeyDownEvent{KeyCode::Space, {}, true}), "repeat dispatch ignored");
+    expect(fired == 0, "repeat does not fire action");
+    expect(ns.dispatch(KeyDownEvent{KeyCode::Space, {}, false}), "non-repeat dispatch ok");
+    expect(fired == 1, "non-repeat fires once");
+  }
+
+  // M15: Backspace deletes a full UTF-8 codepoint (CJK).
+  {
+    TextField field;
+    field.set_text("");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_text_input(TextInputEvent{"测"});
+    expect(field.text() == "测", "text field accepts CJK");
+    field.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    expect(field.text().empty(), "backspace removes full CJK codepoint");
+  }
+  {
+    ComboBox box;
+    box.set_dropdown_only(false);
+    box.set_text("测");
+    box.set_visual_state(WidgetState::Focused);
+    expect(box.text() == "测", "combo set_text keeps CJK");
+    box.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    expect(box.text().empty(), "combo backspace removes full CJK codepoint");
+  }
+
+  // m22: hidden widgets must not keep an active tooltip.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto btn = std::make_unique<Button>();
+    auto* raw = btn.get();
+    raw->set_bounds({10, 10, 80, 28});
+    raw->set_tooltip("tip");
+    root.add_child(std::move(btn));
+    root.process_frame(0.016f, {PointerMoveEvent{{20, 20}, {}}});
+    expect(root.active_tooltip() == "tip", "hover shows tooltip");
+    raw->set_visible(false);
+    root.process_frame(0.016f, {});
+    expect(root.active_tooltip().empty(), "hidden widget clears tooltip");
+  }
+
+  // m23: hiding a focused TextField restores global shortcuts.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto tf = std::make_unique<TextField>();
+    auto* raw = tf.get();
+    raw->set_bounds({10, 10, 120, 28});
+    root.add_child(std::move(tf));
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int fired = 0;
+    ns.bind({KeyCode::Space, {}}, [&] { ++fired; });
+    mgr.set_active_namespace("editor");
+
+    root.process_frame(0.016f, {PointerDownEvent{{20, 20}, PointerButton::Left, {}}});
+    expect(root.focused_widget() == raw, "text field focused");
+    raw->set_visible(false);
+    expect(root.focused_widget() == nullptr, "hide clears focus");
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Space, {}, false}}, &mgr);
+    expect(fired == 1, "Space shortcut works after hide");
+  }
+
   return failures == 0 ? 0 : 1;
 }

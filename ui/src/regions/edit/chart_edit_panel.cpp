@@ -4116,6 +4116,35 @@ void ChartEditPanel::on_scroll(const wds::interaction::ScrollEvent& event) {
   }
   if (!absolute_bounds().contains(event.position)) return;
   active_mods_ = event.mods;
+
+  // Fixed gesture: Shift+wheel adjusts visible range (not in shortcut settings).
+  // Default: scroll up shrinks the window (zoom in). Independent of global
+  // invert_scroll_wheel — undo that adapter flip, then apply the dedicated flag.
+  if (event.mods.shift) {
+    if (std::abs(event.delta_y) < 1e-6f) return;
+    float dy = event.delta_y;
+    if (wds::interaction::invert_scroll_wheel()) {
+      dy = -dy;
+    }
+    if (wds::interaction::invert_visible_range_scroll()) {
+      dy = -dy;
+    }
+    // One hectom per notch; trackpad bursts may report |dy| > 1.
+    int steps = static_cast<int>(std::lround(std::abs(dy)));
+    if (steps < 1) steps = 1;
+    auto grid = viewport_.grid();
+    const int32_t before = grid.visible_hectoms;
+    const int32_t delta = (dy > 0.0f) ? -steps : steps;
+    grid.visible_hectoms = std::clamp(grid.visible_hectoms + delta, 1, 1000);
+    if (grid.visible_hectoms == before) return;
+    set_grid(grid);
+    if (on_visible_range_changed_) {
+      on_visible_range_changed_();
+    }
+    resync_pointer_overlays();
+    return;
+  }
+
   // Scroll = scrub preview timeline by fixed time so motion stays BPM-independent.
   // During marquee, the anchor stays in tick/lane space so the box can grow past
   // the previously visible range.

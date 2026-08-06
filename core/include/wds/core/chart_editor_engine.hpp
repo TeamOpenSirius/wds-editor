@@ -45,9 +45,6 @@ class ChartEditorEngine {
   EditHistory& history() noexcept { return history_; }
   const EditHistory& history() const noexcept { return history_; }
 
-  SeekableClock& clock() noexcept { return clock_; }
-  const SeekableClock& clock() const noexcept { return clock_; }
-
   PreviewConfig& preview_config() noexcept { return preview_config_; }
   const PreviewConfig& preview_config() const noexcept { return preview_config_; }
 
@@ -65,7 +62,6 @@ class ChartEditorEngine {
 
   bool is_editable() const noexcept { return document_.is_editable(); }
   bool is_read_only() const noexcept { return document_.is_read_only(); }
-  ChartEditMode edit_mode() const noexcept { return document_.edit_mode(); }
 
   // Explicit disk I/O — the only path that touches the filesystem.
   // save_to_file writes .wdschart only; rejected when OfficialPreviewOnly.
@@ -117,12 +113,10 @@ class ChartEditorEngine {
   bool undo();
   bool redo();
 
-  // Timeline controls (compat). Prefer apply_timeline() when an external
+  // Timeline controls (compat / tests). Prefer apply_timeline() when an external
   // audio/UI transport owns the shared clock.
   void seek(int64_t time_ms);
   void play();
-  void pause();
-  void toggle_playback();
 
   // Apply an externally authored timeline snapshot, then rebuild preview.
   void apply_timeline(const wds::common::TimelineSnapshot& snap);
@@ -139,10 +133,7 @@ class ChartEditorEngine {
   int64_t timeline_us() const noexcept;
   PreviewPlaybackState playback_state() const noexcept;
 
-  uint64_t revision() const noexcept { return revision_; }
-
  private:
-  void bump_revision();
   const PreviewSnapshot& publish_snapshot();
 
   ChartDocument document_;
@@ -152,7 +143,6 @@ class ChartEditorEngine {
   PreviewSnapshotBuilder snapshot_builder_;
   PreviewSnapshot snapshot_;
   PreviewSnapshotCallback snapshot_callback_;
-  uint64_t revision_ = 0;
   int64_t preview_lead_in_visible_ms_ = 0;
 };
 

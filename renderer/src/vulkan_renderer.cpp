@@ -815,7 +815,8 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     return false;
   }
 
-  // Success — retire previous dependent resources and swapchain handle.
+  // Success — wait for in-flight frames before retiring old swapchain resources.
+  vkDeviceWaitIdle(device);
   for (auto fb : old_framebuffers) {
     if (fb) vkDestroyFramebuffer(device, fb, nullptr);
   }
@@ -938,23 +939,64 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
 
   VkBuffer staging = VK_NULL_HANDLE;
   VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+  auto cleanup_staging = [&]() {
+    if (staging != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, staging, nullptr);
+      staging = VK_NULL_HANDLE;
+    }
+    if (staging_mem != VK_NULL_HANDLE) {
+      vkFreeMemory(device, staging_mem, nullptr);
+      staging_mem = VK_NULL_HANDLE;
+    }
+  };
+  auto cleanup_tex = [&]() {
+    if (tex.view != VK_NULL_HANDLE) {
+      vkDestroyImageView(device, tex.view, nullptr);
+      tex.view = VK_NULL_HANDLE;
+    }
+    if (tex.image != VK_NULL_HANDLE) {
+      vkDestroyImage(device, tex.image, nullptr);
+      tex.image = VK_NULL_HANDLE;
+    }
+    if (tex.memory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, tex.memory, nullptr);
+      tex.memory = VK_NULL_HANDLE;
+    }
+  };
+
   {
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.size = size;
     info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vkCreateBuffer(device, &info, nullptr, &staging);
+    if (vkCreateBuffer(device, &info, nullptr, &staging) != VK_SUCCESS) {
+      return false;
+    }
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(device, staging, &req);
     VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     alloc.allocationSize = req.size;
-    alloc.memoryTypeIndex = find_memory_type(
-        physical, req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(device, &alloc, nullptr, &staging_mem);
-    vkBindBufferMemory(device, staging, staging_mem, 0);
+    try {
+      alloc.memoryTypeIndex = find_memory_type(
+          physical, req.memoryTypeBits,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    } catch (...) {
+      cleanup_staging();
+      return false;
+    }
+    if (vkAllocateMemory(device, &alloc, nullptr, &staging_mem) != VK_SUCCESS) {
+      cleanup_staging();
+      return false;
+    }
+    if (vkBindBufferMemory(device, staging, staging_mem, 0) != VK_SUCCESS) {
+      cleanup_staging();
+      return false;
+    }
     void* mapped = nullptr;
-    vkMapMemory(device, staging_mem, 0, size, 0, &mapped);
+    if (vkMapMemory(device, staging_mem, 0, size, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
+      cleanup_staging();
+      return false;
+    }
     std::memcpy(mapped, pixels, static_cast<size_t>(size));
     vkUnmapMemory(device, staging_mem);
   }
@@ -971,18 +1013,31 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
   image_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   if (vkCreateImage(device, &image_info, nullptr, &tex.image) != VK_SUCCESS) {
+    cleanup_staging();
     return false;
   }
   VkMemoryRequirements req{};
   vkGetImageMemoryRequirements(device, tex.image, &req);
   VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   alloc.allocationSize = req.size;
-  alloc.memoryTypeIndex =
-      find_memory_type(physical, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if (vkAllocateMemory(device, &alloc, nullptr, &tex.memory) != VK_SUCCESS) {
+  try {
+    alloc.memoryTypeIndex =
+        find_memory_type(physical, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  } catch (...) {
+    cleanup_staging();
+    cleanup_tex();
     return false;
   }
-  vkBindImageMemory(device, tex.image, tex.memory, 0);
+  if (vkAllocateMemory(device, &alloc, nullptr, &tex.memory) != VK_SUCCESS) {
+    cleanup_staging();
+    cleanup_tex();
+    return false;
+  }
+  if (vkBindImageMemory(device, tex.image, tex.memory, 0) != VK_SUCCESS) {
+    cleanup_staging();
+    cleanup_tex();
+    return false;
+  }
 
   VkCommandBuffer cmd = begin_one_time();
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -1013,8 +1068,7 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
                        0, nullptr, 0, nullptr, 1, &barrier);
   end_one_time(cmd);
 
-  vkDestroyBuffer(device, staging, nullptr);
-  vkFreeMemory(device, staging_mem, nullptr);
+  cleanup_staging();
 
   VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view_info.image = tex.image;
@@ -1024,11 +1078,16 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
   view_info.subresourceRange.levelCount = 1;
   view_info.subresourceRange.layerCount = 1;
   if (vkCreateImageView(device, &view_info, nullptr, &tex.view) != VK_SUCCESS) {
+    cleanup_tex();
     return false;
   }
   tex.width = width;
   tex.height = height;
-  return create_texture_descriptor(tex);
+  if (!create_texture_descriptor(tex)) {
+    cleanup_tex();
+    return false;
+  }
+  return true;
 }
 
 bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
@@ -1817,15 +1876,13 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                     UINT64_MAX);
   }
 
-  vkResetFences(impl_->device, 1, &impl_->in_flight[frame]);
-
   const size_t additive_verts = additive ? additive->vertex_count() : 0;
   const size_t post_verts = post_overlay ? post_overlay->vertex_count() : 0;
   const size_t post2_verts = post_overlay2 ? post_overlay2->vertex_count() : 0;
   const size_t total_verts = batch.vertex_count() + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
-    // Acquire already signaled image_available[frame]; drain it before returning.
+    // Fence still signaled (not reset yet). Drain the acquire semaphore only.
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     drain.waitSemaphoreCount = 1;
@@ -1835,6 +1892,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     vkQueueWaitIdle(impl_->graphics_queue);
     return false;
   }
+
+  // Reset only once capacity is ensured so a failed path cannot leave the fence unsignaled.
+  vkResetFences(impl_->device, 1, &impl_->in_flight[frame]);
 
   auto& vb = impl_->frame_vertices[frame];
   auto& bucket_first_vertex = impl_->bucket_first_vertex;
@@ -1961,13 +2021,13 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   submit.pSignalSemaphores = &impl_->render_finished[frame];
   const auto submit_t0 = clock::now();
   if (vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]) != VK_SUCCESS) {
-    // Submit failed after acquire signaled image_available; drain so the slot is reusable.
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    // Fence was reset but not submitted — signal it via drain so the next frame wait returns.
+    VkPipelineStageFlags drain_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     drain.waitSemaphoreCount = 1;
     drain.pWaitSemaphores = &impl_->image_available[frame];
-    drain.pWaitDstStageMask = &wait_stage;
-    vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
+    drain.pWaitDstStageMask = &drain_stage;
+    vkQueueSubmit(impl_->graphics_queue, 1, &drain, impl_->in_flight[frame]);
     vkQueueWaitIdle(impl_->graphics_queue);
     return false;
   }

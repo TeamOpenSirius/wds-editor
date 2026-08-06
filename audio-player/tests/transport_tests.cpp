@@ -54,6 +54,14 @@ int main() {
     transport.request_pause();
     const auto paused = transport.poll(0);
     expect(paused.state == wds::common::PlaybackState::Paused, "pause intent");
+    // m4: without music, pause keeps committed clock; with music, snap to audio.position.
+    if (transport.audio().has_music()) {
+      expect(transport.committed_position() == transport.audio().position(),
+             "pause snaps committed_position to audio position");
+    } else {
+      expect(paused.position_ms() == transport.committed_ms(),
+             "pause keeps committed position without music");
+    }
     transport.shutdown();
   } else {
     std::fprintf(stderr, "skip: BASS device unavailable in test environment\n");

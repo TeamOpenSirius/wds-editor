@@ -131,12 +131,7 @@ bool win_rename_replace(const std::string& from_utf8, const std::string& to_utf8
   const std::wstring from = utf8_to_wide(from_utf8);
   const std::wstring to = utf8_to_wide(to_utf8);
   if ((from.empty() && !from_utf8.empty()) || (to.empty() && !to_utf8.empty())) return false;
-  if (MoveFileExW(from.c_str(), to.c_str(),
-                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
-    return true;
-  }
-  // Some volumes reject replace-in-place; delete destination then retry.
-  win_delete_file(to_utf8);
+  // Never delete `to` on failure — contract is "original file left intact".
   return MoveFileExW(from.c_str(), to.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) !=
          0;
@@ -192,17 +187,25 @@ SerializeResult replace_file_atomic(const std::string& path, const std::string& 
   const fs::path temp(temp_path);
   std::error_code ec;
   fs::rename(temp, target, ec);
-  if (ec) {
-    fs::remove(target, ec);
-    ec.clear();
-    fs::rename(temp, target, ec);
+  if (!ec) {
+    return {SerializeError::Ok, {}};
   }
-  if (ec) {
+  // Never delete `target` on failure — contract is "original file left intact".
+  // Cross-device rename cannot replace in place; copy over target, then drop temp.
+  if (ec == std::errc::cross_device_link) {
+    ec.clear();
+    fs::copy_file(temp, target, fs::copy_options::overwrite_existing, ec);
+    if (!ec) {
+      std::error_code cleanup;
+      fs::remove(temp, cleanup);
+      return {SerializeError::Ok, {}};
+    }
+  }
+  {
     std::error_code cleanup;
     fs::remove(temp, cleanup);
-    return {SerializeError::IoError, "failed to replace file: " + path + " (" + ec.message() + ")"};
   }
-  return {SerializeError::Ok, {}};
+  return {SerializeError::IoError, "failed to replace file: " + path + " (" + ec.message() + ")"};
 #endif
 }
 

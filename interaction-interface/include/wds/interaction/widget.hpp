@@ -23,15 +23,12 @@ class Widget {
  public:
   virtual ~Widget() = default;
 
-  const std::string& id() const noexcept { return id_; }
-  void set_id(std::string id) { id_ = std::move(id); }
-
   Rect& bounds() noexcept { return bounds_; }
   const Rect& bounds() const noexcept { return bounds_; }
   void set_bounds(Rect bounds) noexcept { bounds_ = bounds; }
 
   bool visible() const noexcept { return visible_; }
-  void set_visible(bool v) noexcept { visible_ = v; }
+  virtual void set_visible(bool v) noexcept;
 
   bool enabled() const noexcept { return enabled_; }
   void set_enabled(bool e) noexcept { enabled_ = e; }
@@ -43,6 +40,9 @@ class Widget {
 
   Widget* parent() noexcept { return parent_; }
   const Widget* parent() const noexcept { return parent_; }
+
+  // WidgetRoot overrides; used to clear focus when a focused child is hidden.
+  virtual class WidgetRoot* as_root() noexcept { return nullptr; }
 
   const std::vector<std::unique_ptr<Widget>>& children() const noexcept { return children_; }
 
@@ -87,7 +87,6 @@ class Widget {
  protected:
   float interaction_scale() const noexcept;
 
-  std::string id_;
   Rect bounds_{};
   bool visible_ = true;
   bool enabled_ = true;

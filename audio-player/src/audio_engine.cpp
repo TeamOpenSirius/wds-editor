@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -148,6 +150,11 @@ DWORD CALLBACK silence_keep_alive_proc(HSTREAM /*handle*/, void* buffer, DWORD l
   return length;
 }
 
+struct SfxSyncPayload {
+  AudioEngine* engine = nullptr;
+  HitSfxClip clip = HitSfxClip::Count;
+};
+
 }  // namespace
 
 struct AudioEngine::Impl {
@@ -164,7 +171,7 @@ struct AudioEngine::Impl {
   // Music-playtime syncs → ChannelPlay at 1× (independent of BGM FREQ).
   struct PendingSync {
     HSYNC handle = 0;
-    HitSfxClip clip = HitSfxClip::Count;
+    std::shared_ptr<SfxSyncPayload> payload;
   };
 
   std::mutex sfx_mu;
@@ -174,11 +181,12 @@ struct AudioEngine::Impl {
 namespace {
 
 void CALLBACK sfx_pos_sync_proc(HSYNC handle, DWORD /*channel*/, DWORD /*data*/, void* user) {
-  auto* engine = static_cast<AudioEngine*>(user);
-  if (engine == nullptr) {
+  auto* payload = static_cast<SfxSyncPayload*>(user);
+  if (payload == nullptr || payload->engine == nullptr) {
     return;
   }
-  engine->handle_sfx_sync(static_cast<unsigned long long>(handle));
+  // Lifetime is owned by pending_syncs' shared_ptr (or the scheduling stack).
+  payload->engine->handle_sfx_sync(static_cast<unsigned long long>(handle), payload, payload->clip);
 }
 
 }  // namespace
@@ -192,7 +200,7 @@ uint32_t linked_bass_version() noexcept {
 bool AudioEngine::initialize(const std::string& effects_directory, const std::string& music_path) {
   shutdown();
 
-  auto* impl = new Impl();
+  auto impl = std::make_shared<Impl>();
   // Sample-accurate SFX lives in the music DSP. Short update period keeps the
   // playhead staircase small (helps UI clock sync) and decode latency stable;
   // very large periods let device buffering "breathe". 5ms is BASS's floor and
@@ -202,7 +210,6 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
   BASS_SetConfig(BASS_CONFIG_DEV_PERIOD, 10);
   if (!BASS_Init(-1, 44100, 0, nullptr, nullptr)) {
     WDS_LOG("AudioEngine: BASS_Init failed code=%d\n", BASS_ErrorGetCode());
-    delete impl;
     return false;
   }
   impl->device_ok = true;
@@ -299,58 +306,58 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
 }
 
 void AudioEngine::shutdown() {
-  if (impl_ == nullptr) {
+  if (!impl_) {
     ready_ = false;
-    sfx_ready_ = false;
-    music_playing_ = false;
+    sfx_ready_.store(false, std::memory_order_release);
+    music_playing_.store(false, std::memory_order_release);
     music_ = 0;
     return;
   }
 
-  // Invalidate in-flight BASS POS callbacks before freeing samples / impl_.
+  // Keep a local shared_ptr so in-flight SYNCPROCs that already copied impl_
+  // can finish without UAF; drop the member only after BASS_Free.
+  const std::shared_ptr<Impl> impl = impl_;
   shutting_down_.store(true, std::memory_order_release);
-  sfx_epoch_.fetch_add(1, std::memory_order_acq_rel);
   clear_scheduled_sfx();
   stop_all_sfx();
 
-  if (impl_->keep_alive != 0) {
-    BASS_ChannelStop(impl_->keep_alive);
-    BASS_StreamFree(impl_->keep_alive);
-    impl_->keep_alive = 0;
+  if (impl->keep_alive != 0) {
+    BASS_ChannelStop(impl->keep_alive);
+    BASS_StreamFree(impl->keep_alive);
+    impl->keep_alive = 0;
   }
 
-  if (impl_->music != 0) {
-    BASS_ChannelStop(impl_->music);
-    BASS_StreamFree(impl_->music);
-    impl_->music = 0;
+  if (impl->music != 0) {
+    BASS_ChannelStop(impl->music);
+    BASS_StreamFree(impl->music);
+    impl->music = 0;
   }
   music_ = 0;
-  music_playing_ = false;
+  music_playing_.store(false, std::memory_order_release);
   music_base_freq_ = 0.0f;
 
   {
-    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
-    impl_->pending_syncs.clear();
+    std::lock_guard<std::mutex> lock(impl->sfx_mu);
+    impl->pending_syncs.clear();
   }
 
-  for (auto& sample : impl_->samples) {
+  for (auto& sample : impl->samples) {
     if (sample != 0) {
       BASS_SampleFree(sample);
       sample = 0;
     }
   }
-  impl_->hold_ch = 0;
-  impl_->hold_playing = false;
+  impl->hold_ch = 0;
+  impl->hold_playing = false;
 
-  if (impl_->device_ok) {
+  if (impl->device_ok) {
     BASS_Free();
-    impl_->device_ok = false;
+    impl->device_ok = false;
   }
 
-  delete impl_;
-  impl_ = nullptr;
+  impl_.reset();
   ready_ = false;
-  sfx_ready_ = false;
+  sfx_ready_.store(false, std::memory_order_release);
   shutting_down_.store(false, std::memory_order_release);
 }
 
@@ -359,14 +366,6 @@ wds::common::Microseconds AudioEngine::position() const {
     return wds::common::Microseconds{0};
   }
   return bytes_to_us(impl_->music, BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE));
-}
-
-wds::common::Microseconds AudioEngine::decode_position() const {
-  if (impl_ == nullptr || impl_->music == 0) {
-    return wds::common::Microseconds{0};
-  }
-  return bytes_to_us(impl_->music,
-                     BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE | BASS_POS_DECODE));
 }
 
 wds::common::Microseconds AudioEngine::duration() const {
@@ -437,11 +436,11 @@ bool AudioEngine::stream_stopped() const noexcept {
 }
 
 float AudioEngine::effective_music_volume() const noexcept {
-  return clamp_gain(master_gain_) * clamp_gain(music_gain_);
+  return clamp_gain(music_gain_.load(std::memory_order_acquire));
 }
 
 float AudioEngine::effective_sfx_volume() const noexcept {
-  return clamp_gain(master_gain_) * clamp_gain(sfx_gain_);
+  return clamp_gain(sfx_gain_.load(std::memory_order_acquire));
 }
 
 void AudioEngine::apply_music_volume() {
@@ -480,12 +479,6 @@ void AudioEngine::apply_sfx_volume() {
   }
 }
 
-void AudioEngine::set_master_gain(float gain) {
-  master_gain_ = clamp_gain(gain);
-  apply_music_volume();
-  apply_sfx_volume();
-}
-
 void AudioEngine::set_music_gain(float gain) {
   music_gain_ = clamp_gain(gain);
   apply_music_volume();
@@ -501,9 +494,7 @@ void AudioEngine::set_playback_rate(float rate) {
   apply_music_rate();
 }
 
-bool AudioEngine::play_sfx(HitSfxClip clip) {
-  return play_sfx_internal(clip, /*lock_music=*/false);
-}
+bool AudioEngine::play_sfx(HitSfxClip clip) { return play_sfx_internal(clip); }
 
 void AudioEngine::ensure_keep_alive() {
   if (impl_ == nullptr || impl_->keep_alive == 0) {
@@ -531,7 +522,7 @@ std::uint64_t AudioEngine::align_music_bytes(std::uint64_t bytes) const noexcept
   return (bytes / impl_->music_bpf) * impl_->music_bpf;
 }
 
-bool AudioEngine::play_sfx_internal(HitSfxClip clip, bool lock_music) {
+bool AudioEngine::play_sfx_internal(HitSfxClip clip) {
   if (shutting_down_.load(std::memory_order_acquire) || !sfx_ready_ || impl_ == nullptr ||
       clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
     return false;
@@ -558,15 +549,7 @@ bool AudioEngine::play_sfx_internal(HitSfxClip clip, bool lock_music) {
     return false;
   }
   BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
-  const bool do_lock = lock_music && impl_->music != 0;
-  if (do_lock) {
-    BASS_ChannelLock(impl_->music, TRUE);
-  }
-  const BOOL ok = BASS_ChannelPlay(ch, TRUE);
-  if (do_lock) {
-    BASS_ChannelLock(impl_->music, FALSE);
-  }
-  return ok != FALSE;
+  return BASS_ChannelPlay(ch, TRUE) != FALSE;
 }
 
 void AudioEngine::cache_music_format() {
@@ -593,28 +576,29 @@ void AudioEngine::cache_music_format() {
   impl_->music_bpf = bytes_per_sample * ci.chans;
 }
 
-void AudioEngine::handle_sfx_sync(unsigned long long sync_handle) {
-  if (shutting_down_.load(std::memory_order_acquire) || impl_ == nullptr) {
+void AudioEngine::handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip) {
+  if (shutting_down_.load(std::memory_order_acquire)) {
     return;
   }
-  HitSfxClip clip = HitSfxClip::Count;
+  // Elevate shared ownership for the whole callback so shutdown cannot free Impl
+  // under our feet (RemoveSync does not wait for in-flight SYNCPROCs).
+  const std::shared_ptr<Impl> impl = impl_;
+  if (!impl) {
+    return;
+  }
   {
-    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
-    if (shutting_down_.load(std::memory_order_acquire) || impl_ == nullptr) {
-      return;
-    }
-    auto& syncs = impl_->pending_syncs;
+    std::lock_guard<std::mutex> lock(impl->sfx_mu);
+    auto& syncs = impl->pending_syncs;
     for (size_t i = 0; i < syncs.size(); ++i) {
-      if (static_cast<unsigned long long>(syncs[i].handle) == sync_handle) {
-        clip = syncs[i].clip;
+      if (syncs[i].payload.get() == payload ||
+          static_cast<unsigned long long>(syncs[i].handle) == sync_handle) {
         syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
         break;
       }
     }
   }
-  if (clip != HitSfxClip::Count && !shutting_down_.load(std::memory_order_acquire) &&
-      impl_ != nullptr) {
-    play_sfx_internal(clip, /*lock_music=*/false);
+  if (clip != HitSfxClip::Count && !shutting_down_.load(std::memory_order_acquire)) {
+    play_sfx_internal(clip);
   }
 }
 
@@ -646,58 +630,68 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
     return false;
   }
   if (impl_->music == 0) {
-    return play_sfx_internal(clip, /*lock_music=*/false);
+    return play_sfx_internal(clip);
   }
 
-  // Separate sample voices keep hit pitch at 1× while BGM uses BASS_ATTRIB_FREQ.
-  // POS syncs are armed against the render path: if decode already passed `at`,
-  // SetSync will never fire — play immediately. Otherwise playtime ONETIME sync
-  // fires with audible BGM (not mixtime, which would be early by the buffer).
+  // Non-MIXTIME BASS_SYNC_POS is playtime-based: only positions already at/behind
+  // the playback cursor need immediate play. Using decode as frontier caused hits
+  // to fire early by the buffer lead (hundreds of ms after seek).
   const QWORD target = align_music_bytes(us_to_bytes(impl_->music, at));
-  auto frontier_bytes = [&]() -> QWORD {
-    const QWORD decode_pos =
-        BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE | BASS_POS_DECODE);
-    const QWORD play_pos = BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
-    return decode_pos > play_pos ? decode_pos : play_pos;
-  };
-  if (target <= frontier_bytes()) {
-    return play_sfx_internal(clip, /*lock_music=*/false);
+  const QWORD play_pos = BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
+  if (target <= play_pos) {
+    return play_sfx_internal(clip);
   }
 
-  const HSYNC sync = BASS_ChannelSetSync(
-      impl_->music, BASS_SYNC_POS | BASS_SYNC_ONETIME, target, sfx_pos_sync_proc, this);
+  // Track payload before SetSync so an immediate callback can resolve the entry (M5).
+  // Do not hold sfx_mu across SetSync (callback takes the same lock).
+  auto payload = std::make_shared<SfxSyncPayload>();
+  payload->engine = this;
+  payload->clip = clip;
+  {
+    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    impl_->pending_syncs.push_back(Impl::PendingSync{0, payload});
+  }
+  const HSYNC sync = BASS_ChannelSetSync(impl_->music, BASS_SYNC_POS | BASS_SYNC_ONETIME, target,
+                                         sfx_pos_sync_proc, payload.get());
   if (sync == 0) {
-    WDS_LOG("AudioEngine: ChannelSetSync failed code=%d\n", BASS_ErrorGetCode());
-    return play_sfx_internal(clip, /*lock_music=*/false);
-  }
-
-  // TOCTOU: decode may pass `target` between the frontier check and SetSync.
-  // A playtime ONETIME sync set behind the playhead never fires on a non-looping
-  // stream — fall back to immediate play.
-  if (target <= frontier_bytes()) {
-    BASS_ChannelRemoveSync(impl_->music, sync);
-    return play_sfx_internal(clip, /*lock_music=*/false);
-  }
-
-  std::lock_guard<std::mutex> lock(impl_->sfx_mu);
-  impl_->pending_syncs.push_back(Impl::PendingSync{sync, clip});
-  return true;
-}
-
-bool AudioEngine::schedule_sfx_after(HitSfxClip clip, wds::common::Microseconds delay) {
-  if (!sfx_ready_ || impl_ == nullptr) {
-    return false;
-  }
-  if (impl_->music == 0) {
-    if (delay.count() <= 0) {
-      return play_sfx_internal(clip, /*lock_music=*/false);
+    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    auto& syncs = impl_->pending_syncs;
+    for (size_t i = 0; i < syncs.size(); ++i) {
+      if (syncs[i].payload == payload) {
+        syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+        break;
+      }
     }
-    return false;
+    WDS_LOG("AudioEngine: ChannelSetSync failed code=%d\n", BASS_ErrorGetCode());
+    return play_sfx_internal(clip);
   }
-  if (delay.count() <= 0) {
-    return schedule_sfx_at(clip, position());
+  {
+    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    for (auto& s : impl_->pending_syncs) {
+      if (s.payload == payload) {
+        s.handle = sync;
+        break;
+      }
+    }
   }
-  return schedule_sfx_at(clip, position() + delay);
+
+  // TOCTOU: playhead may pass `target` between the check and SetSync.
+  if (target <= BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE)) {
+    BASS_ChannelRemoveSync(impl_->music, sync);
+    {
+      std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+      auto& syncs = impl_->pending_syncs;
+      for (size_t i = 0; i < syncs.size(); ++i) {
+        if (syncs[i].payload == payload || syncs[i].handle == sync) {
+          syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+          break;
+        }
+      }
+    }
+    return play_sfx_internal(clip);
+  }
+
+  return true;
 }
 
 void AudioEngine::clear_scheduled_sfx() {

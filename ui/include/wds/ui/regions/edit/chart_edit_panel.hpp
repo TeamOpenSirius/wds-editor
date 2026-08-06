@@ -34,6 +34,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_grid(wds::chart_editor::EditGridConfig grid);
   // Seek transport so edit scroll stays locked to preview playhead.
   void set_seek_ms(std::function<void(int64_t)> seek) { seek_ms_ = std::move(seek); }
+  // Fired after Shift+wheel changes visible_hectoms (sync toolbar + persist).
+  void set_visible_range_changed_handler(std::function<void()> handler) {
+    on_visible_range_changed_ = std::move(handler);
+  }
   void set_cursor_setter(std::function<void(wds::interaction::CursorKind)> setter) {
     cursor_setter_ = std::move(setter);
   }
@@ -251,6 +255,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable wds::interaction::Rect timing_num_field_{};
   mutable wds::interaction::Rect timing_den_field_{};
   std::function<void(int64_t)> seek_ms_;
+  std::function<void()> on_visible_range_changed_;
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
   std::unordered_set<int32_t> selected_;

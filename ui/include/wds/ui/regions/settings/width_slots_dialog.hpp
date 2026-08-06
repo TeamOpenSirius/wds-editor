@@ -75,6 +75,7 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   wds::interaction::Widget* sus_auto_convert_ = nullptr;
   wds::interaction::Widget* mute_hold_body_sfx_ = nullptr;
   wds::interaction::Widget* invert_scroll_wheel_ = nullptr;
+  wds::interaction::Widget* invert_visible_range_scroll_ = nullptr;
   wds::interaction::Widget* scroll_wheel_speed_ = nullptr;
 
   wds::interaction::Widget* confirm_button_ = nullptr;

@@ -125,8 +125,8 @@ class ChartDocument {
 
   int32_t next_note_id() const;
 
-  // Bumped on every note/timing mutation (including update_note). Preview lookup
-  // caches key off this so UI paths that skip engine.bump_revision stay correct.
+  // Bumped on every note/timing mutation (including update_note). Preview
+  // snapshot / note-lookup caches key off this.
   uint64_t content_generation() const noexcept { return content_generation_; }
 
  private:

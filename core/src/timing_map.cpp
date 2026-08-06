@@ -187,11 +187,14 @@ std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_
       beat_start += (delta / beat) * beat;  // floor onto beat containing start
       if (beat_start < p.tick) beat_start = p.tick;
     }
-    for (; beat_start < seg_end && beat_start <= end_tick; beat_start += beat) {
+    for (int64_t beat_i = beat_start; beat_i < seg_end && beat_i <= end_tick;
+         beat_i += beat) {
       for (int32_t i = 0; i <= subdivs; ++i) {
-        const int32_t t = beat_start + subdivision_offset_ticks(beat, subdivs, i);
-        if (t > end_tick || t >= seg_end) break;
-        if (t >= start_tick) {
+        const int64_t t64 =
+            beat_i + static_cast<int64_t>(subdivision_offset_ticks(beat, subdivs, i));
+        if (t64 > end_tick || t64 >= seg_end) break;
+        if (t64 >= start_tick) {
+          const int32_t t = static_cast<int32_t>(t64);
           if (out.empty() || out.back() != t) out.push_back(t);
         }
       }
@@ -253,8 +256,8 @@ std::vector<int32_t> ticks_from_meter_segments(int32_t start_tick, int32_t end_t
       const int32_t delta = start_tick - t;
       t += ((delta + step - 1) / step) * step;
     }
-    for (; t < seg_end && t <= end_tick; t += step) {
-      if (t >= start_tick) out.push_back(t);
+    for (int64_t t64 = t; t64 < seg_end && t64 <= end_tick; t64 += step) {
+      if (t64 >= start_tick) out.push_back(static_cast<int32_t>(t64));
     }
   }
   return out;

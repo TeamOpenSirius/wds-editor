@@ -58,10 +58,11 @@ std::vector<int32_t> beat_ticks_in_range(int32_t start_tick, int32_t end_tick,
     return ticks;
   }
   const int32_t step = cfg.ticks_per_quarter;
-  const int32_t first = static_cast<int32_t>(
-      std::ceil(static_cast<double>(start_tick) / static_cast<double>(step))) * step;
-  for (int32_t tick = first; tick <= end_tick; tick += step) {
-    ticks.push_back(tick);
+  const int64_t first = static_cast<int64_t>(
+      std::ceil(static_cast<double>(start_tick) / static_cast<double>(step))) *
+                        step;
+  for (int64_t tick = first; tick <= end_tick; tick += step) {
+    ticks.push_back(static_cast<int32_t>(tick));
   }
   return ticks;
 }
@@ -75,15 +76,14 @@ std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_
   }
   const int32_t beat = std::max(1, cfg.ticks_per_quarter);
   const int32_t subdivs = std::max(1, cfg.subdivisions_per_beat);
-  int32_t beat_start = (std::max(0, start_tick) / beat) * beat;
+  int64_t beat_start = (static_cast<int64_t>(std::max(0, start_tick)) / beat) * beat;
   if (beat_start > start_tick && beat_start >= beat) beat_start -= beat;
   for (; beat_start <= end_tick; beat_start += beat) {
     for (int32_t i = 1; i < subdivs; ++i) {
-      const int32_t tick =
-          beat_start + static_cast<int32_t>((static_cast<int64_t>(i) * beat) / subdivs);
+      const int64_t tick = beat_start + (static_cast<int64_t>(i) * beat) / subdivs;
       if (tick < start_tick) continue;
       if (tick > end_tick) return ticks;
-      ticks.push_back(tick);
+      ticks.push_back(static_cast<int32_t>(tick));
     }
   }
   return ticks;

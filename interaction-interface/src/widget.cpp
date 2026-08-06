@@ -1,6 +1,7 @@
 #include "wds/interaction/widget.hpp"
 
 #include "wds/interaction/theme.hpp"
+#include "wds/interaction/widget_root.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,22 @@ namespace wds::interaction {
 
 namespace {
 constexpr float kPressLerpSpeed = 12.0f;
+}
+
+void Widget::set_visible(bool v) noexcept {
+  if (visible_ == v) {
+    return;
+  }
+  visible_ = v;
+  if (!v) {
+    // Hidden focusables must not keep capturing keys / showing tooltips.
+    for (Widget* p = this; p != nullptr; p = p->parent_) {
+      if (WidgetRoot* root = p->as_root()) {
+        root->clear_focus_if(this);
+        break;
+      }
+    }
+  }
 }
 
 Widget& Widget::add_child(std::unique_ptr<Widget> child) {

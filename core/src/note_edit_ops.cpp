@@ -29,7 +29,9 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
                              }),
               notes.end());
   const int32_t step = std::max(1, ticks_per_quarter / 2);
-  for (int32_t tick = hold.start_tick + step; tick < hold.end_tick; tick += step) {
+  for (int64_t tick64 = static_cast<int64_t>(hold.start_tick) + step; tick64 < hold.end_tick;
+       tick64 += step) {
+    const int32_t tick = static_cast<int32_t>(tick64);
     const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
       return (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) &&
              same_tick(note.start_tick, tick) && overlaps(note, hold);

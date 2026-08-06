@@ -122,9 +122,14 @@ WidthSlotsDialog::WidthSlotsDialog() {
   mute_hold_body_sfx_ = mute.get();
   add_child(std::move(mute));
 
-  auto invert = std::make_unique<wds::interaction::Checkbox>("反转滚轮方向");
+  auto invert = std::make_unique<wds::interaction::Checkbox>("反转时间轴滚轮方向");
   invert_scroll_wheel_ = invert.get();
   add_child(std::move(invert));
+
+  auto invert_range =
+      std::make_unique<wds::interaction::Checkbox>("反转滚轮调节可见范围大小方向");
+  invert_visible_range_scroll_ = invert_range.get();
+  add_child(std::move(invert_range));
 
   auto speed = std::make_unique<wds::interaction::ComboBox>();
   speed->set_items(scroll_speed_items());
@@ -242,6 +247,8 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
   static_cast<wds::interaction::Checkbox*>(sus_auto_convert_)->set_checked(cfg.sus_auto_convert);
   static_cast<wds::interaction::Checkbox*>(mute_hold_body_sfx_)->set_checked(cfg.mute_hold_body_sfx);
   static_cast<wds::interaction::Checkbox*>(invert_scroll_wheel_)->set_checked(cfg.invert_scroll_wheel);
+  static_cast<wds::interaction::Checkbox*>(invert_visible_range_scroll_)
+      ->set_checked(cfg.invert_visible_range_scroll);
   static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)
       ->set_text(format_scroll_speed(cfg.scroll_wheel_speed));
   for (int i = 0; i < 6; ++i) {
@@ -265,6 +272,8 @@ void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
       static_cast<const wds::interaction::Checkbox*>(mute_hold_body_sfx_)->checked();
   cfg.invert_scroll_wheel =
       static_cast<const wds::interaction::Checkbox*>(invert_scroll_wheel_)->checked();
+  cfg.invert_visible_range_scroll =
+      static_cast<const wds::interaction::Checkbox*>(invert_visible_range_scroll_)->checked();
   cfg.scroll_wheel_speed = scroll_speed_from_label(
       static_cast<const wds::interaction::ComboBox*>(scroll_wheel_speed_)->text());
   for (int i = 0; i < 6; ++i) {
@@ -311,6 +320,8 @@ void WidthSlotsDialog::apply_fields() {
   wds::interaction::set_width_slot_values(next);
   wds::interaction::set_invert_scroll_wheel(
       static_cast<wds::interaction::Checkbox*>(invert_scroll_wheel_)->checked());
+  wds::interaction::set_invert_visible_range_scroll(
+      static_cast<wds::interaction::Checkbox*>(invert_visible_range_scroll_)->checked());
   wds::interaction::set_scroll_wheel_speed(scroll_speed_from_label(
       static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)->text()));
   for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
@@ -354,6 +365,7 @@ void WidthSlotsDialog::update_tab_visibility() {
   if (sus_auto_convert_) sus_auto_convert_->set_visible(open_ && file);
   if (mute_hold_body_sfx_) mute_hold_body_sfx_->set_visible(open_ && audio);
   if (invert_scroll_wheel_) invert_scroll_wheel_->set_visible(open_ && input);
+  if (invert_visible_range_scroll_) invert_visible_range_scroll_->set_visible(open_ && input);
   if (scroll_wheel_speed_) scroll_wheel_speed_->set_visible(open_ && input);
 }
 
@@ -403,11 +415,13 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   sus_auto_convert_->set_bounds({body_x, y, body_w, ctrl_h});
   mute_hold_body_sfx_->set_bounds({body_x, y, body_w, ctrl_h});
 
-  // Input: invert checkbox, then labeled scroll-speed combo.
+  // Input: invert checkboxes, then labeled scroll-speed combo.
   invert_scroll_wheel_->set_bounds({body_x, y, body_w, ctrl_h});
-  const float speed_y = y + ctrl_h + body_gap;
-  // Tighter than kSettingsLabelW so the combo sits close to "滚轮速度".
-  const float speed_label_w = th::px(88.0f);
+  const float range_y = y + ctrl_h + body_gap;
+  invert_visible_range_scroll_->set_bounds({body_x, range_y, body_w, ctrl_h});
+  const float speed_y = range_y + ctrl_h + body_gap;
+  // Label: 时间轴滚轮速度 — only timeline scrub, not Shift+wheel visible range.
+  const float speed_label_w = th::px(140.0f);
   const float speed_label_gap = th::px(4.0f);
   const float combo_x = body_x + speed_label_w + speed_label_gap;
   // Compact field: speed labels are short (e.g. "1.25x"); full body width looked oversized.
@@ -575,11 +589,14 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
     static_cast<const wds::interaction::Checkbox*>(mute_hold_body_sfx_)->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Input) {
     static_cast<const wds::interaction::Checkbox*>(invert_scroll_wheel_)->paint_at(painter, kFieldZ);
+    static_cast<const wds::interaction::Checkbox*>(invert_visible_range_scroll_)
+        ->paint_at(painter, kFieldZ);
     const float tab_w = th::px(110.0f);
     const float body_x = content.x + pad + tab_w + gap * 1.5f;
-    const float speed_y = content.y + pad + title_h + gap + ctrl_h + body_gap;
-    painter.label({body_x, speed_y, th::px(88.0f), ctrl_h}, "滚轮速度", th::kOnSurfaceMuted,
-                  0.987f, false, 0.0f, true);
+    const float speed_y =
+        content.y + pad + title_h + gap + (ctrl_h + body_gap) * 2.0f;
+    painter.label({body_x, speed_y, th::px(140.0f), ctrl_h}, "时间轴滚轮速度",
+                  th::kOnSurfaceMuted, 0.987f, false, 0.0f, true);
     static_cast<const wds::interaction::ComboBox*>(scroll_wheel_speed_)->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Shortcuts) {
     for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {

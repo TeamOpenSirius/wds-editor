@@ -56,7 +56,6 @@ class UiPainter {
   void clear_soft_disk() noexcept { soft_disk_ = {}; }
 
   void reserve_rects(std::size_t n);
-  void reserve_sprites(std::size_t n);
 
   const std::vector<UiPaintRect>& rects() const noexcept { return rects_; }
   const std::vector<UiPaintRect>& front_rects() const noexcept { return front_rects_; }

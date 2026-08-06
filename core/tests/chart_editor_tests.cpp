@@ -6,6 +6,7 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/edit_history.hpp>
 #include <wds/core/detail/start_ms_avl_index.hpp>
+#include <wds/core/file_io.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
 #include <wds/core/note_edit_ops.hpp>
@@ -15,6 +16,7 @@
 #include <wds/core/core.hpp>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -162,12 +164,11 @@ void test_save_reload_normalizes_and_reloads() {
   CHECK_EQ(static_cast<int>(save.error), static_cast<int>(SerializeError::Ok));
   CHECK(!engine.is_dirty());
 
+  // Scheme B: live document ids are unchanged after save.
   const auto& notes = engine.document().notes();
   CHECK_EQ(static_cast<int32_t>(notes.size()), 2);
-  CHECK_EQ(notes[0].id, 0);
-  CHECK_EQ(notes[1].id, 1);
-  CHECK_EQ(notes[0].start_tick, 0);
-  CHECK_EQ(notes[1].start_tick, 480);
+  CHECK(engine.document().find_note(0).has_value());
+  CHECK(engine.document().find_note(1).has_value());
 
   ChartEditorEngine reloaded;
   const auto load = reloaded.load_from_file(path.string());
@@ -175,6 +176,136 @@ void test_save_reload_normalizes_and_reloads() {
   CHECK_EQ(static_cast<int32_t>(reloaded.document().notes().size()), 2);
   CHECK_EQ(reloaded.document().notes()[0].id, 0);
   CHECK_EQ(reloaded.document().notes()[1].id, 1);
+  CHECK_EQ(reloaded.document().notes()[0].start_tick, 0);
+  CHECK_EQ(reloaded.document().notes()[1].start_tick, 480);
+}
+
+void test_save_success_preserves_history_and_ids() {
+  ChartEditorEngine engine;
+  NotationNote late = make_tap(960, 2);
+  late.id = 99;
+  NotationNote early = make_tap(0, 0);
+  early.id = 42;
+  CHECK(engine.document().set_notes({late, early}));
+  CHECK(engine.execute_command(
+      std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(480, 1)})));
+  CHECK(engine.history().can_undo());
+  CHECK(engine.document().find_note(99).has_value());
+  CHECK(engine.document().find_note(42).has_value());
+
+  const fs::path path = temp_chart_path("save_keeps_history.wdschart");
+  const auto save = engine.save_to_file(path.string());
+  CHECK_EQ(static_cast<int>(save.error), static_cast<int>(SerializeError::Ok));
+  CHECK(!engine.is_dirty());
+  CHECK(engine.history().can_undo());
+  CHECK(engine.document().find_note(99).has_value());
+  CHECK(engine.document().find_note(42).has_value());
+  CHECK(engine.history().undo(engine.document()));
+  // Undo removes the added tap; sparse ids for the original pair remain.
+  CHECK_EQ(static_cast<int32_t>(engine.document().notes().size()), 2);
+  CHECK(engine.document().find_note(99).has_value());
+  CHECK(engine.document().find_note(42).has_value());
+
+  ChartEditorEngine reloaded;
+  CHECK_EQ(static_cast<int>(reloaded.load_from_file(path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int32_t>(reloaded.document().notes().size()), 3);
+  CHECK_EQ(reloaded.document().notes()[0].id, 0);
+  CHECK_EQ(reloaded.document().notes()[1].id, 1);
+  CHECK_EQ(reloaded.document().notes()[2].id, 2);
+}
+
+void test_replace_file_atomic_preserves_target_on_failure() {
+  const fs::path target = temp_chart_path("atomic_keep.txt");
+  {
+    std::ofstream out(target);
+    out << "ORIGINAL";
+  }
+  const fs::path missing_temp = temp_chart_path("atomic_missing.wds-tmp");
+  std::error_code ec;
+  fs::remove(missing_temp, ec);
+  const auto result = replace_file_atomic(target.string(), missing_temp.string());
+  CHECK_NE(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
+  SerializeResult read_status;
+  const std::string body = read_text_file(target.string(), read_status);
+  CHECK_EQ(static_cast<int>(read_status.error), static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(body, std::string("ORIGINAL"));
+}
+
+void test_load_rejects_huge_notes_count() {
+  const fs::path path = temp_chart_path("huge_notes_count.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1000001\nCONCURRENT 0\nEND\n";
+  }
+  NotationChart chart;
+  const auto result = ChartSerializer::load_from_file(path.string(), chart);
+  CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::ParseError));
+}
+
+void test_load_rejects_lane_width_overflow() {
+  const fs::path path = temp_chart_path("lane_width_overflow.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\n"
+           "N 0 0 0 10 2000000000 2000000000 0 0\nCONCURRENT 0\nEND\n";
+  }
+  NotationChart chart;
+  const auto result = ChartSerializer::load_from_file(path.string(), chart);
+  CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::ParseError));
+}
+
+void test_load_rejects_nonfinite_ticks() {
+  const fs::path path = temp_chart_path("nonfinite_ticks.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\n"
+           "N 0 nan inf 10 0 1 0 0\nCONCURRENT 0\nEND\n";
+  }
+  NotationChart chart;
+  const auto result = ChartSerializer::load_from_file(path.string(), chart);
+  CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::ParseError));
+
+  const fs::path path2 = temp_chart_path("huge_ticks.wdschart");
+  {
+    std::ofstream out(path2);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\n"
+           "N 0 1e300 1e300 10 0 1 0 0\nCONCURRENT 0\nEND\n";
+  }
+  const auto result2 = ChartSerializer::load_from_file(path2.string(), chart);
+  CHECK_EQ(static_cast<int>(result2.error), static_cast<int>(SerializeError::ParseError));
+}
+
+void test_measure_ticks_no_hang_near_int_max() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  // int32 t+=step near INT32_MAX would wrap negative and hang; int64 must finish.
+  const auto ticks =
+      measure_ticks_in_range(INT32_MAX - 5000, INT32_MAX - 10, timing);
+  CHECK(ticks.size() < 100u);
+}
+
+void test_sus_rejects_huge_measurebs() {
+  const std::string text =
+      "#MEASUREBS 2000000000\n"
+      "#00002: 1010\n";
+  SusChartLoadResult loaded;
+  const auto result = SusChartFormat::parse(text, loaded);
+  // Invalid MEASUREBS is ignored or rejected — must not hang.
+  CHECK(result.error == SerializeError::Ok || result.error == SerializeError::ParseError);
+}
+
+void test_export_sus_after_edit_preserves_engine_history() {
+  ChartEditorEngine engine;
+  CHECK(engine.execute_command(
+      std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(0, 0)})));
+  CHECK(engine.history().can_undo());
+  const fs::path path = temp_chart_path("export_keeps_history.sus");
+  const auto exported = engine.export_sus_to_file(path.string(), SusChartSaveOptions{});
+  CHECK_EQ(static_cast<int>(exported.error), static_cast<int>(SerializeError::Ok));
+  CHECK(engine.history().can_undo());
 }
 
 void test_load_fixture_normalized_chart() {
@@ -356,7 +487,8 @@ void test_snapshot_incremental_tick() {
   const PreviewSnapshot full =
       builder.build(engine.document().notes(), engine.document().timing(),
                     engine.document().concurrent_lines(), engine.document().index(),
-                    engine.timeline_ms(), engine.playback_state(), engine.revision());
+                    engine.timeline_ms(), engine.playback_state(),
+                    engine.document().content_generation());
   CHECK(snapshot_contents_equal(engine.snapshot(), full));
   CHECK(engine.snapshot().find_note(0) != nullptr);
 }
@@ -398,7 +530,8 @@ void test_snapshot_aux_objects_incremental() {
   const PreviewSnapshot full =
       builder.build(engine.document().notes(), engine.document().timing(),
                     engine.document().concurrent_lines(), engine.document().index(),
-                    engine.timeline_ms(), engine.playback_state(), engine.revision());
+                    engine.timeline_ms(), engine.playback_state(),
+                    engine.document().content_generation());
   CHECK(snapshot_contents_equal(engine.snapshot(), full));
 
   PreviewSnapshot snap;
@@ -2447,6 +2580,31 @@ void test_sus_waveoffset_roundtrip() {
         text.find("#WAVEOFFSET -0.5") != std::string::npos);
 }
 
+// m7: dense same-lane taps must survive remapping without silent overwrite drops.
+void test_sus_export_slot_remap_preserves_note_count() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  // Offsets that force coarse→fine remaps within one measure (lane 0 taps).
+  const int32_t ticks[] = {0, 160, 240, 320, 480, 640, 720, 800, 960, 1120, 1200, 1440};
+  for (size_t i = 0; i < sizeof(ticks) / sizeof(ticks[0]); ++i) {
+    NotationNote tap = make_tap(ticks[i], 0);
+    tap.id = static_cast<int32_t>(i);
+    tap.width = 1;
+    chart.notes.push_back(tap);
+  }
+  SusChartSaveOptions options;
+  options.ched_lane_padding = false;
+  std::string text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
+           static_cast<int>(SerializeError::Ok));
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), static_cast<int>(chart.notes.size()));
+}
+
 // Critical tap roundtrip (SUS type 2).
 void test_sus_critical_tap_roundtrip() {
   NotationChart chart;
@@ -3076,6 +3234,14 @@ int main() {
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
   test_save_reload_normalizes_and_reloads();
+  test_save_success_preserves_history_and_ids();
+  test_replace_file_atomic_preserves_target_on_failure();
+  test_load_rejects_huge_notes_count();
+  test_load_rejects_lane_width_overflow();
+  test_load_rejects_nonfinite_ticks();
+  test_measure_ticks_no_hang_near_int_max();
+  test_sus_rejects_huge_measurebs();
+  test_export_sus_after_edit_preserves_engine_history();
   test_load_fixture_normalized_chart();
   test_start_ms_avl_index_range_query();
   test_chart_note_index_candidates();
@@ -3128,6 +3294,7 @@ int main() {
   test_sus_fractional_measure_length();
   test_sus_measurebs_offset();
   test_sus_waveoffset_roundtrip();
+  test_sus_export_slot_remap_preserves_note_count();
   test_sus_critical_tap_roundtrip();
   test_sus_bpm_defs_without_change_pick_lowest_id();
   test_sus_measurebs_export_roundtrip();

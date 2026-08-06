@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -293,6 +294,25 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
         !parse_int(trim_copy(cols[6]), scratch_length)) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has invalid numeric fields"};
+    }
+    if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec < 0.0 ||
+        start_sec > 1.0e7 || end_sec > 1.0e7) {
+      return {SerializeError::ParseError,
+              "official chart: line " + std::to_string(line_no) + " has out-of-range time"};
+    }
+    if (lane_length < 0 || lane_length > 12) {
+      return {SerializeError::ParseError,
+              "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
+    }
+    // Official leftLane is often 1-based; validate the eventual 0-based span.
+    if (left_lane > 0) {
+      const int64_t zero_based =
+          options.convert_lane_to_zero_based ? static_cast<int64_t>(left_lane) - 1
+                                            : static_cast<int64_t>(left_lane);
+      if (zero_based + static_cast<int64_t>(lane_length) > 12) {
+        return {SerializeError::ParseError,
+                "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
+      }
     }
 
     GimmickType gimmick = GimmickType::None;

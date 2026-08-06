@@ -38,6 +38,14 @@ bool ok(const wds::chart_editor::SerializeResult& result) {
   return result.error == wds::chart_editor::SerializeError::Ok;
 }
 
+// Normalize a chart copy for disk (sort + dense ids). Does not mutate `chart`.
+wds::chart_editor::NotationChart normalized_copy(
+    const wds::chart_editor::NotationChart& chart) {
+  wds::chart_editor::ChartDocument doc;
+  doc.load_from_chart(chart, wds::chart_editor::ChartEditMode::Editable);
+  return doc.normalized_chart();
+}
+
 std::string to_lower_ascii(std::string s) {
   for (char& ch : s) {
     ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -400,13 +408,18 @@ void EditorSession::apply_chart_delay() {
   preview_.transport().set_chart_offset_ms(offset_ms_);
 }
 
-void EditorSession::stash_active() {
+void EditorSession::sync_active_chart() {
   if (charts_.empty() || active_chart_index_ >= charts_.size()) return;
   auto& slot = charts_[active_chart_index_];
   slot.chart = engine().document().to_notation_chart();
   slot.chart.timing.offset_ms = 0;
   slot.dirty = slot.dirty || engine().is_dirty();
-  slot.history = std::move(engine().history());
+}
+
+void EditorSession::stash_active() {
+  sync_active_chart();
+  if (charts_.empty() || active_chart_index_ >= charts_.size()) return;
+  charts_[active_chart_index_].history = std::move(engine().history());
 }
 
 bool EditorSession::activate_chart(std::size_t index) {
@@ -545,7 +558,8 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
     status("保存失败：没有可写入的工程或谱面", StatusLevel::Error);
     return false;
   }
-  stash_active();
+  // Snapshot chart data only — keep engine undo history (scheme B).
+  sync_active_chart();
 
   std::vector<std::string> chart_paths;
   if (!collect_chart_paths_for_save(chart_paths)) {
@@ -554,7 +568,7 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
   }
 
   for (std::size_t i = 0; i < charts_.size(); ++i) {
-    auto chart = charts_[i].chart;
+    auto chart = normalized_copy(charts_[i].chart);
     chart.timing.offset_ms = 0;
     const auto chart_save =
         wds::chart_editor::ChartSerializer::save_to_file(chart, chart_paths[i]);
@@ -564,7 +578,7 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
              StatusLevel::Error);
       return false;
     }
-    // Commit path only after the file is on disk.
+    // Commit path only after the file is on disk. Keep slot chart ids session-stable.
     charts_[i].path = chart_paths[i];
     charts_[i].dirty = false;
   }
@@ -823,7 +837,6 @@ bool EditorSession::export_sus(const std::string& path) {
     status(read_only_ ? "只读预览无法导出" : "导出已取消", StatusLevel::Error);
     return false;
   }
-  stash_active();
   if (!ok(engine().export_sus_to_file(path, make_sus_save_options()))) {
     status("导出 SUS 失败：" + path, StatusLevel::Error);
     return false;
@@ -841,7 +854,7 @@ bool EditorSession::export_sus_project(const std::string& directory) {
     status("导出失败：无效目录或无谱面", StatusLevel::Error);
     return false;
   }
-  stash_active();
+  sync_active_chart();
 
   if (!dir_is_directory_utf8(directory)) {
     status("导出失败：目录不可用", StatusLevel::Error);
@@ -895,7 +908,7 @@ bool EditorSession::export_official_project(const std::string& directory) {
     status("导出失败：无效目录或无谱面", StatusLevel::Error);
     return false;
   }
-  stash_active();
+  sync_active_chart();
 
   if (!dir_is_directory_utf8(directory)) {
     status("导出失败：目录不可用", StatusLevel::Error);
