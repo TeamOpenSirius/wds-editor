@@ -673,7 +673,17 @@ const wds::renderer::DrawBatch& UiManager::build_post_overlay_batch(
     wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
     const wds::renderer::ScreenBounds& screen) {
   post_overlay_batch_.clear();
-  // Modal scrim first, then dropdown popups — otherwise menus open inside a modal
+  // Status bar above edit skins, below modals/menus (depth write off → draw order).
+  if (status_bar_ != nullptr) {
+    wds::interaction::UiPainter status;
+    prepare_painter(status);
+    status_bar_->paint_overlay(status);
+    if (!status.rects().empty() || !status.front_rects().empty() || !status.sprites().empty()) {
+      chart_preview_->sync_ui_font_texture();
+      status.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+    }
+  }
+  // Modal scrim next, then dropdown popups — otherwise menus open inside a modal
   // (export format combo) are drawn under the 55% dim and look transparent.
   if (has_modal_popup()) {
     post_overlay_batch_.append_from(build_modal_batch(solid_texture, fb_w, fb_h, screen));

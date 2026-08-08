@@ -398,8 +398,8 @@ int run_editor(int argc, char** argv) {
       const auto solid = ui.chart_preview().solid_texture();
       const auto batch_t0 = std::chrono::steady_clock::now();
       const auto& ui_batch = ui.build_ui_batch(solid, fb_w, fb_h, preview.geometry().screen());
-      // Dropdown / modal must be post-overlay: main UI batch draws note-skin sprites after
-      // rect fills, so in-batch menus would stay under convert-note artwork.
+      // Status / dropdown / modal must be post-overlay: main UI batch draws note-skin
+      // sprites after rect fills, so in-batch chrome would stay under convert-note artwork.
       const auto& post_batch =
           ui.build_post_overlay_batch(solid, fb_w, fb_h, preview.geometry().screen());
       const auto& chrome_batch =

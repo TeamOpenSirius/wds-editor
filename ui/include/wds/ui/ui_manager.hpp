@@ -84,11 +84,11 @@ class UiManager {
   int64_t last_update_process_us() const noexcept { return last_update_process_us_; }
   void paint(wds::interaction::UiPainter& painter) const;
 
-  // Main UI (panels / edit skins). Dropdown menus and modal dialogs are built
-  // separately so the preview compositor can draw them above skinned note sprites
-  // (depth write is off; UiPainter rects would lose to later sprites in the same batch).
-  // Batches are reused across frames (sticky bucket capacity); returned refs are valid
-  // until the next build_* call of the same kind.
+  // Main UI (panels / edit skins). Status bar, dropdown menus, and modal dialogs
+  // are built separately so the preview compositor can draw them above skinned note
+  // sprites (depth write is off; UiPainter rects would lose to later sprites in the
+  // same batch). Batches are reused across frames (sticky bucket capacity); returned
+  // refs are valid until the next build_* call of the same kind.
   const wds::renderer::DrawBatch& build_ui_batch(wds::renderer::TextureId solid_texture, int fb_w,
                                                  int fb_h,
                                                  const wds::renderer::ScreenBounds& screen);
