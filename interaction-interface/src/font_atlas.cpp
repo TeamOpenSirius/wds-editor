@@ -1,9 +1,10 @@
 #include "wds/interaction/font_atlas.hpp"
 
+#include <wds/common/utf8_path.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <fstream>
 #include <vector>
 
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -55,14 +56,7 @@ std::vector<std::string> system_font_candidates() {
 }
 
 bool read_file(const std::string& path, std::vector<unsigned char>& out) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file) return false;
-  const auto size = file.tellg();
-  if (size <= 0) return false;
-  out.resize(static_cast<std::size_t>(size));
-  file.seekg(0);
-  file.read(reinterpret_cast<char*>(out.data()), size);
-  return static_cast<bool>(file);
+  return wds::common::read_file_bytes(path, out) && !out.empty();
 }
 
 // Decode one UTF-8 codepoint. Advances `i`. Returns 0 on failure / NUL.

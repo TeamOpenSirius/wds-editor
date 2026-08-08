@@ -1,5 +1,7 @@
 #include "wds/renderer/texture.hpp"
 
+#include <wds/common/utf8_path.hpp>
+
 #include <png.h>
 
 #define NANOSVG_IMPLEMENTATION
@@ -11,8 +13,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -20,14 +20,9 @@ namespace wds::renderer {
 namespace {
 
 // Read whole file into a mutable buffer (nsvgParse overwrites its input).
-// Prefer this over nsvgParseFromFile so Windows Unicode paths work via ifstream.
+// Prefer this over nsvgParseFromFile so Windows Unicode/UTF-8 install paths work.
 bool read_file_bytes(const std::string& path, std::vector<char>& out) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    return false;
-  }
-  out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-  if (out.empty()) {
+  if (!wds::common::read_file_bytes(path, out) || out.empty()) {
     return false;
   }
   out.push_back('\0');
@@ -55,7 +50,7 @@ bool svg_raster_looks_like_icon(const unsigned char* pixels, int width, int heig
 
 bool load_png_rgba8(const std::string& path, std::vector<unsigned char>& out, int& width,
                     int& height) {
-  FILE* fp = std::fopen(path.c_str(), "rb");
+  FILE* fp = wds::common::fopen_utf8(path, "rb");
   if (fp == nullptr) {
     return false;
   }

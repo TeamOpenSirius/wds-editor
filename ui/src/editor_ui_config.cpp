@@ -1,5 +1,6 @@
 #include "wds/ui/editor_ui_config.hpp"
 
+#include <wds/common/utf8_path.hpp>
 #include <wds/core/file_io.hpp>
 #include <wds/interaction/platform.hpp>
 
@@ -10,6 +11,16 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace wds::ui {
 namespace {
@@ -134,19 +145,6 @@ void ensure_shortcut_defaults(EditorUiConfig& cfg) {
   cfg.shortcuts_initialized = true;
 }
 
-fs::path exe_parent_dir(const char* argv0) {
-  std::error_code ec;
-  fs::path exe_dir = fs::current_path(ec);
-  if (argv0 == nullptr || argv0[0] == '\0') return exe_dir;
-  fs::path exe = fs::path(argv0);
-  if (!exe.is_absolute()) {
-    exe = fs::current_path(ec) / exe;
-  }
-  exe = fs::weakly_canonical(exe, ec);
-  if (!ec) return exe.parent_path();
-  return fs::absolute(fs::path(argv0), ec).parent_path();
-}
-
 void maybe_migrate_legacy_config(const fs::path& legacy, const fs::path& dest) {
   std::error_code ec;
   if (fs::is_regular_file(dest, ec) && !ec) return;
@@ -157,13 +155,14 @@ void maybe_migrate_legacy_config(const fs::path& legacy, const fs::path& dest) {
 
 #if defined(_WIN32)
 fs::path windows_localappdata_config() {
-  if (const char* local = std::getenv("LOCALAPPDATA");
-      local != nullptr && local[0] != '\0') {
-    return fs::path(local) / "WDS" / "config" / "config.yml";
+  wchar_t buf[MAX_PATH];
+  DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+  if (n > 0 && n < MAX_PATH) {
+    return fs::path(buf) / L"WDS" / L"config" / L"config.yml";
   }
-  if (const char* profile = std::getenv("USERPROFILE");
-      profile != nullptr && profile[0] != '\0') {
-    return fs::path(profile) / "AppData" / "Local" / "WDS" / "config" / "config.yml";
+  n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
+  if (n > 0 && n < MAX_PATH) {
+    return fs::path(buf) / L"AppData" / L"Local" / L"WDS" / L"config" / L"config.yml";
   }
   return {};
 }
@@ -189,30 +188,30 @@ fs::path linux_xdg_config() {
 }  // namespace
 
 std::string resolve_editor_config_path(const char* argv0) {
-  const fs::path exe_dir = exe_parent_dir(argv0);
+  const fs::path exe_dir = wds::common::executable_dir(argv0);
   const fs::path legacy = exe_dir / "config" / "config.yml";
 
 #if defined(_WIN32)
   const fs::path support = windows_localappdata_config();
   if (!support.empty()) {
     maybe_migrate_legacy_config(legacy, support);
-    return support.string();
+    return wds::common::path_to_utf8(support);
   }
 #elif defined(__APPLE__)
   const fs::path support = macos_application_support_config();
   if (!support.empty()) {
     maybe_migrate_legacy_config(legacy, support);
-    return support.string();
+    return wds::common::path_to_utf8(support);
   }
 #else
   const fs::path support = linux_xdg_config();
   if (!support.empty()) {
     maybe_migrate_legacy_config(legacy, support);
-    return support.string();
+    return wds::common::path_to_utf8(support);
   }
 #endif
 
-  return legacy.string();
+  return wds::common::path_to_utf8(legacy);
 }
 
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {

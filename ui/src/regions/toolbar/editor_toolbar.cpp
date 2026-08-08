@@ -19,6 +19,7 @@
 #include <wds/interaction/widgets/icon_button.hpp>
 #include <wds/interaction/widgets/text_field.hpp>
 #include <wds/common/log.hpp>
+#include <wds/common/utf8_path.hpp>
 #include <wds/renderer/texture.hpp>
 
 #include <algorithm>
@@ -261,7 +262,7 @@ void EditorToolbar::load_action_icons(wds::renderer::VulkanRenderer& vulkan,
   }
 
   if (!icons_directory_.empty()) {
-    const fs::path dir(icons_directory_);
+    const fs::path dir = wds::common::path_from_utf8(icons_directory_);
     // Matches icons/*.svg (import-audio replaces the old music.png).
     const std::array<const char*, 8> names = {"open",     "save",         "import", "export",
                                               "settings", "import-audio", "undo",   "redo"};
@@ -269,11 +270,13 @@ void EditorToolbar::load_action_icons(wds::renderer::VulkanRenderer& vulkan,
       const fs::path svg = dir / (std::string(names[i]) + ".svg");
       const fs::path png = dir / (std::string(names[i]) + ".png");
       wds::renderer::TextureInfo tex{};
-      if (fs::is_regular_file(svg)) {
-        tex = wds::renderer::create_texture_from_svg(*vk, svg.string(), svg_px);
+      const std::string svg_utf8 = wds::common::path_to_utf8(svg);
+      const std::string png_utf8 = wds::common::path_to_utf8(png);
+      if (wds::common::is_regular_file_utf8(svg_utf8)) {
+        tex = wds::renderer::create_texture_from_svg(*vk, svg_utf8, svg_px);
       }
-      if (!tex && fs::is_regular_file(png)) {
-        tex = wds::renderer::create_texture_from_png(*vk, png.string());
+      if (!tex && wds::common::is_regular_file_utf8(png_utf8)) {
+        tex = wds::renderer::create_texture_from_png(*vk, png_utf8);
       }
       // Tiny textures (e.g. 1×1 white) become solid squares when stretched — skip.
       if (tex && (tex.width <= 2 || tex.height <= 2)) {

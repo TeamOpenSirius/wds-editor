@@ -1,5 +1,7 @@
 #include <wds/chart_render/skin_catalog.hpp>
 
+#include <wds/common/utf8_path.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -12,12 +14,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
+using wds::common::is_regular_file_utf8;
+using wds::common::path_from_utf8;
+using wds::common::path_to_utf8;
+
 std::string queue_first(TextureCache& cache, const fs::path& dir,
                         std::initializer_list<const char*> names) {
   for (const char* name : names) {
     const fs::path path = dir / name;
-    if (fs::exists(path) && cache.queue_png(path.string())) {
-      return path.string();
+    const std::string utf8 = path_to_utf8(path);
+    if (is_regular_file_utf8(utf8) && cache.queue_png(utf8)) {
+      return utf8;
     }
   }
   return {};
@@ -26,7 +33,7 @@ std::string queue_first(TextureCache& cache, const fs::path& dir,
 }  // namespace
 
 bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) {
-  const fs::path dir(skins_directory);
+  const fs::path dir = path_from_utf8(skins_directory);
 
   const std::string p_stage =
       queue_first(cache, dir, {"_STAGE_COVER.png", "Sirius Stage Cover.png"});

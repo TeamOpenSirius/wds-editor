@@ -1,6 +1,8 @@
 #include "wds/renderer/vulkan_renderer.hpp"
 #include "wds/renderer/log.hpp"
 
+#include <wds/common/utf8_path.hpp>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -8,22 +10,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#elif defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
 
 namespace wds::renderer {
 namespace {
@@ -34,29 +26,6 @@ constexpr int kMaxFramesInFlight = 3;
 constexpr uint32_t kPreferredSwapchainImages = 3;
 // Fixed per-frame host-visible VB capacity (grows only if a frame exceeds this).
 constexpr size_t kRingVertexCapacityBytes = 2 * 1024 * 1024;
-
-std::filesystem::path executable_dir() {
-  namespace fs = std::filesystem;
-  std::error_code ec;
-#if defined(__APPLE__)
-  uint32_t size = 0;
-  _NSGetExecutablePath(nullptr, &size);
-  std::string buf(size > 0 ? size : 1, '\0');
-  if (_NSGetExecutablePath(buf.data(), &size) == 0) {
-    buf.resize(std::strlen(buf.c_str()));
-    return fs::weakly_canonical(fs::path(buf), ec).parent_path();
-  }
-#elif defined(_WIN32)
-  wchar_t buf[MAX_PATH];
-  const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-  if (n > 0 && n < MAX_PATH) {
-    return fs::weakly_canonical(fs::path(buf), ec).parent_path();
-  }
-#elif defined(__linux__)
-  return fs::weakly_canonical(fs::path("/proc/self/exe"), ec).parent_path();
-#endif
-  return fs::current_path(ec);
-}
 
 struct GpuTexture {
   VkImage image = VK_NULL_HANDLE;
@@ -80,9 +49,10 @@ uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPro
 }
 
 bool looks_like_shader_dir(const std::filesystem::path& dir) {
-  std::error_code ec;
-  return std::filesystem::is_regular_file(dir / "textured_quad.vert.spv", ec) && !ec &&
-         std::filesystem::is_regular_file(dir / "textured_quad.frag.spv", ec) && !ec;
+  using wds::common::is_regular_file_utf8;
+  using wds::common::path_to_utf8;
+  return is_regular_file_utf8(path_to_utf8(dir / "textured_quad.vert.spv")) &&
+         is_regular_file_utf8(path_to_utf8(dir / "textured_quad.frag.spv"));
 }
 
 // Resolve SPIR-V directory for both in-tree builds and packaged installs.
@@ -93,12 +63,18 @@ std::string resolve_shader_dir() {
   std::error_code ec;
 
   if (const char* env = std::getenv("WDS_SHADER_DIR"); env != nullptr && env[0] != '\0') {
-    if (looks_like_shader_dir(env)) {
-      return env;
+#if defined(_WIN32)
+    // Process env vars from the CRT are ACP; convert via narrow path → wide → UTF-8.
+    const fs::path env_path(env);
+#else
+    const fs::path env_path = wds::common::path_from_utf8(env);
+#endif
+    if (looks_like_shader_dir(env_path)) {
+      return wds::common::path_to_utf8(env_path);
     }
   }
 
-  const fs::path exe_dir = executable_dir();
+  const fs::path exe_dir = wds::common::executable_dir(nullptr);
   const fs::path candidates[] = {
       fs::current_path(ec) / "shaders",
       exe_dir / "shaders",
@@ -110,13 +86,16 @@ std::string resolve_shader_dir() {
   };
   for (const auto& cand : candidates) {
     if (looks_like_shader_dir(cand)) {
-      return cand.lexically_normal().string();
+      return wds::common::path_to_utf8(cand.lexically_normal());
     }
   }
 
 #ifdef WDS_SHADER_DIR
-  if (looks_like_shader_dir(WDS_SHADER_DIR)) {
-    return WDS_SHADER_DIR;
+  {
+    const fs::path baked = wds::common::path_from_utf8(WDS_SHADER_DIR);
+    if (looks_like_shader_dir(baked)) {
+      return wds::common::path_to_utf8(baked);
+    }
   }
 #endif
 
@@ -124,14 +103,10 @@ std::string resolve_shader_dir() {
 }
 
 std::vector<char> read_file(const std::string& path) {
-  std::ifstream file(path, std::ios::ate | std::ios::binary);
-  if (!file) {
+  std::vector<char> buffer;
+  if (!wds::common::read_file_bytes(path, buffer)) {
     return {};
   }
-  const size_t size = static_cast<size_t>(file.tellg());
-  std::vector<char> buffer(size);
-  file.seekg(0);
-  file.read(buffer.data(), static_cast<std::streamsize>(size));
   return buffer;
 }
 

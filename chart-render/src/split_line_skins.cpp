@@ -1,14 +1,21 @@
 #include <wds/chart_render/split_line_skins.hpp>
 
+#include <wds/common/utf8_path.hpp>
+
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace wds::renderer {
 
 namespace {
 
 namespace fs = std::filesystem;
+
+using wds::common::is_directory_utf8;
+using wds::common::path_from_utf8;
+using wds::common::path_to_utf8;
 
 #include "split_line_color_table.inc"
 
@@ -48,17 +55,25 @@ void SplitLineSkinBank::queue_all(TextureCache& cache, const std::string& skins_
   path_t2_.clear();
   suffix_exists_.clear();
 
-  std::error_code ec;
-  const fs::path dir(skins_directory);
-  if (!fs::is_directory(dir, ec) || ec) {
+  if (!is_directory_utf8(skins_directory)) {
     return;
   }
 
-  for (const auto& entry : fs::directory_iterator(dir, ec)) {
+  std::vector<std::string> files;
+#if defined(_WIN32)
+  files = wds::common::list_regular_files_utf8(skins_directory);
+#else
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(path_from_utf8(skins_directory), ec)) {
     if (ec || !entry.is_regular_file(ec) || ec) {
       continue;
     }
-    const std::string name = entry.path().filename().string();
+    files.push_back(path_to_utf8(entry.path()));
+  }
+#endif
+
+  for (const std::string& path : files) {
+    const std::string name = path_to_utf8(path_from_utf8(path).filename());
     std::string suffix;
     std::string* dest = nullptr;
     if (parse_split_suffix(name, kBasePrefix, suffix)) {
@@ -70,7 +85,6 @@ void SplitLineSkinBank::queue_all(TextureCache& cache, const std::string& skins_
     } else {
       continue;
     }
-    const std::string path = entry.path().string();
     if (cache.queue_png(path)) {
       *dest = path;
       suffix_exists_[suffix] = true;
