@@ -179,6 +179,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void finish_resize();
   void finish_hold_adjust();
   void finish_hold_body(bool chain_next);
+  // Map an out-of-window pointer to the equivalent in-window edge point for
+  // hit/snap math only — does not mutate stored pointer state.
+  wds::interaction::Vec2 pointer_as_in_host(wds::interaction::Vec2 point) const;
+  // Live-update MoveSelection from a pointer (edit-area / window exit OK).
+  void sync_move_selection_to_pointer(wds::interaction::Vec2 point);
   // Middle-button interrupt: drop in-progress place / hold draft. For chained
   // ScratchHold, discards only the current segment and keeps the previous as end.
   void cancel_placement();
@@ -195,6 +200,14 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void place_instant(wds::chart_editor::NoteType type, wds::interaction::Vec2 point,
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
+  // Continue a selected terminal ScratchHold from its JumpScratch end-cap.
+  // Requires pending_chain_extend_id_ armed on pointer-down.
+  void begin_hold_chain_extend();
+  // If point is on a selected terminal ScratchHold end-cap, arm pending_chain_extend_id_.
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point);
+  void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
+  // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
+  void begin_scratch_hold_placement(wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
   // Place a Sound / ScratchSound on an already-selected existing hold body.
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);
@@ -347,6 +360,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t hold_chain_prev_id_ = -1;
   wds::chart_editor::NotationNote hold_chain_prev_body_{};
   std::unordered_set<int32_t> hold_chain_ids_;
+  // Armed on RMB-down over a selected terminal JumpScratch; consumed when the
+  // gesture resolves to ScratchHoldBody (chain continue instead of a new hold).
+  int32_t pending_chain_extend_id_ = -1;
 
   void clear_hold_chain_state();
   void select_hold_chain();
