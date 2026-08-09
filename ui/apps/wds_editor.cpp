@@ -280,6 +280,8 @@ int run_editor(int argc, char** argv) {
     if (close_teardown_done) {
       return;
     }
+    // Drop menu callback before Window/UiManager are torn down.
+    wds::ui::clear_fullscreen_menu_shortcut();
     if (ui.chart_preview().ready()) {
       ui.chart_preview().preview().vulkan().release_fullscreen_exclusive();
     }
@@ -414,6 +416,8 @@ int run_editor(int argc, char** argv) {
 
       const auto render_t0 = std::chrono::steady_clock::now();
       ui.chart_preview().render(&ui_batch, post, chrome);
+      // Safe to free atlases replaced mid-frame now that draw_frame has submitted.
+      ui.chart_preview().flush_retired_font_textures();
       const auto render_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now() - render_t0)
                                  .count();

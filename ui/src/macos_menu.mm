@@ -33,6 +33,10 @@ void invoke_fullscreen_menu_handler() {
   }
 }
 
+void clear_fullscreen_menu_shortcut() {
+  g_fullscreen_handler = nullptr;
+}
+
 void reclaim_cmd_m_from_menubar() {
   NSMenu* main_menu = NSApp.mainMenu;
   if (main_menu == nil) return;

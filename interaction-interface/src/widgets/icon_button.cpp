@@ -89,11 +89,10 @@ void draw_icon(UiPainter& painter, Icon icon, Rect r, Color color) {
   }
 }
 
-// Wide short note strip, centered — preserves skin aspect (no vertical stretch).
+// Wide short flat note, centered — preserves skin aspect (no vertical stretch).
 // Returns the drawn note rect so overlays (flick arrows) can track note scale.
-Rect draw_note_strip(UiPainter& painter, const Rect& area, const wds::renderer::TextureInfo& left,
-                     const wds::renderer::TextureInfo& middle,
-                     const wds::renderer::TextureInfo& right, const Color& tint) {
+Rect draw_note_flat(UiPainter& painter, const Rect& area, const wds::renderer::TextureInfo& top,
+                    const Color& tint) {
   constexpr float kNoteAspect = 3.6f;  // width / height of a typical note bar
   float h = area.h * 0.72f;
   float w = h * kNoteAspect;
@@ -103,11 +102,9 @@ Rect draw_note_strip(UiPainter& painter, const Rect& area, const wds::renderer::
   }
   const float x = area.x + (area.w - w) * 0.5f;
   const float y = area.y + (area.h - h) * 0.5f;
-  const float side = std::min(h * 0.55f, w * 0.18f);
-  const float mid_w = std::max(4.0f, w - side * 2.0f);
-  painter.sprite({x, y, side, h}, left, tint, 0.96f);
-  painter.sprite({x + side, y, mid_w, h}, middle, tint, 0.96f);
-  painter.sprite({x + side + mid_w, y, side, h}, right, tint, 0.96f);
+  if (top) {
+    painter.sprite({x, y, w, h}, top, tint, 0.96f);
+  }
   return {x, y, w, h};
 }
 
@@ -170,15 +167,11 @@ void IconButton::paint(UiPainter& painter) const {
   if (enabled_ && visual_state_ == WidgetState::Pressed) fill = fill.lerp(theme::kPrimary, .35f);
   painter.fill_rect(abs, fill, theme::kCornerRadiusMd);
 
-  const bool has_strip = static_cast<bool>(sprite_) && static_cast<bool>(strip_left_) &&
-                         static_cast<bool>(strip_right_);
   // Ignore 1×1 / tiny sprites (e.g. mistaken solid-white UI texture) — those paint as
   // opaque white squares when tinted. Fall back to procedural stroke glyphs instead.
   const bool sprite_usable =
       static_cast<bool>(sprite_) && sprite_.width > 2 && sprite_.height > 2;
-  const bool has_sprite = sprite_usable && !has_strip &&
-                          preview_style_ == NotePreviewStyle::Flat &&
-                          flick_mode_ == FlickArrowMode::None && !connection_;
+  const bool has_sprite = sprite_usable && !note_preview_;
   const bool has_label = !label_.empty();
   const bool show_tip =
       enabled_ && !tooltip_.empty() &&
@@ -200,11 +193,13 @@ void IconButton::paint(UiPainter& painter) const {
     tint.a *= 0.22f;
     icon_color.a *= 0.22f;
   }
-  if (preview_style_ == NotePreviewStyle::HoldBody ||
-      preview_style_ == NotePreviewStyle::ScratchHoldBody) {
-    draw_hold_body(painter, icon_area, connection_, tint);
-  } else if (has_strip) {
-    const Rect note = draw_note_strip(painter, icon_area, strip_left_, sprite_, strip_right_, tint);
+  if (note_preview_ && (preview_style_ == NotePreviewStyle::HoldBody ||
+                         preview_style_ == NotePreviewStyle::ScratchHoldBody)) {
+    Color hold_tint = connection_tint_;
+    hold_tint.a *= tint.a;
+    draw_hold_body(painter, icon_area, connection_, hold_tint);
+  } else if (note_preview_) {
+    const Rect note = draw_note_flat(painter, icon_area, sprite_, tint);
     draw_flick_arrows(painter, note, arrow_, flick_mode_, tint);
   } else if (has_sprite) {
     // Always draw loaded sprites (SVG/PNG). A size gate used to drop them on

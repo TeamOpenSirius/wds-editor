@@ -1,5 +1,6 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 
+#include <wds/chart_render/note_draw_order.hpp>
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/edit_history.hpp>
 #include <wds/core/gimmick.hpp>
@@ -269,6 +270,29 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
   std::optional<NotationNote> best;
   float best_dist = 1e9f;
   int best_priority = 0;  // higher wins ties (prefer JumpScratch end / head over body)
+  int64_t best_start = 0;
+  int32_t best_type = 0;
+
+  auto consider = [&](float dist, int priority, const NotationNote& note) {
+    const int64_t start = static_cast<int64_t>(note.start_tick);
+    const int32_t type = static_cast<int32_t>(note.note_type);
+    bool better = dist < best_dist - 0.5f;
+    if (!better && std::abs(dist - best_dist) <= 0.5f) {
+      if (priority > best_priority) {
+        better = true;
+      } else if (priority == best_priority && best.has_value()) {
+        // Same geometry priority: prefer the note that draws visually on top.
+        better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+      }
+    }
+    if (!better) return;
+    best_dist = dist;
+    best_priority = priority;
+    best_start = start;
+    best_type = type;
+    best = note;
+  };
+
   for (const auto& note : engine_.document().notes()) {
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     if (note.note_type == NoteType::HoldEighth) continue;
@@ -280,12 +304,7 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
       const float dist = std::hypot(point.x - (star.x + star.w * 0.5f),
                                     point.y - (star.y + star.h * 0.5f));
       constexpr int kStarPriority = 4;  // above body/head when pointer is on the star
-      if (dist < best_dist - 0.5f ||
-          (std::abs(dist - best_dist) <= 0.5f && kStarPriority > best_priority)) {
-        best_dist = dist;
-        best_priority = kStarPriority;
-        best = note;
-      }
+      consider(dist, kStarPriority, note);
       continue;
     }
 
@@ -328,11 +347,7 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
                          : wds::chart_editor::is_hold_with_tail(note.note_type) ? 1
                                                                                : 0;
     }
-    if (dist < best_dist - 0.5f || (std::abs(dist - best_dist) <= 0.5f && priority > best_priority)) {
-      best_dist = dist;
-      best_priority = priority;
-      best = note;
-    }
+    consider(dist, priority, note);
   }
   return best;
 }

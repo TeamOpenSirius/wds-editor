@@ -35,6 +35,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
+using wds::interaction::Color;
 using wds::interaction::FlickArrowMode;
 using wds::interaction::IconButton;
 using wds::interaction::NotePreviewStyle;
@@ -334,33 +335,34 @@ void EditorToolbar::apply_convert_skins() {
   if (skin_ == nullptr) return;
   struct Entry {
     NotePreviewStyle style;
-    wds::renderer::TextureInfo left, middle, right, connection, arrow;
+    wds::renderer::TextureInfo top;
+    wds::renderer::TextureInfo connection;
+    wds::renderer::TextureInfo arrow;
     FlickArrowMode flick;
+    Color connection_tint{1.0f, 1.0f, 1.0f, 1.0f};
   };
   const Entry entries[] = {
-      {NotePreviewStyle::Flat, skin_->note_red_left, skin_->note_red_middle, skin_->note_red_right,
-       {}, {}, FlickArrowMode::None},
-      {NotePreviewStyle::Flat, skin_->note_yellow_left, skin_->note_yellow_middle,
-       skin_->note_yellow_right, {}, {}, FlickArrowMode::None},
-      {NotePreviewStyle::Flat, skin_->note_blue_left, skin_->note_blue_middle,
-       skin_->note_blue_right, {}, {}, FlickArrowMode::None},
-      {NotePreviewStyle::HoldBody, {}, {}, {}, skin_->hold_connection_blue, {},
-       FlickArrowMode::None},
-      {NotePreviewStyle::Flat, skin_->note_purple_left, skin_->note_purple_middle,
-       skin_->note_purple_right, {}, skin_->scratch_arrow, FlickArrowMode::Left},
-      {NotePreviewStyle::Flat, skin_->note_purple_left, skin_->note_purple_middle,
-       skin_->note_purple_right, {}, skin_->scratch_arrow, FlickArrowMode::Both},
-      {NotePreviewStyle::Flat, skin_->note_purple_left, skin_->note_purple_middle,
-       skin_->note_purple_right, {}, skin_->scratch_arrow, FlickArrowMode::Right},
-      {NotePreviewStyle::ScratchHoldBody, {}, {}, {}, skin_->hold_connection_purple, {},
+      {NotePreviewStyle::Flat, skin_->note_red_top, {}, {}, FlickArrowMode::None},
+      {NotePreviewStyle::Flat, skin_->note_yellow_top, {}, {}, FlickArrowMode::None},
+      {NotePreviewStyle::Flat, skin_->note_blue_top, {}, {}, FlickArrowMode::None},
+      {NotePreviewStyle::HoldBody, {}, skin_->hold_connection_blue, {}, FlickArrowMode::None},
+      {NotePreviewStyle::Flat, skin_->note_purple_top, {}, skin_->scratch_arrow,
+       FlickArrowMode::Left},
+      {NotePreviewStyle::Flat, skin_->note_purple_top, {}, skin_->scratch_arrow,
+       FlickArrowMode::Both},
+      {NotePreviewStyle::Flat, skin_->note_purple_top, {}, skin_->scratch_arrow,
+       FlickArrowMode::Right},
+      {NotePreviewStyle::ScratchHoldBody,
+       {},
+       skin_->hold_connection_purple,
+       {},
        FlickArrowMode::None},
   };
   for (std::size_t i = 0; i < convert_buttons_.size(); ++i) {
     auto* button = static_cast<IconButton*>(convert_buttons_[i]);
     button->set_label({});
-    button->set_note_preview(entries[i].style, entries[i].left, entries[i].middle,
-                             entries[i].right, entries[i].connection, entries[i].arrow,
-                             entries[i].flick);
+    button->set_note_preview(entries[i].style, entries[i].top, entries[i].connection,
+                             entries[i].arrow, entries[i].flick, entries[i].connection_tint);
   }
 }
 

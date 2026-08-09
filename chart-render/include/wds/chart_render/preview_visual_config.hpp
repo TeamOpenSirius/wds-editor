@@ -31,6 +31,13 @@ struct PreviewVisualConfig {
   float note_height = 85.0f / 640.0f;
   float note_move_length = 0.02f;
   float note_border_percent = 0.02f;
+  // Official prefab ScratchNote/Notes/* localPosition.z (height toward camera = -z).
+  // NotesSprite is ZTest Off but verts still use MVP; we project height with a pinhole
+  // camera (screen-X invariant, approach-axis from perspective divide).
+  float note_unity_local_z_bottom = -0.01f;
+  float note_unity_local_z_top = -0.1f;
+  // Eye height above the stage plane (Unity Δz ≈ 0.09). Larger → thinner near-edge lip.
+  float note_cam_height = 12.0f;
   float tick_width = 168.0f / 640.0f;
   float tick_height = 112.0f / 640.0f;
   float arrow_width = 80.0f / 640.0f;

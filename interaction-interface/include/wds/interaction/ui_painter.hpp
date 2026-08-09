@@ -23,6 +23,9 @@ struct UiPaintSprite {
   Color tint{1, 1, 1, 1};
   float z = 0.92f;
   bool flip_x = false;
+  // When true, flush_to uses FontAtlas::texture().id (UVs kept) so a mid-frame
+  // atlas upload cannot leave DrawBatch holding a destroyed TextureId.
+  bool font_atlas = false;
 };
 
 // Collects screen-space paint commands; flush to DrawBatch with a 1×1 white texture.

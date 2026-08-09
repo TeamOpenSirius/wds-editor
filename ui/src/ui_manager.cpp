@@ -578,7 +578,7 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
     prepare_painter(overlay);
     edit->paint_overlays(overlay);
   }
-  // One upload after all paints may have packed on-demand glyphs.
+  // Upload after paints packed on-demand glyphs; flush resolves font TextureId live.
   chart_preview_->sync_ui_font_texture();
   painter.flush_to(ui_batch_, solid_texture, fb_w, fb_h, screen);
   if (const auto* edit = edit_panel()) {
@@ -599,7 +599,6 @@ const wds::renderer::DrawBatch& UiManager::build_popup_batch(
   if (painter.rects().empty() && painter.front_rects().empty() && painter.sprites().empty()) {
     return popup_batch_;
   }
-  chart_preview_->sync_ui_font_texture();
   painter.flush_to(popup_batch_, solid_texture, fb_w, fb_h, screen);
   return popup_batch_;
 }
@@ -630,7 +629,6 @@ const wds::renderer::DrawBatch& UiManager::build_modal_batch(
     unsaved_changes_dialog_->paint_modal(modal);
   }
   if (!modal.rects().empty() || !modal.front_rects().empty() || !modal.sprites().empty()) {
-    chart_preview_->sync_ui_font_texture();
     modal.flush_to(modal_batch_, solid_texture, fb_w, fb_h, screen);
   }
   return modal_batch_;
@@ -673,22 +671,68 @@ const wds::renderer::DrawBatch& UiManager::build_post_overlay_batch(
     wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
     const wds::renderer::ScreenBounds& screen) {
   post_overlay_batch_.clear();
-  // Status bar above edit skins, below modals/menus (depth write off → draw order).
+  // Paint all post-overlay layers first, then one atlas upload before any flush
+  // so mid-frame destroy cannot invalidate an earlier DrawBatch TextureId.
+  wds::interaction::UiPainter status;
+  bool have_status = false;
   if (status_bar_ != nullptr) {
-    wds::interaction::UiPainter status;
     prepare_painter(status);
     status_bar_->paint_overlay(status);
-    if (!status.rects().empty() || !status.front_rects().empty() || !status.sprites().empty()) {
-      chart_preview_->sync_ui_font_texture();
-      status.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+    have_status =
+        !status.rects().empty() || !status.front_rects().empty() || !status.sprites().empty();
+  }
+
+  wds::interaction::UiPainter modal;
+  bool have_modal = false;
+  if (has_modal_popup()) {
+    prepare_painter(modal);
+    const auto* edit = edit_panel();
+    if (edit != nullptr && edit->has_modal_popup()) {
+      edit->paint_popups(modal);
     }
+    if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) {
+      width_slots_dialog_->paint_modal(modal);
+    }
+    if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) {
+      export_choice_dialog_->paint_modal(modal);
+    }
+    if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) {
+      chart_add_dialog_->paint_modal(modal);
+    }
+    if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) {
+      unsaved_changes_dialog_->paint_modal(modal);
+    }
+    have_modal =
+        !modal.rects().empty() || !modal.front_rects().empty() || !modal.sprites().empty();
+  }
+
+  wds::interaction::UiPainter popup;
+  prepare_painter(popup);
+  root_.paint_popup_layers(popup);
+  const bool have_popup =
+      !popup.rects().empty() || !popup.front_rects().empty() || !popup.sprites().empty();
+
+  if (have_status || have_modal || have_popup) {
+    chart_preview_->sync_ui_font_texture();
+  }
+  // Status bar above edit skins, below modals/menus (depth write off → draw order).
+  if (have_status) {
+    status.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
   }
   // Modal scrim next, then dropdown popups — otherwise menus open inside a modal
   // (export format combo) are drawn under the 55% dim and look transparent.
-  if (has_modal_popup()) {
-    post_overlay_batch_.append_from(build_modal_batch(solid_texture, fb_w, fb_h, screen));
+  if (have_modal) {
+    modal.flush_to(modal_batch_, solid_texture, fb_w, fb_h, screen);
+    post_overlay_batch_.append_from(modal_batch_);
+  } else {
+    modal_batch_.clear();
   }
-  post_overlay_batch_.append_from(build_popup_batch(solid_texture, fb_w, fb_h, screen));
+  if (have_popup) {
+    popup.flush_to(popup_batch_, solid_texture, fb_w, fb_h, screen);
+    post_overlay_batch_.append_from(popup_batch_);
+  } else {
+    popup_batch_.clear();
+  }
   return post_overlay_batch_;
 }
 

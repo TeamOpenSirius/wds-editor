@@ -1,6 +1,7 @@
 #include "wds/ui/regions/preview/playback_preview.hpp"
 #include "wds/renderer/log.hpp"
 
+#include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
@@ -39,7 +40,7 @@ using wds::renderer::TextureInfo;
 using wds::renderer::TextureId;
 using wds::renderer::Vec2;
 using wds::renderer::VulkanRenderer;
-using wds::renderer::add_note_strips;
+using wds::renderer::add_sliced_note;
 
 namespace {
 
@@ -253,7 +254,7 @@ void PlaybackPreviewView::shutdown() {
   skin_ = SkinCatalog{};
   batch_.clear();
   additive_batch_.clear();
-  notes_by_start_desc_.clear();
+  notes_draw_indices_.clear();
   note_draw_order_.clear();
   notes_order_revision_ = std::numeric_limits<uint64_t>::max();
   vulkan_.destroy();
@@ -434,20 +435,16 @@ void PlaybackPreviewView::prepare_note_draw_order(const PreviewSnapshot& snapsho
   // so caching solely on revision drops newly approaching notes (or keeps stale
   // indices after swap-removes).
   if (notes_order_revision_ != snapshot.revision ||
-      notes_by_start_desc_.size() != snapshot.notes.size()) {
-    notes_by_start_desc_.resize(snapshot.notes.size());
-    for (size_t i = 0; i < snapshot.notes.size(); ++i) {
-      notes_by_start_desc_[i] = i;
-    }
-    std::sort(notes_by_start_desc_.begin(), notes_by_start_desc_.end(),
-              [&](size_t a, size_t b) {
-                return snapshot.notes[a].start_ms > snapshot.notes[b].start_ms;
-              });
+      notes_draw_indices_.size() != snapshot.notes.size()) {
+    wds::chart_render::build_draw_order_indices(
+        snapshot.notes.size(), notes_draw_indices_,
+        [&](size_t i) { return snapshot.notes[i].start_ms; },
+        [&](size_t i) { return static_cast<int32_t>(snapshot.notes[i].note_type); });
     notes_order_revision_ = snapshot.revision;
   }
   note_draw_order_.clear();
   note_draw_order_.reserve(snapshot.notes.size());
-  for (size_t idx : notes_by_start_desc_) {
+  for (size_t idx : notes_draw_indices_) {
     if (idx >= snapshot.notes.size()) {
       continue;
     }
@@ -466,19 +463,28 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
 
   const double now = preview_now_sec(snapshot);
 
-  // Layering (depthWrite off → draw order = visual order). Match Sirius z tiers:
-  // hold connection (50k) < flat notes (100k) < ticks (200k) < arrows.
-  // Pass 1: hold bodies only, always under overlapping taps / stars / flicks.
+  // Official sandwich (depthWrite off → draw order = visual order):
+  // hold → all bottoms → all tops → mid-stars → arrows.
   for (const PreviewNoteInstance* note : order) {
     if (is_hold_body(note->note_type) && !is_hold_mid_star(note->note_type)) {
       draw_hold_body(batch, *note, now);
     }
   }
-  // Pass 2: heads / tails / mid-stars (no hold connection).
   for (const PreviewNoteInstance* note : order) {
-    draw_note(batch, *note, snapshot);
+    draw_note_flat_layer(batch, *note, snapshot, /*bottom_layer=*/true);
   }
-  // Pass 3: flick arrows on top so translucent mid-stars cannot wash them out.
+  for (const PreviewNoteInstance* note : order) {
+    draw_note_flat_layer(batch, *note, snapshot, /*bottom_layer=*/false);
+  }
+  for (const PreviewNoteInstance* note : order) {
+    if (note->visual_state == PreviewNoteVisualState::Holding) {
+      continue;
+    }
+    const NoteSprites sprites = sprites_for(skin_, note->note_type);
+    if (sprites.is_tick) {
+      draw_tick_note(batch, *note, now);
+    }
+  }
   for (const PreviewNoteInstance* note : order) {
     // Scratch-hold end flick (Sirius ScratchHoldEnd) — arrows at end_ms.
     if (is_scratch_hold_body(note->note_type) && is_hold_with_tail(note->note_type) &&
@@ -490,11 +496,9 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
     if (note->visual_state == PreviewNoteVisualState::Holding) {
       continue;
     }
-    // Mid-stars: Sound / ScratchSound are tick-only; HoldEighth has no sprite.
     if (is_hold_mid_star(note->note_type)) {
       continue;
     }
-    // Hold heads are not flick ends — arrows belong on ScratchHoldEnd / Flick / Scratch.
     if (is_hold_start(note->note_type)) {
       continue;
     }
@@ -506,21 +510,25 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
   }
 }
 
-void PlaybackPreviewView::draw_note(DrawBatch& batch, const PreviewNoteInstance& note,
-                                    const PreviewSnapshot& snapshot) {
+void PlaybackPreviewView::draw_note_flat_layer(DrawBatch& batch, const PreviewNoteInstance& note,
+                                               const PreviewSnapshot& snapshot,
+                                               bool bottom_layer) {
   const double now = preview_now_sec(snapshot);
   const NoteSprites sprites = sprites_for(skin_, note.note_type);
+  if (sprites.is_tick) {
+    return;
+  }
 
   // Hold bodies never invent a start head — only a real HoldStart* note draws one.
-  // Start heads despawn at judgment like taps (no judgeline sticky).
   // Tailed holds still draw the approaching end cap (HoldEnd / ScratchHoldEnd).
   if (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) {
     const double end = static_cast<double>(note.end_ms) / 1000.0;
     if (is_hold_with_tail(note.note_type) &&
         (note.visual_state == PreviewNoteVisualState::Approaching ||
          note.visual_state == PreviewNoteVisualState::Holding)) {
-      draw_flat_note_at(batch, note, end, now, 0.05f, /*use_jump_lanes=*/true);
+      draw_flat_note_at(batch, note, end, now, 0.05f, /*use_jump_lanes=*/true, bottom_layer);
     }
+    return;
   }
 
   // HoldStart* / taps: only while Approaching; Holding means already judged → gone.
@@ -528,10 +536,21 @@ void PlaybackPreviewView::draw_note(DrawBatch& batch, const PreviewNoteInstance&
     return;
   }
 
-  if (sprites.is_tick) {
+  if (is_hold_start(note.note_type) || !is_hold_body(note.note_type)) {
+    draw_flat_note(batch, note, now, 0.0f, bottom_layer);
+  }
+}
+
+void PlaybackPreviewView::draw_note(DrawBatch& batch, const PreviewNoteInstance& note,
+                                    const PreviewSnapshot& snapshot) {
+  // Kept for callers that want a single-note composite (top layer only + tick).
+  draw_note_flat_layer(batch, note, snapshot, /*bottom_layer=*/false);
+  const double now = preview_now_sec(snapshot);
+  if (note.visual_state == PreviewNoteVisualState::Holding) {
+    return;
+  }
+  if (sprites_for(skin_, note.note_type).is_tick) {
     draw_tick_note(batch, note, now);
-  } else if (is_hold_start(note.note_type) || !is_hold_body(note.note_type)) {
-    draw_flat_note(batch, note, now, 0.0f);
   }
 }
 
@@ -576,7 +595,8 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
     if (hi <= lo) return;
     batch.add_sprite_vfade(sprites.connection,
                            geometry_.hold_body_quad(note.lane, note.end_lane, hi, lo), -0.25f,
-                           alpha_at(hi), alpha_at(lo));
+                           alpha_at(hi), alpha_at(lo), sprites.connection_r, sprites.connection_g,
+                           sprites.connection_b);
   };
 
   if (p_near <= fade_lo) {
@@ -590,30 +610,28 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
 }
 
 void PlaybackPreviewView::draw_flat_note(DrawBatch& batch, const PreviewNoteInstance& note,
-                                         double now_sec, float z_bias) {
+                                         double now_sec, float z_bias, bool bottom_layer) {
   draw_flat_note_at(batch, note, static_cast<double>(note.start_ms) / 1000.0, now_sec, z_bias,
-                    /*use_jump_lanes=*/false);
+                    /*use_jump_lanes=*/false, bottom_layer);
 }
 
 void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteInstance& note,
                                             double beat_sec, double now_sec, float z_bias,
-                                            bool use_jump_lanes) {
+                                            bool use_jump_lanes, bool bottom_layer) {
   const NoteSprites sprites = sprites_for(skin_, note.note_type);
   NoteSprites head = sprites;
-  // Hold body end caps: scratch end uses purple; regular HoldEnd stays blue.
-  // Gold is only on CriticalHoldStart / ScratchCriticalHoldStart note rows.
+  // Hold body end caps: scratch end uses purple top; regular HoldEnd stays blue top.
   if (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) {
+    head.bottom = skin_.note_bottom;
     if (is_scratch_hold_body(note.note_type) && use_jump_lanes) {
-      head.left = skin_.note_purple_left;
-      head.middle = skin_.note_purple_middle;
-      head.right = skin_.note_purple_right;
+      head.top = skin_.note_purple_top;
     } else {
-      head.left = skin_.note_blue_left;
-      head.middle = skin_.note_blue_middle;
-      head.right = skin_.note_blue_right;
+      head.top = skin_.note_blue_top;
     }
   }
-  if (!head.middle) {
+
+  TextureInfo layer = bottom_layer ? head.bottom : head.top;
+  if (!layer) {
     return;
   }
 
@@ -630,17 +648,13 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
     end_lane = note.jump_scratch_lane_to;
   }
 
-  Quad q = geometry_.note_quad(lane, end_lane, std::clamp(p, 0.0f, 1.0f));
-  const float z = z_bias - static_cast<float>(beat_sec) * 1e-4f;
+  // Bottom/Top share plane footprint; Unity local Z = height, pinhole-projected.
+  const float unity_z = bottom_layer ? config_.note_unity_local_z_bottom
+                                     : config_.note_unity_local_z_top;
+  Quad q = geometry_.note_quad(lane, end_lane, std::clamp(p, 0.0f, 1.0f), unity_z);
+  const float z = z_bias + unity_z - static_cast<float>(beat_sec) * 1e-4f;
   const float alpha = note.is_grayed_out ? 0.55f : 1.0f;
-  const int32_t span = std::max(1, end_lane - lane + 1);
-
-  if (head.left && head.right) {
-    add_note_strips(batch, head.left, head.middle, head.right, q, config_.note_border_percent,
-                    span, z, alpha);
-  } else {
-    batch.add_sprite(head.middle, q, z, alpha);
-  }
+  add_sliced_note(batch, layer, q, skin_.note_slice_border_l, skin_.note_slice_border_r, z, alpha);
 }
 
 void PlaybackPreviewView::draw_tick_note(DrawBatch& batch, const PreviewNoteInstance& note,

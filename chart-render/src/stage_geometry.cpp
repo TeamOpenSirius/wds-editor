@@ -206,13 +206,24 @@ Quad StageGeometry::stage_quad() const {
   };
 }
 
-Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) const {
+float StageGeometry::note_half_height_percent(int32_t lane, float percent) const {
   const float unit = content_unit();
   const float w_ref = std::max(lane_width(lane, 1.0f), 1e-6f);
   const float w = lane_width(lane, percent);
   const float stage_h = std::max(stage_.h, 1e-6f);
   // note_height is authored in full-screen half-height units (=1); scale with content.
-  const float multiplier = config_.note_height * unit * 0.5f / stage_h * w / w_ref;
+  return config_.note_height * unit * 0.5f / stage_h * w / w_ref;
+}
+
+Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) const {
+  return note_quad(lane, end_lane, percent, 0.0f);
+}
+
+Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent,
+                              float unity_local_z) const {
+  const float unit = content_unit();
+  const float w_ref = std::max(lane_width(lane, 1.0f), 1e-6f);
+  const float multiplier = note_half_height_percent(lane, percent);
 
   const Vec2 c1 = lane_position(lane, percent - multiplier);
   const Vec2 c2 = lane_position(lane, percent + multiplier);
@@ -228,6 +239,25 @@ Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) con
   q.lt = c1 - Vec2{w1 * 0.5f - move1, 0.0f};
   q.rb = c4 + Vec2{w2 * 0.5f - move2, 0.0f};
   q.rt = c3 + Vec2{w1 * 0.5f - move1, 0.0f};
+
+  // Pinhole: sx independent of height; sy' = V.y + (sy - V.y) * (Ye - h) / Ye.
+  // Bottom sits on the stage plane (h=0). Top is Δz above Bottom toward the camera
+  // so it projects slightly toward the horizon — thin near-edge gold under the pink.
+  const float h = config_.note_unity_local_z_bottom - unity_local_z;  // Bottom 0, Top +0.09
+  if (std::abs(h) < 1e-6f) {
+    return q;
+  }
+  const float eye_y = std::max(config_.note_cam_height, h + 1e-3f);
+  const float factor = (eye_y - h) / eye_y;
+  const float vanish_y = stage_.t;
+
+  auto project_height = [&](Vec2 s) {
+    return Vec2{s.x, vanish_y + (s.y - vanish_y) * factor};
+  };
+  q.lb = project_height(q.lb);
+  q.lt = project_height(q.lt);
+  q.rb = project_height(q.rb);
+  q.rt = project_height(q.rt);
   return q;
 }
 

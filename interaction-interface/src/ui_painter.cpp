@@ -289,7 +289,7 @@ void UiPainter::sprite(const Rect& bounds, const wds::renderer::TextureInfo& tex
   if (!texture || bounds.w <= 0.0f || bounds.h <= 0.0f) {
     return;
   }
-  sprites_.push_back({bounds, texture, tint, z, flip_x});
+  sprites_.push_back({bounds, texture, tint, z, flip_x, false});
 }
 
 namespace {
@@ -349,7 +349,11 @@ void UiPainter::text(const Rect& bounds, const std::string& text, const Color& c
       glyph.v0 = q.v0;
       glyph.u1 = q.u1;
       glyph.v1 = q.v1;
-      sprite(q.dst, glyph, color, z);
+      if (q.dst.w <= 0.0f || q.dst.h <= 0.0f) {
+        continue;
+      }
+      // font_atlas: resolve GPU id at flush after sync_ui_font_texture.
+      sprites_.push_back({q.dst, glyph, color, z, false, true});
     }
     return;
   }
@@ -453,6 +457,7 @@ void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::Texture
     }
   };
   emit_rects(rects_);
+  const wds::renderer::TextureId font_id = FontAtlas::instance().texture().id;
   for (const auto& sprite : sprites_) {
     auto quad = rect_to_quad(sprite.bounds, framebuffer_width, framebuffer_height, screen);
     float u0 = sprite.texture.u0;
@@ -462,7 +467,13 @@ void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::Texture
     if (sprite.flip_x) {
       std::swap(u0, u1);
     }
-    batch.add_quad(sprite.texture.id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
+    const wds::renderer::TextureId tex_id =
+        sprite.font_atlas ? font_id : sprite.texture.id;
+    if (sprite.font_atlas &&
+        (font_id == wds::renderer::kInvalidTextureId || !FontAtlas::instance().texture())) {
+      continue;
+    }
+    batch.add_quad(tex_id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
                    sprite.tint.g, sprite.tint.b);
   }
   emit_rects(front_rects_);

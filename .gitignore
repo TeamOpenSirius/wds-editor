@@ -42,6 +42,9 @@ compile_commands.json
 /VulkanSDK/
 /sonolus-sirius-engine/
 
+# Local Unity/IL2CPP dumps (not part of the editor)
+/wds/
+
 # Local-only chart migration helpers (not shipped with the editor)
 /tools/migrate_wdschart_scratch_to_flick.py
 /tools/

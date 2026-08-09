@@ -7,18 +7,22 @@
 
 namespace wds::renderer {
 
-// Maps logical sprite names to files under skins/. Prefer Sirius-named assets;
-// fall back to Sonolus #NAME.png convention when present.
+// Official Sirius note skins under skins/ (Top/Bottom sliced sprites).
+// SkinCatalog::load fails hard if any required note asset is missing.
 struct SkinCatalog {
   TextureInfo stage;
   TextureInfo stage_background;
   TextureInfo judgeline;
 
-  TextureInfo note_red_left, note_red_middle, note_red_right;
-  TextureInfo note_yellow_left, note_yellow_middle, note_yellow_right;
-  TextureInfo note_blue_left, note_blue_middle, note_blue_right;
-  TextureInfo note_purple_left, note_purple_middle, note_purple_right;
+  // Shared bottom + per-color tops (official A_NotesBottom / A_*NotesTop).
+  TextureInfo note_bottom;
+  TextureInfo note_red_top;
+  TextureInfo note_yellow_top;
+  TextureInfo note_blue_top;
+  TextureInfo note_purple_top;
 
+  // Hold ribbons baked from Unity Shader Graphs/LongNotesSprite (UV.x profile).
+  // Hold ribbons are baked in SkinCatalog::load (LongNotesSprite UV profiles).
   TextureInfo hold_connection_blue;
   TextureInfo hold_connection_purple;
   TextureInfo sync_line;
@@ -27,13 +31,16 @@ struct SkinCatalog {
   TextureInfo tick_purple;
   TextureInfo hidden_line;
 
+  // Horizontal 3-slice borders for flat tops/bottoms (pixels on 268-wide sprites).
+  float note_slice_border_l = 65.0f;
+  float note_slice_border_r = 65.0f;
+
   // Fallback when color id has no matching Sirius Split Line skin.
   TextureInfo split_line_1;
   TextureInfo split_line_2;
   TextureInfo split_line_trans1;
   TextureInfo split_line_trans2;
 
-  // Official color-id bank (scratchLength → Sirius Split Line _id).
   SplitLineSkinBank split_lines;
 
   TextureInfo judge_auto;
@@ -49,9 +56,7 @@ struct SkinCatalog {
   TextureInfo effect_linear_star;
   TextureInfo effect_circular;
 
-  // Procedural soft gray split-line fallback (packed into the skin atlas).
   TextureInfo soft_split_line;
-  // Procedural soft white disk for UI circles (checkbox etc.) — 1 sprite vs N strips.
   TextureInfo soft_disk;
 
   bool load(TextureCache& cache, const std::string& skins_directory);

@@ -49,7 +49,12 @@ class StageGeometry {
   float judgeline_half_percent() const noexcept;
 
   Quad stage_quad() const;
+  // Half note height along approach axis (percent units), same as note_quad span.
+  float note_half_height_percent(int32_t lane, float percent) const;
+  // Flat note on the stage plane (local Z = 0).
   Quad note_quad(int32_t lane, int32_t end_lane, float percent) const;
+  // Same plane footprint, then pinhole-project Unity local Z as height above the plane.
+  Quad note_quad(int32_t lane, int32_t end_lane, float percent, float unity_local_z) const;
   Quad hold_body_quad(int32_t lane, int32_t end_lane, float percent_near,
                       float percent_far) const;
   Quad tick_quad(int32_t lane, int32_t end_lane, float percent) const;

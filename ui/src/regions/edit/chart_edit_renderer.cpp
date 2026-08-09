@@ -1,5 +1,6 @@
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
 
+#include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
@@ -10,24 +11,35 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace wds::ui {
 namespace {
 
 using wds::chart_editor::NoteType;
+using wds::chart_render::NoteVisualPass;
 
 using NoteSprites = wds::ui::NoteSprites;
 using wds::ui::sprites_for;
 
-enum class NoteDrawPass {
-  HoldRibbons,  // connection strips only — always under every other note layer
-  NoteCaps,     // heads / tails / taps / stars (hold bodies: tail only, never start head)
-};
+void fill_hold_tail_sprites(NoteSprites& tail, const wds::renderer::SkinCatalog& skin,
+                            bool scratch_hold) {
+  tail.bottom = skin.note_bottom;
+  if (scratch_hold) {
+    tail.top = skin.note_purple_top;
+    tail.is_scratch_family = true;
+  } else {
+    tail.top = skin.note_blue_top;
+    tail.is_scratch_family = false;
+  }
+}
 
 void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::SkinCatalog& skin,
                        const EditViewport& viewport, const wds::chart_editor::NotationNote& note,
                        float alpha, float z, float arrow_z, int fb_w, int fb_h,
-                       wds::renderer::ScreenBounds screen, NoteDrawPass pass) {
+                       wds::renderer::ScreenBounds screen, NoteVisualPass pass) {
   // Split-lane gimmicks are authoring markers — never draw as flat/hold note art.
   if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
   if (note.note_type == NoteType::HoldEighth || alpha <= 0.0f) return;
@@ -43,24 +55,24 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   const float inset = viewport.note_inset_px(note.width);
   const float x = viewport.x_at(note.lane) + inset;
   const float width = std::max(4.0f, viewport.lane_width(note.width) - inset * 2.0f);
-  const float border_percent = EditViewport::kNoteBorderPercent;
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
   const bool hold_body =
       note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
 
-  if (pass == NoteDrawPass::HoldRibbons) {
+  if (pass == NoteVisualPass::HoldBody) {
     if (!hold_body || !sprites.connection) return;
     const float top = std::min(y0, y1);
     const float bottom = std::max(y0, y1);
     const auto body = wds::interaction::rect_to_quad(
         {x, top, width, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
-    batch.add_sprite(sprites.connection, body, z, alpha);
+    batch.add_sprite(sprites.connection, body, z, alpha, sprites.connection_r, sprites.connection_g,
+                     sprites.connection_b);
     return;
   }
 
-  if (sprites.is_tick) {
-    if (!sprites.tick) return;
+  if (pass == NoteVisualPass::MidStar) {
+    if (!sprites.is_tick || !sprites.tick) return;
     // Tick art is square (112×112); size by note height and keep native aspect so
     // a 1-lane-wide quad does not flatten the star.
     const float aspect =
@@ -80,6 +92,10 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     return;
   }
 
+  if (sprites.is_tick) {
+    return;
+  }
+
   // ScratchHold end uses Sirius scratchLength span; body ribbon keeps note.lane/width.
   int32_t end_lane = note.lane;
   int32_t end_width = note.width;
@@ -94,8 +110,6 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   }
 
   // scratch_length: - left, + right, 0 both (match preview / Sirius).
-  // Bidirectional: pack from both edges and stop at the midline on wide notes;
-  // on 1-lane notes still force one arrow per direction (otherwise aw/2 < arrow).
   const auto draw_flick_arrows = [&](float y, float ax0, float aw) {
     if (!skin.scratch_arrow || aw <= 1.0f) return;
     const float arrow_h = note_h * 0.95f;
@@ -124,7 +138,6 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
         add_arrow(ax, false);
         ++drawn;
       }
-      // 1-lane bidirectional: midline cull would skip everything — keep one left arrow.
       if (drawn == 0) add_arrow(ax0, false);
     }
     if (sl >= 0) {
@@ -140,48 +153,67 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     }
   };
 
-  const auto draw_flat = [&](const NoteSprites& spr, float y, float note_z, bool with_arrow,
-                             int32_t draw_lane, int32_t draw_width) {
-    if (!spr.middle) return;
+  const bool draw_bottom = pass == NoteVisualPass::FlatBottom;
+  const bool draw_top = pass == NoteVisualPass::FlatTop;
+  const bool draw_arrow = pass == NoteVisualPass::Arrow;
+  if (!draw_bottom && !draw_top && !draw_arrow) return;
+
+  const auto draw_flat = [&](const NoteSprites& spr, float y, int32_t draw_lane,
+                             int32_t draw_width, bool with_arrow_art) {
     const float draw_inset = viewport.note_inset_px(draw_width);
     const float draw_x = viewport.x_at(draw_lane) + draw_inset;
     const float draw_w = std::max(4.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
     const auto head = wds::interaction::rect_to_quad({draw_x, y - note_h * 0.5f, draw_w, note_h},
                                                      fb_w, fb_h, screen);
-    if (spr.left || spr.right) {
-      wds::renderer::add_note_strips(batch, spr.left, spr.middle, spr.right, head, border_percent,
-                                     std::max(1, draw_width), note_z, alpha);
-    } else {
-      batch.add_sprite(spr.middle, head, note_z, alpha);
+    if (draw_bottom) {
+      if (!spr.bottom) return;
+      wds::renderer::add_sliced_note(batch, spr.bottom, head, skin.note_slice_border_l,
+                                     skin.note_slice_border_r, z, alpha);
+      return;
     }
-    if (with_arrow) draw_flick_arrows(y, draw_x, draw_w);
+    if (draw_top) {
+      if (!spr.top) return;
+      wds::renderer::add_sliced_note(batch, spr.top, head, skin.note_slice_border_l,
+                                     skin.note_slice_border_r, z, alpha);
+      return;
+    }
+    if (draw_arrow && with_arrow_art) {
+      draw_flick_arrows(y, draw_x, draw_w);
+    }
   };
 
   NoteSprites head = sprites;
   NoteSprites tail = sprites;
   const bool scratch_hold = hold_body && wds::chart_editor::is_scratch_hold_body(note.note_type);
   if (hold_body) {
-    // Hold body never draws a start head — paired head notes own that art; missing head
-    // means an empty start (authoring-correct). Caps pass only draws the tail / flick end.
-    if (scratch_hold) {
-      tail = {skin.note_purple_left, skin.note_purple_middle, skin.note_purple_right,
-              sprites.connection, {}, true};
-    } else {
-      tail = {skin.note_blue_left, skin.note_blue_middle, skin.note_blue_right, sprites.connection,
-              {}, false};
-    }
+    // Hold body never draws a start head — paired head notes own that art.
+    fill_hold_tail_sprites(tail, skin, scratch_hold);
+    tail.connection = sprites.connection;
+    tail.connection_r = sprites.connection_r;
+    tail.connection_g = sprites.connection_g;
+    tail.connection_b = sprites.connection_b;
   }
 
   if (hold_body) {
     if (note.end_tick > note.start_tick) {
-      draw_flat(tail, y1, z, tail.is_scratch_family, end_lane, end_width);
+      draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   } else {
-    draw_flat(head, y0, z, head.is_scratch_family, note.lane, note.width);
+    draw_flat(head, y0, note.lane, note.width, head.is_scratch_family);
     if (note.end_tick > note.start_tick) {
-      draw_flat(tail, y1, z, tail.is_scratch_family, end_lane, end_width);
+      draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   }
+}
+
+std::vector<size_t> make_edit_draw_order(
+    const std::vector<wds::chart_editor::NotationNote>& notes) {
+  std::vector<size_t> order;
+  wds::chart_render::build_draw_order_indices(
+      notes.size(), order,
+      [&](size_t i) { return static_cast<int64_t>(notes[i].start_tick); },
+      [&](size_t i) { return static_cast<int32_t>(notes[i].note_type); });
+  return order;
 }
 
 }  // namespace
@@ -524,33 +556,29 @@ void ChartEditRenderer::append_skinned_notes(
     return end >= tick_lo && note.start_tick <= tick_hi;
   };
 
-  auto draw_ribbons = [&] {
-    for (const auto& note : notes) {
-      if (!in_window(note)) continue;
-      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
-      draw_skinned_note(batch, skin, viewport, note, alpha, layer_z(depth_.hold_body, note.start_tick),
-                        depth_.flick_arrow, fb_w, fb_h, screen, NoteDrawPass::HoldRibbons);
-    }
-  };
-  auto draw_caps = [&] {
-    for (const auto& note : notes) {
-      if (!in_window(note)) continue;
-      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
-      const bool tick = note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound;
-      const float base = tick ? depth_.mid_star : depth_.note;
-      draw_skinned_note(batch, skin, viewport, note, alpha, layer_z(base, note.start_tick),
-                        layer_z(depth_.flick_arrow, note.start_tick), fb_w, fb_h, screen,
-                        NoteDrawPass::NoteCaps);
-    }
-  };
+  const std::vector<size_t> order = make_edit_draw_order(notes);
 
-  // depthWrite is off → draw order is stacking. Sort passes by configured depth.
-  if (depth_.hold_body <= depth_.note) {
-    draw_ribbons();
-    draw_caps();
-  } else {
-    draw_caps();
-    draw_ribbons();
+  // Edit is a flat 2D view: skip FlatBottom (preview keeps the pseudo-3D sandwich).
+  // Within each pass, iterate GenerateNoteId order reversed (later draw wins).
+  const struct {
+    NoteVisualPass pass;
+    float base_z;
+  } passes[] = {
+      {NoteVisualPass::HoldBody, depth_.hold_body},
+      {NoteVisualPass::FlatTop, depth_.note},
+      {NoteVisualPass::MidStar, depth_.mid_star},
+      {NoteVisualPass::Arrow, depth_.flick_arrow},
+  };
+  for (const auto& layer : passes) {
+    for (size_t idx : order) {
+      const auto& note = notes[idx];
+      if (!in_window(note)) continue;
+      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
+      const float z = layer_z(layer.base_z, note.start_tick);
+      draw_skinned_note(batch, skin, viewport, note, alpha, z,
+                        layer_z(depth_.flick_arrow, note.start_tick), fb_w, fb_h, screen,
+                        layer.pass);
+    }
   }
 }
 
@@ -565,25 +593,19 @@ void ChartEditRenderer::append_skinned_ghosts(
   auto draw_ghost = [&](const EditGhost& g) {
     if (!g.visible) return;
     const auto& n = g.note;
-    auto ribbons = [&] {
-      draw_skinned_note(batch, skin, viewport, n, g.alpha,
-                        layer_z(depth_.ghost_hold_body, n.start_tick),
-                        layer_z(depth_.ghost_flick_arrow, n.start_tick), fb_w, fb_h, screen,
-                        NoteDrawPass::HoldRibbons);
+    const struct {
+      NoteVisualPass pass;
+      float base_z;
+    } passes[] = {
+        {NoteVisualPass::HoldBody, depth_.ghost_hold_body},
+        {NoteVisualPass::FlatTop, depth_.ghost_note},
+        {NoteVisualPass::MidStar, depth_.ghost_mid_star},
+        {NoteVisualPass::Arrow, depth_.ghost_flick_arrow},
     };
-    auto caps = [&] {
-      const bool tick = n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound;
-      const float base = tick ? depth_.ghost_mid_star : depth_.ghost_note;
-      draw_skinned_note(batch, skin, viewport, n, g.alpha, layer_z(base, n.start_tick),
+    for (const auto& layer : passes) {
+      draw_skinned_note(batch, skin, viewport, n, g.alpha, layer_z(layer.base_z, n.start_tick),
                         layer_z(depth_.ghost_flick_arrow, n.start_tick), fb_w, fb_h, screen,
-                        NoteDrawPass::NoteCaps);
-    };
-    if (depth_.ghost_hold_body <= depth_.ghost_note) {
-      ribbons();
-      caps();
-    } else {
-      caps();
-      ribbons();
+                        layer.pass);
     }
   };
   if (ghost) draw_ghost(*ghost);

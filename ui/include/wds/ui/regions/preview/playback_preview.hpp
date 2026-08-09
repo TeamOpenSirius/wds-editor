@@ -98,10 +98,16 @@ class PlaybackPreviewView {
                       const wds::chart_editor::PreviewNoteInstance& note, double now_sec);
   void draw_flat_note(wds::renderer::DrawBatch& batch,
                       const wds::chart_editor::PreviewNoteInstance& note, double now_sec,
-                      float z_bias);
+                      float z_bias, bool bottom_layer = false);
   void draw_flat_note_at(wds::renderer::DrawBatch& batch,
                          const wds::chart_editor::PreviewNoteInstance& note, double beat_sec,
-                         double now_sec, float z_bias, bool use_jump_lanes = true);
+                         double now_sec, float z_bias, bool use_jump_lanes = true,
+                         bool bottom_layer = false);
+  // Flat caps only (no ticks / hold ribbons) for bottom or top sandwich pass.
+  void draw_note_flat_layer(wds::renderer::DrawBatch& batch,
+                            const wds::chart_editor::PreviewNoteInstance& note,
+                            const wds::chart_editor::PreviewSnapshot& snapshot,
+                            bool bottom_layer);
   void draw_tick_note(wds::renderer::DrawBatch& batch,
                       const wds::chart_editor::PreviewNoteInstance& note, double now_sec);
   void draw_arrows(wds::renderer::DrawBatch& batch,
@@ -127,7 +133,7 @@ class PlaybackPreviewView {
   // Mute SFX, clear played keys, latch mono clock to raw_us (pause / seek / scrub).
   void release_sfx_clock_control(const wds::chart_editor::PreviewSnapshot& snapshot,
                                  int64_t raw_us, bool playing);
-  // Rebuild start_ms-desc index when snapshot.revision changes; filter visible notes.
+  // Rebuild GenerateNoteId-reversed draw index when snapshot.revision changes.
   void prepare_note_draw_order(const wds::chart_editor::PreviewSnapshot& snapshot);
 
   wds::renderer::PreviewVisualConfig config_;
@@ -138,8 +144,8 @@ class PlaybackPreviewView {
   wds::audio::HitSfxPlayer hit_sfx_;
   wds::renderer::DrawBatch batch_;
   wds::renderer::DrawBatch additive_batch_;
-  // Indices into snapshot.notes sorted by start_ms descending (stable across frames).
-  std::vector<size_t> notes_by_start_desc_;
+  // Indices into snapshot.notes: GenerateNoteId order reversed (bottom-most first).
+  std::vector<size_t> notes_draw_indices_;
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
   uint64_t notes_order_revision_ = std::numeric_limits<uint64_t>::max();
   bool ready_ = false;

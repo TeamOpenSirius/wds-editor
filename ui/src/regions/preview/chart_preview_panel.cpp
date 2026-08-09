@@ -242,6 +242,7 @@ void ChartPreviewPanel::shutdown() {
   }
   auto& font = wds::interaction::FontAtlas::instance();
   font.clear_gpu_texture();
+  flush_retired_font_textures();
   if (ui_font_texture_) {
     preview_.vulkan().destroy_texture(ui_font_texture_.id);
     ui_font_texture_ = {};
@@ -283,14 +284,29 @@ void ChartPreviewPanel::sync_ui_font_texture() {
   ensure_ui_font_scale();
   auto& font = wds::interaction::FontAtlas::instance();
   if (!font.pixels_dirty() || font.pixels() == nullptr) return;
+  // Retire the previous atlas instead of destroying it immediately. Earlier
+  // DrawBatches in this frame may still reference that TextureId through submit.
   if (ui_font_texture_) {
-    preview_.vulkan().destroy_texture(ui_font_texture_.id);
+    retired_font_textures_.push_back(ui_font_texture_);
     ui_font_texture_ = {};
   }
   ui_font_texture_ = preview_.vulkan().create_texture_rgba(font.pixels(), font.atlas_width(),
                                                            font.atlas_height());
   font.set_gpu_texture(ui_font_texture_);
   font.clear_pixels_dirty();
+}
+
+void ChartPreviewPanel::flush_retired_font_textures() {
+  if (!ready_) {
+    retired_font_textures_.clear();
+    return;
+  }
+  for (auto& tex : retired_font_textures_) {
+    if (tex) {
+      preview_.vulkan().destroy_texture(tex.id);
+    }
+  }
+  retired_font_textures_.clear();
 }
 
 void ChartPreviewPanel::tick(int64_t delta_us) {
