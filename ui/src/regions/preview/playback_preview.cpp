@@ -3,6 +3,7 @@
 
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
+#include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
@@ -590,7 +591,7 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
     return base_alpha * std::clamp(1.0f - (p - fade_lo) / band, 0.0f, 1.0f);
   };
 
-  // Cap size follows flat-note screen height at the near end (Unity: border_px / PPU).
+  // Cap size follows flat-note height in NDC (shared border_scale_from_flat_height).
   auto flat_border_scale = [&](float p) {
     const Quad ref = geometry_.note_quad(note.lane, note.end_lane, std::clamp(p, 0.0f, 1.0f));
     const float hx0 = ref.lt.x - ref.lb.x;
@@ -599,7 +600,7 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
     const float hy1 = ref.rt.y - ref.rb.y;
     const float dh =
         0.5f * (std::sqrt(hx0 * hx0 + hy0 * hy0) + std::sqrt(hx1 * hx1 + hy1 * hy1));
-    return dh / std::max(1.0f, skin_.note_slice_tex_h);
+    return wds::chart_render::border_scale_from_flat_height(dh, skin_);
   };
 
   // hold_body_quad: lb/rb at percent_near, lt/rt at percent_far.
@@ -634,14 +635,10 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
                                             bool use_jump_lanes, bool bottom_layer) {
   const NoteSprites sprites = sprites_for(skin_, note.note_type);
   NoteSprites head = sprites;
-  // Hold body end caps: scratch end uses purple top; regular HoldEnd stays blue top.
+  // Hold body end caps: shared apply_hold_tail_sprites (scratch purple / hold blue).
   if (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) {
-    head.bottom = skin_.note_bottom;
-    if (is_scratch_hold_body(note.note_type) && use_jump_lanes) {
-      head.top = skin_.note_purple_top;
-    } else {
-      head.top = skin_.note_blue_top;
-    }
+    const bool scratch_tail = is_scratch_hold_body(note.note_type) && use_jump_lanes;
+    apply_hold_tail_sprites(head, skin_, scratch_tail);
   }
 
   TextureInfo layer = bottom_layer ? head.bottom : head.top;
@@ -732,46 +729,23 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
     return;
   }
 
-  // scratchLength: + right only, - left only, 0 both (outward) with a center gap.
-  // Match Sirius utils.cpp: bidirectional uses half density; directional uses full.
-  const float sonolus_num =
+  // Animated arrows (ArrowStyle::Animated); sides/density via note_visual_policy.
+  wds::chart_render::AnimatedArrowLayoutParams params;
+  params.span_left = L;
+  params.span_right = R;
+  params.arrow_w = W;
+  params.scratch_length = note.scratch_length;
+  params.sonolus_num =
       w * static_cast<float>(end_lane - lane + 1) * config_.arrow_percent / W;
-  const int32_t sl = note.scratch_length;
-  const float num = std::max(1.0f, (sl == 0) ? sonolus_num * 0.5f : sonolus_num);
-  const float n = num;
-
-  auto arrow_alpha = [&](float i) {
-    const float phase = std::fmod(i + static_cast<float>(anim_time_sec) * config_.arrow_speed, n);
-    return 1.0f - 0.8f * phase / n;
-  };
-
-  if (sl <= 0) {
-    for (float i = 1.0f; i < n; i += 1.0f) {
-      const float x0 = L + (i - 1.0f) * W * 0.5f;
-      const float x1 = L + (i + 1.0f) * W * 0.5f;
-      // Stop before the far (start) end hangs past the note's right edge.
-      if (x1 > R) {
-        break;
-      }
-      batch.add_sprite(skin_.scratch_arrow,
-                       Quad{{x0, c1.y}, {x0, c1.y + H * 0.5f}, {x1, c1.y + H * 0.5f}, {x1, c1.y}},
-                       0.2f, arrow_alpha(i));
-    }
-  }
-  if (sl >= 0) {
-    for (float i = 1.0f; i < n; i += 1.0f) {
-      // Reverse vertex X → horizontal UV flip (Sirius drawRightArrow).
-      const float rx0 = R - (i - 1.0f) * W * 0.5f;
-      const float rx1 = R - (i + 1.0f) * W * 0.5f;
-      // Stop before the far (start) end hangs past the note's left edge.
-      if (rx1 < L) {
-        break;
-      }
-      batch.add_sprite(
-          skin_.scratch_arrow,
-          Quad{{rx0, c2.y}, {rx0, c2.y + H * 0.5f}, {rx1, c2.y + H * 0.5f}, {rx1, c2.y}}, 0.2f,
-          arrow_alpha(i));
-    }
+  params.anim_time_sec = static_cast<float>(anim_time_sec);
+  params.arrow_speed = config_.arrow_speed;
+  for (const auto& inst : wds::chart_render::layout_animated_scratch_arrows(params)) {
+    const float y = inst.flip_x ? c2.y : c1.y;
+    const float x0 = inst.x0;
+    const float x1 = inst.x1;
+    batch.add_sprite(skin_.scratch_arrow,
+                     Quad{{x0, y}, {x0, y + H * 0.5f}, {x1, y + H * 0.5f}, {x1, y}}, 0.2f,
+                     inst.alpha);
   }
 }
 

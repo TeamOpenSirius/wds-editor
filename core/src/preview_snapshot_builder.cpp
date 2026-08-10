@@ -65,13 +65,10 @@ bool PreviewSnapshotBuilder::is_concurrent_line_visible(const ConcurrentLineNote
 
 void PreviewSnapshotBuilder::apply_gimmick_position(PreviewNoteInstance& instance,
                                                     const NotationNote& note) const {
-  // ScratchHoldEnd always uses scratchLength span (Sirius); JumpScratch gimmick too.
-  if (is_scratch_hold_body(note.note_type)) {
-    const auto range = get_scratch_end_lane_range(note);
-    instance.apply_jump_scratch(true, range.first, range.second);
-  } else if (is_jump_scratch(note.gimmick_type)) {
-    const auto range = get_jump_scratch_lane_range(note);
-    instance.apply_jump_scratch(true, range.first, range.second);
+  // Same resolve_end_lane_span as edit draw (ScratchHold / JumpScratch / body).
+  if (is_scratch_hold_body(note.note_type) || is_jump_scratch(note.gimmick_type)) {
+    const auto [lane, width] = resolve_end_lane_span(note);
+    instance.apply_jump_scratch(true, lane, lane + width - 1);
   } else {
     instance.apply_jump_scratch(false, 0, 0);
   }

@@ -1578,6 +1578,35 @@ void test_scratch_hold_end_lane_encoding() {
   CHECK(!scratch_hold_end_cover_representable(note, 1, 7));  // both sides
 }
 
+void test_resolve_end_lane_span_matches_scratch_and_jump() {
+  NotationNote scratch = make_tap(0, 3);
+  scratch.width = 2;
+  scratch.end_tick = 960;
+  scratch.note_type = NoteType::ScratchHold;
+  set_scratch_hold_end_lanes(scratch, 3, 7);
+  auto span = resolve_end_lane_span(scratch);
+  CHECK_EQ(span.first, 3);
+  CHECK_EQ(span.second, 5);  // lanes 3..7
+
+  NotationNote jump = make_tap(0, 2);
+  jump.width = 2;  // body 2-3
+  jump.end_tick = 480;
+  jump.note_type = NoteType::Hold;
+  jump.gimmick_type = GimmickType::JumpScratch;
+  jump.scratch_length = 4;  // right span from lane
+  span = resolve_end_lane_span(jump);
+  const auto raw = get_jump_scratch_lane_range(jump);
+  CHECK_EQ(span.first, std::min(raw.first, raw.second));
+  CHECK_EQ(span.second, std::abs(raw.second - raw.first) + 1);
+
+  NotationNote plain = make_tap(0, 5);
+  plain.width = 3;
+  plain.note_type = NoteType::Hold;
+  span = resolve_end_lane_span(plain);
+  CHECK_EQ(span.first, 5);
+  CHECK_EQ(span.second, 3);
+}
+
 void test_snap_scratch_chain_next_lane_splits_illegal_zone() {
   NotationNote prev = make_tap(0, 3);
   prev.width = 2;  // lanes 3-4
@@ -3307,6 +3336,7 @@ int main() {
   test_concurrent_lines_multi_press_only();
   test_hold_head_pairs_but_attached_excludes_head();
   test_scratch_hold_end_lane_encoding();
+  test_resolve_end_lane_span_matches_scratch_and_jump();
   test_snap_scratch_chain_next_lane_splits_illegal_zone();
   test_scratch_chain_joint_direction();
   test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/chart_render/skin_catalog.hpp>
 #include <wds/core/types.hpp>
 #include <wds/renderer/draw_batch.hpp>
@@ -18,6 +19,15 @@ struct NoteSprites {
   bool is_scratch_family = false;
   bool is_tick = false;
 };
+
+// Hold body end caps (edit + preview). Preserves connection tint from `base` when set.
+inline void apply_hold_tail_sprites(NoteSprites& tail, const wds::renderer::SkinCatalog& skin,
+                                    bool scratch_hold) {
+  const auto layers = wds::chart_render::hold_tail_layers(skin, scratch_hold);
+  tail.bottom = layers.bottom;
+  tail.top = layers.top;
+  tail.is_scratch_family = layers.is_scratch_family;
+}
 
 inline NoteSprites sprites_for(const wds::renderer::SkinCatalog& skin,
                                wds::chart_editor::NoteType type) {
