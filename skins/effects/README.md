@@ -8,13 +8,13 @@ Official Default Bomb at `GameTapEffectType.Light` (BomSquare + BomFlare only).
 
 - `{normal,critical,scratch,hold,sound}/square.png` — hollow frame (`BombEffectDefault_3`)
 - `{normal,critical,scratch,hold,sound}/flare.png` — soft ring halo (`BombEffectDefault_10`); drawn only for Critical/Flick.
-  Recentering note: Unity sprite pivot was ≈(0.514, 0.483); plates were re-aligned so alpha
-  centroid sits on the geometric center (engine draws UV mid = center, no code nudge)..
-  Recentering note: Unity sprite pivot was ≈(0.514, 0.483); plates were re-aligned so alpha
-  centroid sits on the geometric center (engine draws UV mid = center, no code nudge).
+  Recentering: Unity sprite `m_Pivot` `{x: 0.51368976, y: 0.48324347}` is placed on the
+  plate geometric center (engine draws UV mid = bomb anchor). Do **not** use alpha-centroid
+  recentering — that left the visual ring ~1% right of the judgeline. Do **not** map
+  `ParticleSystemRenderer.pivot` `{x:-0.015,y:0.267}` into stage Y (wrong space for 2D).
 - `meta.json` — duration / slice hints
 
-Source: `wds-resources/.../Texture2D/BombEffectDefault_7.png`.
+Source: `wds-resources/.../Texture2D/BombEffectDefault_7.png` + `Sprite/BombEffectDefault_10.asset`.
 
 ## split/lines/
 

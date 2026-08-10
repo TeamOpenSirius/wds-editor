@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -914,8 +915,24 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
 
 void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapshot& snapshot) {
   const double now = preview_now_sec(snapshot);
-  const float duration = config_.effect_duration;
-  const double duration_d = static_cast<double>(duration);
+  const double duration_d = static_cast<double>(config_.effect_duration);
+  // BombControllerBase.SimulationHighSpeed — LaneEffectController.OnBomb speeds up every
+  // tracked bomb whose CurrentStartMilliseconds differs from the new hit (not lane-based).
+  constexpr float kSimHighSpeed = 3.0f;
+
+  struct BombEvt {
+    double t0 = 0.0;
+    int64_t key_ms = 0;  // CurrentStartMilliseconds
+    int32_t lane = 0;
+    int32_t end_lane = 0;
+    NoteType type = NoteType::Normal;
+    int hit_fx_role = 0;
+    bool jump_flare = false;
+    float z = 0.95f;
+  };
+
+  std::vector<BombEvt> evts;
+  evts.reserve(snapshot.notes.size() * 2);
 
   for (const auto& note : snapshot.notes) {
     const bool hold_body = is_hold_body(note.note_type);
@@ -927,18 +944,18 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
           note.note_type == NoteType::Critical ||
           note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
-        const double age = now - static_cast<double>(note.start_ms) / 1000.0;
-        if (age >= 0.0 && age < duration_d) {
-          draw_hit_effect_at(batch, note.lane, note.end_lane, note.note_type,
-                             static_cast<float>(age), 0.95f, 1.0f, 0);
+        const double t0 = static_cast<double>(note.start_ms) / 1000.0;
+        if (t0 <= now) {
+          evts.push_back(BombEvt{t0, note.start_ms, note.lane, note.end_lane, note.note_type, 0,
+                                 false, 0.95f});
         }
       }
     }
 
     // Tail: HoldBomb; JumpScratch ends also get ScratchBomb flare (same as Flick).
     if (with_tail && note.end_ms > note.start_ms) {
-      const double age_end = now - static_cast<double>(note.end_ms) / 1000.0;
-      if (age_end >= 0.0 && age_end < duration_d) {
+      const double t0 = static_cast<double>(note.end_ms) / 1000.0;
+      if (t0 <= now) {
         const bool jump_flare =
             note.uses_jump_scratch_position || is_jump_scratch(note.gimmick_type);
         int32_t fx_lane = note.lane;
@@ -947,10 +964,37 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
           fx_lane = note.jump_scratch_lane_from;
           fx_end = note.jump_scratch_lane_to;
         }
-        draw_hit_effect_at(batch, fx_lane, fx_end, note.note_type,
-                           static_cast<float>(age_end), 0.96f, 1.0f, 1, jump_flare);
+        evts.push_back(BombEvt{t0, note.end_ms, fx_lane, fx_end, note.note_type, 1, jump_flare,
+                               0.96f});
       }
     }
+  }
+
+  for (const auto& evt : evts) {
+    const double wall_age = now - evt.t0;
+    // Retail keeps the pooled instance until FireTime (wall-clock _animationTime).
+    if (wall_age < 0.0 || wall_age >= duration_d) {
+      continue;
+    }
+
+    // Earliest later bomb with a different startMs → ChangeSpeed(3) (TrySpeedUp).
+    double speedup_at = std::numeric_limits<double>::infinity();
+    for (const auto& other : evts) {
+      if (other.key_ms == evt.key_ms) {
+        continue;  // same-ms chord: stay 1x
+      }
+      if (other.t0 > evt.t0 && other.t0 <= now && other.t0 < speedup_at) {
+        speedup_at = other.t0;
+      }
+    }
+
+    double effective_age = wall_age;
+    if (speedup_at <= now) {
+      effective_age = (speedup_at - evt.t0) + (now - speedup_at) * static_cast<double>(kSimHighSpeed);
+    }
+
+    draw_hit_effect_at(batch, evt.lane, evt.end_lane, evt.type, static_cast<float>(effective_age),
+                       evt.z, 1.0f, evt.hit_fx_role, evt.jump_flare);
   }
 }
 
@@ -968,9 +1012,10 @@ struct BombFxSpec {
   bool flare;
 };
 
-// Flare above judgeline. Scratch pivot≈0.017 is too flat; Critical≈0.267 floats away.
-// Mid bias keeps the ring clearly above the line without floating away.
-constexpr float kFlarePivotY = 0.10f;
+// Flare/Square share OnBomb lane-span midpoint on the judgeline (Y=0,Z=0 in
+// retail). flare.png is recentered so Unity Sprite BombEffectDefault_10
+// m_Pivot≈(0.514,0.483) sits on UV mid (skins/effects README). Do NOT map
+// ParticleSystemRenderer.pivot (±0.267×size) into stage Y.
 
 BombFxSpec bomb_fx_spec_for(NoteType type, int hit_fx_role, bool jump_scratch_flare) noexcept {
   // JumpScratch ScratchHoldEnd → ScratchBomb with flare (retail keeps BomFlare in Light).
@@ -1011,12 +1056,10 @@ BombFxSpec bomb_fx_spec_for(NoteType type, int hit_fx_role, bool jump_scratch_fl
 // BombController / *BombEffect.prefab (Light: Square [+ Flare]).
 constexpr float kBombLaneWidthUnity = 0.925f;
 // Square: lengthInSec 0.1, rate 80, startLifetime ∈ [0.3, 0.5] (RandomBetweenTwoConstants).
-// Prefer the shorter half of that range — long-lived max particles + Y growth read as
-// a slow fade on our additive 2D path.
 constexpr float kSquareEmitSec = 0.1f;
 constexpr float kSquareEmitRate = 80.0f;
 constexpr float kSquareLifeMin = 0.3f;
-constexpr float kSquareLifeMax = 0.42f;
+constexpr float kSquareLifeMax = 0.5f;
 constexpr float kFlareLife = 0.6f;
 // ColorModule atime1 = 26214/65535 ≈ 0.4 (hold), then → 0 at life end.
 constexpr float kColorFadeStart = 26214.0f / 65535.0f;
@@ -1032,24 +1075,96 @@ float lerp01(float a, float b, float t) noexcept {
 float square_size_x_mul(float u) noexcept { return lerp01(1.0f, 1.2f, u); }
 float square_size_y_mul(float u) noexcept { return lerp01(1.0f, 1.65f, u); }
 
-// Additive sprites need a steeper alpha falloff than the linear ColorModule ramp to
-// match retail's perceived fade (linear α on additive reads as a long glow).
-float particle_alpha_mul(float u) noexcept {
+// Official ColorModule alpha keys (atime 0 / 26214 / 65535): hold until ~0.4, then linear → 0.
+float color_module_alpha(float u) noexcept {
   if (u <= kColorFadeStart) {
     return 1.0f;
   }
   const float t = (u - kColorFadeStart) / (1.0f - kColorFadeStart);
-  const float lin = 1.0f - std::clamp(t, 0.0f, 1.0f);
-  return lin * lin;
+  return 1.0f - std::clamp(t, 0.0f, 1.0f);
 }
 
-// BomFlare SizeModule (Curve): 0 → ~0.685 @0.133 → 1.
+struct FlareGradRgb {
+  float r, g, b;
+};
+
+// BomFlare ColorModule maxGradient color keys (ctime/65535). Alpha is separate (above).
+// CriticalBombEffect / ScratchBombEffect — RGB darkens hard after mid-life; using a flat
+// note tint instead left the additive ring bright far longer than retail.
+FlareGradRgb flare_color_module_rgb(float u, bool scratch) noexcept {
+  u = std::clamp(u, 0.0f, 1.0f);
+  // times: 0, 0.2, 0.4, 1.0
+  struct Key {
+    float t, r, g, b;
+  };
+  const Key* keys = nullptr;
+  constexpr Key kCritical[] = {
+      {0.0f, 1.0f, 0.603905f, 0.3176471f},
+      {0.2f, 1.0f, 0.9862867f, 0.7783019f},
+      {0.4f, 1.0f, 0.6039216f, 0.31764707f},
+      {1.0f, 1.0f, 0.22532359f, 0.0f},
+  };
+  constexpr Key kScratch[] = {
+      {0.0f, 0.6862745f, 0.25882354f, 1.0f},
+      {0.2f, 0.9934902f, 0.7877358f, 1.0f},
+      {0.4f, 0.68543196f, 0.25943398f, 1.0f},
+      {1.0f, 0.43529412f, 0.0f, 1.0f},
+  };
+  keys = scratch ? kScratch : kCritical;
+  if (u <= keys[0].t) {
+    return {keys[0].r, keys[0].g, keys[0].b};
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (u <= keys[i + 1].t) {
+      const float s = (u - keys[i].t) / (keys[i + 1].t - keys[i].t);
+      return {lerp01(keys[i].r, keys[i + 1].r, s), lerp01(keys[i].g, keys[i + 1].g, s),
+              lerp01(keys[i].b, keys[i + 1].b, s)};
+    }
+  }
+  return {keys[3].r, keys[3].g, keys[3].b};
+}
+
+// Unity AnimationCurve Hermite between two keys (slopes are dValue/dTime).
+float curve_hermite(float t, float t0, float t1, float p0, float p1, float out_slope0,
+                    float in_slope1) noexcept {
+  const float dt = t1 - t0;
+  if (dt <= 1e-8f) {
+    return p1;
+  }
+  const float u = (t - t0) / dt;
+  const float u2 = u * u;
+  const float u3 = u2 * u;
+  const float h00 = 2.0f * u3 - 3.0f * u2 + 1.0f;
+  const float h10 = u3 - 2.0f * u2 + u;
+  const float h01 = -2.0f * u3 + 3.0f * u2;
+  const float h11 = u3 - u2;
+  return h00 * p0 + h10 * (out_slope0 * dt) + h01 * p1 + h11 * (in_slope1 * dt);
+}
+
+// BomFlare SizeModule X curve (Critical/Scratch prefab identical; separateAxes=0).
+// Keys: (time, value, inSlope, outSlope) — linear lerp was ~150–200ms slower mid-growth.
 float flare_size_mul(float u) noexcept {
   u = std::clamp(u, 0.0f, 1.0f);
-  if (u < 0.133f) {
-    return (0.685f / 0.133f) * u;
+  constexpr float kT0 = 0.0f;
+  constexpr float kV0 = 0.0f;
+  constexpr float kOut0 = 13.959289f;
+  constexpr float kT1 = 0.13296969f;
+  constexpr float kV1 = 0.6850656f;
+  constexpr float kIn1 = 1.0710392f;
+  constexpr float kOut1 = 1.0710392f;
+  constexpr float kT2 = 1.0f;
+  constexpr float kV2 = 1.0f;
+  constexpr float kIn2 = 0.0f;
+  if (u <= kT0) {
+    return kV0;
   }
-  return lerp01(0.685f, 1.0f, (u - 0.133f) / 0.867f);
+  if (u >= kT2) {
+    return kV2;
+  }
+  if (u < kT1) {
+    return curve_hermite(u, kT0, kT1, kV0, kV1, kOut0, kIn1);
+  }
+  return curve_hermite(u, kT1, kT2, kV1, kV2, kOut1, kIn2);
 }
 
 }  // namespace
@@ -1100,8 +1215,8 @@ void PlaybackPreviewView::draw_hit_effect_at(DrawBatch& batch, int32_t lane, int
         const float start_y_unity = lerp01(0.5f, 0.68f, static_cast<float>((i * 2) % 5) / 4.0f);
         const float width_scale = start_x_frac * square_size_x_mul(u);
         const float height_screen = start_y_unity * unity_to_screen * square_size_y_mul(u);
-        // startColor.a=1; ~8 additive layers.
-        const float a = particle_alpha_mul(u) * alpha_scale * 0.55f;
+        // Official ColorModule linear × startColor.a=1 (~8 additive layers).
+        const float a = color_module_alpha(u) * alpha_scale;
         if (a < 0.02f) {
           continue;
         }
@@ -1112,44 +1227,37 @@ void PlaybackPreviewView::draw_hit_effect_at(DrawBatch& batch, int32_t lane, int
     }
 
     if (fx.flare && flare && age_sec < kFlareLife) {
-      // Axis-aligned disc at the lane-span / judgeline center (same as BomSquare).
-      // No optical nudge — any tiny L/R bias is in the official flare plate itself.
+      // Axis-aligned disc at the lane-span / judgeline center. Radius is fixed Unity
+      // startSize=8 (Initialize never scales _bombFlare by laneCount / note width).
       constexpr float kHitP = 1.0f;
       const Vec2 c_l = geometry_.lane_position(lane, kHitP);
       const Vec2 c_r = geometry_.lane_position(end_lane, kHitP);
-      const float w_l = geometry_.lane_width(lane, kHitP);
       const float cx = (c_l.x + c_r.x) * 0.5f;
       const auto& jline = geometry_.judgeline();
       const float cy = (jline.lb_y + jline.lt_y) * 0.5f;
-      // Unity size 8 → half 4; +~15% so the soft ring reads slightly larger than the note.
-      // startColor.a is low (Critical≈0.196 / Scratch≈0.588); extra opacity scale keeps
-      // additive burst stacks from looking solid.
-      constexpr float kFlareSizeScale = 1.22f;
-      constexpr float kFlareOpacityScale = 0.55f;
-      const float px = w_l / kBombLaneWidthUnity;
-      const bool scratch_flare =
-          jump_scratch_flare || type == NoteType::Flick ||
-          (hit_fx_role == 0 && type == NoteType::ScratchHoldStart);
+      // Critical burst=4 startColor.a=50/255; Scratch/Flick burst=2 a=150/255. startSize=8.
+      const bool scratch_flare = jump_scratch_flare || type == NoteType::Flick;
       const int flare_burst = scratch_flare ? 2 : 4;
-      const float flare_start_a = scratch_flare ? 0.588f : 0.196f;
+      const float flare_start_a = scratch_flare ? (150.0f / 255.0f) : (50.0f / 255.0f);
       for (int i = 0; i < flare_burst; ++i) {
         const float u = age_sec / kFlareLife;
-        const float size_mul =
-            flare_size_mul(u) * lerp01(0.95f, 1.05f, static_cast<float>(i) /
-                                                         std::max(flare_burst - 1, 1));
-        const float half = 4.0f * px * size_mul * kFlareSizeScale;
-        const float flare_cy = cy + kFlarePivotY * (2.0f * half);
-        const float a =
-            flare_start_a * kFlareOpacityScale * particle_alpha_mul(u) * alpha_scale;
+        // Prefab startSize is constant 8 — no per-burst size jitter.
+        const float size_mul = flare_size_mul(u);
+        // Unity size 8 → half 4; unit scale = one lane / LaneWidth (not note span).
+        // Center = OnBomb judgeline anchor (no renderer-pivot stage remap).
+        const float half = 4.0f * unity_to_screen * size_mul;
+        // MobileParticlesAdditive: tex * (startColor * ColorModule). startColor.rgb = 1.
+        const FlareGradRgb grad = flare_color_module_rgb(u, scratch_flare);
+        const float a = flare_start_a * color_module_alpha(u) * alpha_scale;
         if (a < 0.01f) {
           continue;
         }
-        const Quad fq{{cx - half, flare_cy - half},
-                      {cx - half, flare_cy + half},
-                      {cx + half, flare_cy + half},
-                      {cx + half, flare_cy - half}};
-        batch.add_sprite(flare, fq, z + 0.002f + static_cast<float>(i) * 0.0001f, a, tint.r,
-                         tint.g, tint.b);
+        const Quad fq{{cx - half, cy - half},
+                      {cx - half, cy + half},
+                      {cx + half, cy + half},
+                      {cx + half, cy - half}};
+        batch.add_sprite(flare, fq, z + 0.002f + static_cast<float>(i) * 0.0001f, a, grad.r,
+                         grad.g, grad.b);
       }
     }
     return;

@@ -1,6 +1,7 @@
 #include "wds/interaction/font_atlas.hpp"
 
 #include <wds/common/utf8_path.hpp>
+#include <wds/interaction/theme.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -101,12 +102,18 @@ FontAtlas& FontAtlas::instance() noexcept {
 
 void FontAtlas::rebuild_rgba_from_alpha() {
   pixels_.resize(static_cast<std::size_t>(atlas_w_ * atlas_h_ * 4));
+  // 1× bake (logical max font px): milder ~a^1.2 so thin strokes keep coverage.
+  // Higher tiers keep alpha² to cut the soft fringe that reads as a second stroke.
+  const float bake_1x =
+      std::max({theme::kFontSizeMd, theme::kFontSizeGutter, theme::kFontSizeTooltip});
+  const bool mild_sharpen = baked_size_ <= bake_1x + 0.001f;
   for (int i = 0; i < atlas_w_ * atlas_h_; ++i) {
     const unsigned char a = alpha_[static_cast<std::size_t>(i)];
-    // Square coverage to cut the soft outer fringe that reads as a second stroke
-    // under straight-alpha + MSAA resolve.
-    const unsigned char sharp =
-        static_cast<unsigned char>((static_cast<unsigned int>(a) * a) / 255u);
+    const unsigned int aa = (static_cast<unsigned int>(a) * a) / 255u;
+    // lerp(a, a²/255, 0.2) ≈ a^1.2; full square for retina+ tiers.
+    const unsigned char sharp = mild_sharpen
+                                    ? static_cast<unsigned char>((static_cast<unsigned int>(a) * 4u + aa) / 5u)
+                                    : static_cast<unsigned char>(aa);
     pixels_[static_cast<std::size_t>(i) * 4 + 0] = 255;
     pixels_[static_cast<std::size_t>(i) * 4 + 1] = 255;
     pixels_[static_cast<std::size_t>(i) * 4 + 2] = 255;
