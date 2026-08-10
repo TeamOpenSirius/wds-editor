@@ -31,9 +31,14 @@ struct SkinCatalog {
   TextureInfo tick_purple;
   TextureInfo hidden_line;
 
-  // Horizontal 3-slice borders for flat tops/bottoms (pixels on 268-wide sprites).
+  // Horizontal 3-slice borders (Unity Sprite.border / drawMode=Sliced).
+  // Flat A_*Notes*: 268×108, m_Border L/R = 65. HoldLongNotes: 157×33, L/R = 10.
   float note_slice_border_l = 65.0f;
   float note_slice_border_r = 65.0f;
+  float hold_slice_border_l = 10.0f;
+  float hold_slice_border_r = 10.0f;
+  // Flat note source height; hold caps use note_h_screen / this (same PPU as flats).
+  float note_slice_tex_h = 108.0f;
 
   // Fallback when color id has no matching Sirius Split Line skin.
   TextureInfo split_line_1;

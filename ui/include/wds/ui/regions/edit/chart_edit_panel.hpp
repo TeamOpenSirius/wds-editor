@@ -218,10 +218,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Re-apply default_width_ to the locked placement note without chasing the pointer.
   void apply_width_to_locked_placement();
   // Live-sync previous chain segment's covering tail to hold_draft_; returns false
-  // when the cover is not Sirius-representable (caller should break the chain).
+  // when the cover is not Sirius-representable.
   bool sync_chain_prev_tail_cover();
-  // Disconnect chain drawing and treat hold_draft_ as a fresh ScratchHold start.
-  void break_hold_chain_for_new_segment();
+  // True when hold_draft_ + prev body can form a Sirius JumpScratch cover.
+  bool chain_draft_cover_representable() const noexcept;
+  // Snap hold_draft_.lane onto a JumpScratch-legal chain lane near desired_lane_f,
+  // then sync the previous cover. If no legal lane exists for this width, keeps the
+  // chain armed, restores prev, and shows a disconnected-style ghost preview.
+  // Returns true when the live chain cover is active.
+  bool snap_hold_draft_chain_lane_and_sync(float desired_lane_f);
   wds::interaction::SwipeDirection update_place_swipe(wds::interaction::Vec2 pointer);
 
   bool handle_popup_pointer_down(const wds::interaction::PointerDownEvent& event);
@@ -360,6 +365,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t hold_chain_prev_id_ = -1;
   wds::chart_editor::NotationNote hold_chain_prev_body_{};
   std::unordered_set<int32_t> hold_chain_ids_;
+  // Live JumpScratch cover applied to prev during chain preview. False when the
+  // current width/lane cannot represent a cover — chain stays armed for width
+  // changes, but ghost looks like a disconnected independent ScratchHold.
+  bool hold_chain_link_preview_ = true;
   // Armed on RMB-down over a selected terminal JumpScratch; consumed when the
   // gesture resolves to ScratchHoldBody (chain continue instead of a new hold).
   int32_t pending_chain_extend_id_ = -1;

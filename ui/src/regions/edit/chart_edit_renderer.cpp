@@ -66,8 +66,23 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     const float bottom = std::max(y0, y1);
     const auto body = wds::interaction::rect_to_quad(
         {x, top, width, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
-    batch.add_sprite(sprites.connection, body, z, alpha, sprites.connection_r, sprites.connection_g,
-                     sprites.connection_b);
+    // Cap size must be in the same space as body (NDC). Flat notes use dest_h/tex_h;
+    // measure a same-width note-height quad so we don't mix px with NDC (that made
+    // caps >> width → soft-edge UVs filled both sides).
+    const auto ref = wds::interaction::rect_to_quad(
+        {x, y0 - note_h * 0.5f, width, note_h}, fb_w, fb_h, screen);
+    const auto ndc_len = [](wds::renderer::Vec2 a, wds::renderer::Vec2 b) {
+      const float dx = b.x - a.x;
+      const float dy = b.y - a.y;
+      return std::sqrt(dx * dx + dy * dy);
+    };
+    const float ref_h =
+        0.5f * (ndc_len(ref.lb, ref.lt) + ndc_len(ref.rb, ref.rt));
+    const float border_scale = ref_h / std::max(1.0f, skin.note_slice_tex_h);
+    wds::renderer::add_sliced_note(batch, sprites.connection, body, skin.hold_slice_border_l,
+                                   skin.hold_slice_border_r, z, alpha, alpha, border_scale,
+                                   sprites.connection_r, sprites.connection_g,
+                                   sprites.connection_b);
     return;
   }
 

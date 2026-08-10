@@ -219,9 +219,9 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
   };
 
   // Occupied lanes at hold.start_tick:
-  // - non-hold-body notes that start here
+  // - notes that start here, except hold bodies / HoldEighth / mid-stars
   // - hold tails of other holds that end here (ScratchHold uses end span)
-  // Other hold bodies that merely start here are ignored.
+  // Hold bodies (incl. nontail), eighths, and stars never force head shortening.
   std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
   for (const auto& note : doc.notes()) {
     if (note.id == hold.id) continue;
@@ -236,6 +236,7 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
       continue;
     }
     if (!same_tick(note.start_tick, hold.start_tick)) continue;
+    if (is_hold_body(note.note_type) || is_hold_mid_star(note.note_type)) continue;
     mark_range(occupied, note.lane, note.end_lane());
   }
 

@@ -590,13 +590,27 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
     return base_alpha * std::clamp(1.0f - (p - fade_lo) / band, 0.0f, 1.0f);
   };
 
+  // Cap size follows flat-note screen height at the near end (Unity: border_px / PPU).
+  auto flat_border_scale = [&](float p) {
+    const Quad ref = geometry_.note_quad(note.lane, note.end_lane, std::clamp(p, 0.0f, 1.0f));
+    const float hx0 = ref.lt.x - ref.lb.x;
+    const float hy0 = ref.lt.y - ref.lb.y;
+    const float hx1 = ref.rt.x - ref.rb.x;
+    const float hy1 = ref.rt.y - ref.rb.y;
+    const float dh =
+        0.5f * (std::sqrt(hx0 * hx0 + hy0 * hy0) + std::sqrt(hx1 * hx1 + hy1 * hy1));
+    return dh / std::max(1.0f, skin_.note_slice_tex_h);
+  };
+
   // hold_body_quad: lb/rb at percent_near, lt/rt at percent_far.
+  // Official HoldLongNotes: SpriteRenderer Sliced, m_Border L/R = 10 on 157-wide art.
   auto emit = [&](float lo, float hi) {
     if (hi <= lo) return;
-    batch.add_sprite_vfade(sprites.connection,
-                           geometry_.hold_body_quad(note.lane, note.end_lane, hi, lo), -0.25f,
-                           alpha_at(hi), alpha_at(lo), sprites.connection_r, sprites.connection_g,
-                           sprites.connection_b);
+    add_sliced_note(batch, sprites.connection,
+                    geometry_.hold_body_quad(note.lane, note.end_lane, hi, lo),
+                    skin_.hold_slice_border_l, skin_.hold_slice_border_r, -0.25f, alpha_at(hi),
+                    alpha_at(lo), flat_border_scale(hi), sprites.connection_r,
+                    sprites.connection_g, sprites.connection_b);
   };
 
   if (p_near <= fade_lo) {

@@ -1,6 +1,7 @@
 #include <wds/core/gimmick.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace wds::chart_editor {
@@ -105,6 +106,45 @@ bool scratch_hold_end_cover_representable(const NotationNote& body, int32_t cove
   const bool ext_left = cover_left < body.lane;
   const bool ext_right = cover_right > body.end_lane();
   return !(ext_left && ext_right);
+}
+
+int32_t snap_scratch_chain_next_lane(const NotationNote& prev_body, int32_t next_width,
+                                     float desired_lane, int32_t lane_count) noexcept {
+  next_width = std::max(1, next_width);
+  if (lane_count <= 0 || next_width > lane_count) return 0;
+  const int32_t max_lane = lane_count - next_width;
+  const auto clamp_lane = [&](int32_t lane) {
+    return std::clamp(lane, 0, max_lane);
+  };
+  const auto cover_ok = [&](int32_t lane) {
+    if (lane < 0 || lane > max_lane) return false;
+    const int32_t cover_left = std::min(prev_body.lane, lane);
+    const int32_t cover_right = std::max(prev_body.end_lane(), lane + next_width - 1);
+    return scratch_hold_end_cover_representable(prev_body, cover_left, cover_right);
+  };
+
+  // Both-side extension ⟺ open interval (end - W + 1, prev.lane) for next.left.
+  const float illegal_lo = static_cast<float>(prev_body.end_lane() - next_width + 1);
+  const float illegal_hi = static_cast<float>(prev_body.lane);
+  desired_lane = std::clamp(desired_lane, 0.0f, static_cast<float>(max_lane));
+
+  const auto round_lane = [](float lane) {
+    return static_cast<int32_t>(std::lround(lane));
+  };
+
+  if (!(illegal_lo < illegal_hi) || desired_lane <= illegal_lo ||
+      desired_lane >= illegal_hi) {
+    return clamp_lane(round_lane(desired_lane));
+  }
+
+  const float mid = 0.5f * (illegal_lo + illegal_hi);
+  const int32_t left_legal = prev_body.end_lane() - next_width + 1;
+  const int32_t right_legal = prev_body.lane;
+  const int32_t primary = (desired_lane < mid) ? left_legal : right_legal;
+  const int32_t secondary = (primary == left_legal) ? right_legal : left_legal;
+  if (cover_ok(primary)) return primary;
+  if (cover_ok(secondary)) return secondary;
+  return clamp_lane(round_lane(desired_lane));
 }
 
 int32_t scratch_chain_joint_direction_score(const NotationNote& prev_body,

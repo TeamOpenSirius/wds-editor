@@ -43,6 +43,14 @@ void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t en
 bool scratch_hold_end_cover_representable(const NotationNote& body, int32_t cover_left,
                                           int32_t cover_right) noexcept;
 
+// Snap a chained next ScratchHold's left lane so the JumpScratch cover of `prev_body`
+// stays Sirius-representable. Lanes that would extend both sides of `prev_body` form
+// an open illegal interval; that interval is split at its midpoint and desired positions
+// adsorb to the nearest legal lane on the left / right. `desired_lane` may be fractional
+// (pointer-derived left edge). Result is clamped to [0, lane_count - next_width].
+int32_t snap_scratch_chain_next_lane(const NotationNote& prev_body, int32_t next_width,
+                                     float desired_lane, int32_t lane_count) noexcept;
+
 // Chain-joint JumpScratch direction from adjacent body edges (not the terminal end-cap).
 // Each side: next more-left → -1, same → 0, more-right → +1. Sum of left+right scores:
 //   <0 left,  ==0 bidirectional,  >0 right.

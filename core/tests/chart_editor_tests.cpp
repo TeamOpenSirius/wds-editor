@@ -1578,6 +1578,37 @@ void test_scratch_hold_end_lane_encoding() {
   CHECK(!scratch_hold_end_cover_representable(note, 1, 7));  // both sides
 }
 
+void test_snap_scratch_chain_next_lane_splits_illegal_zone() {
+  NotationNote prev = make_tap(0, 3);
+  prev.width = 2;  // lanes 3-4
+  prev.end_tick = 480;
+  prev.note_type = NoteType::ScratchHold;
+
+  // Next width 4: illegal open interval for left edge is (1, 3); mid = 2.
+  // Left of mid → lane 1; right of mid → lane 3. Lane 2 is both-sides.
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 1.0f, 12), 1);
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 1.9f, 12), 1);
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 2.0f, 12), 3);
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 2.5f, 12), 3);
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 3.0f, 12), 3);
+  // Already legal stays put.
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 0.4f, 12), 0);
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 4, 4.2f, 12), 4);
+
+  // Wider illegal band: prev 5-6, next width 6 → illegal (1, 5), mid = 3.
+  NotationNote wide_prev = make_tap(0, 5);
+  wide_prev.width = 2;
+  wide_prev.end_tick = 480;
+  wide_prev.note_type = NoteType::ScratchHold;
+  CHECK_EQ(snap_scratch_chain_next_lane(wide_prev, 6, 2.9f, 12), 1);
+  CHECK_EQ(snap_scratch_chain_next_lane(wide_prev, 6, 3.0f, 12), 5);
+  CHECK_EQ(snap_scratch_chain_next_lane(wide_prev, 6, 4.0f, 12), 5);
+
+  // Equal/narrower next: no both-side illegal zone.
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 2, 2.0f, 12), 2);
+  CHECK_EQ(snap_scratch_chain_next_lane(prev, 2, 3.0f, 12), 3);
+}
+
 void test_scratch_chain_joint_direction() {
   NotationNote prev = make_tap(0, 3);
   prev.width = 2;  // lanes 3-4
@@ -1736,6 +1767,59 @@ void test_hold_head_partial_overlap_with_prior_hold_tail() {
   next2.note_type = NoteType::Hold;
   CHECK(doc2.add_note(next2) == 2);
   CHECK(!make_auto_hold_head(doc2, *doc2.find_note(2)).has_value());
+}
+
+void test_hold_head_ignores_body_eighth_and_star_overlap() {
+  // Mid-span overlap with another hold body + its eighth must not shorten the head.
+  ChartDocument doc;
+  NotationNote prior = make_tap(0, 2);
+  prior.id = 1;
+  prior.width = 4;  // lanes 2-5
+  prior.end_tick = 960;
+  prior.note_type = NoteType::Hold;
+  CHECK(doc.add_note(prior) == 1);
+
+  NotationNote eighth = make_tap(480, 2);
+  eighth.id = 2;
+  eighth.width = 4;
+  eighth.note_type = NoteType::HoldEighth;
+  CHECK(doc.add_note(eighth) == 2);
+
+  NotationNote star = make_tap(480, 3);
+  star.id = 3;
+  star.width = 1;
+  star.note_type = NoteType::Sound;
+  CHECK(doc.add_note(star) == 3);
+
+  NotationNote next = make_tap(480, 4);
+  next.id = 4;
+  next.width = 4;  // lanes 4-7; overlaps prior body/eighth/star on 4-5
+  next.end_tick = 1440;
+  next.note_type = NoteType::Hold;
+  CHECK(doc.add_note(next) == 4);
+
+  auto head = make_auto_hold_head(doc, *doc.find_note(4));
+  CHECK(head.has_value());
+  CHECK_EQ(head->lane, 4);
+  CHECK_EQ(head->width, 4);
+
+  // Scratch mid-star likewise ignored.
+  ChartDocument doc2;
+  NotationNote scratch_star = make_tap(0, 2);
+  scratch_star.id = 1;
+  scratch_star.width = 2;
+  scratch_star.note_type = NoteType::ScratchSound;
+  CHECK(doc2.add_note(scratch_star) == 1);
+  NotationNote hold = make_tap(0, 2);
+  hold.id = 2;
+  hold.width = 4;
+  hold.end_tick = 960;
+  hold.note_type = NoteType::ScratchHold;
+  CHECK(doc2.add_note(hold) == 2);
+  auto head2 = make_auto_hold_head(doc2, *doc2.find_note(2));
+  CHECK(head2.has_value());
+  CHECK_EQ(head2->lane, 2);
+  CHECK_EQ(head2->width, 4);
 }
 
 void test_scratch_hold_auto_head_is_scratch_hold_start() {
@@ -3223,11 +3307,13 @@ int main() {
   test_concurrent_lines_multi_press_only();
   test_hold_head_pairs_but_attached_excludes_head();
   test_scratch_hold_end_lane_encoding();
+  test_snap_scratch_chain_next_lane_splits_illegal_zone();
   test_scratch_chain_joint_direction();
   test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body();
   test_hold_head_partial_overlap_single_free_run();
   test_hold_head_partial_overlap_multiple_free_runs_skipped();
   test_hold_head_partial_overlap_with_prior_hold_tail();
+  test_hold_head_ignores_body_eighth_and_star_overlap();
   test_scratch_hold_auto_head_is_scratch_hold_start();
   test_repair_legacy_scratch_hold_heads();
   test_resolve_convert_scratch_head_stays_official();

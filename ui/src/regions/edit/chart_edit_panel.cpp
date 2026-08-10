@@ -144,29 +144,31 @@ void ChartEditPanel::apply_width_to_locked_placement() {
   // current lane center (updated by pointer move) so width grows around it.
   const wds::interaction::Vec2 anchor = place_note_center();
   apply_placement_lane_width(anchor, hold_draft_.lane, hold_draft_.width);
+  if (hold_chain_prev_id_ >= 0) {
+    snap_hold_draft_chain_lane_and_sync(
+        viewport_.lane_left_at_f(anchor.x, hold_draft_.width));
+  }
   for (auto& star : hold_stars_) {
     star.note.lane = hold_draft_.lane;
     star.note.width = hold_draft_.width;
   }
-  if (hold_chain_prev_id_ >= 0) {
-    if (!sync_chain_prev_tail_cover()) {
-      break_hold_chain_for_new_segment();
-    }
-  }
   sync_hold_placement_ghost();
+}
+
+bool ChartEditPanel::chain_draft_cover_representable() const noexcept {
+  if (hold_chain_prev_id_ < 0) return true;
+  const int32_t cover_left = std::min(hold_chain_prev_body_.lane, hold_draft_.lane);
+  const int32_t cover_right =
+      std::max(hold_chain_prev_body_.end_lane(), hold_draft_.end_lane());
+  return wds::chart_editor::scratch_hold_end_cover_representable(hold_chain_prev_body_,
+                                                                 cover_left, cover_right);
 }
 
 bool ChartEditPanel::sync_chain_prev_tail_cover() {
   if (hold_chain_prev_id_ < 0) return true;
   auto prev = engine_.document().find_note(hold_chain_prev_id_);
   if (!prev) return true;
-  const int32_t cover_left = std::min(hold_chain_prev_body_.lane, hold_draft_.lane);
-  const int32_t cover_right =
-      std::max(hold_chain_prev_body_.end_lane(), hold_draft_.end_lane());
-  if (!wds::chart_editor::scratch_hold_end_cover_representable(hold_chain_prev_body_, cover_left,
-                                                               cover_right)) {
-    return false;
-  }
+  if (!chain_draft_cover_representable()) return false;
   NotationNote updated = *prev;
   apply_hold_tail_cover(updated, hold_chain_prev_body_, hold_draft_, hold_scratch_);
   if (updated.gimmick_type != prev->gimmick_type ||
@@ -178,18 +180,25 @@ bool ChartEditPanel::sync_chain_prev_tail_cover() {
   return true;
 }
 
-void ChartEditPanel::break_hold_chain_for_new_segment() {
-  if (hold_chain_prev_id_ < 0) return;
-  // Keep the previous segment at its last valid cover, then start a new hold.
+bool ChartEditPanel::snap_hold_draft_chain_lane_and_sync(float desired_lane_f) {
+  if (hold_chain_prev_id_ < 0) {
+    hold_chain_link_preview_ = true;
+    return true;
+  }
+  sync_viewport();
+  hold_draft_.lane = wds::chart_editor::snap_scratch_chain_next_lane(
+      hold_chain_prev_body_, hold_draft_.width, desired_lane_f, viewport_.grid().lane_count);
+  if (sync_chain_prev_tail_cover()) {
+    hold_chain_link_preview_ = true;
+    return true;
+  }
+  // Keep chain armed (width hotkeys may make it representable again). Restore prev
+  // and preview the draft as a disconnected independent ScratchHold.
   restore_hold_chain_prev_preview();
-  hold_chain_prev_id_ = -1;
-  hold_chain_prev_body_ = {};
-  hold_chain_ids_.clear();
-  hold_chain_start_tick_ = hold_draft_.start_tick;
-  // Fresh ScratchHold: equal body/tail until finished.
   hold_draft_.scratch_length = 0;
   hold_draft_.gimmick_type = wds::chart_editor::GimmickType::None;
-  sync_hold_placement_ghost();
+  hold_chain_link_preview_ = false;
+  return false;
 }
 
 void ChartEditPanel::sync_viewport() const {
@@ -682,6 +691,7 @@ void ChartEditPanel::clear_hold_chain_state() {
   hold_chain_prev_id_ = -1;
   hold_chain_prev_body_ = {};
   hold_chain_ids_.clear();
+  hold_chain_link_preview_ = true;
 }
 
 void ChartEditPanel::select_hold_chain() {
@@ -1021,19 +1031,20 @@ void ChartEditPanel::begin_hold_chain_extend() {
   // Same as chained-next after finish_hold_body(true): undrawn until vertical pull.
   next.end_tick = next.start_tick;
   next.width = default_width_;
-  next.lane = viewport_.lane_at(pointer_.x, default_width_);
   apply_placement_lane_width(pointer_, next.lane, next.width);
+  next.lane = wds::chart_editor::snap_scratch_chain_next_lane(
+      hold_chain_prev_body_, next.width, viewport_.lane_left_at_f(pointer_.x, next.width),
+      viewport_.grid().lane_count);
   next.scratch_length = 0;
   next.gimmick_type = wds::chart_editor::GimmickType::None;
   hold_draft_ = next;
 
   place_swipe_.reset();
   mode_ = Mode::PlaceHoldBody;
-  // Terminal JumpScratch → joint cover as soon as chain-extend starts.
-  if (!sync_chain_prev_tail_cover()) {
-    break_hold_chain_for_new_segment();
-    return;
-  }
+  // Terminal JumpScratch → joint cover as soon as chain-extend starts. If the
+  // current width cannot link, keep the chain armed and show a disconnected ghost.
+  snap_hold_draft_chain_lane_and_sync(
+      viewport_.lane_left_at_f(pointer_.x, hold_draft_.width));
   select_hold_chain();
   sync_hold_placement_ghost();
 }
@@ -1048,9 +1059,11 @@ void ChartEditPanel::begin_scratch_hold_placement(wds::interaction::Vec2 point) 
 
 void ChartEditPanel::sync_hold_placement_ghost() {
   const int32_t min_end = hold_draft_.start_tick + min_hold_duration_ticks();
-  // Chained next segment starts as a flick-tail adjuster only: no body until the
-  // pointer pulls a vertical height. Hide the draft ghost in that mode.
-  if (hold_draft_.end_tick < min_end && hold_chain_prev_id_ >= 0) {
+  // Linked chain next starts as a flick-tail adjuster only: no body until the
+  // pointer pulls a vertical height. Unlinked preview (no representable cover)
+  // still shows a disconnected-style ghost so width edits have a visual target.
+  if (hold_draft_.end_tick < min_end && hold_chain_prev_id_ >= 0 &&
+      hold_chain_link_preview_) {
     ghost_.visible = false;
     return;
   }
@@ -1073,14 +1086,13 @@ void ChartEditPanel::sync_hold_draft_to_pointer() {
   hold_draft_.start_tick = start;
   hold_draft_.end_tick = std::max(start, cur);
   // First segment keeps the press lane; chained next follows pointer X so the
-  // previous hold's covering tail can span both bodies.
+  // previous hold's covering tail can span both bodies. Illegal both-side
+  // JumpScratch lanes adsorb to the nearest one-sided legal lane.
   if (hold_chain_prev_id_ >= 0) {
     hold_draft_.width = default_width_;
-    hold_draft_.lane = viewport_.lane_at(pointer_.x, default_width_);
     apply_placement_lane_width(pointer_, hold_draft_.lane, hold_draft_.width);
-    if (!sync_chain_prev_tail_cover()) {
-      break_hold_chain_for_new_segment();
-    }
+    const float desired = viewport_.lane_left_at_f(pointer_.x, hold_draft_.width);
+    snap_hold_draft_chain_lane_and_sync(desired);
   }
   for (auto& star : hold_stars_) {
     star.note.lane = hold_draft_.lane;
@@ -1277,16 +1289,20 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     return;
   }
 
+  // Place as a chain continuation only when JumpScratch cover is representable.
+  // Otherwise auto-disconnect: independent hold + head, previous segment restored.
+  const bool chain_link =
+      hold_chain_prev_id_ >= 0 && chain_draft_cover_representable();
+
   // Equal-width body/tail → bidirectional flick until a chained next expands the cover.
-  if (hold_scratch_ && hold_chain_prev_id_ < 0) {
+  if (hold_scratch_ && !chain_link) {
     hold_draft_.scratch_length = 0;
     hold_draft_.gimmick_type = wds::chart_editor::GimmickType::None;
   }
 
-  // Auto head: only the first hold body in a chain. If start partially overlaps
-  // non-hold-body notes, head covers only the single continuous free lane run.
+  // Auto head: first segment of a chain, or a hold that disconnects on place.
   std::vector<NotationNote> to_add;
-  if (hold_chain_prev_id_ < 0) {
+  if (!chain_link) {
     if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), hold_draft_)) {
       to_add.push_back(*head);
     }
@@ -1312,7 +1328,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     }
   }
   auto after = before;
-  if (hold_chain_prev_id_ >= 0) {
+  if (chain_link) {
     for (auto& n : after) {
       if (n.id != hold_chain_prev_id_) continue;
       apply_hold_tail_cover(n, hold_chain_prev_body_, hold_draft_, hold_scratch_);
@@ -1338,7 +1354,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
           std::move(after), *new_hold, engine_.document().timing().ticks_per_quarter);
     }
   }
-  if (hold_chain_prev_id_ >= 0) {
+  if (chain_link) {
     std::optional<NotationNote> prev_hold;
     for (const auto& n : after) {
       if (n.id != hold_chain_prev_id_) continue;
@@ -1367,8 +1383,12 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     placed = *it;
     break;
   }
-  if (placed) {
-    hold_chain_ids_.insert(placed->id);
+  if (chain_link) {
+    if (placed) hold_chain_ids_.insert(placed->id);
+  } else {
+    // Auto-disconnect on place: start a fresh chain selection from the new hold.
+    hold_chain_ids_.clear();
+    if (placed) hold_chain_ids_.insert(placed->id);
   }
   engine_.rebuild_snapshot();
   select_hold_chain();
@@ -1379,6 +1399,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     // Body span for later cover: use the just-placed body before any future widening.
     hold_chain_prev_body_.lane = hold_draft_.lane;
     hold_chain_prev_body_.width = hold_draft_.width;
+    hold_chain_link_preview_ = true;
 
     NotationNote next = hold_draft_;
     next.id = wds::chart_editor::kAutoNoteId;
@@ -1387,24 +1408,18 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     // the pointer pulls a vertical height for the next body.
     next.end_tick = next.start_tick;
     next.width = default_width_;
-    next.lane = viewport_.lane_at(pointer_.x, default_width_);
     apply_placement_lane_width(pointer_, next.lane, next.width);
+    next.lane = wds::chart_editor::snap_scratch_chain_next_lane(
+        hold_chain_prev_body_, next.width, viewport_.lane_left_at_f(pointer_.x, next.width),
+        viewport_.grid().lane_count);
     next.scratch_length = 0;
     hold_draft_ = next;
     hold_stars_.clear();
     place_swipe_.reset();
     mode_ = Mode::PlaceHoldBody;
     // Immediately treat the pointer as the next flick-tail tip (no body yet).
-    if (auto prev = engine_.document().find_note(hold_chain_prev_id_)) {
-      NotationNote updated = *prev;
-      apply_hold_tail_cover(updated, hold_chain_prev_body_, hold_draft_, hold_scratch_);
-      if (updated.gimmick_type != prev->gimmick_type ||
-          updated.scratch_length != prev->scratch_length || updated.lane != prev->lane ||
-          updated.width != prev->width) {
-        engine_.document().update_note(hold_chain_prev_id_, updated);
-        engine_.rebuild_snapshot();
-      }
-    }
+    snap_hold_draft_chain_lane_and_sync(
+        viewport_.lane_left_at_f(pointer_.x, hold_draft_.width));
     sync_hold_placement_ghost();
   } else {
     mode_ = Mode::Idle;
@@ -2802,10 +2817,12 @@ void ChartEditPanel::append_skin_batch(wds::renderer::DrawBatch& batch,
   for (const auto& s : hold_stars_) {
     if (s.visible) extras.push_back({s.note, true, 0.4f});
   }
-  // Preview auto head with the same free-lane rules as finish_hold_body (first chain
-  // segment only). Hold-body ghost no longer draws a full-width start cap.
+  // Preview auto head for first-chain / disconnected-preview drafts (same rules as
+  // finish_hold_body). Linked chain continuations stay headless.
+  const bool preview_auto_head =
+      hold_chain_prev_id_ < 0 || !hold_chain_link_preview_;
   if (ghost && wds::chart_editor::is_hold_with_tail(ghost->note.note_type) &&
-      ghost->note.end_tick > ghost->note.start_tick && hold_chain_prev_id_ < 0) {
+      ghost->note.end_tick > ghost->note.start_tick && preview_auto_head) {
     if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), ghost->note)) {
       extras.push_back({*head, true, alpha});
     }

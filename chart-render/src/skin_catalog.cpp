@@ -103,8 +103,9 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   constexpr const char* kHoldBlueKey = "__wds/hold_long_blue";
   constexpr const char* kHoldPurpleKey = "__wds/hold_long_purple";
   {
+    // Match HoldLongNotes width (157) so m_Border 10/10 maps 1:1 to UV caps.
     auto bake_hold = [](bool scratch) {
-      constexpr int kW = 128;
+      constexpr int kW = 157;
       constexpr int kH = 8;
       std::vector<unsigned char> px(static_cast<size_t>(kW) * static_cast<size_t>(kH) * 4);
       const float base_r = scratch ? 0.706069827f : 0.265174389f;
@@ -149,8 +150,8 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
       }
       return px;
     };
-    cache.queue_rgba(kHoldBlueKey, bake_hold(false), 128, 8);
-    cache.queue_rgba(kHoldPurpleKey, bake_hold(true), 128, 8);
+    cache.queue_rgba(kHoldBlueKey, bake_hold(false), 157, 8);
+    cache.queue_rgba(kHoldPurpleKey, bake_hold(true), 157, 8);
   }
 
   constexpr const char* kSoftSplitKey = "__wds/soft_split_line";
@@ -236,6 +237,9 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
 
   note_slice_border_l = 65.0f;
   note_slice_border_r = 65.0f;
+  hold_slice_border_l = 10.0f;
+  hold_slice_border_r = 10.0f;
+  note_slice_tex_h = 108.0f;
 
   return static_cast<bool>(stage) && static_cast<bool>(judgeline) &&
          static_cast<bool>(note_bottom) && static_cast<bool>(note_red_top) &&

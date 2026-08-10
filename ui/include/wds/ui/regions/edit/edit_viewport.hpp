@@ -81,13 +81,17 @@ class EditViewport {
     return {std::max(0, start), std::max(std::max(0, start), end)};
   }
 
-  // Left lane so the note's horizontal center snaps to the nearest track under `x`.
-  int32_t lane_at(float x, int32_t width = 1) const {
+  // Continuous left-edge lane under `x` before integer snap (width-centered).
+  float lane_left_at_f(float x, int32_t width = 1) const {
     const int32_t w = std::max(1, width);
     const float p =
         (x - bounds_.x) * static_cast<float>(grid_.lane_count) / std::max(bounds_.w, 1.0f);
-    const int32_t lane =
-        wds::chart_editor::round_to_int_tick(p - static_cast<float>(w) * 0.5f);
+    return p - static_cast<float>(w) * 0.5f;
+  }
+  // Left lane so the note's horizontal center snaps to the nearest track under `x`.
+  int32_t lane_at(float x, int32_t width = 1) const {
+    const int32_t w = std::max(1, width);
+    const int32_t lane = wds::chart_editor::round_to_int_tick(lane_left_at_f(x, w));
     return wds::chart_editor::clamp_lane_for_width(lane, w, grid_.lane_count);
   }
   float x_at(int32_t lane) const { return bounds_.x + lane * bounds_.w / grid_.lane_count; }
