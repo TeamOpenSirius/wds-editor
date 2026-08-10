@@ -11,6 +11,7 @@
 #include <wds/interaction/caret.hpp>
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/theme.hpp>
+#include <wds/interaction/widget_root.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -2240,6 +2241,10 @@ wds::interaction::Rect ChartEditPanel::overlay_host_bounds() const {
   return root->absolute_bounds();
 }
 
+bool ChartEditPanel::blocks_interaction_behind(wds::interaction::Vec2 point) const {
+  return has_modal_popup() && visible() && enabled() && overlay_host_bounds().contains(point);
+}
+
 wds::interaction::Widget* ChartEditPanel::hit_test(wds::interaction::Vec2 point) {
   if (!visible() || !enabled()) return nullptr;
   // Modal must own the whole window so toolbar/settings cannot steal clicks.
@@ -2393,6 +2398,9 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
   split_color_scroll_ = 0.0f;
   close_timing_popup();
   hide_gutter_ghost();
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
 }
 
 void ChartEditPanel::scroll_split_picker_to_color(int32_t color_id) {
@@ -2428,6 +2436,9 @@ void ChartEditPanel::open_split_picker_for_edit(int32_t note_id) {
   scroll_split_picker_to_color(split_picker_color_id_);
   close_timing_popup();
   hide_gutter_ghost();
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
 }
 
 void ChartEditPanel::close_split_picker() {
@@ -2481,6 +2492,9 @@ void ChartEditPanel::open_bpm_popup(int32_t tick) {
   timing_bpm_committed_ = timing_bpm_text_;
   close_split_picker();
   hide_gutter_ghost();
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
 }
 
 void ChartEditPanel::open_meter_popup(int32_t tick) {
@@ -2497,6 +2511,9 @@ void ChartEditPanel::open_meter_popup(int32_t tick) {
   timing_den_committed_ = timing_den_text_;
   close_split_picker();
   hide_gutter_ghost();
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
 }
 
 void ChartEditPanel::close_timing_popup() { timing_popup_open_ = false; }

@@ -33,6 +33,7 @@ class ComboBox : public Widget {
   // Open the item menu above the field (toolbar / bottom panels).
   void set_opens_upward(bool enabled) noexcept { opens_upward_ = enabled; }
   bool opens_upward() const noexcept { return opens_upward_; }
+  bool is_open() const noexcept { return open_; }
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
@@ -46,7 +47,9 @@ class ComboBox : public Widget {
   void paint_popup_layer(UiPainter& painter) const override;
   Widget* hit_test(Vec2 point) override;
   Widget* hit_test_popup(Vec2 point) override;
+  Widget* hit_test_popup_host(Vec2 point) override;
   bool dismiss_popups(Vec2 point) override;
+  void close_own_popup() override;
   void on_pointer_down(const PointerDownEvent& event) override;
   void on_pointer_move(const PointerMoveEvent& event) override;
   void on_key_down(const KeyDownEvent& event) override;

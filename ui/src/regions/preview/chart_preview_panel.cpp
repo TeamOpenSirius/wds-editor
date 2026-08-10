@@ -15,14 +15,15 @@
 namespace wds::ui {
 namespace {
 
-constexpr float kFontOversample = 1.25f;
 constexpr int kFallbackDisplayHz = 60;
 
 float ui_font_bake_px(float tier) {
   namespace th = wds::interaction::theme;
   const float logical =
       std::max({th::kFontSizeMd, th::kFontSizeGutter, th::kFontSizeTooltip});
-  return std::max(logical * tier * kFontOversample, 32.0f);
+  // Bake exactly at framebuffer pixel size (logical × tier). A higher floor used
+  // to downscale glyphs through LINEAR and embolden every label.
+  return std::max(logical * std::max(tier, 1.0f), 16.0f);
 }
 
 // Prefer the monitor that currently owns the window (fullscreen or windowed).
@@ -130,8 +131,8 @@ bool ChartPreviewPanel::bake_ui_font(float bake_px) {
     preview_.vulkan().destroy_texture(ui_font_texture_.id);
     ui_font_texture_ = {};
   }
-  ui_font_texture_ = preview_.vulkan().create_texture_rgba(font.pixels(), font.atlas_width(),
-                                                           font.atlas_height());
+  ui_font_texture_ = preview_.vulkan().create_texture_rgba(
+      font.pixels(), font.atlas_width(), font.atlas_height(), /*nearest=*/true);
   font.set_gpu_texture(ui_font_texture_);
   font.clear_pixels_dirty();
   return static_cast<bool>(ui_font_texture_);
@@ -184,6 +185,8 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
     core_cfg.note_approach_seconds = visual.appear_time();
     core_cfg.split_line_animation_start_sec = visual.split_line_animation_start;
     core_cfg.split_line_animation_end_sec = visual.split_line_animation_end;
+    core_cfg.auto_hit_feedback_ms =
+        std::llround(static_cast<double>(visual.effect_duration) * 1000.0);
     engine_.set_preview_config(core_cfg);
   }
 
@@ -279,6 +282,10 @@ void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) 
   preview_.geometry().set_content_rect(content_x_, content_y_, content_width_, content_height_);
 }
 
+void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) noexcept {
+  preview_.geometry().set_panel_rect(x, y, width, height);
+}
+
 void ChartPreviewPanel::sync_ui_font_texture() {
   if (!ready_) return;
   ensure_ui_font_scale();
@@ -290,8 +297,8 @@ void ChartPreviewPanel::sync_ui_font_texture() {
     retired_font_textures_.push_back(ui_font_texture_);
     ui_font_texture_ = {};
   }
-  ui_font_texture_ = preview_.vulkan().create_texture_rgba(font.pixels(), font.atlas_width(),
-                                                           font.atlas_height());
+  ui_font_texture_ = preview_.vulkan().create_texture_rgba(
+      font.pixels(), font.atlas_width(), font.atlas_height(), /*nearest=*/true);
   font.set_gpu_texture(ui_font_texture_);
   font.clear_pixels_dirty();
 }

@@ -55,6 +55,8 @@ class ChartPreviewPanel {
               const wds::renderer::DrawBatch* modal_chrome = nullptr);
 
   void set_content_bounds(int x, int y, int width, int height) noexcept;
+  // Full preview column (may be wider than the aspect-locked stage content).
+  void set_panel_bounds(int x, int y, int width, int height) noexcept;
 
   // Re-upload the UI font atlas if new glyphs were packed (e.g. CJK on demand),
   // and rebake when content-scale tier crosses a bucket.

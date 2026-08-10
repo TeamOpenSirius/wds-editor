@@ -106,6 +106,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint_overlays(wds::interaction::UiPainter& painter) const;
   // Modal dialogs (split picker / timing) — paint after overlays, above everything.
   bool has_modal_popup() const noexcept { return split_picker_open_ || timing_popup_open_; }
+  bool is_interaction_modal() const override { return has_modal_popup(); }
+  bool blocks_interaction_behind(wds::interaction::Vec2 point) const override;
   void paint_popups(wds::interaction::UiPainter& painter) const;
   // Footer buttons drawn in a later pass so list sprites cannot cover them.
   void paint_popup_chrome(wds::interaction::UiPainter& painter) const;

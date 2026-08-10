@@ -30,4 +30,10 @@ inline void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Q
                   border_scale_px, r, g, b);
 }
 
+// Same as add_sliced_note, but atlas V for near(lb) / far(lt) are explicit (spawn clip).
+void add_sliced_note_v(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
+                       float border_l_px, float border_r_px, float z, float alpha,
+                       float border_scale_px, float v_near_atlas, float v_far_atlas,
+                       float r = 1.0f, float g = 1.0f, float b = 1.0f);
+
 }  // namespace wds::renderer

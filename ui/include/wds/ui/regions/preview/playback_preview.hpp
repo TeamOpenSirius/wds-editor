@@ -59,6 +59,10 @@ class PlaybackPreviewView {
   void set_mute_hold_body_sfx(bool mute) noexcept { mute_hold_body_sfx_ = mute; }
   bool mute_hold_body_sfx() const noexcept { return mute_hold_body_sfx_; }
 
+  // When true, show TimingEffect Auto judgment text on auto-hit (persisted setting).
+  void set_show_judgment_text(bool show) noexcept { show_judgment_text_ = show; }
+  bool show_judgment_text() const noexcept { return show_judgment_text_; }
+
   void resize(int framebuffer_width, int framebuffer_height);
 
   // Update hit SFX from the latest snapshot. Call after apply_timeline; still
@@ -85,7 +89,10 @@ class PlaybackPreviewView {
  private:
   void draw_stage(wds::renderer::DrawBatch& batch,
                   const wds::chart_editor::PreviewSnapshot& snapshot);
-  void draw_split_lanes(wds::renderer::DrawBatch& batch,
+  void draw_hidden_line(wds::renderer::DrawBatch& batch);
+  // Note-percent at the judgeline-side edge of the Hidden Line; only p >= this is drawn.
+  float spawn_clip_percent() const noexcept;
+  void draw_split_lanes(wds::renderer::DrawBatch& batch, wds::renderer::DrawBatch& additive,
                         const wds::chart_editor::PreviewSnapshot& snapshot);
   void draw_concurrent_lines(wds::renderer::DrawBatch& batch,
                              const wds::chart_editor::PreviewSnapshot& snapshot);
@@ -118,9 +125,14 @@ class PlaybackPreviewView {
                       double now_sec, double anim_time_sec);
   void draw_hit_effects(wds::renderer::DrawBatch& batch,
                         const wds::chart_editor::PreviewSnapshot& snapshot);
+  // role: 0=head/tap, 1=hold tail, 2=hold-body soft (mid-star / HoldEighth).
+  // jump_scratch_flare: ScratchHold JumpScratch end uses ScratchBomb flare (same as Flick).
   void draw_hit_effect_at(wds::renderer::DrawBatch& batch, int32_t lane, int32_t end_lane,
                           wds::chart_editor::NoteType type, float age_sec, float z,
-                          float alpha_scale = 1.0f);
+                          float alpha_scale = 1.0f, int hit_fx_role = 0,
+                          bool jump_scratch_flare = false);
+  void draw_timing_effect(wds::renderer::DrawBatch& batch,
+                          const wds::chart_editor::PreviewSnapshot& snapshot);
   void draw_combo(wds::renderer::DrawBatch& batch,
                   const wds::chart_editor::PreviewSnapshot& snapshot);
   void update_hit_sfx(const wds::chart_editor::PreviewSnapshot& snapshot);
@@ -150,6 +162,7 @@ class PlaybackPreviewView {
   uint64_t notes_order_revision_ = std::numeric_limits<uint64_t>::max();
   bool ready_ = false;
   bool mute_hold_body_sfx_ = false;
+  bool show_judgment_text_ = false;
   int64_t chart_offset_ms_ = 0;
   int64_t preview_lead_in_visible_ms_ = 0;
   // Monotonic SFX clock (µs). Advances with BASS/Timeline; ignores small backwards

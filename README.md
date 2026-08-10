@@ -130,7 +130,7 @@ wds-editor/
 ├── cmake/                  # 平台默认值与交叉 toolchain
 ├── scripts/                # 构建 / 打包 / 图标
 ├── skins/ effects/ icons/  # 运行时资源
-└── docs/                   # 迁移与债务说明
+└── docs/                   # 官方 UI 对齐、编辑/预览一致性、复刻路线等
 ```
 
 ### 依赖方向（下层不得反向依赖 `ui`）

@@ -103,10 +103,14 @@ void FontAtlas::rebuild_rgba_from_alpha() {
   pixels_.resize(static_cast<std::size_t>(atlas_w_ * atlas_h_ * 4));
   for (int i = 0; i < atlas_w_ * atlas_h_; ++i) {
     const unsigned char a = alpha_[static_cast<std::size_t>(i)];
+    // Square coverage to cut the soft outer fringe that reads as a second stroke
+    // under straight-alpha + MSAA resolve.
+    const unsigned char sharp =
+        static_cast<unsigned char>((static_cast<unsigned int>(a) * a) / 255u);
     pixels_[static_cast<std::size_t>(i) * 4 + 0] = 255;
     pixels_[static_cast<std::size_t>(i) * 4 + 1] = 255;
     pixels_[static_cast<std::size_t>(i) * 4 + 2] = 255;
-    pixels_[static_cast<std::size_t>(i) * 4 + 3] = a;
+    pixels_[static_cast<std::size_t>(i) * 4 + 3] = sharp;
   }
 }
 

@@ -64,6 +64,8 @@ class UiPainter {
   const std::vector<UiPaintRect>& front_rects() const noexcept { return front_rects_; }
   const std::vector<UiPaintSprite>& sprites() const noexcept { return sprites_; }
 
+  // Appends into `batch` (does not clear). Callers that rebuild a frame must
+  // `batch.clear()` first; otherwise prior verts accumulate across frames.
   void flush_to(wds::renderer::DrawBatch& batch, wds::renderer::TextureId solid_texture,
                 int framebuffer_width, int framebuffer_height,
                 const wds::renderer::ScreenBounds& screen) const;

@@ -16,6 +16,7 @@ class ExportChoiceDialog final : public wds::interaction::Widget {
   ExportChoiceDialog();
 
   bool is_open() const noexcept { return open_; }
+  bool is_interaction_modal() const override { return open_; }
   void open();
   void close();
 

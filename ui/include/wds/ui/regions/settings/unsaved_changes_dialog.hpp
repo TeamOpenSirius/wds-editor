@@ -12,6 +12,7 @@ class UnsavedChangesDialog final : public wds::interaction::Widget {
   UnsavedChangesDialog();
 
   bool is_open() const noexcept { return open_; }
+  bool is_interaction_modal() const override { return open_; }
   void open();
   void close();
 

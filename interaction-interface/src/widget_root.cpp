@@ -29,6 +29,50 @@ void WidgetRoot::clear_focus_if(Widget* widget) {
   }
 }
 
+void WidgetRoot::note_popup_opened(Widget* widget) {
+  if (widget == nullptr || exclusive_popup_ == widget) {
+    return;
+  }
+  Widget* prev = exclusive_popup_;
+  // Claim first so prev->close_own_popup() → note_popup_closed(prev) is a no-op.
+  exclusive_popup_ = widget;
+  if (prev != nullptr) {
+    prev->close_own_popup();
+  }
+}
+
+void WidgetRoot::note_popup_closed(Widget* widget) {
+  if (exclusive_popup_ == widget) {
+    exclusive_popup_ = nullptr;
+  }
+}
+
+void WidgetRoot::close_exclusive_popup_outside(Widget* modal) {
+  if (exclusive_popup_ == nullptr) {
+    return;
+  }
+  for (Widget* p = exclusive_popup_; p != nullptr; p = p->parent()) {
+    if (p == modal) {
+      return;
+    }
+  }
+  exclusive_popup_->close_own_popup();
+}
+
+void WidgetRoot::enforce_modal_popup_occlusion() {
+  if (exclusive_popup_ == nullptr) {
+    return;
+  }
+  for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
+    Widget* child = it->get();
+    if (child == nullptr || !child->visible() || !child->is_interaction_modal()) {
+      continue;
+    }
+    close_exclusive_popup_outside(child);
+    return;
+  }
+}
+
 Widget* WidgetRoot::hit_test(Vec2 point) {
   if (!visible_) {
     return nullptr;
@@ -86,15 +130,28 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
 
   if (std::holds_alternative<PointerDownEvent>(event)) {
     const auto& e = std::get<PointerDownEvent>(event);
-    // Resolve popup hit before dismiss so menu-item clicks still target the owner.
+    Widget* host_hit = hit_test_popup_host(e.position);
     Widget* popup_hit = hit_test_popup(e.position);
-    for (auto& child : children_) {
-      child->dismiss_popups(e.position);
-    }
 
-    // Outside dismiss: fall through to whatever is under the cursor.
-    // Menu-item press: keep targeting the popup owner so Click does not hit-through.
-    Widget* target = popup_hit != nullptr ? popup_hit : hit_test(e.position);
+    // Prefer a dropdown/combo field under the cursor when another menu is covering it.
+    // Do NOT mass-close siblings here — closing the current menu must not close others.
+    // Mutual exclusion is enforced only when a menu opens (note_popup_opened).
+    if (host_hit != nullptr && popup_hit != nullptr && popup_hit != host_hit) {
+      popup_hit->close_own_popup();
+      target = host_hit;
+    } else {
+      for (auto& child : children_) {
+        child->dismiss_popups(e.position);
+      }
+      // Outside dismiss: fall through to whatever is under the cursor.
+      // Menu-item press: keep targeting the popup owner so Click does not hit-through.
+      // Field press: prefer the host so editable combos receive chevron toggles.
+      if (host_hit != nullptr && (popup_hit == nullptr || popup_hit == host_hit)) {
+        target = host_hit;
+      } else {
+        target = popup_hit != nullptr ? popup_hit : hit_test(e.position);
+      }
+    }
 
     // Focus sticks until Enter blur or an explicit click elsewhere.
     if (target != nullptr && target->wants_focus()) {
@@ -204,9 +261,11 @@ void WidgetRoot::process_frame(float delta_seconds, const std::vector<InputEvent
     hover_ = nullptr;
     active_tooltip_.clear();
   }
+  enforce_modal_popup_occlusion();
   for (const auto& event : events) {
     dispatch_event(event, shortcuts);
   }
+  enforce_modal_popup_occlusion();
   Widget::update(delta_seconds);
 }
 

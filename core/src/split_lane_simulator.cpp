@@ -60,21 +60,27 @@ void SplitLaneSimulator::fill_instance(PreviewSplitLaneInstance& out, const Nota
   const int64_t disappear_ms = std::max<int64_t>(1, sec_to_ms(config_.split_line_animation_end_sec));
 
   if (preview_time_ms < start_ms) {
-    // Appear: drawAppearLine(t) with t = now - (beat - appear), p = 1 - t/appear
-    // Uses Transform 1 sprites (preview extra=1).
-    const float t =
-        static_cast<float>(preview_time_ms - (start_ms - appear_ms)) / static_cast<float>(appear_ms);
-    const float p = 1.0f - std::clamp(t, 0.0f, 1.0f);
-    out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/p, /*percent_end=*/1.0f,
-                        /*cover_alpha=*/p, /*anim_phase=*/0);
+    // Official SplitEffect_fadeIn_anim: root localScale.y 0→1 over Show≈1000ms
+    // (ease-out), SpriteRenderer.a stays 1. Pivot at the near/judgeline end so the
+    // ribbon grows tip-ward — percent_start = 1-scale, percent_end = 1. No sprite swap.
+    const float t = std::clamp(
+        static_cast<float>(preview_time_ms - (start_ms - appear_ms)) /
+            static_cast<float>(appear_ms),
+        0.0f, 1.0f);
+    const float one_minus = 1.0f - t;
+    const float scale = 1.0f - one_minus * one_minus;  // ease-out quad ≈ anim outSlope
+    const float p0 = 1.0f - scale;
+    out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/p0, /*percent_end=*/1.0f,
+                        /*cover_alpha=*/p0, /*anim_phase=*/0);
   } else if (preview_time_ms <= visible_end) {
     out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
                         /*cover_alpha=*/0.0f, /*anim_phase=*/1);
   } else {
-    // Disappear: a = 1 - t/disappear; Transform 2 sprites (preview extra=2).
-    const float t =
-        static_cast<float>(preview_time_ms - visible_end) / static_cast<float>(disappear_ms);
-    const float a = 1.0f - std::clamp(t, 0.0f, 1.0f);
+    // Official SplitEffect_fadeOut_anim: full geometry, m_Color.a 1→0 (Hide window).
+    const float t = std::clamp(
+        static_cast<float>(preview_time_ms - visible_end) / static_cast<float>(disappear_ms),
+        0.0f, 1.0f);
+    const float a = 1.0f - t;
     out.apply_animation(/*line_alpha=*/a, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
                         /*cover_alpha=*/1.0f - a, /*anim_phase=*/2);
   }

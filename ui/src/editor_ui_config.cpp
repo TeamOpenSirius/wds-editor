@@ -99,6 +99,9 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "mute_hold_body_sfx") {
     bool v = cfg.mute_hold_body_sfx;
     if (parse_bool(value, v)) cfg.mute_hold_body_sfx = v;
+  } else if (key == "show_judgment_text") {
+    bool v = cfg.show_judgment_text;
+    if (parse_bool(value, v)) cfg.show_judgment_text = v;
   } else if (key == "sus_auto_convert") {
     bool v = cfg.sus_auto_convert;
     if (parse_bool(value, v)) cfg.sus_auto_convert = v;
@@ -262,6 +265,7 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "pause_at_current: " << emit_bool(cfg.pause_at_current) << '\n'
       << "split_width_follow: " << emit_bool(cfg.split_width_follow) << '\n'
       << "mute_hold_body_sfx: " << emit_bool(cfg.mute_hold_body_sfx) << '\n'
+      << "show_judgment_text: " << emit_bool(cfg.show_judgment_text) << '\n'
       << "sus_auto_convert: " << emit_bool(cfg.sus_auto_convert) << '\n'
       << "invert_scroll_wheel: " << emit_bool(cfg.invert_scroll_wheel) << '\n'
       << "invert_visible_range_scroll: " << emit_bool(cfg.invert_visible_range_scroll) << '\n'

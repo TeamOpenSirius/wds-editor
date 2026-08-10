@@ -35,6 +35,7 @@ struct GpuTexture {
   int width = 0;
   int height = 0;
   bool alive = false;
+  bool nearest = false;  // UI font atlases — avoid LINEAR soft-fringe emboldening.
 };
 
 uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props) {
@@ -196,6 +197,7 @@ struct VulkanRenderer::Impl {
   VkPipeline pipeline = VK_NULL_HANDLE;
   VkPipeline pipeline_additive = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
+  VkSampler sampler_nearest = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 
   VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -895,7 +897,7 @@ bool VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
     return false;
   }
   VkDescriptorImageInfo image_info{};
-  image_info.sampler = sampler;
+  image_info.sampler = tex.nearest && sampler_nearest != VK_NULL_HANDLE ? sampler_nearest : sampler;
   image_info.imageView = tex.view;
   image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1537,6 +1539,13 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   if (vkCreateSampler(impl_->device, &sampler_info, nullptr, &impl_->sampler) != VK_SUCCESS) {
     return false;
   }
+  VkSamplerCreateInfo nearest_info = sampler_info;
+  nearest_info.magFilter = VK_FILTER_NEAREST;
+  nearest_info.minFilter = VK_FILTER_NEAREST;
+  if (vkCreateSampler(impl_->device, &nearest_info, nullptr, &impl_->sampler_nearest) !=
+      VK_SUCCESS) {
+    return false;
+  }
 
   VkDescriptorPoolSize pool_size{};
   pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1623,6 +1632,7 @@ void VulkanRenderer::destroy() {
     if (impl_->pipeline_layout) vkDestroyPipelineLayout(impl_->device, impl_->pipeline_layout, nullptr);
     if (impl_->render_pass) vkDestroyRenderPass(impl_->device, impl_->render_pass, nullptr);
     if (impl_->sampler) vkDestroySampler(impl_->device, impl_->sampler, nullptr);
+    if (impl_->sampler_nearest) vkDestroySampler(impl_->device, impl_->sampler_nearest, nullptr);
     if (impl_->descriptor_pool) vkDestroyDescriptorPool(impl_->device, impl_->descriptor_pool, nullptr);
     if (impl_->descriptor_layout)
       vkDestroyDescriptorSetLayout(impl_->device, impl_->descriptor_layout, nullptr);
@@ -1746,13 +1756,15 @@ bool VulkanRenderer::resize(int width, int height) {
   return true;
 }
 
-TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int width, int height) {
+TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int width, int height,
+                                                bool nearest) {
   TextureInfo info;
   if (!ready_ || pixels == nullptr || width <= 0 || height <= 0) {
     return info;
   }
   const TextureId id = impl_->alloc_texture_slot();
   GpuTexture& tex = impl_->textures[id];
+  tex.nearest = nearest;
   if (!impl_->upload_texture_pixels(tex, pixels, width, height)) {
     tex = GpuTexture{};
     return {};
@@ -1790,7 +1802,8 @@ void VulkanRenderer::destroy_texture(TextureId id) {
 
 bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r,
                                 float clear_g, float clear_b, const DrawBatch* additive,
-                                const DrawBatch* post_overlay, const DrawBatch* post_overlay2) {
+                                const DrawBatch* post_overlay, const DrawBatch* post_overlay2,
+                                const ScissorRect* additive_scissor) {
   if (!ready_ || impl_ == nullptr || impl_->swapchain == VK_NULL_HANDLE) {
     return false;
   }
@@ -1972,7 +1985,22 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
 
   draw_buckets(impl_->pipeline, batch, bucket_first_vertex);
   if (additive && additive_verts > 0 && impl_->pipeline_additive) {
+    VkRect2D add_scissor = scissor;
+    if (additive_scissor != nullptr && additive_scissor->valid()) {
+      const int fb_w = static_cast<int>(impl_->swapchain_extent.width);
+      const int fb_h = static_cast<int>(impl_->swapchain_extent.height);
+      const int x0 = std::clamp(additive_scissor->x, 0, fb_w);
+      const int y0 = std::clamp(additive_scissor->y, 0, fb_h);
+      const int x1 = std::clamp(additive_scissor->x + additive_scissor->w, 0, fb_w);
+      const int y1 = std::clamp(additive_scissor->y + additive_scissor->h, 0, fb_h);
+      add_scissor.offset.x = static_cast<int32_t>(x0);
+      add_scissor.offset.y = static_cast<int32_t>(y0);
+      add_scissor.extent.width = static_cast<uint32_t>(std::max(0, x1 - x0));
+      add_scissor.extent.height = static_cast<uint32_t>(std::max(0, y1 - y0));
+    }
+    vkCmdSetScissor(cmd, 0, 1, &add_scissor);
     draw_buckets(impl_->pipeline_additive, *additive, additive_first_vertex);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
   // Modal / top overlays: separate pass so sticky bucket indices in `batch` cannot bury them.
   if (post_overlay && post_verts > 0) {

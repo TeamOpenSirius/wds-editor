@@ -17,9 +17,9 @@ struct PreviewVisualConfig {
   float extra_width = 1.0f;
   float stage_opacity = 0.8f;
   float high_width = 0.1f;  // top width / bottom width ratio
-  // Push stage tip above the visible panel so notes spawn off-screen and scroll in.
-  // Fraction of pre-extend stage height; taller preview raises the tip accordingly.
-  float stage_top_overscan = 0.38f;
+  // Tip sits just above the visible top / hidden bar so notes enter from outside the bar
+  // (not from the screen edge). Fraction of pre-extend stage height.
+  float stage_top_overscan = 0.08f;
 
   // Judgment line — slightly lower than Sirius default to use more of the tall panel.
   float judgeline_margin_bottom = 0.16f;
@@ -46,11 +46,30 @@ struct PreviewVisualConfig {
   // Sirius constants.cpp: alpha = 1 - 0.8 * Mod(i + times.now * arrowSpeed, num) / num
   float arrow_speed = 20.0f;
   float sync_line_height = 5.0f / 640.0f;
-  float split_line_length = 0.02f;
-  float split_line_animation_start = 0.75f;
-  float split_line_animation_end = 0.20f;
-  // Multiply snapshot split_line_alpha when drawing (1 = full; lower = more see-through).
-  float split_line_opacity = 0.72f;
+  // Slightly wider than stock so the gaussian glow skirts have screen-space room.
+  float split_line_length = 0.048f;
+  // Official SplitEffect Show≈1000ms / Hide≈500ms (Light: lines only, no particles).
+  float split_line_animation_start = 1.0f;
+  float split_line_animation_end = 0.5f;
+  // Low enough that the judgeline reads clearly through the beam (official look).
+  float split_line_opacity = 0.40f;
+  // Mild additive body glow so overlaps with the judgeline brighten (beam, not matte).
+  float split_line_body_glow = 0.18f;
+  // Traveling semi-transparent band (SplitEffect particle streak), bottom→tip.
+  float split_line_pulse_period = 0.85f;
+  float split_line_pulse_band = 0.02f;  // half-width in note-percent (short traveling dip)
+  // Center keeps ~(1 - dip) of base alpha (0.4 → ~60% opacity at band center).
+  float split_line_pulse_dip = 0.4f;
+  // Tip→white fraction of the *visible* [p0,p1] length (official LineColor lerp to white).
+  float split_line_tip_whiten = 0.82f;
+  // Extra additive bloom on the whitened tip.
+  float split_line_tip_glow = 0.55f;
+  // Upper spawn mask (Sirius Hidden Line / LaneMask band).
+  float hidden_line_height = 0.12f;
+  // Official Hidden Line SpriteRenderer alpha (~0.45); decorative only — notes hard-clip.
+  float hidden_line_alpha = 0.45f;
+  // Added to tip_visible percent (0=tip); larger → bar sits further down the track.
+  float hidden_line_y_offset = 0.12f;
 
   // Note / hold alphas (sonolus-sirius-engine/engine/play/utils.cpp Draw args)
   // drawTick → 0.5; drawHoldEighth → 0.8 / 0.85 while holding; flat notes → 1.0
@@ -58,19 +77,28 @@ struct PreviewVisualConfig {
   float hold_body_alpha = 0.8f;
   float hold_body_holding_alpha = 0.85f;
 
-  // Hit VFX (sonolus-sirius-engine/engine/shared/constants.cpp)
+  // Hit VFX — official Bomb Light (~0.7s). Sonolus linear heights kept as fallback.
   float effect_linear_height = 0.4375f;
   float effect_circular_height = 0.3125f;
-  float effect_duration = 0.5f;
+  float effect_duration = 0.7f;
   float effect_distance = 0.03125f;
-  // Hold-body eighth pulses (more transparent than head/tail hits).
-  float hold_body_effect_alpha = 0.35f;
+  // Hold-body eighth pulses — Default Light Square matches HoldBomb (isStrong only
+  // scales disabled Light modules; keep full opacity).
+  float hold_body_effect_alpha = 1.0f;
+  // TimingEffect Auto (TimingEffect_anime m_StopTime ≈ 0.417s).
   float judge_text_height = 0.15f;
   float judge_auto_ratio = 216.0f / 76.0f;
-  float judge_text_duration = 0.1f;
+  float judge_text_duration = 0.1f;  // combo number pop window
+  float timing_effect_duration = 0.417f;
+  // Centered on the stage (PreviewUI's local X=-0.87 is relative to an offset parent).
+  float timing_effect_unity_x = 0.0f;
+  float timing_effect_unity_half_width = 5.55f;  // LaneWidth 0.925 * 12 / 2
+  // Y: fraction from judgeline toward tip (lower → sits closer to judgeline).
+  float timing_effect_y_fraction = 0.34f;
+  float timing_effect_root_scale = 0.8f;
 
   // Combo (Sirius Stage.cpp drawCombo AP branch)
-  float combo_scale = 1.0f;
+  float combo_scale = 1.12f;
   float combo_alpha = 1.0f;
   float combo_ap_number_height = 0.238f;
   float combo_ap_number_distance = -0.048f;
@@ -80,11 +108,11 @@ struct PreviewVisualConfig {
   float combo_ap_text_ratio = 168.0f / 48.0f;
   // Sirius drawCombo: cx = screen.w * factor (origin at screen center) → track right side.
   float combo_center_x_factor = 0.4f;
-  float combo_baseline_y = 0.2f;
+  // Lower baseline (toward judgeline) than stock 0.2.
+  float combo_baseline_y = 0.12f;
 
-  // Longer approach than stock Sirius so notes spawn earlier and cover the taller
-  // tip→judgeline path after lowering the judgment line.
-  float appear_time_base = 8.5f;
+  // Longer approach than stock Sirius (7.4) for the deeper tip→judgeline path.
+  float appear_time_base = 10.5f;
 
   // Directory containing skin PNGs (project-root skins/ by default)
   std::string skins_directory = "skins";

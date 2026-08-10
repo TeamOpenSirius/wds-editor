@@ -413,7 +413,7 @@ void paint_split_lane_preview(wds::interaction::UiPainter& painter, const Rect& 
   // Only effect split boundaries — no gray default lane dividers.
   std::vector<int32_t> mids;
   split_boundaries_12(split_count, mids);
-  const float line_w = std::clamp(area.w / static_cast<float>(kLanes) * 0.35f, 3.0f, 8.0f);
+  const float line_w = std::clamp(area.w / static_cast<float>(kLanes) * 0.14f, 1.5f, 2.5f);
 
   auto draw_edge = [&](int32_t edge_lane, int32_t slot) {
     const float x = std::floor(area.x + static_cast<float>(edge_lane) * area.w /

@@ -9,6 +9,7 @@
 #include "wds/interaction/widgets/button.hpp"
 #include "wds/interaction/widgets/checkbox.hpp"
 #include "wds/interaction/widgets/combo_box.hpp"
+#include "wds/interaction/widgets/dropdown.hpp"
 #include "wds/interaction/widgets/shortcut_field.hpp"
 #include "wds/interaction/widgets/slider.hpp"
 #include "wds/interaction/widgets/stepper.hpp"
@@ -414,6 +415,118 @@ int main() {
     expect(!menu_only.captures_keys(), "closed dropdown-only does not capture");
   }
 
+  // Opening one popup closes any other open Dropdown / ComboBox.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+
+    auto a = std::make_unique<Dropdown>();
+    auto* drop_a = a.get();
+    drop_a->set_bounds({10, 10, 80, 28});
+    drop_a->set_items({"A1", "A2", "A3"});
+    drop_a->set_selected_index(0);
+    root.add_child(std::move(a));
+
+    auto b = std::make_unique<ComboBox>();
+    auto* combo_b = b.get();
+    combo_b->set_bounds({120, 10, 80, 28});
+    combo_b->set_dropdown_only(true);
+    combo_b->set_items({"B1", "B2", "B3"});
+    combo_b->set_text("B1");
+    root.add_child(std::move(b));
+
+    root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+    expect(drop_a->is_open(), "first dropdown opens");
+    expect(!combo_b->is_open(), "combo still closed");
+    expect(root.exclusive_popup() == drop_a, "exclusive tracks first open");
+
+    root.process_frame(0.016f, {PointerDownEvent{{160, 24}, PointerButton::Left, {}}});
+    expect(!drop_a->is_open(), "opening another popup closes the first");
+    expect(combo_b->is_open(), "second popup opens");
+    expect(root.exclusive_popup() == combo_b, "exclusive tracks second open");
+
+    // Toggle-close the open menu must not mass-close unrelated popup hosts.
+    struct SpyPopup : Widget {
+      int close_count = 0;
+      void close_own_popup() override { ++close_count; }
+    };
+    auto spy = std::make_unique<SpyPopup>();
+    auto* spy_raw = spy.get();
+    spy_raw->set_bounds({300, 10, 40, 28});
+    root.add_child(std::move(spy));
+    const int closes_before = spy_raw->close_count;
+    root.process_frame(0.016f, {PointerDownEvent{{160, 24}, PointerButton::Left, {}}});
+    expect(!combo_b->is_open(), "second popup toggles closed");
+    expect(root.exclusive_popup() == nullptr, "exclusive cleared on close");
+    expect(spy_raw->close_count == closes_before,
+           "closing one menu must not close unrelated popups");
+  }
+
+  // Side-by-side editable ComboBoxes (toolbar-style): open via chevron only.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+
+    auto a = std::make_unique<ComboBox>();
+    auto* combo_a = a.get();
+    combo_a->set_bounds({10, 10, 80, 28});
+    combo_a->set_dropdown_only(false);
+    combo_a->set_opens_upward(true);
+    combo_a->set_items({"10", "20", "30"});
+    combo_a->set_text("10");
+    root.add_child(std::move(a));
+
+    auto b = std::make_unique<ComboBox>();
+    auto* combo_b = b.get();
+    combo_b->set_bounds({120, 10, 80, 28});
+    combo_b->set_dropdown_only(false);
+    combo_b->set_opens_upward(true);
+    combo_b->set_items({"2", "4", "8"});
+    combo_b->set_text("4");
+    root.add_child(std::move(b));
+
+    // Chevron is the rightmost ~18px of the field.
+    root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+    expect(combo_a->is_open(), "editable combo opens from chevron");
+    expect(!combo_b->is_open(), "peer combo stays closed");
+
+    root.process_frame(0.016f, {PointerDownEvent{{195, 24}, PointerButton::Left, {}}});
+    expect(!combo_a->is_open(), "opening peer closes the first (non-overlapping)");
+    expect(combo_b->is_open(), "peer combo opens from its chevron");
+
+    root.process_frame(0.016f, {PointerDownEvent{{195, 24}, PointerButton::Left, {}}});
+    expect(!combo_b->is_open(), "chevron toggles peer closed");
+    expect(!combo_a->is_open(), "first remains closed after peer close");
+  }
+
+  // Same exclusive-open rule when the first menu covers the second field.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+
+    auto a = std::make_unique<Dropdown>();
+    auto* drop_a = a.get();
+    drop_a->set_bounds({10, 10, 80, 28});
+    drop_a->set_items({"A1", "A2", "A3", "A4", "A5"});
+    drop_a->set_selected_index(0);
+    root.add_child(std::move(a));
+
+    auto b = std::make_unique<ComboBox>();
+    auto* combo_b = b.get();
+    combo_b->set_bounds({10, 50, 80, 28});
+    combo_b->set_dropdown_only(true);
+    combo_b->set_items({"B1", "B2", "B3"});
+    combo_b->set_text("B1");
+    root.add_child(std::move(b));
+
+    root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+    expect(drop_a->is_open(), "covering dropdown opens");
+
+    root.process_frame(0.016f, {PointerDownEvent{{40, 64}, PointerButton::Left, {}}});
+    expect(!drop_a->is_open(), "opening covered field closes covering menu");
+    expect(combo_b->is_open(), "covered field opens");
+  }
+
   {
     ShortcutNamespace ns;
     expect(ns.bind({KeyCode::Space, {}}, [] {}), "clear-test bind");
@@ -490,6 +603,84 @@ int main() {
     expect(root.focused_widget() == nullptr, "hide clears focus");
     root.process_frame(0.016f, {KeyDownEvent{KeyCode::Space, {}, false}}, &mgr);
     expect(fired == 1, "Space shortcut works after hide");
+  }
+
+  // Modal must block dropdown hit-testing behind it (click-through to menus).
+  {
+    struct ModalPanel : Widget {
+      bool open = false;
+      bool is_interaction_modal() const override { return open; }
+      Widget* hit_test(Vec2 point) override {
+        if (!open || !visible() || !enabled()) return nullptr;
+        if (!absolute_bounds().contains(point)) return nullptr;
+        for (auto it = children().rbegin(); it != children().rend(); ++it) {
+          if (Widget* hit = (*it)->hit_test(point)) return hit;
+        }
+        return this;
+      }
+    };
+
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+
+    auto drop = std::make_unique<Dropdown>();
+    auto* menu = drop.get();
+    menu->set_bounds({40, 40, 80, 28});
+    menu->set_items({"A1", "A2", "A3", "A4", "A5"});
+    menu->set_selected_index(0);
+    root.add_child(std::move(drop));
+
+    auto modal = std::make_unique<ModalPanel>();
+    auto* dlg = modal.get();
+    dlg->set_bounds({0, 0, 400, 400});
+    auto btn = std::make_unique<Button>("OK");
+    auto* ok = btn.get();
+    ok->set_bounds({150, 180, 100, 32});
+    int clicks = 0;
+    ok->on_click([&] { ++clicks; });
+    dlg->add_child(std::move(btn));
+    root.add_child(std::move(modal));
+
+    root.process_frame(0.016f, {PointerDownEvent{{80, 54}, PointerButton::Left, {}}});
+    expect(menu->is_open(), "dropdown opens before modal");
+
+    dlg->open = true;
+    dlg->set_visible(true);
+    // Stale open menu behind an open modal: click must hit the dialog button.
+    root.process_frame(0.016f,
+                       {PointerDownEvent{{200, 196}, PointerButton::Left, {}},
+                        PointerUpEvent{{200, 196}, PointerButton::Left, {}},
+                        ClickEvent{{200, 196}, PointerButton::Left, {}, 1}});
+    expect(!menu->is_open(), "modal frame closes background exclusive popup");
+    expect(clicks == 1, "modal button receives click, not background menu");
+
+    root.process_frame(0.016f, {PointerDownEvent{{80, 54}, PointerButton::Left, {}}});
+    expect(!menu->is_open(), "modal blocks opening dropdown behind scrim");
+  }
+
+  // DrawBatch / UiPainter::flush_to append — frame rebuilds must clear first.
+  // (Regression: post-overlay popup_batch cleared only when empty → ghost menus.)
+  {
+    wds::renderer::DrawBatch batch;
+    const wds::renderer::ScreenBounds screen{};
+    UiPainter painter;
+    painter.fill_rect({0, 0, 10, 10}, {1, 1, 1, 1});
+    painter.flush_to(batch, /*solid*/ 1, 100, 100, screen);
+    const auto first = batch.vertex_count();
+    expect(first > 0, "flush_to emits verts");
+    painter.flush_to(batch, 1, 100, 100, screen);
+    expect(batch.vertex_count() == first * 2, "flush_to appends without clear");
+    batch.clear();
+    painter.flush_to(batch, 1, 100, 100, screen);
+    expect(batch.vertex_count() == first, "clear then flush replaces frame content");
+
+    wds::renderer::DrawBatch scratch;
+    painter.flush_to(scratch, 1, 100, 100, screen);
+    batch.clear();
+    batch.append_from(scratch);
+    const auto merged = batch.vertex_count();
+    batch.append_from(scratch);
+    expect(batch.vertex_count() == merged * 2, "append_from also accumulates");
   }
 
   return failures == 0 ? 0 : 1;

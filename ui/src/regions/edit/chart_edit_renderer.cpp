@@ -267,7 +267,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
   // Fade in/out: 1px slices + smoothstep opacity — keep ms-level sampling (U1 skipped
   // coarsening here; split count is small).
   constexpr float kFadeSlicePx = 1.0f;
-  constexpr float kSplitLineW = 7.0f;
+  // Logical px (Retina ×2 at flush). Soft plate fills the rect — keep ≤2 so it reads thin.
+  constexpr float kSplitLineW = 2.0f;
   const auto draw_split_edges = [&](const wds::chart_editor::NotationNote& split_note, float y_a,
                                     float y_b, float opacity, int32_t /*anim_phase*/) {
     const float top = std::min(y_a, y_b);

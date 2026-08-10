@@ -40,15 +40,18 @@ struct DrawBucket {
   std::vector<DrawVertex> vertices;
 };
 
+// Per-texture vertex lists. All writers (add_quad / append_from / UiPainter::flush_to)
+// append; callers must clear() (or reset()) at the start of each frame rebuild.
 struct DrawBatch {
   std::vector<DrawBucket> buckets;
   std::unordered_map<TextureId, size_t> bucket_lookup;
 
+  // Drop vertices but keep sticky bucket slots/capacity for reused texture ids.
+  // This is the per-frame reset — not optional when the batch is member-owned.
   void clear() {
     for (auto& b : buckets) {
       b.vertices.clear();
     }
-    // Keep bucket slots/capacity; lookup stays valid for reused texture ids.
   }
 
   void reset() {
@@ -77,6 +80,7 @@ struct DrawBatch {
     return buckets.back();
   }
 
+  // Appends non-empty buckets from `src`. Does not clear this batch first.
   void append_from(const DrawBatch& src) {
     for (const auto& bucket : src.buckets) {
       if (bucket.vertices.empty()) {
@@ -97,6 +101,15 @@ struct DrawBatch {
                         float a_lt, float a_rt, float u0 = 0.0f, float v0 = 0.0f,
                         float u1 = 1.0f, float v1 = 1.0f, float r = 1.0f, float g = 1.0f,
                         float b = 1.0f) {
+    add_quad_corners(texture, quad, z, a_lb, a_rb, a_lt, a_rt, u0, v0, u1, v1, r, g, b, r, g, b,
+                     r, g, b, r, g, b);
+  }
+
+  // Per-corner RGB + alpha (GPU interpolates along the strip — soft tip/pulse gradients).
+  void add_quad_corners(TextureId texture, const Quad& quad, float z, float a_lb, float a_rb,
+                        float a_lt, float a_rt, float u0, float v0, float u1, float v1,
+                        float r_lb, float g_lb, float b_lb, float r_rb, float g_rb, float b_rb,
+                        float r_lt, float g_lt, float b_lt, float r_rt, float g_rt, float b_rt) {
     if (texture == kInvalidTextureId) {
       return;
     }
@@ -105,7 +118,8 @@ struct DrawBatch {
     }
     auto& bucket = bucket_for(texture);
 
-    auto push = [&](float x, float y, float u, float v, float q, float a) {
+    auto push = [&](float x, float y, float u, float v, float q, float a, float r, float g,
+                    float b) {
       const float qq = std::max(q, 1e-6f);
       DrawVertex vert;
       vert.x = x;
@@ -122,12 +136,12 @@ struct DrawBatch {
     };
 
     auto emit = [&](float q_lb, float q_rb, float q_lt, float q_rt) {
-      push(quad.lb.x, quad.lb.y, u0, v0, q_lb, a_lb);
-      push(quad.lt.x, quad.lt.y, u0, v1, q_lt, a_lt);
-      push(quad.rt.x, quad.rt.y, u1, v1, q_rt, a_rt);
-      push(quad.lb.x, quad.lb.y, u0, v0, q_lb, a_lb);
-      push(quad.rt.x, quad.rt.y, u1, v1, q_rt, a_rt);
-      push(quad.rb.x, quad.rb.y, u1, v0, q_rb, a_rb);
+      push(quad.lb.x, quad.lb.y, u0, v0, q_lb, a_lb, r_lb, g_lb, b_lb);
+      push(quad.lt.x, quad.lt.y, u0, v1, q_lt, a_lt, r_lt, g_lt, b_lt);
+      push(quad.rt.x, quad.rt.y, u1, v1, q_rt, a_rt, r_rt, g_rt, b_rt);
+      push(quad.lb.x, quad.lb.y, u0, v0, q_lb, a_lb, r_lb, g_lb, b_lb);
+      push(quad.rt.x, quad.rt.y, u1, v1, q_rt, a_rt, r_rt, g_rt, b_rt);
+      push(quad.rb.x, quad.rb.y, u1, v0, q_rb, a_rb, r_rb, g_rb, b_rb);
     };
 
     // Affine fast path: axis-aligned rects (UI / edit grid / most note caps).

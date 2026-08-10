@@ -12,6 +12,7 @@ class ChartAddDialog final : public wds::interaction::Widget {
   ChartAddDialog();
 
   bool is_open() const noexcept { return open_; }
+  bool is_interaction_modal() const override { return open_; }
   void open();
   void close();
 

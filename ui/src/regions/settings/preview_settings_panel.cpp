@@ -108,7 +108,7 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
   add_child(std::move(speed_minus));
 
   auto speed = std::make_unique<wds::interaction::ComboBox>();
-  speed->set_items({"3", "5", "7", "9", "11"});
+  speed->set_items({"6", "8", "10", "12", "14", "16", "18"});
   speed->set_text(format_speed(speed_));
   speed->set_validator([](const std::string& text) {
     const auto value = wds::interaction::parse_speed(text, 1.0);

@@ -1,5 +1,6 @@
 #include <wds/chart_render/skin_catalog.hpp>
 
+#include <wds/chart_render/split_soft_profile.hpp>
 #include <wds/common/utf8_path.hpp>
 
 #include <algorithm>
@@ -46,10 +47,20 @@ std::string queue_optional(TextureCache& cache, const fs::path& dir,
 bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) {
   const fs::path dir = path_from_utf8(skins_directory);
 
-  const std::string p_stage =
-      queue_optional(cache, dir, {"_STAGE_COVER.png", "Sirius Stage Cover.png"});
+  // Large stage plates stay out of the atlas (same reason as ingame_bg).
+  auto find_skin = [&](std::initializer_list<const char*> names) -> std::string {
+    for (const char* name : names) {
+      const fs::path path = dir / name;
+      const std::string utf8 = path_to_utf8(path);
+      if (is_regular_file_utf8(utf8)) {
+        return utf8;
+      }
+    }
+    return {};
+  };
+  const std::string p_stage = find_skin({"_STAGE_COVER.png", "Sirius Stage Cover.png"});
   const std::string p_stage_bg =
-      queue_optional(cache, dir, {"_STAGE_BOTTOM_BORDER.png", "Sirius Stage Bottom Border.png"});
+      find_skin({"_STAGE_BOTTOM_BORDER.png", "Sirius Stage Bottom Border.png"});
   const std::string p_judgeline =
       queue_optional(cache, dir, {"_JUDGMENT_LINE.png", "Sirius Judgment Line.png"});
 
@@ -87,6 +98,27 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   const std::string p_lin_bg = queue_optional(cache, dir, {"Sirius Linear Background.png"});
   const std::string p_lin_line = queue_optional(cache, dir, {"Sirius Linear Line.png"});
   const std::string p_lin_star = queue_optional(cache, dir, {"Sirius Linear Star.png"});
+
+  auto queue_bomb_layer = [&](const char* type_dir, const char* layer) -> std::string {
+    const fs::path path =
+        dir / "effects" / "bomb" / "light" / "default" / type_dir / layer;
+    const std::string utf8 = path_to_utf8(path);
+    if (is_regular_file_utf8(utf8) && cache.queue_png(utf8)) {
+      return utf8;
+    }
+    return {};
+  };
+  const std::string p_b_sq_n = queue_bomb_layer("normal", "square.png");
+  const std::string p_b_fl_n = queue_bomb_layer("normal", "flare.png");
+  const std::string p_b_sq_c = queue_bomb_layer("critical", "square.png");
+  const std::string p_b_fl_c = queue_bomb_layer("critical", "flare.png");
+  const std::string p_b_sq_s = queue_bomb_layer("scratch", "square.png");
+  const std::string p_b_fl_s = queue_bomb_layer("scratch", "flare.png");
+  const std::string p_b_sq_h = queue_bomb_layer("hold", "square.png");
+  const std::string p_b_fl_h = queue_bomb_layer("hold", "flare.png");
+  const std::string p_b_sq_o = queue_bomb_layer("sound", "square.png");
+  const std::string p_b_fl_o = queue_bomb_layer("sound", "flare.png");
+
   const std::string p_combo_text = queue_optional(cache, dir, {"Sirius Combo AP.png"});
   const char* combo_digit_names[10] = {
       "Sirius Combo AP 0.png", "Sirius Combo AP 1.png", "Sirius Combo AP 2.png",
@@ -156,17 +188,17 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
 
   constexpr const char* kSoftSplitKey = "__wds/soft_split_line";
   {
-    constexpr int kW = 32;
+    // Wide gaussian glow plate (see split_soft_profile.hpp) — official lines are
+    // soft beams that let the judgeline show through, not hard-core 8-tap bars.
+    constexpr int kW = kSplitSoftPlateW;
     std::vector<unsigned char> px(static_cast<size_t>(kW) * 4);
     for (int x = 0; x < kW; ++x) {
       const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kW);
-      float a = 1.0f - std::abs(u - 0.5f) * 2.0f;
-      a = std::clamp(a, 0.0f, 1.0f);
-      a = a * a * (3.0f - 2.0f * a);
-      px[static_cast<size_t>(x) * 4 + 0] = 200;
-      px[static_cast<size_t>(x) * 4 + 1] = 200;
-      px[static_cast<size_t>(x) * 4 + 2] = 200;
-      px[static_cast<size_t>(x) * 4 + 3] = static_cast<unsigned char>(a * 255.0f);
+      const float a = split_soft_edge_alpha(u);
+      px[static_cast<size_t>(x) * 4 + 0] = 255;
+      px[static_cast<size_t>(x) * 4 + 1] = 255;
+      px[static_cast<size_t>(x) * 4 + 2] = 255;
+      px[static_cast<size_t>(x) * 4 + 3] = static_cast<unsigned char>(a * 255.0f + 0.5f);
     }
     cache.queue_rgba(kSoftSplitKey, std::move(px), kW, 1);
   }
@@ -198,9 +230,19 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     return false;
   }
 
-  stage = cache.get(p_stage);
-  stage_background = cache.get(p_stage_bg);
+  stage = p_stage.empty() ? TextureInfo{} : cache.load_standalone_png(p_stage);
+  stage_background =
+      p_stage_bg.empty() ? TextureInfo{} : cache.load_standalone_png(p_stage_bg);
   judgeline = cache.get(p_judgeline);
+
+  // Official Texture2D/ingame_bg.png — large plate, keep out of the atlas.
+  const std::string p_ingame_bg =
+      path_to_utf8(dir / "ingame_bg.png");
+  if (is_regular_file_utf8(p_ingame_bg)) {
+    ingame_background = cache.load_standalone_png(p_ingame_bg);
+  } else {
+    ingame_background = {};
+  }
 
   note_bottom = cache.get(p_bottom);
   note_red_top = cache.get(p_red);
@@ -228,6 +270,16 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   effect_linear_line = cache.get(p_lin_line);
   effect_linear_star = cache.get(p_lin_star);
   effect_circular = flick_circle ? flick_circle : cache.get(p_flick_s);
+  bomb_square_normal = cache.get(p_b_sq_n);
+  bomb_flare_normal = cache.get(p_b_fl_n);
+  bomb_square_critical = cache.get(p_b_sq_c);
+  bomb_flare_critical = cache.get(p_b_fl_c);
+  bomb_square_scratch = cache.get(p_b_sq_s);
+  bomb_flare_scratch = cache.get(p_b_fl_s);
+  bomb_square_hold = cache.get(p_b_sq_h);
+  bomb_flare_hold = cache.get(p_b_fl_h);
+  bomb_square_sound = cache.get(p_b_sq_o);
+  bomb_flare_sound = cache.get(p_b_fl_o);
   combo_ap_text = cache.get(p_combo_text);
   for (int i = 0; i < 10; ++i) {
     combo_ap_digit[i] = cache.get(p_combo_digit[i]);
@@ -248,6 +300,38 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
          static_cast<bool>(hold_connection_purple) && static_cast<bool>(sync_line) &&
          static_cast<bool>(scratch_arrow) && static_cast<bool>(tick_blue) &&
          static_cast<bool>(tick_purple);
+}
+
+bool SkinCatalog::bomb_light_for(const char* type_dir, TextureInfo& square,
+                                 TextureInfo& flare) const noexcept {
+  auto pick = [&](const TextureInfo& typed, const TextureInfo& normal) -> TextureInfo {
+    return typed ? typed : normal;
+  };
+  square = {};
+  flare = {};
+  if (type_dir != nullptr) {
+    const std::string t(type_dir);
+    if (t == "critical") {
+      square = pick(bomb_square_critical, bomb_square_normal);
+      flare = pick(bomb_flare_critical, bomb_flare_normal);
+    } else if (t == "scratch") {
+      square = pick(bomb_square_scratch, bomb_square_normal);
+      flare = pick(bomb_flare_scratch, bomb_flare_normal);
+    } else if (t == "hold") {
+      square = pick(bomb_square_hold, bomb_square_normal);
+      flare = pick(bomb_flare_hold, bomb_flare_normal);
+    } else if (t == "sound") {
+      square = pick(bomb_square_sound, bomb_square_normal);
+      flare = pick(bomb_flare_sound, bomb_flare_normal);
+    } else {
+      square = bomb_square_normal;
+      flare = bomb_flare_normal;
+    }
+  } else {
+    square = bomb_square_normal;
+    flare = bomb_flare_normal;
+  }
+  return static_cast<bool>(square);
 }
 
 }  // namespace wds::renderer

@@ -12,11 +12,10 @@ float dist(Vec2 a, Vec2 b) noexcept {
   return std::sqrt(dx * dx + dy * dy);
 }
 
-}  // namespace
-
-void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
-                     float border_l_px, float border_r_px, float z, float alpha_near,
-                     float alpha_far, float border_scale_px, float r, float g, float b) {
+void add_sliced_note_impl(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
+                          float border_l_px, float border_r_px, float z, float alpha_near,
+                          float alpha_far, float border_scale_px, float r, float g, float b,
+                          float v0, float v1) {
   if (!sprite || (alpha_near <= 0.0f && alpha_far <= 0.0f)) {
     return;
   }
@@ -68,8 +67,6 @@ void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& qu
 
   const float u0 = sprite.u0;
   const float u1 = sprite.u1;
-  const float v0 = sprite.v0;
-  const float v1 = sprite.v1;
   const float du = u1 - u0;
   const float u_l = u0 + du * u_bl;
   const float u_r = u1 - du * u_br;
@@ -110,6 +107,23 @@ void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& qu
     batch.add_quad_corners(sprite.id, Quad{rb_m, rt_m, rt, rb}, z, a_lb_m, a_rb, a_lt_m, a_rt, u_r,
                            v0, u1, v1, r, g, b);
   }
+}
+
+}  // namespace
+
+void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
+                     float border_l_px, float border_r_px, float z, float alpha_near,
+                     float alpha_far, float border_scale_px, float r, float g, float b) {
+  add_sliced_note_impl(batch, sprite, quad, border_l_px, border_r_px, z, alpha_near, alpha_far,
+                       border_scale_px, r, g, b, sprite.v0, sprite.v1);
+}
+
+void add_sliced_note_v(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
+                       float border_l_px, float border_r_px, float z, float alpha,
+                       float border_scale_px, float v_near_atlas, float v_far_atlas, float r,
+                       float g, float b) {
+  add_sliced_note_impl(batch, sprite, quad, border_l_px, border_r_px, z, alpha, alpha,
+                       border_scale_px, r, g, b, v_near_atlas, v_far_atlas);
 }
 
 }  // namespace wds::renderer

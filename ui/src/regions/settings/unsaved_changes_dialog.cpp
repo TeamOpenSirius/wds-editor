@@ -1,6 +1,7 @@
 #include "wds/ui/regions/settings/unsaved_changes_dialog.hpp"
 
 #include <wds/interaction/theme.hpp>
+#include <wds/interaction/widget_root.hpp>
 #include <wds/interaction/widgets/button.hpp>
 
 #include <algorithm>
@@ -43,6 +44,9 @@ UnsavedChangesDialog::UnsavedChangesDialog() {
 void UnsavedChangesDialog::open() {
   open_ = true;
   set_visible(true);
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
 }
 
 void UnsavedChangesDialog::close() {

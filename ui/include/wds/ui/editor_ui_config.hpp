@@ -26,6 +26,8 @@ struct EditorUiConfig {
   std::array<int, 6> width_slots{{1, 2, 3, 4, 6, 12}};
   // When true, mute looping Hold-body SFX (head/tail/JumpScratch/stars unchanged).
   bool mute_hold_body_sfx = false;
+  // When true, show TimingEffect Auto judgment text during preview auto-hit.
+  bool show_judgment_text = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
   // When true, negate timeline-scrub wheel deltas (not Ctrl/Cmd+wheel visible range).

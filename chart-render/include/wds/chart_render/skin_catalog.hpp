@@ -12,6 +12,8 @@ namespace wds::renderer {
 struct SkinCatalog {
   TextureInfo stage;
   TextureInfo stage_background;
+  // Official GameBackground theater plate (curtains / floor / lights).
+  TextureInfo ingame_background;
   TextureInfo judgeline;
 
   // Shared bottom + per-color tops (official A_NotesBottom / A_*NotesTop).
@@ -61,10 +63,27 @@ struct SkinCatalog {
   TextureInfo effect_linear_star;
   TextureInfo effect_circular;
 
+  // Official Default Bomb Light layers under skins/effects/bomb/light/default/{type}/.
+  // Missing type falls back to normal; missing all → Sonolus linear/circular.
+  TextureInfo bomb_square_normal;
+  TextureInfo bomb_flare_normal;
+  TextureInfo bomb_square_critical;
+  TextureInfo bomb_flare_critical;
+  TextureInfo bomb_square_scratch;
+  TextureInfo bomb_flare_scratch;
+  TextureInfo bomb_square_hold;
+  TextureInfo bomb_flare_hold;
+  TextureInfo bomb_square_sound;
+  TextureInfo bomb_flare_sound;
+
   TextureInfo soft_split_line;
   TextureInfo soft_disk;
 
   bool load(TextureCache& cache, const std::string& skins_directory);
+
+  // Resolve Light bomb layers for a note family. Returns false if square is missing
+  // (caller should use Sonolus fallback).
+  bool bomb_light_for(const char* type_dir, TextureInfo& square, TextureInfo& flare) const noexcept;
 };
 
 }  // namespace wds::renderer

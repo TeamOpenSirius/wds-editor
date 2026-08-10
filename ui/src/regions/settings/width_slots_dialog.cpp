@@ -5,6 +5,7 @@
 #include <wds/interaction/shortcuts.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/validators.hpp>
+#include <wds/interaction/widget_root.hpp>
 #include <wds/interaction/widgets/button.hpp>
 #include <wds/interaction/widgets/checkbox.hpp>
 #include <wds/interaction/widgets/combo_box.hpp>
@@ -122,6 +123,10 @@ WidthSlotsDialog::WidthSlotsDialog() {
   mute_hold_body_sfx_ = mute.get();
   add_child(std::move(mute));
 
+  auto judge_text = std::make_unique<wds::interaction::Checkbox>("开启判定文字显示");
+  show_judgment_text_ = judge_text.get();
+  add_child(std::move(judge_text));
+
   auto invert = std::make_unique<wds::interaction::Checkbox>("反转时间轴滚轮方向");
   invert_scroll_wheel_ = invert.get();
   add_child(std::move(invert));
@@ -228,6 +233,9 @@ void WidthSlotsDialog::try_confirm() {
 void WidthSlotsDialog::open() {
   open_ = true;
   set_visible(true);
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
   sync_fields_from_state();
   // Always land on the first sidebar tab (文件), not the last-used one.
   set_tab(Tab::File);
@@ -246,6 +254,7 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
   pause_at_current_ = cfg.pause_at_current;
   static_cast<wds::interaction::Checkbox*>(sus_auto_convert_)->set_checked(cfg.sus_auto_convert);
   static_cast<wds::interaction::Checkbox*>(mute_hold_body_sfx_)->set_checked(cfg.mute_hold_body_sfx);
+  static_cast<wds::interaction::Checkbox*>(show_judgment_text_)->set_checked(cfg.show_judgment_text);
   static_cast<wds::interaction::Checkbox*>(invert_scroll_wheel_)->set_checked(cfg.invert_scroll_wheel);
   static_cast<wds::interaction::Checkbox*>(invert_visible_range_scroll_)
       ->set_checked(cfg.invert_visible_range_scroll);
@@ -270,6 +279,8 @@ void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
       static_cast<const wds::interaction::Checkbox*>(sus_auto_convert_)->checked();
   cfg.mute_hold_body_sfx =
       static_cast<const wds::interaction::Checkbox*>(mute_hold_body_sfx_)->checked();
+  cfg.show_judgment_text =
+      static_cast<const wds::interaction::Checkbox*>(show_judgment_text_)->checked();
   cfg.invert_scroll_wheel =
       static_cast<const wds::interaction::Checkbox*>(invert_scroll_wheel_)->checked();
   cfg.invert_visible_range_scroll =
@@ -349,6 +360,7 @@ void WidthSlotsDialog::update_tab_visibility() {
   const bool file = tab_ == Tab::File;
   const bool audio = tab_ == Tab::Audio;
   const bool input = tab_ == Tab::Input;
+  const bool display = tab_ == Tab::Display;
   const bool shortcuts = tab_ == Tab::Shortcuts;
   for (auto* f : fields_) {
     if (f) f->set_visible(open_ && width);
@@ -364,6 +376,7 @@ void WidthSlotsDialog::update_tab_visibility() {
   }
   if (sus_auto_convert_) sus_auto_convert_->set_visible(open_ && file);
   if (mute_hold_body_sfx_) mute_hold_body_sfx_->set_visible(open_ && audio);
+  if (show_judgment_text_) show_judgment_text_->set_visible(open_ && display);
   if (invert_scroll_wheel_) invert_scroll_wheel_->set_visible(open_ && input);
   if (invert_visible_range_scroll_) invert_visible_range_scroll_->set_visible(open_ && input);
   if (scroll_wheel_speed_) scroll_wheel_speed_->set_visible(open_ && input);
@@ -403,6 +416,8 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   tab_y += ctrl_h + tab_gap;
   tab_input_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
   tab_y += ctrl_h + tab_gap;
+  tab_display_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
+  tab_y += ctrl_h + tab_gap;
   tab_width_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
   tab_y += ctrl_h + tab_gap;
   tab_shortcuts_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
@@ -411,9 +426,10 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   const float body_w = content_bounds_.right() - pad - body_x;
   float y = content_bounds_.y + pad + title_h + gap;
 
-  // File / Audio checkboxes (single row each).
+  // File / Audio / Display checkboxes (single row each).
   sus_auto_convert_->set_bounds({body_x, y, body_w, ctrl_h});
   mute_hold_body_sfx_->set_bounds({body_x, y, body_w, ctrl_h});
+  show_judgment_text_->set_bounds({body_x, y, body_w, ctrl_h});
 
   // Input: invert checkboxes, then labeled scroll-speed combo.
   invert_scroll_wheel_->set_bounds({body_x, y, body_w, ctrl_h});
@@ -532,6 +548,7 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
   paint_tab(tab_file_bounds_, "文件", tab_ == Tab::File);
   paint_tab(tab_audio_bounds_, "音频", tab_ == Tab::Audio);
   paint_tab(tab_input_bounds_, "输入", tab_ == Tab::Input);
+  paint_tab(tab_display_bounds_, "显示", tab_ == Tab::Display);
   paint_tab(tab_width_bounds_, "快捷键宽", tab_ == Tab::Width);
   paint_tab(tab_shortcuts_bounds_, "快捷键设置", tab_ == Tab::Shortcuts);
 
@@ -587,6 +604,8 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
     static_cast<const wds::interaction::Checkbox*>(sus_auto_convert_)->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Audio) {
     static_cast<const wds::interaction::Checkbox*>(mute_hold_body_sfx_)->paint_at(painter, kFieldZ);
+  } else if (tab_ == Tab::Display) {
+    static_cast<const wds::interaction::Checkbox*>(show_judgment_text_)->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Input) {
     static_cast<const wds::interaction::Checkbox*>(invert_scroll_wheel_)->paint_at(painter, kFieldZ);
     static_cast<const wds::interaction::Checkbox*>(invert_visible_range_scroll_)
@@ -702,6 +721,10 @@ void WidthSlotsDialog::on_click(const wds::interaction::ClickEvent& event) {
   }
   if (hit_tab(tab_input_bounds_)) {
     set_tab(Tab::Input);
+    return;
+  }
+  if (hit_tab(tab_display_bounds_)) {
+    set_tab(Tab::Display);
     return;
   }
   if (hit_tab(tab_width_bounds_)) {

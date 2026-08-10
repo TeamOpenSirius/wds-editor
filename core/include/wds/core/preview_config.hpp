@@ -41,15 +41,14 @@ struct PreviewConfig {
   // After judgment time, note body is gone; AutoHit window drives hit VFX
   // (mirrors Sirius terminate() particle lifetime = effectDurationTime).
   bool show_auto_hit_feedback = true;
-  int64_t auto_hit_feedback_ms = 500;  // effectDurationTime = 0.5s
+  int64_t auto_hit_feedback_ms = 700;  // official Bomb _animationTime ≈ 0.7s
 
   // Fallback tail when hold-span cache has not been reduced after deletions.
   int64_t preview_tail_fallback_ms = 8000;
 
-  // Split-line / STAGE_COVER fade windows (seconds). Keep both equal so gray
-  // lane dividers and effect lines ease in/out together.
-  float split_line_animation_start_sec = 0.75f;
-  float split_line_animation_end_sec = 0.20f;
+  // Split-line / STAGE_COVER fade windows (seconds). Official Show≈1000 / Hide≈500.
+  float split_line_animation_start_sec = 1.0f;
+  float split_line_animation_end_sec = 0.5f;
 
   // Incremental snapshot update policy (see PreviewSnapshotBuilder::estimate_diff).
   // Prefer FullRebuild when |timeline delta| exceeds this (large seek / scrub).

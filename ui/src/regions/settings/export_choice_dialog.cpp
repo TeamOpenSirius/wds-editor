@@ -1,6 +1,7 @@
 #include "wds/ui/regions/settings/export_choice_dialog.hpp"
 
 #include <wds/interaction/theme.hpp>
+#include <wds/interaction/widget_root.hpp>
 #include <wds/interaction/widgets/button.hpp>
 #include <wds/interaction/widgets/combo_box.hpp>
 
@@ -70,6 +71,9 @@ ExportFormat ExportChoiceDialog::format_from_combo() const {
 void ExportChoiceDialog::open() {
   open_ = true;
   set_visible(true);
+  if (auto* root = find_root()) {
+    root->close_exclusive_popup_outside(this);
+  }
   format_ = ExportFormat::OfficialCsv;
   if (auto* combo = static_cast<wds::interaction::ComboBox*>(format_combo_)) {
     combo->set_text("官方 CSV");

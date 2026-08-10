@@ -62,6 +62,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (auto* toolbar_panel = this->toolbar_panel()) toolbar_panel->capture_config(cfg);
     cfg.width_slots = wds::interaction::width_slot_values_const();
     cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
+    cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
     cfg.sus_auto_convert = session_->sus_auto_convert();
     cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
     cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
@@ -185,6 +186,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       width_slots_dialog_->capture_config(cfg);
       session_->set_sus_auto_convert(cfg.sus_auto_convert);
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+      chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
       wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -440,6 +442,7 @@ void UiManager::load_ui_config() {
   wds::interaction::set_width_slot_values(cfg.width_slots);
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+  chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
   wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -459,6 +462,7 @@ void UiManager::save_ui_config() {
   if (auto* toolbar = toolbar_panel()) toolbar->capture_config(cfg);
   cfg.width_slots = wds::interaction::width_slot_values_const();
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
+  cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
@@ -491,6 +495,11 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
       static_cast<int>(std::lround(static_cast<float>(computed.preview_content.y) * s)),
       round_fb(static_cast<float>(computed.preview_content.width)),
       round_fb(static_cast<float>(computed.preview_content.height)));
+  // Full preview column — background cover fills this without spilling into edit.
+  chart_preview_->set_panel_bounds(
+      static_cast<int>(std::lround(layout_.preview.x * s)),
+      static_cast<int>(std::lround(layout_.preview.y * s)),
+      round_fb(layout_.preview.w), round_fb(layout_.preview.h));
 }
 
 void UiManager::apply_region_bounds() {
@@ -670,7 +679,13 @@ const wds::renderer::DrawBatch& UiManager::build_modal_chrome_batch(
 const wds::renderer::DrawBatch& UiManager::build_post_overlay_batch(
     wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
     const wds::renderer::ScreenBounds& screen) {
+  // Clear every reused batch at the start of the frame. UiPainter::flush_to and
+  // DrawBatch::append_from only append; clearing only when a layer is empty left
+  // prior-frame popup/modal verts in place for as long as any menu stayed open.
   post_overlay_batch_.clear();
+  modal_batch_.clear();
+  popup_batch_.clear();
+
   // Paint all post-overlay layers first, then one atlas upload before any flush
   // so mid-frame destroy cannot invalidate an earlier DrawBatch TextureId.
   wds::interaction::UiPainter status;
@@ -715,23 +730,17 @@ const wds::renderer::DrawBatch& UiManager::build_post_overlay_batch(
   if (have_status || have_modal || have_popup) {
     chart_preview_->sync_ui_font_texture();
   }
-  // Status bar above edit skins, below modals/menus (depth write off → draw order).
+  // Flush straight into the cleared post batch (status → modal → popup). No
+  // intermediate scratch+append_from: that path previously cleared scratch only
+  // when a layer was absent, so open menus accumulated every frame.
   if (have_status) {
     status.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
   }
-  // Modal scrim next, then dropdown popups — otherwise menus open inside a modal
-  // (export format combo) are drawn under the 55% dim and look transparent.
   if (have_modal) {
-    modal.flush_to(modal_batch_, solid_texture, fb_w, fb_h, screen);
-    post_overlay_batch_.append_from(modal_batch_);
-  } else {
-    modal_batch_.clear();
+    modal.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
   }
   if (have_popup) {
-    popup.flush_to(popup_batch_, solid_texture, fb_w, fb_h, screen);
-    post_overlay_batch_.append_from(popup_batch_);
-  } else {
-    popup_batch_.clear();
+    popup.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
   }
   return post_overlay_batch_;
 }
