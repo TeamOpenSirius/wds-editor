@@ -371,30 +371,11 @@ void UiPainter::label(const Rect& bounds, const std::string& text, const Color& 
   font.ensure_glyphs(text);
   if (font.ready() || font.atlas_width() > 0) {
     const float max_w = std::max(1.0f, bounds.w - 4.0f);
-    const float max_h = std::max(1.0f, bounds.h - 4.0f);
 
     if (wrap) {
-#if defined(_WIN32)
-      // Prefer larger tips on 1× so bake≈draw; avoid crushing to ~7px mush.
-      const float kMinReadable = theme::px(11.0f);
-      const float height_frac = 0.55f;
-#else
-      const float kMinReadable = theme::px(7.0f);
-      const float height_frac = 0.42f;
-#endif
-      float tip_px =
-          std::clamp(std::min(max_h * height_frac, theme::kFontSizeTooltip), kMinReadable,
-                     theme::kFontSizeTooltip);
-      if (pixel_size > 0.0f) {
-        tip_px = pixel_size;
-      }
-      std::string wrapped = wrap_text_to_width(font, text, tip_px, max_w);
-      Vec2 size = font.measure(wrapped, tip_px);
-      for (int guard = 0; guard < 8 && size.y > max_h && tip_px > kMinReadable; ++guard) {
-        tip_px = std::max(kMinReadable, tip_px * 0.88f);
-        wrapped = wrap_text_to_width(font, text, tip_px, max_w);
-        size = font.measure(wrapped, tip_px);
-      }
+      // Fixed tip size — never shrink to fit height; wrap to multiple lines instead.
+      const float tip_px = pixel_size > 0.0f ? pixel_size : theme::kFontSizeTooltip;
+      const std::string wrapped = wrap_text_to_width(font, text, tip_px, max_w);
       if (font.ready()) {
         draw_centered_lines(*this, bounds, wrapped, color, z, tip_px);
       } else {

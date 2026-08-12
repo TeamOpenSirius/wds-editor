@@ -17,14 +17,20 @@ namespace {
 
 constexpr int kFallbackDisplayHz = 60;
 
-float ui_font_bake_px(float tier) {
+// Body (Md/Gutter) and tip sizes are baked separately so each draw stays near 1:1.
+float ui_font_body_bake_px(float tier) {
   namespace th = wds::interaction::theme;
-  const float logical =
-      std::max({th::kFontSizeMd, th::kFontSizeGutter, th::kFontSizeTooltip});
-  // Bake exactly at framebuffer pixel size (logical × tier). A higher floor used
-  // to downscale glyphs through LINEAR and embolden every label.
+  const float logical = std::max(th::kFontSizeMd, th::kFontSizeGutter);
   return std::max(logical * std::max(tier, 1.0f), 16.0f);
 }
+
+float ui_font_tip_bake_px(float tier) {
+  namespace th = wds::interaction::theme;
+  return std::max(th::kFontSizeTooltip * std::max(tier, 1.0f), 12.0f);
+}
+
+// Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
+bool ui_font_mild_sharpen(float tier) { return tier <= 1.5f + 0.001f; }
 
 // Prefer the monitor that currently owns the window (fullscreen or windowed).
 GLFWmonitor* monitor_for_window(GLFWwindow* window) {
@@ -114,14 +120,14 @@ void ChartPreviewPanel::warm_ui_font_glyphs() {
       "：；（）、，。！？“”‘’—…·％");
 }
 
-bool ChartPreviewPanel::bake_ui_font(float bake_px) {
+bool ChartPreviewPanel::bake_ui_font(float body_px, float tip_px, bool mild_sharpen) {
   auto& font = wds::interaction::FontAtlas::instance();
   bool font_ok = false;
   if (!ui_font_path_.empty()) {
-    font_ok = font.bake_font_file(ui_font_path_, bake_px);
+    font_ok = font.bake_font_file(ui_font_path_, body_px, tip_px, mild_sharpen);
   }
   if (!font_ok) {
-    font_ok = font.bake_system_font(bake_px);
+    font_ok = font.bake_system_font(body_px, tip_px, mild_sharpen);
   }
   if (!font_ok || font.pixels() == nullptr) {
     return false;
@@ -145,7 +151,8 @@ bool ChartPreviewPanel::ensure_ui_font_scale() {
   if (std::abs(tier - font_bake_tier_) < 0.001f) {
     return false;
   }
-  if (!bake_ui_font(ui_font_bake_px(tier))) {
+  if (!bake_ui_font(ui_font_body_bake_px(tier), ui_font_tip_bake_px(tier),
+                    ui_font_mild_sharpen(tier))) {
     return false;
   }
   font_bake_tier_ = tier;
@@ -196,8 +203,9 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
   ui_font_path_ = ui_font_path;
   namespace th = wds::interaction::theme;
   font_bake_tier_ = th::content_scale_tier();
-  // Layout uses logical font sizes; bake at tier×oversample physical px for HiDPI crispness.
-  if (!bake_ui_font(ui_font_bake_px(font_bake_tier_))) {
+  // Dual body+tip bake at logical×tier so Md and Tooltip each stay near 1:1.
+  if (!bake_ui_font(ui_font_body_bake_px(font_bake_tier_), ui_font_tip_bake_px(font_bake_tier_),
+                    ui_font_mild_sharpen(font_bake_tier_))) {
     std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
   }
 

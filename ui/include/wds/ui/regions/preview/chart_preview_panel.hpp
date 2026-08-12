@@ -82,7 +82,7 @@ class ChartPreviewPanel {
                          const std::string& ui_font_path);
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
-  bool bake_ui_font(float bake_px);
+  bool bake_ui_font(float body_px, float tip_px, bool mild_sharpen);
   void warm_ui_font_glyphs();
   bool ensure_ui_font_scale();
 

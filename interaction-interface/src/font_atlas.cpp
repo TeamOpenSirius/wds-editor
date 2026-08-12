@@ -1,7 +1,6 @@
 #include "wds/interaction/font_atlas.hpp"
 
 #include <wds/common/utf8_path.hpp>
-#include <wds/interaction/theme.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -86,6 +85,8 @@ int next_utf8_codepoint(const std::string& text, std::size_t& i) noexcept {
   return static_cast<int>('?');
 }
 
+constexpr float kDualSizeEpsilon = 0.5f;
+
 }  // namespace
 
 struct FontAtlas::FontInfo {
@@ -102,16 +103,12 @@ FontAtlas& FontAtlas::instance() noexcept {
 
 void FontAtlas::rebuild_rgba_from_alpha() {
   pixels_.resize(static_cast<std::size_t>(atlas_w_ * atlas_h_ * 4));
-  // 1× bake (logical max font px): milder ~a^1.2 so thin strokes keep coverage.
-  // Higher tiers keep alpha² to cut the soft fringe that reads as a second stroke.
-  const float bake_1x =
-      std::max({theme::kFontSizeMd, theme::kFontSizeGutter, theme::kFontSizeTooltip});
-  const bool mild_sharpen = baked_size_ <= bake_1x + 0.001f;
+  // Mild ≈a^1.2 keeps thin strokes at low DPI; full a² cuts soft fringe on retina+.
   for (int i = 0; i < atlas_w_ * atlas_h_; ++i) {
     const unsigned char a = alpha_[static_cast<std::size_t>(i)];
     const unsigned int aa = (static_cast<unsigned int>(a) * a) / 255u;
-    // lerp(a, a²/255, 0.2) ≈ a^1.2; full square for retina+ tiers.
-    const unsigned char sharp = mild_sharpen
+    // lerp(a, a²/255, 0.2) ≈ a^1.2; full square when mild_sharpen_ is off.
+    const unsigned char sharp = mild_sharpen_
                                     ? static_cast<unsigned char>((static_cast<unsigned int>(a) * 4u + aa) / 5u)
                                     : static_cast<unsigned char>(aa);
     pixels_[static_cast<std::size_t>(i) * 4 + 0] = 255;
@@ -128,23 +125,49 @@ void FontAtlas::clear() {
   fallback_font_file_.clear();
   alpha_.clear();
   pixels_.clear();
-  glyphs_.clear();
+  glyphs_body_.clear();
+  glyphs_tip_.clear();
   texture_ = {};
   atlas_w_ = 0;
   atlas_h_ = 0;
-  baked_size_ = 32.0f;
-  ascent_ = 0.0f;
-  scale_ = 1.0f;
-  fallback_scale_ = 1.0f;
+  baked_body_ = 32.0f;
+  baked_tip_ = 32.0f;
+  ascent_body_ = 0.0f;
+  ascent_tip_ = 0.0f;
+  scale_body_ = 1.0f;
+  scale_tip_ = 1.0f;
+  fallback_scale_body_ = 1.0f;
+  fallback_scale_tip_ = 1.0f;
   pack_x_ = 0;
   pack_y_ = 0;
   pack_row_h_ = 0;
   pixels_dirty_ = false;
+  dual_ = false;
+  mild_sharpen_ = false;
 }
 
-bool FontAtlas::pack_codepoint_from(const FontInfo& face, float face_scale, int codepoint) {
+FontAtlas::Slot FontAtlas::pick_slot(float pixel_size) const noexcept {
+  if (!dual_) {
+    return Slot::Body;
+  }
+  const float d_body = std::abs(pixel_size - baked_body_);
+  const float d_tip = std::abs(pixel_size - baked_tip_);
+  return d_tip < d_body ? Slot::Tip : Slot::Body;
+}
+
+float FontAtlas::slot_baked(Slot slot) const noexcept {
+  return (slot == Slot::Tip && dual_) ? baked_tip_ : baked_body_;
+}
+
+float FontAtlas::slot_ascent(Slot slot) const noexcept {
+  return (slot == Slot::Tip && dual_) ? ascent_tip_ : ascent_body_;
+}
+
+bool FontAtlas::pack_codepoint_from(const FontInfo& face, float face_scale, int codepoint,
+                                    std::unordered_map<int, BakedChar>& out) {
   if (alpha_.empty() || codepoint <= 0 || face_scale <= 0.0f) return false;
   if (stbtt_FindGlyphIndex(&face.stb, codepoint) == 0) return false;
+  if (out.count(codepoint) != 0) return true;
 
   int advance = 0, lsb = 0;
   stbtt_GetCodepointHMetrics(&face.stb, codepoint, &advance, &lsb);
@@ -182,7 +205,7 @@ bool FontAtlas::pack_codepoint_from(const FontInfo& face, float face_scale, int 
   c.xoff = static_cast<float>(x0);
   c.yoff = static_cast<float>(y0);
   c.xadvance = static_cast<float>(advance) * face_scale;
-  glyphs_.emplace(codepoint, c);
+  out.emplace(codepoint, c);
 
   pack_x_ += cell_w;
   pack_row_h_ = std::max(pack_row_h_, cell_h);
@@ -190,21 +213,37 @@ bool FontAtlas::pack_codepoint_from(const FontInfo& face, float face_scale, int 
   return true;
 }
 
-bool FontAtlas::pack_codepoint(int codepoint) {
+bool FontAtlas::pack_codepoint_into(Slot slot, int codepoint) {
   if (info_ == nullptr || alpha_.empty() || codepoint <= 0) return false;
-  if (glyphs_.count(codepoint) != 0) return true;
-  if (pack_codepoint_from(*info_, scale_, codepoint)) return true;
+  auto& map = (slot == Slot::Tip && dual_) ? glyphs_tip_ : glyphs_body_;
+  if (map.count(codepoint) != 0) return true;
+
+  const float face_scale = (slot == Slot::Tip && dual_) ? scale_tip_ : scale_body_;
+  const float fallback_scale =
+      (slot == Slot::Tip && dual_) ? fallback_scale_tip_ : fallback_scale_body_;
+
+  if (pack_codepoint_from(*info_, face_scale, codepoint, map)) return true;
   if (fallback_info_ != nullptr &&
-      pack_codepoint_from(*fallback_info_, fallback_scale_, codepoint)) {
+      pack_codepoint_from(*fallback_info_, fallback_scale, codepoint, map)) {
     return true;
   }
   return false;
 }
 
+bool FontAtlas::pack_codepoint(int codepoint) {
+  const bool body_ok = pack_codepoint_into(Slot::Body, codepoint);
+  if (!dual_) {
+    return body_ok;
+  }
+  const bool tip_ok = pack_codepoint_into(Slot::Tip, codepoint);
+  return body_ok || tip_ok;
+}
+
 void FontAtlas::try_load_fallback_font(const std::string& primary_path) {
   fallback_info_.reset();
   fallback_font_file_.clear();
-  fallback_scale_ = 1.0f;
+  fallback_scale_body_ = 1.0f;
+  fallback_scale_tip_ = 1.0f;
   for (const auto& path : system_font_candidates()) {
     if (!primary_path.empty() && path == primary_path) continue;
     if (!read_file(path, fallback_font_file_)) {
@@ -218,14 +257,17 @@ void FontAtlas::try_load_fallback_font(const std::string& primary_path) {
       fallback_font_file_.clear();
       continue;
     }
-    fallback_scale_ = stbtt_ScaleForPixelHeight(&face->stb, baked_size_);
+    fallback_scale_body_ = stbtt_ScaleForPixelHeight(&face->stb, baked_body_);
+    fallback_scale_tip_ =
+        dual_ ? stbtt_ScaleForPixelHeight(&face->stb, baked_tip_) : fallback_scale_body_;
     fallback_info_ = std::move(face);
     std::fprintf(stderr, "FontAtlas: fallback face %s\n", path.c_str());
     return;
   }
 }
 
-bool FontAtlas::bake_font_file(const std::string& path, float pixel_height) {
+bool FontAtlas::bake_font_file(const std::string& path, float body_px, float tip_px,
+                               bool mild_sharpen) {
   clear();
   if (path.empty() || !read_file(path, font_file_)) {
     clear();
@@ -241,17 +283,26 @@ bool FontAtlas::bake_font_file(const std::string& path, float pixel_height) {
     return false;
   }
 
-  // Bake near display size. Oversized atlases (e.g. 64px → 12px tip) bilinear-blur to mush.
-  baked_size_ = std::max(16.0f, pixel_height);
+  mild_sharpen_ = mild_sharpen;
+  baked_body_ = std::max(16.0f, body_px);
+  baked_tip_ = tip_px > 0.0f ? std::max(12.0f, tip_px) : baked_body_;
+  dual_ = tip_px > 0.0f && std::abs(baked_tip_ - baked_body_) > kDualSizeEpsilon;
+  if (!dual_) {
+    baked_tip_ = baked_body_;
+  }
+
+  // Dual packs ~1.4× pixels; 2048² stays enough for UI warm + on-demand CJK.
   atlas_w_ = 2048;
   atlas_h_ = 2048;
   alpha_.assign(static_cast<std::size_t>(atlas_w_ * atlas_h_), 0);
-  scale_ = stbtt_ScaleForPixelHeight(&info_->stb, baked_size_);
+  scale_body_ = stbtt_ScaleForPixelHeight(&info_->stb, baked_body_);
+  scale_tip_ = dual_ ? stbtt_ScaleForPixelHeight(&info_->stb, baked_tip_) : scale_body_;
   try_load_fallback_font(path);
 
   int ascent = 0, descent = 0, line_gap = 0;
   stbtt_GetFontVMetrics(&info_->stb, &ascent, &descent, &line_gap);
-  ascent_ = static_cast<float>(ascent) * scale_;
+  ascent_body_ = static_cast<float>(ascent) * scale_body_;
+  ascent_tip_ = static_cast<float>(ascent) * scale_tip_;
 
   pack_x_ = 1;
   pack_y_ = 1;
@@ -267,13 +318,19 @@ bool FontAtlas::bake_font_file(const std::string& path, float pixel_height) {
 
   rebuild_rgba_from_alpha();
   pixels_dirty_ = true;
-  std::fprintf(stderr, "FontAtlas: loaded %s (%.0fpx)\n", path.c_str(), baked_size_);
+  if (dual_) {
+    std::fprintf(stderr, "FontAtlas: loaded %s (body %.0fpx + tip %.0fpx%s)\n", path.c_str(),
+                 baked_body_, baked_tip_, mild_sharpen_ ? ", mild sharpen" : "");
+  } else {
+    std::fprintf(stderr, "FontAtlas: loaded %s (%.0fpx%s)\n", path.c_str(), baked_body_,
+                 mild_sharpen_ ? ", mild sharpen" : "");
+  }
   return true;
 }
 
-bool FontAtlas::bake_system_font(float pixel_height) {
+bool FontAtlas::bake_system_font(float body_px, float tip_px, bool mild_sharpen) {
   for (const auto& path : system_font_candidates()) {
-    if (bake_font_file(path, pixel_height)) {
+    if (bake_font_file(path, body_px, tip_px, mild_sharpen)) {
       return true;
     }
   }
@@ -289,7 +346,9 @@ bool FontAtlas::ensure_glyphs(const std::string& text) {
     const int cp = next_utf8_codepoint(text, i);
     if (cp <= 0) continue;
     if (cp == '\n' || cp == '\r' || cp == '\t') continue;
-    if (glyphs_.count(cp) != 0) continue;
+    const bool body_missing = glyphs_body_.count(cp) == 0;
+    const bool tip_missing = dual_ && glyphs_tip_.count(cp) == 0;
+    if (!body_missing && !tip_missing) continue;
     if (pack_codepoint(cp)) added = true;
   }
   if (added) {
@@ -298,18 +357,31 @@ bool FontAtlas::ensure_glyphs(const std::string& text) {
   return added;
 }
 
-const FontAtlas::BakedChar* FontAtlas::find_glyph(int codepoint) const noexcept {
-  const auto it = glyphs_.find(codepoint);
-  if (it != glyphs_.end()) return &it->second;
-  const auto fallback = glyphs_.find(static_cast<int>('?'));
-  if (fallback != glyphs_.end()) return &fallback->second;
-  return nullptr;
+FontAtlas::GlyphRef FontAtlas::resolve_glyph(int codepoint, Slot slot) const noexcept {
+  const auto& primary = (slot == Slot::Tip && dual_) ? glyphs_tip_ : glyphs_body_;
+  const auto it = primary.find(codepoint);
+  if (it != primary.end()) {
+    return {&it->second, slot_baked(slot), slot_ascent(slot)};
+  }
+  if (dual_) {
+    const Slot other = (slot == Slot::Tip) ? Slot::Body : Slot::Tip;
+    const auto& other_map = (other == Slot::Tip) ? glyphs_tip_ : glyphs_body_;
+    const auto ot = other_map.find(codepoint);
+    if (ot != other_map.end()) {
+      return {&ot->second, slot_baked(other), slot_ascent(other)};
+    }
+  }
+  const auto fallback = glyphs_body_.find(static_cast<int>('?'));
+  if (fallback != glyphs_body_.end()) {
+    return {&fallback->second, baked_body_, ascent_body_};
+  }
+  return {};
 }
 
 Vec2 FontAtlas::measure(const std::string& text, float pixel_size) const noexcept {
-  if (glyphs_.empty() || text.empty()) return {};
+  if (glyphs_body_.empty() || text.empty()) return {};
   // ensure_glyphs is non-const; callers should warm glyphs before measuring.
-  const float scale = pixel_size / std::max(baked_size_, 1.0f);
+  const Slot slot = pick_slot(pixel_size);
   float x = 0.0f;
   float max_x = 0.0f;
   float height = pixel_size;
@@ -323,9 +395,9 @@ Vec2 FontAtlas::measure(const std::string& text, float pixel_size) const noexcep
       height += pixel_size;
       continue;
     }
-    const BakedChar* c = find_glyph(cp);
-    if (c == nullptr) continue;
-    x += c->xadvance * scale;
+    const GlyphRef g = resolve_glyph(cp, slot);
+    if (g.c == nullptr) continue;
+    x += g.c->xadvance * (pixel_size / std::max(g.baked, 1.0f));
   }
   return {std::max(max_x, x), height};
 }
@@ -333,11 +405,10 @@ Vec2 FontAtlas::measure(const std::string& text, float pixel_size) const noexcep
 void FontAtlas::build_quads(const std::string& text, float x, float y, float pixel_size,
                             std::vector<GlyphQuad>& out) const {
   out.clear();
-  if (glyphs_.empty() || text.empty() || atlas_w_ <= 0 || atlas_h_ <= 0) return;
-  const float scale = pixel_size / std::max(baked_size_, 1.0f);
-  // Snap the pen to the pixel grid so LINEAR sampling does not re-blur glyph AA.
+  if (glyphs_body_.empty() || text.empty() || atlas_w_ <= 0 || atlas_h_ <= 0) return;
+  const Slot slot = pick_slot(pixel_size);
   float pen_x = std::floor(x + 0.5f);
-  float pen_y = std::floor(y + ascent_ * scale + 0.5f);
+  float line_y = y;
   const float inv_w = 1.0f / static_cast<float>(atlas_w_);
   const float inv_h = 1.0f / static_cast<float>(atlas_h_);
 
@@ -347,27 +418,30 @@ void FontAtlas::build_quads(const std::string& text, float x, float y, float pix
     if (cp <= 0) continue;
     if (cp == '\n') {
       pen_x = std::floor(x + 0.5f);
-      pen_y = std::floor(pen_y + pixel_size + 0.5f);
+      line_y += pixel_size;
       continue;
     }
-    const BakedChar* c = find_glyph(cp);
-    if (c == nullptr) continue;
-    const float gw = (c->x1 - c->x0) * scale;
-    const float gh = (c->y1 - c->y0) * scale;
-    const float gx = std::floor(pen_x + c->xoff * scale + 0.5f);
-    const float gy = std::floor(pen_y + c->yoff * scale + 0.5f);
+    const GlyphRef g = resolve_glyph(cp, slot);
+    if (g.c == nullptr) continue;
+    const float glyph_scale = pixel_size / std::max(g.baked, 1.0f);
+    // Baseline from this glyph's bake metrics so tip/body fallback stays aligned.
+    const float baseline = std::floor(line_y + g.ascent * glyph_scale + 0.5f);
+    const float gw = (g.c->x1 - g.c->x0) * glyph_scale;
+    const float gh = (g.c->y1 - g.c->y0) * glyph_scale;
+    const float gx = std::floor(pen_x + g.c->xoff * glyph_scale + 0.5f);
+    const float gy = std::floor(baseline + g.c->yoff * glyph_scale + 0.5f);
     if (gw > 0.0f && gh > 0.0f) {
       GlyphQuad q;
       q.dst = {gx, gy, std::max(1.0f, std::floor(gw + 0.5f)), std::max(1.0f, std::floor(gh + 0.5f))};
-      q.u0 = c->x0 * inv_w;
-      q.u1 = c->x1 * inv_w;
+      q.u0 = g.c->x0 * inv_w;
+      q.u1 = g.c->x1 * inv_w;
       // DrawBatch maps v0→quad bottom and v1→quad top. Atlas y grows downward, so
       // the glyph's bottom row (y1) must be v0 or text renders upside-down / tofu.
-      q.v0 = c->y1 * inv_h;
-      q.v1 = c->y0 * inv_h;
+      q.v0 = g.c->y1 * inv_h;
+      q.v1 = g.c->y0 * inv_h;
       out.push_back(q);
     }
-    pen_x += c->xadvance * scale;
+    pen_x += g.c->xadvance * glyph_scale;
   }
 }
 
