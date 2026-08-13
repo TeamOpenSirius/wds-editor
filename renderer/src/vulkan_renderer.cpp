@@ -36,6 +36,7 @@ struct GpuTexture {
   int height = 0;
   bool alive = false;
   bool nearest = false;  // UI font atlases — avoid LINEAR soft-fringe emboldening.
+  uint64_t retire_after_seq = 0;  // 0 = not retiring; GPU-free when frame_seq >= this
 };
 
 uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props) {
@@ -207,6 +208,7 @@ struct VulkanRenderer::Impl {
   std::array<VkFence, kMaxFramesInFlight> in_flight{};
   VkFence upload_fence = VK_NULL_HANDLE;
   uint32_t frame_index = 0;
+  uint64_t frame_seq = 0;
   int preferred_msaa = 1;
 
   struct FrameVertexBuffer {
@@ -239,6 +241,8 @@ struct VulkanRenderer::Impl {
   bool ensure_frame_vertex_capacity(uint32_t frame, size_t bytes);
   void destroy_frame_vertices();
   TextureId alloc_texture_slot();
+  void destroy_gpu_texture_resources(GpuTexture& tex);
+  void reap_retired_textures(uint64_t now_seq);
   bool upload_texture_pixels(GpuTexture& tex, const unsigned char* pixels, int width, int height);
   bool create_texture_descriptor(GpuTexture& tex);
   VkCommandBuffer begin_one_time();
@@ -877,7 +881,8 @@ void VulkanRenderer::Impl::destroy_frame_vertices() {
 
 TextureId VulkanRenderer::Impl::alloc_texture_slot() {
   for (size_t i = 1; i < textures.size(); ++i) {
-    if (!textures[i].alive) {
+    // Pending-destroy slots still hold live GPU images — do not reuse.
+    if (!textures[i].alive && textures[i].image == VK_NULL_HANDLE) {
       textures[i] = GpuTexture{};
       textures[i].alive = true;
       return static_cast<TextureId>(i);
@@ -886,6 +891,28 @@ TextureId VulkanRenderer::Impl::alloc_texture_slot() {
   textures.push_back(GpuTexture{});
   textures.back().alive = true;
   return static_cast<TextureId>(textures.size() - 1);
+}
+
+void VulkanRenderer::Impl::destroy_gpu_texture_resources(GpuTexture& tex) {
+  if (tex.descriptor) {
+    vkFreeDescriptorSets(device, descriptor_pool, 1, &tex.descriptor);
+  }
+  if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
+  if (tex.image) vkDestroyImage(device, tex.image, nullptr);
+  if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
+  tex = GpuTexture{};
+}
+
+void VulkanRenderer::Impl::reap_retired_textures(uint64_t now_seq) {
+  for (size_t i = 1; i < textures.size(); ++i) {
+    GpuTexture& tex = textures[i];
+    if (tex.alive || tex.image == VK_NULL_HANDLE) {
+      continue;
+    }
+    if (tex.retire_after_seq != 0 && now_seq >= tex.retire_after_seq) {
+      destroy_gpu_texture_resources(tex);
+    }
+  }
 }
 
 bool VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
@@ -1784,20 +1811,17 @@ void VulkanRenderer::destroy_texture(TextureId id) {
     return;
   }
   GpuTexture& tex = impl_->textures[id];
-  if (!tex.alive) {
+  if (!tex.alive && tex.image == VK_NULL_HANDLE) {
     return;
   }
-  // Ensure in-flight descriptor/image use is complete before free.
-  if (ready_ && impl_->device != VK_NULL_HANDLE) {
-    vkDeviceWaitIdle(impl_->device);
+  tex.alive = false;
+  if (!ready_ || impl_->device == VK_NULL_HANDLE) {
+    impl_->destroy_gpu_texture_resources(tex);
+    return;
   }
-  if (tex.descriptor) {
-    vkFreeDescriptorSets(impl_->device, impl_->descriptor_pool, 1, &tex.descriptor);
-  }
-  if (tex.view) vkDestroyImageView(impl_->device, tex.view, nullptr);
-  if (tex.image) vkDestroyImage(impl_->device, tex.image, nullptr);
-  if (tex.memory) vkFreeMemory(impl_->device, tex.memory, nullptr);
-  tex = GpuTexture{};
+  // Delay free until in-flight frames that sampled this image have completed.
+  // Do not vkDeviceWaitIdle on the UI thread (CJK atlas / DPI hitch).
+  tex.retire_after_seq = impl_->frame_seq + static_cast<uint64_t>(kMaxFramesInFlight);
 }
 
 bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r,
@@ -1828,6 +1852,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   vkWaitForFences(impl_->device, 1, &impl_->in_flight[frame], VK_TRUE, UINT64_MAX);
   impl_->last_fence_wait_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - fence_t0).count();
+  ++impl_->frame_seq;
+  impl_->reap_retired_textures(impl_->frame_seq);
 
   uint32_t image_index = 0;
   const auto acquire_t0 = clock::now();

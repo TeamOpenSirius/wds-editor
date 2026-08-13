@@ -111,6 +111,10 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
   };
 
   if (playing_) {
+    if (want_seek) {
+      apply_seek();
+    }
+
     if (audio_.has_music()) {
       // Audio-primary display clock. Hit SFX is hard-locked to BASS music POS;
       // the note timeline follows a filtered copy of that clock so ~5ms
@@ -183,10 +187,6 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
           static_cast<int64_t>(std::llround(static_cast<double>(wall_delta_us) *
                                             static_cast<double>(playback_rate_)))};
       committed_position_ = clamp_time(committed_position_ + scaled_us);
-    }
-
-    if (want_seek) {
-      apply_seek();
     }
 
     if (want_pause) {

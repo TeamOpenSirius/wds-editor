@@ -59,11 +59,12 @@ using wds::chart_editor::is_scratch_hold_body;
 using wds::chart_editor::is_split_lane_gimmick;
 
 // Prefer sub-ms clock so notes do not stair-step on floored timeline_ms.
-double preview_now_sec(const PreviewSnapshot& snapshot) noexcept {
-  if (snapshot.timeline_us != 0 || snapshot.timeline_ms == 0) {
-    return static_cast<double>(snapshot.timeline_us) / 1'000'000.0;
+double preview_now_sec(const PreviewSnapshot& snapshot, int64_t visual_lead_us = 0) noexcept {
+  int64_t us = snapshot.timeline_us;
+  if (us == 0 && snapshot.timeline_ms != 0) {
+    us = snapshot.timeline_ms * 1000;
   }
-  return static_cast<double>(snapshot.timeline_ms) / 1000.0;
+  return static_cast<double>(us + visual_lead_us) / 1'000'000.0;
 }
 
 using NoteSprites = wds::ui::NoteSprites;
@@ -74,6 +75,51 @@ int32_t scale_boundary(int32_t boundary_12, int32_t lane_count) {
     return boundary_12;
   }
   return boundary_12 * lane_count / 12;
+}
+
+// Unity AnimationCurve cubic Hermite (SplitEffect_all baked curves).
+float sample_hermite_curve(float t, const float* times, const float* values, const float* slopes,
+                           int n) noexcept {
+  if (n < 2) {
+    return 0.0f;
+  }
+  if (t <= times[0]) {
+    return values[0];
+  }
+  if (t >= times[n - 1]) {
+    return values[n - 1];
+  }
+  int i = 0;
+  while (i + 2 < n && t > times[i + 1]) {
+    ++i;
+  }
+  const float t0 = times[i];
+  const float t1 = times[i + 1];
+  const float dt = t1 - t0;
+  const float u = (t - t0) / dt;
+  const float u2 = u * u;
+  const float u3 = u2 * u;
+  const float h00 = 2.0f * u3 - 3.0f * u2 + 1.0f;
+  const float h10 = u3 - 2.0f * u2 + u;
+  const float h01 = -2.0f * u3 + 3.0f * u2;
+  const float h11 = u3 - u2;
+  return h00 * values[i] + h10 * dt * slopes[i] + h01 * values[i + 1] + h11 * dt * slopes[i + 1];
+}
+
+// SplitEffect_all position-over-life (m_ExpressionIndex 40): ease-in 0→1.
+float split_pulse_travel_t(float u) noexcept {
+  constexpr float kTimes[] = {0.0f, 1.0f};
+  constexpr float kValues[] = {-0.0023498535f, 1.0f};
+  constexpr float kSlopes[] = {0.42439872f, 1.7960812f};
+  return std::clamp(sample_hermite_curve(u, kTimes, kValues, kSlopes, 2), 0.0f, 1.0f);
+}
+
+// SplitEffect_all SplitLine alpha envelope (m_ExpressionIndex 68): sharp head, long tail.
+float split_pulse_envelope(float u) noexcept {
+  constexpr float kTimes[] = {0.0f, 0.05f, 1.0f};
+  constexpr float kValues[] = {0.0f, 1.0f, 0.0f};
+  constexpr float kSlopes[] = {25.406168f, 0.06726602f, -2.2623842f};
+  return std::clamp(sample_hermite_curve(u, kTimes, kValues, kSlopes, 3), 0.0f, 1.0f);
 }
 
 // Tint hit VFX to match the on-screen note family (not Sonolus particle name colors).
@@ -236,7 +282,6 @@ void PlaybackPreviewView::shutdown() {
   additive_batch_.clear();
   notes_draw_indices_.clear();
   note_draw_order_.clear();
-  notes_order_revision_ = std::numeric_limits<uint64_t>::max();
   vulkan_.destroy();
   ready_ = false;
 }
@@ -260,10 +305,11 @@ void PlaybackPreviewView::sync_hit_sfx(const wds::chart_editor::PreviewSnapshot&
 
 void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatch* ui_overlay,
                                  TextureId ui_solid_texture, const DrawBatch* modal_overlay,
-                                 const DrawBatch* modal_chrome) {
+                                 const DrawBatch* modal_chrome, int64_t visual_lead_us) {
   if (!ready_) {
     return;
   }
+  visual_lead_us_ = visual_lead_us;
 
   // Hit SFX is armed in sync_hit_sfx() from ChartPreviewPanel::tick — before
   // Transport::start_pending_music() so POS syncs land on a still-paused stream.
@@ -420,16 +466,19 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
     return;
   }
 
-  const double now = preview_now_sec(snapshot);
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
   const float period = std::max(config_.split_line_pulse_period, 1e-3f);
-  const float band_half = std::max(config_.split_line_pulse_band, 1e-4f);
+  const float band = std::max(config_.split_line_pulse_band, 1e-4f);
   const float dip = std::clamp(config_.split_line_pulse_dip, 0.0f, 1.0f);
-  // More-transparent band travels bottom (percent=1) → tip (percent=0).
+  // Official position curve: bottom (percent=1) → tip (percent=0), ease-in.
   float band_travel = std::fmod(static_cast<float>(now), period) / period;
   if (band_travel < 0.0f) {
     band_travel += 1.0f;
   }
-  const float band_center = 1.0f - band_travel;
+  constexpr float kEnvPeakT = 0.05f;  // SplitLine envelope peaks at 5% of the blob.
+  const float band_peak = 1.0f - split_pulse_travel_t(band_travel);
+  // Leading edge toward the tip (lower percent); long tail toward the judgeline.
+  const float band_leading = band_peak - kEnvPeakT * band;
   const float base_a =
       std::clamp(split.split_line_alpha * config_.split_line_opacity, 0.0f, 1.0f);
   const float tip_whiten = std::clamp(config_.split_line_tip_whiten, 0.05f, 1.0f);
@@ -442,19 +491,14 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
     return;
   }
 
-  // Dense segments + per-corner GPU lerp (alpha/color) so tip white & pulse aren't stepped.
-  constexpr int kSegs = 96;
   const float tip_span = std::max((p1 - p0) * tip_whiten, 1e-4f);
 
   auto pulse_mul = [&](float percent) {
-    // Raised-cosine lobe over ±band_half: soft edges, shallow center (higher opacity).
-    const float x = std::abs(percent - band_center) / band_half;
-    if (x >= 1.0f) {
+    const float t = (percent - band_leading) / band;
+    if (t <= 0.0f || t >= 1.0f) {
       return 1.0f;
     }
-    constexpr float kPi = 3.14159265358979323846f;
-    const float w = 0.5f * (1.0f + std::cos(x * kPi));  // 1 at center → 0 at edge
-    return 1.0f - dip * w;
+    return 1.0f - dip * split_pulse_envelope(t);
   };
   auto tip_whiten_t = [&](float percent) {
     // 1 at growing tip (p0) → 0 after tip_span toward judgeline.
@@ -469,16 +513,35 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
     cb = lb + (1.0f - lb) * tip_t;
   };
 
+  // Knots along percent: tip ramp + pulse lobe + range ends. GPU lerps RGB/alpha
+  // between knots (same per-corner path as the old 96-seg strip — do not drop
+  // the white tip / pulse look by thinning to two vertices).
+  std::vector<float> knots;
+  knots.push_back(p0);
+  knots.push_back(p1);
+  knots.push_back(std::clamp(p0 + tip_span * 0.5f, p0, p1));
+  knots.push_back(std::clamp(p0 + tip_span, p0, p1));
+  // Envelope keys: head (0 / 0.05) + decaying tail toward the judgeline.
+  constexpr float kEnvKnots[] = {0.0f, 0.05f, 0.12f, 0.22f, 0.35f, 0.5f, 0.65f, 0.8f, 1.0f};
+  for (float kt : kEnvKnots) {
+    knots.push_back(std::clamp(band_leading + kt * band, p0, p1));
+  }
+  std::sort(knots.begin(), knots.end());
+  knots.erase(std::unique(knots.begin(), knots.end(),
+                          [](float a, float b) { return std::abs(a - b) < 1e-5f; }),
+              knots.end());
+  if (knots.size() < 2) {
+    return;
+  }
+
   auto draw_slot = [&](int32_t memory_slot, int32_t boundary_after_lane, bool end_line) {
     const auto slot_c = split_slot_color(color_id, memory_slot, &skin_);
     const float lr = slot_c.r;
     const float lg = slot_c.g;
     const float lb = slot_c.b;
-    for (int i = 0; i < kSegs; ++i) {
-      const float t0 = static_cast<float>(i) / static_cast<float>(kSegs);
-      const float t1 = static_cast<float>(i + 1) / static_cast<float>(kSegs);
-      const float sa = p0 + (p1 - p0) * t0;
-      const float sb = p0 + (p1 - p0) * t1;
+    for (size_t i = 0; i + 1 < knots.size(); ++i) {
+      const float sa = knots[i];
+      const float sb = knots[i + 1];
       // split_line_quad: lt/rt = percent_start (sa), lb/rb = percent_end (sb).
       const float tip_a = tip_whiten_t(sa);
       const float tip_b = tip_whiten_t(sb);
@@ -536,7 +599,7 @@ void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewS
   if (!skin_.sync_line) {
     return;
   }
-  const double now = preview_now_sec(snapshot);
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
   for (const auto& line : snapshot.concurrent_lines) {
     const double beat = static_cast<double>(line.milliseconds) / 1000.0;
     const float p = geometry_.note_percent(beat, now);
@@ -553,18 +616,12 @@ void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewS
 }
 
 void PlaybackPreviewView::prepare_note_draw_order(const PreviewSnapshot& snapshot) {
-  // Rebuild whenever the visible set changes. Snapshot revision only bumps on
-  // chart edits — IncrementalPatch grows/shrinks notes while revision stays put,
-  // so caching solely on revision drops newly approaching notes (or keeps stale
-  // indices after swap-removes).
-  if (notes_order_revision_ != snapshot.revision ||
-      notes_draw_indices_.size() != snapshot.notes.size()) {
-    wds::chart_render::build_draw_order_indices(
-        snapshot.notes.size(), notes_draw_indices_,
-        [&](size_t i) { return snapshot.notes[i].start_ms; },
-        [&](size_t i) { return static_cast<int32_t>(snapshot.notes[i].note_type); });
-    notes_order_revision_ = snapshot.revision;
-  }
+  // Visible set is small (on-screen notes). IncrementalPatch swap-remove can
+  // reorder start_ms while size+revision stay put — always rebuild.
+  wds::chart_render::build_draw_order_indices(
+      snapshot.notes.size(), notes_draw_indices_,
+      [&](size_t i) { return snapshot.notes[i].start_ms; },
+      [&](size_t i) { return static_cast<int32_t>(snapshot.notes[i].note_type); });
   note_draw_order_.clear();
   note_draw_order_.reserve(snapshot.notes.size());
   for (size_t idx : notes_draw_indices_) {
@@ -584,7 +641,7 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
   prepare_note_draw_order(snapshot);
   const auto& order = note_draw_order_;
 
-  const double now = preview_now_sec(snapshot);
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
 
   // Official sandwich (depthWrite off → draw order = visual order):
   // hold → all bottoms → all tops → mid-stars → arrows.
@@ -636,7 +693,7 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
 void PlaybackPreviewView::draw_note_flat_layer(DrawBatch& batch, const PreviewNoteInstance& note,
                                                const PreviewSnapshot& snapshot,
                                                bool bottom_layer) {
-  const double now = preview_now_sec(snapshot);
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
   const NoteSprites sprites = sprites_for(skin_, note.note_type);
   if (sprites.is_tick) {
     return;
@@ -668,7 +725,7 @@ void PlaybackPreviewView::draw_note(DrawBatch& batch, const PreviewNoteInstance&
                                     const PreviewSnapshot& snapshot) {
   // Kept for callers that want a single-note composite (top layer only + tick).
   draw_note_flat_layer(batch, note, snapshot, /*bottom_layer=*/false);
-  const double now = preview_now_sec(snapshot);
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
   if (note.visual_state == PreviewNoteVisualState::Holding) {
     return;
   }
@@ -914,7 +971,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
 }
 
 void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapshot& snapshot) {
-  const double now = preview_now_sec(snapshot);
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
   const double duration_d = static_cast<double>(config_.effect_duration);
   // BombControllerBase.SimulationHighSpeed — LaneEffectController.OnBomb speeds up every
   // tracked bomb whose CurrentStartMilliseconds differs from the new hit (not lane-based).
@@ -1287,7 +1344,7 @@ void PlaybackPreviewView::draw_timing_effect(DrawBatch& batch, const PreviewSnap
     return;
   }
   const float age =
-      static_cast<float>(preview_now_sec(snapshot) -
+      static_cast<float>(preview_now_sec(snapshot, visual_lead_us_) -
                          static_cast<double>(snapshot.last_judge_ms) / 1000.0);
   const float duration = std::max(config_.timing_effect_duration, 1e-4f);
   if (age < 0.0f || age >= duration) {

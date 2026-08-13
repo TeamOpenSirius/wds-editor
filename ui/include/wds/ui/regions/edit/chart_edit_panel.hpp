@@ -47,9 +47,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_to_timeline_ms(int64_t timeline_ms) const {
     sync_to_timeline_ms(static_cast<double>(timeline_ms));
   }
-  // Re-derive placement / gutter ghosts from the current pointer after the
-  // viewport scrolls (playback or scrub). Ghosts are stored in tick space; without
-  // this they stick to the old tick and scroll away under a stationary mouse.
+  // Re-derive placement / gutter ghosts / live drags from the current pointer
+  // after the viewport scrolls (playback or scrub). Ghosts and drag targets are
+  // stored in tick space; without this they stick to the old tick and scroll
+  // away under a stationary mouse.
   void resync_pointer_overlays();
   // Host feeds the true window pointer each frame so Idle ghosts can hide when
   // the cursor leaves the edit pane (move events stop once hover leaves).
@@ -186,6 +187,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   wds::interaction::Vec2 pointer_as_in_host(wds::interaction::Vec2 point) const;
   // Live-update MoveSelection from a pointer (edit-area / window exit OK).
   void sync_move_selection_to_pointer(wds::interaction::Vec2 point);
+  // Live-update DragSplitEdge from a pointer so scroll-without-move still tracks.
+  void sync_split_edge_to_pointer(wds::interaction::Vec2 point);
   // Middle-button interrupt: drop in-progress place / hold draft. For chained
   // ScratchHold, discards only the current segment and keeps the previous as end.
   void cancel_placement();
@@ -306,9 +309,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   int32_t drag_split_note_id_ = -1;
   bool drag_split_is_end_ = false;
-  // Press on a split label: click → edit picker; drag past threshold → resize edge.
-  int32_t pending_split_note_id_ = -1;
-  bool pending_split_is_end_ = false;
+  // Pointer's snapped tick at press. The label sits off the grid line, so the
+  // press tick may differ from the note; do not snap until this tick changes
+  // (mouse move or wheel). True click = the note never left its original ticks.
+  int32_t drag_split_press_tick_ = 0;
+  bool split_edge_ever_moved_ = false;
 
   // Solid label previews on BPM / meter / split gutters (no text).
   struct GutterGhost {

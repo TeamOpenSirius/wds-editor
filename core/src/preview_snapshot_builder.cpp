@@ -111,6 +111,17 @@ void PreviewSnapshotBuilder::ensure_note_lookup(const std::vector<NotationNote>&
   cached_notes_ = &notes;
 }
 
+void PreviewSnapshotBuilder::ensure_combo_hits(const std::vector<NotationNote>& notes,
+                                               const MusicTiming& timing,
+                                               uint64_t revision) const {
+  if (cached_combo_revision_ == revision && cached_combo_notes_ == &notes) {
+    return;
+  }
+  collect_preview_combo_hits(notes, timing, cached_combo_hits_);
+  cached_combo_revision_ = revision;
+  cached_combo_notes_ = &notes;
+}
+
 const NotationNote* PreviewSnapshotBuilder::lookup_note(int32_t note_id) const {
   if (cached_notes_ == nullptr) {
     return nullptr;
@@ -473,7 +484,8 @@ void PreviewSnapshotBuilder::build_into(
   rebuild_notes(out, preview_time_ms, timing, index, out.active_lane_count,
                 concurrent_lines.size());
 
-  const PreviewComboState combo = compute_preview_combo(notes, timing, preview_time_ms);
+  ensure_combo_hits(notes, timing, revision);
+  const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   out.combo_count = combo.combo;
   out.last_judge_ms = combo.last_judge_ms;
 }
@@ -497,7 +509,8 @@ void PreviewSnapshotBuilder::update_incremental(
   update_concurrent_lines_incremental(inout, concurrent_lines, preview_time_ms);
   update_notes_incremental(inout, preview_time_ms, timing, index, inout.active_lane_count);
 
-  const PreviewComboState combo = compute_preview_combo(notes, timing, preview_time_ms);
+  ensure_combo_hits(notes, timing, revision);
+  const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   inout.combo_count = combo.combo;
   inout.last_judge_ms = combo.last_judge_ms;
 }

@@ -105,6 +105,23 @@ void normalize_timing_points(MusicTiming& timing) {
   timing.points.front().has_bpm = true;
   timing.points.front().has_meter = true;
   timing.bpm = timing.points.front().bpm;
+  rebuild_timing_prefix_ms(timing);
+}
+
+void rebuild_timing_prefix_ms(const MusicTiming& timing) {
+  const auto& pts = timing.points;
+  timing.prefix_ms.resize(pts.size());
+  if (pts.empty()) {
+    return;
+  }
+  timing.prefix_ms[0] = 0.0;
+  const double tpq = static_cast<double>(std::max(1, timing.ticks_per_quarter));
+  for (size_t i = 1; i < pts.size(); ++i) {
+    const double bpm = pts[i - 1].bpm > 0.0 ? pts[i - 1].bpm : 120.0;
+    const double rate = 60000.0 / (bpm * tpq);
+    timing.prefix_ms[i] =
+        timing.prefix_ms[i - 1] + static_cast<double>(pts[i].tick - pts[i - 1].tick) * rate;
+  }
 }
 
 int32_t beat_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter) noexcept {

@@ -58,8 +58,8 @@ class VulkanRenderer {
   bool create(const VulkanHostSurface& host);
   void destroy();
 
-  // Block until the GPU is idle. Call before freeing textures / tearing down outside
-  // destroy() (e.g. toolbar icons) so in-flight frames cannot touch freed images.
+  // Block until the GPU is idle. Call before tearing down outside destroy().
+  // Texture frees are fence-deferred; this is for swapchain / device teardown.
   void device_wait_idle();
 
   bool ready() const noexcept { return ready_; }

@@ -58,6 +58,8 @@ class UiManager {
   const std::string& config_path() const noexcept { return config_path_; }
   void load_ui_config();
   void save_ui_config();
+  // Wheel/visible-range: coalesce disk writes (~500ms). Settings/toolbar persist stays immediate.
+  void request_save_ui_config(bool immediate = true);
 
   // Used by the window-close path to actually quit after the in-app prompt.
   void set_request_close(std::function<void()> handler) { request_close_ = std::move(handler); }
@@ -111,6 +113,7 @@ class UiManager {
 
  private:
   void apply_region_bounds();
+  void flush_pending_ui_config();
   void prepare_painter(wds::interaction::UiPainter& painter) const;
   // Clear + rebind the active "editor" shortcut namespace from current chords.
   void bind_editor_shortcuts();
@@ -157,6 +160,8 @@ class UiManager {
   int64_t last_update_layout_us_ = 0;
   int64_t last_update_sync_us_ = 0;
   int64_t last_update_process_us_ = 0;
+  bool ui_config_dirty_ = false;
+  int64_t ui_config_dirty_us_ = 0;
 };
 
 }  // namespace wds::ui

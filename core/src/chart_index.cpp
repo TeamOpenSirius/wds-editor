@@ -11,6 +11,7 @@ void ChartNoteIndex::clear() {
   by_start_ms_.clear();
   split_lane_by_start_ms_.clear();
   max_hold_span_ms_ = 0;
+  hold_span_stale_ = false;
 }
 
 void ChartNoteIndex::rebuild(const std::vector<NotationNote>& notes, const MusicTiming& timing) {
@@ -55,7 +56,7 @@ void ChartNoteIndex::on_note_removed(const NotationNote& note, const MusicTiming
 
   const int64_t span = std::max<int64_t>(0, note.end_ms(timing) - note.start_ms(timing));
   if (span > 0 && span >= max_hold_span_ms_) {
-    // Max may now be stale; ChartDocument rebuilds when this is zeroed.
+    hold_span_stale_ = true;
     max_hold_span_ms_ = 0;
   }
 }
@@ -82,6 +83,7 @@ void ChartNoteIndex::on_note_updated(const NotationNote& old_note, const Notatio
   const int64_t new_span =
       std::max<int64_t>(0, new_note.end_ms(timing) - new_note.start_ms(timing));
   if (old_span >= max_hold_span_ms_ && new_span < old_span) {
+    hold_span_stale_ = true;
     max_hold_span_ms_ = 0;
   } else {
     update_hold_span(new_note, timing);

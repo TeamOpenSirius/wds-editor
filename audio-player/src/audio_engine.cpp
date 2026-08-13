@@ -195,6 +195,17 @@ void release_payload_self(const std::shared_ptr<SfxSyncPayload>& p) {
   }
 }
 
+// Keep a small ring so a late SYNCPROC can still look up cancelled payloads.
+// Do not free in the same stack as RemoveSync — drop self on the oldest extras.
+constexpr size_t kMaxRetiredSfxPayloads = 32;
+
+void prune_retired_payloads(std::vector<std::shared_ptr<SfxSyncPayload>>& retired) {
+  while (retired.size() > kMaxRetiredSfxPayloads) {
+    release_payload_self(retired.front());
+    retired.erase(retired.begin());
+  }
+}
+
 void CALLBACK sfx_pos_sync_proc(HSYNC handle, DWORD /*channel*/, DWORD /*data*/, void* user) {
   auto* raw = static_cast<SfxSyncPayload*>(user);
   if (raw == nullptr) {
@@ -797,6 +808,7 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
     {
       std::lock_guard<std::mutex> lock(impl_->sfx_mu);
       impl_->retired_payloads.push_back(payload);
+      prune_retired_payloads(impl_->retired_payloads);
     }
     return false;
   }
@@ -811,6 +823,7 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
       for (size_t i = 0; i < syncs.size(); ++i) {
         if (syncs[i].payload == payload || syncs[i].handle == sync) {
           impl_->retired_payloads.push_back(std::move(syncs[i].payload));
+          prune_retired_payloads(impl_->retired_payloads);
           syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
           break;
         }
@@ -854,8 +867,9 @@ void AudioEngine::clear_scheduled_sfx() {
         impl_->retired_payloads.push_back(std::move(s.payload));
       }
     }
-    // Do not prune / release self here: a late SYNCPROC may still elevate via self.
-    // Cleared only after BASS_Free in shutdown().
+    prune_retired_payloads(impl_->retired_payloads);
+    // Oldest extras drop self after RemoveSync; a late SYNCPROC may still
+    // elevate via keep. Hard-cleared only after BASS_Free in shutdown().
   }
 }
 

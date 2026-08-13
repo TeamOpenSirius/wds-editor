@@ -55,11 +55,15 @@ struct PreviewVisualConfig {
   float split_line_opacity = 0.40f;
   // Mild additive body glow so overlaps with the judgeline brighten (beam, not matte).
   float split_line_body_glow = 0.18f;
-  // Traveling semi-transparent band (SplitEffect particle streak), bottom→tip.
-  float split_line_pulse_period = 0.85f;
-  float split_line_pulse_band = 0.02f;  // half-width in note-percent (short traveling dip)
-  // Center keeps ~(1 - dip) of base alpha (0.4 → ~60% opacity at band center).
-  float split_line_pulse_dip = 0.4f;
+  // Traveling semi-transparent band (SplitEffect_all SplitLine particle streak).
+  // Period: EndTimeSecond (LaneEffect / VFX default 0.5s). Travel uses the baked
+  // position curve (slow near judgeline, accelerates toward tip).
+  float split_line_pulse_period = 0.5f;
+  // Full width in note-percent: official OffSet 5 / Height 45.
+  float split_line_pulse_band = 5.0f / 45.0f;
+  // Peak darkening. SpriteRenderer alpha stays LineColor.a; the streak is a
+  // VFX overlay (CheckAlpha 0.5 on an already ~0.4 line ≈ 0.2 extra hole).
+  float split_line_pulse_dip = 0.2f;
   // Tip→white fraction of the *visible* [p0,p1] length (official LineColor lerp to white).
   float split_line_tip_whiten = 0.82f;
   // Extra additive bloom on the whitened tip.

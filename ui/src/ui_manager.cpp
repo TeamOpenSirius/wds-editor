@@ -40,7 +40,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
     }
-    save_ui_config();
+    request_save_ui_config(false);
   });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
@@ -328,7 +328,11 @@ void UiManager::bind_editor_shortcuts() {
   });
 }
 
-UiManager::~UiManager() = default;
+UiManager::~UiManager() {
+  if (ui_config_dirty_) {
+    save_ui_config();
+  }
+}
 
 ChartEditPanel* UiManager::edit_panel() noexcept {
   const auto& children = root_.children();
@@ -456,6 +460,8 @@ void UiManager::load_ui_config() {
 }
 
 void UiManager::save_ui_config() {
+  ui_config_dirty_ = false;
+  ui_config_dirty_us_ = 0;
   if (config_path_.empty()) return;
   EditorUiConfig cfg;
   if (auto* settings = settings_panel()) settings->capture_config(cfg);
@@ -472,12 +478,42 @@ void UiManager::save_ui_config() {
   save_editor_ui_config(config_path_, cfg);
 }
 
+void UiManager::request_save_ui_config(bool immediate) {
+  if (immediate) {
+    save_ui_config();
+    return;
+  }
+  ui_config_dirty_ = true;
+  ui_config_dirty_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+}
+
+void UiManager::flush_pending_ui_config() {
+  if (!ui_config_dirty_) {
+    return;
+  }
+  const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  if (now_us - ui_config_dirty_us_ >= 500000) {
+    save_ui_config();
+  }
+}
+
 void UiManager::resize(int logical_width, int logical_height, int framebuffer_width,
                        int framebuffer_height) {
-  width_ = std::max(1, logical_width);
-  height_ = std::max(1, logical_height);
-  fb_width_ = std::max(1, framebuffer_width);
-  fb_height_ = std::max(1, framebuffer_height);
+  const int w = std::max(1, logical_width);
+  const int h = std::max(1, logical_height);
+  const int fb_w = std::max(1, framebuffer_width);
+  const int fb_h = std::max(1, framebuffer_height);
+  if (w == width_ && h == height_ && fb_w == fb_width_ && fb_h == fb_height_) {
+    return;
+  }
+  width_ = w;
+  height_ = h;
+  fb_width_ = fb_w;
+  fb_height_ = fb_h;
 
   const EditorLayoutResult computed = layouter_.compute(width_, height_);
   layout_ = computed.regions;
@@ -553,6 +589,7 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   t0 = clock::now();
   root_.process_frame(delta_seconds, events, &shortcuts_);
   last_update_process_us_ = phase_us(t0);
+  flush_pending_ui_config();
 }
 
 void UiManager::paint(wds::interaction::UiPainter& painter) const { root_.paint(painter); }
@@ -568,14 +605,8 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
                                                           const wds::renderer::ScreenBounds& screen) {
   ui_batch_.clear();
   if (auto* edit = edit_panel()) {
-    // Final scroll sample for this frame (post-transport tick), then re-snap
-    // placement ghosts to the stationary pointer under the new viewport.
-    double sync_ms = session_->engine().timeline_us() / 1000.0;
-    if (chart_preview_ != nullptr &&
-        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
-      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
-    }
-    edit->sync_to_timeline_ms(sync_ms);
+    // Viewport already synced in update() after transport tick; only re-snap
+    // placement ghosts to the stationary pointer under the current viewport.
     edit->resync_pointer_overlays();
   }
   wds::interaction::UiPainter painter;

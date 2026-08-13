@@ -57,6 +57,9 @@ ComboBox::ComboBox() = default;
 void ComboBox::set_items(std::vector<std::string> items) { items_ = std::move(items); }
 
 void ComboBox::set_text(std::string text) {
+  if (text_ == text && committed_text_ == text) {
+    return;
+  }
   text_ = std::move(text);
   committed_text_ = text_;
 }

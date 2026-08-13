@@ -35,6 +35,9 @@ class ChartNoteIndex {
   void query_split_lanes_up_to(int64_t time_ms, std::vector<int32_t>& out_note_ids) const;
 
   int64_t max_hold_span_ms() const noexcept { return max_hold_span_ms_; }
+  // True when the cached max may be stale (longest hold removed/shortened).
+  // Distinct from max==0 which is the normal "no holds" state.
+  bool hold_span_stale() const noexcept { return hold_span_stale_; }
 
  private:
   void insert_id(int32_t note_id, int64_t start_ms);
@@ -44,6 +47,7 @@ class ChartNoteIndex {
   detail::StartMsAvlIndex by_start_ms_;
   detail::StartMsAvlIndex split_lane_by_start_ms_;
   int64_t max_hold_span_ms_ = 0;
+  bool hold_span_stale_ = false;
 };
 
 }  // namespace wds::chart_editor

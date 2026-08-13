@@ -264,35 +264,37 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
   }
 
   // Split lines: continuous along Y. Soft horizontal AA via soft_split_line (no MSAA).
-  // Fade in/out: 1px slices + smoothstep opacity — keep ms-level sampling (U1 skipped
-  // coarsening here; split count is small).
-  constexpr float kFadeSlicePx = 1.0f;
+  // Fade in/out: coarse knots + vertical GPU alpha (not 1px slices).
+  constexpr int kFadeKnots = 8;
   // Logical px (Retina ×2 at flush). Soft plate fills the rect — keep ≤2 so it reads thin.
   constexpr float kSplitLineW = 2.0f;
   const auto draw_split_edges = [&](const wds::chart_editor::NotationNote& split_note, float y_a,
-                                    float y_b, float opacity, int32_t /*anim_phase*/) {
+                                    float y_b, float opacity_a, float opacity_b,
+                                    int32_t /*anim_phase*/) {
     const float top = std::min(y_a, y_b);
     const float bottom = std::max(y_a, y_b);
     if (bottom < b.y || top > b.bottom()) return;
     const float clip_top = std::max(top, b.y);
     const float clip_bot = std::min(bottom, b.bottom());
     const float h = std::max(0.0f, clip_bot - clip_top);
-    if (h <= 0.0f || opacity <= 0.001f) return;
+    if (h <= 0.0f) return;
+    const float a_top = (top == y_a) ? opacity_a : opacity_b;
+    const float a_bot = (bottom == y_a) ? opacity_a : opacity_b;
+    if (a_top <= 0.001f && a_bot <= 0.001f) return;
     const int32_t color_id = split_note.scratch_length;
     const int32_t split_count = wds::chart_editor::get_split_count(split_note.gimmick_type);
     std::vector<int32_t> mids;
     split_boundaries_12(split_count, mids);
     const auto draw_v = [&](int32_t edge_lane, int32_t slot) {
-      // Pixel-snap center so soft edges don't shimmer while scrolling.
       const float x = std::floor(viewport.x_at(edge_lane) + 0.5f);
       const wds::interaction::Rect line{x - kSplitLineW * 0.5f, clip_top, kSplitLineW, h};
       auto c = split_slot_color(color_id, slot, skin);
-      // Soft strip maps a smoothstep alpha across width — covers thin-line AA without MSAA.
       if (skin != nullptr && skin->soft_split_line) {
-        painter.sprite(line, skin->soft_split_line, {c.r, c.g, c.b, opacity}, 0.91f);
+        painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.91f, a_bot,
+                             a_top);
         return;
       }
-      c.a *= opacity;
+      c.a *= 0.5f * (a_top + a_bot);
       painter.fill_rect(line, c, 0.0f, 0.91f);
     };
     draw_v(0, 0);
@@ -335,17 +337,17 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       const float y_a = viewport.y_at_ms(ms0);
       const float y_b = viewport.y_at_ms(ms1);
       if (std::abs(y_a - y_b) < 0.5f) {
-        draw_split_edges(note, y_a, y_b, fade_opacity((ms0 + ms1) * 0.5f), phase);
+        const float o = fade_opacity((ms0 + ms1) * 0.5f);
+        draw_split_edges(note, y_a, y_b, o, o, phase);
         return;
       }
-      // Higher ms → smaller screen Y; walk from larger Y toward smaller Y.
-      float y = std::max(y_a, y_b);
-      const float y_stop = std::min(y_a, y_b);
-      while (y > y_stop + 0.25f) {
-        const float y_next = std::max(y_stop, y - kFadeSlicePx);
-        const float y_mid = (y + y_next) * 0.5f;
-        draw_split_edges(note, y, y_next, fade_opacity(viewport.ms_at_y(y_mid)), phase);
-        y = y_next;
+      for (int i = 0; i < kFadeKnots; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(kFadeKnots);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(kFadeKnots);
+        const float msa = ms0 + (ms1 - ms0) * t0;
+        const float msb = ms0 + (ms1 - ms0) * t1;
+        draw_split_edges(note, viewport.y_at_ms(msa), viewport.y_at_ms(msb), fade_opacity(msa),
+                         fade_opacity(msb), phase);
       }
     };
 
@@ -354,7 +356,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       const float ms0 = std::max(static_cast<float>(start_ms), view_ms_lo);
       const float ms1 = std::min(static_cast<float>(end_ms), view_ms_hi);
       if (ms1 > ms0) {
-        draw_split_edges(note, viewport.y_at_ms(ms0), viewport.y_at_ms(ms1), 1.0f, /*steady*/ 1);
+        draw_split_edges(note, viewport.y_at_ms(ms0), viewport.y_at_ms(ms1), 1.0f, 1.0f,
+                         /*steady*/ 1);
       }
     }
     paint_fade_range(end_ms, fade_end_ms, /*disappear*/ 2);

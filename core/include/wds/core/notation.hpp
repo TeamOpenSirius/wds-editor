@@ -37,6 +37,9 @@ struct MusicTiming {
   // BPM / meter changes. Always normalized to include a tick-0 anchor.
   // bpm above mirrors points[0].bpm after normalize_timing_points().
   std::vector<TimingPoint> points;
+  // Milliseconds from tick 0 (excluding offset_ms) at each points[i].tick.
+  // Filled by normalize_timing_points / tick↔ms; not part of the file format.
+  mutable std::vector<double> prefix_ms;
 };
 
 // Editor note — field layout mirrors official CSV columns, but times stay in ticks:
@@ -190,6 +193,13 @@ struct PreviewComboState {
   int32_t combo = 0;
   int64_t last_judge_ms = -1;
 };
+
+// All auto-preview combo hit times, sorted (seek-safe). Hold soft judges come
+// from chart HoldEighth / Sound / ScratchSound only (absorbed once per hold).
+void collect_preview_combo_hits(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                                std::vector<int64_t>& out_sorted_hits);
+PreviewComboState combo_from_sorted_hits(const std::vector<int64_t>& sorted_hits,
+                                         int64_t preview_time_ms);
 
 // Auto-preview combo up to preview_time_ms (seek-safe). Hold soft judges come
 // from chart HoldEighth / Sound / ScratchSound only (absorbed once per hold).

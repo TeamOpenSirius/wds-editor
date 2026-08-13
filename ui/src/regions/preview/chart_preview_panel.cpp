@@ -332,9 +332,8 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   constexpr int64_t kMaxWallDeltaUs = 80000;  // 80 ms
   const int64_t clamped =
       std::clamp(delta_us, int64_t{0}, kMaxWallDeltaUs);
-  // Transport clock only — no display lead. Lead is applied once in render() so
-  // it tracks presented frames (FIFO), not uncapped tick rate; SFX stays on the
-  // music clock via sync_hit_sfx.
+  // Transport clock only — no display lead. Lead is added to the draw clock in
+  // render() so it tracks presented frames (FIFO); SFX stays on the music clock.
   const auto timeline = transport_.poll(clamped);
   engine_.apply_timeline(timeline);
   // Keep SFX chart-delay / lead-in mapping in sync with transport + edit blank.
@@ -353,20 +352,13 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
     return;
   }
   // One scan-out frame of visual lead while playing (does not scale with rate).
-  // Applied here — once per present — not in tick(). Restore committed afterward
-  // so the next update()/edit sync does not inherit the present-only lead (at
-  // 165 Hz that leftover ~6ms offset was a visible one-frame scroll hitch).
+  // Added to the draw clock only — do not apply+rollback the engine snapshot
+  // (that rebuilt combo / notes three times per frame).
   const auto committed = transport_.committed_snapshot();
   const bool playing = committed.state == wds::common::PlaybackState::Playing;
-  if (playing) {
-    auto visual = committed;
-    visual.position += wds::common::Microseconds{display_frame_lead_us()};
-    engine_.apply_timeline(visual);
-  }
-  preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome);
-  if (playing) {
-    engine_.apply_timeline(committed);
-  }
+  const int64_t lead_us = playing ? display_frame_lead_us() : 0;
+  preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome,
+                  lead_us);
 }
 
 void ChartPreviewPanel::set_note_speed(double speed) {

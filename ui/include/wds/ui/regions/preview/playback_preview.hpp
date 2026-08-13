@@ -78,7 +78,8 @@ class PlaybackPreviewView {
               const wds::renderer::DrawBatch* ui_overlay = nullptr,
               wds::renderer::TextureId ui_solid_texture = wds::renderer::kInvalidTextureId,
               const wds::renderer::DrawBatch* modal_overlay = nullptr,
-              const wds::renderer::DrawBatch* modal_chrome = nullptr);
+              const wds::renderer::DrawBatch* modal_chrome = nullptr,
+              int64_t visual_lead_us = 0);
 
   wds::renderer::StageGeometry& geometry() noexcept { return geometry_; }
   const wds::renderer::StageGeometry& geometry() const noexcept { return geometry_; }
@@ -145,7 +146,7 @@ class PlaybackPreviewView {
   // Mute SFX, clear played keys, latch mono clock to raw_us (pause / seek / scrub).
   void release_sfx_clock_control(const wds::chart_editor::PreviewSnapshot& snapshot,
                                  int64_t raw_us, bool playing);
-  // Rebuild GenerateNoteId-reversed draw index when snapshot.revision changes.
+  // Rebuild GenerateNoteId-reversed draw index for the current visible set.
   void prepare_note_draw_order(const wds::chart_editor::PreviewSnapshot& snapshot);
 
   wds::renderer::PreviewVisualConfig config_;
@@ -159,12 +160,13 @@ class PlaybackPreviewView {
   // Indices into snapshot.notes: GenerateNoteId order reversed (bottom-most first).
   std::vector<size_t> notes_draw_indices_;
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
-  uint64_t notes_order_revision_ = std::numeric_limits<uint64_t>::max();
   bool ready_ = false;
   bool mute_hold_body_sfx_ = false;
   bool show_judgment_text_ = false;
   int64_t chart_offset_ms_ = 0;
   int64_t preview_lead_in_visible_ms_ = 0;
+  // Present-only visual lead (µs). SFX / engine snapshot stay on the committed clock.
+  int64_t visual_lead_us_ = 0;
   // Monotonic SFX clock (µs). Advances with BASS/Timeline; ignores small backwards
   // glitches. Released (reset) on pause / seek / scrub via control generation.
   int64_t sfx_mono_us_ = -1;

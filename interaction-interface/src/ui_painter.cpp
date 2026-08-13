@@ -292,6 +292,14 @@ void UiPainter::sprite(const Rect& bounds, const wds::renderer::TextureInfo& tex
   sprites_.push_back({bounds, texture, tint, z, flip_x, false});
 }
 
+void UiPainter::sprite_vfade(const Rect& bounds, const wds::renderer::TextureInfo& texture,
+                             const Color& tint, float z, float alpha_bottom, float alpha_top) {
+  if (!texture || bounds.w <= 0.0f || bounds.h <= 0.0f) {
+    return;
+  }
+  sprites_.push_back({bounds, texture, tint, z, false, false, alpha_bottom, alpha_top});
+}
+
 namespace {
 
 // Atlas path: treat scale as pixel size once it looks like UI px.
@@ -454,8 +462,15 @@ void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::Texture
         (font_id == wds::renderer::kInvalidTextureId || !FontAtlas::instance().texture())) {
       continue;
     }
-    batch.add_quad(tex_id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
-                   sprite.tint.g, sprite.tint.b);
+    if (sprite.alpha_bottom >= 0.0f || sprite.alpha_top >= 0.0f) {
+      const float a_bot = sprite.alpha_bottom >= 0.0f ? sprite.alpha_bottom : sprite.tint.a;
+      const float a_top = sprite.alpha_top >= 0.0f ? sprite.alpha_top : sprite.tint.a;
+      batch.add_quad_corners(tex_id, quad, sprite.z, a_bot, a_bot, a_top, a_top, u0, v0, u1, v1,
+                             sprite.tint.r, sprite.tint.g, sprite.tint.b);
+    } else {
+      batch.add_quad(tex_id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
+                     sprite.tint.g, sprite.tint.b);
+    }
   }
   emit_rects(front_rects_);
 }

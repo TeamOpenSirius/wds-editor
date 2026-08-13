@@ -64,6 +64,10 @@ void ChartEditPanel::resync_pointer_overlays() {
     sync_move_selection_to_pointer(global_pointer_);
     return;
   }
+  if (mode_ == Mode::DragSplitEdge) {
+    sync_split_edge_to_pointer(global_pointer_);
+    return;
+  }
   if (mode_ == Mode::Idle) {
     if (!pointer_over_edit_ || !pointer_in_edit_ghost_zone(global_pointer_)) {
       hide_placement_ghost();
@@ -87,6 +91,11 @@ void ChartEditPanel::sync_global_pointer(wds::interaction::Vec2 point) {
   if (mode_ == Mode::MoveSelection) {
     sync_viewport();
     sync_move_selection_to_pointer(point);
+    return;
+  }
+  if (mode_ == Mode::DragSplitEdge) {
+    sync_viewport();
+    sync_split_edge_to_pointer(point);
     return;
   }
   if (is_note_drawing()) {
@@ -502,7 +511,6 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
   if (!engine_.is_editable() || has_modal_popup()) return;
   // Only while hovering idle — active place gestures keep the note ghost.
   if (mode_ != Mode::Idle) return;
-  if (pending_split_note_id_ >= 0) return;
 
   if (left_gutter_.contains(point)) {
     const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
@@ -1602,6 +1610,33 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
     }
   }
   for (const auto& [id, n] : next) engine_.document().update_note(id, n);
+  engine_.rebuild_snapshot();
+}
+
+void ChartEditPanel::sync_split_edge_to_pointer(wds::interaction::Vec2 point) {
+  if (mode_ != Mode::DragSplitEdge || !engine_.is_editable()) return;
+  sync_viewport();
+  const wds::interaction::Vec2 mapped = pointer_as_in_host(point);
+  const int32_t tick = viewport_.tick_at(mapped.y);
+  // Hold still on the press tick so a click on the off-line label does not jump.
+  if (!split_edge_ever_moved_ && tick == drag_split_press_tick_) return;
+  const int32_t min_dur = min_hold_duration_ticks();
+  auto note = engine_.document().find_note(drag_split_note_id_);
+  if (!note) return;
+  NotationNote updated = *note;
+  if (drag_split_is_end_) {
+    updated.end_tick = std::max(updated.start_tick + min_dur, tick);
+  } else {
+    updated.start_tick = std::min(tick, updated.end_tick - min_dur);
+  }
+  if (auto orig_it = drag_originals_.find(drag_split_note_id_); orig_it != drag_originals_.end()) {
+    if (updated.start_tick != orig_it->second.start_tick ||
+        updated.end_tick != orig_it->second.end_tick) {
+      split_edge_ever_moved_ = true;
+    }
+  }
+  if (updated.start_tick == note->start_tick && updated.end_tick == note->end_tick) return;
+  engine_.document().update_note(drag_split_note_id_, updated);
   engine_.rebuild_snapshot();
 }
 
@@ -2711,13 +2746,18 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
       return true;
     }
     if (wds::interaction::is_left_button(event.button)) {
-      // Click → edit picker; drag past threshold → resize edge.
+      // Press starts a live drag immediately (wheel-without-move still tracks).
+      // Pointer-up opens the picker only if the label never left its original ticks.
+      if (!engine_.is_editable()) return true;
       if (auto note = engine_.document().find_note(hit.note_id)) {
         drag_originals_.clear();
         drag_originals_[hit.note_id] = *note;
       }
-      pending_split_note_id_ = hit.note_id;
-      pending_split_is_end_ = !hit.is_start;
+      drag_split_note_id_ = hit.note_id;
+      drag_split_is_end_ = !hit.is_start;
+      drag_split_press_tick_ = viewport_.tick_at(pointer_as_in_host(event.position).y);
+      split_edge_ever_moved_ = false;
+      mode_ = Mode::DragSplitEdge;
       hide_gutter_ghost();
       return true;
     }
@@ -3195,28 +3235,6 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       return;
     }
     pointer_over_edit_ = true;
-    if (pending_split_note_id_ >= 0 && gesture_.is_dragging() && engine_.is_editable()) {
-      drag_split_note_id_ = pending_split_note_id_;
-      drag_split_is_end_ = pending_split_is_end_;
-      pending_split_note_id_ = -1;
-      mode_ = Mode::DragSplitEdge;
-      // Fall through to DragSplitEdge handling below via re-entry on next move;
-      // apply immediately with this event's position.
-      const int32_t tick = viewport_.tick_at(event.position.y);
-      const int32_t min_dur = min_hold_duration_ticks();
-      auto note = engine_.document().find_note(drag_split_note_id_);
-      if (note) {
-        NotationNote updated = *note;
-        if (drag_split_is_end_) {
-          updated.end_tick = std::max(updated.start_tick + min_dur, tick);
-        } else {
-          updated.start_tick = std::min(tick, updated.end_tick - min_dur);
-        }
-        engine_.document().update_note(drag_split_note_id_, updated);
-        engine_.rebuild_snapshot();
-      }
-      return;
-    }
     update_ghost(event.position);
     return;
   }
@@ -4203,19 +4221,8 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     sync_attached_to_live_holds();
     engine_.rebuild_snapshot();
   }
-  if (mode_ == Mode::DragSplitEdge && engine_.is_editable()) {
-    const int32_t tick = viewport_.tick_at(event.position.y);
-    const int32_t min_dur = min_hold_duration_ticks();
-    auto note = engine_.document().find_note(drag_split_note_id_);
-    if (!note) return;
-    NotationNote updated = *note;
-    if (drag_split_is_end_) {
-      updated.end_tick = std::max(updated.start_tick + min_dur, tick);
-    } else {
-      updated.start_tick = std::min(tick, updated.end_tick - min_dur);
-    }
-    engine_.document().update_note(drag_split_note_id_, updated);
-    engine_.rebuild_snapshot();
+  if (mode_ == Mode::DragSplitEdge) {
+    sync_split_edge_to_pointer(event.position);
   }
 }
 
@@ -4245,30 +4252,27 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     return;
   }
   if (mode_ == Mode::DragSplitEdge) {
-    auto orig_it = drag_originals_.find(drag_split_note_id_);
-    auto cur = engine_.document().find_note(drag_split_note_id_);
-    if (orig_it != drag_originals_.end() && cur &&
-        (cur->start_tick != orig_it->second.start_tick || cur->end_tick != orig_it->second.end_tick)) {
+    const int32_t note_id = drag_split_note_id_;
+    const bool ever_moved = split_edge_ever_moved_;
+    auto orig_it = drag_originals_.find(note_id);
+    auto cur = engine_.document().find_note(note_id);
+    if (ever_moved && orig_it != drag_originals_.end() && cur &&
+        (cur->start_tick != orig_it->second.start_tick ||
+         cur->end_tick != orig_it->second.end_tick)) {
       std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
-      changes[drag_split_note_id_] = {orig_it->second, *cur};
+      changes[note_id] = {orig_it->second, *cur};
       for (const auto& [id, pair] : changes) {
         engine_.document().update_note(id, pair.first);
       }
       commit_updates(changes, "Resize split");
     }
     drag_originals_.clear();
+    drag_split_note_id_ = -1;
+    split_edge_ever_moved_ = false;
     mode_ = Mode::Idle;
-    return;
-  }
-  if (pending_split_note_id_ >= 0) {
-    const int32_t note_id = pending_split_note_id_;
-    pending_split_note_id_ = -1;
-    drag_originals_.clear();
-    if (gesture_.is_click() && wds::interaction::is_left_button(event.button) &&
-        engine_.is_editable()) {
+    if (!ever_moved && wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
       open_split_picker_for_edit(note_id);
     }
-    mode_ = Mode::Idle;
     return;
   }
   if (mode_ == Mode::PlaceHoldBody) {

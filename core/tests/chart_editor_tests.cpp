@@ -3291,6 +3291,50 @@ void test_timing_tick_ms_roundtrip_multi_bpm() {
   CHECK_EQ(d.start_ms(timing), 2750);
 }
 
+void test_timing_first_bpm_is_song_start_without_tick0() {
+  MusicTiming raw;
+  raw.bpm = 999.0;  // header field must not win over the first authored BPM label
+  raw.ticks_per_quarter = 480;
+  raw.offset_ms = 0;
+  raw.points = {TimingPoint{480, 60.0, 4, 4, true, true}};
+
+  MusicTiming normalized = raw;
+  normalize_timing_points(normalized);
+  CHECK_EQ(normalized.points.front().tick, 0);
+  CHECK(std::fabs(normalized.points.front().bpm - 60.0) < 1e-9);
+
+  CHECK_EQ(tick_to_milliseconds(0, raw), tick_to_milliseconds(0, normalized));
+  CHECK_EQ(tick_to_milliseconds(480, raw), tick_to_milliseconds(480, normalized));
+  CHECK_EQ(tick_to_milliseconds(960, raw), tick_to_milliseconds(960, normalized));
+  CHECK_EQ(milliseconds_to_tick(1000, raw), milliseconds_to_tick(1000, normalized));
+}
+
+void test_hold_span_stale_skips_rebuild_without_holds() {
+  ChartDocument doc;
+  NotationNote tap = make_tap(0, 0);
+  tap.id = 1;
+  CHECK_EQ(doc.add_note(tap), 1);
+  CHECK(!doc.index().hold_span_stale());
+  CHECK_EQ(doc.index().max_hold_span_ms(), 0);
+
+  NotationNote tap2 = make_tap(480, 1);
+  tap2.id = 2;
+  CHECK_EQ(doc.add_note(tap2), 2);
+  CHECK(doc.remove_note(2));
+  CHECK(!doc.index().hold_span_stale());
+  CHECK_EQ(doc.index().max_hold_span_ms(), 0);
+
+  NotationNote body = make_tap(0, 2);
+  body.id = 3;
+  body.end_tick = 960;
+  body.note_type = NoteType::Hold;
+  CHECK_EQ(doc.add_note(body), 3);
+  CHECK(doc.index().max_hold_span_ms() > 0);
+  CHECK(doc.remove_note(3));
+  CHECK(!doc.index().hold_span_stale());
+  CHECK_EQ(doc.index().max_hold_span_ms(), 0);
+}
+
 void test_resolve_convert_scratch_head_stays_official() {
   ChartDocument doc;
   NotationNote body = make_tap(0, 2);
@@ -3390,6 +3434,8 @@ int main() {
   test_paired_hold_head_tolerates_subtick_drift();
   test_recompute_hold_eighths_respects_fractional_star();
   test_timing_tick_ms_roundtrip_multi_bpm();
+  test_timing_first_bpm_is_song_start_without_tick0();
+  test_hold_span_stale_skips_rebuild_without_holds();
   test_sus_channel_reuse_two_holds();
   test_sus_cross_measure_hold_at_bar_head();
   test_sus_spec_example_hold_14002400();
