@@ -2,6 +2,7 @@
 
 #include <wds/renderer/texture.hpp>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,10 @@ struct SplitLineVariant {
   TextureInfo base;
   TextureInfo transform1;
   TextureInfo transform2;
+  // Official LineColor: white soft sprite × this tint (sampled from colored skin).
+  float r = 1.0f;
+  float g = 1.0f;
+  float b = 1.0f;
 
   const TextureInfo* for_phase(int32_t anim_phase) const noexcept {
     if (anim_phase == 0 && transform1) {
@@ -44,6 +49,9 @@ class SplitLineSkinBank {
   // line_slot matches Sonolus splitLineMemory index: 0=left, 1..N-1=mids, N=right end.
   const TextureInfo* texture_for(int32_t color_id, int32_t line_slot, int32_t anim_phase) const;
 
+  // Official SplitEffectElement._lineColor for this slot (falls back to white).
+  bool color_for(int32_t color_id, int32_t line_slot, float& r, float& g, float& b) const;
+
   // Resolved skin suffixes for a color id (multi-sprite colors return multiple entries).
   std::vector<std::string> suffixes_for(int32_t color_id) const;
 
@@ -60,6 +68,8 @@ class SplitLineSkinBank {
   std::unordered_map<std::string, std::string> path_base_;
   std::unordered_map<std::string, std::string> path_t1_;
   std::unordered_map<std::string, std::string> path_t2_;
+  // Tint RGB sampled from colored skins (near-white official plates do not overwrite).
+  std::unordered_map<std::string, std::array<float, 3>> suffix_rgb_;
   // Discovered suffixes present on disk (for a/b and _N auto-resolve).
   std::unordered_map<std::string, bool> suffix_exists_;
 };

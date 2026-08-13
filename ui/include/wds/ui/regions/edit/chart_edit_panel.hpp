@@ -34,7 +34,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_grid(wds::chart_editor::EditGridConfig grid);
   // Seek transport so edit scroll stays locked to preview playhead.
   void set_seek_ms(std::function<void(int64_t)> seek) { seek_ms_ = std::move(seek); }
-  // Fired after Shift+wheel changes visible_hectoms (sync toolbar + persist).
+  // Fired after Ctrl/Cmd+wheel changes visible_hectoms (sync toolbar + persist).
   void set_visible_range_changed_handler(std::function<void()> handler) {
     on_visible_range_changed_ = std::move(handler);
   }
@@ -47,9 +47,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_to_timeline_ms(int64_t timeline_ms) const {
     sync_to_timeline_ms(static_cast<double>(timeline_ms));
   }
-  // Re-derive placement / gutter ghosts from the current pointer after the
-  // viewport scrolls (playback or scrub). Ghosts are stored in tick space; without
-  // this they stick to the old tick and scroll away under a stationary mouse.
+  // Re-derive placement / gutter ghosts / live drags from the current pointer
+  // after the viewport scrolls (playback or scrub). Ghosts and drag targets are
+  // stored in tick space; without this they stick to the old tick and scroll
+  // away under a stationary mouse.
   void resync_pointer_overlays();
   // Host feeds the true window pointer each frame so Idle ghosts can hide when
   // the cursor leaves the edit pane (move events stop once hover leaves).
@@ -106,6 +107,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint_overlays(wds::interaction::UiPainter& painter) const;
   // Modal dialogs (split picker / timing) — paint after overlays, above everything.
   bool has_modal_popup() const noexcept { return split_picker_open_ || timing_popup_open_; }
+  bool is_interaction_modal() const override { return has_modal_popup(); }
+  bool blocks_interaction_behind(wds::interaction::Vec2 point) const override;
   void paint_popups(wds::interaction::UiPainter& painter) const;
   // Footer buttons drawn in a later pass so list sprites cannot cover them.
   void paint_popup_chrome(wds::interaction::UiPainter& painter) const;
@@ -179,6 +182,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void finish_resize();
   void finish_hold_adjust();
   void finish_hold_body(bool chain_next);
+  // Map an out-of-window pointer to the equivalent in-window edge point for
+  // hit/snap math only — does not mutate stored pointer state.
+  wds::interaction::Vec2 pointer_as_in_host(wds::interaction::Vec2 point) const;
+  // Live-update MoveSelection from a pointer (edit-area / window exit OK).
+  void sync_move_selection_to_pointer(wds::interaction::Vec2 point);
+  // Live-update DragSplitEdge from a pointer so scroll-without-move still tracks.
+  void sync_split_edge_to_pointer(wds::interaction::Vec2 point);
   // Middle-button interrupt: drop in-progress place / hold draft. For chained
   // ScratchHold, discards only the current segment and keeps the previous as end.
   void cancel_placement();
@@ -195,6 +205,14 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void place_instant(wds::chart_editor::NoteType type, wds::interaction::Vec2 point,
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
+  // Continue a selected terminal ScratchHold from its JumpScratch end-cap.
+  // Requires pending_chain_extend_id_ armed on pointer-down.
+  void begin_hold_chain_extend();
+  // If point is on a selected terminal ScratchHold end-cap, arm pending_chain_extend_id_.
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point);
+  void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
+  // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
+  void begin_scratch_hold_placement(wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
   // Place a Sound / ScratchSound on an already-selected existing hold body.
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);
@@ -205,10 +223,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Re-apply default_width_ to the locked placement note without chasing the pointer.
   void apply_width_to_locked_placement();
   // Live-sync previous chain segment's covering tail to hold_draft_; returns false
-  // when the cover is not Sirius-representable (caller should break the chain).
+  // when the cover is not Sirius-representable.
   bool sync_chain_prev_tail_cover();
-  // Disconnect chain drawing and treat hold_draft_ as a fresh ScratchHold start.
-  void break_hold_chain_for_new_segment();
+  // True when hold_draft_ + prev body can form a Sirius JumpScratch cover.
+  bool chain_draft_cover_representable() const noexcept;
+  // Snap hold_draft_.lane onto a JumpScratch-legal chain lane near desired_lane_f,
+  // then sync the previous cover. If no legal lane exists for this width, keeps the
+  // chain armed, restores prev, and shows a disconnected-style ghost preview.
+  // Returns true when the live chain cover is active.
+  bool snap_hold_draft_chain_lane_and_sync(float desired_lane_f);
   wds::interaction::SwipeDirection update_place_swipe(wds::interaction::Vec2 pointer);
 
   bool handle_popup_pointer_down(const wds::interaction::PointerDownEvent& event);
@@ -286,9 +309,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   int32_t drag_split_note_id_ = -1;
   bool drag_split_is_end_ = false;
-  // Press on a split label: click → edit picker; drag past threshold → resize edge.
-  int32_t pending_split_note_id_ = -1;
-  bool pending_split_is_end_ = false;
+  // Pointer's snapped tick at press. The label sits off the grid line, so the
+  // press tick may differ from the note; do not snap until this tick changes
+  // (mouse move or wheel). True click = the note never left its original ticks.
+  int32_t drag_split_press_tick_ = 0;
+  bool split_edge_ever_moved_ = false;
 
   // Solid label previews on BPM / meter / split gutters (no text).
   struct GutterGhost {
@@ -347,6 +372,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t hold_chain_prev_id_ = -1;
   wds::chart_editor::NotationNote hold_chain_prev_body_{};
   std::unordered_set<int32_t> hold_chain_ids_;
+  // Live JumpScratch cover applied to prev during chain preview. False when the
+  // current width/lane cannot represent a cover — chain stays armed for width
+  // changes, but ghost looks like a disconnected independent ScratchHold.
+  bool hold_chain_link_preview_ = true;
+  // Armed on RMB-down over a selected terminal JumpScratch; consumed when the
+  // gesture resolves to ScratchHoldBody (chain continue instead of a new hold).
+  int32_t pending_chain_extend_id_ = -1;
 
   void clear_hold_chain_state();
   void select_hold_chain();

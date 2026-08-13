@@ -26,12 +26,15 @@ class Dropdown : public Widget {
   // Open the item menu above the field (toolbar / bottom panels).
   void set_opens_upward(bool enabled) noexcept { opens_upward_ = enabled; }
   bool opens_upward() const noexcept { return opens_upward_; }
+  bool is_open() const noexcept { return open_; }
 
   void paint(UiPainter& painter) const override;
   void paint_popup_layer(UiPainter& painter) const override;
   Widget* hit_test(Vec2 point) override;
   Widget* hit_test_popup(Vec2 point) override;
+  Widget* hit_test_popup_host(Vec2 point) override;
   bool dismiss_popups(Vec2 point) override;
+  void close_own_popup() override;
   void on_pointer_down(const PointerDownEvent& event) override;
   void on_pointer_move(const PointerMoveEvent& event) override;
   void on_click(const ClickEvent& event) override;

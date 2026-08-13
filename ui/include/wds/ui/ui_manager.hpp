@@ -58,6 +58,8 @@ class UiManager {
   const std::string& config_path() const noexcept { return config_path_; }
   void load_ui_config();
   void save_ui_config();
+  // Wheel/visible-range: coalesce disk writes (~500ms). Settings/toolbar persist stays immediate.
+  void request_save_ui_config(bool immediate = true);
 
   // Used by the window-close path to actually quit after the in-app prompt.
   void set_request_close(std::function<void()> handler) { request_close_ = std::move(handler); }
@@ -84,10 +86,11 @@ class UiManager {
   int64_t last_update_process_us() const noexcept { return last_update_process_us_; }
   void paint(wds::interaction::UiPainter& painter) const;
 
-  // Main UI (panels / edit skins). Dropdown menus and modal dialogs are built
-  // separately so the preview compositor can draw them above skinned note sprites
-  // (depth write is off; UiPainter rects would lose to later sprites in the same batch).
-  // Batches are reused across frames (sticky bucket capacity); returned refs are valid
+  // Main UI (panels / edit skins). Status bar, dropdown menus, and modal dialogs
+  // are built separately so the preview compositor can draw them above skinned note
+  // sprites (depth write is off; UiPainter rects would lose to later sprites in the
+  // same batch). Batches are reused across frames (sticky bucket capacity); each
+  // build_* clears its target at entry before appending. Returned refs are valid
   // until the next build_* call of the same kind.
   const wds::renderer::DrawBatch& build_ui_batch(wds::renderer::TextureId solid_texture, int fb_w,
                                                  int fb_h,
@@ -110,6 +113,7 @@ class UiManager {
 
  private:
   void apply_region_bounds();
+  void flush_pending_ui_config();
   void prepare_painter(wds::interaction::UiPainter& painter) const;
   // Clear + rebind the active "editor" shortcut namespace from current chords.
   void bind_editor_shortcuts();
@@ -156,6 +160,8 @@ class UiManager {
   int64_t last_update_layout_us_ = 0;
   int64_t last_update_sync_us_ = 0;
   int64_t last_update_process_us_ = 0;
+  bool ui_config_dirty_ = false;
+  int64_t ui_config_dirty_us_ = 0;
 };
 
 }  // namespace wds::ui

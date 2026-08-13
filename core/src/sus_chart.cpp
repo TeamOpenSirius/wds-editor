@@ -127,8 +127,8 @@ NoteType tap_type_from_sus(int type) {
 
 bool same_tick_i(int32_t a, int32_t b) { return a == b; }
 
-// Start lanes fully occupied by non-hold-body notes (or other hold tails ending
-// here). Other hold bodies that merely start here are ignored — same occupancy
+// Start lanes fully occupied by blocking notes (or other hold tails ending
+// here). Hold bodies / HoldEighth / mid-stars never count — same occupancy
 // model as make_auto_hold_head.
 bool hold_start_fully_covered(const NotationNote& hold,
                               const std::vector<NotationNote>& notes) {
@@ -154,6 +154,7 @@ bool hold_start_fully_covered(const NotationNote& hold,
       continue;
     }
     if (!same_tick_i(note.start_tick, hold.start_tick)) continue;
+    if (is_hold_body(note.note_type) || is_hold_mid_star(note.note_type)) continue;
     mark_range(occupied, note.lane, note.end_lane());
   }
   return std::all_of(occupied.begin(), occupied.end(), [](char c) { return c != 0; });

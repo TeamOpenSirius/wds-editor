@@ -40,7 +40,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
     }
-    save_ui_config();
+    request_save_ui_config(false);
   });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
@@ -62,6 +62,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (auto* toolbar_panel = this->toolbar_panel()) toolbar_panel->capture_config(cfg);
     cfg.width_slots = wds::interaction::width_slot_values_const();
     cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
+    cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
     cfg.sus_auto_convert = session_->sus_auto_convert();
     cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
     cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
@@ -185,6 +186,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       width_slots_dialog_->capture_config(cfg);
       session_->set_sus_auto_convert(cfg.sus_auto_convert);
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+      chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
       wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -326,7 +328,11 @@ void UiManager::bind_editor_shortcuts() {
   });
 }
 
-UiManager::~UiManager() = default;
+UiManager::~UiManager() {
+  if (ui_config_dirty_) {
+    save_ui_config();
+  }
+}
 
 ChartEditPanel* UiManager::edit_panel() noexcept {
   const auto& children = root_.children();
@@ -440,6 +446,7 @@ void UiManager::load_ui_config() {
   wds::interaction::set_width_slot_values(cfg.width_slots);
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+  chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
   wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -453,12 +460,15 @@ void UiManager::load_ui_config() {
 }
 
 void UiManager::save_ui_config() {
+  ui_config_dirty_ = false;
+  ui_config_dirty_us_ = 0;
   if (config_path_.empty()) return;
   EditorUiConfig cfg;
   if (auto* settings = settings_panel()) settings->capture_config(cfg);
   if (auto* toolbar = toolbar_panel()) toolbar->capture_config(cfg);
   cfg.width_slots = wds::interaction::width_slot_values_const();
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
+  cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
@@ -468,12 +478,42 @@ void UiManager::save_ui_config() {
   save_editor_ui_config(config_path_, cfg);
 }
 
+void UiManager::request_save_ui_config(bool immediate) {
+  if (immediate) {
+    save_ui_config();
+    return;
+  }
+  ui_config_dirty_ = true;
+  ui_config_dirty_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+}
+
+void UiManager::flush_pending_ui_config() {
+  if (!ui_config_dirty_) {
+    return;
+  }
+  const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  if (now_us - ui_config_dirty_us_ >= 500000) {
+    save_ui_config();
+  }
+}
+
 void UiManager::resize(int logical_width, int logical_height, int framebuffer_width,
                        int framebuffer_height) {
-  width_ = std::max(1, logical_width);
-  height_ = std::max(1, logical_height);
-  fb_width_ = std::max(1, framebuffer_width);
-  fb_height_ = std::max(1, framebuffer_height);
+  const int w = std::max(1, logical_width);
+  const int h = std::max(1, logical_height);
+  const int fb_w = std::max(1, framebuffer_width);
+  const int fb_h = std::max(1, framebuffer_height);
+  if (w == width_ && h == height_ && fb_w == fb_width_ && fb_h == fb_height_) {
+    return;
+  }
+  width_ = w;
+  height_ = h;
+  fb_width_ = fb_w;
+  fb_height_ = fb_h;
 
   const EditorLayoutResult computed = layouter_.compute(width_, height_);
   layout_ = computed.regions;
@@ -491,6 +531,11 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
       static_cast<int>(std::lround(static_cast<float>(computed.preview_content.y) * s)),
       round_fb(static_cast<float>(computed.preview_content.width)),
       round_fb(static_cast<float>(computed.preview_content.height)));
+  // Full preview column — background cover fills this without spilling into edit.
+  chart_preview_->set_panel_bounds(
+      static_cast<int>(std::lround(layout_.preview.x * s)),
+      static_cast<int>(std::lround(layout_.preview.y * s)),
+      round_fb(layout_.preview.w), round_fb(layout_.preview.h));
 }
 
 void UiManager::apply_region_bounds() {
@@ -544,6 +589,7 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   t0 = clock::now();
   root_.process_frame(delta_seconds, events, &shortcuts_);
   last_update_process_us_ = phase_us(t0);
+  flush_pending_ui_config();
 }
 
 void UiManager::paint(wds::interaction::UiPainter& painter) const { root_.paint(painter); }
@@ -559,14 +605,8 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
                                                           const wds::renderer::ScreenBounds& screen) {
   ui_batch_.clear();
   if (auto* edit = edit_panel()) {
-    // Final scroll sample for this frame (post-transport tick), then re-snap
-    // placement ghosts to the stationary pointer under the new viewport.
-    double sync_ms = session_->engine().timeline_us() / 1000.0;
-    if (chart_preview_ != nullptr &&
-        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
-      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
-    }
-    edit->sync_to_timeline_ms(sync_ms);
+    // Viewport already synced in update() after transport tick; only re-snap
+    // placement ghosts to the stationary pointer under the current viewport.
     edit->resync_pointer_overlays();
   }
   wds::interaction::UiPainter painter;
@@ -578,7 +618,7 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
     prepare_painter(overlay);
     edit->paint_overlays(overlay);
   }
-  // One upload after all paints may have packed on-demand glyphs.
+  // Upload after paints packed on-demand glyphs; flush resolves font TextureId live.
   chart_preview_->sync_ui_font_texture();
   painter.flush_to(ui_batch_, solid_texture, fb_w, fb_h, screen);
   if (const auto* edit = edit_panel()) {
@@ -599,7 +639,6 @@ const wds::renderer::DrawBatch& UiManager::build_popup_batch(
   if (painter.rects().empty() && painter.front_rects().empty() && painter.sprites().empty()) {
     return popup_batch_;
   }
-  chart_preview_->sync_ui_font_texture();
   painter.flush_to(popup_batch_, solid_texture, fb_w, fb_h, screen);
   return popup_batch_;
 }
@@ -630,7 +669,6 @@ const wds::renderer::DrawBatch& UiManager::build_modal_batch(
     unsaved_changes_dialog_->paint_modal(modal);
   }
   if (!modal.rects().empty() || !modal.front_rects().empty() || !modal.sprites().empty()) {
-    chart_preview_->sync_ui_font_texture();
     modal.flush_to(modal_batch_, solid_texture, fb_w, fb_h, screen);
   }
   return modal_batch_;
@@ -672,13 +710,69 @@ const wds::renderer::DrawBatch& UiManager::build_modal_chrome_batch(
 const wds::renderer::DrawBatch& UiManager::build_post_overlay_batch(
     wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
     const wds::renderer::ScreenBounds& screen) {
+  // Clear every reused batch at the start of the frame. UiPainter::flush_to and
+  // DrawBatch::append_from only append; clearing only when a layer is empty left
+  // prior-frame popup/modal verts in place for as long as any menu stayed open.
   post_overlay_batch_.clear();
-  // Modal scrim first, then dropdown popups — otherwise menus open inside a modal
-  // (export format combo) are drawn under the 55% dim and look transparent.
-  if (has_modal_popup()) {
-    post_overlay_batch_.append_from(build_modal_batch(solid_texture, fb_w, fb_h, screen));
+  modal_batch_.clear();
+  popup_batch_.clear();
+
+  // Paint all post-overlay layers first, then one atlas upload before any flush
+  // so mid-frame destroy cannot invalidate an earlier DrawBatch TextureId.
+  wds::interaction::UiPainter status;
+  bool have_status = false;
+  if (status_bar_ != nullptr) {
+    prepare_painter(status);
+    status_bar_->paint_overlay(status);
+    have_status =
+        !status.rects().empty() || !status.front_rects().empty() || !status.sprites().empty();
   }
-  post_overlay_batch_.append_from(build_popup_batch(solid_texture, fb_w, fb_h, screen));
+
+  wds::interaction::UiPainter modal;
+  bool have_modal = false;
+  if (has_modal_popup()) {
+    prepare_painter(modal);
+    const auto* edit = edit_panel();
+    if (edit != nullptr && edit->has_modal_popup()) {
+      edit->paint_popups(modal);
+    }
+    if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) {
+      width_slots_dialog_->paint_modal(modal);
+    }
+    if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) {
+      export_choice_dialog_->paint_modal(modal);
+    }
+    if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) {
+      chart_add_dialog_->paint_modal(modal);
+    }
+    if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) {
+      unsaved_changes_dialog_->paint_modal(modal);
+    }
+    have_modal =
+        !modal.rects().empty() || !modal.front_rects().empty() || !modal.sprites().empty();
+  }
+
+  wds::interaction::UiPainter popup;
+  prepare_painter(popup);
+  root_.paint_popup_layers(popup);
+  const bool have_popup =
+      !popup.rects().empty() || !popup.front_rects().empty() || !popup.sprites().empty();
+
+  if (have_status || have_modal || have_popup) {
+    chart_preview_->sync_ui_font_texture();
+  }
+  // Flush straight into the cleared post batch (status → modal → popup). No
+  // intermediate scratch+append_from: that path previously cleared scratch only
+  // when a layer was absent, so open menus accumulated every frame.
+  if (have_status) {
+    status.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+  }
+  if (have_modal) {
+    modal.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+  }
+  if (have_popup) {
+    popup.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+  }
   return post_overlay_batch_;
 }
 

@@ -37,9 +37,9 @@ std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote>
                                                        int32_t ticks_per_quarter);
 
 // Auto head for a hold body start: full body span if free; if other notes
-// (non-hold-body at start, or hold tails ending here) partially overlap,
+// (taps/heads/flicks/… at start, or hold tails ending here) partially overlap,
 // only the single continuous free lane run inside the body. Multiple free
-// runs → nullopt (no head). Other hold bodies starting at the same tick ignored.
+// runs → nullopt (no head). Hold bodies, HoldEighth, and mid-stars never block.
 std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
                                                 const NotationNote& hold);
 bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold);

@@ -9,6 +9,7 @@
 #include <wds/core/chart_editor_engine.hpp>
 
 #include <string>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -54,10 +55,16 @@ class ChartPreviewPanel {
               const wds::renderer::DrawBatch* modal_chrome = nullptr);
 
   void set_content_bounds(int x, int y, int width, int height) noexcept;
+  // Full preview column (may be wider than the aspect-locked stage content).
+  void set_panel_bounds(int x, int y, int width, int height) noexcept;
 
   // Re-upload the UI font atlas if new glyphs were packed (e.g. CJK on demand),
   // and rebake when content-scale tier crosses a bucket.
+  // Previous GPU atlases are retired (not destroyed) until flush_retired_font_textures().
   void sync_ui_font_texture();
+  // Destroy font atlases retired during this frame. Call after draw_frame so
+  // DrawBatches that still reference the previous id remain valid through submit.
+  void flush_retired_font_textures();
 
   // Apply note_speed to both visual and core preview configs and rebuild.
   void set_note_speed(double speed);
@@ -75,7 +82,7 @@ class ChartPreviewPanel {
                          const std::string& ui_font_path);
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
-  bool bake_ui_font(float bake_px);
+  bool bake_ui_font(float body_px, float tip_px, bool mild_sharpen);
   void warm_ui_font_glyphs();
   bool ensure_ui_font_scale();
 
@@ -85,6 +92,8 @@ class ChartPreviewPanel {
   wds::chart_editor::ChartEditorEngine engine_;
   wds::renderer::TextureInfo solid_texture_{};
   wds::renderer::TextureInfo ui_font_texture_{};
+  // Atlases replaced mid-frame; destroyed in flush_retired_font_textures().
+  std::vector<wds::renderer::TextureInfo> retired_font_textures_;
   std::string ui_font_path_;
   GLFWwindow* window_ = nullptr;
   float font_bake_tier_ = 0.0f;

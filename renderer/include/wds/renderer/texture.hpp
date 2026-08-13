@@ -43,7 +43,10 @@ class TextureCache {
   // Pack queued images into one atlas texture and fill path → TextureInfo (with UVs).
   bool bake_atlas();
 
-  // Valid after bake_atlas().
+  // Full-res GPU texture outside the atlas (large BGs). Safe after bake_atlas().
+  TextureInfo load_standalone_png(const std::string& path);
+
+  // Valid after bake_atlas() / load_standalone_png().
   TextureInfo get(const std::string& path) const;
 
   bool baked() const noexcept { return baked_; }
@@ -61,6 +64,7 @@ class TextureCache {
   VulkanRenderer* renderer_ = nullptr;
   std::unordered_map<std::string, CpuImage> pending_;
   std::unordered_map<std::string, TextureInfo> cache_;
+  std::vector<TextureId> standalone_ids_;
   TextureId atlas_id_ = kInvalidTextureId;
   bool baked_ = false;
 };

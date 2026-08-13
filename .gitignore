@@ -42,9 +42,8 @@ compile_commands.json
 /VulkanSDK/
 /sonolus-sirius-engine/
 
-# Local-only chart migration helpers (not shipped with the editor)
-/tools/migrate_wdschart_scratch_to_flick.py
-/tools/
+# Local Unity/IL2CPP dumps (not part of the editor)
+/wds/
 
 # MSI Binary-table dumps (not build inputs; WixUI assets come from wixl-data)
 /Binary/

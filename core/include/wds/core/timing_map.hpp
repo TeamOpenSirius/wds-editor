@@ -11,6 +11,10 @@ namespace wds::chart_editor {
 // Guarantee a tick-0 point (BPM+meter), propagate inherited fields, drop empty points.
 void normalize_timing_points(MusicTiming& timing);
 
+// Prefix milliseconds (excluding offset_ms) at each points[i].tick. Requires a
+// tick-0 first point and strictly increasing ticks.
+void rebuild_timing_prefix_ms(const MusicTiming& timing);
+
 // Ticks per one beat under a point (TPQ is quarter-note based).
 int32_t beat_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter) noexcept;
 

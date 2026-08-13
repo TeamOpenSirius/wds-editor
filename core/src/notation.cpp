@@ -4,60 +4,116 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace wds::chart_editor {
+namespace {
 
-int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing) {
-  MusicTiming t = timing;
-  normalize_timing_points(t);
-  if (t.ticks_per_quarter <= 0 || t.points.empty()) {
-    return t.offset_ms;
+bool timing_points_are_normalized(const MusicTiming& timing) noexcept {
+  if (timing.ticks_per_quarter <= 0 || timing.points.empty()) {
+    return false;
   }
-  const double tpq = static_cast<double>(t.ticks_per_quarter);
-  double ms = static_cast<double>(t.offset_ms);
+  if (timing.points.front().tick != 0) {
+    return false;
+  }
+  for (size_t i = 1; i < timing.points.size(); ++i) {
+    if (timing.points[i].tick <= timing.points[i - 1].tick) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void ensure_timing_prefix(const MusicTiming& timing) {
+  if (timing.prefix_ms.size() == timing.points.size() && !timing.points.empty()) {
+    return;
+  }
+  rebuild_timing_prefix_ms(timing);
+}
+
+size_t last_index_tick_le(const std::vector<TimingPoint>& pts, int32_t target) {
+  size_t lo = 0;
+  size_t hi = pts.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (pts[mid].tick <= target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo == 0 ? 0 : lo - 1;
+}
+
+size_t last_index_prefix_le(const std::vector<double>& prefix, double remain) {
+  size_t lo = 0;
+  size_t hi = prefix.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (prefix[mid] <= remain) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo == 0 ? 0 : lo - 1;
+}
+
+int64_t tick_to_milliseconds_normalized(int32_t tick, const MusicTiming& timing) {
+  if (timing.ticks_per_quarter <= 0 || timing.points.empty()) {
+    return timing.offset_ms;
+  }
+  ensure_timing_prefix(timing);
+  const auto& pts = timing.points;
   const int32_t target = std::max(0, tick);
-  for (size_t i = 0; i < t.points.size(); ++i) {
-    const int32_t t0 = t.points[i].tick;
-    const bool last = (i + 1 >= t.points.size());
-    const int32_t t1 = last ? std::numeric_limits<int32_t>::max() : t.points[i + 1].tick;
-    if (target <= t0) break;
-    const int32_t use = last ? target : std::min(target, t1);
-    const double bpm = t.points[i].bpm > 0.0 ? t.points[i].bpm : 120.0;
-    ms += static_cast<double>(use - t0) * (60000.0 / (bpm * tpq));
-    if (!last && target <= t1) break;
-  }
+  const size_t i = last_index_tick_le(pts, target);
+  const double tpq = static_cast<double>(timing.ticks_per_quarter);
+  const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
+  const double rate = 60000.0 / (bpm * tpq);
+  const double ms = static_cast<double>(timing.offset_ms) + timing.prefix_ms[i] +
+                    static_cast<double>(target - pts[i].tick) * rate;
   return static_cast<int64_t>(std::llround(ms));
 }
 
-int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing) {
-  MusicTiming t = timing;
-  normalize_timing_points(t);
-  if (t.ticks_per_quarter <= 0 || t.points.empty()) {
+int32_t milliseconds_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
+  if (timing.ticks_per_quarter <= 0 || timing.points.empty()) {
     return 0;
   }
-  const double tpq = static_cast<double>(t.ticks_per_quarter);
-  double remain = static_cast<double>(ms - t.offset_ms);
-  if (remain <= 0.0) return 0;
-  for (size_t i = 0; i < t.points.size(); ++i) {
-    const int32_t t0 = t.points[i].tick;
-    const bool last = (i + 1 >= t.points.size());
-    const int32_t t1 = last ? std::numeric_limits<int32_t>::max() : t.points[i + 1].tick;
-    const double bpm = t.points[i].bpm > 0.0 ? t.points[i].bpm : 120.0;
-    const double ms_per_tick = 60000.0 / (bpm * tpq);
-    if (last) {
-      return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(t0) + remain / ms_per_tick)));
-    }
-    const double seg_ms = static_cast<double>(t1 - t0) * ms_per_tick;
-    if (remain <= seg_ms) {
-      return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(t0) + remain / ms_per_tick)));
-    }
-    remain -= seg_ms;
+  const double remain = static_cast<double>(ms - timing.offset_ms);
+  if (remain <= 0.0) {
+    return 0;
   }
-  return std::max(0, t.points.back().tick);
+  ensure_timing_prefix(timing);
+  const auto& pts = timing.points;
+  const size_t i = last_index_prefix_le(timing.prefix_ms, remain);
+  const double tpq = static_cast<double>(timing.ticks_per_quarter);
+  const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
+  const double ms_per_tick = 60000.0 / (bpm * tpq);
+  const double into = remain - timing.prefix_ms[i];
+  return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(pts[i].tick) +
+                                                       into / ms_per_tick)));
+}
+
+}  // namespace
+
+int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing) {
+  if (timing_points_are_normalized(timing)) {
+    return tick_to_milliseconds_normalized(tick, timing);
+  }
+  MusicTiming t = timing;
+  normalize_timing_points(t);
+  return tick_to_milliseconds_normalized(tick, t);
+}
+
+int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing) {
+  if (timing_points_are_normalized(timing)) {
+    return milliseconds_to_tick_normalized(ms, timing);
+  }
+  MusicTiming t = timing;
+  normalize_timing_points(t);
+  return milliseconds_to_tick_normalized(ms, t);
 }
 
 int64_t NotationNote::start_ms(const MusicTiming& timing) const {
@@ -250,29 +306,17 @@ void collect_hold_body_judge_times(const NotationNote& hold,
   out_sorted_unique = std::move(times);
 }
 
-PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
-                                        const MusicTiming& timing,
-                                        int64_t preview_time_ms) {
-  PreviewComboState state;
+void collect_preview_combo_hits(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                                std::vector<int64_t>& out_sorted_hits) {
+  out_sorted_hits.clear();
   std::vector<int64_t> hold_times;
   std::vector<char> star_consumed(notes.size(), 0);
-
-  auto register_hit = [&](int64_t ms) {
-    if (ms > preview_time_ms) {
-      return;
-    }
-    state.combo += 1;
-    state.last_judge_ms = std::max(state.last_judge_ms, ms);
-  };
 
   for (size_t i = 0; i < notes.size(); ++i) {
     const auto& note = notes[i];
     if (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) {
       collect_hold_body_judge_times(note, notes, timing, hold_times);
-      for (int64_t t : hold_times) {
-        register_hit(t);
-      }
-      // Mark mid-stars absorbed by this hold so orphans are not double-counted.
+      out_sorted_hits.insert(out_sorted_hits.end(), hold_times.begin(), hold_times.end());
       const int64_t start = note.start_ms(timing);
       const int64_t end = note.end_ms(timing);
       for (size_t j = 0; j < notes.size(); ++j) {
@@ -285,13 +329,13 @@ PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
         }
       }
       if (is_hold_with_tail(note.note_type) && end > start) {
-        register_hit(end);
+        out_sorted_hits.push_back(end);
       }
       continue;
     }
 
     if (is_combo_head_note(note)) {
-      register_hit(note.start_ms(timing));
+      out_sorted_hits.push_back(note.start_ms(timing));
     }
   }
 
@@ -302,10 +346,30 @@ PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
     if (is_split_lane_gimmick(notes[i].gimmick_type)) {
       continue;
     }
-    register_hit(notes[i].start_ms(timing));
+    out_sorted_hits.push_back(notes[i].start_ms(timing));
   }
 
+  std::sort(out_sorted_hits.begin(), out_sorted_hits.end());
+}
+
+PreviewComboState combo_from_sorted_hits(const std::vector<int64_t>& sorted_hits,
+                                         int64_t preview_time_ms) {
+  PreviewComboState state;
+  const auto it =
+      std::upper_bound(sorted_hits.begin(), sorted_hits.end(), preview_time_ms);
+  state.combo = static_cast<int32_t>(it - sorted_hits.begin());
+  if (state.combo > 0) {
+    state.last_judge_ms = *(it - 1);
+  }
   return state;
+}
+
+PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
+                                        const MusicTiming& timing,
+                                        int64_t preview_time_ms) {
+  std::vector<int64_t> hits;
+  collect_preview_combo_hits(notes, timing, hits);
+  return combo_from_sorted_hits(hits, preview_time_ms);
 }
 
 bool contributes_to_concurrent_at_start(NoteType type) noexcept {
@@ -459,7 +523,7 @@ bool ChartDocument::update_note(int32_t id, const NotationNote& note) {
   notes_[it->second] = updated;
   sort_notes_for_display();
   rebuild_id_index();
-  if (index_.max_hold_span_ms() == 0) {
+  if (index_.hold_span_stale()) {
     rebuild_index();
   }
   rebuild_concurrent_lines();
@@ -481,7 +545,7 @@ bool ChartDocument::remove_note(int32_t id) {
   notes_.erase(notes_.begin() + static_cast<std::ptrdiff_t>(it->second));
   sort_notes_for_display();
   rebuild_id_index();
-  if (index_.max_hold_span_ms() == 0) {
+  if (index_.hold_span_stale()) {
     rebuild_index();
   }
   rebuild_concurrent_lines();

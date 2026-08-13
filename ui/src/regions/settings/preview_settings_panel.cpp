@@ -108,7 +108,7 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
   add_child(std::move(speed_minus));
 
   auto speed = std::make_unique<wds::interaction::ComboBox>();
-  speed->set_items({"3", "5", "7", "9", "11"});
+  speed->set_items({"6", "8", "10", "12", "14", "16", "18"});
   speed->set_text(format_speed(speed_));
   speed->set_validator([](const std::string& text) {
     const auto value = wds::interaction::parse_speed(text, 1.0);
@@ -142,11 +142,7 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
   seek->on_change([this](float fraction) {
     int64_t duration = preview_.transport().audio().duration_ms();
     if (duration <= 0) {
-      duration = 1;
-      for (const auto& n : preview_.engine().document().notes()) {
-        duration = std::max(duration, n.end_ms(preview_.engine().document().timing()) + 1);
-        duration = std::max(duration, n.start_ms(preview_.engine().document().timing()) + 1);
-      }
+      duration = fallback_chart_duration_ms();
     }
     duration = std::max<int64_t>(duration, 1);
     preview_.transport().request_seek_ms(static_cast<int64_t>(fraction * duration));
@@ -281,6 +277,23 @@ void PreviewSettingsPanel::sync_from_state() const {
   static_cast<wds::interaction::Checkbox*>(sfx_mute_)->set_checked(sfx_muted_);
 }
 
+int64_t PreviewSettingsPanel::fallback_chart_duration_ms() const {
+  const auto& doc = preview_.engine().document();
+  const uint64_t rev = doc.content_generation();
+  if (cached_span_revision_ == rev) {
+    return cached_chart_span_ms_;
+  }
+  int64_t duration = 1;
+  const auto& timing = doc.timing();
+  for (const auto& n : doc.notes()) {
+    duration = std::max(duration, n.end_ms(timing) + 1);
+    duration = std::max(duration, n.start_ms(timing) + 1);
+  }
+  cached_span_revision_ = rev;
+  cached_chart_span_ms_ = std::max<int64_t>(duration, 1);
+  return cached_chart_span_ms_;
+}
+
 void PreviewSettingsPanel::layout(const wds::interaction::Rect& parent_bounds) {
   const auto b = bounds_;
   const auto m = compute_metrics(b);
@@ -394,11 +407,7 @@ void PreviewSettingsPanel::update(float delta_seconds) {
   }
   int64_t duration = preview_.transport().audio().duration_ms();
   if (duration <= 0) {
-    duration = 1;
-    for (const auto& n : preview_.engine().document().notes()) {
-      duration = std::max(duration, n.end_ms(preview_.engine().document().timing()) + 1);
-      duration = std::max(duration, n.start_ms(preview_.engine().document().timing()) + 1);
-    }
+    duration = fallback_chart_duration_ms();
   }
   duration = std::max<int64_t>(duration, 1);
   const float frac = std::clamp(

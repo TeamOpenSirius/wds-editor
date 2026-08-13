@@ -1,6 +1,8 @@
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
 
+#include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
+#include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
@@ -10,24 +12,24 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace wds::ui {
 namespace {
 
 using wds::chart_editor::NoteType;
+using wds::chart_render::NoteVisualPass;
 
 using NoteSprites = wds::ui::NoteSprites;
+using wds::ui::apply_hold_tail_sprites;
 using wds::ui::sprites_for;
-
-enum class NoteDrawPass {
-  HoldRibbons,  // connection strips only — always under every other note layer
-  NoteCaps,     // heads / tails / taps / stars (hold bodies: tail only, never start head)
-};
 
 void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::SkinCatalog& skin,
                        const EditViewport& viewport, const wds::chart_editor::NotationNote& note,
                        float alpha, float z, float arrow_z, int fb_w, int fb_h,
-                       wds::renderer::ScreenBounds screen, NoteDrawPass pass) {
+                       wds::renderer::ScreenBounds screen, NoteVisualPass pass) {
   // Split-lane gimmicks are authoring markers — never draw as flat/hold note art.
   if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
   if (note.note_type == NoteType::HoldEighth || alpha <= 0.0f) return;
@@ -43,24 +45,40 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   const float inset = viewport.note_inset_px(note.width);
   const float x = viewport.x_at(note.lane) + inset;
   const float width = std::max(4.0f, viewport.lane_width(note.width) - inset * 2.0f);
-  const float border_percent = EditViewport::kNoteBorderPercent;
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
   const bool hold_body =
       note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
 
-  if (pass == NoteDrawPass::HoldRibbons) {
+  if (pass == NoteVisualPass::HoldBody) {
     if (!hold_body || !sprites.connection) return;
     const float top = std::min(y0, y1);
     const float bottom = std::max(y0, y1);
     const auto body = wds::interaction::rect_to_quad(
         {x, top, width, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
-    batch.add_sprite(sprites.connection, body, z, alpha);
+    // Cap size must be in the same space as body (NDC). Flat notes use dest_h/tex_h;
+    // measure a same-width note-height quad so we don't mix px with NDC (that made
+    // caps >> width → soft-edge UVs filled both sides).
+    const auto ref = wds::interaction::rect_to_quad(
+        {x, y0 - note_h * 0.5f, width, note_h}, fb_w, fb_h, screen);
+    const auto ndc_len = [](wds::renderer::Vec2 a, wds::renderer::Vec2 b) {
+      const float dx = b.x - a.x;
+      const float dy = b.y - a.y;
+      return std::sqrt(dx * dx + dy * dy);
+    };
+    const float ref_h =
+        0.5f * (ndc_len(ref.lb, ref.lt) + ndc_len(ref.rb, ref.rt));
+    const float border_scale =
+        wds::chart_render::border_scale_from_flat_height(ref_h, skin);
+    wds::renderer::add_sliced_note(batch, sprites.connection, body, skin.hold_slice_border_l,
+                                   skin.hold_slice_border_r, z, alpha, alpha, border_scale,
+                                   sprites.connection_r, sprites.connection_g,
+                                   sprites.connection_b);
     return;
   }
 
-  if (sprites.is_tick) {
-    if (!sprites.tick) return;
+  if (pass == NoteVisualPass::MidStar) {
+    if (!sprites.is_tick || !sprites.tick) return;
     // Tick art is square (112×112); size by note height and keep native aspect so
     // a 1-lane-wide quad does not flatten the star.
     const float aspect =
@@ -80,108 +98,109 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     return;
   }
 
-  // ScratchHold end uses Sirius scratchLength span; body ribbon keeps note.lane/width.
-  int32_t end_lane = note.lane;
-  int32_t end_width = note.width;
-  if (hold_body && wds::chart_editor::is_scratch_hold_body(note.note_type)) {
-    const auto range = wds::chart_editor::get_scratch_end_lane_range(note);
-    end_lane = range.first;
-    end_width = std::max(1, range.second - range.first + 1);
-  } else if (hold_body && wds::chart_editor::is_jump_scratch(note.gimmick_type)) {
-    const auto range = wds::chart_editor::get_jump_scratch_lane_range(note);
-    end_lane = range.first;
-    end_width = std::max(1, range.second - range.first + 1);
+  if (sprites.is_tick) {
+    return;
   }
 
-  // scratch_length: - left, + right, 0 both (match preview / Sirius).
-  // Bidirectional: pack from both edges and stop at the midline on wide notes;
-  // on 1-lane notes still force one arrow per direction (otherwise aw/2 < arrow).
+  // ScratchHold / JumpScratch end span (shared with preview snapshot).
+  int32_t end_lane = note.lane;
+  int32_t end_width = note.width;
+  if (hold_body && (wds::chart_editor::is_scratch_hold_body(note.note_type) ||
+                    wds::chart_editor::is_jump_scratch(note.gimmick_type))) {
+    const auto span = wds::chart_editor::resolve_end_lane_span(note);
+    end_lane = span.first;
+    end_width = span.second;
+  }
+
+  // Static arrow packing (ArrowStyle::Static); sides from scratch_arrow_sides.
   const auto draw_flick_arrows = [&](float y, float ax0, float aw) {
     if (!skin.scratch_arrow || aw <= 1.0f) return;
     const float arrow_h = note_h * 0.95f;
     float arrow_w = std::clamp(viewport.lane_width(1) * 0.55f, 8.0f, note_h * 1.2f);
     arrow_w = std::min(arrow_w, aw);
     if (arrow_w <= 1.0f) return;
-    const int32_t sl = note.scratch_length;
-    const float step = (sl == 0) ? arrow_w * 0.9f : arrow_w * 0.55f;
-    const int max_n = std::max(1, static_cast<int>(aw / std::max(step, 1.0f)) + 1);
-    const float mid = ax0 + aw * 0.5f;
-    auto add_arrow = [&](float ax, bool flip_x) {
+    wds::chart_render::StaticArrowLayoutParams params;
+    params.span_left = ax0;
+    params.span_right = ax0 + aw;
+    params.arrow_w = arrow_w;
+    params.scratch_length = note.scratch_length;
+    for (const auto& inst : wds::chart_render::layout_static_scratch_arrows(params)) {
       wds::renderer::Quad q = wds::interaction::rect_to_quad(
-          {ax, y - arrow_h * 0.5f, arrow_w, arrow_h}, fb_w, fb_h, screen);
-      if (flip_x) {
+          {inst.x0, y - arrow_h * 0.5f, inst.x1 - inst.x0, arrow_h}, fb_w, fb_h, screen);
+      if (inst.flip_x) {
         std::swap(q.lb, q.rb);
         std::swap(q.lt, q.rt);
       }
-      batch.add_sprite(skin.scratch_arrow, q, arrow_z, alpha);
-    };
-    if (sl <= 0) {
-      int drawn = 0;
-      for (int i = 0; i < max_n; ++i) {
-        const float ax = ax0 + static_cast<float>(i) * step;
-        if (ax + arrow_w > ax0 + aw + 0.5f) break;
-        if (sl == 0 && ax + arrow_w > mid + 0.5f) break;
-        add_arrow(ax, false);
-        ++drawn;
-      }
-      // 1-lane bidirectional: midline cull would skip everything — keep one left arrow.
-      if (drawn == 0) add_arrow(ax0, false);
-    }
-    if (sl >= 0) {
-      int drawn = 0;
-      for (int i = 0; i < max_n; ++i) {
-        const float ax = ax0 + aw - arrow_w - static_cast<float>(i) * step;
-        if (ax < ax0 - 0.5f) break;
-        if (sl == 0 && ax < mid - 0.5f) break;
-        add_arrow(ax, true);
-        ++drawn;
-      }
-      if (drawn == 0) add_arrow(ax0 + aw - arrow_w, true);
+      batch.add_sprite(skin.scratch_arrow, q, arrow_z, alpha * inst.alpha);
     }
   };
 
-  const auto draw_flat = [&](const NoteSprites& spr, float y, float note_z, bool with_arrow,
-                             int32_t draw_lane, int32_t draw_width) {
-    if (!spr.middle) return;
+  const bool draw_bottom = pass == NoteVisualPass::FlatBottom;
+  const bool draw_top = pass == NoteVisualPass::FlatTop;
+  const bool draw_arrow = pass == NoteVisualPass::Arrow;
+  if (!draw_bottom && !draw_top && !draw_arrow) return;
+
+  const auto draw_flat = [&](const NoteSprites& spr, float y, int32_t draw_lane,
+                             int32_t draw_width, bool with_arrow_art) {
     const float draw_inset = viewport.note_inset_px(draw_width);
     const float draw_x = viewport.x_at(draw_lane) + draw_inset;
     const float draw_w = std::max(4.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
     const auto head = wds::interaction::rect_to_quad({draw_x, y - note_h * 0.5f, draw_w, note_h},
                                                      fb_w, fb_h, screen);
-    if (spr.left || spr.right) {
-      wds::renderer::add_note_strips(batch, spr.left, spr.middle, spr.right, head, border_percent,
-                                     std::max(1, draw_width), note_z, alpha);
-    } else {
-      batch.add_sprite(spr.middle, head, note_z, alpha);
+    if (draw_bottom) {
+      if (!spr.bottom) return;
+      wds::renderer::add_sliced_note(batch, spr.bottom, head, skin.note_slice_border_l,
+                                     skin.note_slice_border_r, z, alpha);
+      return;
     }
-    if (with_arrow) draw_flick_arrows(y, draw_x, draw_w);
+    if (draw_top) {
+      if (!spr.top) return;
+      wds::renderer::add_sliced_note(batch, spr.top, head, skin.note_slice_border_l,
+                                     skin.note_slice_border_r, z, alpha);
+      return;
+    }
+    if (draw_arrow && with_arrow_art) {
+      draw_flick_arrows(y, draw_x, draw_w);
+    }
   };
 
   NoteSprites head = sprites;
   NoteSprites tail = sprites;
   const bool scratch_hold = hold_body && wds::chart_editor::is_scratch_hold_body(note.note_type);
   if (hold_body) {
-    // Hold body never draws a start head — paired head notes own that art; missing head
-    // means an empty start (authoring-correct). Caps pass only draws the tail / flick end.
-    if (scratch_hold) {
-      tail = {skin.note_purple_left, skin.note_purple_middle, skin.note_purple_right,
-              sprites.connection, {}, true};
-    } else {
-      tail = {skin.note_blue_left, skin.note_blue_middle, skin.note_blue_right, sprites.connection,
-              {}, false};
-    }
+    // Hold body never draws a start head — paired head notes own that art.
+    apply_hold_tail_sprites(tail, skin, scratch_hold);
+    tail.connection = sprites.connection;
+    tail.connection_r = sprites.connection_r;
+    tail.connection_g = sprites.connection_g;
+    tail.connection_b = sprites.connection_b;
   }
 
   if (hold_body) {
     if (note.end_tick > note.start_tick) {
-      draw_flat(tail, y1, z, tail.is_scratch_family, end_lane, end_width);
+      draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   } else {
-    draw_flat(head, y0, z, head.is_scratch_family, note.lane, note.width);
+    draw_flat(head, y0, note.lane, note.width, head.is_scratch_family);
     if (note.end_tick > note.start_tick) {
-      draw_flat(tail, y1, z, tail.is_scratch_family, end_lane, end_width);
+      draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   }
+}
+
+std::vector<size_t> make_edit_draw_order(
+    const std::vector<wds::chart_editor::NotationNote>& notes,
+    const wds::chart_editor::MusicTiming& timing) {
+  std::vector<size_t> order;
+  // Match preview: primary key is milliseconds (not tick) so BPM changes keep
+  // the same overlap order as the stage view.
+  wds::chart_render::build_draw_order_indices(
+      notes.size(), order,
+      [&](size_t i) {
+        return wds::chart_editor::tick_to_milliseconds(notes[i].start_tick, timing);
+      },
+      [&](size_t i) { return static_cast<int32_t>(notes[i].note_type); });
+  return order;
 }
 
 }  // namespace
@@ -245,34 +264,37 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
   }
 
   // Split lines: continuous along Y. Soft horizontal AA via soft_split_line (no MSAA).
-  // Fade in/out: 1px slices + smoothstep opacity — keep ms-level sampling (U1 skipped
-  // coarsening here; split count is small).
-  constexpr float kFadeSlicePx = 1.0f;
-  constexpr float kSplitLineW = 7.0f;
+  // Fade in/out: coarse knots + vertical GPU alpha (not 1px slices).
+  constexpr int kFadeKnots = 8;
+  // Logical px (Retina ×2 at flush). Soft plate fills the rect — keep ≤2 so it reads thin.
+  constexpr float kSplitLineW = 2.0f;
   const auto draw_split_edges = [&](const wds::chart_editor::NotationNote& split_note, float y_a,
-                                    float y_b, float opacity, int32_t /*anim_phase*/) {
+                                    float y_b, float opacity_a, float opacity_b,
+                                    int32_t /*anim_phase*/) {
     const float top = std::min(y_a, y_b);
     const float bottom = std::max(y_a, y_b);
     if (bottom < b.y || top > b.bottom()) return;
     const float clip_top = std::max(top, b.y);
     const float clip_bot = std::min(bottom, b.bottom());
     const float h = std::max(0.0f, clip_bot - clip_top);
-    if (h <= 0.0f || opacity <= 0.001f) return;
+    if (h <= 0.0f) return;
+    const float a_top = (top == y_a) ? opacity_a : opacity_b;
+    const float a_bot = (bottom == y_a) ? opacity_a : opacity_b;
+    if (a_top <= 0.001f && a_bot <= 0.001f) return;
     const int32_t color_id = split_note.scratch_length;
     const int32_t split_count = wds::chart_editor::get_split_count(split_note.gimmick_type);
     std::vector<int32_t> mids;
     split_boundaries_12(split_count, mids);
     const auto draw_v = [&](int32_t edge_lane, int32_t slot) {
-      // Pixel-snap center so soft edges don't shimmer while scrolling.
       const float x = std::floor(viewport.x_at(edge_lane) + 0.5f);
       const wds::interaction::Rect line{x - kSplitLineW * 0.5f, clip_top, kSplitLineW, h};
       auto c = split_slot_color(color_id, slot, skin);
-      // Soft strip maps a smoothstep alpha across width — covers thin-line AA without MSAA.
       if (skin != nullptr && skin->soft_split_line) {
-        painter.sprite(line, skin->soft_split_line, {c.r, c.g, c.b, opacity}, 0.91f);
+        painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.91f, a_bot,
+                             a_top);
         return;
       }
-      c.a *= opacity;
+      c.a *= 0.5f * (a_top + a_bot);
       painter.fill_rect(line, c, 0.0f, 0.91f);
     };
     draw_v(0, 0);
@@ -315,17 +337,17 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       const float y_a = viewport.y_at_ms(ms0);
       const float y_b = viewport.y_at_ms(ms1);
       if (std::abs(y_a - y_b) < 0.5f) {
-        draw_split_edges(note, y_a, y_b, fade_opacity((ms0 + ms1) * 0.5f), phase);
+        const float o = fade_opacity((ms0 + ms1) * 0.5f);
+        draw_split_edges(note, y_a, y_b, o, o, phase);
         return;
       }
-      // Higher ms → smaller screen Y; walk from larger Y toward smaller Y.
-      float y = std::max(y_a, y_b);
-      const float y_stop = std::min(y_a, y_b);
-      while (y > y_stop + 0.25f) {
-        const float y_next = std::max(y_stop, y - kFadeSlicePx);
-        const float y_mid = (y + y_next) * 0.5f;
-        draw_split_edges(note, y, y_next, fade_opacity(viewport.ms_at_y(y_mid)), phase);
-        y = y_next;
+      for (int i = 0; i < kFadeKnots; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(kFadeKnots);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(kFadeKnots);
+        const float msa = ms0 + (ms1 - ms0) * t0;
+        const float msb = ms0 + (ms1 - ms0) * t1;
+        draw_split_edges(note, viewport.y_at_ms(msa), viewport.y_at_ms(msb), fade_opacity(msa),
+                         fade_opacity(msb), phase);
       }
     };
 
@@ -334,7 +356,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       const float ms0 = std::max(static_cast<float>(start_ms), view_ms_lo);
       const float ms1 = std::min(static_cast<float>(end_ms), view_ms_hi);
       if (ms1 > ms0) {
-        draw_split_edges(note, viewport.y_at_ms(ms0), viewport.y_at_ms(ms1), 1.0f, /*steady*/ 1);
+        draw_split_edges(note, viewport.y_at_ms(ms0), viewport.y_at_ms(ms1), 1.0f, 1.0f,
+                         /*steady*/ 1);
       }
     }
     paint_fade_range(end_ms, fade_end_ms, /*disappear*/ 2);
@@ -524,33 +547,30 @@ void ChartEditRenderer::append_skinned_notes(
     return end >= tick_lo && note.start_tick <= tick_hi;
   };
 
-  auto draw_ribbons = [&] {
-    for (const auto& note : notes) {
-      if (!in_window(note)) continue;
-      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
-      draw_skinned_note(batch, skin, viewport, note, alpha, layer_z(depth_.hold_body, note.start_tick),
-                        depth_.flick_arrow, fb_w, fb_h, screen, NoteDrawPass::HoldRibbons);
-    }
-  };
-  auto draw_caps = [&] {
-    for (const auto& note : notes) {
-      if (!in_window(note)) continue;
-      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
-      const bool tick = note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound;
-      const float base = tick ? depth_.mid_star : depth_.note;
-      draw_skinned_note(batch, skin, viewport, note, alpha, layer_z(base, note.start_tick),
-                        layer_z(depth_.flick_arrow, note.start_tick), fb_w, fb_h, screen,
-                        NoteDrawPass::NoteCaps);
-    }
-  };
+  // Draw order keyed by ms (parity with preview); z bias stays tick-scaled.
+  const std::vector<size_t> order = make_edit_draw_order(notes, viewport.timing());
 
-  // depthWrite is off → draw order is stacking. Sort passes by configured depth.
-  if (depth_.hold_body <= depth_.note) {
-    draw_ribbons();
-    draw_caps();
-  } else {
-    draw_caps();
-    draw_ribbons();
+  // Edit is a flat 2D view: skip FlatBottom (preview keeps the pseudo-3D sandwich).
+  // See docs/edit-preview-render-parity.md.
+  const struct {
+    NoteVisualPass pass;
+    float base_z;
+  } passes[] = {
+      {NoteVisualPass::HoldBody, depth_.hold_body},
+      {NoteVisualPass::FlatTop, depth_.note},
+      {NoteVisualPass::MidStar, depth_.mid_star},
+      {NoteVisualPass::Arrow, depth_.flick_arrow},
+  };
+  for (const auto& layer : passes) {
+    for (size_t idx : order) {
+      const auto& note = notes[idx];
+      if (!in_window(note)) continue;
+      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
+      const float z = layer_z(layer.base_z, static_cast<float>(note.start_tick));
+      draw_skinned_note(batch, skin, viewport, note, alpha, z,
+                        layer_z(depth_.flick_arrow, static_cast<float>(note.start_tick)), fb_w,
+                        fb_h, screen, layer.pass);
+    }
   }
 }
 
@@ -565,25 +585,20 @@ void ChartEditRenderer::append_skinned_ghosts(
   auto draw_ghost = [&](const EditGhost& g) {
     if (!g.visible) return;
     const auto& n = g.note;
-    auto ribbons = [&] {
+    const struct {
+      NoteVisualPass pass;
+      float base_z;
+    } passes[] = {
+        {NoteVisualPass::HoldBody, depth_.ghost_hold_body},
+        {NoteVisualPass::FlatTop, depth_.ghost_note},
+        {NoteVisualPass::MidStar, depth_.ghost_mid_star},
+        {NoteVisualPass::Arrow, depth_.ghost_flick_arrow},
+    };
+    for (const auto& layer : passes) {
       draw_skinned_note(batch, skin, viewport, n, g.alpha,
-                        layer_z(depth_.ghost_hold_body, n.start_tick),
-                        layer_z(depth_.ghost_flick_arrow, n.start_tick), fb_w, fb_h, screen,
-                        NoteDrawPass::HoldRibbons);
-    };
-    auto caps = [&] {
-      const bool tick = n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound;
-      const float base = tick ? depth_.ghost_mid_star : depth_.ghost_note;
-      draw_skinned_note(batch, skin, viewport, n, g.alpha, layer_z(base, n.start_tick),
-                        layer_z(depth_.ghost_flick_arrow, n.start_tick), fb_w, fb_h, screen,
-                        NoteDrawPass::NoteCaps);
-    };
-    if (depth_.ghost_hold_body <= depth_.ghost_note) {
-      ribbons();
-      caps();
-    } else {
-      caps();
-      ribbons();
+                        layer_z(layer.base_z, static_cast<float>(n.start_tick)),
+                        layer_z(depth_.ghost_flick_arrow, static_cast<float>(n.start_tick)), fb_w,
+                        fb_h, screen, layer.pass);
     }
   };
   if (ghost) draw_ghost(*ghost);

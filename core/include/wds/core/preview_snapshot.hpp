@@ -93,13 +93,13 @@ struct PreviewSplitLaneInstance {
   int64_t end_ms = 0;
   int32_t effective_lane_count = 0;
 
-  // Sirius drawAppearLine / drawDisappearLine / drawSplitLine parameters.
-  float split_line_alpha = 1.0f;     // disappear fade
-  float split_percent_start = 0.0f;  // appear grows from p→1; steady/disappear use 0→1
+  // Official SplitEffect: fadeIn = scale.y grow (percent_start→0); fadeOut = alpha only.
+  float split_line_alpha = 1.0f;     // disappear fade (SpriteRenderer.a)
+  float split_percent_start = 0.0f;  // appear: 1-scale → 0; steady/disappear: 0
   float split_percent_end = 1.0f;
   // STAGE_COVER opacity: inverse of split presence (1 before appear, 0 while steady, …).
   float stage_cover_alpha = 1.0f;
-  // 0=appear (Transform1), 1=steady (base), 2=disappear (Transform2) — preview extra index.
+  // 0=appear, 1=steady, 2=disappear (texture always base soft line in Light preview).
   int32_t split_anim_phase = 1;
 
   void apply_identity(int32_t source_id, int32_t count, SplitLaneType type, int32_t value,

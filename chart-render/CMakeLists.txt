@@ -6,6 +6,7 @@ add_library(wds_chart_render STATIC
   src/skin_catalog.cpp
   src/split_line_skins.cpp
   src/note_strips.cpp
+  src/note_visual_policy.cpp
 )
 add_library(wds::chart_render ALIAS wds_chart_render)
 
@@ -27,3 +28,7 @@ if(MSVC)
 else()
   target_compile_options(wds_chart_render PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_executable(wds_note_visual_policy_tests tests/note_visual_policy_tests.cpp)
+target_link_libraries(wds_note_visual_policy_tests PRIVATE wds::chart_render)
+add_test(NAME wds_note_visual_policy_tests COMMAND wds_note_visual_policy_tests)

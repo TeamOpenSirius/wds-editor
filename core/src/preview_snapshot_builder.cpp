@@ -65,13 +65,10 @@ bool PreviewSnapshotBuilder::is_concurrent_line_visible(const ConcurrentLineNote
 
 void PreviewSnapshotBuilder::apply_gimmick_position(PreviewNoteInstance& instance,
                                                     const NotationNote& note) const {
-  // ScratchHoldEnd always uses scratchLength span (Sirius); JumpScratch gimmick too.
-  if (is_scratch_hold_body(note.note_type)) {
-    const auto range = get_scratch_end_lane_range(note);
-    instance.apply_jump_scratch(true, range.first, range.second);
-  } else if (is_jump_scratch(note.gimmick_type)) {
-    const auto range = get_jump_scratch_lane_range(note);
-    instance.apply_jump_scratch(true, range.first, range.second);
+  // Same resolve_end_lane_span as edit draw (ScratchHold / JumpScratch / body).
+  if (is_scratch_hold_body(note.note_type) || is_jump_scratch(note.gimmick_type)) {
+    const auto [lane, width] = resolve_end_lane_span(note);
+    instance.apply_jump_scratch(true, lane, lane + width - 1);
   } else {
     instance.apply_jump_scratch(false, 0, 0);
   }
@@ -112,6 +109,17 @@ void PreviewSnapshotBuilder::ensure_note_lookup(const std::vector<NotationNote>&
   }
   cached_lookup_revision_ = revision;
   cached_notes_ = &notes;
+}
+
+void PreviewSnapshotBuilder::ensure_combo_hits(const std::vector<NotationNote>& notes,
+                                               const MusicTiming& timing,
+                                               uint64_t revision) const {
+  if (cached_combo_revision_ == revision && cached_combo_notes_ == &notes) {
+    return;
+  }
+  collect_preview_combo_hits(notes, timing, cached_combo_hits_);
+  cached_combo_revision_ = revision;
+  cached_combo_notes_ = &notes;
 }
 
 const NotationNote* PreviewSnapshotBuilder::lookup_note(int32_t note_id) const {
@@ -476,7 +484,8 @@ void PreviewSnapshotBuilder::build_into(
   rebuild_notes(out, preview_time_ms, timing, index, out.active_lane_count,
                 concurrent_lines.size());
 
-  const PreviewComboState combo = compute_preview_combo(notes, timing, preview_time_ms);
+  ensure_combo_hits(notes, timing, revision);
+  const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   out.combo_count = combo.combo;
   out.last_judge_ms = combo.last_judge_ms;
 }
@@ -500,7 +509,8 @@ void PreviewSnapshotBuilder::update_incremental(
   update_concurrent_lines_incremental(inout, concurrent_lines, preview_time_ms);
   update_notes_incremental(inout, preview_time_ms, timing, index, inout.active_lane_count);
 
-  const PreviewComboState combo = compute_preview_combo(notes, timing, preview_time_ms);
+  ensure_combo_hits(notes, timing, revision);
+  const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   inout.combo_count = combo.combo;
   inout.last_judge_ms = combo.last_judge_ms;
 }

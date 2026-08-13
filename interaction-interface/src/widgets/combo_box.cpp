@@ -3,6 +3,7 @@
 #include "wds/interaction/caret.hpp"
 #include "wds/interaction/popup_menu.hpp"
 #include "wds/interaction/theme.hpp"
+#include "wds/interaction/widget_root.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -56,6 +57,9 @@ ComboBox::ComboBox() = default;
 void ComboBox::set_items(std::vector<std::string> items) { items_ = std::move(items); }
 
 void ComboBox::set_text(std::string text) {
+  if (text_ == text && committed_text_ == text) {
+    return;
+  }
   text_ = std::move(text);
   committed_text_ = text_;
 }
@@ -106,6 +110,10 @@ void ComboBox::paint(UiPainter& painter) const { paint_at(painter, 0.9f); }
 
 void ComboBox::paint_at(UiPainter& painter, float z) const {
   if (!visible_) {
+    return;
+  }
+  // While open, paint_popup_layer owns the host chrome so text is not alpha-stacked.
+  if (open_) {
     return;
   }
   constexpr float kZMax = 0.999f;
@@ -160,6 +168,13 @@ Widget* ComboBox::hit_test_popup(Vec2 point) {
   return geom.rect.contains(point) ? this : nullptr;
 }
 
+Widget* ComboBox::hit_test_popup_host(Vec2 point) {
+  if (!visible_ || !enabled_) {
+    return nullptr;
+  }
+  return absolute_bounds().contains(point) ? this : nullptr;
+}
+
 Widget* ComboBox::hit_test(Vec2 point) {
   if (!visible_ || !enabled_) {
     return nullptr;
@@ -170,6 +185,18 @@ Widget* ComboBox::hit_test(Vec2 point) {
   return absolute_bounds().contains(point) ? this : nullptr;
 }
 
+void ComboBox::close_own_popup() {
+  if (!open_) {
+    return;
+  }
+  open_ = false;
+  menu_scroll_ = 0.0f;
+  hover_index_ = -1;
+  if (WidgetRoot* root = find_root()) {
+    root->note_popup_closed(this);
+  }
+}
+
 bool ComboBox::dismiss_popups(Vec2 point) {
   bool closed = false;
   const Rect abs = absolute_bounds();
@@ -178,9 +205,7 @@ bool ComboBox::dismiss_popups(Vec2 point) {
           ? popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_))
           : popup_menu::Geometry{};
   if (open_ && !abs.contains(point) && !geom.rect.contains(point)) {
-    open_ = false;
-    menu_scroll_ = 0.0f;
-    hover_index_ = -1;
+    close_own_popup();
     closed = true;
   }
   return Widget::dismiss_popups(point) || closed;
@@ -199,9 +224,7 @@ void ComboBox::on_pointer_down(const PointerDownEvent& event) {
       if (index >= 0) {
         accept_text(items_[static_cast<std::size_t>(index)]);
       }
-      open_ = false;
-      menu_scroll_ = 0.0f;
-      hover_index_ = -1;
+      close_own_popup();
       return;
     }
   }
@@ -211,18 +234,21 @@ void ComboBox::on_pointer_down(const PointerDownEvent& event) {
   }
 
   if (dropdown_only_ || event.position.x > abs.right() - chevron_slot_w()) {
-    open_ = !open_;
     if (open_) {
+      close_own_popup();
+    } else {
+      open_ = true;
       menu_scroll_ = 0.0f;
       hover_index_ = -1;
-    } else {
-      hover_index_ = -1;
+      if (WidgetRoot* root = find_root()) {
+        root->note_popup_opened(this);
+      } else {
+        close_sibling_popups();
+      }
     }
     set_visual_state(WidgetState::Focused);
   } else {
-    open_ = false;
-    menu_scroll_ = 0.0f;
-    hover_index_ = -1;
+    close_own_popup();
     set_visual_state(WidgetState::Focused);
   }
   reset_caret_blink();
@@ -244,16 +270,12 @@ void ComboBox::on_key_down(const KeyDownEvent& event) {
   }
   if (event.key == KeyCode::Escape) {
     text_ = committed_text_;
-    open_ = false;
-    menu_scroll_ = 0.0f;
-    hover_index_ = -1;
+    close_own_popup();
     set_visual_state(WidgetState::Normal);
     return;
   }
   if (event.key == KeyCode::Enter) {
-    open_ = false;
-    menu_scroll_ = 0.0f;
-    hover_index_ = -1;
+    close_own_popup();
     // Blur (and commit/revert) is handled by WidgetRoot when Focused is cleared.
     set_visual_state(WidgetState::Normal);
     return;
@@ -271,9 +293,7 @@ void ComboBox::on_focus() { reset_caret_blink(); }
 
 void ComboBox::on_blur() {
   commit_or_revert();
-  open_ = false;
-  menu_scroll_ = 0.0f;
-  hover_index_ = -1;
+  close_own_popup();
 }
 
 void ComboBox::on_text_input(const TextInputEvent& event) {

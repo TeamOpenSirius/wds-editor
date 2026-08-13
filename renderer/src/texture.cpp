@@ -1,5 +1,7 @@
 #include "wds/renderer/texture.hpp"
 
+#include <wds/common/utf8_path.hpp>
+
 #include <png.h>
 
 #define NANOSVG_IMPLEMENTATION
@@ -11,8 +13,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -20,14 +20,9 @@ namespace wds::renderer {
 namespace {
 
 // Read whole file into a mutable buffer (nsvgParse overwrites its input).
-// Prefer this over nsvgParseFromFile so Windows Unicode paths work via ifstream.
+// Prefer this over nsvgParseFromFile so Windows Unicode/UTF-8 install paths work.
 bool read_file_bytes(const std::string& path, std::vector<char>& out) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    return false;
-  }
-  out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-  if (out.empty()) {
+  if (!wds::common::read_file_bytes(path, out) || out.empty()) {
     return false;
   }
   out.push_back('\0');
@@ -55,7 +50,7 @@ bool svg_raster_looks_like_icon(const unsigned char* pixels, int width, int heig
 
 bool load_png_rgba8(const std::string& path, std::vector<unsigned char>& out, int& width,
                     int& height) {
-  FILE* fp = std::fopen(path.c_str(), "rb");
+  FILE* fp = wds::common::fopen_utf8(path, "rb");
   if (fp == nullptr) {
     return false;
   }
@@ -338,7 +333,9 @@ bool TextureCache::bake_atlas() {
   int atlas_w = 512;
   int atlas_h = 512;
   bool packed = false;
-  for (int attempt = 0; attempt < 6; ++attempt) {
+  // Soft-expanded split lines (8×256 × ~1k) need up to 4096×4096; keep headroom for
+  // 8192×4096 before giving up (MoltenVK / desktop limits are typically ≥8192).
+  for (int attempt = 0; attempt < 10; ++attempt) {
     auto try_rects = rects;
     if (shelf_pack(try_rects, atlas_w, atlas_h, kPadding)) {
       rects = std::move(try_rects);
@@ -352,6 +349,9 @@ bool TextureCache::bake_atlas() {
     }
   }
   if (!packed) {
+    std::fprintf(stderr,
+                 "TextureCache::bake_atlas: shelf pack failed after growing to %dx%d (%zu sprites)\n",
+                 atlas_w, atlas_h, rects.size());
     return false;
   }
 
@@ -421,6 +421,23 @@ bool TextureCache::bake_atlas() {
   return true;
 }
 
+TextureInfo TextureCache::load_standalone_png(const std::string& path) {
+  if (renderer_ == nullptr || !renderer_->ready() || path.empty()) {
+    return {};
+  }
+  const auto it = cache_.find(path);
+  if (it != cache_.end()) {
+    return it->second;
+  }
+  TextureInfo info = create_texture_from_png(*renderer_, path);
+  if (!info) {
+    return {};
+  }
+  standalone_ids_.push_back(info.id);
+  cache_.emplace(path, info);
+  return info;
+}
+
 TextureInfo TextureCache::get(const std::string& path) const {
   const auto it = cache_.find(path);
   if (it == cache_.end()) {
@@ -430,10 +447,18 @@ TextureInfo TextureCache::get(const std::string& path) const {
 }
 
 void TextureCache::clear() {
-  if (renderer_ != nullptr && atlas_id_ != kInvalidTextureId) {
-    renderer_->destroy_texture(atlas_id_);
+  if (renderer_ != nullptr) {
+    if (atlas_id_ != kInvalidTextureId) {
+      renderer_->destroy_texture(atlas_id_);
+    }
+    for (TextureId id : standalone_ids_) {
+      if (id != kInvalidTextureId && id != atlas_id_) {
+        renderer_->destroy_texture(id);
+      }
+    }
   }
   atlas_id_ = kInvalidTextureId;
+  standalone_ids_.clear();
   pending_.clear();
   cache_.clear();
   baked_ = false;

@@ -39,6 +39,7 @@ void StageGeometry::resize(int framebuffer_width, int framebuffer_height) {
   screen_.w = screen_.aspect_ratio * 2.0f;
   screen_.h = 2.0f;
   rebuild_stage();
+  rebuild_panel();
 }
 
 void StageGeometry::set_content_rect(int x, int y, int width, int height) {
@@ -53,6 +54,40 @@ void StageGeometry::set_content_rect(int x, int y, int width, int height) {
 void StageGeometry::clear_content_rect() {
   has_content_rect_ = false;
   rebuild_stage();
+}
+
+void StageGeometry::set_panel_rect(int x, int y, int width, int height) {
+  panel_x_ = x;
+  panel_y_ = y;
+  panel_w_ = width;
+  panel_h_ = height;
+  has_panel_rect_ = width > 0 && height > 0;
+  rebuild_panel();
+}
+
+void StageGeometry::clear_panel_rect() {
+  has_panel_rect_ = false;
+  rebuild_panel();
+}
+
+void StageGeometry::rebuild_panel() {
+  if (!has_panel_rect_) {
+    panel_ = content_;
+    return;
+  }
+  const float x0 = std::clamp(static_cast<float>(panel_x_), 0.0f, fb_w_);
+  const float y0 = std::clamp(static_cast<float>(panel_y_), 0.0f, fb_h_);
+  const float x1 =
+      std::clamp(static_cast<float>(panel_x_ + panel_w_), 0.0f, fb_w_);
+  const float y1 =
+      std::clamp(static_cast<float>(panel_y_ + panel_h_), 0.0f, fb_h_);
+  panel_.l = screen_.l + x0 / fb_w_ * screen_.w;
+  panel_.r = screen_.l + x1 / fb_w_ * screen_.w;
+  panel_.t = screen_.t - y0 / fb_h_ * screen_.h;
+  panel_.b = screen_.t - y1 / fb_h_ * screen_.h;
+  panel_.w = std::max(0.0f, panel_.r - panel_.l);
+  panel_.h = std::max(0.0f, panel_.t - panel_.b);
+  panel_.aspect_ratio = panel_.w / std::max(panel_.h, 1e-6f);
 }
 
 void StageGeometry::rebuild_stage() {
@@ -121,6 +156,8 @@ void StageGeometry::rebuild_stage() {
   judgeline_.lt_x = lerp(stage_.l, top_l, y1) - move;
   judgeline_.rb_x = lerp(stage_.r, top_r, y0) + move;
   judgeline_.rt_x = lerp(stage_.r, top_r, y1) + move;
+
+  rebuild_panel();
 }
 
 float StageGeometry::taper_x(float bottom_x) const noexcept {
@@ -197,6 +234,21 @@ float StageGeometry::judgeline_half_percent() const noexcept {
   return (jh * 0.5f) / std::max(denom, 1e-6f);
 }
 
+float StageGeometry::hidden_line_center_percent() const noexcept {
+  const float overscan = std::max(0.0f, config_.stage_top_overscan);
+  const float tip_visible_p = overscan / (1.0f + overscan);
+  return tip_visible_p + config_.hidden_line_y_offset;
+}
+
+float StageGeometry::hidden_line_half_percent() const noexcept {
+  const float unit = content_unit();
+  const float p = hidden_line_center_percent();
+  const float w_ref = std::max(lane_width(0, 1.0f), 1e-6f);
+  const float w = lane_width(0, p);
+  const float multiplier = w / std::max(w_ref, 1e-6f);
+  return config_.hidden_line_height * unit * 0.5f / std::max(stage_.h, 1e-6f) * multiplier;
+}
+
 Quad StageGeometry::stage_quad() const {
   return {
       {stage_.l, stage_.b},
@@ -206,20 +258,32 @@ Quad StageGeometry::stage_quad() const {
   };
 }
 
-Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) const {
+float StageGeometry::note_half_height_percent(int32_t lane, float percent) const {
   const float unit = content_unit();
   const float w_ref = std::max(lane_width(lane, 1.0f), 1e-6f);
   const float w = lane_width(lane, percent);
   const float stage_h = std::max(stage_.h, 1e-6f);
   // note_height is authored in full-screen half-height units (=1); scale with content.
-  const float multiplier = config_.note_height * unit * 0.5f / stage_h * w / w_ref;
+  return config_.note_height * unit * 0.5f / stage_h * w / w_ref;
+}
 
-  const Vec2 c1 = lane_position(lane, percent - multiplier);
-  const Vec2 c2 = lane_position(lane, percent + multiplier);
-  const Vec2 c3 = lane_position(end_lane, percent - multiplier);
-  const Vec2 c4 = lane_position(end_lane, percent + multiplier);
-  const float w1 = lane_width(lane, percent - multiplier);
-  const float w2 = lane_width(lane, percent + multiplier);
+Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) const {
+  return note_quad(lane, end_lane, percent, 0.0f);
+}
+
+Quad StageGeometry::note_span_quad(int32_t lane, int32_t end_lane, float percent_near,
+                                   float percent_far, float unity_local_z) const {
+  const float unit = content_unit();
+  const float w_ref = std::max(lane_width(lane, 1.0f), 1e-6f);
+  const float p_far = percent_far;
+  const float p_near = percent_near;
+
+  const Vec2 c1 = lane_position(lane, p_far);
+  const Vec2 c2 = lane_position(lane, p_near);
+  const Vec2 c3 = lane_position(end_lane, p_far);
+  const Vec2 c4 = lane_position(end_lane, p_near);
+  const float w1 = lane_width(lane, p_far);
+  const float w2 = lane_width(lane, p_near);
   const float move1 = config_.note_move_length * unit * w1 / w_ref;
   const float move2 = config_.note_move_length * unit * w2 / w_ref;
 
@@ -228,7 +292,29 @@ Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) con
   q.lt = c1 - Vec2{w1 * 0.5f - move1, 0.0f};
   q.rb = c4 + Vec2{w2 * 0.5f - move2, 0.0f};
   q.rt = c3 + Vec2{w1 * 0.5f - move1, 0.0f};
+
+  const float h = config_.note_unity_local_z_bottom - unity_local_z;
+  if (std::abs(h) < 1e-6f) {
+    return q;
+  }
+  const float eye_y = std::max(config_.note_cam_height, h + 1e-3f);
+  const float factor = (eye_y - h) / eye_y;
+  const float vanish_y = stage_.t;
+  auto project_height = [&](Vec2 s) {
+    return Vec2{s.x, vanish_y + (s.y - vanish_y) * factor};
+  };
+  q.lb = project_height(q.lb);
+  q.lt = project_height(q.lt);
+  q.rb = project_height(q.rb);
+  q.rt = project_height(q.rt);
   return q;
+}
+
+Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent,
+                              float unity_local_z) const {
+  const float multiplier = note_half_height_percent(lane, percent);
+  return note_span_quad(lane, end_lane, percent + multiplier, percent - multiplier,
+                        unity_local_z);
 }
 
 Quad StageGeometry::hold_body_quad(int32_t lane, int32_t end_lane, float percent_near,
@@ -326,6 +412,47 @@ Quad StageGeometry::effect_quad(int32_t lane, int32_t end_lane) const {
   return q;
 }
 
+Quad StageGeometry::bomb_frame_quad(int32_t lane, int32_t end_lane, float width_scale,
+                                   float height_screen) const {
+  // Rebuild from lane edges so taper matches the track (do not non-uniform-scale a
+  // trapezoid about its center — that changes edge slopes).
+  const float cy = (judgeline_.lb_y + judgeline_.lt_y) * 0.5f;
+  const float half_h = std::max(height_screen * 0.5f, 1e-4f);
+  const float y0 = cy - half_h;  // near (bottom)
+  const float y1 = cy + half_h;  // far (top)
+  const float denom = std::max(stage_.h * (1.0f - config_.judgeline_margin_bottom), 1e-4f);
+  auto p_at_y = [&](float y) { return (stage_.t - y) / denom; };
+  const float p0 = p_at_y(y0);
+  const float p1 = p_at_y(y1);
+  const float ws = std::max(width_scale, 1e-4f);
+
+  const Vec2 c_l0 = lane_position(lane, p0);
+  const Vec2 c_l1 = lane_position(lane, p1);
+  const Vec2 c_r0 = lane_position(end_lane, p0);
+  const Vec2 c_r1 = lane_position(end_lane, p1);
+  const float w_l0 = lane_width(lane, p0);
+  const float w_l1 = lane_width(lane, p1);
+  const float w_r0 = lane_width(end_lane, p0);
+  const float w_r1 = lane_width(end_lane, p1);
+
+  // Scale the full note span about each edge's midpoint (preserves lane taper).
+  const float left0 = c_l0.x - w_l0 * 0.5f;
+  const float right0 = c_r0.x + w_r0 * 0.5f;
+  const float left1 = c_l1.x - w_l1 * 0.5f;
+  const float right1 = c_r1.x + w_r1 * 0.5f;
+  const float mid0 = (left0 + right0) * 0.5f;
+  const float mid1 = (left1 + right1) * 0.5f;
+  const float half0 = (right0 - left0) * 0.5f * ws;
+  const float half1 = (right1 - left1) * 0.5f * ws;
+
+  Quad q;
+  q.lb = {mid0 - half0, y0};
+  q.rb = {mid0 + half0, y0};
+  q.lt = {mid1 - half1, y1};
+  q.rt = {mid1 + half1, y1};
+  return q;
+}
+
 Quad StageGeometry::split_line_quad(int32_t boundary_after_lane, float percent_start,
                                     float percent_end, float length_override) const {
   // boundary_after_lane: draw on the left edge of lane (boundary_after_lane + 1),
@@ -344,8 +471,9 @@ Quad StageGeometry::split_line_quad(int32_t boundary_after_lane, float percent_s
 
   // Sirius drawLine: move = splitLineLength/2; offset *= localWidth / widthAt(1).
   // Far (top) is narrower — do not invert with screen-space thickness boosts.
+  // splitLineLength is authored in full-screen half-height units (= content_unit).
   const float length =
-      length_override > 0.0f ? length_override : config_.split_line_length;
+      (length_override > 0.0f ? length_override : config_.split_line_length) * content_unit();
   const float move = length * 0.5f;
   const float move1 = move * w1 / w_ref;
   const float move2 = move * w2 / w_ref;
@@ -356,6 +484,41 @@ Quad StageGeometry::split_line_quad(int32_t boundary_after_lane, float percent_s
   q.rb = left2 + Vec2{move2, 0.0f};
   q.rt = left1 + Vec2{move1, 0.0f};
   return q;
+}
+
+Quad StageGeometry::lane_span_quad(float percent_start, float percent_end) const {
+  const int32_t lane = 0;
+  const int32_t end_lane = std::max(0, config_.lane_count - 1);
+  const float unit = content_unit();
+  const float w_ref = std::max(lane_width(lane, 1.0f), 1e-6f);
+  const float p0 = std::min(percent_start, percent_end);
+  const float p1 = std::max(percent_start, percent_end);
+
+  const Vec2 c1 = lane_position(lane, p0);
+  const Vec2 c2 = lane_position(lane, p1);
+  const Vec2 c3 = lane_position(end_lane, p0);
+  const Vec2 c4 = lane_position(end_lane, p1);
+  const float w1 = lane_width(lane, p0);
+  const float w2 = lane_width(lane, p1);
+  const float move1 = config_.note_move_length * unit * w1 / w_ref;
+  const float move2 = config_.note_move_length * unit * w2 / w_ref;
+
+  Quad q;
+  q.lb = c2 - Vec2{w2 * 0.5f - move2, 0.0f};
+  q.lt = c1 - Vec2{w1 * 0.5f - move1, 0.0f};
+  q.rb = c4 + Vec2{w2 * 0.5f - move2, 0.0f};
+  q.rt = c3 + Vec2{w1 * 0.5f - move1, 0.0f};
+  return q;
+}
+
+Quad StageGeometry::hidden_line_quad(float percent) const {
+  const float unit = content_unit();
+  const float w_ref = std::max(lane_width(0, 1.0f), 1e-6f);
+  const float w = lane_width(0, percent);
+  const float multiplier = w / w_ref;
+  const float half_h =
+      config_.hidden_line_height * unit * 0.5f / std::max(stage_.h, 1e-6f) * multiplier;
+  return lane_span_quad(percent - half_h, percent + half_h);
 }
 
 Quad StageGeometry::split_end_line_quad(float percent_start, float percent_end,
@@ -373,7 +536,7 @@ Quad StageGeometry::split_end_line_quad(float percent_start, float percent_end,
   const Vec2 right2 = c2 + Vec2{w2 * 0.5f, 0.0f};
 
   const float length =
-      length_override > 0.0f ? length_override : config_.split_line_length;
+      (length_override > 0.0f ? length_override : config_.split_line_length) * content_unit();
   const float move = length * 0.5f;
   const float move1 = move * w1 / w_ref;
   const float move2 = move * w2 / w_ref;

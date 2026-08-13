@@ -151,8 +151,14 @@ DWORD CALLBACK silence_keep_alive_proc(HSTREAM /*handle*/, void* buffer, DWORD l
 }
 
 struct SfxSyncPayload {
-  AudioEngine* engine = nullptr;
+  // Self-keep so SYNCPROC can elevate before touching other fields. Cleared only
+  // after BASS can no longer invoke the callback (post BASS_Free / after fire).
+  std::shared_ptr<SfxSyncPayload> self;
+  // Cleared at shutdown start so late callbacks never touch a destroyed AudioEngine.
+  std::atomic<AudioEngine*> engine{nullptr};
   HitSfxClip clip = HitSfxClip::Count;
+  // Set before RemoveSync / erase so late or racing SYNCPROCs become no-ops.
+  std::atomic<bool> cancelled{false};
 };
 
 }  // namespace
@@ -176,17 +182,49 @@ struct AudioEngine::Impl {
 
   std::mutex sfx_mu;
   std::vector<PendingSync> pending_syncs;
+  // Keep cancelled payloads alive across RemoveSync / in-flight SYNCPROCs.
+  // Rapid Space play/pause can arm hundreds of POS syncs; retire instead of free.
+  std::vector<std::shared_ptr<SfxSyncPayload>> retired_payloads;
 };
 
 namespace {
 
+void release_payload_self(const std::shared_ptr<SfxSyncPayload>& p) {
+  if (p != nullptr) {
+    p->self.reset();
+  }
+}
+
+// Keep a small ring so a late SYNCPROC can still look up cancelled payloads.
+// Do not free in the same stack as RemoveSync — drop self on the oldest extras.
+constexpr size_t kMaxRetiredSfxPayloads = 32;
+
+void prune_retired_payloads(std::vector<std::shared_ptr<SfxSyncPayload>>& retired) {
+  while (retired.size() > kMaxRetiredSfxPayloads) {
+    release_payload_self(retired.front());
+    retired.erase(retired.begin());
+  }
+}
+
 void CALLBACK sfx_pos_sync_proc(HSYNC handle, DWORD /*channel*/, DWORD /*data*/, void* user) {
-  auto* payload = static_cast<SfxSyncPayload*>(user);
-  if (payload == nullptr || payload->engine == nullptr) {
+  auto* raw = static_cast<SfxSyncPayload*>(user);
+  if (raw == nullptr) {
     return;
   }
-  // Lifetime is owned by pending_syncs' shared_ptr (or the scheduling stack).
-  payload->engine->handle_sfx_sync(static_cast<unsigned long long>(handle), payload, payload->clip);
+  // Elevate before any other field read. `self` keeps the payload alive for this call.
+  const std::shared_ptr<SfxSyncPayload> keep = raw->self;
+  if (keep == nullptr || keep.get() != raw) {
+    return;
+  }
+  if (keep->cancelled.load(std::memory_order_acquire)) {
+    return;
+  }
+  AudioEngine* engine = keep->engine.load(std::memory_order_acquire);
+  if (engine == nullptr) {
+    return;
+  }
+  const HitSfxClip clip = keep->clip;
+  engine->handle_sfx_sync(static_cast<unsigned long long>(handle), keep.get(), clip);
 }
 
 }  // namespace
@@ -318,8 +356,27 @@ void AudioEngine::shutdown() {
   // can finish without UAF; drop the member only after BASS_Free.
   const std::shared_ptr<Impl> impl = impl_;
   shutting_down_.store(true, std::memory_order_release);
+  // Fail new schedule/play immediately; do not wait until the end of teardown.
+  sfx_ready_.store(false, std::memory_order_release);
   clear_scheduled_sfx();
   stop_all_sfx();
+
+  // Detach engine* on every retained payload before destroying AudioEngine state.
+  {
+    std::lock_guard<std::mutex> lock(impl->sfx_mu);
+    for (auto& s : impl->pending_syncs) {
+      if (s.payload != nullptr) {
+        s.payload->engine.store(nullptr, std::memory_order_release);
+        s.payload->cancelled.store(true, std::memory_order_release);
+      }
+    }
+    for (auto& p : impl->retired_payloads) {
+      if (p != nullptr) {
+        p->engine.store(nullptr, std::memory_order_release);
+        p->cancelled.store(true, std::memory_order_release);
+      }
+    }
+  }
 
   if (impl->keep_alive != 0) {
     BASS_ChannelStop(impl->keep_alive);
@@ -336,11 +393,6 @@ void AudioEngine::shutdown() {
   music_playing_.store(false, std::memory_order_release);
   music_base_freq_ = 0.0f;
 
-  {
-    std::lock_guard<std::mutex> lock(impl->sfx_mu);
-    impl->pending_syncs.clear();
-  }
-
   for (auto& sample : impl->samples) {
     if (sample != 0) {
       BASS_SampleFree(sample);
@@ -353,6 +405,19 @@ void AudioEngine::shutdown() {
   if (impl->device_ok) {
     BASS_Free();
     impl->device_ok = false;
+  }
+
+  // Payloads may only be destroyed after BASS_Free (no more SYNCPROC).
+  {
+    std::lock_guard<std::mutex> lock(impl->sfx_mu);
+    for (auto& s : impl->pending_syncs) {
+      release_payload_self(s.payload);
+    }
+    for (auto& p : impl->retired_payloads) {
+      release_payload_self(p);
+    }
+    impl->pending_syncs.clear();
+    impl->retired_payloads.clear();
   }
 
   impl_.reset();
@@ -523,29 +588,40 @@ std::uint64_t AudioEngine::align_music_bytes(std::uint64_t bytes) const noexcept
 }
 
 bool AudioEngine::play_sfx_internal(HitSfxClip clip) {
-  if (shutting_down_.load(std::memory_order_acquire) || !sfx_ready_ || impl_ == nullptr ||
+  if (shutting_down_.load(std::memory_order_acquire) ||
+      !sfx_ready_.load(std::memory_order_acquire) || impl_ == nullptr ||
       clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
     return false;
   }
+  const std::shared_ptr<Impl> impl = impl_;
+  if (!impl || impl.get() != impl_.get()) {
+    return false;
+  }
   const size_t idx = static_cast<size_t>(clip);
-  if (!impl_->sample_ok[idx]) {
+  if (!impl->sample_ok[idx] || impl->samples[idx] == 0) {
     return false;
   }
   // BGM already keeps the device hot. Starting keep-alive alongside music causes
   // dual-stream resampling that can intermittently drop or smear hit attacks.
-  if (music_playing_) {
+  if (music_playing_.load(std::memory_order_acquire)) {
     pause_keep_alive();
   } else {
     ensure_keep_alive();
   }
+  if (shutting_down_.load(std::memory_order_acquire) || !impl_ || impl.get() != impl_.get()) {
+    return false;
+  }
   // Prefer a fresh voice so rapid same-clip hits (e.g. 32nds) do not restart an
   // older channel. If the sample's max polyphony is exhausted, fall back to a
   // recycled OVER_POS voice so the new hit is heard instead of silently dropped.
-  HCHANNEL ch = BASS_SampleGetChannel(impl_->samples[idx], BASS_SAMCHAN_NEW);
+  HCHANNEL ch = BASS_SampleGetChannel(impl->samples[idx], BASS_SAMCHAN_NEW);
   if (ch == 0) {
-    ch = BASS_SampleGetChannel(impl_->samples[idx], 0);
+    ch = BASS_SampleGetChannel(impl->samples[idx], 0);
   }
   if (ch == 0) {
+    return false;
+  }
+  if (shutting_down_.load(std::memory_order_acquire)) {
     return false;
   }
   BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
@@ -581,25 +657,45 @@ void AudioEngine::handle_sfx_sync(unsigned long long sync_handle, void* payload,
     return;
   }
   // Elevate shared ownership for the whole callback so shutdown cannot free Impl
-  // under our feet (RemoveSync does not wait for in-flight SYNCPROCs).
+  // under our feet (RemoveSync may not wait for in-flight SYNCPROCs on all paths).
   const std::shared_ptr<Impl> impl = impl_;
-  if (!impl) {
+  if (!impl || impl.get() != impl_.get()) {
     return;
   }
+  std::shared_ptr<SfxSyncPayload> keep;
   {
     std::lock_guard<std::mutex> lock(impl->sfx_mu);
     auto& syncs = impl->pending_syncs;
     for (size_t i = 0; i < syncs.size(); ++i) {
       if (syncs[i].payload.get() == payload ||
           static_cast<unsigned long long>(syncs[i].handle) == sync_handle) {
+        keep = syncs[i].payload;
         syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
         break;
       }
     }
+    if (keep == nullptr) {
+      // Already moved to retired by clear_scheduled_sfx — still honor cancelled.
+      for (const auto& p : impl->retired_payloads) {
+        if (p.get() == payload) {
+          keep = p;
+          break;
+        }
+      }
+    }
   }
-  if (clip != HitSfxClip::Count && !shutting_down_.load(std::memory_order_acquire)) {
+  if (keep == nullptr || keep->cancelled.load(std::memory_order_acquire)) {
+    if (keep != nullptr) {
+      release_payload_self(keep);
+    }
+    return;
+  }
+  if (clip != HitSfxClip::Count && !shutting_down_.load(std::memory_order_acquire) &&
+      impl_ && impl.get() == impl_.get()) {
     play_sfx_internal(clip);
   }
+  // Drop self-cycle so the payload can free when `keep` leaves this stack.
+  release_payload_self(keep);
 }
 
 void AudioEngine::warmup_sfx() {
@@ -623,7 +719,9 @@ void AudioEngine::warmup_sfx() {
 }
 
 bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at) {
-  if (!sfx_ready_ || impl_ == nullptr || clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
+  if (shutting_down_.load(std::memory_order_acquire) ||
+      !sfx_ready_.load(std::memory_order_acquire) || impl_ == nullptr ||
+      clip == HitSfxClip::Hold || clip == HitSfxClip::Count) {
     return false;
   }
   if (!impl_->sample_ok[static_cast<size_t>(clip)]) {
@@ -645,44 +743,87 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
   // Track payload before SetSync so an immediate callback can resolve the entry (M5).
   // Do not hold sfx_mu across SetSync (callback takes the same lock).
   auto payload = std::make_shared<SfxSyncPayload>();
-  payload->engine = this;
+  payload->self = payload;
+  payload->engine.store(this, std::memory_order_release);
   payload->clip = clip;
   {
     std::lock_guard<std::mutex> lock(impl_->sfx_mu);
     impl_->pending_syncs.push_back(Impl::PendingSync{0, payload});
   }
+  if (shutting_down_.load(std::memory_order_acquire)) {
+    payload->cancelled.store(true, std::memory_order_release);
+    payload->engine.store(nullptr, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+      auto& syncs = impl_->pending_syncs;
+      for (size_t i = 0; i < syncs.size(); ++i) {
+        if (syncs[i].payload == payload) {
+          syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+          break;
+        }
+      }
+    }
+    release_payload_self(payload);
+    return false;
+  }
   const HSYNC sync = BASS_ChannelSetSync(impl_->music, BASS_SYNC_POS | BASS_SYNC_ONETIME, target,
                                          sfx_pos_sync_proc, payload.get());
   if (sync == 0) {
-    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
-    auto& syncs = impl_->pending_syncs;
-    for (size_t i = 0; i < syncs.size(); ++i) {
-      if (syncs[i].payload == payload) {
-        syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
-        break;
+    payload->cancelled.store(true, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+      auto& syncs = impl_->pending_syncs;
+      for (size_t i = 0; i < syncs.size(); ++i) {
+        if (syncs[i].payload == payload) {
+          syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+          break;
+        }
       }
     }
+    release_payload_self(payload);
     WDS_LOG("AudioEngine: ChannelSetSync failed code=%d\n", BASS_ErrorGetCode());
     return play_sfx_internal(clip);
   }
+
+  // Write handle back, or RemoveSync immediately if clear_scheduled_sfx already
+  // retired this payload during the handle==0 window.
+  bool retired_during_set = false;
   {
     std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    bool found_pending = false;
     for (auto& s : impl_->pending_syncs) {
       if (s.payload == payload) {
         s.handle = sync;
+        found_pending = true;
         break;
       }
     }
+    if (!found_pending) {
+      retired_during_set = true;
+    }
+  }
+  if (retired_during_set || payload->cancelled.load(std::memory_order_acquire)) {
+    payload->cancelled.store(true, std::memory_order_release);
+    BASS_ChannelRemoveSync(impl_->music, sync);
+    {
+      std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+      impl_->retired_payloads.push_back(payload);
+      prune_retired_payloads(impl_->retired_payloads);
+    }
+    return false;
   }
 
   // TOCTOU: playhead may pass `target` between the check and SetSync.
   if (target <= BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE)) {
+    payload->cancelled.store(true, std::memory_order_release);
     BASS_ChannelRemoveSync(impl_->music, sync);
     {
       std::lock_guard<std::mutex> lock(impl_->sfx_mu);
       auto& syncs = impl_->pending_syncs;
       for (size_t i = 0; i < syncs.size(); ++i) {
         if (syncs[i].payload == payload || syncs[i].handle == sync) {
+          impl_->retired_payloads.push_back(std::move(syncs[i].payload));
+          prune_retired_payloads(impl_->retired_payloads);
           syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
           break;
         }
@@ -698,21 +839,37 @@ void AudioEngine::clear_scheduled_sfx() {
   if (impl_ == nullptr) {
     return;
   }
-  std::vector<HSYNC> to_remove;
+  // MUST keep payloads alive until after RemoveSync. Previously pending_syncs was
+  // cleared first; rapid Space pause then raced BASS SYNCPROC against freed
+  // SfxSyncPayload (Windows ACCESS_VIOLATION with music + nearby notes).
+  std::vector<Impl::PendingSync> doomed;
   {
     std::lock_guard<std::mutex> lock(impl_->sfx_mu);
-    to_remove.reserve(impl_->pending_syncs.size());
-    for (const auto& s : impl_->pending_syncs) {
-      if (s.handle != 0) {
-        to_remove.push_back(s.handle);
-      }
+    doomed.swap(impl_->pending_syncs);
+  }
+  for (auto& s : doomed) {
+    if (s.payload != nullptr) {
+      s.payload->cancelled.store(true, std::memory_order_release);
     }
-    impl_->pending_syncs.clear();
   }
   if (impl_->music != 0) {
-    for (HSYNC sync : to_remove) {
-      BASS_ChannelRemoveSync(impl_->music, sync);
+    for (const auto& s : doomed) {
+      if (s.handle != 0) {
+        BASS_ChannelRemoveSync(impl_->music, s.handle);
+      }
     }
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl_->sfx_mu);
+    impl_->retired_payloads.reserve(impl_->retired_payloads.size() + doomed.size());
+    for (auto& s : doomed) {
+      if (s.payload != nullptr) {
+        impl_->retired_payloads.push_back(std::move(s.payload));
+      }
+    }
+    prune_retired_payloads(impl_->retired_payloads);
+    // Oldest extras drop self after RemoveSync; a late SYNCPROC may still
+    // elevate via keep. Hard-cleared only after BASS_Free in shutdown().
   }
 }
 

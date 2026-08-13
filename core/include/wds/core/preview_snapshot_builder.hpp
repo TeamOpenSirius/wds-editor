@@ -76,6 +76,9 @@ class PreviewSnapshotBuilder {
 
   void ensure_note_lookup(const std::vector<NotationNote>& notes, uint64_t revision) const;
 
+  void ensure_combo_hits(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                         uint64_t revision) const;
+
   const NotationNote* lookup_note(int32_t note_id) const;
 
   void fill_note_instance(PreviewNoteInstance& instance, const NotationNote& note,
@@ -126,6 +129,9 @@ class PreviewSnapshotBuilder {
   mutable std::unordered_map<int32_t, size_t> note_id_to_chart_index_;
   mutable uint64_t cached_lookup_revision_ = ~uint64_t{0};
   mutable const std::vector<NotationNote>* cached_notes_ = nullptr;
+  mutable uint64_t cached_combo_revision_ = ~uint64_t{0};
+  mutable const std::vector<NotationNote>* cached_combo_notes_ = nullptr;
+  mutable std::vector<int64_t> cached_combo_hits_;
 };
 
 }  // namespace wds::chart_editor

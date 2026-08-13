@@ -1,6 +1,8 @@
 #include "wds/renderer/vulkan_renderer.hpp"
 #include "wds/renderer/log.hpp"
 
+#include <wds/common/utf8_path.hpp>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -8,22 +10,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#elif defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
 
 namespace wds::renderer {
 namespace {
@@ -35,29 +27,6 @@ constexpr uint32_t kPreferredSwapchainImages = 3;
 // Fixed per-frame host-visible VB capacity (grows only if a frame exceeds this).
 constexpr size_t kRingVertexCapacityBytes = 2 * 1024 * 1024;
 
-std::filesystem::path executable_dir() {
-  namespace fs = std::filesystem;
-  std::error_code ec;
-#if defined(__APPLE__)
-  uint32_t size = 0;
-  _NSGetExecutablePath(nullptr, &size);
-  std::string buf(size > 0 ? size : 1, '\0');
-  if (_NSGetExecutablePath(buf.data(), &size) == 0) {
-    buf.resize(std::strlen(buf.c_str()));
-    return fs::weakly_canonical(fs::path(buf), ec).parent_path();
-  }
-#elif defined(_WIN32)
-  wchar_t buf[MAX_PATH];
-  const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-  if (n > 0 && n < MAX_PATH) {
-    return fs::weakly_canonical(fs::path(buf), ec).parent_path();
-  }
-#elif defined(__linux__)
-  return fs::weakly_canonical(fs::path("/proc/self/exe"), ec).parent_path();
-#endif
-  return fs::current_path(ec);
-}
-
 struct GpuTexture {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -66,6 +35,8 @@ struct GpuTexture {
   int width = 0;
   int height = 0;
   bool alive = false;
+  bool nearest = false;  // UI font atlases — avoid LINEAR soft-fringe emboldening.
+  uint64_t retire_after_seq = 0;  // 0 = not retiring; GPU-free when frame_seq >= this
 };
 
 uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props) {
@@ -80,9 +51,10 @@ uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPro
 }
 
 bool looks_like_shader_dir(const std::filesystem::path& dir) {
-  std::error_code ec;
-  return std::filesystem::is_regular_file(dir / "textured_quad.vert.spv", ec) && !ec &&
-         std::filesystem::is_regular_file(dir / "textured_quad.frag.spv", ec) && !ec;
+  using wds::common::is_regular_file_utf8;
+  using wds::common::path_to_utf8;
+  return is_regular_file_utf8(path_to_utf8(dir / "textured_quad.vert.spv")) &&
+         is_regular_file_utf8(path_to_utf8(dir / "textured_quad.frag.spv"));
 }
 
 // Resolve SPIR-V directory for both in-tree builds and packaged installs.
@@ -93,12 +65,18 @@ std::string resolve_shader_dir() {
   std::error_code ec;
 
   if (const char* env = std::getenv("WDS_SHADER_DIR"); env != nullptr && env[0] != '\0') {
-    if (looks_like_shader_dir(env)) {
-      return env;
+#if defined(_WIN32)
+    // Process env vars from the CRT are ACP; convert via narrow path → wide → UTF-8.
+    const fs::path env_path(env);
+#else
+    const fs::path env_path = wds::common::path_from_utf8(env);
+#endif
+    if (looks_like_shader_dir(env_path)) {
+      return wds::common::path_to_utf8(env_path);
     }
   }
 
-  const fs::path exe_dir = executable_dir();
+  const fs::path exe_dir = wds::common::executable_dir(nullptr);
   const fs::path candidates[] = {
       fs::current_path(ec) / "shaders",
       exe_dir / "shaders",
@@ -110,13 +88,16 @@ std::string resolve_shader_dir() {
   };
   for (const auto& cand : candidates) {
     if (looks_like_shader_dir(cand)) {
-      return cand.lexically_normal().string();
+      return wds::common::path_to_utf8(cand.lexically_normal());
     }
   }
 
 #ifdef WDS_SHADER_DIR
-  if (looks_like_shader_dir(WDS_SHADER_DIR)) {
-    return WDS_SHADER_DIR;
+  {
+    const fs::path baked = wds::common::path_from_utf8(WDS_SHADER_DIR);
+    if (looks_like_shader_dir(baked)) {
+      return wds::common::path_to_utf8(baked);
+    }
   }
 #endif
 
@@ -124,14 +105,10 @@ std::string resolve_shader_dir() {
 }
 
 std::vector<char> read_file(const std::string& path) {
-  std::ifstream file(path, std::ios::ate | std::ios::binary);
-  if (!file) {
+  std::vector<char> buffer;
+  if (!wds::common::read_file_bytes(path, buffer)) {
     return {};
   }
-  const size_t size = static_cast<size_t>(file.tellg());
-  std::vector<char> buffer(size);
-  file.seekg(0);
-  file.read(buffer.data(), static_cast<std::streamsize>(size));
   return buffer;
 }
 
@@ -221,6 +198,7 @@ struct VulkanRenderer::Impl {
   VkPipeline pipeline = VK_NULL_HANDLE;
   VkPipeline pipeline_additive = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
+  VkSampler sampler_nearest = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 
   VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -230,6 +208,7 @@ struct VulkanRenderer::Impl {
   std::array<VkFence, kMaxFramesInFlight> in_flight{};
   VkFence upload_fence = VK_NULL_HANDLE;
   uint32_t frame_index = 0;
+  uint64_t frame_seq = 0;
   int preferred_msaa = 1;
 
   struct FrameVertexBuffer {
@@ -262,6 +241,8 @@ struct VulkanRenderer::Impl {
   bool ensure_frame_vertex_capacity(uint32_t frame, size_t bytes);
   void destroy_frame_vertices();
   TextureId alloc_texture_slot();
+  void destroy_gpu_texture_resources(GpuTexture& tex);
+  void reap_retired_textures(uint64_t now_seq);
   bool upload_texture_pixels(GpuTexture& tex, const unsigned char* pixels, int width, int height);
   bool create_texture_descriptor(GpuTexture& tex);
   VkCommandBuffer begin_one_time();
@@ -900,7 +881,8 @@ void VulkanRenderer::Impl::destroy_frame_vertices() {
 
 TextureId VulkanRenderer::Impl::alloc_texture_slot() {
   for (size_t i = 1; i < textures.size(); ++i) {
-    if (!textures[i].alive) {
+    // Pending-destroy slots still hold live GPU images — do not reuse.
+    if (!textures[i].alive && textures[i].image == VK_NULL_HANDLE) {
       textures[i] = GpuTexture{};
       textures[i].alive = true;
       return static_cast<TextureId>(i);
@@ -909,6 +891,28 @@ TextureId VulkanRenderer::Impl::alloc_texture_slot() {
   textures.push_back(GpuTexture{});
   textures.back().alive = true;
   return static_cast<TextureId>(textures.size() - 1);
+}
+
+void VulkanRenderer::Impl::destroy_gpu_texture_resources(GpuTexture& tex) {
+  if (tex.descriptor) {
+    vkFreeDescriptorSets(device, descriptor_pool, 1, &tex.descriptor);
+  }
+  if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
+  if (tex.image) vkDestroyImage(device, tex.image, nullptr);
+  if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
+  tex = GpuTexture{};
+}
+
+void VulkanRenderer::Impl::reap_retired_textures(uint64_t now_seq) {
+  for (size_t i = 1; i < textures.size(); ++i) {
+    GpuTexture& tex = textures[i];
+    if (tex.alive || tex.image == VK_NULL_HANDLE) {
+      continue;
+    }
+    if (tex.retire_after_seq != 0 && now_seq >= tex.retire_after_seq) {
+      destroy_gpu_texture_resources(tex);
+    }
+  }
 }
 
 bool VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
@@ -920,7 +924,7 @@ bool VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
     return false;
   }
   VkDescriptorImageInfo image_info{};
-  image_info.sampler = sampler;
+  image_info.sampler = tex.nearest && sampler_nearest != VK_NULL_HANDLE ? sampler_nearest : sampler;
   image_info.imageView = tex.view;
   image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1562,6 +1566,13 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   if (vkCreateSampler(impl_->device, &sampler_info, nullptr, &impl_->sampler) != VK_SUCCESS) {
     return false;
   }
+  VkSamplerCreateInfo nearest_info = sampler_info;
+  nearest_info.magFilter = VK_FILTER_NEAREST;
+  nearest_info.minFilter = VK_FILTER_NEAREST;
+  if (vkCreateSampler(impl_->device, &nearest_info, nullptr, &impl_->sampler_nearest) !=
+      VK_SUCCESS) {
+    return false;
+  }
 
   VkDescriptorPoolSize pool_size{};
   pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1648,6 +1659,7 @@ void VulkanRenderer::destroy() {
     if (impl_->pipeline_layout) vkDestroyPipelineLayout(impl_->device, impl_->pipeline_layout, nullptr);
     if (impl_->render_pass) vkDestroyRenderPass(impl_->device, impl_->render_pass, nullptr);
     if (impl_->sampler) vkDestroySampler(impl_->device, impl_->sampler, nullptr);
+    if (impl_->sampler_nearest) vkDestroySampler(impl_->device, impl_->sampler_nearest, nullptr);
     if (impl_->descriptor_pool) vkDestroyDescriptorPool(impl_->device, impl_->descriptor_pool, nullptr);
     if (impl_->descriptor_layout)
       vkDestroyDescriptorSetLayout(impl_->device, impl_->descriptor_layout, nullptr);
@@ -1771,13 +1783,15 @@ bool VulkanRenderer::resize(int width, int height) {
   return true;
 }
 
-TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int width, int height) {
+TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int width, int height,
+                                                bool nearest) {
   TextureInfo info;
   if (!ready_ || pixels == nullptr || width <= 0 || height <= 0) {
     return info;
   }
   const TextureId id = impl_->alloc_texture_slot();
   GpuTexture& tex = impl_->textures[id];
+  tex.nearest = nearest;
   if (!impl_->upload_texture_pixels(tex, pixels, width, height)) {
     tex = GpuTexture{};
     return {};
@@ -1797,25 +1811,23 @@ void VulkanRenderer::destroy_texture(TextureId id) {
     return;
   }
   GpuTexture& tex = impl_->textures[id];
-  if (!tex.alive) {
+  if (!tex.alive && tex.image == VK_NULL_HANDLE) {
     return;
   }
-  // Ensure in-flight descriptor/image use is complete before free.
-  if (ready_ && impl_->device != VK_NULL_HANDLE) {
-    vkDeviceWaitIdle(impl_->device);
+  tex.alive = false;
+  if (!ready_ || impl_->device == VK_NULL_HANDLE) {
+    impl_->destroy_gpu_texture_resources(tex);
+    return;
   }
-  if (tex.descriptor) {
-    vkFreeDescriptorSets(impl_->device, impl_->descriptor_pool, 1, &tex.descriptor);
-  }
-  if (tex.view) vkDestroyImageView(impl_->device, tex.view, nullptr);
-  if (tex.image) vkDestroyImage(impl_->device, tex.image, nullptr);
-  if (tex.memory) vkFreeMemory(impl_->device, tex.memory, nullptr);
-  tex = GpuTexture{};
+  // Delay free until in-flight frames that sampled this image have completed.
+  // Do not vkDeviceWaitIdle on the UI thread (CJK atlas / DPI hitch).
+  tex.retire_after_seq = impl_->frame_seq + static_cast<uint64_t>(kMaxFramesInFlight);
 }
 
 bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r,
                                 float clear_g, float clear_b, const DrawBatch* additive,
-                                const DrawBatch* post_overlay, const DrawBatch* post_overlay2) {
+                                const DrawBatch* post_overlay, const DrawBatch* post_overlay2,
+                                const ScissorRect* additive_scissor) {
   if (!ready_ || impl_ == nullptr || impl_->swapchain == VK_NULL_HANDLE) {
     return false;
   }
@@ -1840,6 +1852,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   vkWaitForFences(impl_->device, 1, &impl_->in_flight[frame], VK_TRUE, UINT64_MAX);
   impl_->last_fence_wait_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - fence_t0).count();
+  ++impl_->frame_seq;
+  impl_->reap_retired_textures(impl_->frame_seq);
 
   uint32_t image_index = 0;
   const auto acquire_t0 = clock::now();
@@ -1997,7 +2011,22 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
 
   draw_buckets(impl_->pipeline, batch, bucket_first_vertex);
   if (additive && additive_verts > 0 && impl_->pipeline_additive) {
+    VkRect2D add_scissor = scissor;
+    if (additive_scissor != nullptr && additive_scissor->valid()) {
+      const int fb_w = static_cast<int>(impl_->swapchain_extent.width);
+      const int fb_h = static_cast<int>(impl_->swapchain_extent.height);
+      const int x0 = std::clamp(additive_scissor->x, 0, fb_w);
+      const int y0 = std::clamp(additive_scissor->y, 0, fb_h);
+      const int x1 = std::clamp(additive_scissor->x + additive_scissor->w, 0, fb_w);
+      const int y1 = std::clamp(additive_scissor->y + additive_scissor->h, 0, fb_h);
+      add_scissor.offset.x = static_cast<int32_t>(x0);
+      add_scissor.offset.y = static_cast<int32_t>(y0);
+      add_scissor.extent.width = static_cast<uint32_t>(std::max(0, x1 - x0));
+      add_scissor.extent.height = static_cast<uint32_t>(std::max(0, y1 - y0));
+    }
+    vkCmdSetScissor(cmd, 0, 1, &add_scissor);
     draw_buckets(impl_->pipeline_additive, *additive, additive_first_vertex);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
   // Modal / top overlays: separate pass so sticky bucket indices in `batch` cannot bury them.
   if (post_overlay && post_verts > 0) {

@@ -19,6 +19,7 @@
 #include <wds/interaction/widgets/icon_button.hpp>
 #include <wds/interaction/widgets/text_field.hpp>
 #include <wds/common/log.hpp>
+#include <wds/common/utf8_path.hpp>
 #include <wds/renderer/texture.hpp>
 
 #include <algorithm>
@@ -34,6 +35,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
+using wds::interaction::Color;
 using wds::interaction::FlickArrowMode;
 using wds::interaction::IconButton;
 using wds::interaction::NotePreviewStyle;
@@ -261,7 +263,7 @@ void EditorToolbar::load_action_icons(wds::renderer::VulkanRenderer& vulkan,
   }
 
   if (!icons_directory_.empty()) {
-    const fs::path dir(icons_directory_);
+    const fs::path dir = wds::common::path_from_utf8(icons_directory_);
     // Matches icons/*.svg (import-audio replaces the old music.png).
     const std::array<const char*, 8> names = {"open",     "save",         "import", "export",
                                               "settings", "import-audio", "undo",   "redo"};
@@ -269,11 +271,13 @@ void EditorToolbar::load_action_icons(wds::renderer::VulkanRenderer& vulkan,
       const fs::path svg = dir / (std::string(names[i]) + ".svg");
       const fs::path png = dir / (std::string(names[i]) + ".png");
       wds::renderer::TextureInfo tex{};
-      if (fs::is_regular_file(svg)) {
-        tex = wds::renderer::create_texture_from_svg(*vk, svg.string(), svg_px);
+      const std::string svg_utf8 = wds::common::path_to_utf8(svg);
+      const std::string png_utf8 = wds::common::path_to_utf8(png);
+      if (wds::common::is_regular_file_utf8(svg_utf8)) {
+        tex = wds::renderer::create_texture_from_svg(*vk, svg_utf8, svg_px);
       }
-      if (!tex && fs::is_regular_file(png)) {
-        tex = wds::renderer::create_texture_from_png(*vk, png.string());
+      if (!tex && wds::common::is_regular_file_utf8(png_utf8)) {
+        tex = wds::renderer::create_texture_from_png(*vk, png_utf8);
       }
       // Tiny textures (e.g. 1×1 white) become solid squares when stretched — skip.
       if (tex && (tex.width <= 2 || tex.height <= 2)) {
@@ -331,33 +335,34 @@ void EditorToolbar::apply_convert_skins() {
   if (skin_ == nullptr) return;
   struct Entry {
     NotePreviewStyle style;
-    wds::renderer::TextureInfo left, middle, right, connection, arrow;
+    wds::renderer::TextureInfo top;
+    wds::renderer::TextureInfo connection;
+    wds::renderer::TextureInfo arrow;
     FlickArrowMode flick;
+    Color connection_tint{1.0f, 1.0f, 1.0f, 1.0f};
   };
   const Entry entries[] = {
-      {NotePreviewStyle::Flat, skin_->note_red_left, skin_->note_red_middle, skin_->note_red_right,
-       {}, {}, FlickArrowMode::None},
-      {NotePreviewStyle::Flat, skin_->note_yellow_left, skin_->note_yellow_middle,
-       skin_->note_yellow_right, {}, {}, FlickArrowMode::None},
-      {NotePreviewStyle::Flat, skin_->note_blue_left, skin_->note_blue_middle,
-       skin_->note_blue_right, {}, {}, FlickArrowMode::None},
-      {NotePreviewStyle::HoldBody, {}, {}, {}, skin_->hold_connection_blue, {},
-       FlickArrowMode::None},
-      {NotePreviewStyle::Flat, skin_->note_purple_left, skin_->note_purple_middle,
-       skin_->note_purple_right, {}, skin_->scratch_arrow, FlickArrowMode::Left},
-      {NotePreviewStyle::Flat, skin_->note_purple_left, skin_->note_purple_middle,
-       skin_->note_purple_right, {}, skin_->scratch_arrow, FlickArrowMode::Both},
-      {NotePreviewStyle::Flat, skin_->note_purple_left, skin_->note_purple_middle,
-       skin_->note_purple_right, {}, skin_->scratch_arrow, FlickArrowMode::Right},
-      {NotePreviewStyle::ScratchHoldBody, {}, {}, {}, skin_->hold_connection_purple, {},
+      {NotePreviewStyle::Flat, skin_->note_red_top, {}, {}, FlickArrowMode::None},
+      {NotePreviewStyle::Flat, skin_->note_yellow_top, {}, {}, FlickArrowMode::None},
+      {NotePreviewStyle::Flat, skin_->note_blue_top, {}, {}, FlickArrowMode::None},
+      {NotePreviewStyle::HoldBody, {}, skin_->hold_connection_blue, {}, FlickArrowMode::None},
+      {NotePreviewStyle::Flat, skin_->note_purple_top, {}, skin_->scratch_arrow,
+       FlickArrowMode::Left},
+      {NotePreviewStyle::Flat, skin_->note_purple_top, {}, skin_->scratch_arrow,
+       FlickArrowMode::Both},
+      {NotePreviewStyle::Flat, skin_->note_purple_top, {}, skin_->scratch_arrow,
+       FlickArrowMode::Right},
+      {NotePreviewStyle::ScratchHoldBody,
+       {},
+       skin_->hold_connection_purple,
+       {},
        FlickArrowMode::None},
   };
   for (std::size_t i = 0; i < convert_buttons_.size(); ++i) {
     auto* button = static_cast<IconButton*>(convert_buttons_[i]);
     button->set_label({});
-    button->set_note_preview(entries[i].style, entries[i].left, entries[i].middle,
-                             entries[i].right, entries[i].connection, entries[i].arrow,
-                             entries[i].flick);
+    button->set_note_preview(entries[i].style, entries[i].top, entries[i].connection,
+                             entries[i].arrow, entries[i].flick, entries[i].connection_tint);
   }
 }
 

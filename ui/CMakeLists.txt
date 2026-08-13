@@ -67,6 +67,10 @@ target_link_libraries(wds_ui_logic_tests PRIVATE wds::core wds::interaction)
 target_include_directories(wds_ui_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
 
+add_executable(wds_note_draw_order_tests tests/note_draw_order_tests.cpp)
+target_link_libraries(wds_note_draw_order_tests PRIVATE wds::chart_render wds::core)
+add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
+
 if(MSVC)
   target_compile_options(wds_ui PRIVATE /W4)
 else()

@@ -34,6 +34,14 @@ Widget& Widget::add_child(std::unique_ptr<Widget> child) {
   return *children_.back();
 }
 
+WidgetRoot* Widget::find_root() noexcept {
+  Widget* p = this;
+  while (p->parent_ != nullptr) {
+    p = p->parent_;
+  }
+  return p->as_root();
+}
+
 Rect Widget::absolute_bounds() const {
   float x = bounds_.x;
   float y = bounds_.y;
@@ -81,6 +89,10 @@ void Widget::paint_popup_layers(UiPainter& painter) const {
   paint_popup_layer(painter);
 }
 
+bool Widget::blocks_interaction_behind(Vec2 point) const {
+  return is_interaction_modal() && visible_ && enabled_ && absolute_bounds().contains(point);
+}
+
 Widget* Widget::hit_test_popup(Vec2 point) {
   if (!visible_) {
     return nullptr;
@@ -88,6 +100,25 @@ Widget* Widget::hit_test_popup(Vec2 point) {
   for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
     if (Widget* hit = (*it)->hit_test_popup(point)) {
       return hit;
+    }
+    // Modal scrim / panel owns this point — do not hit menus on widgets behind it.
+    if ((*it)->blocks_interaction_behind(point)) {
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+Widget* Widget::hit_test_popup_host(Vec2 point) {
+  if (!visible_ || !enabled_) {
+    return nullptr;
+  }
+  for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
+    if (Widget* hit = (*it)->hit_test_popup_host(point)) {
+      return hit;
+    }
+    if ((*it)->blocks_interaction_behind(point)) {
+      return nullptr;
     }
   }
   return nullptr;
@@ -115,6 +146,31 @@ bool Widget::dismiss_popups(Vec2 point) {
     closed = child->dismiss_popups(point) || closed;
   }
   return closed;
+}
+
+void Widget::close_popups() {
+  close_own_popup();
+  for (auto& child : children_) {
+    child->close_popups();
+  }
+}
+
+void Widget::close_popups_except(Widget* keep) {
+  if (this == keep) {
+    return;
+  }
+  close_own_popup();
+  for (auto& child : children_) {
+    child->close_popups_except(keep);
+  }
+}
+
+void Widget::close_sibling_popups() {
+  Widget* root = this;
+  while (root->parent_ != nullptr) {
+    root = root->parent_;
+  }
+  root->close_popups_except(this);
 }
 
 float Widget::interaction_scale() const noexcept {

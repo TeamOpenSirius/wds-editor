@@ -4,3 +4,4 @@
 #include "wds/common/crash_handler.hpp"
 #include "wds/common/time.hpp"
 #include "wds/common/timeline.hpp"
+#include "wds/common/utf8_path.hpp"
