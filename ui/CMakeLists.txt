@@ -48,6 +48,9 @@ endif()
 if(TARGET wds_bass)
   target_link_libraries(wds_ui PRIVATE wds_bass)
 endif()
+if(TARGET wds_bassmix)
+  target_link_libraries(wds_ui PRIVATE wds_bassmix)
+endif()
 if(APPLE)
   target_link_libraries(wds_ui PRIVATE "-framework AppKit" "-framework UniformTypeIdentifiers")
 elseif(WIN32)
@@ -180,13 +183,17 @@ if(APPLE)
   add_custom_command(TARGET wds_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WDS_BASS_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/libbass.dylib"
-    COMMENT "Copy libbass.dylib next to wds_editor"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/libbassmix.dylib"
+    COMMENT "Copy libbass.dylib and libbassmix.dylib next to wds_editor"
   )
 elseif(WIN32)
   add_custom_command(TARGET wds_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WDS_BASS_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/bass.dll"
-    COMMENT "Copy bass.dll next to wds_editor"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/bassmix.dll"
+    COMMENT "Copy bass.dll and bassmix.dll next to wds_editor"
   )
 else()
   add_custom_command(TARGET wds_editor POST_BUILD

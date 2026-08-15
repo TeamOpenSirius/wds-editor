@@ -216,11 +216,13 @@ copy_bass_runtime() {
     macos-arm)
       mkdir -p "${stage}/lib"
       cp -a "${ROOT}/audio-player/third_party/bass/macos-arm/libbass.dylib" "${stage}/lib/"
+      cp -a "${ROOT}/audio-player/third_party/bass/macos-arm/libbassmix.dylib" "${stage}/lib/"
       ;;
     win-x86_64)
       # Windows package layout puts the exe at stage root (with MinGW / vulkan DLLs);
-      # bass.dll must sit next to the exe for the loader to find it.
+      # bass.dll / bassmix.dll must sit next to the exe for the loader to find them.
       cp -a "${ROOT}/audio-player/third_party/bass/win-x86_64/bass.dll" "${stage}/"
+      cp -a "${ROOT}/audio-player/third_party/bass/win-x86_64/bassmix.dll" "${stage}/"
       ;;
   esac
 }
@@ -238,7 +240,7 @@ This zip is a portable copy of the same payload.
 
 Bundled next to wds_editor.exe:
   skins\ effects\ fonts\ icons\ shaders\ wds.png
-  bass.dll, vulkan-1.dll, Uninstall.exe
+  bass.dll, bassmix.dll, vulkan-1.dll, Uninstall.exe
 MinGW libgcc/libstdc++/winpthread are statically linked into the exe when possible.
 
 1. Keep this folder layout intact, then double-click wds_editor.exe.
@@ -601,7 +603,7 @@ text = re.sub(
 
 text = text.replace('Win64="$(var.Win64)"', 'Win64="yes"')
 
-RUNTIME_DLLS = ("bass.dll", "vulkan-1.dll")
+RUNTIME_DLLS = ("bass.dll", "bassmix.dll", "vulkan-1.dll")
 EXE_NAME = "wds_editor.exe"
 
 
@@ -680,20 +682,20 @@ path.write_text(text, encoding="utf-8")
 
 # Hard fail if merge did not stick (packaging host must not ship a broken MSI).
 final = path.read_text(encoding="utf-8")
-if "bass.dll" not in final or "vulkan-1.dll" not in final:
+if "bass.dll" not in final or "bassmix.dll" not in final or "vulkan-1.dll" not in final:
     raise SystemExit("runtime DLLs missing from heat WXS after merge")
-if final.count("bass.dll") != 1 or final.count("vulkan-1.dll") != 1:
+if final.count("bass.dll") != 1 or final.count("bassmix.dll") != 1 or final.count("vulkan-1.dll") != 1:
     raise SystemExit("runtime DLL Source paths must appear exactly once after merge")
 exe_blocks = [
     m.group(0)
     for m in component_blocks(final)
     if file_source_basename(m.group(0)) == EXE_NAME
 ]
-if len(exe_blocks) != 1 or "bass.dll" not in exe_blocks[0] or "vulkan-1.dll" not in exe_blocks[0]:
-    raise SystemExit("bass.dll/vulkan-1.dll must live inside the wds_editor.exe component")
+if len(exe_blocks) != 1 or "bass.dll" not in exe_blocks[0] or "bassmix.dll" not in exe_blocks[0] or "vulkan-1.dll" not in exe_blocks[0]:
+    raise SystemExit("bass.dll/bassmix.dll/vulkan-1.dll must live inside the wds_editor.exe component")
 print(
     "MSI harvest: hoisted root files; Win64=yes; "
-    "merged bass.dll+vulkan-1.dll into wds_editor.exe component"
+    "merged bass.dll+bassmix.dll+vulkan-1.dll into wds_editor.exe component"
 )
 PY
 
@@ -795,6 +797,7 @@ PY
   local files_tbl=""
   files_tbl="$(msiinfo_export "$msi_path" File | tr -d '\r')" || die "msiinfo failed: File"
   grep -Fq 'bass.dll' <<<"${files_tbl}" || die "MSI File table missing bass.dll"
+  grep -Fq 'bassmix.dll' <<<"${files_tbl}" || die "MSI File table missing bassmix.dll"
   grep -Fq 'vulkan-1.dll' <<<"${files_tbl}" || die "MSI File table missing vulkan-1.dll"
   grep -Fq 'wds_editor.exe' <<<"${files_tbl}" || die "MSI File table missing wds_editor.exe"
   # InstallDirDlg must run after FindRelatedProducts / costing (not sequence 1).
@@ -888,11 +891,13 @@ fix_macos_rpaths() {
       fi
     done < <(otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}')
 
-    # Normalize @rpath/libbass.dylib → @loader_path/... so rpath alone is enough.
+    # Normalize @rpath/libbass*.dylib → @loader_path/... so rpath alone is enough.
     if [[ "$(dirname "$f")" == "$payload" ]]; then
       install_name_tool -change '@rpath/libbass.dylib' '@loader_path/lib/libbass.dylib' "$f" 2>/dev/null || true
+      install_name_tool -change '@rpath/libbassmix.dylib' '@loader_path/lib/libbassmix.dylib' "$f" 2>/dev/null || true
     else
       install_name_tool -change '@rpath/libbass.dylib' '@loader_path/libbass.dylib' "$f" 2>/dev/null || true
+      install_name_tool -change '@rpath/libbassmix.dylib' '@loader_path/libbassmix.dylib' "$f" 2>/dev/null || true
     fi
   done
 }
@@ -1382,7 +1387,7 @@ stage_win_debug() {
   cp -a "${vk_dll}" "${stage}/vulkan-1.dll"
 
   echo "Win Debug runtime staged at: ${stage}"
-  echo "Copy the whole ui/ folder to Windows (exe + bass.dll + vulkan-1.dll + skins/effects/shaders/fonts/icons)."
+    echo "Copy the whole ui/ folder to Windows (exe + bass.dll + bassmix.dll + vulkan-1.dll + skins/effects/shaders/fonts/icons)."
 }
 
 # --- main -------------------------------------------------------------------

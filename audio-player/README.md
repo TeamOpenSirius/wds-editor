@@ -22,9 +22,9 @@ audio-player/
 ├── src/
 ├── tests/
 └── third_party/bass/
-    ├── include/bass.h
-    ├── macos-arm/libbass.dylib
-    └── win-x86_64/bass.dll + bass.lib
+    ├── include/bass.h + bassmix.h
+    ├── macos-arm/libbass.dylib + libbassmix.dylib
+    └── win-x86_64/bass.dll + bassmix.dll (+ .lib)
 ```
 
 CMake：`wds_audio_player`（别名 `wds::audio_player`）。  
@@ -67,10 +67,10 @@ transport.start_pending_music();            // 武装 SFX 后再真正出声
 
 ## 依赖与平台
 
-| 目标 | BASS 路径 |
+| 目标 | BASS / BASSmix 路径 |
 |------|-----------|
-| `macos-arm` | `third_party/bass/macos-arm/libbass.dylib` |
-| `win-x86_64` | `third_party/bass/win-x86_64/bass.dll` |
+| `macos-arm` | `third_party/bass/macos-arm/libbass.dylib` + `libbassmix.dylib` |
+| `win-x86_64` | `third_party/bass/win-x86_64/bass.dll` + `bassmix.dll` |
 
 Linux **不是**产品目标（无 BASS linux 二进制）；在 Linux 主机上请交叉编译 Windows。
 
