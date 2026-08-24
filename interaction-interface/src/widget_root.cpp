@@ -133,24 +133,18 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
     Widget* host_hit = hit_test_popup_host(e.position);
     Widget* popup_hit = hit_test_popup(e.position);
 
-    // Prefer a dropdown/combo field under the cursor when another menu is covering it.
     // Do NOT mass-close siblings here — closing the current menu must not close others.
     // Mutual exclusion is enforced only when a menu opens (note_popup_opened).
-    if (host_hit != nullptr && popup_hit != nullptr && popup_hit != host_hit) {
-      popup_hit->close_own_popup();
+    for (auto& child : children_) {
+      child->dismiss_popups(e.position);
+    }
+    // Open menus win over sibling fields they cover. Preferring the host here
+    // closed the menu without selecting and opened the field underneath.
+    // Field press: prefer the host so editable combos receive chevron toggles.
+    if (host_hit != nullptr && (popup_hit == nullptr || popup_hit == host_hit)) {
       target = host_hit;
     } else {
-      for (auto& child : children_) {
-        child->dismiss_popups(e.position);
-      }
-      // Outside dismiss: fall through to whatever is under the cursor.
-      // Menu-item press: keep targeting the popup owner so Click does not hit-through.
-      // Field press: prefer the host so editable combos receive chevron toggles.
-      if (host_hit != nullptr && (popup_hit == nullptr || popup_hit == host_hit)) {
-        target = host_hit;
-      } else {
-        target = popup_hit != nullptr ? popup_hit : hit_test(e.position);
-      }
+      target = popup_hit != nullptr ? popup_hit : hit_test(e.position);
     }
 
     // Focus sticks until Enter blur or an explicit click elsewhere.
