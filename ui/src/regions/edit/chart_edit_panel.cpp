@@ -1537,8 +1537,9 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
   int32_t d_lane = lane - drag_start_lane_;
   const int lane_count = viewport_.grid().lane_count;
 
-  // Shrink the shared delta so every free-moving note stays in bounds (do not
-  // snap the whole selection back to the drag origin when the cursor overshoots).
+  // Shrink the shared delta so every free-moving note stays in bounds, including
+  // ScratchHold terminal JumpScratch overhang (do not snap the whole selection
+  // back to the drag origin when the cursor overshoots).
   for (const auto& [id, orig] : drag_originals_) {
     if (is_visible_mid_star(orig.note_type) || orig.note_type == NoteType::HoldEighth) {
       continue;
@@ -1549,12 +1550,13 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
       d_tick = -snapped0;
     }
     if (orig.width > 0 && lane_count > 0) {
-      const int32_t max_lane = lane_count - orig.width;
-      if (orig.lane + d_lane < 0) {
-        d_lane = -orig.lane;
+      const auto [occ_lane, occ_width] = wds::chart_editor::occupied_lane_span(orig);
+      const int32_t max_lane = lane_count - occ_width;
+      if (occ_lane + d_lane < 0) {
+        d_lane = -occ_lane;
       }
-      if (orig.lane + d_lane > max_lane) {
-        d_lane = max_lane - orig.lane;
+      if (occ_lane + d_lane > max_lane) {
+        d_lane = max_lane - occ_lane;
       }
     }
   }
