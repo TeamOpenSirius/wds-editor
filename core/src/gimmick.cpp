@@ -76,6 +76,17 @@ std::pair<int32_t, int32_t> resolve_end_lane_span(const NotationNote& note) noex
   return {lo, std::max(1, hi - lo + 1)};
 }
 
+std::pair<int32_t, int32_t> occupied_lane_span(const NotationNote& note) noexcept {
+  int32_t lo = note.lane;
+  int32_t hi = note.end_lane();
+  if (is_scratch_hold_body(note.note_type)) {
+    const auto range = get_scratch_end_lane_range(note);
+    lo = std::min({lo, range.first, range.second});
+    hi = std::max({hi, range.first, range.second});
+  }
+  return {lo, std::max(1, hi - lo + 1)};
+}
+
 void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t end_right) noexcept {
   // Tail must fully cover the body.
   // Sirius ScratchHoldEnd scratchLength cannot encode an end that extends BOTH

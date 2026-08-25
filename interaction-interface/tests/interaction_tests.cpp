@@ -485,7 +485,7 @@ int main() {
     combo_b->set_text("4");
     root.add_child(std::move(b));
 
-    // Chevron is the rightmost ~18px of the field.
+    // Chevron hit is the rightmost ≥32px (wider than the painted triangle).
     root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
     expect(combo_a->is_open(), "editable combo opens from chevron");
     expect(!combo_b->is_open(), "peer combo stays closed");
@@ -499,7 +499,71 @@ int main() {
     expect(!combo_a->is_open(), "first remains closed after peer close");
   }
 
-  // Same exclusive-open rule when the first menu covers the second field.
+  // Chevron hit extends inward past the painted triangle (avoid focusing as text).
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto box = std::make_unique<ComboBox>();
+    auto* combo = box.get();
+    combo->set_bounds({10, 10, 80, 28});
+    combo->set_dropdown_only(false);
+    combo->set_items({"10", "20", "30"});
+    combo->set_text("10");
+    root.add_child(std::move(box));
+
+    // Field right=90. Old 18px slot started at x=72; 70 used to miss into text input.
+    root.process_frame(0.016f, {PointerDownEvent{{70, 24}, PointerButton::Left, {}}});
+    expect(combo->is_open(), "click inward of triangle still opens the menu");
+    expect(root.focused_widget() == combo, "opening via chevron still focuses");
+
+    combo->close_own_popup();
+    root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+    expect(!combo->is_open(), "text-area click does not open the menu");
+    expect(root.focused_widget() == combo, "text-area click focuses for typing");
+  }
+
+  // Selecting a popup item commits and immediately blurs the combo.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto box = std::make_unique<ComboBox>();
+    auto* combo = box.get();
+    combo->set_bounds({10, 10, 80, 28});
+    combo->set_dropdown_only(false);
+    combo->set_items({"10", "20", "30"});
+    combo->set_text("10");
+    int commits = 0;
+    std::string last;
+    combo->on_commit([&](const std::string& text) {
+      ++commits;
+      last = text;
+    });
+    root.add_child(std::move(box));
+
+    root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+    expect(combo->is_open(), "menu opens before item pick");
+    expect(root.focused_widget() == combo, "combo focused while menu open");
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int fired = 0;
+    ns.bind({KeyCode::Space, {}}, [&] { ++fired; });
+    mgr.set_active_namespace("editor");
+
+    // Menu opens downward; row 1 ("20") is at y≈67–96 (kControlHeight=29).
+    root.process_frame(0.016f, {PointerDownEvent{{40, 80}, PointerButton::Left, {}}});
+    expect(combo->text() == "20", "selecting an item updates the value");
+    expect(commits == 1, "selecting an item commits once");
+    expect(last == "20", "commit receives the selected label");
+    expect(!combo->is_open(), "menu closes after selecting an item");
+    expect(root.focused_widget() == nullptr, "combo blurs after picking a menu item");
+    expect(combo->visual_state() == WidgetState::Normal, "picked combo is not focused");
+
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Space, {}, false}}, &mgr);
+    expect(fired == 1, "global shortcut works after menu pick blur");
+  }
+
+  // Open menu items win over a sibling field they cover (no click-through).
   {
     WidgetRoot root;
     root.set_bounds({0, 0, 400, 400});
@@ -509,6 +573,8 @@ int main() {
     drop_a->set_bounds({10, 10, 80, 28});
     drop_a->set_items({"A1", "A2", "A3", "A4", "A5"});
     drop_a->set_selected_index(0);
+    int selected = -1;
+    drop_a->on_select([&](int index, const std::string&) { selected = index; });
     root.add_child(std::move(a));
 
     auto b = std::make_unique<ComboBox>();
@@ -522,9 +588,13 @@ int main() {
     root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
     expect(drop_a->is_open(), "covering dropdown opens");
 
-    root.process_frame(0.016f, {PointerDownEvent{{40, 64}, PointerButton::Left, {}}});
-    expect(!drop_a->is_open(), "opening covered field closes covering menu");
-    expect(combo_b->is_open(), "covered field opens");
+    // Menu row 1 (A2) is at y≈67–96 and covers combo_b's host (y=50–78).
+    root.process_frame(0.016f, {PointerDownEvent{{40, 72}, PointerButton::Left, {}}});
+    expect(selected == 1, "overlapping menu item is selected");
+    expect(drop_a->selected_index() == 1, "dropdown value updates");
+    expect(!drop_a->is_open(), "menu closes after selecting an item");
+    expect(!combo_b->is_open(), "covered field must not steal the click");
+    expect(combo_b->text() == "B1", "covered combo value unchanged");
   }
 
   {

@@ -1638,6 +1638,53 @@ void test_snap_scratch_chain_next_lane_splits_illegal_zone() {
   CHECK_EQ(snap_scratch_chain_next_lane(prev, 2, 3.0f, 12), 3);
 }
 
+void test_scratch_hold_jump_scratch_stays_in_lane_bounds() {
+  // Terminal JumpScratch can overhang the body. Lane-bounds checks must use
+  // that cover — body-only [lane, width] lets the last cap leave [0, lane_count).
+
+  NotationNote last = make_tap(0, 8);
+  last.width = 2;  // body 8-9
+  last.end_tick = 480;
+  last.note_type = NoteType::ScratchHold;
+  set_scratch_hold_end_lanes(last, 8, 11);  // last JumpScratch covers 8-11
+  {
+    const auto occ = occupied_lane_span(last);
+    CHECK_EQ(occ.first, 8);
+    CHECK_EQ(occ.second, 4);
+  }
+
+  std::vector<NotationNote> notes = {last};
+  CHECK(!nudge_notes_lane(notes, 1, 12));  // JS would become 9-12
+  CHECK_EQ(notes[0].lane, 8);
+
+  NotationNote left = make_tap(0, 1);
+  left.width = 2;  // body 1-2
+  left.end_tick = 480;
+  left.note_type = NoteType::ScratchHold;
+  set_scratch_hold_end_lanes(left, 0, 2);
+  notes = {left};
+  CHECK(!nudge_notes_lane(notes, -1, 12));  // JS would become -1-1
+  CHECK_EQ(notes[0].lane, 1);
+
+  NotationNote mid = make_tap(0, 6);
+  mid.width = 2;
+  mid.end_tick = 480;
+  mid.note_type = NoteType::ScratchHold;
+  set_scratch_hold_end_lanes(mid, 6, 9);
+  notes = {mid};
+  CHECK(nudge_notes_lane(notes, 1, 12));
+  CHECK_EQ(notes[0].lane, 7);
+  const auto range = get_scratch_end_lane_range(notes[0]);
+  CHECK_EQ(range.first, 7);
+  CHECK_EQ(range.second, 10);
+
+  NotationNote tap = make_tap(0, 10);
+  tap.width = 2;
+  notes = {tap};
+  CHECK(!nudge_notes_lane(notes, 1, 12));
+  CHECK(nudge_notes_lane(notes, 0, 12));
+}
+
 void test_scratch_chain_joint_direction() {
   NotationNote prev = make_tap(0, 3);
   prev.width = 2;  // lanes 3-4
@@ -3381,6 +3428,7 @@ int main() {
   test_hold_head_pairs_but_attached_excludes_head();
   test_scratch_hold_end_lane_encoding();
   test_resolve_end_lane_span_matches_scratch_and_jump();
+  test_scratch_hold_jump_scratch_stays_in_lane_bounds();
   test_snap_scratch_chain_next_lane_splits_illegal_zone();
   test_scratch_chain_joint_direction();
   test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body();

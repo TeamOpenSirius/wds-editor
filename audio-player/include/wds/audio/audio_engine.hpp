@@ -57,9 +57,9 @@ class AudioEngine {
   bool play_sfx(HitSfxClip clip);
   // Prime Hold channel / ensure keep-alive. Safe to call repeatedly.
   void warmup_sfx();
-  // Arm a one-shot at an absolute music playtime. Fired via BASS_SYNC_POS on a
-  // separate sample voice (1× pitch) so BGM BASS_ATTRIB_FREQ does not stretch
-  // hits. Falls back to immediate play when there is no music.
+  // Arm a one-shot at an absolute music time. With BGM, MIXTIME POS on the
+  // decode source plugs a 1× DECODE stream into the same BASSmix output (not a
+  // device ChannelPlay). Falls back to immediate play when there is no music.
   // Returns false if the hit could not be armed or played (caller may retry).
   bool schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at);
   void clear_scheduled_sfx();
@@ -88,8 +88,11 @@ class AudioEngine {
   void ensure_keep_alive();
   void pause_keep_alive();
   bool play_sfx_internal(HitSfxClip clip);
+  bool mix_sfx_on_mixer(HitSfxClip clip);
+  void remove_mixer_sfx_sources();
   void cache_music_format();
   std::uint64_t align_music_bytes(std::uint64_t bytes) const noexcept;
+  std::uint64_t music_heard_bytes() const;
 
   struct Impl;
   // shared_ptr so in-flight BASS SYNCPROCs can keep Impl alive across shutdown.

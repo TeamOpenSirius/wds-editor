@@ -22,6 +22,10 @@ void pop_utf8_codepoint(std::string& text) {
 
 float chevron_slot_w() noexcept { return std::max(18.0f, theme::px(11.0f)); }
 
+// Painted triangle stays in chevron_slot_w(); hit box is a full-height strip so
+// clicks near the arrow open the menu instead of focusing the text field.
+float chevron_hit_w(const Rect& abs) noexcept { return std::max(32.0f, abs.h); }
+
 void paint_chevron(UiPainter& painter, const Rect& abs, bool open, float z = 0.9f) {
   const float slot = chevron_slot_w();
   const int cx = static_cast<int>(std::lround(abs.right() - slot * 0.5f));
@@ -223,6 +227,13 @@ void ComboBox::on_pointer_down(const PointerDownEvent& event) {
       const int index = popup_menu::index_at_point(geom, event.position, items_.size());
       if (index >= 0) {
         accept_text(items_[static_cast<std::size_t>(index)]);
+        close_own_popup();
+        if (WidgetRoot* root = find_root()) {
+          root->clear_focus_if(this);
+        } else {
+          set_visual_state(WidgetState::Normal);
+        }
+        return;
       }
       close_own_popup();
       return;
@@ -233,7 +244,7 @@ void ComboBox::on_pointer_down(const PointerDownEvent& event) {
     return;
   }
 
-  if (dropdown_only_ || event.position.x > abs.right() - chevron_slot_w()) {
+  if (dropdown_only_ || event.position.x > abs.right() - chevron_hit_w(abs)) {
     if (open_) {
       close_own_popup();
     } else {

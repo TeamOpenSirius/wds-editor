@@ -43,7 +43,7 @@ class HitSfxPlayer {
 
   // Returns false when the engine could not start/arm the voice (retry later).
   bool play(HitSfxClip clip);
-  // Absolute music-stream time. Armed via BASS_SYNC_POS → 1× ChannelPlay.
+  // Absolute music-stream time. Armed via MIXTIME POS → 1× mixer source.
   bool schedule_at(HitSfxClip clip, wds::common::Microseconds music_time);
   // Drop pending syncs and cut audible one-shots / Hold (pause, seek, scrub).
   void stop_all();

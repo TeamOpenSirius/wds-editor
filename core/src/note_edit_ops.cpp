@@ -148,8 +148,10 @@ bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick) {
 }
 
 bool nudge_notes_lane(std::vector<NotationNote>& notes, int32_t delta_lane, int32_t lane_count) {
-  for (const auto& note : notes)
-    if (note.lane + delta_lane < 0 || note.end_lane() + delta_lane >= lane_count) return false;
+  for (const auto& note : notes) {
+    const auto [occ_lane, occ_width] = occupied_lane_span(note);
+    if (!lane_in_bounds(occ_lane + delta_lane, occ_width, lane_count)) return false;
+  }
   for (auto& note : notes) note.lane += delta_lane;
   return true;
 }
