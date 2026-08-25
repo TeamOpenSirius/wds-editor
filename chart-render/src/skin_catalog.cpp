@@ -195,10 +195,7 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     for (int x = 0; x < kW; ++x) {
       const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kW);
       const float a = split_soft_edge_alpha(u);
-      px[static_cast<size_t>(x) * 4 + 0] = 255;
-      px[static_cast<size_t>(x) * 4 + 1] = 255;
-      px[static_cast<size_t>(x) * 4 + 2] = 255;
-      px[static_cast<size_t>(x) * 4 + 3] = static_cast<unsigned char>(a * 255.0f + 0.5f);
+      write_white_soft_texel(px.data() + static_cast<size_t>(x) * 4, a);
     }
     cache.queue_rgba(kSoftSplitKey, std::move(px), kW, 1);
   }

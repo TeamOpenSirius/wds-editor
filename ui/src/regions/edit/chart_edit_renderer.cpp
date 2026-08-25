@@ -288,7 +288,9 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const auto draw_v = [&](int32_t edge_lane, int32_t slot) {
       const float x = std::floor(viewport.x_at(edge_lane) + 0.5f);
       const wds::interaction::Rect line{x - kSplitLineW * 0.5f, clip_top, kSplitLineW, h};
-      auto c = split_slot_color(color_id, slot, skin);
+      auto c = split_slot_color(color_id, slot, split_count, skin);
+      if (c.a < 0.02f) return;
+      apply_official_split_rgb_opacity(c);
       if (skin != nullptr && skin->soft_split_line) {
         painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.91f, a_bot,
                              a_top);

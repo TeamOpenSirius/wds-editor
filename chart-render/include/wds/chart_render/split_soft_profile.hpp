@@ -20,4 +20,12 @@ inline float split_soft_edge_alpha(float u01) noexcept {
 
 inline constexpr int kSplitSoftPlateW = 48;
 
+// Soft plate is always a white sprite; LineColor tints at draw time.
+inline void write_white_soft_texel(unsigned char* rgba, float alpha) noexcept {
+  rgba[0] = 255;
+  rgba[1] = 255;
+  rgba[2] = 255;
+  rgba[3] = static_cast<unsigned char>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
 }  // namespace wds::renderer

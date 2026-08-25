@@ -2,6 +2,8 @@
 
 #include "wds/ui/regions/edit/edit_viewport.hpp"
 
+#include <wds/chart_render/preview_visual_config.hpp>
+#include <wds/chart_render/split_line_official_colors.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
@@ -145,22 +147,24 @@ Color split_color_for_id(int32_t color_id) noexcept {
   return {r + m, g + m, b + m, 1.0f};
 }
 
-Color split_slot_color(int32_t color_id, int32_t line_slot,
-                       const wds::renderer::SkinCatalog* skin) noexcept {
-  if (skin != nullptr) {
-    const auto suffixes = skin->split_lines.suffixes_for(color_id);
-    if (suffixes.size() > 1) {
-      const size_t idx =
-          static_cast<size_t>(line_slot < 0 ? 0 : line_slot) % suffixes.size();
-      uint32_t h = 2166136261u;
-      for (unsigned char c : suffixes[idx]) {
-        h ^= c;
-        h *= 16777619u;
-      }
-      return split_color_for_id(static_cast<int32_t>(h & 0x7fffffff));
-    }
+Color split_slot_color(int32_t color_id, int32_t world_index, int32_t split_count,
+                       const wds::renderer::SkinCatalog* /*skin*/) noexcept {
+  const int32_t official =
+      wds::chart_editor::split_color_slot(color_id, split_count, world_index);
+  float sr = 1.0f, sg = 1.0f, sb = 1.0f, sa = 1.0f;
+  if (wds::chart_render::official_split_line_color(color_id, official, sr, sg, sb, sa)) {
+    return {sr, sg, sb, sa};
   }
   return split_color_for_id(color_id);
+}
+
+void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept {
+  const float k = wds::renderer::PreviewVisualConfig{}.split_line_opacity;
+  wds::chart_render::apply_split_line_opacity(c.r, c.g, c.b, c.a, k, 1.0f);
+}
+
+std::vector<int32_t> split_picker_color_ids() {
+  return wds::chart_render::official_split_color_ids();
 }
 
 namespace {
@@ -408,28 +412,28 @@ void paint_split_gutter(wds::interaction::UiPainter& painter, const EditViewport
 void paint_split_lane_preview(wds::interaction::UiPainter& painter, const Rect& area,
                               int32_t split_count, int32_t color_id,
                               const wds::renderer::SkinCatalog* skin) {
-  painter.fill_rect(area, {0.02f, 0.03f, 0.05f, 1.0f}, 2.0f, 0.996f);
   constexpr int32_t kLanes = 12;
   // Only effect split boundaries — no gray default lane dividers.
   std::vector<int32_t> mids;
   split_boundaries_12(split_count, mids);
   const float line_w = std::clamp(area.w / static_cast<float>(kLanes) * 0.14f, 1.5f, 2.5f);
+  // Edge lines are centered on area.x / area.right; widen the black plate so the
+  // soft sprite does not composite over the gray cell.
+  const float bg_pad_x = line_w * 0.5f + 1.0f;
+  const Rect bg{area.x - bg_pad_x, area.y, area.w + bg_pad_x * 2.0f, area.h};
+  painter.fill_rect(bg, {0.02f, 0.03f, 0.05f, 1.0f}, 2.0f, 0.996f);
 
   auto draw_edge = [&](int32_t edge_lane, int32_t slot) {
     const float x = std::floor(area.x + static_cast<float>(edge_lane) * area.w /
                                             static_cast<float>(kLanes) +
                                 0.5f);
     const Rect line{x - line_w * 0.5f, area.y + 2.0f, line_w, area.h - 4.0f};
-    auto c = split_slot_color(color_id, slot, skin);
+    auto c = split_slot_color(color_id, slot, split_count, skin);
+    if (c.a < 0.02f) return;
+    apply_official_split_rgb_opacity(c);
     if (skin != nullptr && skin->soft_split_line) {
       painter.sprite(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.997f);
       return;
-    }
-    if (skin != nullptr) {
-      if (const auto* tex = skin->split_lines.texture_for(color_id, slot, /*steady*/ 1)) {
-        painter.sprite(line, *tex, {1.0f, 1.0f, 1.0f, 1.0f}, 0.997f);
-        return;
-      }
     }
     painter.fill_rect(line, c, 1.0f, 0.997f);
   };

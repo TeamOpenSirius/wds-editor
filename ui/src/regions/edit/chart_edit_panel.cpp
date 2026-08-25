@@ -2225,9 +2225,7 @@ void ChartEditPanel::layout_popup_rects() const {
   // Cap matches prior Mac Retina look (84–128 fb @ 2× ≈ 42–64 logical).
   split_color_row_h_ = std::clamp(list_h / 3.2f, th::px(42.0f), th::px(64.0f));
   split_color_buttons_.clear();
-  std::vector<int32_t> colors;
-  if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-  if (colors.empty()) colors = {1, 1010, 10170, 1060};
+  std::vector<int32_t> colors = split_picker_color_ids();
   const float cell_w =
       (split_picker_bounds_.w - pad * 2.0f - col_gap * static_cast<float>(kSplitColorCols - 1)) /
       static_cast<float>(kSplitColorCols);
@@ -2326,9 +2324,7 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
                    section_h},
                   "分割线外观", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
 
-    std::vector<int32_t> colors;
-    if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-    if (colors.empty()) colors = {1, 1010, 10170, 1060};
+    std::vector<int32_t> colors = split_picker_color_ids();
     const float scroll = std::clamp(split_color_scroll_, 0.0f, split_color_max_scroll_);
     const int first_row = std::max(0, static_cast<int>(scroll / split_color_row_h_));
     for (size_t i = 0; i < split_color_buttons_.size(); ++i) {
@@ -2442,9 +2438,7 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
 
 void ChartEditPanel::scroll_split_picker_to_color(int32_t color_id) {
   layout_popup_rects();
-  std::vector<int32_t> colors;
-  if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-  if (colors.empty()) colors = {1, 1010, 10170, 1060};
+  std::vector<int32_t> colors = split_picker_color_ids();
   int idx = -1;
   for (size_t i = 0; i < colors.size(); ++i) {
     if (colors[i] == color_id) {
@@ -2688,9 +2682,7 @@ bool ChartEditPanel::handle_popup_pointer_down(const wds::interaction::PointerDo
         return true;
       }
     }
-    std::vector<int32_t> colors;
-    if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-    if (colors.empty()) colors = {1, 1010, 10170, 1060};
+    std::vector<int32_t> colors = split_picker_color_ids();
     for (size_t i = 0; i < split_color_buttons_.size(); ++i) {
       if (!split_color_buttons_[i].contains(event.position)) continue;
       const float scroll = std::clamp(split_color_scroll_, 0.0f, split_color_max_scroll_);

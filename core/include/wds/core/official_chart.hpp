@@ -21,7 +21,9 @@ namespace wds::chart_editor {
 //   leftLane      — leftmost lane, official 1..12; split rows use -1
 //   laneLength    — width in lanes; split rows use 0
 //   gimmickType   — numeric GimmickType, or "JumpScratch" / "OneDirection"
-//   scratchLength — flick/scratch span (signed); split color; JumpScratch target span
+//   scratchLength — flick/scratch span (signed); JumpScratch target span;
+//                   split Addressable SplitEffects/{id} (also fadeIn growth:
+//                   LineHight z=180 = tip-anchored; not gimmickType, not id%2)
 //                   → stored as NotationNote::scratch_length
 //
 // Times are converted to ticks (BPM 60 + TPQ 480 by default) for editor precision;

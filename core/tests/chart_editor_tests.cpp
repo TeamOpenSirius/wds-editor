@@ -11,6 +11,7 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
+#include <wds/core/split_lane_simulator.hpp>
 #include <wds/core/sus_chart.hpp>
 #include <wds/core/timing_map.hpp>
 #include <wds/core/core.hpp>
@@ -683,6 +684,102 @@ void test_split_appear_phase_before_start_ms() {
   engine.rebuild_snapshot();
   CHECK_EQ(engine.snapshot().split_lanes[0].split_anim_phase, 1);
   CHECK_EQ(engine.snapshot().split_lanes[0].stage_cover_alpha, 0.0f);
+}
+
+void test_split_fadein_direction_from_linehight_z180() {
+  // Official SplitEffects/{id} LineHight.localRotation (client 1.96.0):
+  // identity → grow from judge (percent [1-scale, 1]);
+  // z=180    → grow from tip   (percent [0, scale]).
+  // Direction is the prefab, not gimmickType and not scratch_length%2.
+  CHECK(!split_fade_grows_from_tip(0));
+  CHECK(!split_fade_grows_from_tip(10390));  // even + identity: falsifies id%2
+  CHECK(!split_fade_grows_from_tip(10391));
+  CHECK(!split_fade_grows_from_tip(11611));
+  CHECK(!split_fade_grows_from_tip(11613));
+  CHECK(!split_fade_grows_from_tip(11615));
+  CHECK(!split_fade_grows_from_tip(11617));
+  for (int32_t id : {10392, 10393, 10518, 10631, 11331, 11511, 11591, 11612, 11614, 11616,
+                     11700, 11792, 11805}) {
+    CHECK(split_fade_grows_from_tip(id));
+  }
+
+  PreviewConfig cfg;
+  cfg.split_line_animation_start_sec = 1.0f;
+  SplitLaneSimulator sim(cfg);
+
+  MusicTiming timing;
+  timing.bpm = 60.0;
+  timing.ticks_per_quarter = 480;
+
+  auto make_split = [](int32_t color, GimmickType gimmick) {
+    NotationNote note;
+    note.start_tick = 4800;
+    note.end_tick = 9600;
+    note.gimmick_type = gimmick;
+    note.scratch_length = color;
+    return note;
+  };
+
+  const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  const int64_t mid = start_ms - 500;  // t=0.5 → ease-out scale = 0.75
+  constexpr float kScale = 0.75f;
+
+  PreviewSplitLaneInstance bottom;
+  sim.fill_instance(bottom, make_split(10390, GimmickType::Split4), timing, mid);
+  CHECK(std::fabs(bottom.split_percent_start - (1.0f - kScale)) < 0.02f);
+  CHECK(std::fabs(bottom.split_percent_end - 1.0f) < 0.02f);
+  CHECK(bottom.split_percent_start > 0.1f);
+
+  PreviewSplitLaneInstance tip;
+  sim.fill_instance(tip, make_split(10392, GimmickType::Split4), timing, mid);
+  CHECK(std::fabs(tip.split_percent_start - 0.0f) < 0.02f);
+  CHECK(std::fabs(tip.split_percent_end - kScale) < 0.02f);
+
+  // 4.txt: 11611/13/15/17 grow from judge; 11612/14/16 grow from tip.
+  PreviewSplitLaneInstance id_11611;
+  sim.fill_instance(id_11611, make_split(11611, GimmickType::Split6), timing, mid);
+  CHECK(id_11611.split_percent_start > 0.1f);
+  CHECK(std::fabs(id_11611.split_percent_end - 1.0f) < 0.02f);
+
+  PreviewSplitLaneInstance id_11612;
+  sim.fill_instance(id_11612, make_split(11612, GimmickType::Split6), timing, mid);
+  CHECK(id_11612.split_percent_start < 0.02f);
+  CHECK(id_11612.split_percent_end < 0.85f);
+
+  // Same prefab ID: 16 vs 36 only changes particles, not fade clip.
+  PreviewSplitLaneInstance both_ends;
+  PreviewSplitLaneInstance full;
+  sim.fill_instance(both_ends, make_split(11613, GimmickType::Split6), timing, mid);
+  sim.fill_instance(full, make_split(11613, GimmickType::FullSplit6), timing, mid);
+  CHECK(std::fabs(both_ends.split_percent_start - full.split_percent_start) < 0.001f);
+  CHECK(std::fabs(both_ends.split_percent_end - full.split_percent_end) < 0.001f);
+  CHECK(both_ends.split_percent_start > 0.1f);
+
+  PreviewSplitLaneInstance tip_both;
+  PreviewSplitLaneInstance tip_full;
+  sim.fill_instance(tip_both, make_split(11614, GimmickType::Split6), timing, mid);
+  sim.fill_instance(tip_full, make_split(11614, GimmickType::FullSplit6), timing, mid);
+  CHECK(std::fabs(tip_both.split_percent_start - tip_full.split_percent_start) < 0.001f);
+  CHECK(tip_both.split_percent_start < 0.02f);
+}
+
+void test_split_color_slot_mirrors_linehight_z180() {
+  // 4.txt uses split_count=6 (7 lines). Z=180 mirrors official Line index onto world X.
+  CHECK_EQ(split_color_slot(11611, 6, 0), 0);
+  CHECK_EQ(split_color_slot(11617, 6, 6), 6);
+  CHECK_EQ(split_color_slot(11613, 6, 2), 2);
+
+  CHECK_EQ(split_color_slot(11612, 6, 1), 5);  // world left-of-center ← official slot 5 (blue)
+  CHECK_EQ(split_color_slot(11616, 6, 5), 1);  // world right-of-center ← official slot 1 (orange)
+  CHECK_EQ(split_color_slot(11614, 6, 3), 3);  // center is fixed
+
+  CHECK_EQ(split_color_slot(10390, 4, 0), 0);  // identity, even id
+  CHECK_EQ(split_color_slot(10392, 4, 0), 4);
+  CHECK_EQ(split_color_slot(10392, 4, 4), 0);
+
+  // 10518 is tip-grow; official controller order is used, then mirrored.
+  CHECK_EQ(split_color_slot(10518, 4, 0), 4);
+  CHECK(split_fade_grows_from_tip(10518));
 }
 
 void test_hold_start_visible_with_zero_end_tick() {
@@ -3460,6 +3557,8 @@ int main() {
   test_snapshot_large_seek_full_rebuild();
   test_split_gimmick_range_and_combo_includes_heads();
   test_split_appear_phase_before_start_ms();
+  test_split_fadein_direction_from_linehight_z180();
+  test_split_color_slot_mirrors_linehight_z180();
   test_hold_start_visible_with_zero_end_tick();
   test_load_legacy_v1_wdschart();
   test_official_chart_import_and_roundtrip();

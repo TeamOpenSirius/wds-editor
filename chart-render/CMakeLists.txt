@@ -5,6 +5,7 @@ add_library(wds_chart_render STATIC
   src/stage_geometry.cpp
   src/skin_catalog.cpp
   src/split_line_skins.cpp
+  src/split_line_official_colors.cpp
   src/note_strips.cpp
   src/note_visual_policy.cpp
 )
@@ -32,3 +33,7 @@ endif()
 add_executable(wds_note_visual_policy_tests tests/note_visual_policy_tests.cpp)
 target_link_libraries(wds_note_visual_policy_tests PRIVATE wds::chart_render)
 add_test(NAME wds_note_visual_policy_tests COMMAND wds_note_visual_policy_tests)
+
+add_executable(wds_split_line_official_colors_tests tests/split_line_official_colors_tests.cpp)
+target_link_libraries(wds_split_line_official_colors_tests PRIVATE wds::chart_render)
+add_test(NAME wds_split_line_official_colors_tests COMMAND wds_split_line_official_colors_tests)

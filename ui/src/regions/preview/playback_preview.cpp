@@ -4,6 +4,8 @@
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
+#include <wds/chart_render/split_line_fade.hpp>
+#include <wds/chart_render/split_line_official_colors.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
@@ -26,7 +28,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <limits>
 #include <unordered_set>
 #include <vector>
@@ -51,6 +52,7 @@ using wds::chart_editor::NoteType;
 using wds::chart_editor::PreviewNoteInstance;
 using wds::chart_editor::PreviewNoteVisualState;
 using wds::chart_editor::PreviewSnapshot;
+using wds::chart_editor::PreviewSplitLaneInstance;
 using wds::chart_editor::is_hold_body;
 using wds::chart_editor::is_hold_mid_star;
 using wds::chart_editor::is_hold_start;
@@ -440,50 +442,11 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
   if (snapshot.split_lanes.empty()) {
     return;
   }
-  const auto& split = snapshot.split_lanes.back();
-  if (!split.should_show || split.split_count <= 0) {
-    return;
-  }
-
-  // Same color id / slot tint as the edit-region split lines (split_slot_color).
-  const int32_t color_id = split.scratch_length != 0 ? split.scratch_length : 1;
-  // Light preview: white soft plate × LineColor (official SpriteRenderer). Never swap
-  // to Transform wipe sprites (Sonolus-only); that caused a hard pop.
 
   auto fallback_tex = [&]() -> const TextureInfo* {
     return skin_.split_line_1 ? &skin_.split_line_1
                               : (skin_.split_line_2 ? &skin_.split_line_2 : nullptr);
   };
-
-  const int32_t n = config_.lane_count;
-  std::vector<int32_t> mids;
-  split_boundaries_12(split.split_count, mids);
-
-  // Official fadeIn: scale.y grow from judgeline → tip ⇒ visible [p0, p1].
-  const float p0 = split.split_percent_start;
-  const float p1 = split.split_percent_end;
-  if (p1 - p0 < 1e-4f) {
-    return;
-  }
-
-  const double now = preview_now_sec(snapshot, visual_lead_us_);
-  const float period = std::max(config_.split_line_pulse_period, 1e-3f);
-  const float band = std::max(config_.split_line_pulse_band, 1e-4f);
-  const float dip = std::clamp(config_.split_line_pulse_dip, 0.0f, 1.0f);
-  // Official position curve: bottom (percent=1) → tip (percent=0), ease-in.
-  float band_travel = std::fmod(static_cast<float>(now), period) / period;
-  if (band_travel < 0.0f) {
-    band_travel += 1.0f;
-  }
-  constexpr float kEnvPeakT = 0.05f;  // SplitLine envelope peaks at 5% of the blob.
-  const float band_peak = 1.0f - split_pulse_travel_t(band_travel);
-  // Leading edge toward the tip (lower percent); long tail toward the judgeline.
-  const float band_leading = band_peak - kEnvPeakT * band;
-  const float base_a =
-      std::clamp(split.split_line_alpha * config_.split_line_opacity, 0.0f, 1.0f);
-  const float tip_whiten = std::clamp(config_.split_line_tip_whiten, 0.05f, 1.0f);
-  const float tip_glow = std::clamp(config_.split_line_tip_glow, 0.0f, 1.0f);
-
   // Official soft white plate; colored skins only supply LineColor tint.
   const TextureInfo* plate =
       skin_.soft_split_line ? &skin_.soft_split_line : fallback_tex();
@@ -491,108 +454,138 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
     return;
   }
 
-  const float tip_span = std::max((p1 - p0) * tip_whiten, 1e-4f);
+  auto split_visible = [](const PreviewSplitLaneInstance& s) {
+    return s.should_show && s.split_count > 0 &&
+           (s.split_percent_end - s.split_percent_start) >= 1e-4f;
+  };
 
-  auto pulse_mul = [&](float percent) {
-    const float t = (percent - band_leading) / band;
-    if (t <= 0.0f || t >= 1.0f) {
-      return 1.0f;
+  const double now = preview_now_sec(snapshot, visual_lead_us_);
+  const float period = std::max(config_.split_line_pulse_period, 1e-3f);
+  const float band = std::max(config_.split_line_pulse_band, 1e-4f);
+  const float dip = std::clamp(config_.split_line_pulse_dip, 0.0f, 1.0f);
+  float band_travel = std::fmod(static_cast<float>(now), period) / period;
+  if (band_travel < 0.0f) {
+    band_travel += 1.0f;
+  }
+  constexpr float kEnvPeakT = 0.05f;  // SplitLine envelope peaks at 5% of the blob.
+  const float travel_t = split_pulse_travel_t(band_travel);
+  const float tip_whiten = std::clamp(config_.split_line_tip_whiten, 0.05f, 1.0f);
+  const float tip_glow = std::clamp(config_.split_line_tip_glow, 0.0f, 1.0f);
+  const int32_t n = config_.lane_count;
+
+  for (const auto& split : snapshot.split_lanes) {
+    if (!split_visible(split)) {
+      continue;
     }
-    return 1.0f - dip * split_pulse_envelope(t);
-  };
-  auto tip_whiten_t = [&](float percent) {
-    // 1 at growing tip (p0) → 0 after tip_span toward judgeline.
-    float t = 1.0f - (percent - p0) / tip_span;
-    t = std::clamp(t, 0.0f, 1.0f);
-    // Long soft ramp (smoothstep); no extra squaring that shortens the white zone.
-    return t * t * (3.0f - 2.0f * t);
-  };
-  auto tint_at = [&](float lr, float lg, float lb, float tip_t, float& cr, float& cg, float& cb) {
-    cr = lr + (1.0f - lr) * tip_t;
-    cg = lg + (1.0f - lg) * tip_t;
-    cb = lb + (1.0f - lb) * tip_t;
-  };
+    const int32_t color_id = split.scratch_length != 0 ? split.scratch_length : 1;
+    const bool judge_whiten = wds::chart_editor::split_fade_grows_from_tip(color_id);
+    const float band_peak = wds::chart_render::split_line_pulse_peak(travel_t, judge_whiten);
+    const float band_leading = band_peak - kEnvPeakT * band;
+    const float p0 = split.split_percent_start;
+    const float p1 = split.split_percent_end;
+    const float tip_span = std::max((p1 - p0) * tip_whiten, 1e-4f);
 
-  // Knots along percent: tip ramp + pulse lobe + range ends. GPU lerps RGB/alpha
-  // between knots (same per-corner path as the old 96-seg strip — do not drop
-  // the white tip / pulse look by thinning to two vertices).
-  std::vector<float> knots;
-  knots.push_back(p0);
-  knots.push_back(p1);
-  knots.push_back(std::clamp(p0 + tip_span * 0.5f, p0, p1));
-  knots.push_back(std::clamp(p0 + tip_span, p0, p1));
-  // Envelope keys: head (0 / 0.05) + decaying tail toward the judgeline.
-  constexpr float kEnvKnots[] = {0.0f, 0.05f, 0.12f, 0.22f, 0.35f, 0.5f, 0.65f, 0.8f, 1.0f};
-  for (float kt : kEnvKnots) {
-    knots.push_back(std::clamp(band_leading + kt * band, p0, p1));
-  }
-  std::sort(knots.begin(), knots.end());
-  knots.erase(std::unique(knots.begin(), knots.end(),
-                          [](float a, float b) { return std::abs(a - b) < 1e-5f; }),
-              knots.end());
-  if (knots.size() < 2) {
-    return;
-  }
-
-  auto draw_slot = [&](int32_t memory_slot, int32_t boundary_after_lane, bool end_line) {
-    const auto slot_c = split_slot_color(color_id, memory_slot, &skin_);
-    const float lr = slot_c.r;
-    const float lg = slot_c.g;
-    const float lb = slot_c.b;
-    for (size_t i = 0; i + 1 < knots.size(); ++i) {
-      const float sa = knots[i];
-      const float sb = knots[i + 1];
-      // split_line_quad: lt/rt = percent_start (sa), lb/rb = percent_end (sb).
-      const float tip_a = tip_whiten_t(sa);
-      const float tip_b = tip_whiten_t(sb);
-      // Tip→body is RGB mix only at full base alpha. Pulse must not dig a transparent
-      // trough through that blend — gate the dip by (1 - tip_t).
-      const float mul_a = 1.0f + (pulse_mul(sa) - 1.0f) * (1.0f - tip_a);
-      const float mul_b = 1.0f + (pulse_mul(sb) - 1.0f) * (1.0f - tip_b);
-      const float a_start = base_a * mul_a;
-      const float a_end = base_a * mul_b;
-      if (a_start < 0.008f && a_end < 0.008f) {
-        continue;
+    auto pulse_mul = [&](float percent) {
+      const float t = (percent - band_leading) / band;
+      if (t <= 0.0f || t >= 1.0f) {
+        return 1.0f;
       }
-      const Quad q = end_line ? geometry_.split_end_line_quad(sa, sb)
-                              : geometry_.split_line_quad(boundary_after_lane, sa, sb);
+      return 1.0f - dip * split_pulse_envelope(t);
+    };
+    auto tip_whiten_t = [&](float percent) {
+      return wds::chart_render::split_line_whiten_t(percent, p0, p1, tip_span, judge_whiten);
+    };
+    auto tint_at = [&](float lr, float lg, float lb, float tip_t, float& cr, float& cg, float& cb) {
+      cr = lr + (1.0f - lr) * tip_t;
+      cg = lg + (1.0f - lg) * tip_t;
+      cb = lb + (1.0f - lb) * tip_t;
+    };
 
-      float r0 = 1.0f, g0 = 1.0f, b0 = 1.0f;
-      float r1 = 1.0f, g1 = 1.0f, b1 = 1.0f;
-      tint_at(lr, lg, lb, tip_a, r0, g0, b0);
-      tint_at(lr, lg, lb, tip_b, r1, g1, b1);
-      batch.add_quad_corners(plate->id, q, -0.6f, a_end, a_end, a_start, a_start, plate->u0,
-                             plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0, g0, b0,
-                             r0, g0, b0);
-      // Soft tip bloom only near pure white; keep out of the color-mix midsection.
-      const float glow_w_a = std::max(0.0f, tip_a - 0.55f) / 0.45f;
-      const float glow_w_b = std::max(0.0f, tip_b - 0.55f) / 0.45f;
-      const float glow_a = tip_glow * glow_w_a;
-      const float glow_b = tip_glow * glow_w_b;
-      if (tip_glow > 0.01f && (glow_a > 0.01f || glow_b > 0.01f)) {
-        additive.add_quad_corners(plate->id, q, -0.55f, glow_b, glow_b, glow_a, glow_a, plate->u0,
-                                  plate->v0, plate->u1, plate->v1, 1.0f, 1.0f, 1.0f);
+    std::vector<float> knots;
+    knots.push_back(p0);
+    knots.push_back(p1);
+    if (judge_whiten) {
+      knots.push_back(std::clamp(p1 - tip_span * 0.5f, p0, p1));
+      knots.push_back(std::clamp(p1 - tip_span, p0, p1));
+    } else {
+      knots.push_back(std::clamp(p0 + tip_span * 0.5f, p0, p1));
+      knots.push_back(std::clamp(p0 + tip_span, p0, p1));
+    }
+    constexpr float kEnvKnots[] = {0.0f, 0.05f, 0.12f, 0.22f, 0.35f, 0.5f, 0.65f, 0.8f, 1.0f};
+    for (float kt : kEnvKnots) {
+      knots.push_back(std::clamp(band_leading + kt * band, p0, p1));
+    }
+    std::sort(knots.begin(), knots.end());
+    knots.erase(std::unique(knots.begin(), knots.end(),
+                            [](float a, float b) { return std::abs(a - b) < 1e-5f; }),
+                knots.end());
+    if (knots.size() < 2) {
+      continue;
+    }
+
+    auto draw_slot = [&](int32_t memory_slot, int32_t boundary_after_lane, bool end_line) {
+      const auto slot_c = split_slot_color(color_id, memory_slot, split.split_count, &skin_);
+      if (slot_c.a < 0.02f) {
+        return;
       }
-      // Mild additive body beam so overlaps with the judgeline brighten (official soft look).
-      const float body_glow = std::clamp(config_.split_line_body_glow, 0.0f, 1.0f);
-      if (body_glow > 0.01f) {
-        const float bg_a = body_glow * mul_a * (1.0f - tip_a * 0.65f);
-        const float bg_b = body_glow * mul_b * (1.0f - tip_b * 0.65f);
-        if (bg_a > 0.008f || bg_b > 0.008f) {
-          additive.add_quad_corners(plate->id, q, -0.58f, bg_b, bg_b, bg_a, bg_a, plate->u0,
-                                    plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0,
-                                    g0, b0, r0, g0, b0);
+      float lr = slot_c.r;
+      float lg = slot_c.g;
+      float lb = slot_c.b;
+      float la = slot_c.a;
+      wds::chart_render::apply_split_line_opacity(lr, lg, lb, la, config_.split_line_opacity,
+                                                  split.split_line_alpha);
+      for (size_t i = 0; i + 1 < knots.size(); ++i) {
+        const float sa = knots[i];
+        const float sb = knots[i + 1];
+        const float tip_a = tip_whiten_t(sa);
+        const float tip_b = tip_whiten_t(sb);
+        const float mul_a = 1.0f + (pulse_mul(sa) - 1.0f) * (1.0f - tip_a);
+        const float mul_b = 1.0f + (pulse_mul(sb) - 1.0f) * (1.0f - tip_b);
+        const float a_start = la * mul_a;
+        const float a_end = la * mul_b;
+        if (a_start < 0.008f && a_end < 0.008f) {
+          continue;
+        }
+        const Quad q = end_line ? geometry_.split_end_line_quad(sa, sb)
+                                : geometry_.split_line_quad(boundary_after_lane, sa, sb);
+
+        float r0 = 1.0f, g0 = 1.0f, b0 = 1.0f;
+        float r1 = 1.0f, g1 = 1.0f, b1 = 1.0f;
+        tint_at(lr, lg, lb, tip_a, r0, g0, b0);
+        tint_at(lr, lg, lb, tip_b, r1, g1, b1);
+        batch.add_quad_corners(plate->id, q, -0.6f, a_end, a_end, a_start, a_start, plate->u0,
+                               plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0, g0, b0,
+                               r0, g0, b0);
+        const float glow_w_a = std::max(0.0f, tip_a - 0.55f) / 0.45f;
+        const float glow_w_b = std::max(0.0f, tip_b - 0.55f) / 0.45f;
+        const float glow_a = tip_glow * glow_w_a;
+        const float glow_b = tip_glow * glow_w_b;
+        if (tip_glow > 0.01f && (glow_a > 0.01f || glow_b > 0.01f)) {
+          additive.add_quad_corners(plate->id, q, -0.55f, glow_b, glow_b, glow_a, glow_a, plate->u0,
+                                    plate->v0, plate->u1, plate->v1, 1.0f, 1.0f, 1.0f);
+        }
+        const float body_glow = std::clamp(config_.split_line_body_glow, 0.0f, 1.0f);
+        if (body_glow > 0.01f) {
+          const float bg_a = body_glow * mul_a * (1.0f - tip_a * 0.65f);
+          const float bg_b = body_glow * mul_b * (1.0f - tip_b * 0.65f);
+          if (bg_a > 0.008f || bg_b > 0.008f) {
+            additive.add_quad_corners(plate->id, q, -0.58f, bg_b, bg_b, bg_a, bg_a, plate->u0,
+                                      plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0,
+                                      g0, b0, r0, g0, b0);
+          }
         }
       }
-    }
-  };
+    };
 
-  draw_slot(0, -1, false);
-  int32_t mid_slot = 1;
-  for (int32_t b12 : mids) {
-    draw_slot(mid_slot++, scale_boundary(b12, n), false);
+    std::vector<int32_t> mids;
+    split_boundaries_12(split.split_count, mids);
+    draw_slot(0, -1, false);
+    int32_t mid_slot = 1;
+    for (int32_t b12 : mids) {
+      draw_slot(mid_slot++, scale_boundary(b12, n), false);
+    }
+    draw_slot(split.split_count, 0, true);
   }
-  draw_slot(split.split_count, 0, true);
 }
 
 void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewSnapshot& snapshot) {
