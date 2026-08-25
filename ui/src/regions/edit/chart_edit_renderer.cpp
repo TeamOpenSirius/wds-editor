@@ -214,7 +214,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
                               const std::vector<EditGhost>& extra_ghosts,
                               const std::optional<wds::interaction::Rect>& marquee,
                               const wds::renderer::SkinCatalog* skin,
-                              bool show_beat_grid) const {
+                              bool show_beat_grid,
+                              int32_t highlighted_split_note_id) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f, 0.86f);
   const auto& grid = viewport.grid();
@@ -268,45 +269,9 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
   constexpr int kFadeKnots = 8;
   // Logical px (Retina ×2 at flush). Soft plate fills the rect — keep ≤2 so it reads thin.
   constexpr float kSplitLineW = 2.0f;
-  const auto draw_split_edges = [&](const wds::chart_editor::NotationNote& split_note, float y_a,
-                                    float y_b, float opacity_a, float opacity_b,
-                                    int32_t /*anim_phase*/) {
-    const float top = std::min(y_a, y_b);
-    const float bottom = std::max(y_a, y_b);
-    if (bottom < b.y || top > b.bottom()) return;
-    const float clip_top = std::max(top, b.y);
-    const float clip_bot = std::min(bottom, b.bottom());
-    const float h = std::max(0.0f, clip_bot - clip_top);
-    if (h <= 0.0f) return;
-    const float a_top = (top == y_a) ? opacity_a : opacity_b;
-    const float a_bot = (bottom == y_a) ? opacity_a : opacity_b;
-    if (a_top <= 0.001f && a_bot <= 0.001f) return;
-    const int32_t color_id = split_note.scratch_length;
-    const int32_t split_count = wds::chart_editor::get_split_count(split_note.gimmick_type);
-    std::vector<int32_t> mids;
-    split_boundaries_12(split_count, mids);
-    const auto draw_v = [&](int32_t edge_lane, int32_t slot) {
-      const float x = std::floor(viewport.x_at(edge_lane) + 0.5f);
-      const wds::interaction::Rect line{x - kSplitLineW * 0.5f, clip_top, kSplitLineW, h};
-      auto c = split_slot_color(color_id, slot, split_count, skin);
-      if (c.a < 0.02f) return;
-      apply_official_split_rgb_opacity(c);
-      if (skin != nullptr && skin->soft_split_line) {
-        painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.91f, a_bot,
-                             a_top);
-        return;
-      }
-      c.a *= 0.5f * (a_top + a_bot);
-      painter.fill_rect(line, c, 0.0f, 0.91f);
-    };
-    draw_v(0, 0);
-    int32_t slot = 1;
-    for (int32_t mid : mids) draw_v(mid + 1, slot++);
-    draw_v(grid.lane_count, std::max(1, split_count));
-  };
-
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+  constexpr float kSplitLineHighlightW = 4.0f;
+  const auto paint_one_split = [&](const wds::chart_editor::NotationNote& note, float line_w,
+                                   bool highlight) {
     const int64_t start_ms = note.start_ms(timing);
     const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
     const int64_t appear_ms = std::max<int64_t>(
@@ -322,8 +287,46 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const float view_ms_hi = view_ms_lo + static_cast<float>(viewport.visible_ms());
     if (static_cast<float>(fade_end_ms) < view_ms_lo ||
         static_cast<float>(fade_start_ms) > view_ms_hi) {
-      continue;
+      return;
     }
+
+    const float z = highlight ? 0.914f : 0.91f;
+    const auto draw_split_edges = [&](float y_a, float y_b, float opacity_a, float opacity_b) {
+      const float top = std::min(y_a, y_b);
+      const float bottom = std::max(y_a, y_b);
+      if (bottom < b.y || top > b.bottom()) return;
+      const float clip_top = std::max(top, b.y);
+      const float clip_bot = std::min(bottom, b.bottom());
+      const float h = std::max(0.0f, clip_bot - clip_top);
+      if (h <= 0.0f) return;
+      const float a_top = (top == y_a) ? opacity_a : opacity_b;
+      const float a_bot = (bottom == y_a) ? opacity_a : opacity_b;
+      if (a_top <= 0.001f && a_bot <= 0.001f) return;
+      const int32_t color_id = note.scratch_length;
+      const int32_t split_count = wds::chart_editor::get_split_count(note.gimmick_type);
+      std::vector<int32_t> mids;
+      split_boundaries_12(split_count, mids);
+      const auto draw_v = [&](int32_t edge_lane, int32_t slot) {
+        const float x = std::floor(viewport.x_at(edge_lane) + 0.5f);
+        const wds::interaction::Rect line{x - line_w * 0.5f, clip_top, line_w, h};
+        auto c = split_slot_color(color_id, slot, split_count, skin);
+        if (c.a < 0.02f) return;
+        apply_official_split_rgb_opacity(c);
+        if (highlight) {
+          c = c.lerp({1.0f, 1.0f, 1.0f, c.a}, 0.28f);
+        }
+        if (skin != nullptr && skin->soft_split_line) {
+          painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, z, a_bot, a_top);
+          return;
+        }
+        c.a *= 0.5f * (a_top + a_bot);
+        painter.fill_rect(line, c, 0.0f, z);
+      };
+      draw_v(0, 0);
+      int32_t slot = 1;
+      for (int32_t mid : mids) draw_v(mid + 1, slot++);
+      draw_v(grid.lane_count, std::max(1, split_count));
+    };
 
     const auto fade_opacity = [&](float mid_ms) {
       float o = split_line_opacity_at_ms(note, timing, preview,
@@ -332,7 +335,7 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       return o * o * (3.0f - 2.0f * o);
     };
 
-    const auto paint_fade_range = [&](int64_t range_lo, int64_t range_hi, int32_t phase) {
+    const auto paint_fade_range = [&](int64_t range_lo, int64_t range_hi) {
       const float ms0 = std::max(static_cast<float>(range_lo), view_ms_lo);
       const float ms1 = std::min(static_cast<float>(range_hi), view_ms_hi);
       if (ms1 <= ms0) return;
@@ -340,7 +343,7 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       const float y_b = viewport.y_at_ms(ms1);
       if (std::abs(y_a - y_b) < 0.5f) {
         const float o = fade_opacity((ms0 + ms1) * 0.5f);
-        draw_split_edges(note, y_a, y_b, o, o, phase);
+        draw_split_edges(y_a, y_b, o, o);
         return;
       }
       for (int i = 0; i < kFadeKnots; ++i) {
@@ -348,21 +351,31 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
         const float t1 = static_cast<float>(i + 1) / static_cast<float>(kFadeKnots);
         const float msa = ms0 + (ms1 - ms0) * t0;
         const float msb = ms0 + (ms1 - ms0) * t1;
-        draw_split_edges(note, viewport.y_at_ms(msa), viewport.y_at_ms(msb), fade_opacity(msa),
-                         fade_opacity(msb), phase);
+        draw_split_edges(viewport.y_at_ms(msa), viewport.y_at_ms(msb), fade_opacity(msa),
+                         fade_opacity(msb));
       }
     };
 
-    paint_fade_range(fade_start_ms, start_ms, /*appear*/ 0);
+    paint_fade_range(fade_start_ms, start_ms);
     {
       const float ms0 = std::max(static_cast<float>(start_ms), view_ms_lo);
       const float ms1 = std::min(static_cast<float>(end_ms), view_ms_hi);
       if (ms1 > ms0) {
-        draw_split_edges(note, viewport.y_at_ms(ms0), viewport.y_at_ms(ms1), 1.0f, 1.0f,
-                         /*steady*/ 1);
+        draw_split_edges(viewport.y_at_ms(ms0), viewport.y_at_ms(ms1), 1.0f, 1.0f);
       }
     }
-    paint_fade_range(end_ms, fade_end_ms, /*disappear*/ 2);
+    paint_fade_range(end_ms, fade_end_ms);
+  };
+
+  for (const auto& note : notes) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    if (note.id == highlighted_split_note_id) continue;
+    paint_one_split(note, kSplitLineW, false);
+  }
+  for (const auto& note : notes) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    if (note.id != highlighted_split_note_id) continue;
+    paint_one_split(note, kSplitLineHighlightW, true);
   }
 
   (void)selected;

@@ -10,6 +10,7 @@
 #include <wds/renderer/draw_batch.hpp>
 #include <wds/renderer/skin_catalog.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <unordered_set>
 #include <vector>
@@ -37,7 +38,8 @@ class ChartEditRenderer {
              const std::vector<EditGhost>& extra_ghosts = {},
              const std::optional<wds::interaction::Rect>& marquee = std::nullopt,
              const wds::renderer::SkinCatalog* skin = nullptr,
-             bool show_beat_grid = true) const;
+             bool show_beat_grid = true,
+             int32_t highlighted_split_note_id = -1) const;
 
   // Drawn after skinned notes so the highlight sits on top of sprites.
   void paint_overlays(wds::interaction::UiPainter& painter, const EditViewport& viewport,

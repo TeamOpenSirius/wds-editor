@@ -87,8 +87,15 @@ struct GutterLabelHit {
   bool is_start = true;
   // Anchor tick for paint/hit priority (earlier = on top / first to receive input).
   int32_t anchor_tick = 0;
+  // True time Y (grid line). Visual bounds.y may differ after vertical stacking.
+  float anchor_y = 0.0f;
+  // 0 = left column, 1 = right column. Never a third column.
+  int column = 0;
   wds::interaction::Rect bounds{};
 };
+
+// Hit-test pad around a compact chip. Do not use for collision layout.
+wds::interaction::Rect split_label_hot_bounds(const GutterLabelHit& hit);
 
 enum class TimingLabelKind { Bpm, Meter };
 
@@ -148,6 +155,11 @@ std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport,
                                               const wds::interaction::Rect& gutter,
                                               const wds::chart_editor::MusicTiming& timing,
                                               wds::interaction::Vec2 point);
+
+// Next start-chip slot at `tick` after `existing` (two columns, then vertical stack).
+GutterLabelHit split_start_placement(const EditViewport& viewport,
+                                     const wds::interaction::Rect& gutter, int32_t tick,
+                                     const std::vector<GutterLabelHit>& existing);
 
 // Placement-preview band geometry (same as real start / BPM / meter labels).
 wds::interaction::Rect split_start_label_bounds(const EditViewport& viewport,
