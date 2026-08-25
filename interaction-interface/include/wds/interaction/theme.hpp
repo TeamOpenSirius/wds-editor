@@ -40,8 +40,31 @@ inline constexpr float kFontSizeSm = 26.0f;
 inline constexpr float kFontSizeLg = 26.0f;
 inline constexpr float kFontSizeLabelMin = 26.0f;
 inline constexpr float kFontSizeLabelMax = 26.0f;
-inline constexpr float kFontSizeTooltip = 16.0f;
+inline constexpr float kFontSizeTooltip = 13.0f;
 inline constexpr float kFontSizeGutter = 22.0f;
+// Shared tip size for every icon button of a given cell. ~25% of the host
+// (13px in a 52px cell) so long CJK tips wrap at one size instead of shrinking
+// per string. Larger cells (fullscreen / higher window resolution at
+// content-scale 1) still scale the shared size with the host.
+inline constexpr float kTooltipDesignHostPx = 52.0f;
+
+inline float tooltip_px_for_host(float host_min_side) noexcept {
+  const float host = std::max(1.0f, host_min_side);
+  return std::max(kFontSizeTooltip, host * (kFontSizeTooltip / kTooltipDesignHostPx));
+}
+
+// Discrete bake sizes so a resize does not rebuild the atlas every pixel.
+inline float tooltip_bake_bucket(float logical_tip_px) noexcept {
+  static constexpr float kBuckets[] = {16.0f, 20.0f, 26.0f, 32.0f, 40.0f,
+                                       52.0f, 64.0f, 80.0f, 104.0f};
+  const float s = std::clamp(logical_tip_px, kFontSizeTooltip, kBuckets[8]);
+  for (float bucket : kBuckets) {
+    if (s <= bucket + 0.001f) {
+      return bucket;
+    }
+  }
+  return kBuckets[8];
+}
 
 inline constexpr float kControlHeight = 29.0f;
 inline constexpr float kStatusBarHeight = 26.0f;

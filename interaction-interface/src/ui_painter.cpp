@@ -193,6 +193,15 @@ std::string wrap_text_to_width(FontAtlas& font, const std::string& text, float p
   return out;
 }
 
+// One size for every wrap label in the same host rect — scale with the cell,
+// never shrink per string (long tips wrap instead).
+float resolve_wrapped_px(const Rect& bounds, float requested) {
+  if (requested > 0.0f) {
+    return requested;
+  }
+  return theme::tooltip_px_for_host(std::min(bounds.w, bounds.h));
+}
+
 void draw_centered_lines(UiPainter& painter, const Rect& bounds, const std::string& wrapped,
                          const Color& color, float z, float pixel_size) {
   auto& font = FontAtlas::instance();
@@ -381,8 +390,7 @@ void UiPainter::label(const Rect& bounds, const std::string& text, const Color& 
     const float max_w = std::max(1.0f, bounds.w - 4.0f);
 
     if (wrap) {
-      // Fixed tip size — never shrink to fit height; wrap to multiple lines instead.
-      const float tip_px = pixel_size > 0.0f ? pixel_size : theme::kFontSizeTooltip;
+      const float tip_px = resolve_wrapped_px(bounds, pixel_size);
       const std::string wrapped = wrap_text_to_width(font, text, tip_px, max_w);
       if (font.ready()) {
         draw_centered_lines(*this, bounds, wrapped, color, z, tip_px);

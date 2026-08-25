@@ -6,8 +6,10 @@
 #include "wds/interaction/shortcuts.hpp"
 #include "wds/interaction/ui_painter.hpp"
 #include "wds/interaction/widget_root.hpp"
+#include "wds/interaction/theme.hpp"
 #include "wds/interaction/widgets/button.hpp"
 #include "wds/interaction/widgets/checkbox.hpp"
+#include "wds/interaction/widgets/icon_button.hpp"
 #include "wds/interaction/widgets/combo_box.hpp"
 #include "wds/interaction/widgets/dropdown.hpp"
 #include "wds/interaction/widgets/shortcut_field.hpp"
@@ -751,6 +753,76 @@ int main() {
     const auto merged = batch.vertex_count();
     batch.append_from(scratch);
     expect(batch.vertex_count() == merged * 2, "append_from also accumulates");
+  }
+
+  // Icon-button inline tips must grow with the host cell (fullscreen / higher
+  // resolution at content-scale 1). A 3× cell should produce clearly larger glyphs.
+  {
+    auto& font = FontAtlas::instance();
+    bool baked = false;
+#ifdef WDS_REPO_ROOT
+    baked = font.bake_font_file(std::string(WDS_REPO_ROOT) +
+                                    "/ui/assets/fonts/NotoSansSC-Regular.ttf",
+                                64.0f, 16.0f);
+#endif
+    if (!baked) {
+      baked = font.bake_font_file("ui/assets/fonts/NotoSansSC-Regular.ttf", 64.0f, 16.0f);
+    }
+    if (!baked) {
+      baked = font.bake_system_font(64.0f, 16.0f);
+    }
+    if (baked) {
+      font.ensure_glyphs("撤销导入谱面（只读）");
+      wds::renderer::TextureInfo dummy;
+      dummy.id = 1;
+      dummy.width = font.atlas_width();
+      dummy.height = font.atlas_height();
+      font.set_gpu_texture(dummy);
+
+      const auto max_glyph_h = [](const UiPainter& p) {
+        float h = 0.0f;
+        for (const auto& s : p.sprites()) {
+          if (s.font_atlas) h = std::max(h, s.bounds.h);
+        }
+        return h;
+      };
+
+      IconButton small_btn;
+      small_btn.set_tooltip("撤销");
+      small_btn.set_visual_state(WidgetState::Hovered);
+      small_btn.set_bounds({0, 0, 40, 40});
+      UiPainter small_p;
+      small_btn.paint(small_p);
+
+      IconButton large_btn;
+      large_btn.set_tooltip("撤销");
+      large_btn.set_visual_state(WidgetState::Hovered);
+      large_btn.set_bounds({0, 0, 120, 120});
+      UiPainter large_p;
+      large_btn.paint(large_p);
+
+      const float small_h = max_glyph_h(small_p);
+      const float large_h = max_glyph_h(large_p);
+      IconButton long_btn;
+      long_btn.set_tooltip("导入谱面（只读）");
+      long_btn.set_visual_state(WidgetState::Hovered);
+      long_btn.set_bounds({0, 0, 120, 120});
+      UiPainter long_p;
+      long_btn.paint(long_p);
+      expect(max_glyph_h(long_p) > 8.0f, "long icon tip emits glyphs");
+
+      expect(small_h > 8.0f, "small icon tip emits glyphs");
+      expect(large_h > small_h * 1.6f, "icon tip grows with button size");
+      expect(theme::tooltip_px_for_host(40.0f) >= theme::kFontSizeTooltip - 0.01f,
+             "typical cell keeps readable tip floor");
+      expect(theme::tooltip_px_for_host(120.0f) > theme::tooltip_px_for_host(40.0f) * 2.0f,
+             "tooltip_px_for_host tracks host size");
+      expect(theme::tooltip_bake_bucket(18.0f) == 20.0f, "tip bake buckets up");
+      expect(theme::tooltip_bake_bucket(40.0f) == 40.0f, "tip bake bucket exact");
+
+      font.clear_gpu_texture();
+      font.clear();
+    }
   }
 
   return failures == 0 ? 0 : 1;
