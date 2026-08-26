@@ -60,18 +60,24 @@ void SplitLaneSimulator::fill_instance(PreviewSplitLaneInstance& out, const Nota
   const int64_t disappear_ms = std::max<int64_t>(1, sec_to_ms(config_.split_line_animation_end_sec));
 
   if (preview_time_ms < start_ms) {
-    // Official SplitEffect_fadeIn_anim: root localScale.y 0→1 over Show≈1000ms
-    // (ease-out), SpriteRenderer.a stays 1. Pivot at the near/judgeline end so the
-    // ribbon grows tip-ward — percent_start = 1-scale, percent_end = 1. No sprite swap.
+    // Official SplitEffect_fadeIn_anim: LineHight localScale.y 0→1 over Show≈1000ms
+    // (ease-out), SpriteRenderer.a stays 1. Initialize writes scale.y=27 / pos.y=-5
+    // but does not reset rotation. LineHight z=180 → grow from tip [0, scale];
+    // identity → grow from judge [1-scale, 1]. No sprite swap.
     const float t = std::clamp(
         static_cast<float>(preview_time_ms - (start_ms - appear_ms)) /
             static_cast<float>(appear_ms),
         0.0f, 1.0f);
     const float one_minus = 1.0f - t;
     const float scale = 1.0f - one_minus * one_minus;  // ease-out quad ≈ anim outSlope
-    const float p0 = 1.0f - scale;
-    out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/p0, /*percent_end=*/1.0f,
-                        /*cover_alpha=*/p0, /*anim_phase=*/0);
+    const float uncovered = 1.0f - scale;
+    if (split_fade_grows_from_tip(note.scratch_length)) {
+      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/scale,
+                          /*cover_alpha=*/uncovered, /*anim_phase=*/0);
+    } else {
+      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/uncovered, /*percent_end=*/1.0f,
+                          /*cover_alpha=*/uncovered, /*anim_phase=*/0);
+    }
   } else if (preview_time_ms <= visible_end) {
     out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
                         /*cover_alpha=*/0.0f, /*anim_phase=*/1);

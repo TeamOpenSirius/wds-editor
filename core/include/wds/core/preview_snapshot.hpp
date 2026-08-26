@@ -93,10 +93,10 @@ struct PreviewSplitLaneInstance {
   int64_t end_ms = 0;
   int32_t effective_lane_count = 0;
 
-  // Official SplitEffect: fadeIn = scale.y grow (percent_start→0); fadeOut = alpha only.
+  // Official SplitEffect: fadeIn = LineHight scale.y grow; fadeOut = alpha only.
   float split_line_alpha = 1.0f;     // disappear fade (SpriteRenderer.a)
-  float split_percent_start = 0.0f;  // appear: 1-scale → 0; steady/disappear: 0
-  float split_percent_end = 1.0f;
+  float split_percent_start = 0.0f;  // appear: judge-grow 1-scale, tip-grow 0
+  float split_percent_end = 1.0f;    // appear: judge-grow 1, tip-grow scale
   // STAGE_COVER opacity: inverse of split presence (1 before appear, 0 while steady, …).
   float stage_cover_alpha = 1.0f;
   // 0=appear, 1=steady, 2=disappear (texture always base soft line in Light preview).

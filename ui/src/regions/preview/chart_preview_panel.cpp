@@ -1,6 +1,7 @@
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 
 #include "wds/renderer/log.hpp"
+#include "wds/ui/layout/editor_layout.hpp"
 
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
@@ -24,9 +25,17 @@ float ui_font_body_bake_px(float tier) {
   return std::max(logical * std::max(tier, 1.0f), 16.0f);
 }
 
-float ui_font_tip_bake_px(float tier) {
+float ui_font_tip_bake_px(float tier, float logical_tip_px = 0.0f) {
   namespace th = wds::interaction::theme;
-  return std::max(th::kFontSizeTooltip * std::max(tier, 1.0f), 12.0f);
+  const float logical =
+      logical_tip_px > 0.0f ? th::tooltip_bake_bucket(logical_tip_px) : th::kFontSizeTooltip;
+  return std::max(logical * std::max(tier, 1.0f), 12.0f);
+}
+
+float toolbar_tip_logical_px(float left_w_logical) {
+  namespace th = wds::interaction::theme;
+  const float icon = estimate_toolbar_icon_px(left_w_logical);
+  return th::tooltip_px_for_host(std::max(1.0f, icon - th::px(4.0f)));
 }
 
 // Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
@@ -148,14 +157,20 @@ bool ChartPreviewPanel::ensure_ui_font_scale() {
   if (!ready_) return false;
   namespace th = wds::interaction::theme;
   const float tier = th::content_scale_tier();
-  if (std::abs(tier - font_bake_tier_) < 0.001f) {
+  const float scale = std::max(th::ui_content_scale(), 0.01f);
+  const float left_w = static_cast<float>(std::max(panel_fb_w_, 0)) / scale;
+  const float tip_logical = toolbar_tip_logical_px(left_w);
+  const float tip_bucket = th::tooltip_bake_bucket(tip_logical);
+  if (std::abs(tier - font_bake_tier_) < 0.001f &&
+      std::abs(tip_bucket - font_bake_tip_bucket_) < 0.001f) {
     return false;
   }
-  if (!bake_ui_font(ui_font_body_bake_px(tier), ui_font_tip_bake_px(tier),
+  if (!bake_ui_font(ui_font_body_bake_px(tier), ui_font_tip_bake_px(tier, tip_logical),
                     ui_font_mild_sharpen(tier))) {
     return false;
   }
   font_bake_tier_ = tier;
+  font_bake_tip_bucket_ = tip_bucket;
   return true;
 }
 
@@ -203,8 +218,13 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
   ui_font_path_ = ui_font_path;
   namespace th = wds::interaction::theme;
   font_bake_tier_ = th::content_scale_tier();
+  font_bake_tip_bucket_ = 0.0f;
   // Dual body+tip bake at logical×tier so Md and Tooltip each stay near 1:1.
-  if (!bake_ui_font(ui_font_body_bake_px(font_bake_tier_), ui_font_tip_bake_px(font_bake_tier_),
+  // Tip slot follows the current toolbar cell so fullscreen tips stay sharp.
+  const float init_tip = toolbar_tip_logical_px(0.0f);
+  font_bake_tip_bucket_ = th::tooltip_bake_bucket(init_tip);
+  if (!bake_ui_font(ui_font_body_bake_px(font_bake_tier_),
+                    ui_font_tip_bake_px(font_bake_tier_, init_tip),
                     ui_font_mild_sharpen(font_bake_tier_))) {
     std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
   }
@@ -267,6 +287,9 @@ void ChartPreviewPanel::shutdown() {
   transport_.shutdown();
   window_ = nullptr;
   ready_ = false;
+  font_bake_tier_ = 0.0f;
+  font_bake_tip_bucket_ = 0.0f;
+  panel_fb_w_ = 0;
 }
 
 int64_t ChartPreviewPanel::display_frame_lead_us() const noexcept {
@@ -291,6 +314,7 @@ void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) 
 }
 
 void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) noexcept {
+  panel_fb_w_ = std::max(0, width);
   preview_.geometry().set_panel_rect(x, y, width, height);
 }
 

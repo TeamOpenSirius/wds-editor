@@ -55,7 +55,8 @@ struct NotationNote {
   int32_t lane = 0;   // 0-based (official leftLane is 1-based)
   int32_t width = 1;  // official laneLength
   GimmickType gimmick_type = GimmickType::None;
-  // Official scratchLength: flick/scratch span; JumpScratch span; split color.
+  // Official scratchLength: flick/scratch span; JumpScratch span; split
+  // Addressable SplitEffects/{id} (fadeIn growth follows LineHight rotation).
   int32_t scratch_length = 0;
 
   int32_t end_lane() const noexcept { return lane + width - 1; }

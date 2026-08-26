@@ -40,6 +40,37 @@ bool is_one_direction(GimmickType gimmick) noexcept {
   return gimmick == GimmickType::OneDirection;
 }
 
+int32_t split_color_slot(int32_t scratch_length, int32_t split_count,
+                         int32_t world_index) noexcept {
+  const int32_t n = std::max(split_count, 1);
+  const int32_t world = std::clamp(world_index, 0, n);
+  if (split_fade_grows_from_tip(scratch_length)) {
+    return n - world;
+  }
+  return world;
+}
+
+bool split_fade_grows_from_tip(int32_t scratch_length) noexcept {
+  switch (scratch_length) {
+    case 10392:
+    case 10393:
+    case 10518:
+    case 10631:
+    case 11331:
+    case 11511:
+    case 11591:
+    case 11612:
+    case 11614:
+    case 11616:
+    case 11700:
+    case 11792:
+    case 11805:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::pair<int32_t, int32_t> get_scratch_end_lane_range(const NotationNote& note) noexcept {
   // Official scratchLength is a signed span (Sirius ScratchHoldEnd / JumpScratch).
   // scratchLane   = sl >= 0 ? lane : endLane + sl + 1

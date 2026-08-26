@@ -54,9 +54,11 @@ class UiPainter {
                     const Color& tint, float z, float alpha_bottom, float alpha_top);
   void text(const Rect& bounds, const std::string& text, const Color& color, float z,
             float scale = 1.0f);
-  // Centered label. When `wrap` is true, insert line breaks instead of shrinking below a
-  // readable size when the string is wider than `bounds`.
-  // `pixel_size` <= 0 uses theme::kFontSizeMd. `left_align` pins text to the left edge.
+  // Centered label. When `wrap` is true, insert line breaks instead of shrinking
+  // when the string is wider than `bounds`. Unspecified wrap size is shared for
+  // the host rect (theme::tooltip_px_for_host) so every icon-button tip matches.
+  // `pixel_size` <= 0 uses theme::kFontSizeMd (or the wrap host size). `left_align`
+  // pins text to the left edge.
   void label(const Rect& bounds, const std::string& text, const Color& color, float z = 0.91f,
              bool wrap = false, float pixel_size = 0.0f, bool left_align = false);
   Vec2 measure_text(const std::string& text, float scale = 1.0f) const noexcept;

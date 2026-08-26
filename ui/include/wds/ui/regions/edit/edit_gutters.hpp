@@ -29,9 +29,17 @@ bool split_track_for_lane(int32_t split_count, int32_t lane_count, int32_t probe
 
 wds::interaction::Color split_color_for_id(int32_t color_id) noexcept;
 
-// Per-line tint for multi-suffix color ids (falls back to split_color_for_id).
-wds::interaction::Color split_slot_color(int32_t color_id, int32_t line_slot,
+// Official LineColor for a left-to-right world slot. Z=180 IDs are mirrored.
+// Transparent official slots stay a=0 (never hashed).
+wds::interaction::Color split_slot_color(int32_t color_id, int32_t world_index,
+                                         int32_t split_count,
                                          const wds::renderer::SkinCatalog* skin) noexcept;
+
+// Official Initialize RGB×settings/100. Fade stays on sprite alpha separately.
+void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept;
+
+// Official 1.96.0 SplitEffects IDs for the picker (no PNG / hardcoded fallback).
+std::vector<int32_t> split_picker_color_ids();
 
 // Split coverage for default-lane-guide hiding. Fade windows are wall-clock
 // seconds (PreviewConfig), never BPM/subdivision ticks — edit and official share
@@ -79,8 +87,15 @@ struct GutterLabelHit {
   bool is_start = true;
   // Anchor tick for paint/hit priority (earlier = on top / first to receive input).
   int32_t anchor_tick = 0;
+  // True time Y (grid line). Visual bounds.y may differ after vertical stacking.
+  float anchor_y = 0.0f;
+  // 0 = left column, 1 = right column. Never a third column.
+  int column = 0;
   wds::interaction::Rect bounds{};
 };
+
+// Hit-test pad around a compact chip. Do not use for collision layout.
+wds::interaction::Rect split_label_hot_bounds(const GutterLabelHit& hit);
 
 enum class TimingLabelKind { Bpm, Meter };
 
@@ -140,6 +155,11 @@ std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport,
                                               const wds::interaction::Rect& gutter,
                                               const wds::chart_editor::MusicTiming& timing,
                                               wds::interaction::Vec2 point);
+
+// Next start-chip slot at `tick` after `existing` (two columns, then vertical stack).
+GutterLabelHit split_start_placement(const EditViewport& viewport,
+                                     const wds::interaction::Rect& gutter, int32_t tick,
+                                     const std::vector<GutterLabelHit>& existing);
 
 // Placement-preview band geometry (same as real start / BPM / meter labels).
 wds::interaction::Rect split_start_label_bounds(const EditViewport& viewport,

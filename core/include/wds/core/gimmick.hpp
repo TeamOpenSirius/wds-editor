@@ -23,6 +23,18 @@ SplitLaneType get_split_lane_type(GimmickType gimmick) noexcept;
 bool is_jump_scratch(GimmickType gimmick) noexcept;
 bool is_one_direction(GimmickType gimmick) noexcept;
 
+// Official SplitEffects/{id} fadeIn grows LineHight.localScale.y 0→1 (shared clip).
+// Initialize does not reset LineHight rotation. Prefabs whose LineHight is
+// rotated 180° about Z grow from the tip (preview percent 0); identity grows
+// from the judge line (percent 1). Client 1.96.0 is frozen — these IDs are the
+// complete z=180 set. Not gimmickType, not scratch_length % 2.
+bool split_fade_grows_from_tip(int32_t scratch_length) noexcept;
+
+// Official Line[i] index for a left-to-right world slot (0 = leftmost).
+// LineHight z=180 flips world X, so world_index maps to split_count - world_index.
+int32_t split_color_slot(int32_t scratch_length, int32_t split_count,
+                         int32_t world_index) noexcept;
+
 // Sirius ScratchHoldEnd / JumpScratch end span from scratchLength (signed):
 //   sl == 0 → [lane, endLane] (bidirectional arrows)
 //   sl > 0  → [lane, lane+sl-1] (right arrows)

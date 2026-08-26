@@ -51,8 +51,8 @@ struct PreviewVisualConfig {
   // Official SplitEffect Show≈1000ms / Hide≈500ms (Light: lines only, no particles).
   float split_line_animation_start = 1.0f;
   float split_line_animation_end = 0.5f;
-  // Low enough that the judgeline reads clearly through the beam (official look).
-  float split_line_opacity = 0.40f;
+  // Official Initialize: RGB *= settings/100. GameSettings default is 100.
+  float split_line_opacity = 1.00f;
   // Mild additive body glow so overlaps with the judgeline brighten (beam, not matte).
   float split_line_body_glow = 0.18f;
   // Traveling semi-transparent band (SplitEffect_all SplitLine particle streak).

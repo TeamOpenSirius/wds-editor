@@ -97,6 +97,8 @@ class ChartPreviewPanel {
   std::string ui_font_path_;
   GLFWwindow* window_ = nullptr;
   float font_bake_tier_ = 0.0f;
+  float font_bake_tip_bucket_ = 0.0f;
+  int panel_fb_w_ = 0;
   int content_x_ = 0;
   int content_y_ = 0;
   int content_width_ = 0;

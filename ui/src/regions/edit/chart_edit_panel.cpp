@@ -494,6 +494,7 @@ void ChartEditPanel::hide_placement_ghost() {
   if (mode_ == Mode::PlaceHoldBody) return;
   ghost_.visible = false;
   hide_gutter_ghost();
+  clear_split_label_hover();
 }
 
 void ChartEditPanel::on_hover_leave() {
@@ -506,23 +507,54 @@ void ChartEditPanel::on_hover_leave() {
 
 void ChartEditPanel::hide_gutter_ghost() { gutter_ghosts_.clear(); }
 
+void ChartEditPanel::clear_split_label_hover() {
+  if (mode_ == Mode::DragSplitEdge) return;
+  hovered_split_note_id_ = -1;
+  hovered_split_is_end_ = false;
+}
+
+void ChartEditPanel::update_split_label_hover(wds::interaction::Vec2 point) {
+  hovered_split_note_id_ = -1;
+  hovered_split_is_end_ = false;
+  if (mode_ == Mode::DragSplitEdge) return;
+  if (has_modal_popup()) return;
+  if (!left_gutter_.contains(point)) return;
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  for (const auto& hit : hits) {
+    if (!split_label_hot_bounds(hit).contains(point)) continue;
+    hovered_split_note_id_ = hit.note_id;
+    hovered_split_is_end_ = !hit.is_start;
+    return;
+  }
+}
+
+int32_t ChartEditPanel::active_split_highlight_id() const noexcept {
+  if (mode_ == Mode::DragSplitEdge && drag_split_note_id_ >= 0) return drag_split_note_id_;
+  return hovered_split_note_id_;
+}
+
+bool ChartEditPanel::active_split_highlight_is_end() const noexcept {
+  if (mode_ == Mode::DragSplitEdge && drag_split_note_id_ >= 0) return drag_split_is_end_;
+  return hovered_split_is_end_;
+}
+
 void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
   hide_gutter_ghost();
+  update_split_label_hover(point);
   if (!engine_.is_editable() || has_modal_popup()) return;
   // Only while hovering idle — active place gestures keep the note ghost.
   if (mode_ != Mode::Idle) return;
 
   if (left_gutter_.contains(point)) {
+    if (hovered_split_note_id_ >= 0) return;  // glowing label owns the gutter
     const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
     for (const auto& hit : hits) {
-      if (hit.bounds.contains(point)) return;  // existing label → edit, no add ghost
+      if (split_label_hot_bounds(hit).contains(point)) return;  // existing label → edit, no add ghost
     }
     const int32_t tick = viewport_.tick_at(point.y);
-    for (const auto& hit : hits) {
-      if (hit.is_start && hit.anchor_tick == tick) return;
-    }
+    const auto placed = split_start_placement(viewport_, left_gutter_, tick, hits);
     gutter_ghosts_.push_back(
-        {split_start_label_bounds(viewport_, left_gutter_, tick), kSplitLabelGhostColor});
+        {placed.bounds, kSplitLabelGhostColor, placed.anchor_y, true, true, placed.column});
     return;
   }
 
@@ -545,6 +577,7 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
 }
 
 void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
+  update_split_label_hover(point);
   if (!engine_.is_editable()) {
     ghost_.visible = false;
     hide_gutter_ghost();
@@ -563,6 +596,7 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
     pointer_over_edit_ = false;
     ghost_.visible = false;
     hide_gutter_ghost();
+    clear_split_label_hover();
     return;
   }
   if (mode_ == Mode::Idle) {
@@ -2151,7 +2185,7 @@ void ChartEditPanel::paint(wds::interaction::UiPainter& painter) const {
   paint_gutters(painter);
   renderer_.paint(painter, viewport_, timing, engine_.document().notes(),
                   engine_.preview_config(), selected_, std::nullopt, {}, std::nullopt, skin_,
-                  show_timing_grid);
+                  show_timing_grid, active_split_highlight_id());
   // Modals are painted last via paint_popups() from UiManager (above skins).
 }
 
@@ -2225,9 +2259,7 @@ void ChartEditPanel::layout_popup_rects() const {
   // Cap matches prior Mac Retina look (84–128 fb @ 2× ≈ 42–64 logical).
   split_color_row_h_ = std::clamp(list_h / 3.2f, th::px(42.0f), th::px(64.0f));
   split_color_buttons_.clear();
-  std::vector<int32_t> colors;
-  if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-  if (colors.empty()) colors = {1, 1010, 10170, 1060};
+  std::vector<int32_t> colors = split_picker_color_ids();
   const float cell_w =
       (split_picker_bounds_.w - pad * 2.0f - col_gap * static_cast<float>(kSplitColorCols - 1)) /
       static_cast<float>(kSplitColorCols);
@@ -2326,9 +2358,7 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
                    section_h},
                   "分割线外观", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
 
-    std::vector<int32_t> colors;
-    if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-    if (colors.empty()) colors = {1, 1010, 10170, 1060};
+    std::vector<int32_t> colors = split_picker_color_ids();
     const float scroll = std::clamp(split_color_scroll_, 0.0f, split_color_max_scroll_);
     const int first_row = std::max(0, static_cast<int>(scroll / split_color_row_h_));
     for (size_t i = 0; i < split_color_buttons_.size(); ++i) {
@@ -2442,9 +2472,7 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
 
 void ChartEditPanel::scroll_split_picker_to_color(int32_t color_id) {
   layout_popup_rects();
-  std::vector<int32_t> colors;
-  if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-  if (colors.empty()) colors = {1, 1010, 10170, 1060};
+  std::vector<int32_t> colors = split_picker_color_ids();
   int idx = -1;
   for (size_t i = 0; i < colors.size(); ++i) {
     if (colors[i] == color_id) {
@@ -2688,9 +2716,7 @@ bool ChartEditPanel::handle_popup_pointer_down(const wds::interaction::PointerDo
         return true;
       }
     }
-    std::vector<int32_t> colors;
-    if (skin_ != nullptr) colors = skin_->split_lines.catalog_color_ids();
-    if (colors.empty()) colors = {1, 1010, 10170, 1060};
+    std::vector<int32_t> colors = split_picker_color_ids();
     for (size_t i = 0; i < split_color_buttons_.size(); ++i) {
       if (!split_color_buttons_[i].contains(event.position)) continue;
       const float scroll = std::clamp(split_color_scroll_, 0.0f, split_color_max_scroll_);
@@ -2742,7 +2768,7 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
   sync_viewport();
   const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
   for (const auto& hit : hits) {
-    if (!hit.bounds.contains(event.position)) continue;
+    if (!split_label_hot_bounds(hit).contains(event.position)) continue;
     if (event.button == wds::interaction::PointerButton::Middle) {
       delete_split_note(hit.note_id);
       return true;
@@ -2768,13 +2794,6 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
   if (event.button == wds::interaction::PointerButton::Middle) return true;
   if (wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
     const int32_t tick = viewport_.tick_at(event.position.y);
-    // Prefer editing an existing start label at this tick over adding another.
-    for (const auto& hit : hits) {
-      if (hit.is_start && hit.anchor_tick == tick) {
-        open_split_picker_for_edit(hit.note_id);
-        return true;
-      }
-    }
     open_split_picker(tick);
     return true;
   }
@@ -2833,26 +2852,69 @@ void ChartEditPanel::paint_overlays(wds::interaction::UiPainter& painter) const 
     marquee = marquee_screen_rect(pointer_);
   }
   renderer_.paint_overlays(painter, viewport_, engine_.document().notes(), selected_, marquee);
-  // Split endpoint labels above skinned notes so numbering stays visible.
+  // Compact split chips above skinned notes. Color ID only on hover/drag.
   // Hits are time-ascending; paint reverse so earlier labels stay on top.
-  // (Bands+text live only here — paint_split_gutter draws bg/grid only.)
   namespace th = wds::interaction::theme;
-  const float label_px = th::kFontSizeGutter;
   const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const int32_t highlight_id = active_split_highlight_id();
+  const bool highlight_is_end = active_split_highlight_is_end();
+  const GutterLabelHit* active_hit = nullptr;
+  auto paint_leader = [&](const wds::interaction::Rect& bounds, float anchor_y, bool is_start,
+                          int column, const wds::interaction::Color& c, float z) {
+    const float natural_y =
+        is_start ? anchor_y - bounds.h - th::px(1.0f) : anchor_y + th::px(1.0f);
+    if (std::abs(bounds.y - natural_y) <= 0.5f) return;
+    const float line_w = th::px(2.0f);
+    const float inner_x = column == 0 ? bounds.right() : bounds.x;
+    const float leader_x = column == 0 ? bounds.right() + line_w * 0.5f : bounds.x - line_w * 0.5f;
+    const float connect_y = is_start ? bounds.bottom() - 0.5f : bounds.y + 0.5f;
+    const float hx = std::min(inner_x, leader_x);
+    const float hw = std::max(line_w, std::abs(leader_x - inner_x));
+    painter.fill_rect({hx, connect_y - line_w * 0.5f, hw, line_w}, c, 0.0f, z);
+    const float top = std::min(connect_y, anchor_y);
+    const float line_h = std::abs(anchor_y - connect_y);
+    if (line_h > 0.5f) {
+      painter.fill_rect({leader_x - line_w * 0.5f, top, line_w, line_h}, c, 0.0f, z);
+    }
+  };
   for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
     const auto& hit = *it;
     auto note = engine_.document().find_note(hit.note_id);
     if (!note) continue;
+    const bool active = hit.note_id == highlight_id && hit.is_start == !highlight_is_end;
+    if (active) active_hit = &hit;
     const wds::interaction::Color c =
         hit.is_start ? wds::interaction::Color{0.22f, 0.48f, 0.95f, 1.0f}
                      : wds::interaction::Color{0.92f, 0.28f, 0.28f, 1.0f};
-    painter.fill_rect(hit.bounds, c, th::kCornerRadiusSm, 0.978f);
+    paint_leader(hit.bounds, hit.anchor_y, hit.is_start, hit.column, c, 0.977f);
+    if (active) {
+      painter.fill_rect(hit.bounds.inset(-th::px(1.0f), -th::px(1.0f)),
+                        {1.0f, 1.0f, 1.0f, 0.92f}, th::kCornerRadiusSm, 0.978f);
+    }
+    painter.fill_rect(hit.bounds, c, th::kCornerRadiusSm, 0.979f);
     painter.fill_rect(hit.bounds.inset(th::px(0.5f), th::px(0.5f)), {0.08f, 0.08f, 0.10f, 0.40f},
-                      th::px(1.0f), 0.979f);
-    painter.label(hit.bounds, std::to_string(note->scratch_length), {1.0f, 1.0f, 1.0f, 1.0f},
-                  0.98f, false, label_px);
+                      th::px(1.0f), 0.98f);
+  }
+  if (active_hit) {
+    if (auto note = engine_.document().find_note(active_hit->note_id)) {
+      const std::string id_text = std::to_string(note->scratch_length);
+      const float card_px = th::kFontSizeGutter;
+      const float card_h = th::px(26.0f);
+      const float card_w = std::max(th::px(56.0f), card_px * 0.62f * static_cast<float>(id_text.size()) +
+                                                       th::px(10.0f));
+      float card_y = active_hit->bounds.y + (active_hit->bounds.h - card_h) * 0.5f;
+      card_y = std::clamp(card_y, playfield_.y, std::max(playfield_.y, playfield_.bottom() - card_h));
+      const wds::interaction::Rect card{playfield_.x + th::px(2.0f), card_y, card_w, card_h};
+      painter.fill_rect(card, {0.10f, 0.11f, 0.14f, 0.94f}, th::kCornerRadiusMd, 0.982f);
+      painter.fill_rect(card.inset(th::px(0.5f), th::px(0.5f)), {0.22f, 0.24f, 0.28f, 0.9f},
+                        th::kCornerRadiusSm, 0.983f);
+      painter.label(card, id_text, {1.0f, 1.0f, 1.0f, 1.0f}, 0.984f, false, card_px);
+    }
   }
   for (const auto& ghost : gutter_ghosts_) {
+    if (ghost.draw_leader) {
+      paint_leader(ghost.bounds, ghost.anchor_y, ghost.is_start, ghost.column, ghost.color, 0.976f);
+    }
     painter.fill_rect(ghost.bounds, ghost.color, th::kCornerRadiusSm, 0.977f);
   }
 }
@@ -4272,6 +4334,7 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     drag_split_note_id_ = -1;
     split_edge_ever_moved_ = false;
     mode_ = Mode::Idle;
+    update_split_label_hover(event.position);
     if (!ever_moved && wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
       open_split_picker_for_edit(note_id);
     }

@@ -1,5 +1,6 @@
 #include <wds/chart_render/split_line_skins.hpp>
 
+#include <wds/chart_render/split_line_official_colors.hpp>
 #include <wds/chart_render/split_soft_profile.hpp>
 #include <wds/common/utf8_path.hpp>
 #include <wds/renderer/texture.hpp>
@@ -27,14 +28,6 @@ constexpr const char* kBasePrefix = "Sirius Split Line _";
 constexpr const char* kT1Prefix = "Sirius Split Line Transform 1 _";
 constexpr const char* kT2Prefix = "Sirius Split Line Transform 2 _";
 
-bool is_pure_numeric_suffix(const std::string& s) {
-  if (s.empty()) return false;
-  for (char c : s) {
-    if (c < '0' || c > '9') return false;
-  }
-  return true;
-}
-
 bool parse_split_suffix(const std::string& filename, const char* prefix, std::string& out_suffix) {
   const std::string pref(prefix);
   if (filename.size() <= pref.size() + 4) {
@@ -50,32 +43,15 @@ bool parse_split_suffix(const std::string& filename, const char* prefix, std::st
   return !out_suffix.empty();
 }
 
-void sample_center_rgb(const std::vector<unsigned char>& px, int w, int h, float& r, float& g,
-                       float& b) {
-  const int sx = std::max(0, w / 2);
-  const int sy = std::max(0, h / 2);
-  const unsigned char* src =
-      px.data() + (static_cast<size_t>(sy) * static_cast<size_t>(w) + static_cast<size_t>(sx)) * 4u;
-  r = static_cast<float>(src[0]) / 255.0f;
-  g = static_cast<float>(src[1]) / 255.0f;
-  b = static_cast<float>(src[2]) / 255.0f;
-}
-
-bool nearly_white(float r, float g, float b) {
-  return r > 0.92f && g > 0.92f && b > 0.92f;
-}
-
 // Official ribbons are soft-edged white sprites tinted by LineColor. Expand thin /
-// already-narrow sources with the official horizontal AA profile.
-bool queue_split_skin(TextureCache& cache, const std::string& path, std::string& out_key,
-                      float& out_r, float& out_g, float& out_b) {
+// already-narrow sources with the official horizontal AA profile. PNG RGB is discarded.
+bool queue_split_skin(TextureCache& cache, const std::string& path, std::string& out_key) {
   std::vector<unsigned char> px;
   int w = 0;
   int h = 0;
   if (!load_png_rgba8(path, px, w, h) || w <= 0 || h <= 0) {
     return false;
   }
-  sample_center_rgb(px, w, h, out_r, out_g, out_b);
 
   // Re-soft even 8px plates: stock 8-tap has an opaque core; preview wants a glow beam.
   constexpr int kSoftW = kSplitSoftPlateW;
@@ -91,11 +67,7 @@ bool queue_split_skin(TextureCache& cache, const std::string& path, std::string&
       unsigned char* d =
           soft.data() +
           (static_cast<size_t>(y) * static_cast<size_t>(kSoftW) + static_cast<size_t>(x)) * 4u;
-      d[0] = src[0];
-      d[1] = src[1];
-      d[2] = src[2];
-      d[3] = static_cast<unsigned char>(
-          std::clamp(sa * edge, 0.0f, 1.0f) * 255.0f + 0.5f);
+      write_white_soft_texel(d, sa * edge);
     }
   }
   const std::string key = path + "##soft48g";
@@ -112,7 +84,6 @@ void SplitLineSkinBank::queue_all(TextureCache& cache, const std::string& skins_
   path_base_.clear();
   path_t1_.clear();
   path_t2_.clear();
-  suffix_rgb_.clear();
   suffix_exists_.clear();
 
   if (!is_directory_utf8(skins_directory)) {
@@ -171,18 +142,9 @@ void SplitLineSkinBank::queue_all(TextureCache& cache, const std::string& skins_
         continue;
       }
       std::string key;
-      float sr = 1.0f;
-      float sg = 1.0f;
-      float sb = 1.0f;
-      if (queue_split_skin(cache, path, key, sr, sg, sb)) {
+      if (queue_split_skin(cache, path, key)) {
         *dest = key;
         suffix_exists_[suffix] = true;
-        // Prefer saturated LineColor from colored Sirius skins; white plates do not overwrite.
-        if (!nearly_white(sr, sg, sb)) {
-          suffix_rgb_[suffix] = {sr, sg, sb};
-        } else if (suffix_rgb_.count(suffix) == 0) {
-          suffix_rgb_[suffix] = {sr, sg, sb};
-        }
       }
     }
   };
@@ -210,11 +172,6 @@ void SplitLineSkinBank::bind_after_bake(TextureCache& cache, const std::string& 
     }
     if (const auto it = path_t2_.find(suffix); it != path_t2_.end()) {
       v.transform2 = cache.get(it->second);
-    }
-    if (const auto it = suffix_rgb_.find(suffix); it != suffix_rgb_.end()) {
-      v.r = it->second[0];
-      v.g = it->second[1];
-      v.b = it->second[2];
     }
     if (v.base || v.transform1 || v.transform2) {
       by_suffix_.emplace(suffix, v);
@@ -282,20 +239,7 @@ const SplitLineVariant* SplitLineSkinBank::variant_for_suffix(
 }
 
 std::vector<int32_t> SplitLineSkinBank::catalog_color_ids() const {
-  std::vector<int32_t> out;
-  out.reserve(std::size(kSplitColorOverrides) + suffix_exists_.size());
-  for (const auto& entry : kSplitColorOverrides) {
-    out.push_back(entry.color_id);
-  }
-  for (const auto& [suffix, exists] : suffix_exists_) {
-    if (!exists || !is_pure_numeric_suffix(suffix)) continue;
-    const int32_t id = std::stoi(suffix);
-    if (std::find(out.begin(), out.end(), id) == out.end()) {
-      out.push_back(id);
-    }
-  }
-  std::sort(out.begin(), out.end());
-  return out;
+  return wds::chart_render::official_split_color_ids();
 }
 
 const TextureInfo* SplitLineSkinBank::texture_for(int32_t color_id, int32_t line_slot,
@@ -315,20 +259,13 @@ const TextureInfo* SplitLineSkinBank::texture_for(int32_t color_id, int32_t line
 
 bool SplitLineSkinBank::color_for(int32_t color_id, int32_t line_slot, float& r, float& g,
                                   float& b) const {
-  const std::vector<std::string> suffixes = resolve_suffixes(color_id);
-  if (suffixes.empty()) {
-    return false;
-  }
-  const size_t idx =
-      static_cast<size_t>(line_slot < 0 ? 0 : line_slot) % suffixes.size();
-  const SplitLineVariant* variant = variant_for_suffix(suffixes[idx]);
-  if (variant == nullptr) {
-    return false;
-  }
-  r = variant->r;
-  g = variant->g;
-  b = variant->b;
-  return true;
+  float a = 1.0f;
+  return color_for(color_id, line_slot, r, g, b, a);
+}
+
+bool SplitLineSkinBank::color_for(int32_t color_id, int32_t line_slot, float& r, float& g, float& b,
+                                  float& a) const {
+  return wds::chart_render::official_split_line_color(color_id, line_slot, r, g, b, a);
 }
 
 std::vector<std::string> SplitLineSkinBank::suffixes_for(int32_t color_id) const {

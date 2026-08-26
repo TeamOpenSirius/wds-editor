@@ -252,6 +252,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool delete_split_note(int32_t note_id);
   void update_gutter_ghost(wds::interaction::Vec2 point);
   void hide_gutter_ghost();
+  void update_split_label_hover(wds::interaction::Vec2 point);
+  void clear_split_label_hover();
+  int32_t active_split_highlight_id() const noexcept;
+  bool active_split_highlight_is_end() const noexcept;
   void layout_popup_rects() const;
   wds::interaction::Rect overlay_host_bounds() const;
 
@@ -309,6 +313,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   int32_t drag_split_note_id_ = -1;
   bool drag_split_is_end_ = false;
+  int32_t hovered_split_note_id_ = -1;
+  bool hovered_split_is_end_ = false;
   // Pointer's snapped tick at press. The label sits off the grid line, so the
   // press tick may differ from the note; do not snap until this tick changes
   // (mouse move or wheel). True click = the note never left its original ticks.
@@ -319,6 +325,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   struct GutterGhost {
     wds::interaction::Rect bounds{};
     wds::interaction::Color color{};
+    float anchor_y = 0.0f;
+    bool is_start = true;
+    bool draw_leader = false;
+    int column = 0;
   };
   std::vector<GutterGhost> gutter_ghosts_{};
 
