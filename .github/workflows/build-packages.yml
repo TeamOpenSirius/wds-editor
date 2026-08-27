@@ -77,12 +77,13 @@ jobs:
         run: ./scripts/build-target.sh win-x86_64
 
       - name: Upload MSI
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v6
         with:
           name: wds-win-x86_64
           path: dist/wds-win-x86_64.msi
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
   macos-arm:
     name: macos-arm
@@ -111,12 +112,13 @@ jobs:
           ./scripts/build-target.sh macos-arm
 
       - name: Upload DMG
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v6
         with:
           name: wds-macos-arm
           path: dist/wds-macos-arm.dmg
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
   release:
     name: Publish GitHub Release
