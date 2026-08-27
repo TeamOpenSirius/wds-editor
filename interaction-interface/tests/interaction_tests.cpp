@@ -186,6 +186,55 @@ int main() {
     }
   }
 
+  {
+    // Retina: bake sizes are framebuffer px (logical × scale), but draw sizes are
+    // logical. pick_slot must compare them in the same space or body text (26)
+    // binds the tip atlas (26) and NEAREST-upscales 2×.
+    auto& font = FontAtlas::instance();
+    auto try_bake = [&](float body, float tip) {
+      bool baked = false;
+#ifdef WDS_REPO_ROOT
+      baked = font.bake_font_file(std::string(WDS_REPO_ROOT) +
+                                      "/ui/assets/fonts/NotoSansSC-Regular.ttf",
+                                  body, tip);
+#endif
+      if (!baked) {
+        baked = font.bake_font_file("ui/assets/fonts/NotoSansSC-Regular.ttf", body, tip);
+      }
+      if (!baked) {
+        baked = font.bake_system_font(body, tip);
+      }
+      return baked;
+    };
+    const float previous_scale = theme::ui_content_scale();
+    theme::apply_content_scale(2.0f);
+    const auto atlas_span = [](const FontAtlas& f, const std::vector<FontAtlas::GlyphQuad>& quads) {
+      if (quads.empty() || f.atlas_width() <= 0) return 0.0f;
+      return std::fabs(quads[0].u1 - quads[0].u0) * static_cast<float>(f.atlas_width());
+    };
+    std::vector<FontAtlas::GlyphQuad> body_only;
+    std::vector<FontAtlas::GlyphQuad> dual;
+    float span_body = 0.0f;
+    bool ok = try_bake(52.0f, 0.0f);
+    if (ok) {
+      font.ensure_glyphs("W");
+      font.build_quads("W", 0.0f, 0.0f, 26.0f, body_only);
+      span_body = atlas_span(font, body_only);
+      ok = try_bake(52.0f, 26.0f);
+    }
+    if (ok) {
+      font.ensure_glyphs("W");
+      font.build_quads("W", 0.0f, 0.0f, 26.0f, dual);
+      const float span_dual = atlas_span(font, dual);
+      expect(span_body > 8.0f, "retina body-only W has atlas width");
+      expect(span_dual > 8.0f, "retina dual W has atlas width");
+      expect(std::fabs(span_dual - span_body) < 2.0f,
+             "retina Md (26 logical) uses body atlas not tip");
+      font.clear();
+    }
+    theme::apply_content_scale(previous_scale);
+  }
+
   Checkbox checkbox("Mute");
   checkbox.set_bounds({0, 0, 100, 24});
   checkbox.on_click(ClickEvent{{5, 5}, PointerButton::Left, {}, 1});

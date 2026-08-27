@@ -510,12 +510,12 @@ namespace {
 
 bool same_chain_tick(int32_t a, int32_t b) noexcept { return a == b; }
 
-// Prev's JumpScratch must cover the union of both bodies (may be wider on one side).
+// Prev's JumpScratch must be exactly the union of both bodies (not merely contain it).
 bool scratch_chain_lanes_connected(const NotationNote& prev, const NotationNote& next) noexcept {
   const int32_t union_left = std::min(prev.lane, next.lane);
   const int32_t union_right = std::max(prev.end_lane(), next.end_lane());
   const auto [cover_lo, cover_hi] = get_scratch_end_lane_range(prev);
-  return cover_lo <= union_left && cover_hi >= union_right;
+  return cover_lo == union_left && cover_hi == union_right;
 }
 
 }  // namespace
@@ -545,7 +545,7 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
     if (note.id == body.id || !is_scratch_hold_body(note.note_type)) continue;
     if (!same_chain_tick(note.end_tick, body.start_tick)) continue;
     // Prev may have its own head (first segment of a chain). Connection is decided
-    // by time abutment + JumpScratch cover containing both bodies.
+    // by time abutment + JumpScratch cover exactly matching both bodies.
     if (!scratch_chain_lanes_connected(note, body)) continue;
     return note;
   }

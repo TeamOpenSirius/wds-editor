@@ -1954,6 +1954,24 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   CHECK_EQ(legacy.document().timing().offset_ms, 0);
 }
 
+void test_selection_drag_snaps_only_anchor_tick() {
+  EditGridConfig grid;
+  CHECK_EQ(subdivision_tick_step(grid), 120);
+  const int32_t anchor = 100;
+  const int32_t follower = 250;
+  const int32_t pointer_delta = 120;
+  const int32_t delta = selection_drag_tick_delta(anchor, pointer_delta, grid);
+  const int32_t anchor_new = anchor + delta;
+  const int32_t follower_new = follower + delta;
+  CHECK_EQ(anchor_new, snap_tick(static_cast<float>(anchor), grid) + pointer_delta);
+  CHECK_EQ(follower_new - anchor_new, follower - anchor);
+  // Snapping every note independently would change the follower's offset.
+  const int32_t snapped_both_offset =
+      (snap_tick(static_cast<float>(follower), grid) + pointer_delta) -
+      (snap_tick(static_cast<float>(anchor), grid) + pointer_delta);
+  CHECK_NE(snapped_both_offset, follower - anchor);
+}
+
 void test_edit_grid_and_note_operations() {
   EditGridConfig grid;
   CHECK_EQ(round_to_int_tick(2.5f), 3);
@@ -2606,6 +2624,102 @@ void test_snap_scratch_chain_next_lane_splits_illegal_zone() {
   CHECK_EQ(snap_scratch_chain_next_lane(prev, 2, 3.0f, 12), 3);
 }
 
+void test_snap_scratch_hold_segment_lane_avoids_both_side_cover() {
+  auto make_body = [](int32_t lane, int32_t width) {
+    NotationNote n = make_tap(0, lane);
+    n.width = width;
+    n.end_tick = 480;
+    n.note_type = NoteType::ScratchHold;
+    return n;
+  };
+
+  // Prev [3-4], body width 4: illegal open interval (1, 3) → lane 2 hangs both sides.
+  NotationNote prev = make_body(3, 2);
+  NotationNote body = make_body(0, 4);
+  CHECK_EQ(snap_scratch_hold_segment_lane(&prev, body, nullptr, 2.0f, 12), 1);
+  body.lane = 5;
+  CHECK_EQ(snap_scratch_hold_segment_lane(&prev, body, nullptr, 2.0f, 12), 3);
+  body.lane = 1;
+  CHECK_EQ(snap_scratch_hold_segment_lane(&prev, body, nullptr, 1.0f, 12), 1);
+  CHECK_EQ(snap_scratch_hold_segment_lane(&prev, body, nullptr, 3.0f, 12), 3);
+
+  // Next [6-9] width 4, body width 2: nested at lane 7 (both-side hang on THIS).
+  NotationNote next = make_body(6, 4);
+  body = make_body(2, 2);
+  CHECK_EQ(snap_scratch_hold_segment_lane(nullptr, body, &next, 7.0f, 12), 6);
+  body.lane = 10;
+  CHECK_EQ(snap_scratch_hold_segment_lane(nullptr, body, &next, 7.0f, 12), 8);
+  body.lane = 6;
+  CHECK_EQ(snap_scratch_hold_segment_lane(nullptr, body, &next, 6.0f, 12), 6);
+
+  // Terminal JS overhang 8-11 on body 8-9: cannot shift right on a 12-lane field.
+  NotationNote last = make_body(8, 2);
+  set_scratch_hold_end_lanes(last, 8, 11);
+  CHECK_EQ(snap_scratch_hold_segment_lane(nullptr, last, nullptr, 9.0f, 12), 8);
+  CHECK_EQ(snap_scratch_hold_segment_lane(nullptr, last, nullptr, 7.0f, 12), 7);
+}
+
+void test_sync_scratch_chain_joint_exact_union() {
+  NotationNote prev = make_tap(0, 2);
+  prev.width = 2;
+  prev.end_tick = 480;
+  prev.note_type = NoteType::ScratchHold;
+  prev.scratch_length = 0;
+
+  NotationNote next = make_tap(480, 4);
+  next.width = 2;
+  next.end_tick = 960;
+  next.note_type = NoteType::ScratchHold;
+
+  sync_scratch_chain_joint(prev, next);
+  const auto cover = get_scratch_end_lane_range(prev);
+  CHECK_EQ(cover.first, 2);
+  CHECK_EQ(cover.second, 5);
+  CHECK(prev.scratch_length > 0);
+
+  next.lane = 2;
+  next.width = 2;
+  sync_scratch_chain_joint(prev, next);
+  const auto same = get_scratch_end_lane_range(prev);
+  CHECK_EQ(same.first, 2);
+  CHECK_EQ(same.second, 3);
+}
+
+void test_scratch_hold_segment_horizontal_move_keeps_chain() {
+  ChartDocument doc;
+  NotationNote first = make_tap(0, 2);
+  first.id = 1;
+  first.width = 2;
+  first.end_tick = 480;
+  first.note_type = NoteType::ScratchHold;
+  NotationNote second = make_tap(480, 4);
+  second.id = 2;
+  second.width = 2;
+  second.end_tick = 960;
+  second.note_type = NoteType::ScratchHold;
+  sync_scratch_chain_joint(first, second);
+  CHECK_EQ(doc.add_note(first), 1);
+  CHECK_EQ(doc.add_note(second), 2);
+  CHECK(chained_next_scratch_hold(doc, *doc.find_note(1)).has_value());
+
+  NotationNote moved = *doc.find_note(2);
+  const auto prev = doc.find_note(1);
+  CHECK(prev.has_value());
+  const int32_t lane =
+      snap_scratch_hold_segment_lane(prev ? &*prev : nullptr, moved, nullptr, 6.0f, 12);
+  moved.lane = lane;
+  NotationNote joint = *prev;
+  sync_scratch_chain_joint(joint, moved);
+  CHECK(doc.update_note(1, joint));
+  CHECK(doc.update_note(2, moved));
+  const auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+  CHECK(next.has_value());
+  if (next) CHECK_EQ(next->id, 2);
+  const auto cover = get_scratch_end_lane_range(*doc.find_note(1));
+  CHECK_EQ(cover.first, 2);
+  CHECK_EQ(cover.second, moved.end_lane());
+}
+
 void test_scratch_hold_jump_scratch_stays_in_lane_bounds() {
   // Terminal JumpScratch can overhang the body. Lane-bounds checks must use
   // that cover — body-only [lane, width] lets the last cap leave [0, lane_count).
@@ -2690,6 +2804,66 @@ void test_scratch_chain_joint_direction() {
   set_scratch_hold_end_lanes(prev, 3, 4);
   apply_scratch_chain_joint_direction(prev, next);
   CHECK_EQ(prev.scratch_length, -prev.width);
+}
+
+void test_scratch_hold_chain_requires_exact_jump_scratch_cover() {
+  // Two headless ScratchHold bodies that abut in time are a chain only when
+  // prev's JumpScratch span is exactly the union of both bodies — not merely
+  // wide enough to contain them.
+
+  auto add_body = [](ChartDocument& doc, int32_t id, int32_t start, int32_t end, int32_t lane,
+                     int32_t width, int32_t cover_left, int32_t cover_right) {
+    NotationNote body = make_tap(start, lane);
+    body.id = id;
+    body.width = width;
+    body.end_tick = end;
+    body.note_type = NoteType::ScratchHold;
+    body.gimmick_type = GimmickType::JumpScratch;
+    set_scratch_hold_end_lanes(body, cover_left, cover_right);
+    CHECK_EQ(doc.add_note(body), id);
+  };
+
+  // Wider-than-union terminal flick: prev [2-3] JS [2-6], next same-lane [2-3].
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 480, 2, 2, 2, 6);
+    add_body(doc, 2, 480, 960, 2, 2, 2, 3);
+    CHECK(!chained_next_scratch_hold(doc, *doc.find_note(1)).has_value());
+    CHECK(!chained_prev_scratch_hold(doc, *doc.find_note(2)).has_value());
+  }
+
+  // Exact union of a lane-shifted next: prev [2-3] + next [4-5] → JS [2-5].
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 480, 2, 2, 2, 5);
+    add_body(doc, 2, 480, 960, 4, 2, 4, 5);
+    const auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, 2);
+    const auto prev = chained_prev_scratch_hold(doc, *doc.find_note(2));
+    CHECK(prev.has_value());
+    if (prev) CHECK_EQ(prev->id, 1);
+  }
+
+  // Same-lane continuation: JumpScratch equal to both bodies.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 480, 2, 2, 2, 3);
+    add_body(doc, 2, 480, 960, 2, 2, 2, 3);
+    const auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, 2);
+  }
+
+  // JS covers next but not the full union (prev [0-2] JS [1-4], next [3-4]).
+  // Encoding forces body cover, so use a JS that still misses the next body.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 480, 0, 3, 0, 2);  // cover == prev body, misses next [4-5]
+    add_body(doc, 2, 480, 960, 4, 2, 4, 5);
+    CHECK(!chained_next_scratch_hold(doc, *doc.find_note(1)).has_value());
+    CHECK(!chained_prev_scratch_hold(doc, *doc.find_note(2)).has_value());
+  }
 }
 
 void test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body() {
@@ -5519,7 +5693,11 @@ int main() {
   test_resolve_end_lane_span_matches_scratch_and_jump();
   test_scratch_hold_jump_scratch_stays_in_lane_bounds();
   test_snap_scratch_chain_next_lane_splits_illegal_zone();
+  test_snap_scratch_hold_segment_lane_avoids_both_side_cover();
+  test_sync_scratch_chain_joint_exact_union();
+  test_scratch_hold_segment_horizontal_move_keeps_chain();
   test_scratch_chain_joint_direction();
+  test_scratch_hold_chain_requires_exact_jump_scratch_cover();
   test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body();
   test_hold_head_partial_overlap_single_free_run();
   test_hold_head_partial_overlap_multiple_free_runs_skipped();
@@ -5588,6 +5766,7 @@ int main() {
   test_load_repo_test_official_charts();
   test_wdsproject_format_roundtrip_and_relative_paths();
   test_edit_grid_and_note_operations();
+  test_selection_drag_snaps_only_anchor_tick();
   test_timing_bpm_meter_split_and_prune();
   test_truncated_wdschart_rejected();
   test_official_csv_tempo_map_export();

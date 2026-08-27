@@ -360,6 +360,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool resize_scratch_end_ = false;
   // True when the ScratchHold was already selected before this resize drag.
   bool resize_was_selected_ = false;
+  // Single chained ScratchHold segment MoveSelection: lock time, keep chain joints.
+  bool move_scratch_segment_ = false;
   // Chained neighbor involved in an unselected ScratchHold width edit (-1 = none).
   int32_t resize_chain_peer_id_ = -1;   // prev when editing body; next when editing end
   int32_t resize_chain_next_id_ = -1;   // next body for cover validation while editing body

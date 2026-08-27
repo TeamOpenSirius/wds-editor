@@ -71,6 +71,20 @@ bool scratch_hold_end_cover_representable(const NotationNote& body, int32_t cove
 int32_t snap_scratch_chain_next_lane(const NotationNote& prev_body, int32_t next_width,
                                      float desired_lane, int32_t lane_count) noexcept;
 
+// Snap a chained ScratchHold *segment* left-lane while dragging it horizontally.
+// `prev` / `next` are the time-abutting neighbors (omit `next` when this is the
+// chain terminal — its JumpScratch span stays encoded on `body` and must remain
+// in playfield). Illegal lanes are those where a joint JumpScratch would extend
+// both sides of its owner body. Among legal lanes, pick nearest to `desired_lane`;
+// ties go to the lane closer to `body.lane`, then the lower lane.
+int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationNote& body,
+                                       const NotationNote* next, float desired_lane,
+                                       int32_t lane_count) noexcept;
+
+// Set `prev`'s JumpScratch to the exact union of `prev` and `next` bodies, then
+// re-encode joint direction. Caller must pass a Sirius-representable pair.
+void sync_scratch_chain_joint(NotationNote& prev, const NotationNote& next) noexcept;
+
 // Chain-joint JumpScratch direction from adjacent body edges (not the terminal end-cap).
 // Each side: next more-left → -1, same → 0, more-right → +1. Sum of left+right scores:
 //   <0 left,  ==0 bidirectional,  >0 right.

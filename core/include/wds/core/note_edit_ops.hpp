@@ -78,7 +78,7 @@ std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
 std::optional<NotationNote> parent_hold_for(const ChartDocument& doc, const NotationNote& note);
 
 // Chained ScratchHold neighbors: next starts at this end, has no own head, and
-// prev's end (JumpScratch) covers the union of both bodies. When looking
+// prev's end (JumpScratch) is exactly the union of both bodies. When looking
 // up prev, the previous segment is allowed to have a head.
 std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body);
