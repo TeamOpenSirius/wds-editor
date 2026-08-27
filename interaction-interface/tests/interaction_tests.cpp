@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1064,6 +1065,24 @@ int main() {
     field.on_blur();
     expect(field.text() == "12", "valid width blur keeps the new value");
     expect(commits == 1, "valid width blur commits once");
+  }
+
+  {
+    const float previous = scroll_wheel_speed();
+    set_scroll_wheel_speed(0.25f);
+    expect(scroll_wheel_speed() == 0.25f, "scroll speed keeps 0.25");
+    set_scroll_wheel_speed(3.0f);
+    expect(scroll_wheel_speed() == 3.0f, "scroll speed keeps 3");
+    set_scroll_wheel_speed(-1.0f);
+    expect(scroll_wheel_speed() == 0.25f, "negative scroll speed clamps to 0.25");
+    set_scroll_wheel_speed(0.0f);
+    expect(scroll_wheel_speed() == 0.25f, "zero scroll speed clamps to 0.25");
+    set_scroll_wheel_speed(std::numeric_limits<float>::quiet_NaN());
+    expect(scroll_wheel_speed() == 1.0f, "NaN scroll speed becomes 1");
+    expect(std::isfinite(scroll_wheel_speed()), "getter is finite after NaN");
+    set_scroll_wheel_speed(std::numeric_limits<float>::infinity());
+    expect(scroll_wheel_speed() == 1.0f, "Inf scroll speed becomes 1");
+    set_scroll_wheel_speed(previous);
   }
 
   return failures == 0 ? 0 : 1;

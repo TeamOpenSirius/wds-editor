@@ -123,6 +123,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void on_pointer_up(const wds::interaction::PointerUpEvent& event) override;
   void on_double_click(const wds::interaction::DoubleClickEvent& event) override;
   void on_scroll(const wds::interaction::ScrollEvent& event) override;
+  // Shared timeline scrub / visible-range zoom. PreviewHitWidget calls this
+  // without the modal or edit-pane bounds guards in on_scroll.
+  void handle_timeline_wheel(const wds::interaction::ScrollEvent& event);
   void on_key_down(const wds::interaction::KeyDownEvent& event) override;
   void on_key_up(const wds::interaction::KeyUpEvent& event) override;
   void on_text_input(const wds::interaction::TextInputEvent& event) override;

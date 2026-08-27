@@ -33,6 +33,7 @@ namespace {
 HWND g_owner_hwnd = nullptr;
 #endif
 
+#if !defined(__APPLE__) && !defined(_WIN32)
 std::string apple_quote(const std::string& value) {
   std::string out = "\"";
   for (char ch : value) {
@@ -42,7 +43,6 @@ std::string apple_quote(const std::string& value) {
   return out + '"';
 }
 
-#if !defined(__APPLE__)
 std::string shell_single_quote(const std::string& value) {
   std::string out = "'";
   for (char ch : value) {
@@ -51,7 +51,6 @@ std::string shell_single_quote(const std::string& value) {
   }
   return out + "'";
 }
-#endif
 
 std::optional<std::string> run_line(const std::string& command) {
   std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command.c_str(), "r"), pclose);
@@ -65,6 +64,7 @@ std::optional<std::string> run_line(const std::string& command) {
   }
   return value.empty() ? std::nullopt : std::optional<std::string>(value);
 }
+#endif
 
 std::string to_lower_ascii(std::string s) {
   for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));

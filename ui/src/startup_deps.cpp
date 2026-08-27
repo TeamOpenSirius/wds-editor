@@ -49,12 +49,14 @@ bool any_exists(std::initializer_list<fs::path> paths) {
   return false;
 }
 
+#if defined(__APPLE__)
 bool looks_like_macos_app(const fs::path& exe_dir) {
   // .../Something.app/Contents/MacOS
   const auto macos = exe_dir.filename();
   const auto contents = exe_dir.parent_path().filename();
   return macos == "MacOS" && contents == "Contents";
 }
+#endif
 
 void require_resource_dir(StartupDependencyReport& report, const std::string& resolved,
                           const char* label, bool (*looks_ok)(const std::string&)) {
@@ -86,6 +88,7 @@ void check_bass_runtime(StartupDependencyReport& report, const fs::path& exe_dir
 #endif
 }
 
+#if defined(__APPLE__)
 fs::path bundled_moltenvk_icd(const fs::path& exe_dir) {
   // Loader auto-discovery path for .app bundles. Must live under Resources/
   // (not Contents/MacOS/) so codesign can seal the bundle.
@@ -102,6 +105,7 @@ fs::path bundled_moltenvk_icd(const fs::path& exe_dir) {
   }
   return {};
 }
+#endif
 
 void check_vulkan_runtime_files(StartupDependencyReport& report, const fs::path& exe_dir) {
 #if defined(__APPLE__)

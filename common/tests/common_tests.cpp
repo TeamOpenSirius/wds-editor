@@ -1,10 +1,12 @@
 #include "wds/common/common.hpp"
 #include "wds/common/utf8_path.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -79,13 +81,46 @@ void test_timeline_advance_guards_and_apply() {
 }
 
 void test_microsecond_helpers() {
+  using wds::common::Microseconds;
   using wds::common::ms_to_us;
   using wds::common::us_to_ms_floor;
   using wds::common::us_to_ms_round;
 
   CHECK(ms_to_us(1).count() == 1000);
-  CHECK(us_to_ms_floor(wds::common::Microseconds{1999}) == 1);
-  CHECK(us_to_ms_round(wds::common::Microseconds{1500}) == 2);
+  CHECK(ms_to_us(-1).count() == -1000);
+  CHECK(us_to_ms_floor(Microseconds{1999}) == 1);
+  CHECK(us_to_ms_round(Microseconds{1500}) == 2);
+  CHECK(us_to_ms_round(Microseconds{1499}) == 1);
+  CHECK(us_to_ms_round(Microseconds{500}) == 1);
+  CHECK(us_to_ms_round(Microseconds{499}) == 0);
+  CHECK(us_to_ms_round(Microseconds{-1499}) == -1);
+  CHECK(us_to_ms_round(Microseconds{-1500}) == -2);
+  CHECK(us_to_ms_round(Microseconds{-500}) == -1);
+  CHECK(us_to_ms_round(Microseconds{-499}) == 0);
+
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+  // Last representable products: C++ `/` truncates toward zero, so kMinMs is
+  // INT64_MIN/1000 (not floor-toward-inf). A `>=`/`<=` saturate would fail these.
+  constexpr int64_t kMaxMs = kMax / 1000;
+  constexpr int64_t kMinMs = kMin / 1000;
+  static_assert(ms_to_us(kMaxMs).count() == kMaxMs * 1000, "last-safe max ms");
+  static_assert(ms_to_us(kMinMs).count() == kMinMs * 1000, "last-safe min ms");
+  static_assert(ms_to_us(kMaxMs + 1).count() == kMax, "max adjacent saturates");
+  static_assert(ms_to_us(kMinMs - 1).count() == kMin, "min adjacent saturates");
+  static_assert(ms_to_us(kMax).count() == kMax, "INT64_MAX saturates");
+  static_assert(ms_to_us(kMin).count() == kMin, "INT64_MIN saturates");
+
+  CHECK(ms_to_us(kMaxMs).count() == kMaxMs * 1000);
+  CHECK(ms_to_us(kMinMs).count() == kMinMs * 1000);
+  CHECK(ms_to_us(kMaxMs + 1).count() == kMax);
+  CHECK(ms_to_us(kMinMs - 1).count() == kMin);
+  CHECK(ms_to_us(kMax).count() == kMax);
+  CHECK(ms_to_us(kMin).count() == kMin);
+
+  // Half-away-from-zero at INT64 extremes without ±500 overflow.
+  CHECK(us_to_ms_round(Microseconds{kMax}) == kMax / 1000 + 1);
+  CHECK(us_to_ms_round(Microseconds{kMin}) == kMin / 1000 - 1);
 }
 
 // Install-path regression: resource roots under non-ASCII directories must round-trip

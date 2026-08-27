@@ -33,8 +33,16 @@ endif()
 
 add_executable(wds_note_visual_policy_tests tests/note_visual_policy_tests.cpp)
 target_link_libraries(wds_note_visual_policy_tests PRIVATE wds::chart_render)
-add_test(NAME wds_note_visual_policy_tests COMMAND wds_note_visual_policy_tests)
 
 add_executable(wds_split_line_official_colors_tests tests/split_line_official_colors_tests.cpp)
 target_link_libraries(wds_split_line_official_colors_tests PRIVATE wds::chart_render)
-add_test(NAME wds_split_line_official_colors_tests COMMAND wds_split_line_official_colors_tests)
+target_compile_definitions(wds_split_line_official_colors_tests PRIVATE
+  WDS_TEST_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+
+# Host ctest cannot execute foreign PE binaries; still build the test targets.
+if(NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME wds_note_visual_policy_tests COMMAND wds_note_visual_policy_tests)
+  add_test(NAME wds_split_line_official_colors_tests COMMAND wds_split_line_official_colors_tests)
+else()
+  message(STATUS "Skipping ctest registration for chart-render tests (cross build)")
+endif()

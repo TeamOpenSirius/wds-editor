@@ -26,10 +26,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -289,6 +292,480 @@ void test_measure_ticks_no_hang_near_int_max() {
   const auto ticks =
       measure_ticks_in_range(INT32_MAX - 5000, INT32_MAX - 10, timing);
   CHECK(ticks.size() < 100u);
+}
+
+SerializeError load_chart_error(const char* name, const std::string& body) {
+  const fs::path path = temp_chart_path(name);
+  {
+    std::ofstream out(path);
+    out << body;
+  }
+  NotationChart chart;
+  return ChartSerializer::load_from_file(path.string(), chart).error;
+}
+
+void test_load_rejects_invalid_tpq_and_nonfinite_bpm() {
+  CHECK_EQ(kMaxTicksPerQuarter, INT32_MAX / 128);
+  const int32_t max_tpq = kMaxTicksPerQuarter;
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "tpq_zero.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 0\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "tpq_negative.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ -1\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "tpq_too_large.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ " + std::to_string(max_tpq + 1) +
+                   "\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "bpm_zero.wdschart",
+               "WDSCHART 4\nBPM 0\nTPQ 480\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "bpm_nan.wdschart",
+               "WDSCHART 4\nBPM nan\nTPQ 480\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "bpm_inf.wdschart",
+               "WDSCHART 4\nBPM inf\nTPQ 480\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "timing_bpm_nan.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 nan 4 4 3\nNOTES 0\n"
+               "CONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "timing_bpm_inf.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 inf 4 4 3\nNOTES 0\n"
+               "CONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "timing_bpm_zero.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 0 4 4 3\nNOTES 0\n"
+               "CONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+
+  NotationChart accepted;
+  const fs::path ok = temp_chart_path("tpq_max_ok.wdschart");
+  {
+    std::ofstream out(ok);
+    out << "WDSCHART 4\nBPM 120\nTPQ " << max_tpq
+        << "\nTIMING 0\nNOTES 0\nCONCURRENT 0\nEND\n";
+  }
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(ok.string(), accepted).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(accepted.timing.ticks_per_quarter, max_tpq);
+}
+
+void test_set_timing_rejects_illegal_tpq_atomically() {
+  ChartDocument doc;
+  CHECK_EQ(doc.add_note(make_tap(0, 0)), 0);
+  doc.mark_saved();
+  const uint64_t gen = doc.content_generation();
+  const int32_t tpq0 = doc.timing().ticks_per_quarter;
+  CHECK_EQ(tpq0, 480);
+
+  MusicTiming zero = doc.timing();
+  zero.ticks_per_quarter = 0;
+  CHECK(!doc.set_timing(zero));
+  CHECK_EQ(doc.timing().ticks_per_quarter, tpq0);
+  CHECK_EQ(doc.content_generation(), gen);
+  CHECK(!doc.is_dirty());
+  CHECK_EQ(static_cast<int32_t>(doc.notes().size()), 1);
+
+  MusicTiming huge = doc.timing();
+  huge.ticks_per_quarter = INT32_MAX / 128 + 1;
+  CHECK(!doc.set_timing(huge));
+  CHECK_EQ(doc.timing().ticks_per_quarter, tpq0);
+  CHECK_EQ(doc.content_generation(), gen);
+  CHECK(!doc.is_dirty());
+
+  MusicTiming ok = doc.timing();
+  ok.bpm = 140.0;
+  ok.points = {TimingPoint{0, 140.0, 4, 4, true, true}};
+  ok.ticks_per_quarter = 480;
+  CHECK(doc.set_timing(ok));
+  CHECK_EQ(doc.timing().ticks_per_quarter, 480);
+  CHECK(std::fabs(doc.timing().bpm - 140.0) < 1e-9);
+}
+
+void test_construct_normalize_fallback_illegal_tpq() {
+  MusicTiming zero;
+  zero.ticks_per_quarter = 0;
+  ChartDocument from_zero(zero);
+  CHECK_EQ(from_zero.timing().ticks_per_quarter, 480);
+
+  MusicTiming huge;
+  huge.ticks_per_quarter = INT32_MAX / 128 + 1;
+  normalize_timing_points(huge);
+  CHECK_EQ(huge.ticks_per_quarter, 480);
+
+  MusicTiming negative;
+  negative.ticks_per_quarter = -12;
+  ChartDocument from_neg(negative);
+  CHECK_EQ(from_neg.timing().ticks_per_quarter, 480);
+
+  MusicTiming valid;
+  valid.ticks_per_quarter = 240;
+  normalize_timing_points(valid);
+  CHECK_EQ(valid.ticks_per_quarter, 240);
+}
+
+void test_tick_ms_saturates_nan_inf_and_extremes() {
+  MusicTiming normal;
+  normal.bpm = 120.0;
+  normal.ticks_per_quarter = 480;
+  normal.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(normal);
+  CHECK_EQ(tick_to_milliseconds(480, normal), 500);
+  CHECK_EQ(milliseconds_to_tick(500, normal), 480);
+
+  MusicTiming tiny;
+  tiny.bpm = 1e-300;
+  tiny.ticks_per_quarter = 480;
+  tiny.points = {TimingPoint{0, 1e-300, 4, 4, true, true}};
+  normalize_timing_points(tiny);
+  CHECK_EQ(tick_to_milliseconds(1, tiny), std::numeric_limits<int64_t>::max());
+
+  MusicTiming nan_bpm;
+  nan_bpm.bpm = 120.0;
+  nan_bpm.ticks_per_quarter = 480;
+  nan_bpm.points = {TimingPoint{0, std::numeric_limits<double>::quiet_NaN(), 4, 4, true, true}};
+  nan_bpm.prefix_ms = {0.0};
+  const int64_t nan_ms = tick_to_milliseconds(480, nan_bpm);
+  CHECK(nan_ms == 500 || nan_ms == 0 || nan_ms == std::numeric_limits<int64_t>::max() ||
+        nan_ms == std::numeric_limits<int64_t>::min());
+
+  normal.offset_ms = 1000;
+  CHECK_EQ(milliseconds_to_tick(std::numeric_limits<int64_t>::min(), normal), 0);
+  CHECK_EQ(milliseconds_to_tick(std::numeric_limits<int64_t>::max(), normal), INT32_MAX);
+  CHECK_EQ(milliseconds_to_tick(1500, normal), 480);
+}
+
+void test_int32_tick_range_measure_and_snap_no_hang() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(timing);
+
+  const auto full = measure_ticks_in_range(0, INT32_MAX, timing);
+  CHECK(!full.empty());
+  CHECK_EQ(full.front(), 0);
+  CHECK(full.size() < 2000000u);
+
+  const int32_t last_bar = (INT32_MAX / 1920) * 1920;
+  const auto near_end = measure_ticks_in_range(last_bar - 10, INT32_MAX, timing);
+  CHECK(!near_end.empty());
+  CHECK_EQ(near_end.front(), last_bar);
+
+  CHECK_EQ(snap_to_measure(INT32_MAX, timing), last_bar);
+  CHECK(snap_to_measure(INT32_MAX, timing) >= 0);
+
+  TimingPoint den1{0, 120.0, 32, 1, true, true};
+  CHECK_EQ(beat_length_ticks(den1, 536870912), INT32_MAX);
+  CHECK_EQ(measure_length_ticks(den1, 100000000), INT32_MAX);
+  CHECK_EQ(beat_length_ticks(TimingPoint{0, 120.0, 4, 4, true, true}, 480), 480);
+
+  const int32_t fade = seconds_to_ticks_at(1.0f, timing, 0);
+  CHECK_EQ(fade, 960);
+  CHECK_EQ(seconds_to_ticks_at(std::numeric_limits<float>::infinity(), timing, 0), INT32_MAX);
+  CHECK_EQ(seconds_to_ticks_at(std::numeric_limits<float>::quiet_NaN(), timing, 0), 1);
+  CHECK_EQ(seconds_to_ticks_at(1e30f, timing, 0), INT32_MAX);
+}
+
+void test_note_id_max_and_auto_exhaust_are_atomic() {
+  ChartDocument doc;
+  NotationNote at_max = make_tap(0, 0);
+  at_max.id = INT32_MAX;
+  CHECK_EQ(doc.add_note(at_max), -1);
+  CHECK(doc.notes().empty());
+  CHECK_EQ(doc.next_note_id(), 0);
+
+  NotationNote almost = make_tap(0, 0);
+  almost.id = INT32_MAX - 1;
+  CHECK_EQ(doc.add_note(almost), INT32_MAX - 1);
+  CHECK_EQ(doc.next_note_id(), INT32_MAX);
+  const uint64_t gen = doc.content_generation();
+
+  CHECK_EQ(doc.add_note(make_tap(480, 1)), -1);
+  CHECK_EQ(static_cast<int32_t>(doc.notes().size()), 1);
+  CHECK_EQ(doc.next_note_id(), INT32_MAX);
+  CHECK_EQ(doc.content_generation(), gen);
+
+  NotationNote auto_note = make_tap(480, 1);
+  CHECK(!doc.set_notes({auto_note}));
+  CHECK_EQ(static_cast<int32_t>(doc.notes().size()), 1);
+  CHECK_EQ(doc.notes()[0].id, INT32_MAX - 1);
+  CHECK_EQ(doc.content_generation(), gen);
+  CHECK_EQ(doc.next_note_id(), INT32_MAX);
+
+  NotationNote explicit_max = make_tap(960, 2);
+  explicit_max.id = INT32_MAX;
+  CHECK(!doc.set_notes({explicit_max}));
+  CHECK_EQ(doc.notes()[0].id, INT32_MAX - 1);
+  CHECK_EQ(doc.content_generation(), gen);
+
+  ChartDocument fresh;
+  NotationNote a = make_tap(0, 0);
+  NotationNote b = make_tap(480, 1);
+  b.id = -5;
+  CHECK(fresh.set_notes({a, b}));
+  CHECK_EQ(static_cast<int32_t>(fresh.notes().size()), 2);
+  CHECK_EQ(fresh.notes()[0].id, 0);
+  CHECK_EQ(fresh.notes()[1].id, 1);
+  CHECK_EQ(fresh.next_note_id(), 2);
+
+  NotationNote high = make_tap(960, 2);
+  high.id = INT32_MAX - 2;
+  CHECK(fresh.set_notes({high}));
+  CHECK_EQ(fresh.next_note_id(), INT32_MAX - 1);
+  CHECK_EQ(fresh.notes()[0].id, INT32_MAX - 2);
+}
+
+void test_set_notes_auto_explicit_collision_is_atomic() {
+  ChartDocument empty;
+  empty.mark_saved();
+  const uint64_t gen0 = empty.content_generation();
+  CHECK(!empty.is_dirty());
+  CHECK_EQ(empty.next_note_id(), 0);
+  CHECK(empty.notes().empty());
+  CHECK(!empty.find_note(0).has_value());
+
+  NotationNote auto_first = make_tap(0, 0);
+  NotationNote explicit_zero = make_tap(480, 1);
+  explicit_zero.id = 0;
+  CHECK(!empty.set_notes({auto_first, explicit_zero}));
+  CHECK(empty.notes().empty());
+  CHECK(!empty.find_note(0).has_value());
+  CHECK_EQ(empty.next_note_id(), 0);
+  CHECK_EQ(empty.content_generation(), gen0);
+  CHECK(!empty.is_dirty());
+
+  ChartDocument seeded;
+  CHECK_EQ(seeded.add_note(make_tap(0, 3)), 0);
+  seeded.mark_saved();
+  const uint64_t gen1 = seeded.content_generation();
+  const int32_t next1 = seeded.next_note_id();
+  CHECK_EQ(next1, 1);
+  NotationNote collide_one = make_tap(480, 1);
+  collide_one.id = 1;
+  CHECK(!seeded.set_notes({auto_first, collide_one}));
+  CHECK_EQ(static_cast<int32_t>(seeded.notes().size()), 1);
+  CHECK_EQ(seeded.notes()[0].id, 0);
+  CHECK_EQ(seeded.notes()[0].lane, 3);
+  CHECK(seeded.find_note(0).has_value());
+  CHECK_EQ(seeded.find_note(0)->lane, 3);
+  CHECK_EQ(seeded.next_note_id(), next1);
+  CHECK_EQ(seeded.content_generation(), gen1);
+  CHECK(!seeded.is_dirty());
+
+  ChartDocument after_one;
+  NotationNote explicit_one = make_tap(0, 0);
+  explicit_one.id = 1;
+  NotationNote auto_after = make_tap(480, 2);
+  CHECK(after_one.set_notes({explicit_one, auto_after}));
+  CHECK_EQ(static_cast<int32_t>(after_one.notes().size()), 2);
+  CHECK(after_one.find_note(1).has_value());
+  CHECK(after_one.find_note(2).has_value());
+  CHECK_EQ(after_one.find_note(1)->start_tick, 0);
+  CHECK_EQ(after_one.find_note(2)->start_tick, 480);
+  CHECK_NE(after_one.find_note(1)->id, after_one.find_note(2)->id);
+  CHECK(!after_one.find_note(0).has_value());
+  CHECK_EQ(after_one.next_note_id(), 3);
+
+  ChartDocument two_auto;
+  NotationNote neg_a = make_tap(0, 0);
+  neg_a.id = -1;
+  NotationNote neg_b = make_tap(960, 4);
+  neg_b.id = -9;
+  CHECK(two_auto.set_notes({neg_a, neg_b}));
+  CHECK_EQ(static_cast<int32_t>(two_auto.notes().size()), 2);
+  CHECK_EQ(two_auto.notes()[0].id, 0);
+  CHECK_EQ(two_auto.notes()[1].id, 1);
+  CHECK_NE(two_auto.notes()[0].id, two_auto.notes()[1].id);
+  CHECK_EQ(two_auto.find_note(0)->start_tick, 0);
+  CHECK_EQ(two_auto.find_note(1)->start_tick, 960);
+  CHECK_EQ(two_auto.next_note_id(), 2);
+}
+
+void expect_unique_safe_ids(const ChartDocument& doc) {
+  std::unordered_set<int32_t> ids;
+  ids.reserve(doc.notes().size());
+  for (const auto& note : doc.notes()) {
+    CHECK(note.id >= 0);
+    CHECK(note.id < INT32_MAX);
+    CHECK(ids.insert(note.id).second);
+  }
+  CHECK(doc.next_note_id() >= 0);
+  CHECK(doc.next_note_id() < INT32_MAX || doc.notes().empty());
+  if (!doc.notes().empty()) {
+    CHECK(doc.next_note_id() == static_cast<int32_t>(doc.notes().size()) ||
+          doc.next_note_id() > doc.notes().back().id ||
+          doc.find_note(doc.next_note_id() - 1).has_value());
+  }
+}
+
+void test_load_rejects_explicit_int32_max_note_id() {
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "note_id_max.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\nN " +
+                   std::to_string(INT32_MAX) + " 0 0 10 0 1 0 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_load_from_chart_renormalizes_unsafe_ids_keeps_sparse() {
+  NotationChart sparse;
+  NotationNote keep_a = make_tap(0, 0);
+  keep_a.id = 10;
+  NotationNote keep_b = make_tap(480, 2);
+  keep_b.id = 42;
+  sparse.notes = {keep_a, keep_b};
+  ChartDocument sparse_doc;
+  sparse_doc.load_from_chart(sparse);
+  CHECK_EQ(static_cast<int32_t>(sparse_doc.notes().size()), 2);
+  CHECK(sparse_doc.find_note(10).has_value());
+  CHECK(sparse_doc.find_note(42).has_value());
+  CHECK_EQ(sparse_doc.find_note(10)->lane, 0);
+  CHECK_EQ(sparse_doc.find_note(42)->lane, 2);
+  CHECK_EQ(sparse_doc.next_note_id(), 43);
+
+  NotationChart max_auto;
+  NotationNote at_max = make_tap(0, 0);
+  at_max.id = INT32_MAX;
+  NotationNote auto_note = make_tap(480, 1);
+  auto_note.id = -1;
+  max_auto.notes = {at_max, auto_note};
+  ChartDocument max_doc;
+  max_doc.load_from_chart(max_auto);
+  CHECK_EQ(static_cast<int32_t>(max_doc.notes().size()), 2);
+  expect_unique_safe_ids(max_doc);
+  CHECK(!max_doc.find_note(INT32_MAX).has_value());
+  CHECK_EQ(max_doc.notes()[0].id, 0);
+  CHECK_EQ(max_doc.notes()[1].id, 1);
+  CHECK_EQ(max_doc.next_note_id(), 2);
+
+  NotationChart dup;
+  NotationNote d0 = make_tap(0, 0);
+  d0.id = 7;
+  NotationNote d1 = make_tap(960, 3);
+  d1.id = 7;
+  dup.notes = {d0, d1};
+  ChartDocument dup_doc;
+  dup_doc.load_from_chart(dup);
+  CHECK_EQ(static_cast<int32_t>(dup_doc.notes().size()), 2);
+  expect_unique_safe_ids(dup_doc);
+  CHECK_EQ(dup_doc.notes()[0].id, 0);
+  CHECK_EQ(dup_doc.notes()[1].id, 1);
+  CHECK_EQ(dup_doc.next_note_id(), 2);
+  CHECK_EQ(dup_doc.find_note(0)->start_tick, 0);
+  CHECK_EQ(dup_doc.find_note(1)->start_tick, 960);
+
+  NotationChart collide;
+  NotationNote auto_first = make_tap(0, 0);
+  auto_first.id = -1;
+  NotationNote explicit_zero = make_tap(240, 1);
+  explicit_zero.id = 0;
+  collide.notes = {auto_first, explicit_zero};
+  ChartDocument collide_doc;
+  collide_doc.load_from_chart(collide);
+  expect_unique_safe_ids(collide_doc);
+  CHECK_EQ(static_cast<int32_t>(collide_doc.notes().size()), 2);
+  CHECK_EQ(collide_doc.next_note_id(), 2);
+}
+
+void test_seconds_to_ticks_large_negative_finite() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(timing);
+  CHECK_EQ(seconds_to_ticks_at(-1e20f, timing, 0), 1);
+  CHECK_EQ(seconds_to_ticks_at(-0.5f, timing, 0), 1);
+  CHECK_EQ(seconds_to_ticks_at(0.0f, timing, 0), 1);
+}
+
+void test_set_timing_rejects_negative_tick_atomically() {
+  ChartDocument doc;
+  CHECK_EQ(doc.add_note(make_tap(0, 0)), 0);
+  doc.mark_saved();
+  const uint64_t gen = doc.content_generation();
+  MusicTiming bad = doc.timing();
+  bad.points.push_back(TimingPoint{-120, 140.0, 4, 4, true, false});
+  CHECK(!doc.set_timing(bad));
+  CHECK_EQ(doc.content_generation(), gen);
+  CHECK(!doc.is_dirty());
+  CHECK_EQ(doc.timing().points.size(), 1u);
+  CHECK_EQ(doc.timing().points.front().tick, 0);
+}
+
+void test_normalize_clamps_negative_ticks_before_merge() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{-240, 180.0, 3, 4, true, true},
+                   TimingPoint{480, 90.0, 4, 4, true, false}};
+  normalize_timing_points(timing);
+  CHECK(!timing.points.empty());
+  CHECK_EQ(timing.points.front().tick, 0);
+  for (const auto& p : timing.points) {
+    CHECK(p.tick >= 0);
+  }
+  CHECK(std::fabs(timing.points.front().bpm - 180.0) < 1e-9);
+  CHECK_EQ(timing.ticks_per_quarter, 480);
+}
+
+void test_load_rejects_negative_timing_tick() {
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "neg_timing_tick.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT -1 120 4 4 3\nNOTES 0\n"
+               "CONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_legacy_and_missing_tpq_remain_compatible() {
+  NotationChart missing;
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "missing_tpq_v2.wdschart",
+               "WDSCHART 2\nBPM 120\nNOTES 0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::Ok));
+  const fs::path path = temp_chart_path("missing_tpq_v2_load.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 2\nBPM 120\nNOTES 0\nCONCURRENT 0\nEND\n";
+  }
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), missing).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(missing.timing.ticks_per_quarter, 480);
+
+  const fs::path v1 = fixture_path("legacy_v1.wdschart");
+  CHECK(fs::exists(v1));
+  NotationChart v1_chart;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(v1.string(), v1_chart).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(v1_chart.timing.ticks_per_quarter, 480);
+}
+
+void test_tick_ms_hits_saturation_gates() {
+  MusicTiming tiny;
+  tiny.bpm = 1e-300;
+  tiny.ticks_per_quarter = 480;
+  tiny.offset_ms = 0;
+  tiny.points = {TimingPoint{0, 1e-300, 4, 4, true, true}};
+  normalize_timing_points(tiny);
+  CHECK_EQ(tick_to_milliseconds(1, tiny), std::numeric_limits<int64_t>::max());
+
+  MusicTiming pref;
+  pref.bpm = 120.0;
+  pref.ticks_per_quarter = 480;
+  pref.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  pref.prefix_ms = {std::numeric_limits<double>::infinity()};
+  CHECK_EQ(tick_to_milliseconds(0, pref), std::numeric_limits<int64_t>::max());
+  pref.prefix_ms = {-std::numeric_limits<double>::infinity()};
+  CHECK_EQ(tick_to_milliseconds(0, pref), std::numeric_limits<int64_t>::min());
 }
 
 void test_sus_rejects_huge_measurebs() {
@@ -569,6 +1046,64 @@ void test_snapshot_large_seek_full_rebuild() {
   engine.seek(5000);
   CHECK_EQ(static_cast<int>(engine.snapshot().last_update_strategy),
            static_cast<int>(SnapshotUpdateStrategy::FullRebuild));
+}
+
+void test_snapshot_sub_ms_timeline_us_survives_rebuild_and_patch() {
+  ChartEditorEngine engine;
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  engine.document().set_timing(timing);
+  engine.set_preview_lead_in_visible_ms(2000);
+
+  for (int i = 0; i < 8; ++i) {
+    engine.add_note(make_tap(i * 480, i % 6));
+  }
+
+  const int64_t lead_ms = engine.preview_lead_in_visible_ms();
+  const int64_t positions_us[] = {300, 600, 9900};
+
+  auto apply_us = [&](int64_t us) {
+    wds::common::TimelineSnapshot snap;
+    snap.position = wds::common::Microseconds{us};
+    snap.state = wds::common::PlaybackState::Paused;
+    engine.apply_timeline(snap);
+  };
+
+  auto expect_mapped_clock = [&](int64_t input_us) {
+    const int64_t visual_us = EditLeadIn::preview_chart_us(input_us, lead_ms);
+    CHECK_EQ(engine.timeline_us(), input_us);
+    CHECK_EQ(engine.snapshot().timeline_us, visual_us);
+    CHECK_EQ(engine.timeline_ms(), input_us / 1000);
+    CHECK_EQ(engine.snapshot().timeline_ms, visual_us / 1000);
+    CHECK_NE(engine.snapshot().timeline_us, engine.snapshot().timeline_ms * 1000);
+  };
+
+  // Force FullRebuild at each high-refresh / sub-ms transport position.
+  for (int64_t us : positions_us) {
+    engine.seek(20000);
+    apply_us(us);
+    CHECK_EQ(static_cast<int>(engine.snapshot().last_update_strategy),
+             static_cast<int>(SnapshotUpdateStrategy::FullRebuild));
+    expect_mapped_clock(us);
+  }
+
+  // Consecutive applies: first rebuild, then IncrementalPatch must keep µs.
+  engine.seek(20000);
+  apply_us(300);
+  CHECK_EQ(static_cast<int>(engine.snapshot().last_update_strategy),
+           static_cast<int>(SnapshotUpdateStrategy::FullRebuild));
+  expect_mapped_clock(300);
+
+  apply_us(600);
+  CHECK_EQ(static_cast<int>(engine.snapshot().last_update_strategy),
+           static_cast<int>(SnapshotUpdateStrategy::IncrementalPatch));
+  expect_mapped_clock(600);
+
+  apply_us(9900);
+  CHECK_EQ(static_cast<int>(engine.snapshot().last_update_strategy),
+           static_cast<int>(SnapshotUpdateStrategy::IncrementalPatch));
+  expect_mapped_clock(9900);
 }
 
 void test_preview_note_and_snapshot_incremental_api() {
@@ -4103,6 +4638,879 @@ void test_resolve_convert_scratch_head_stays_official() {
   CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Flick) == NoteType::Flick);
 }
 
+NotationNote note_with_id(int32_t id, int32_t start_tick, int32_t lane) {
+  NotationNote note = make_tap(start_tick, lane);
+  note.id = id;
+  return note;
+}
+
+bool notes_match_by_id(const ChartDocument& a, const ChartDocument& b) {
+  if (a.notes().size() != b.notes().size()) {
+    return false;
+  }
+  for (const auto& note : a.notes()) {
+    const auto found = b.find_note(note.id);
+    if (!found) {
+      return false;
+    }
+    if (found->id != note.id || found->start_tick != note.start_tick ||
+        found->end_tick != note.end_tick || found->lane != note.lane ||
+        found->width != note.width || found->note_type != note.note_type ||
+        found->gimmick_type != note.gimmick_type ||
+        found->scratch_length != note.scratch_length) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool concurrent_lines_match(const ChartDocument& a, const ChartDocument& b) {
+  const auto& la = a.concurrent_lines();
+  const auto& lb = b.concurrent_lines();
+  if (la.size() != lb.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < la.size(); ++i) {
+    if (la[i].milliseconds != lb[i].milliseconds || la[i].start_lane != lb[i].start_lane ||
+        la[i].width != lb[i].width) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool index_query_ids_match(const ChartDocument& a, const ChartDocument& b, int64_t time_ms,
+                           int64_t lead_ms, int64_t tail_ms) {
+  std::vector<int32_t> ca;
+  std::vector<int32_t> cb;
+  a.index().query_candidates(time_ms, lead_ms, tail_ms, ca);
+  b.index().query_candidates(time_ms, lead_ms, tail_ms, cb);
+  std::sort(ca.begin(), ca.end());
+  std::sort(cb.begin(), cb.end());
+  return ca == cb;
+}
+
+bool notation_note_fields_equal(const NotationNote& a, const NotationNote& b) {
+  return a.id == b.id && a.start_tick == b.start_tick && a.end_tick == b.end_tick &&
+         a.lane == b.lane && a.width == b.width && a.note_type == b.note_type &&
+         a.gimmick_type == b.gimmick_type && a.scratch_length == b.scratch_length;
+}
+
+bool notes_vector_equal(const std::vector<NotationNote>& a, const std::vector<NotationNote>& b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!notation_note_fields_equal(a[i], b[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void sorted_query_candidates(const ChartDocument& doc, int64_t time_ms, int64_t lead_ms,
+                             int64_t tail_ms, std::vector<int32_t>& out) {
+  doc.index().query_candidates(time_ms, lead_ms, tail_ms, out);
+  std::sort(out.begin(), out.end());
+}
+
+void sorted_split_query(const ChartDocument& doc, int64_t time_ms, std::vector<int32_t>& out) {
+  doc.index().query_split_lanes_up_to(time_ms, out);
+  std::sort(out.begin(), out.end());
+}
+
+bool split_query_ids_match(const ChartDocument& a, const ChartDocument& b, int64_t time_ms) {
+  std::vector<int32_t> sa;
+  std::vector<int32_t> sb;
+  sorted_split_query(a, time_ms, sa);
+  sorted_split_query(b, time_ms, sb);
+  return sa == sb;
+}
+
+struct IndexProbe {
+  std::vector<int32_t> candidates;
+  std::vector<int32_t> splits;
+};
+
+IndexProbe make_index_probe(const ChartDocument& doc, int64_t time_ms, int64_t lead_ms,
+                            int64_t tail_ms) {
+  IndexProbe probe;
+  sorted_query_candidates(doc, time_ms, lead_ms, tail_ms, probe.candidates);
+  sorted_split_query(doc, time_ms, probe.splits);
+  return probe;
+}
+
+bool index_probe_equal(const IndexProbe& a, const IndexProbe& b) {
+  return a.candidates == b.candidates && a.splits == b.splits;
+}
+
+void add_split_to_fixture(ChartDocument& doc, int32_t id, int32_t start_tick) {
+  NotationNote split = note_with_id(id, start_tick, 0);
+  split.end_tick = start_tick + 1920;
+  split.gimmick_type = GimmickType::Split3;
+  CHECK_EQ(doc.add_note(split), id);
+}
+
+void seed_apply_note_updates_fixture(ChartDocument& doc) {
+  NotationNote tap_a = note_with_id(1, 0, 0);
+  NotationNote tap_b = note_with_id(2, 480, 2);
+  NotationNote tap_c = note_with_id(3, 1440, 4);
+  NotationNote hold = note_with_id(4, 0, 6);
+  hold.end_tick = 1920;
+  hold.note_type = NoteType::Hold;
+  NotationNote hold_short = note_with_id(5, 480, 8);
+  hold_short.end_tick = 960;
+  hold_short.note_type = NoteType::Hold;
+  CHECK(doc.set_notes({tap_a, tap_b, tap_c, hold, hold_short}));
+}
+
+std::vector<NoteUpdate> make_batch_move_and_shorten() {
+  NotationNote tap_a = note_with_id(1, 0, 1);
+  NotationNote tap_c = note_with_id(3, 0, 5);
+  NotationNote hold = note_with_id(4, 0, 6);
+  hold.end_tick = 480;
+  hold.note_type = NoteType::Hold;
+  return {{1, tap_a}, {3, tap_c}, {4, hold}};
+}
+
+void test_apply_note_updates_empty_does_not_change_generation() {
+  ChartDocument doc;
+  seed_apply_note_updates_fixture(doc);
+  const uint64_t gen = doc.content_generation();
+  const bool dirty = doc.is_dirty();
+  CHECK(doc.apply_note_updates({}));
+  CHECK_EQ(doc.content_generation(), gen);
+  CHECK_EQ(doc.is_dirty(), dirty);
+}
+
+void test_apply_note_updates_batch_equivalent_and_generation_plus_one() {
+  ChartDocument sequential;
+  seed_apply_note_updates_fixture(sequential);
+  ChartDocument batched;
+  batched.load_from_chart(sequential.to_notation_chart(), sequential.edit_mode());
+
+  const auto updates = make_batch_move_and_shorten();
+  for (const auto& update : updates) {
+    CHECK(sequential.update_note(update.id, update.note));
+  }
+  const uint64_t gen_before = batched.content_generation();
+  CHECK(batched.apply_note_updates(updates));
+  CHECK_EQ(batched.content_generation(), gen_before + 1);
+  CHECK(batched.is_dirty());
+
+  CHECK(notes_match_by_id(sequential, batched));
+  CHECK(concurrent_lines_match(sequential, batched));
+  CHECK_EQ(sequential.index().hold_span_stale(), batched.index().hold_span_stale());
+  CHECK_EQ(sequential.index().max_hold_span_ms(), batched.index().max_hold_span_ms());
+  CHECK(index_query_ids_match(sequential, batched, 0, 100, 100));
+  CHECK(index_query_ids_match(sequential, batched, 500, 300, 300));
+
+  // Single update_note must reuse the batch path (exactly +1, not per-rebuild +2).
+  ChartDocument single;
+  seed_apply_note_updates_fixture(single);
+  const uint64_t single_gen = single.content_generation();
+  NotationNote moved = *single.find_note(2);
+  moved.lane = 3;
+  CHECK(single.update_note(2, moved));
+  CHECK_EQ(single.content_generation(), single_gen + 1);
+}
+
+void test_apply_note_updates_rejects_duplicate_and_unknown_atomically() {
+  ChartDocument doc;
+  seed_apply_note_updates_fixture(doc);
+  add_split_to_fixture(doc, 6, 480);
+  doc.mark_saved();
+  const uint64_t gen = doc.content_generation();
+  const bool dirty = doc.is_dirty();
+  const auto notes_before = doc.notes();
+  const auto lines_before = doc.concurrent_lines();
+  const int64_t span = doc.index().max_hold_span_ms();
+  const bool stale = doc.index().hold_span_stale();
+  const int64_t probe_times[] = {0, 500, 1500, 2500};
+  std::vector<IndexProbe> probes_before;
+  probes_before.reserve(4);
+  for (int64_t t : probe_times) {
+    probes_before.push_back(make_index_probe(doc, t, 80, 80));
+  }
+
+  auto assert_unchanged = [&] {
+    CHECK_EQ(doc.content_generation(), gen);
+    CHECK_EQ(doc.is_dirty(), dirty);
+    CHECK(notes_vector_equal(doc.notes(), notes_before));
+    CHECK_EQ(doc.concurrent_lines().size(), lines_before.size());
+    for (size_t i = 0; i < lines_before.size(); ++i) {
+      CHECK_EQ(doc.concurrent_lines()[i].milliseconds, lines_before[i].milliseconds);
+      CHECK_EQ(doc.concurrent_lines()[i].start_lane, lines_before[i].start_lane);
+      CHECK_EQ(doc.concurrent_lines()[i].width, lines_before[i].width);
+    }
+    CHECK_EQ(doc.index().max_hold_span_ms(), span);
+    CHECK_EQ(doc.index().hold_span_stale(), stale);
+    for (size_t i = 0; i < probes_before.size(); ++i) {
+      CHECK(index_probe_equal(make_index_probe(doc, probe_times[i], 80, 80), probes_before[i]));
+    }
+  };
+
+  NotationNote tap = note_with_id(1, 240, 3);
+  NotationNote unknown = note_with_id(99, 0, 0);
+  CHECK(!doc.apply_note_updates({{1, tap}, {99, unknown}}));
+  CHECK(!doc.find_note(99).has_value());
+  assert_unchanged();
+
+  NotationNote again = note_with_id(1, 720, 2);
+  CHECK(!doc.apply_note_updates({{1, tap}, {1, again}}));
+  assert_unchanged();
+}
+
+void test_apply_note_updates_forces_note_id() {
+  ChartDocument doc;
+  seed_apply_note_updates_fixture(doc);
+  const uint64_t gen = doc.content_generation();
+  NotationNote spoofed = note_with_id(99, 240, 3);
+  CHECK(doc.apply_note_updates({{2, spoofed}}));
+  CHECK_EQ(doc.content_generation(), gen + 1);
+  const auto found = doc.find_note(2);
+  CHECK(found.has_value());
+  CHECK_EQ(found->id, 2);
+  CHECK_EQ(found->start_tick, 240);
+  CHECK_EQ(found->lane, 3);
+  CHECK(!doc.find_note(99).has_value());
+}
+
+void test_apply_note_updates_incremental_index_without_hold_rebuild() {
+  ChartDocument sequential;
+  seed_apply_note_updates_fixture(sequential);
+  add_split_to_fixture(sequential, 6, 960);
+  CHECK(!sequential.index().hold_span_stale());
+  const int64_t span0 = sequential.index().max_hold_span_ms();
+  CHECK(span0 > 0);
+
+  ChartDocument batched;
+  batched.load_from_chart(sequential.to_notation_chart(), sequential.edit_mode());
+  CHECK(!batched.index().hold_span_stale());
+  CHECK_EQ(batched.index().max_hold_span_ms(), span0);
+
+  // Move taps only, including a start-time swap. Longest hold (id 4) is untouched so
+  // hold_span_stale stays false and a batch-end rebuild_index would be the only way
+  // to "fix" a broken incremental on_note_updated — that path must not run.
+  const auto tap1 = *sequential.find_note(1);
+  const auto tap2 = *sequential.find_note(2);
+  const auto tap3 = *sequential.find_note(3);
+  NotationNote swap1 = tap1;
+  swap1.start_tick = tap3.start_tick;
+  swap1.end_tick = tap3.start_tick;
+  NotationNote swap3 = tap3;
+  swap3.start_tick = tap1.start_tick;
+  swap3.end_tick = tap1.start_tick;
+  NotationNote move2 = tap2;
+  move2.start_tick = 960;
+  move2.end_tick = 960;
+  move2.lane = 3;
+  const std::vector<NoteUpdate> updates = {{1, swap1}, {2, move2}, {3, swap3}};
+
+  const int64_t old_ms[] = {tap1.start_ms(sequential.timing()), tap2.start_ms(sequential.timing()),
+                            tap3.start_ms(sequential.timing())};
+  const int32_t moved_ids[] = {1, 2, 3};
+
+  for (const auto& update : updates) {
+    CHECK(sequential.update_note(update.id, update.note));
+  }
+  const uint64_t gen_before = batched.content_generation();
+  CHECK(batched.apply_note_updates(updates));
+  CHECK_EQ(batched.content_generation(), gen_before + 1);
+
+  CHECK(!sequential.index().hold_span_stale());
+  CHECK(!batched.index().hold_span_stale());
+  CHECK_EQ(sequential.index().max_hold_span_ms(), span0);
+  CHECK_EQ(batched.index().max_hold_span_ms(), span0);
+  CHECK(notes_match_by_id(sequential, batched));
+  CHECK(concurrent_lines_match(sequential, batched));
+
+  const int64_t new_ms[] = {batched.find_note(1)->start_ms(batched.timing()),
+                            batched.find_note(2)->start_ms(batched.timing()),
+                            batched.find_note(3)->start_ms(batched.timing())};
+  for (int i = 0; i < 3; ++i) {
+    CHECK(index_query_ids_match(sequential, batched, old_ms[i], 40, 40));
+    CHECK(index_query_ids_match(sequential, batched, new_ms[i], 40, 40));
+    CHECK(split_query_ids_match(sequential, batched, old_ms[i]));
+    CHECK(split_query_ids_match(sequential, batched, new_ms[i]));
+
+    std::vector<int32_t> at_old;
+    std::vector<int32_t> at_new;
+    sorted_query_candidates(batched, old_ms[i], 40, 40, at_old);
+    sorted_query_candidates(batched, new_ms[i], 40, 40, at_new);
+    if (old_ms[i] != new_ms[i]) {
+      CHECK(std::find(at_old.begin(), at_old.end(), moved_ids[i]) == at_old.end());
+    }
+    CHECK(std::find(at_new.begin(), at_new.end(), moved_ids[i]) != at_new.end());
+  }
+  CHECK(split_query_ids_match(sequential, batched, 2000));
+  std::vector<int32_t> splits;
+  sorted_split_query(batched, 2000, splits);
+  CHECK(std::find(splits.begin(), splits.end(), 6) != splits.end());
+}
+
+void test_apply_note_updates_read_only() {
+  ChartDocument doc;
+  seed_apply_note_updates_fixture(doc);
+  doc.set_edit_mode(ChartEditMode::OfficialPreviewOnly);
+  const uint64_t gen = doc.content_generation();
+  NotationNote tap = note_with_id(1, 240, 3);
+  CHECK(!doc.apply_note_updates({{1, tap}}));
+  CHECK_EQ(doc.content_generation(), gen);
+  CHECK_EQ(doc.find_note(1)->start_tick, 0);
+  CHECK_EQ(doc.find_note(1)->lane, 0);
+}
+
+void test_apply_note_updates_hold_span_index_and_concurrent() {
+  ChartDocument doc;
+  seed_apply_note_updates_fixture(doc);
+  CHECK(doc.index().max_hold_span_ms() > 0);
+  CHECK(!doc.index().hold_span_stale());
+  CHECK_EQ(static_cast<int32_t>(doc.concurrent_lines().size()), 0);
+
+  const auto updates = make_batch_move_and_shorten();
+  CHECK(doc.apply_note_updates(updates));
+  CHECK(!doc.index().hold_span_stale());
+  CHECK(doc.index().max_hold_span_ms() > 0);
+  // Long hold 0–1920 shortened to 0–480; remaining short hold is also 480 ticks.
+  CHECK_EQ(doc.find_note(4)->end_tick, 480);
+  CHECK_EQ(doc.index().max_hold_span_ms(), doc.find_note(5)->end_ms(doc.timing()) -
+                                               doc.find_note(5)->start_ms(doc.timing()));
+
+  // Taps 1 and 3 now share tick 0 → multi-press sync line (hold tail + tap 2 may
+  // add another line at the shortened hold end).
+  bool found_start_line = false;
+  for (const auto& line : doc.concurrent_lines()) {
+    if (line.milliseconds != 0) {
+      continue;
+    }
+    found_start_line = true;
+    CHECK_EQ(line.start_lane, 1);
+    CHECK_EQ(line.width, 5);  // lanes 1..5
+  }
+  CHECK(found_start_line);
+
+  std::vector<int32_t> at_start;
+  doc.index().query_candidates(0, 50, 50, at_start);
+  std::sort(at_start.begin(), at_start.end());
+  CHECK(std::find(at_start.begin(), at_start.end(), 1) != at_start.end());
+  CHECK(std::find(at_start.begin(), at_start.end(), 3) != at_start.end());
+  CHECK(std::find(at_start.begin(), at_start.end(), 4) != at_start.end());
+
+  std::vector<int32_t> at_old_c;
+  doc.index().query_candidates(1500, 50, 50, at_old_c);
+  CHECK(std::find(at_old_c.begin(), at_old_c.end(), 3) == at_old_c.end());
+}
+
+void test_update_notes_command_undo_redo_generation() {
+  ChartDocument doc;
+  seed_apply_note_updates_fixture(doc);
+  NotationNote before_a = *doc.find_note(1);
+  NotationNote before_c = *doc.find_note(3);
+  NotationNote after_a = before_a;
+  after_a.lane = 1;
+  NotationNote after_c = before_c;
+  after_c.start_tick = 0;
+  after_c.lane = 5;
+
+  std::unordered_map<int32_t, UpdateNotesCommand::NotePair> changes;
+  changes[1] = {before_a, after_a};
+  changes[3] = {before_c, after_c};
+
+  EditHistory history;
+  const uint64_t g0 = doc.content_generation();
+  CHECK(history.execute(std::make_unique<UpdateNotesCommand>(changes, "Batch move"), doc));
+  CHECK_EQ(doc.content_generation(), g0 + 1);
+  CHECK_EQ(doc.find_note(1)->lane, 1);
+  CHECK_EQ(doc.find_note(3)->start_tick, 0);
+  CHECK_EQ(doc.find_note(3)->lane, 5);
+
+  CHECK(history.undo(doc));
+  CHECK_EQ(doc.content_generation(), g0 + 2);
+  CHECK_EQ(doc.find_note(1)->lane, before_a.lane);
+  CHECK_EQ(doc.find_note(3)->start_tick, before_c.start_tick);
+  CHECK_EQ(doc.find_note(3)->lane, before_c.lane);
+
+  CHECK(history.redo(doc));
+  CHECK_EQ(doc.content_generation(), g0 + 3);
+  CHECK_EQ(doc.find_note(1)->lane, 1);
+  CHECK_EQ(doc.find_note(3)->start_tick, 0);
+  CHECK_EQ(doc.find_note(3)->lane, 5);
+
+  // Failed apply must not mutate (pre-validation is atomic; no per-item rollback).
+  ChartDocument rejected;
+  seed_apply_note_updates_fixture(rejected);
+  std::unordered_map<int32_t, UpdateNotesCommand::NotePair> bad;
+  bad[1] = {before_a, after_a};
+  NotationNote ghost = note_with_id(99, 0, 0);
+  bad[99] = {ghost, ghost};
+  const uint64_t rejected_gen = rejected.content_generation();
+  UpdateNotesCommand bad_cmd(bad, "Bad batch");
+  CHECK(!bad_cmd.execute(rejected));
+  CHECK_EQ(rejected.content_generation(), rejected_gen);
+  CHECK_EQ(rejected.find_note(1)->lane, 0);
+  CHECK(!rejected.find_note(99).has_value());
+}
+
+// Naive oracle for hold-body / preview-combo hits. Must stay a double full-table
+// scan so optimized collect_* can be checked against the original semantics.
+bool reference_lanes_overlap(const NotationNote& a, const NotationNote& b) noexcept {
+  return a.lane <= b.end_lane() && b.lane <= a.end_lane();
+}
+
+bool reference_is_combo_head_note(const NotationNote& note) noexcept {
+  if (is_split_lane_gimmick(note.gimmick_type)) {
+    return false;
+  }
+  if (is_hold_mid_star(note.note_type) || is_hold_body(note.note_type)) {
+    return false;
+  }
+  switch (note.note_type) {
+    case NoteType::Normal:
+    case NoteType::Critical:
+    case NoteType::Flick:
+    case NoteType::BlueTap:
+    case NoteType::HoldStart:
+    case NoteType::CriticalHoldStart:
+    case NoteType::ScratchHoldStart:
+    case NoteType::ScratchCriticalHoldStart:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void reference_collect_hold_body_judge_times(const NotationNote& hold,
+                                             const std::vector<NotationNote>& notes,
+                                             const MusicTiming& timing,
+                                             std::vector<int64_t>& out_sorted_unique) {
+  out_sorted_unique.clear();
+  if (!is_hold_body(hold.note_type) || is_hold_mid_star(hold.note_type)) {
+    return;
+  }
+
+  const int64_t start = hold.start_ms(timing);
+  const int64_t end = hold.end_ms(timing);
+  if (end <= start) {
+    return;
+  }
+
+  std::vector<int64_t> times;
+  for (const auto& note : notes) {
+    if (!is_hold_mid_star(note.note_type)) {
+      continue;
+    }
+    const int64_t ms = note.start_ms(timing);
+    if (ms <= start || ms >= end) {
+      continue;
+    }
+    if (!reference_lanes_overlap(hold, note)) {
+      continue;
+    }
+    times.push_back(ms);
+  }
+
+  std::sort(times.begin(), times.end());
+  times.erase(std::unique(times.begin(), times.end()), times.end());
+  out_sorted_unique = std::move(times);
+}
+
+void reference_collect_preview_combo_hits(const std::vector<NotationNote>& notes,
+                                          const MusicTiming& timing,
+                                          std::vector<int64_t>& out_sorted_hits) {
+  out_sorted_hits.clear();
+  std::vector<int64_t> hold_times;
+  std::vector<char> star_consumed(notes.size(), 0);
+
+  for (size_t i = 0; i < notes.size(); ++i) {
+    const auto& note = notes[i];
+    if (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) {
+      reference_collect_hold_body_judge_times(note, notes, timing, hold_times);
+      out_sorted_hits.insert(out_sorted_hits.end(), hold_times.begin(), hold_times.end());
+      const int64_t start = note.start_ms(timing);
+      const int64_t end = note.end_ms(timing);
+      for (size_t j = 0; j < notes.size(); ++j) {
+        if (!is_hold_mid_star(notes[j].note_type)) {
+          continue;
+        }
+        const int64_t ms = notes[j].start_ms(timing);
+        if (ms > start && ms < end && reference_lanes_overlap(note, notes[j])) {
+          star_consumed[j] = 1;
+        }
+      }
+      if (is_hold_with_tail(note.note_type) && end > start) {
+        out_sorted_hits.push_back(end);
+      }
+      continue;
+    }
+
+    if (reference_is_combo_head_note(note)) {
+      out_sorted_hits.push_back(note.start_ms(timing));
+    }
+  }
+
+  for (size_t i = 0; i < notes.size(); ++i) {
+    if (star_consumed[i] || !is_hold_mid_star(notes[i].note_type)) {
+      continue;
+    }
+    if (is_split_lane_gimmick(notes[i].gimmick_type)) {
+      continue;
+    }
+    out_sorted_hits.push_back(notes[i].start_ms(timing));
+  }
+
+  std::sort(out_sorted_hits.begin(), out_sorted_hits.end());
+}
+
+void sabotaged_inclusive_hold_body_judge_times(const NotationNote& hold,
+                                               const std::vector<NotationNote>& notes,
+                                               const MusicTiming& timing,
+                                               std::vector<int64_t>& out_sorted_unique) {
+  out_sorted_unique.clear();
+  if (!is_hold_body(hold.note_type) || is_hold_mid_star(hold.note_type)) {
+    return;
+  }
+  const int64_t start = hold.start_ms(timing);
+  const int64_t end = hold.end_ms(timing);
+  if (end <= start) {
+    return;
+  }
+  std::vector<int64_t> times;
+  for (const auto& note : notes) {
+    if (!is_hold_mid_star(note.note_type)) {
+      continue;
+    }
+    const int64_t ms = note.start_ms(timing);
+    if (ms < start || ms > end) {
+      continue;
+    }
+    if (!reference_lanes_overlap(hold, note)) {
+      continue;
+    }
+    times.push_back(ms);
+  }
+  std::sort(times.begin(), times.end());
+  times.erase(std::unique(times.begin(), times.end()), times.end());
+  out_sorted_unique = std::move(times);
+}
+
+void sabotaged_combo_without_consume(const std::vector<NotationNote>& notes,
+                                     const MusicTiming& timing,
+                                     std::vector<int64_t>& out_sorted_hits) {
+  reference_collect_preview_combo_hits(notes, timing, out_sorted_hits);
+  for (const auto& note : notes) {
+    if (is_hold_mid_star(note.note_type) && !is_split_lane_gimmick(note.gimmick_type)) {
+      out_sorted_hits.push_back(note.start_ms(timing));
+    }
+  }
+  std::sort(out_sorted_hits.begin(), out_sorted_hits.end());
+}
+
+NotationNote combo_note(int32_t start_tick, int32_t end_tick, int32_t lane, int32_t width,
+                        NoteType type, GimmickType gimmick = GimmickType::None) {
+  NotationNote note;
+  note.start_tick = start_tick;
+  note.end_tick = end_tick;
+  note.lane = lane;
+  note.width = width;
+  note.note_type = type;
+  note.gimmick_type = gimmick;
+  return note;
+}
+
+MusicTiming combo_test_timing() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  return timing;
+}
+
+void check_ms_lists_equal(const std::vector<int64_t>& got, const std::vector<int64_t>& ref,
+                          const char* label) {
+  if (got != ref) {
+    std::fprintf(stderr, "combo ms mismatch (%s): got %zu vs ref %zu\n", label, got.size(),
+                 ref.size());
+    const size_t n = std::min(got.size(), ref.size());
+    for (size_t i = 0; i < n; ++i) {
+      if (got[i] != ref[i]) {
+        std::fprintf(stderr, "  first diff i=%zu got=%lld ref=%lld\n", i,
+                     static_cast<long long>(got[i]), static_cast<long long>(ref[i]));
+        break;
+      }
+    }
+  }
+  CHECK(got == ref);
+}
+
+void expect_hold_and_combo_match(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                                 const char* label) {
+  std::vector<int64_t> got_hold;
+  std::vector<int64_t> ref_hold;
+  for (const auto& note : notes) {
+    collect_hold_body_judge_times(note, notes, timing, got_hold);
+    reference_collect_hold_body_judge_times(note, notes, timing, ref_hold);
+    check_ms_lists_equal(got_hold, ref_hold, label);
+  }
+  std::vector<int64_t> got_combo;
+  std::vector<int64_t> ref_combo;
+  collect_preview_combo_hits(notes, timing, got_combo);
+  reference_collect_preview_combo_hits(notes, timing, ref_combo);
+  check_ms_lists_equal(got_combo, ref_combo, label);
+}
+
+void test_hold_combo_reference_fixed_cases() {
+  const MusicTiming timing = combo_test_timing();
+
+  // Duplicate ms: two overlapping stars at the same tick collapse to one judge.
+  {
+    const auto hold = combo_note(0, 1920, 0, 3, NoteType::Hold);
+    const auto star_a = combo_note(480, 480, 0, 1, NoteType::Sound);
+    const auto star_b = combo_note(480, 480, 1, 1, NoteType::HoldEighth);
+    const auto star_c = combo_note(960, 960, 0, 1, NoteType::ScratchSound);
+    const std::vector<NotationNote> notes{hold, star_a, star_b, star_c};
+    std::vector<int64_t> times;
+    reference_collect_hold_body_judge_times(hold, notes, timing, times);
+    CHECK_EQ(static_cast<int>(times.size()), 2);
+    CHECK_EQ(times[0], star_a.start_ms(timing));
+    CHECK_EQ(times[1], star_c.start_ms(timing));
+    CHECK_EQ(times[0], star_b.start_ms(timing));
+
+    std::vector<int64_t> combo;
+    reference_collect_preview_combo_hits(notes, timing, combo);
+    CHECK_EQ(static_cast<int>(combo.size()), 3);
+    CHECK_EQ(combo[0], times[0]);
+    CHECK_EQ(combo[1], times[1]);
+    CHECK_EQ(combo[2], hold.end_ms(timing));
+    expect_hold_and_combo_match(notes, timing, "duplicate-ms");
+  }
+
+  // Wide hold covers every playable lane.
+  {
+    const auto hold = combo_note(0, 1920, 0, 12, NoteType::Hold);
+    const auto s0 = combo_note(240, 240, 0, 1, NoteType::HoldEighth);
+    const auto s5 = combo_note(480, 480, 5, 2, NoteType::Sound);
+    const auto s11 = combo_note(720, 720, 11, 1, NoteType::ScratchSound);
+    const std::vector<NotationNote> notes{hold, s0, s5, s11};
+    std::vector<int64_t> times;
+    reference_collect_hold_body_judge_times(hold, notes, timing, times);
+    CHECK_EQ(static_cast<int>(times.size()), 3);
+    CHECK_EQ(times[0], s0.start_ms(timing));
+    CHECK_EQ(times[1], s5.start_ms(timing));
+    CHECK_EQ(times[2], s11.start_ms(timing));
+    expect_hold_and_combo_match(notes, timing, "wide-lane");
+  }
+
+  // Overlapping holds each emit the shared star; star is consumed once globally.
+  {
+    const auto hold_a = combo_note(0, 1920, 0, 3, NoteType::Hold);
+    const auto hold_b = combo_note(480, 2400, 2, 3, NoteType::CriticalHold);
+    const auto star = combo_note(960, 960, 2, 1, NoteType::Sound);
+    const std::vector<NotationNote> notes{hold_a, hold_b, star};
+    std::vector<int64_t> times_a;
+    std::vector<int64_t> times_b;
+    reference_collect_hold_body_judge_times(hold_a, notes, timing, times_a);
+    reference_collect_hold_body_judge_times(hold_b, notes, timing, times_b);
+    CHECK_EQ(static_cast<int>(times_a.size()), 1);
+    CHECK_EQ(static_cast<int>(times_b.size()), 1);
+    CHECK_EQ(times_a[0], star.start_ms(timing));
+    CHECK_EQ(times_b[0], star.start_ms(timing));
+
+    std::vector<int64_t> combo;
+    reference_collect_preview_combo_hits(notes, timing, combo);
+    int shared = 0;
+    for (const int64_t ms : combo) {
+      if (ms == star.start_ms(timing)) {
+        ++shared;
+      }
+    }
+    CHECK_EQ(shared, 2);
+    CHECK_EQ(static_cast<int>(combo.size()), 4);
+    expect_hold_and_combo_match(notes, timing, "overlapping-holds");
+  }
+
+  // Stars exactly on hold start/end are exclusive; only the interior star counts.
+  {
+    const auto hold = combo_note(480, 1440, 1, 2, NoteType::Hold);
+    const auto at_start = combo_note(480, 480, 1, 1, NoteType::Sound);
+    const auto at_end = combo_note(1440, 1440, 1, 1, NoteType::Sound);
+    const auto before = combo_note(0, 0, 1, 1, NoteType::HoldEighth);
+    const auto inside = combo_note(960, 960, 2, 1, NoteType::ScratchSound);
+    const std::vector<NotationNote> notes{hold, at_start, at_end, before, inside};
+    std::vector<int64_t> times;
+    reference_collect_hold_body_judge_times(hold, notes, timing, times);
+    CHECK_EQ(static_cast<int>(times.size()), 1);
+    CHECK_EQ(times[0], inside.start_ms(timing));
+    expect_hold_and_combo_match(notes, timing, "boundary-star");
+  }
+
+  // Isolated split mid-star is not combo; absorbed split star is a hold judge.
+  {
+    const auto isolated_split = combo_note(240, 240, 8, 1, NoteType::Sound, GimmickType::Split3);
+    const auto hold = combo_note(0, 1920, 3, 2, NoteType::Hold);
+    const auto absorbed_split = combo_note(960, 960, 3, 1, NoteType::Sound, GimmickType::Split3);
+    const auto isolated = combo_note(2400, 2400, 5, 1, NoteType::HoldEighth);
+    const std::vector<NotationNote> notes{isolated_split, hold, absorbed_split, isolated};
+    std::vector<int64_t> times;
+    reference_collect_hold_body_judge_times(hold, notes, timing, times);
+    CHECK_EQ(static_cast<int>(times.size()), 1);
+    CHECK_EQ(times[0], absorbed_split.start_ms(timing));
+
+    std::vector<int64_t> combo;
+    reference_collect_preview_combo_hits(notes, timing, combo);
+    CHECK_EQ(static_cast<int>(combo.size()), 3);
+    CHECK_EQ(combo[0], absorbed_split.start_ms(timing));
+    CHECK_EQ(combo[1], hold.end_ms(timing));
+    CHECK_EQ(combo[2], isolated.start_ms(timing));
+    expect_hold_and_combo_match(notes, timing, "split-mid-star");
+  }
+
+  // Zero-width hold still uses lanes_overlap (end_lane = lane-1).
+  {
+    const auto hold = combo_note(0, 1920, 5, 0, NoteType::Hold);
+    const auto star = combo_note(480, 480, 4, 2, NoteType::Sound);
+    const auto miss = combo_note(720, 720, 8, 1, NoteType::Sound);
+    const std::vector<NotationNote> notes{hold, star, miss};
+    std::vector<int64_t> times;
+    reference_collect_hold_body_judge_times(hold, notes, timing, times);
+    CHECK_EQ(static_cast<int>(times.size()), 1);
+    CHECK_EQ(times[0], star.start_ms(timing));
+    expect_hold_and_combo_match(notes, timing, "zero-width-hold");
+  }
+
+  // Negative-lane star can still overlap; production must not OOB.
+  {
+    const auto hold = combo_note(0, 1920, 0, 2, NoteType::NontailHold);
+    const auto star = combo_note(480, 480, -3, 5, NoteType::Sound);
+    const std::vector<NotationNote> notes{hold, star};
+    std::vector<int64_t> times;
+    reference_collect_hold_body_judge_times(hold, notes, timing, times);
+    CHECK_EQ(static_cast<int>(times.size()), 1);
+    std::vector<int64_t> combo;
+    reference_collect_preview_combo_hits(notes, timing, combo);
+    CHECK_EQ(static_cast<int>(combo.size()), 1);
+    expect_hold_and_combo_match(notes, timing, "negative-lane-star");
+  }
+}
+
+void test_hold_combo_sabotage_detects_wrong_oracle() {
+  const MusicTiming timing = combo_test_timing();
+  const auto hold = combo_note(480, 1440, 1, 2, NoteType::Hold);
+  const auto at_start = combo_note(480, 480, 1, 1, NoteType::Sound);
+  const auto at_end = combo_note(1440, 1440, 1, 1, NoteType::Sound);
+  const auto inside = combo_note(960, 960, 1, 1, NoteType::HoldEighth);
+  const std::vector<NotationNote> notes{hold, at_start, at_end, inside};
+
+  std::vector<int64_t> ref_times;
+  std::vector<int64_t> broken_times;
+  reference_collect_hold_body_judge_times(hold, notes, timing, ref_times);
+  sabotaged_inclusive_hold_body_judge_times(hold, notes, timing, broken_times);
+  CHECK_EQ(static_cast<int>(ref_times.size()), 1);
+  CHECK(broken_times != ref_times);
+  CHECK_EQ(static_cast<int>(broken_times.size()), 3);
+
+  std::vector<int64_t> ref_combo;
+  std::vector<int64_t> broken_combo;
+  reference_collect_preview_combo_hits(notes, timing, ref_combo);
+  sabotaged_combo_without_consume(notes, timing, broken_combo);
+  CHECK(broken_combo != ref_combo);
+}
+
+void test_hold_combo_production_matches_reference_random() {
+  const MusicTiming timing = combo_test_timing();
+  expect_hold_and_combo_match({}, timing, "empty");
+
+  const NoteType hold_types[] = {NoteType::Hold, NoteType::CriticalHold, NoteType::ScratchHold,
+                                 NoteType::NontailHold, NoteType::NontailScratchHold};
+  const NoteType star_types[] = {NoteType::HoldEighth, NoteType::Sound, NoteType::ScratchSound};
+  const NoteType head_types[] = {NoteType::Normal, NoteType::Critical, NoteType::Flick,
+                                 NoteType::HoldStart, NoteType::BlueTap};
+
+  for (uint32_t seed = 1; seed <= 48; ++seed) {
+    uint32_t state = seed * 747796405u + 2891336453u;
+    auto next = [&]() {
+      state = state * 1664525u + 1013904223u;
+      return state;
+    };
+    auto pick = [&](int32_t n) { return static_cast<int32_t>(next() % static_cast<uint32_t>(n)); };
+
+    std::vector<NotationNote> notes;
+    notes.reserve(96);
+    for (int32_t i = 0; i < 80; ++i) {
+      NotationNote note;
+      note.id = i;
+      note.start_tick = pick(64) * 120;
+      note.lane = pick(14) - 1;
+      note.width = pick(8);
+      const int32_t kind = pick(10);
+      if (kind < 3) {
+        note.note_type = hold_types[static_cast<size_t>(pick(5))];
+        note.end_tick = note.start_tick + 240 + pick(16) * 120;
+      } else if (kind < 7) {
+        note.note_type = star_types[static_cast<size_t>(pick(3))];
+        note.end_tick = note.start_tick;
+        if (pick(7) == 0) {
+          note.gimmick_type = GimmickType::Split3;
+        }
+        if (pick(5) == 0 && !notes.empty()) {
+          note.start_tick = notes[static_cast<size_t>(pick(static_cast<int32_t>(notes.size())))]
+                                .start_tick;
+          note.end_tick = note.start_tick;
+        }
+      } else {
+        note.note_type = head_types[static_cast<size_t>(pick(5))];
+        note.end_tick = (note.note_type == NoteType::HoldStart) ? note.start_tick + 480
+                                                               : note.start_tick;
+        if (pick(11) == 0) {
+          note.gimmick_type = GimmickType::Split6;
+        }
+      }
+      if (pick(19) == 0) {
+        note.width = 12;
+        note.lane = 0;
+      }
+      notes.push_back(note);
+    }
+
+    char label[64];
+    std::snprintf(label, sizeof(label), "random-seed-%u", seed);
+    expect_hold_and_combo_match(notes, timing, label);
+  }
+}
+
+void test_public_mutation_generation_semantics_unchanged() {
+  ChartDocument doc;
+  doc.mark_saved();
+  const uint64_t g0 = doc.content_generation();
+  CHECK_EQ(doc.add_note(note_with_id(1, 0, 0)), 1);
+  CHECK_EQ(doc.content_generation(), g0 + 2);
+
+  doc.mark_saved();
+  const uint64_t g1 = doc.content_generation();
+  CHECK(doc.remove_note(1));
+  CHECK_EQ(doc.content_generation(), g1 + 2);
+
+  CHECK_EQ(doc.add_note(note_with_id(2, 0, 1)), 2);
+  doc.mark_saved();
+  const uint64_t g2 = doc.content_generation();
+  MusicTiming timing = doc.timing();
+  timing.bpm = 140.0;
+  timing.points = {TimingPoint{0, 140.0, 4, 4, true, true}};
+  CHECK(doc.set_timing(std::move(timing)));
+  CHECK_EQ(doc.content_generation(), g2 + 2);
+
+  doc.mark_saved();
+  const uint64_t g3 = doc.content_generation();
+  CHECK(doc.set_notes({note_with_id(3, 480, 2)}));
+  CHECK_EQ(doc.content_generation(), g3 + 2);
+
+  doc.mark_saved();
+  const uint64_t g4 = doc.content_generation();
+  doc.rebuild_concurrent_lines();
+  CHECK(doc.is_dirty());
+  CHECK_EQ(doc.content_generation(), g4 + 1);
+}
+
 int main() {
   test_auto_note_id_starts_at_zero();
   test_concurrent_lines_multi_press_only();
@@ -4130,6 +5538,21 @@ int main() {
   test_load_rejects_lane_width_overflow();
   test_load_rejects_nonfinite_ticks();
   test_measure_ticks_no_hang_near_int_max();
+  test_load_rejects_invalid_tpq_and_nonfinite_bpm();
+  test_set_timing_rejects_illegal_tpq_atomically();
+  test_construct_normalize_fallback_illegal_tpq();
+  test_tick_ms_saturates_nan_inf_and_extremes();
+  test_int32_tick_range_measure_and_snap_no_hang();
+  test_note_id_max_and_auto_exhaust_are_atomic();
+  test_set_notes_auto_explicit_collision_is_atomic();
+  test_load_rejects_explicit_int32_max_note_id();
+  test_load_from_chart_renormalizes_unsafe_ids_keeps_sparse();
+  test_seconds_to_ticks_large_negative_finite();
+  test_set_timing_rejects_negative_tick_atomically();
+  test_normalize_clamps_negative_ticks_before_merge();
+  test_load_rejects_negative_timing_tick();
+  test_legacy_and_missing_tpq_remain_compatible();
+  test_tick_ms_hits_saturation_gates();
   test_sus_rejects_huge_measurebs();
   test_export_sus_after_edit_preserves_engine_history();
   test_load_fixture_normalized_chart();
@@ -4140,7 +5563,11 @@ int main() {
   test_snapshot_incremental_tick();
   test_snapshot_aux_objects_incremental();
   test_snapshot_large_seek_full_rebuild();
+  test_snapshot_sub_ms_timeline_us_survives_rebuild_and_patch();
   test_split_gimmick_range_and_combo_includes_heads();
+  test_hold_combo_reference_fixed_cases();
+  test_hold_combo_sabotage_detects_wrong_oracle();
+  test_hold_combo_production_matches_reference_random();
   test_split_appear_phase_before_start_ms();
   test_official_playfield_visual_lanes_are_six();
   test_official_playfield_judge_ndc_and_perspective();
@@ -4178,6 +5605,15 @@ int main() {
   test_timing_tick_ms_roundtrip_multi_bpm();
   test_timing_first_bpm_is_song_start_without_tick0();
   test_hold_span_stale_skips_rebuild_without_holds();
+  test_apply_note_updates_empty_does_not_change_generation();
+  test_apply_note_updates_batch_equivalent_and_generation_plus_one();
+  test_apply_note_updates_rejects_duplicate_and_unknown_atomically();
+  test_apply_note_updates_forces_note_id();
+  test_apply_note_updates_incremental_index_without_hold_rebuild();
+  test_apply_note_updates_read_only();
+  test_apply_note_updates_hold_span_index_and_concurrent();
+  test_update_notes_command_undo_redo_generation();
+  test_public_mutation_generation_semantics_unchanged();
   test_sus_channel_reuse_two_holds();
   test_sus_cross_measure_hold_at_bar_head();
   test_sus_spec_example_hold_14002400();

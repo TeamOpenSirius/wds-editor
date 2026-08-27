@@ -1,15 +1,19 @@
 #pragma once
 
 #include "hit_sfx.hpp"
+#include "recovery_backoff.hpp"
 
 #include <wds/common/time.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 
 namespace wds::audio {
+
+struct AudioEngineTestAccess;
 
 // Linked BASS library version (same packing as BASS_GetVersion). 0 if the
 // symbol is unavailable. UI/startup must use this instead of including bass.h.
@@ -29,7 +33,7 @@ class AudioEngine {
   void shutdown();
 
   bool ready() const noexcept { return ready_; }
-  bool has_music() const noexcept { return music_ != 0; }
+  bool has_music() const noexcept;
   bool sfx_ready() const noexcept { return sfx_ready_.load(std::memory_order_acquire); }
 
   // --- position ---
@@ -45,11 +49,15 @@ class AudioEngine {
   void begin_timeline_control();
 
   // --- music ---
-  void play_music();
+  // True on ChannelPlay success. No stream is an explicit failure.
+  // Success clears last_bass_error(); failure stores BASS_ErrorGetCode()
+  // (or a non-zero handle error when there is no music).
+  bool play_music();
   void pause_music();
-  // True when the BASS music channel is currently outputting (PLAYING).
+  int last_bass_error() const noexcept { return last_bass_error_; }
+  StreamHealth stream_health() const noexcept;
+  // Compatibility wrappers around stream_health().
   bool stream_playing() const noexcept;
-  // True when the stream has stopped (natural end or never started).
   bool stream_stopped() const noexcept;
 
   // --- SFX ---
@@ -62,6 +70,8 @@ class AudioEngine {
   // device ChannelPlay). Falls back to immediate play when there is no music.
   // Returns false if the hit could not be armed or played (caller may retry).
   bool schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at);
+  // Armed MIXTIME POS syncs still waiting to fire. Thread-safe (same lock as push).
+  size_t pending_sfx_sync_count() const noexcept;
   void clear_scheduled_sfx();
   void set_hold_looping(bool enabled);
   // Stop currently audible sample voices (one-shots / Hold). Pending music
@@ -80,6 +90,8 @@ class AudioEngine {
   void handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip);
 
  private:
+  friend struct AudioEngineTestAccess;
+  struct TestDouble;
   void apply_music_volume();
   void apply_music_rate();
   void apply_sfx_volume();
@@ -107,6 +119,8 @@ class AudioEngine {
   float music_base_freq_ = 0.0f;
   uint64_t position_generation_ = 0;
   std::atomic<bool> shutting_down_{false};
+  int last_bass_error_ = 0;
+  TestDouble* test_double_ = nullptr;
 };
 
 }  // namespace wds::audio

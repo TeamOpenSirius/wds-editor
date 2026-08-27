@@ -3,6 +3,7 @@
 #include "wds/interaction/platform.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace wds::interaction {
 namespace {
@@ -160,8 +161,12 @@ void set_invert_visible_range_scroll(bool enabled) noexcept {
 float scroll_wheel_speed() noexcept { return scroll_wheel_speed_storage(); }
 
 void set_scroll_wheel_speed(float speed) noexcept {
-  if (speed < 0.25f) speed = 0.25f;
-  if (speed > 3.0f) speed = 3.0f;
+  if (!std::isfinite(speed)) {
+    speed = 1.0f;
+  } else {
+    if (speed < 0.25f) speed = 0.25f;
+    if (speed > 3.0f) speed = 3.0f;
+  }
   scroll_wheel_speed_storage() = speed;
 }
 

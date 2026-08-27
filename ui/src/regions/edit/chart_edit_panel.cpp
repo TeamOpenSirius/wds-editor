@@ -1,5 +1,7 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 
+#include "wds/ui/timeline_wheel.hpp"
+
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/edit_history.hpp>
@@ -42,6 +44,21 @@ float measure_gutter_w() { return wds::interaction::theme::px(40.0f); }
 
 bool is_visible_mid_star(NoteType type) noexcept {
   return type == NoteType::Sound || type == NoteType::ScratchSound;
+}
+
+std::vector<wds::chart_editor::NoteUpdate> to_note_updates(
+    const std::unordered_map<int32_t, NotationNote>& notes) {
+  std::vector<wds::chart_editor::NoteUpdate> updates;
+  updates.reserve(notes.size());
+  for (const auto& [id, note] : notes) {
+    updates.push_back({id, note});
+  }
+  return updates;
+}
+
+bool apply_note_map(wds::chart_editor::ChartDocument& doc,
+                    const std::unordered_map<int32_t, NotationNote>& notes) {
+  return doc.apply_note_updates(to_note_updates(notes));
 }
 
 }  // namespace
@@ -1659,7 +1676,9 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
       n.width = orig.width;
     }
   }
-  for (const auto& [id, n] : next) engine_.document().update_note(id, n);
+  if (!apply_note_map(engine_.document(), next)) {
+    return;
+  }
   engine_.rebuild_snapshot();
 }
 
@@ -1701,11 +1720,17 @@ void ChartEditPanel::finish_move() {
     }
   }
   // Revert live edits then apply command (document already mutated during drag).
-  // During drag we mutate via update_note — for undo, rebuild from originals→final.
   if (!changes.empty()) {
-    // Document is already at "after"; set before state then execute update.
+    std::vector<wds::chart_editor::NoteUpdate> revert;
+    revert.reserve(changes.size());
     for (const auto& [id, pair] : changes) {
-      engine_.document().update_note(id, pair.first);
+      revert.push_back({id, pair.first});
+    }
+    if (!engine_.document().apply_note_updates(revert)) {
+      // Keep the live document; do not push a history entry from a failed revert.
+      drag_originals_.clear();
+      mode_ = Mode::Idle;
+      return;
     }
     commit_updates(changes, "Move notes");
   }
@@ -3839,11 +3864,12 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
 
     // Write the gesture snapshot back — used when the pointer returns to drag-start
     // geometry so mid-drag tip/direction edits do not linger in the document.
-    auto restore_drag_originals = [&] {
-      for (const auto& [id, orig] : drag_originals_) {
-        engine_.document().update_note(id, orig);
+    auto restore_drag_originals = [&]() -> bool {
+      if (!apply_note_map(engine_.document(), drag_originals_)) {
+        return false;
       }
       engine_.rebuild_snapshot();
+      return true;
     };
 
     // Keep equal-width hold heads matched to a resized body.
@@ -3888,7 +3914,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         if (resize_applied_end_l_ != orig_end.first || resize_applied_end_r_ != orig_end.second ||
             resize_applied_body_lane_ != anchor_orig.lane ||
             resize_applied_body_width_ != anchor_orig.width) {
-          restore_drag_originals();
+          if (!restore_drag_originals()) {
+            return;
+          }
           resize_applied_end_l_ = orig_end.first;
           resize_applied_end_r_ = orig_end.second;
           resize_applied_body_lane_ = anchor_orig.lane;
@@ -4032,7 +4060,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       if (!sync_equal_width_heads(next) || !sync_mid_stars(next)) {
         return;
       }
-      for (const auto& [id, n] : next) engine_.document().update_note(id, n);
+      if (!apply_note_map(engine_.document(), next)) {
+        return;
+      }
       resize_applied_end_l_ = end_left;
       resize_applied_end_r_ = end_right;
       resize_applied_body_lane_ = next[body.id].lane;
@@ -4061,7 +4091,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       if (resize_applied_body_lane_ != anchor_orig.lane ||
           resize_applied_body_width_ != anchor_orig.width ||
           resize_applied_end_l_ != std::numeric_limits<int32_t>::min()) {
-        restore_drag_originals();
+        if (!restore_drag_originals()) {
+          return;
+        }
         resize_applied_end_l_ = std::numeric_limits<int32_t>::min();
         resize_applied_end_r_ = std::numeric_limits<int32_t>::min();
         resize_applied_body_lane_ = anchor_orig.lane;
@@ -4167,7 +4199,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     if (!sync_equal_width_heads(next_map) || !sync_mid_stars(next_map)) {
       return;
     }
-    for (const auto& [id, n] : next_map) engine_.document().update_note(id, n);
+    if (!apply_note_map(engine_.document(), next_map)) {
+      return;
+    }
     if (auto ait = next_map.find(anchor_note_id_); ait != next_map.end()) {
       resize_applied_body_lane_ = ait->second.lane;
       resize_applied_body_width_ = ait->second.width;
@@ -4187,7 +4221,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     const NotationNote& anchor_orig = anchor_it->second;
 
     // Keep HoldEighth / mid-stars inside their parent hold after body edges move.
-    auto sync_attached_to_live_holds = [&] {
+    auto collect_attached_updates = [&](std::unordered_map<int32_t, NotationNote>& pending) {
       for (const auto& [id, orig] : drag_originals_) {
         if (!is_visible_mid_star(orig.note_type) && orig.note_type != NoteType::HoldEighth) {
           continue;
@@ -4210,6 +4244,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
           }
         }
         if (!parent) continue;
+        if (auto pit = pending.find(parent->id); pit != pending.end()) {
+          parent = pit->second;
+        }
         NotationNote n = orig;
         n.lane = parent->lane;
         n.width = parent->width;
@@ -4223,7 +4260,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
             n.start_tick = std::clamp(orig.start_tick + delta, lo, hi);
           }
           n.end_tick = n.start_tick;
-          engine_.document().update_note(id, n);
+          pending[id] = n;
         }
       }
     };
@@ -4256,19 +4293,24 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       if (lo > hi) return;
       const int32_t joint = std::clamp(tick, lo, hi);
 
+      std::unordered_map<int32_t, NotationNote> pending;
       NotationNote prev_n = anchor_orig;
       prev_n.end_tick = joint;
-      engine_.document().update_note(prev_n.id, prev_n);
+      pending[prev_n.id] = prev_n;
       if (next_orig) {
         NotationNote next_n = *next_orig;
         next_n.start_tick = joint;
-        engine_.document().update_note(next_n.id, next_n);
+        pending[next_n.id] = next_n;
       }
-      sync_attached_to_live_holds();
+      collect_attached_updates(pending);
+      if (!apply_note_map(engine_.document(), pending)) {
+        return;
+      }
       engine_.rebuild_snapshot();
       return;
     }
 
+    std::unordered_map<int32_t, NotationNote> pending;
     int32_t new_start = -1;
     for (const auto& [id, orig] : drag_originals_) {
       NotationNote n = orig;
@@ -4284,7 +4326,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         n.start_tick = std::min(tick, n.end_tick - min_dur);
         new_start = n.start_tick;
       }
-      engine_.document().update_note(id, n);
+      pending[id] = n;
     }
     // Paired head follows hold start when the start edge is dragged.
     if (!adjust_end_ && new_start >= 0) {
@@ -4293,10 +4335,13 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         NotationNote n = orig;
         n.start_tick = new_start;
         n.end_tick = new_start;
-        engine_.document().update_note(id, n);
+        pending[id] = n;
       }
     }
-    sync_attached_to_live_holds();
+    collect_attached_updates(pending);
+    if (!apply_note_map(engine_.document(), pending)) {
+      return;
+    }
     engine_.rebuild_snapshot();
   }
   if (mode_ == Mode::DragSplitEdge) {
@@ -4339,8 +4384,13 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
          cur->end_tick != orig_it->second.end_tick)) {
       std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
       changes[note_id] = {orig_it->second, *cur};
-      for (const auto& [id, pair] : changes) {
-        engine_.document().update_note(id, pair.first);
+      if (!engine_.document().update_note(note_id, orig_it->second)) {
+        drag_originals_.clear();
+        drag_split_note_id_ = -1;
+        split_edge_ever_moved_ = false;
+        mode_ = Mode::Idle;
+        update_split_label_hover(event.position);
+        return;
       }
       commit_updates(changes, "Resize split");
     }
@@ -4399,28 +4449,20 @@ void ChartEditPanel::on_scroll(const wds::interaction::ScrollEvent& event) {
     return;
   }
   if (!absolute_bounds().contains(event.position)) return;
+  handle_timeline_wheel(event);
+}
+
+void ChartEditPanel::handle_timeline_wheel(const wds::interaction::ScrollEvent& event) {
   active_mods_ = event.mods;
 
   // Fixed gesture: Ctrl+wheel (Cmd+wheel on macOS) adjusts visible range
   // (not in shortcut settings). Default: scroll up shrinks the window (zoom in).
-  // Independent of global invert_scroll_wheel — undo that adapter flip, then
-  // apply the dedicated flag.
   if (wds::interaction::is_primary_modifier(event.mods)) {
-    if (std::abs(event.delta_y) < 1e-6f) return;
-    float dy = event.delta_y;
-    if (wds::interaction::invert_scroll_wheel()) {
-      dy = -dy;
-    }
-    if (wds::interaction::invert_visible_range_scroll()) {
-      dy = -dy;
-    }
-    // One hectom per notch; trackpad bursts may report |dy| > 1.
-    int steps = static_cast<int>(std::lround(std::abs(dy)));
-    if (steps < 1) steps = 1;
     auto grid = viewport_.grid();
     const int32_t before = grid.visible_hectoms;
-    const int32_t delta = (dy > 0.0f) ? -steps : steps;
-    grid.visible_hectoms = std::clamp(grid.visible_hectoms + delta, 1, 1000);
+    grid.visible_hectoms = visible_range_after_wheel(
+        event.delta_y, before, wds::interaction::invert_scroll_wheel(),
+        wds::interaction::invert_visible_range_scroll());
     if (grid.visible_hectoms == before) return;
     set_grid(grid);
     if (on_visible_range_changed_) {
@@ -4431,20 +4473,10 @@ void ChartEditPanel::on_scroll(const wds::interaction::ScrollEvent& event) {
   }
 
   // Scroll = scrub preview timeline by fixed time so motion stays BPM-independent.
-  // During marquee, the anchor stays in tick/lane space so the box can grow past
-  // the previously visible range.
-  // 1x notch ms scales with visible range: 20 hectoms → 100ms, 40 → 200ms.
-  // Legacy hardcoded 50ms/notch at range 20 corresponds to 0.5x.
-  constexpr float kScrollMsPerNotchAtVisible20 = 100.0f;
-  constexpr float kScrollVisibleRefHectoms = 20.0f;
-  const float ms_per_notch_at_1x =
-      kScrollMsPerNotchAtVisible20 *
-      (static_cast<float>(std::max(1, viewport_.grid().visible_hectoms)) /
-       kScrollVisibleRefHectoms);
-  const float delta_ms =
-      -event.delta_y * ms_per_notch_at_1x * wds::interaction::scroll_wheel_speed();
-  const int64_t next_ms =
-      std::max<int64_t>(0, engine_.timeline_ms() + static_cast<int64_t>(std::lround(delta_ms)));
+  const int64_t next_ms = std::max<int64_t>(
+      0, engine_.timeline_ms() +
+             timeline_scrub_delta_ms(event.delta_y, viewport_.grid().visible_hectoms,
+                                     wds::interaction::scroll_wheel_speed()));
   if (seek_ms_) {
     seek_ms_(next_ms);
   } else {

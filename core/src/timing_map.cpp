@@ -27,9 +27,32 @@ void propagate_inherited_fields(MusicTiming& timing) {
   }
 }
 
+int32_t clamp_i64_to_i32_min1(int64_t value) noexcept {
+  if (value < 1) {
+    return 1;
+  }
+  if (value > std::numeric_limits<int32_t>::max()) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  return static_cast<int32_t>(value);
+}
+
+int32_t clamp_i64_to_i32_nonneg(int64_t value) noexcept {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > std::numeric_limits<int32_t>::max()) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  return static_cast<int32_t>(value);
+}
+
 }  // namespace
 
 void normalize_timing_points(MusicTiming& timing) {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter)) {
+    timing.ticks_per_quarter = kDefaultTicksPerQuarter;
+  }
   if (timing.points.empty()) {
     TimingPoint root;
     root.tick = 0;
@@ -39,6 +62,11 @@ void normalize_timing_points(MusicTiming& timing) {
     root.has_bpm = true;
     root.has_meter = true;
     timing.points.push_back(root);
+  }
+  for (auto& point : timing.points) {
+    if (point.tick < 0) {
+      point.tick = 0;
+    }
   }
   std::sort(timing.points.begin(), timing.points.end(),
             [](const TimingPoint& a, const TimingPoint& b) { return a.tick < b.tick; });
@@ -119,19 +147,21 @@ void rebuild_timing_prefix_ms(const MusicTiming& timing) {
   for (size_t i = 1; i < pts.size(); ++i) {
     const double bpm = pts[i - 1].bpm > 0.0 ? pts[i - 1].bpm : 120.0;
     const double rate = 60000.0 / (bpm * tpq);
-    timing.prefix_ms[i] =
-        timing.prefix_ms[i - 1] + static_cast<double>(pts[i].tick - pts[i - 1].tick) * rate;
+    const int64_t dt =
+        static_cast<int64_t>(pts[i].tick) - static_cast<int64_t>(pts[i - 1].tick);
+    timing.prefix_ms[i] = timing.prefix_ms[i - 1] + static_cast<double>(dt) * rate;
   }
 }
 
 int32_t beat_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter) noexcept {
-  const int32_t tpq = std::max(1, ticks_per_quarter);
-  const int32_t den = std::max(1, point.denominator);
-  return std::max(1, tpq * 4 / den);
+  const int64_t tpq = std::max<int64_t>(1, ticks_per_quarter);
+  const int64_t den = std::max<int64_t>(1, point.denominator);
+  return clamp_i64_to_i32_min1(tpq * 4 / den);
 }
 
 int32_t measure_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter) noexcept {
-  return std::max(1, point.numerator * beat_length_ticks(point, ticks_per_quarter));
+  const int64_t beat = beat_length_ticks(point, ticks_per_quarter);
+  return clamp_i64_to_i32_min1(static_cast<int64_t>(point.numerator) * beat);
 }
 
 int32_t subdivision_length_ticks(const TimingPoint& point, int32_t ticks_per_quarter,
@@ -154,7 +184,7 @@ int32_t snap_to_subdivision(int32_t tick, const MusicTiming& timing,
   if (timing.points.empty()) return std::max(0, tick);
   const int32_t tpq = std::max(1, timing.ticks_per_quarter);
   const TimingPoint& p = timing_meter_at(timing, tick);
-  int32_t seg_end = std::numeric_limits<int32_t>::max() / 4;
+  int64_t seg_end = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
   for (const auto& q : timing.points) {
     if (q.has_meter && q.tick > p.tick) {
       seg_end = q.tick;
@@ -163,19 +193,19 @@ int32_t snap_to_subdivision(int32_t tick, const MusicTiming& timing,
   }
   const int32_t beat = beat_length_ticks(p, tpq);
   const int32_t subdivs = std::max(1, subdivisions_per_beat);
-  const int32_t rel = std::max(0, tick - p.tick);
-  const int32_t beat_start = p.tick + (rel / beat) * beat;
+  const int64_t rel = std::max<int64_t>(0, static_cast<int64_t>(tick) - p.tick);
+  int64_t beat_start = static_cast<int64_t>(p.tick) + (rel / beat) * beat;
   if (beat_start >= seg_end && seg_end > p.tick) {
-    return std::max(0, seg_end);
+    return clamp_i64_to_i32_nonneg(seg_end);
   }
-  const int32_t within = std::max(0, tick - beat_start);
-  const int32_t i = static_cast<int32_t>(
-      (static_cast<int64_t>(within) * subdivs + beat / 2) / beat);
-  int32_t snapped = beat_start + subdivision_offset_ticks(beat, subdivs, std::min(i, subdivs));
+  const int64_t within = std::max<int64_t>(0, static_cast<int64_t>(tick) - beat_start);
+  const int64_t i = (within * static_cast<int64_t>(subdivs) + beat / 2) / beat;
+  const int32_t index = static_cast<int32_t>(std::min(i, static_cast<int64_t>(subdivs)));
+  int64_t snapped = beat_start + subdivision_offset_ticks(beat, subdivs, index);
   if (snapped >= seg_end && seg_end > p.tick) {
     snapped = seg_end;
   }
-  return std::max(0, snapped);
+  return clamp_i64_to_i32_nonneg(snapped);
 }
 
 std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_tick,
@@ -195,12 +225,13 @@ std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_
 
   for (size_t mi = 0; mi < meters.size(); ++mi) {
     const auto& p = *meters[mi];
-    const int32_t seg_end =
-        (mi + 1 < meters.size()) ? meters[mi + 1]->tick : end_tick + 1;
+    const int64_t seg_end = (mi + 1 < meters.size())
+                                ? static_cast<int64_t>(meters[mi + 1]->tick)
+                                : static_cast<int64_t>(end_tick) + 1;
     const int32_t beat = beat_length_ticks(p, tpq);
-    int32_t beat_start = p.tick;
+    int64_t beat_start = p.tick;
     if (beat_start < start_tick) {
-      const int32_t delta = start_tick - beat_start;
+      const int64_t delta = static_cast<int64_t>(start_tick) - beat_start;
       beat_start += (delta / beat) * beat;  // floor onto beat containing start
       if (beat_start < p.tick) beat_start = p.tick;
     }
@@ -210,7 +241,7 @@ std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_
         const int64_t t64 =
             beat_i + static_cast<int64_t>(subdivision_offset_ticks(beat, subdivs, i));
         if (t64 > end_tick || t64 >= seg_end) break;
-        if (t64 >= start_tick) {
+        if (t64 >= start_tick && t64 <= std::numeric_limits<int32_t>::max()) {
           const int32_t t = static_cast<int32_t>(t64);
           if (out.empty() || out.back() != t) out.push_back(t);
         }
@@ -265,16 +296,20 @@ std::vector<int32_t> ticks_from_meter_segments(int32_t start_tick, int32_t end_t
 
   for (size_t i = 0; i < meters.size(); ++i) {
     const auto& p = *meters[i];
-    const int32_t seg_end =
-        (i + 1 < meters.size()) ? meters[i + 1]->tick : end_tick + 1;
+    const int64_t seg_end = (i + 1 < meters.size())
+                                ? static_cast<int64_t>(meters[i + 1]->tick)
+                                : static_cast<int64_t>(end_tick) + 1;
     const int32_t step = std::max(1, step_fn(p, tpq));
-    int32_t t = p.tick;
+    int64_t t = p.tick;
     if (t < start_tick) {
-      const int32_t delta = start_tick - t;
-      t += ((delta + step - 1) / step) * step;
+      const int64_t delta = static_cast<int64_t>(start_tick) - t;
+      const int64_t step64 = step;
+      t += ((delta + step64 - 1) / step64) * step64;
     }
     for (int64_t t64 = t; t64 < seg_end && t64 <= end_tick; t64 += step) {
-      if (t64 >= start_tick) out.push_back(static_cast<int32_t>(t64));
+      if (t64 >= start_tick && t64 <= std::numeric_limits<int32_t>::max()) {
+        out.push_back(static_cast<int32_t>(t64));
+      }
     }
   }
   return out;
@@ -302,21 +337,21 @@ int32_t snap_to_measure(int32_t tick, const MusicTiming& timing) noexcept {
   if (timing.points.empty()) return std::max(0, tick);
   const int32_t tpq = std::max(1, timing.ticks_per_quarter);
   const TimingPoint& p = timing_meter_at(timing, tick);
-  int32_t seg_end = std::numeric_limits<int32_t>::max() / 4;
+  int64_t seg_end = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
   for (const auto& q : timing.points) {
     if (q.has_meter && q.tick > p.tick) {
       seg_end = q.tick;
       break;
     }
   }
-  const int32_t bar = measure_length_ticks(p, tpq);
-  const int32_t rel = std::max(0, tick - p.tick);
-  const int32_t n = (rel + bar / 2) / bar;
-  int32_t snapped = p.tick + n * bar;
+  const int64_t bar = measure_length_ticks(p, tpq);
+  const int64_t rel = std::max<int64_t>(0, static_cast<int64_t>(tick) - p.tick);
+  const int64_t n = (rel + bar / 2) / bar;
+  int64_t snapped = static_cast<int64_t>(p.tick) + n * bar;
   if (snapped >= seg_end && seg_end > p.tick) {
     snapped = seg_end;
   }
-  return std::max(0, snapped);
+  return clamp_i64_to_i32_nonneg(snapped);
 }
 
 void prune_orphaned_meter_changes(MusicTiming& timing, int32_t edited_tick) {
@@ -355,9 +390,22 @@ int32_t split_default_note_width(int32_t split_count, int32_t lane_count) noexce
 int32_t seconds_to_ticks_at(float seconds, const MusicTiming& timing,
                             int32_t anchor_tick) noexcept {
   const TimingPoint& p = timing_point_at(timing, anchor_tick);
-  const double bpm = p.bpm > 0.0 ? p.bpm : 120.0;
+  const double bpm = (std::isfinite(p.bpm) && p.bpm > 0.0) ? p.bpm : 120.0;
   const double tpq = static_cast<double>(std::max(1, timing.ticks_per_quarter));
-  return std::max(1, static_cast<int32_t>(std::llround(seconds * bpm / 60.0 * tpq)));
+  if (!std::isfinite(seconds)) {
+    return (std::isnan(seconds) || seconds < 0.f) ? 1 : std::numeric_limits<int32_t>::max();
+  }
+  const double ticks = static_cast<double>(seconds) * bpm / 60.0 * tpq;
+  if (!std::isfinite(ticks)) {
+    return ticks > 0.0 ? std::numeric_limits<int32_t>::max() : 1;
+  }
+  if (ticks <= 1.0) {
+    return 1;
+  }
+  if (ticks >= static_cast<double>(std::numeric_limits<int32_t>::max())) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  return std::max(1, static_cast<int32_t>(std::llround(ticks)));
 }
 
 }  // namespace wds::chart_editor

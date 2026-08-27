@@ -66,7 +66,7 @@ using wds::chart_editor::is_split_lane_gimmick;
 double preview_now_sec(const PreviewSnapshot& snapshot, int64_t visual_lead_us = 0) noexcept {
   int64_t us = snapshot.timeline_us;
   if (us == 0 && snapshot.timeline_ms != 0) {
-    us = snapshot.timeline_ms * 1000;
+    us = wds::common::ms_to_us(snapshot.timeline_ms).count();
   }
   return static_cast<double>(us + visual_lead_us) / 1'000'000.0;
 }
@@ -265,6 +265,10 @@ bool PlaybackPreviewView::initialize(GLFWwindow* window, const PreviewVisualConf
 
 void PlaybackPreviewView::attach_audio(wds::audio::AudioEngine* audio) noexcept {
   hit_sfx_.attach(audio);
+}
+
+size_t PlaybackPreviewView::pending_sfx_sync_count() const noexcept {
+  return hit_sfx_.pending_sfx_sync_count();
 }
 
 void PlaybackPreviewView::shutdown() {
@@ -1502,7 +1506,7 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     const uint64_t key = (static_cast<uint64_t>(snapshot.revision) << 32) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(note_id)) << 2) | kind;
     const int64_t when_ms = music_clock ? transport_hit_ms(hit_ms) : hit_ms;
-    const int64_t when_us = when_ms * 1000;
+    const int64_t when_us = wds::common::ms_to_us(when_ms).count();
 
     if (!arm) {
       // Seek/pause resync: remember hits already at/behind the playhead so resume
@@ -1519,15 +1523,14 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
         mark_hit_sfx_event(key);
         return;
       }
-      if (!mark_hit_sfx_event(key)) {
-        return;
-      }
       // Music byte sync (not display-frame quantized). Engine plays immediately if
       // decode already passed the target so SetSync cannot miss silently.
-      // If arming/play fails (voice limit race, etc.), unmark so a later tick retries.
-      if (!hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)))) {
-        hit_sfx_played_.erase(key);
-      }
+      // TooFar / AtCapacity / SetSyncFailure return false — drop the mark so a
+      // later tick retries instead of permanently skipping the hit. Pass a factory
+      // so already-marked keys do not re-evaluate schedule_at every frame.
+      (void)commit_hit_sfx_schedule(hit_sfx_played_, key, [&] {
+        return hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)));
+      });
       return;
     }
 
@@ -1613,7 +1616,7 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
   const int64_t timeline_us =
       (snapshot.timeline_us != 0 || snapshot.timeline_ms == 0)
           ? snapshot.timeline_us
-          : snapshot.timeline_ms * 1000;
+          : wds::common::ms_to_us(snapshot.timeline_ms).count();
   const int64_t raw_us =
       music_clock ? hit_sfx_.music_position().count() : timeline_us;
 

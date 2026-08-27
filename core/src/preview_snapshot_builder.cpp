@@ -1,12 +1,48 @@
 #include <wds/core/preview_snapshot_builder.hpp>
 
 #include <wds/core/gimmick.hpp>
+#include <wds/core/split_fade.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 
 namespace wds::chart_editor {
+namespace {
+
+int64_t sat_sub_nonneg(int64_t value, int64_t amount) {
+  if (amount <= 0) {
+    return value;
+  }
+  if (value < std::numeric_limits<int64_t>::min() + amount) {
+    return std::numeric_limits<int64_t>::min();
+  }
+  return value - amount;
+}
+
+int64_t sat_add_nonneg(int64_t value, int64_t amount) {
+  if (amount <= 0) {
+    return value;
+  }
+  if (value > std::numeric_limits<int64_t>::max() - amount) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return value + amount;
+}
+
+void query_preview_split_candidates(const ChartNoteIndex& index, int64_t preview_time_ms,
+                                    const PreviewConfig& config,
+                                    std::vector<int32_t>& out_note_ids) {
+  const int64_t appear_ms = split_fade_sec_to_ms(config.split_line_animation_start_sec);
+  const int64_t disappear_ms = split_fade_sec_to_ms(config.split_line_animation_end_sec);
+  const int64_t lower_ms =
+      sat_sub_nonneg(sat_sub_nonneg(preview_time_ms, index.max_split_span_ms()), disappear_ms);
+  const int64_t upper_ms = sat_add_nonneg(preview_time_ms, appear_ms);
+  index.query_split_lanes_in_range(lower_ms, upper_ms, out_note_ids);
+}
+
+}  // namespace
 
 PreviewSnapshotBuilder::PreviewSnapshotBuilder(PreviewConfig config)
     : config_(config),
@@ -178,9 +214,8 @@ void PreviewSnapshotBuilder::rebuild_split_lanes(PreviewSnapshot& out,
                                                  int64_t preview_time_ms) const {
   (void)notes;
   // Appear starts at beat - animationStart; include future splits within that window.
-  const int64_t appear_ms = static_cast<int64_t>(
-      std::llround(static_cast<double>(config_.split_line_animation_start_sec) * 1000.0));
-  index.query_split_lanes_up_to(preview_time_ms + std::max<int64_t>(0, appear_ms), split_buffer_);
+  // Lower bound also drops expired splits: preview - max_split_span - disappear.
+  query_preview_split_candidates(index, preview_time_ms, config_, split_buffer_);
   out.clear_split_lanes_keep_capacity();
   out.reserve(0, 0, split_buffer_.size());
 
@@ -206,9 +241,7 @@ void PreviewSnapshotBuilder::update_split_lanes_incremental(
     PreviewSnapshot& inout, const std::vector<NotationNote>& notes, const MusicTiming& timing,
     const ChartNoteIndex& index, int64_t preview_time_ms) const {
   (void)notes;
-  const int64_t appear_ms = static_cast<int64_t>(
-      std::llround(static_cast<double>(config_.split_line_animation_start_sec) * 1000.0));
-  index.query_split_lanes_up_to(preview_time_ms + std::max<int64_t>(0, appear_ms), split_buffer_);
+  query_preview_split_candidates(index, preview_time_ms, config_, split_buffer_);
   visited_buffer_.assign(inout.split_lanes.size(), 0);
 
   for (int32_t note_id : split_buffer_) {
@@ -428,9 +461,7 @@ SnapshotDiffEstimate PreviewSnapshotBuilder::estimate_diff(
   index.query_candidates(preview_time_ms, spawn_lead_ms(), tail_ms(index), candidate_buffer_);
   estimate.note_candidate_count = candidate_buffer_.size();
 
-  const int64_t appear_ms = static_cast<int64_t>(
-      std::llround(static_cast<double>(config_.split_line_animation_start_sec) * 1000.0));
-  index.query_split_lanes_up_to(preview_time_ms + std::max<int64_t>(0, appear_ms), split_buffer_);
+  query_preview_split_candidates(index, preview_time_ms, config_, split_buffer_);
   estimate.split_candidate_count = split_buffer_.size();
 
   size_t concurrent_visible = 0;
@@ -472,7 +503,7 @@ void PreviewSnapshotBuilder::build_into(
   ensure_note_lookup(notes, revision);
 
   out.timeline_ms = preview_time_ms;
-  out.timeline_us = preview_time_ms * 1000;
+  out.timeline_us = wds::common::ms_to_us(preview_time_ms).count();
   out.bpm = timing.bpm;
   out.ticks_per_quarter = timing.ticks_per_quarter;
   out.playback_state = playback_state;
@@ -497,7 +528,7 @@ void PreviewSnapshotBuilder::update_incremental(
   ensure_note_lookup(notes, revision);
 
   inout.timeline_ms = preview_time_ms;
-  inout.timeline_us = preview_time_ms * 1000;
+  inout.timeline_us = wds::common::ms_to_us(preview_time_ms).count();
   inout.bpm = timing.bpm;
   inout.ticks_per_quarter = timing.ticks_per_quarter;
   inout.playback_state = playback_state;

@@ -5,6 +5,7 @@
 #include "wds/ui/native_file_dialog.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
+#include "wds/ui/regions/preview/preview_hit_widget.hpp"
 #include "wds/ui/regions/settings/chart_add_dialog.hpp"
 #include "wds/ui/regions/settings/export_choice_dialog.hpp"
 #include "wds/ui/regions/settings/preview_settings_panel.hpp"
@@ -50,14 +51,24 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     set_status(std::move(text), level);
   });
 
-  // Child order: toolbar → settings → edit → status → dialogs (topmost).
+  // Child order: toolbar → settings → preview_hit → edit → status → dialogs.
+  // Later siblings win reverse hit-test, so edit full-window modals and dialogs
+  // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
+  edit_panel_ = edit.get();
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
   edit->set_visible_range_changed_handler([this] {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
     }
     request_save_ui_config(false);
+  });
+  auto preview_hit = std::make_unique<PreviewHitWidget>();
+  preview_hit_ = preview_hit.get();
+  preview_hit_->set_scroll_handler([this](const wds::interaction::ScrollEvent& event) {
+    if (edit_panel_ != nullptr) {
+      edit_panel_->handle_timeline_wheel(event);
+    }
   });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
@@ -188,6 +199,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   });
   root_.add_child(std::move(toolbar));
   root_.add_child(std::move(settings));
+  root_.add_child(std::move(preview_hit));
   root_.add_child(std::move(edit));
   root_.add_child(std::move(status));
   root_.add_child(std::move(width_dialog));
@@ -353,17 +365,9 @@ UiManager::~UiManager() {
   }
 }
 
-ChartEditPanel* UiManager::edit_panel() noexcept {
-  const auto& children = root_.children();
-  if (children.size() < 3) return nullptr;
-  return static_cast<ChartEditPanel*>(children[2].get());
-}
+ChartEditPanel* UiManager::edit_panel() noexcept { return edit_panel_; }
 
-const ChartEditPanel* UiManager::edit_panel() const noexcept {
-  const auto& children = root_.children();
-  if (children.size() < 3) return nullptr;
-  return static_cast<const ChartEditPanel*>(children[2].get());
-}
+const ChartEditPanel* UiManager::edit_panel() const noexcept { return edit_panel_; }
 
 EditorToolbar* UiManager::toolbar_panel() noexcept {
   const auto& children = root_.children();
@@ -560,16 +564,33 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
 }
 
 void UiManager::apply_region_bounds() {
-  const auto& children = root_.children();
-  if (children.size() >= 4) {
-    children[0]->set_bounds(layout_.toolbar);
-    children[1]->set_bounds(layout_.settings);
-    children[2]->set_bounds(layout_.edit);
-    children[3]->set_bounds(layout_.status);
+  if (auto* toolbar = toolbar_panel()) {
+    toolbar->set_bounds(layout_.toolbar);
   }
-  // Modal dialogs cover the whole window.
-  for (std::size_t i = 4; i < children.size(); ++i) {
-    children[i]->set_bounds(root_.bounds());
+  if (auto* settings = settings_panel()) {
+    settings->set_bounds(layout_.settings);
+  }
+  if (preview_hit_ != nullptr) {
+    preview_hit_->set_bounds(layout_.preview);
+  }
+  if (edit_panel_ != nullptr) {
+    edit_panel_->set_bounds(layout_.edit);
+  }
+  if (status_bar_ != nullptr) {
+    status_bar_->set_bounds(layout_.status);
+  }
+  // Modal dialogs cover the whole window (later siblings win reverse hit-test).
+  if (width_slots_dialog_ != nullptr) {
+    width_slots_dialog_->set_bounds(root_.bounds());
+  }
+  if (export_choice_dialog_ != nullptr) {
+    export_choice_dialog_->set_bounds(root_.bounds());
+  }
+  if (chart_add_dialog_ != nullptr) {
+    chart_add_dialog_->set_bounds(root_.bounds());
+  }
+  if (unsaved_changes_dialog_ != nullptr) {
+    unsaved_changes_dialog_->set_bounds(root_.bounds());
   }
 }
 

@@ -291,13 +291,14 @@ void test_visual_lane_borders_are_every_two_columns() {
   CHECK(std::fabs(cx(odd) - cx(mid)) > 0.01f);
 }
 
+#ifndef WDS_TEST_REPO_ROOT
+#error "WDS_TEST_REPO_ROOT must be injected by CMake (repo root containing skins/)"
+#endif
+
 fs::path find_skins_png(const char* name) {
-  for (fs::path dir = fs::current_path(); !dir.empty() && dir != dir.parent_path();
-       dir = dir.parent_path()) {
-    const fs::path cand = dir / "skins" / name;
-    if (fs::is_regular_file(cand)) {
-      return cand;
-    }
+  const fs::path cand = fs::path(WDS_TEST_REPO_ROOT) / "skins" / name;
+  if (fs::is_regular_file(cand)) {
+    return cand;
   }
   return {};
 }

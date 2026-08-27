@@ -60,6 +60,31 @@ ui/
 
 窗口固定 16:9。
 
+### 预览 / 编辑滚轮
+
+预览区命中控件把滚轮转给编辑区同一套时间轴逻辑（与 BPM 无关）：
+
+| 手势 | 行为 |
+|------|------|
+| 滚轮 | scrub 播放头。可见范围 20 hectom、速度 1× 时约 100ms/格；步长随可见范围与「时间轴滚轮速度」正比 |
+| Ctrl/Cmd+滚轮 | 调可见范围（1–1000 hectom）。默认上滚缩小窗口 |
+
+设置（「输入」页，写入 OS 配置目录的 `config.yml`）：
+
+- **反转时间轴滚轮方向**：只翻 scrub；适配器先按此项取反 delta
+- **反转滚轮调节可见范围大小方向**：只翻 Ctrl/Cmd+滚轮。两项各自生效、互不抵消
+- **时间轴滚轮速度**：0.25–3；非有限值回 1。只影响 scrub，不影响可见范围
+
+### 帧诊断
+
+仅当环境变量 **精确** 为 `WDS_FRAME_DIAG=1` 时开启（`1` 以外、大小写变体均关），与编译期 `WDS_ENABLE_LOGGING` 无关。默认不打诊断时钟、不建日志文件。
+
+macOS 已验证路径：`~/Library/Application Support/WDS/logs/frame-diag.log`。约每秒一行：fps、playing 帧占比、wall / hitch（原始帧间隔 >25ms）、poll / update / tick / batch / render，以及 fence / acquire / submit / present。打开失败不致命。不要把 Debug 控制台当诊断输出（避免 I/O 伪卡顿）。
+
+```bash
+WDS_FRAME_DIAG=1 ./build-macos-arm-debug/ui/wds_editor
+```
+
 ## 主要接口
 
 ### `UiManager`
@@ -75,6 +100,7 @@ ui.session();
 ```
 
 每帧：input → `transport.poll` → `session/engine.apply_timeline` → regions paint → present。
+墙钟 delta 夹在 0–80ms，低于 Transport 的 100ms hard snap，避免单帧 hitch 触发硬对齐。
 
 ### `EditorSession`
 
@@ -107,7 +133,11 @@ Primary = Ctrl（Windows）/ Cmd（macOS）。
 ./build-macos-arm-debug/ui/wds_editor path/to/project.wdsproject
 ```
 
-Windows 产物见仓库根 README 的安装与交叉编译章节。
+Windows 产物见仓库根 README 的安装与交叉编译章节。交叉构建仍可能编译 `wds_ui_logic_tests` / `wds_note_draw_order_tests`，但 **不** 向 CTest 注册。macOS：
+
+```bash
+ctest --test-dir build-macos-arm -R 'wds_ui_logic_tests|wds_note_draw_order_tests' --output-on-failure
+```
 
 ## 依赖
 

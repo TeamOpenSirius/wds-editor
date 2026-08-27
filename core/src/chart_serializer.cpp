@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <locale>
 #include <sstream>
@@ -148,9 +149,15 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     if (key == "BPM") {
       file >> chart.timing.bpm;
       if (!file) return {SerializeError::ParseError, "malformed BPM"};
+      if (!std::isfinite(chart.timing.bpm) || !(chart.timing.bpm > 0.0)) {
+        return {SerializeError::ParseError, "BPM out of range"};
+      }
     } else if (key == "TPQ") {
       file >> chart.timing.ticks_per_quarter;
       if (!file) return {SerializeError::ParseError, "malformed TPQ"};
+      if (!is_valid_ticks_per_quarter(chart.timing.ticks_per_quarter)) {
+        return {SerializeError::ParseError, "TPQ out of range"};
+      }
     } else if (key == "OFFSET_MS") {
       // Legacy charts may still contain OFFSET_MS; discard — offset is project-scoped.
       int64_t ignored = 0;
@@ -186,7 +193,8 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
           point.has_bpm = true;
         }
       }
-      if (point.tick < 0 || point.bpm <= 0.0 || point.numerator <= 0 || point.denominator <= 0) {
+      if (point.tick < 0 || !std::isfinite(point.bpm) || !(point.bpm > 0.0) ||
+          point.numerator <= 0 || point.denominator <= 0) {
         return {SerializeError::ParseError, "timing point out of range"};
       }
       chart.timing.points.push_back(point);
@@ -240,6 +248,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       }
       note.start_tick = static_cast<int32_t>(std::llround(start_tick_raw));
       note.end_tick = static_cast<int32_t>(std::llround(end_tick_raw));
+      if (note.id == std::numeric_limits<int32_t>::max()) {
+        return {SerializeError::ParseError, "note id out of range"};
+      }
       if (note.id >= 0 && !seen_ids.insert(note.id).second) {
         return {SerializeError::ParseError, "duplicate note id"};
       }

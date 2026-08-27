@@ -42,6 +42,13 @@ bool HitSfxPlayer::schedule_at(HitSfxClip clip, wds::common::Microseconds music_
   return audio_->schedule_sfx_at(clip, music_time);
 }
 
+size_t HitSfxPlayer::pending_sfx_sync_count() const noexcept {
+  if (audio_ == nullptr) {
+    return 0;
+  }
+  return audio_->pending_sfx_sync_count();
+}
+
 void HitSfxPlayer::stop_all() {
   if (audio_ == nullptr) {
     return;
