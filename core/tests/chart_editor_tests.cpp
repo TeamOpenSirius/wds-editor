@@ -2914,7 +2914,7 @@ void test_sus_slide_export_not_orphan_hold_start() {
   CHECK_EQ(plain_hold, 0);
 }
 
-// Standalone Flick must be paired Flick (#1 type3) + Air (#5); orphan Air is ignored.
+// Standalone leftover #5 becomes Flick; lane/width come from Air (sus2txt).
 void test_sus_standalone_directional_keeps_width() {
   const char* sus =
       "#TITLE \"dir\"\n"
@@ -2936,18 +2936,21 @@ void test_sus_standalone_directional_keeps_width() {
   CHECK_EQ(flick->scratch_length, 0);  // up
 }
 
-// Orphan Air alone must not become a Flick.
-void test_sus_orphan_air_ignored() {
+// Leftover #5 (no slide) → standalone Flick; scratchLength = ±width for type 3/4.
+void test_sus_leftover_air_becomes_flick() {
   const char* sus =
       "#TITLE \"orphan\"\n"
       "#BPM01: 120.0\n"
       "#00008: 01\n"
-      "#00052: 14\n";
+      "#00050: 14\n";  // Air up, lane 0 width 4 — no #1 pair required
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 0);
-  CHECK(!loaded.warnings.empty());
+  CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
+  if (loaded.chart.notes.size() != 1) return;
+  CHECK_EQ(static_cast<int>(loaded.chart.notes[0].note_type), static_cast<int>(NoteType::Flick));
+  CHECK_EQ(loaded.chart.notes[0].width, 4);
+  CHECK_EQ(loaded.chart.notes[0].scratch_length, 0);
 }
 
 // Flick (#1 type3) + Air at same tick/lane → flick with Air direction.
@@ -2963,9 +2966,10 @@ void test_sus_tap_plus_directional_becomes_flick() {
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
            static_cast<int>(SerializeError::Ok));
   CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
+  if (loaded.chart.notes.size() != 1) return;
   CHECK_EQ(static_cast<int>(loaded.chart.notes[0].note_type), static_cast<int>(NoteType::Flick));
   CHECK_EQ(loaded.chart.notes[0].width, 3);
-  CHECK_EQ(loaded.chart.notes[0].scratch_length, 1);
+  CHECK_EQ(loaded.chart.notes[0].scratch_length, 3);  // sus2txt: type 4 → +width
 }
 
 // Ched: Slide #3 without end Flick+Air → blue Hold; with pair → ScratchHold.
@@ -3075,6 +3079,137 @@ void test_sus_ched_mid_flick_splits_jump_scratch() {
   CHECK(jump >= 1);
 }
 
+// Start #5 on a purple slide (end also has #5) suppresses ScratchHoldStart (addStart=false).
+void test_sus_start_air_suppresses_pink_head() {
+  const char* sus =
+      "#TITLE \"pink\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00030a: 1222\n"
+      "#00050: 1212\n";  // Air on body at start AND end; no #1 type3
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int scratch = 0;
+  int pink = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) ++scratch;
+    if (n.note_type == NoteType::ScratchHoldStart) ++pink;
+  }
+  CHECK_EQ(scratch, 1);
+  CHECK_EQ(pink, 0);
+}
+
+// Left-extended Air sharing the body right edge (different left lane, no #1) binds JumpScratch.
+void test_sus_left_jump_air_binds_scratch_hold() {
+  const char* sus =
+      "#TITLE \"leftjump\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00032a: 1222\n"  // body [2,3] (lane 0 used by Air → no Ched offset)
+      "#00050: 0014\n";  // Air [0,3] at end — i-r-1 = 0-3-1 = -4
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  const NotationNote* body = nullptr;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) body = &n;
+  }
+  CHECK(body != nullptr);
+  if (body == nullptr) return;
+  CHECK_EQ(body->lane, 2);
+  CHECK_EQ(body->width, 2);
+  CHECK_EQ(body->scratch_length, -4);
+  CHECK_EQ(static_cast<int>(body->gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+}
+
+// Slide A ends and slide B starts at the same tick, sharing an adjacent #5.
+void test_sus_jump_scratch_chain_joint_no_pink_head() {
+  const char* sus =
+      "#TITLE \"chain\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00030a: 1222\n"  // A [0,1] 0→960
+      "#00032b: 0012\n"  // B start @960 [2,3]
+      "#00132b: 22\n"    // B end @1920
+      "#00050: 0014\n"   // Air [0,3] at joint (A's JumpScratch + B addStart=false)
+      "#00152: 12\n";    // B end Air on [2,3] — keeps B purple (no shouldUnscratch)
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  const NotationNote* first = nullptr;
+  const NotationNote* second = nullptr;
+  int pink = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) {
+      if (n.start_tick == 0) first = &n;
+      if (n.start_tick == 960) second = &n;
+    }
+    if (n.note_type == NoteType::ScratchHoldStart && n.start_tick == 960) ++pink;
+  }
+  CHECK(first != nullptr);
+  CHECK(second != nullptr);
+  if (first == nullptr || second == nullptr) return;
+  CHECK_EQ(first->scratch_length, 4);
+  CHECK_EQ(static_cast<int>(first->gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+  CHECK_EQ(pink, 0);
+  ChartDocument doc;
+  doc.set_notes(loaded.chart.notes);
+  doc.set_timing(loaded.chart.timing);
+  const auto next = chained_next_scratch_hold(doc, *first);
+  CHECK(next.has_value());
+  if (next) {
+    CHECK_EQ(next->id, second->id);
+  }
+}
+
+// Mid #5 on the exact body span splits without a Slide type-3 diamond.
+void test_sus_mid_air_only_splits_jump_scratch() {
+  const char* sus =
+      "#TITLE \"midair\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00030a: 12002200\n"  // start@0 end@2 of 4 slots
+      "#00050: 00120012\n";  // Air at mid and end, exact body span
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int scratch_bodies = 0;
+  int jump = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) {
+      ++scratch_bodies;
+      if (n.gimmick_type == GimmickType::JumpScratch) ++jump;
+    }
+  }
+  CHECK_EQ(scratch_bodies, 2);
+  CHECK(jump >= 1);
+}
+
+// Start #5 only → shouldUnscratch back to blue Hold with a head.
+void test_sus_start_air_only_unscratches_to_blue_hold() {
+  const char* sus =
+      "#TITLE \"unscratch\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00030a: 1222\n"
+      "#00050: 1200\n";  // Air only at start
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int holds = 0;
+  int scratches = 0;
+  int heads = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::Hold) ++holds;
+    if (n.note_type == NoteType::ScratchHold) ++scratches;
+    if (is_hold_head_note(n)) ++heads;
+  }
+  CHECK_EQ(holds, 1);
+  CHECK_EQ(scratches, 0);
+  CHECK_EQ(heads, 1);
+}
+
 // Split gimmick ↔ #TIL01.
 void test_sus_til01_split_roundtrip() {
   NotationChart chart;
@@ -3097,7 +3232,22 @@ void test_sus_til01_split_roundtrip() {
   std::string text;
   CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK(text.find("#TIL01") != std::string::npos);
+  // sus2txt splits header/body on ": " — a bare "#TIL01 \"" is eaten as garbage.
+  CHECK(text.find("#TIL01: \"") != std::string::npos);
+  const auto til_pos = text.find("#TIL01: \"");
+  CHECK(til_pos != std::string::npos);
+  if (til_pos != std::string::npos) {
+    const auto q1 = text.find('"', til_pos);
+    const auto q2 = text.find('"', q1 + 1);
+    CHECK(q1 != std::string::npos);
+    CHECK(q2 != std::string::npos);
+    if (q1 != std::string::npos && q2 != std::string::npos) {
+      const std::string body = text.substr(q1 + 1, q2 - q1 - 1);
+      CHECK(body.find(":") != std::string::npos);
+      CHECK(body.find(", ") != std::string::npos);
+      CHECK(body.find("-") != std::string::npos);
+    }
+  }
 
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
@@ -4037,11 +4187,16 @@ int main() {
   test_sus_hold_mid_star_roundtrip();
   test_sus_slide_export_not_orphan_hold_start();
   test_sus_standalone_directional_keeps_width();
-  test_sus_orphan_air_ignored();
+  test_sus_leftover_air_becomes_flick();
   test_sus_tap_plus_directional_becomes_flick();
   test_sus_ched_slide_air_distinguishes_hold_family();
   test_sus_ched_export_slide_and_end_pair();
   test_sus_ched_mid_flick_splits_jump_scratch();
+  test_sus_start_air_suppresses_pink_head();
+  test_sus_left_jump_air_binds_scratch_hold();
+  test_sus_jump_scratch_chain_joint_no_pink_head();
+  test_sus_mid_air_only_splits_jump_scratch();
+  test_sus_start_air_only_unscratches_to_blue_hold();
   test_sus_til01_split_roundtrip();
   test_wdschart_export_import_preserves_chart();
   test_sus_slide_invisible_mid_not_sound();
