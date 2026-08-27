@@ -376,25 +376,25 @@ void PlaybackPreviewView::draw_ingame_background(DrawBatch& batch) {
   if (!skin_.ingame_background) {
     return;
   }
-  const auto& c = geometry_.content();
-  const Quad bg{{c.l, c.b}, {c.l, c.t}, {c.r, c.t}, {c.r, c.b}};
+  const auto& p = geometry_.panel();
+  const Quad bg{{p.l, p.b}, {p.l, p.t}, {p.r, p.t}, {p.r, p.b}};
   const auto& tex = skin_.ingame_background;
   const float tw = std::max(1.0f, static_cast<float>(tex.width));
   const float th = std::max(1.0f, static_cast<float>(tex.height));
   const float tex_aspect = tw / th;
-  const float content_aspect = std::max(c.w, 1e-6f) / std::max(c.h, 1e-6f);
+  const float panel_aspect = std::max(p.w, 1e-6f) / std::max(p.h, 1e-6f);
   float u0 = tex.u0;
   float u1 = tex.u1;
   float v0 = tex.v0;
   float v1 = tex.v1;
-  if (tex_aspect > content_aspect) {
-    const float visible = content_aspect / tex_aspect;
+  if (tex_aspect > panel_aspect) {
+    const float visible = panel_aspect / tex_aspect;
     const float mid = 0.5f * (tex.u0 + tex.u1);
     const float half = 0.5f * (tex.u1 - tex.u0) * visible;
     u0 = mid - half;
     u1 = mid + half;
   } else {
-    const float visible = tex_aspect / content_aspect;
+    const float visible = tex_aspect / panel_aspect;
     const float mid = 0.5f * (tex.v0 + tex.v1);
     const float half = 0.5f * (tex.v1 - tex.v0) * visible;
     v0 = mid - half;
