@@ -65,7 +65,7 @@ endif()
 target_compile_features(wds_ui PUBLIC cxx_std_17)
 target_compile_definitions(wds_ui PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 
-add_executable(wds_ui_logic_tests tests/edit_viewport_tests.cpp)
+add_executable(wds_ui_logic_tests tests/edit_viewport_tests.cpp src/layout/editor_layout.cpp)
 target_link_libraries(wds_ui_logic_tests PRIVATE wds::core wds::interaction)
 target_include_directories(wds_ui_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)

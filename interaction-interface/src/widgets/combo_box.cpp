@@ -126,8 +126,10 @@ void ComboBox::paint_at(UiPainter& painter, float z) const {
   const float z_caret = std::min(z + 0.02f, kZMax);
 
   const Rect abs = absolute_bounds();
-  const Color outline =
-      visual_state_ == WidgetState::Focused ? theme::kPrimary : theme::kOutline;
+  const Color outline = text_invalid()
+                            ? theme::kError
+                            : (visual_state_ == WidgetState::Focused ? theme::kPrimary
+                                                                     : theme::kOutline);
   painter.fill_rect_outline(abs, theme::kSurfaceVariant, outline, theme::kCornerRadiusSm, z_fill);
 
   const Rect text_bounds{abs.x + 4.0f, abs.y, std::max(0.0f, abs.w - chevron_slot_w() - 4.0f),
@@ -153,8 +155,10 @@ void ComboBox::paint_popup_layer(UiPainter& painter) const {
       popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_));
   popup_menu::paint_items(painter, geom, items_, selected_item_index(), hover_index_);
 
-  const Color outline =
-      visual_state_ == WidgetState::Focused ? theme::kPrimary : theme::kOutline;
+  const Color outline = text_invalid()
+                            ? theme::kError
+                            : (visual_state_ == WidgetState::Focused ? theme::kPrimary
+                                                                     : theme::kOutline);
   painter.fill_rect_outline(abs, theme::kSurfaceVariant, outline, theme::kCornerRadiusSm,
                             popup_menu::kHostZ);
   const Rect text_bounds{abs.x + 4.0f, abs.y, std::max(0.0f, abs.w - chevron_slot_w() - 4.0f),

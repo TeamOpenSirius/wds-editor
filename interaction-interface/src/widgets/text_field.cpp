@@ -65,7 +65,7 @@ void TextField::paint_at(UiPainter& painter, float z) const {
   const Rect abs = absolute_bounds();
   const bool focused = visual_state_ == WidgetState::Focused;
   const Color fill = focused ? theme::kSurface : theme::kSurfaceVariant;
-  const Color outline = focused ? theme::kPrimary : theme::kOutline;
+  const Color outline = text_invalid() ? theme::kError : (focused ? theme::kPrimary : theme::kOutline);
   painter.fill_rect_outline(abs, fill, outline, theme::kCornerRadiusSm, z_fill);
   // When focused, skip placeholder so the caret is not covered by muted hint text.
   const bool show_placeholder = text_.empty() && !focused;

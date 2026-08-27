@@ -92,8 +92,8 @@ inline LeftColumnMetrics compute_left_column_metrics(float left_w, float rest_h)
 // Outer layouter: computes region bounds and the Vulkan stage content rect.
 class EditorLayouter {
  public:
-  // Sirius stage / track aspect (1115×640).
-  static constexpr float kPreviewAspect = 1115.0f / 640.0f;
+  // Official preview canvas is 16:9 landscape (1280×720).
+  static constexpr float kPreviewAspect = 16.0f / 9.0f;
   // Uniform scale of the fitted stage (slightly larger than the tight fit).
   static constexpr float kPreviewScale = 1.08f;
   // Stage width as a fraction of the preview column (small side gutters).

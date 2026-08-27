@@ -27,7 +27,7 @@ split/lines/
 
 Light mode draws lines + fade only (no SplitEffect particles / no Sonolus Transform wipe).
 `transform1/` / `transform2/` trees are unused and should not be shipped. Appear/disappear
-windows match official Show≈1000ms / Hide≈500ms via `PreviewVisualConfig`.
+windows match official fadeIn 1000ms / fadeOut 300ms via `PreviewVisualConfig`.
 
 Preview/edit soft ribbons are **not** the stock 8-tap hard-core plate as-is: the engine
 rebakes a wide gaussian glow (`split_soft_profile.hpp` → `soft_split_line` / `##soft48g`)
@@ -36,9 +36,12 @@ tint; tip RGB lerp to white; optional mild additive body glow.
 
 ## Root `skins/` keep-list (Light preview)
 
-Required / used: note Top/Bottom/ticks, arrow, sync, stage cover + bottom border, judgment
-line, hidden line, Auto judgment + Combo AP digits, `ingame_bg.png`, base split-line color
-plates (`Sirius Split Line _*.png`), and this `effects/` tree.
+Required / used: note Top/Bottom/ticks, arrow, sync, official judgment
+(`img_ingame_judgment_area3.png`), official start-line plates
+(`img_game_common_start_line_*.png`), official lane border
+(`img_ingame_lane_border2.png`), Auto judgment + Combo AP digits, `ingame_bg.png`,
+base split-line color plates (`Sirius Split Line _*.png`), and this `effects/` tree.
 
 Do **not** keep: Combo FC/Normal, unused Judgment grades, Linear/Flick legacy Sonolus FX,
-Transform 1/2 split plates, grid helpers (`_GRID_*`), `_STAGE_MIDDLE`.
+Transform 1/2 split plates, grid helpers (`_GRID_*`), `_STAGE_*` covers,
+`Sirius Hidden Line.png`, `_JUDGMENT_LINE.png`.

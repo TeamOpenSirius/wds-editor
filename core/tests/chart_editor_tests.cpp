@@ -11,6 +11,9 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
+#include <wds/core/official_playfield.hpp>
+#include <wds/core/note_position_calculator.hpp>
+#include <wds/core/split_fade.hpp>
 #include <wds/core/split_lane_simulator.hpp>
 #include <wds/core/sus_chart.hpp>
 #include <wds/core/timing_map.hpp>
@@ -668,17 +671,20 @@ void test_split_appear_phase_before_start_ms() {
   split.width = 12;
   split.note_type = NoteType::Normal;
   split.gimmick_type = GimmickType::Split3;
+  split.scratch_length = 10392;  // z=180: tip grows from far
   engine.add_note(split);
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
-  // Mid-appear: before beat, after beat-appear
+  // Mid-appear: t=0.5 of the 0.75s window (start−375ms). Screen coverage is
+  // the cubic local-Y tip after LaneGroup tilt + FOV 50 — not 69.12/8.
   engine.seek(start_ms - 375);
   engine.rebuild_snapshot();
   CHECK_EQ(static_cast<int32_t>(engine.snapshot().split_lanes.size()), 1);
   CHECK_EQ(engine.snapshot().split_lanes[0].split_anim_phase, 0);
   CHECK(engine.snapshot().split_lanes[0].stage_cover_alpha > 0.1f);
   CHECK(engine.snapshot().split_lanes[0].stage_cover_alpha < 0.9f);
-  CHECK(engine.snapshot().split_lanes[0].split_percent_start > 0.1f);
+  CHECK(engine.snapshot().split_lanes[0].split_percent_end > 0.2f);
+  CHECK(engine.snapshot().split_lanes[0].split_percent_end < 0.6f);
 
   engine.seek(start_ms);
   engine.rebuild_snapshot();
@@ -721,24 +727,25 @@ void test_split_fadein_direction_from_linehight_z180() {
   };
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
-  const int64_t mid = start_ms - 500;  // t=0.5 → ease-out scale = 0.75
-  constexpr float kScale = 0.75f;
+  const int64_t mid = start_ms - 500;  // t=0.5 → tilt+FOV projected tips
+  const float kTip = official_split_fade_in_from_tip_end(0.5f);
+  const float kId = official_split_fade_in_from_judge_start(0.5f);
 
   PreviewSplitLaneInstance bottom;
   sim.fill_instance(bottom, make_split(10390, GimmickType::Split4), timing, mid);
-  CHECK(std::fabs(bottom.split_percent_start - (1.0f - kScale)) < 0.02f);
+  CHECK(std::fabs(bottom.split_percent_start - kId) < 0.02f);
   CHECK(std::fabs(bottom.split_percent_end - 1.0f) < 0.02f);
-  CHECK(bottom.split_percent_start > 0.1f);
+  CHECK(bottom.split_percent_start < 0.10f);
 
   PreviewSplitLaneInstance tip;
   sim.fill_instance(tip, make_split(10392, GimmickType::Split4), timing, mid);
   CHECK(std::fabs(tip.split_percent_start - 0.0f) < 0.02f);
-  CHECK(std::fabs(tip.split_percent_end - kScale) < 0.02f);
+  CHECK(std::fabs(tip.split_percent_end - kTip) < 0.02f);
 
   // 4.txt: 11611/13/15/17 grow from judge; 11612/14/16 grow from tip.
   PreviewSplitLaneInstance id_11611;
   sim.fill_instance(id_11611, make_split(11611, GimmickType::Split6), timing, mid);
-  CHECK(id_11611.split_percent_start > 0.1f);
+  CHECK(id_11611.split_percent_start < 0.10f);
   CHECK(std::fabs(id_11611.split_percent_end - 1.0f) < 0.02f);
 
   PreviewSplitLaneInstance id_11612;
@@ -753,7 +760,7 @@ void test_split_fadein_direction_from_linehight_z180() {
   sim.fill_instance(full, make_split(11613, GimmickType::FullSplit6), timing, mid);
   CHECK(std::fabs(both_ends.split_percent_start - full.split_percent_start) < 0.001f);
   CHECK(std::fabs(both_ends.split_percent_end - full.split_percent_end) < 0.001f);
-  CHECK(both_ends.split_percent_start > 0.1f);
+  CHECK(both_ends.split_percent_start < 0.10f);
 
   PreviewSplitLaneInstance tip_both;
   PreviewSplitLaneInstance tip_full;
@@ -761,6 +768,335 @@ void test_split_fadein_direction_from_linehight_z180() {
   sim.fill_instance(tip_full, make_split(11614, GimmickType::FullSplit6), timing, mid);
   CHECK(std::fabs(tip_both.split_percent_start - tip_full.split_percent_start) < 0.001f);
   CHECK(tip_both.split_percent_start < 0.02f);
+}
+
+void test_official_split_fade_in_cubic_and_zero_length() {
+  // Official SplitEffect_fadeIn_anim scale.y cubic (t=0 key):
+  // 0.30408168 t^3 − 1.60816336 t^2 + 2.30408168 t. Duration 1.0s, a stays 1.
+  // Animator state speed=1, fadeIn→fadeOut TransitionDuration=0.
+  CHECK(std::fabs(PreviewConfig{}.split_line_animation_start_sec - 1.0f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_in_scale(0.0f) - 0.0f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_in_scale(0.25f) - 0.480263f) < 0.002f);
+  CHECK(std::fabs(official_split_fade_in_scale(0.5f) - 0.788010f) < 0.002f);
+  CHECK(std::fabs(official_split_fade_in_scale(1.0f) - 1.0f) < 1e-5f);
+  // Not the old ease-out quad (0.75 at t=0.5).
+  CHECK(std::fabs(official_split_fade_in_scale(0.5f) - 0.75f) > 0.02f);
+
+  // Official scheduler: fadeIn at start−1s; fadeOut at EndTickCount.
+  // MinimumShowingMilliseconds is unused. Zero-length still gets the 1s show
+  // window, then hide starts immediately at start==end (no start+1500 pad).
+  PreviewConfig cfg;
+  SplitLaneSimulator sim(cfg);
+  MusicTiming timing;
+  timing.bpm = 60.0;
+  timing.ticks_per_quarter = 480;
+
+  NotationNote note;
+  note.start_tick = 4800;
+  note.end_tick = 4800;
+  note.gimmick_type = GimmickType::Split3;
+  note.scratch_length = 10390;
+
+  const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  CHECK(sim.is_split_active(note, timing, start_ms - 1000));
+  CHECK(!sim.is_split_active(note, timing, start_ms - 1001));
+
+  PreviewSplitLaneInstance mid_in;
+  sim.fill_instance(mid_in, note, timing, start_ms - 500);
+  CHECK_EQ(mid_in.split_anim_phase, 0);
+  CHECK(std::fabs(mid_in.split_line_alpha - 1.0f) < 0.02f);
+  CHECK(std::fabs(mid_in.split_percent_start - official_split_fade_in_from_judge_start(0.5f)) <
+        0.02f);
+
+  PreviewSplitLaneInstance at_end;
+  sim.fill_instance(at_end, note, timing, start_ms);
+  CHECK_EQ(at_end.split_anim_phase, 1);
+
+  PreviewSplitLaneInstance fade_out;
+  sim.fill_instance(fade_out, note, timing, start_ms + 75);
+  CHECK_EQ(fade_out.split_anim_phase, 2);
+  CHECK(std::fabs(fade_out.split_line_alpha - 0.84375f) < 0.02f);
+  CHECK(!sim.is_split_active(note, timing, start_ms + 300));
+  CHECK(!sim.is_split_active(note, timing, start_ms + 1500));
+}
+
+void test_official_playfield_visual_lanes_are_six() {
+  // SplitEffect max splitCount=6; default note width = 12/6 = 2.
+  // Persistent borders sit on the 7 visual-track edges, not 13 column edges.
+  CHECK_EQ(kOfficialVisualLaneCount, 6);
+  CHECK_EQ(kOfficialLogicalLanesPerVisual, 2);
+  CHECK_EQ(kOfficialVisualBorderEdgeCount, 7);
+  CHECK_EQ(kOfficialLaneBorderSpriteWidth, 1115);
+  CHECK_EQ(kOfficialLaneBorderSpriteHeight, 640);
+  CHECK_EQ(kOfficialJudgeSpritePixelWidth, 1119);
+  CHECK_EQ(kOfficialJudgeSpritePixelHeight, 72);
+  CHECK_EQ(split_default_note_width(6, 12), 2);
+  CHECK_EQ(official_visual_border_edge_index(0), 0);
+  CHECK_EQ(official_visual_border_edge_index(1), 2);
+  CHECK_EQ(official_visual_border_edge_index(3), 6);
+  CHECK_EQ(official_visual_border_edge_index(6), 12);
+  CHECK(std::fabs(official_lane_border_alpha(100) - 51.0f / 255.0f) < 1e-5f);
+}
+
+void test_official_playfield_judge_ndc_and_perspective() {
+  CHECK(std::fabs(kOfficialPreviewAspect - 16.0f / 9.0f) < 1e-6f);
+  CHECK(kOfficialDefaultScreenWidth == 1280);
+  CHECK(kOfficialDefaultScreenHeight == 720);
+
+  const auto ndc = project_judge_xyz(0.0f, 0.0f, 0.0f);
+  CHECK(std::fabs(ndc.y + 0.485f) < 0.02f);
+  CHECK(official_judge_y_to_percent(0.0f) > 0.70f);
+  CHECK(official_judge_y_to_percent(0.0f) < 0.80f);
+
+  // Unity vertical FOV 50: the same 11.11 world plate fits 16:9 and overflows 4:3.
+  const float half = 0.5f * kOfficialBgLaneWidth;
+  const auto wide = project_judge_xyz(half, 0.0f, 0.0f, kOfficialPreviewAspect);
+  const auto four_three = project_judge_xyz(half, 0.0f, 0.0f, 4.0f / 3.0f);
+  CHECK(std::fabs(wide.x) < 1.0f);
+  CHECK(std::fabs(four_three.x) > 1.0f);
+  CHECK(std::fabs(wide.x) < std::fabs(four_three.x));
+
+  const float p0 = official_judge_y_to_percent(0.0f);
+  const float p1 = official_judge_y_to_percent(1.0f);
+  const float p2 = official_judge_y_to_percent(2.0f);
+  const float p10 = official_judge_y_to_percent(10.0f);
+  CHECK(p10 < p2);
+  CHECK(p2 < p1);
+  CHECK(p1 < p0);
+  CHECK(std::fabs(p0 - p1) > std::fabs(p1 - p2));
+}
+
+void test_official_calculate_position_y_matches_il2cpp() {
+  const float y = official_note_local_y(500, 0, 5.0);
+  const float t = official_speed_rate(5.0) * 0.5f;
+  const float expected = static_cast<float>(0.2 * t * t * t + 10.0 * t);
+  CHECK(std::fabs(y - expected) < 1e-4f);
+  CHECK(std::fabs(y - 0.5f * 8.0f) > 0.5f);
+
+  const float y5 = official_note_local_y(500, 0, 5.0);
+  const float y10 = official_note_local_y(500, 0, 10.0);
+  CHECK(y10 > y5);
+
+  NotePositionCalculator calc;
+  CHECK(std::fabs(calc.calculate_position_y(500, 0) - y5) < 1e-4f);
+  CHECK(std::fabs(calc.move_seconds() - official_move_seconds(5.0)) < 1e-4f);
+  CHECK(std::fabs(calc.speed_rate() - 3.0f) < 1e-4f);
+  CHECK(std::fabs(official_move_seconds(5.0) - (7.4166667f / 5.0f)) < 1e-4f);
+}
+
+void test_official_setting_value_ranges() {
+  CHECK(official_note_speed_valid(1.0));
+  CHECK(official_note_speed_valid(5.0));
+  CHECK(official_note_speed_valid(5.1));
+  CHECK(official_note_speed_valid(25.0));
+  CHECK(!official_note_speed_valid(0.9));
+  CHECK(!official_note_speed_valid(25.1));
+  CHECK(!official_note_speed_valid(5.05));
+  CHECK(std::fabs(official_clamp_note_speed(5.14) - 5.1) < 1e-9);
+  CHECK(std::fabs(official_clamp_note_speed(5.16) - 5.2) < 1e-9);
+  CHECK(std::fabs(official_clamp_note_speed(0.5) - 1.0) < 1e-9);
+  CHECK(std::fabs(official_clamp_note_speed(30.0) - 25.0) < 1e-9);
+
+  CHECK(official_note_height_level_valid(1));
+  CHECK(official_note_height_level_valid(10));
+  CHECK(!official_note_height_level_valid(0));
+  CHECK(!official_note_height_level_valid(11));
+  CHECK_EQ(official_clamp_note_height_level(0), 1);
+  CHECK_EQ(official_clamp_note_height_level(11), 10);
+
+  CHECK(official_note_start_offset_valid(0));
+  CHECK(official_note_start_offset_valid(35));
+  CHECK(official_note_start_offset_valid(100));
+  CHECK(!official_note_start_offset_valid(3));
+  CHECK(!official_note_start_offset_valid(105));
+  CHECK_EQ(official_clamp_note_start_offset(3), 5);
+  CHECK_EQ(official_clamp_note_start_offset(2), 0);
+
+  CHECK(official_split_effect_line_opacity_valid(10));
+  CHECK(official_split_effect_line_opacity_valid(100));
+  CHECK(!official_split_effect_line_opacity_valid(0));
+  CHECK(!official_split_effect_line_opacity_valid(15));
+  CHECK_EQ(official_clamp_split_effect_line_opacity(0), 10);
+  CHECK_EQ(official_clamp_split_effect_line_opacity(14), 10);
+  CHECK_EQ(official_clamp_split_effect_line_opacity(16), 20);
+}
+
+void test_official_hidden_line_and_note_height_defaults() {
+  CHECK(std::fabs(official_note_visible_position_y(0) - 58.0f) < 1e-5f);
+  CHECK(std::fabs(official_lane_mask_scale_y(0) - 12.5f) < 1e-4f);
+  CHECK(std::fabs(official_note_height_rotation_x(8) + 15.0f) < 1e-5f);
+  CHECK(std::fabs(official_note_height_rotation_x(1) - 6.0f) < 1e-5f);
+  CHECK(std::fabs(official_hidden_line_center_y() -
+                  (official_note_visible_position_y(0) + kOfficialStartLineSpriteLocalY)) < 1e-5f);
+  CHECK(std::fabs(official_hidden_line_center_y(35) -
+                  (official_note_visible_position_y(35) + kOfficialStartLineSpriteLocalY)) < 1e-5f);
+  CHECK(std::fabs(official_hidden_line_center_y(0) - 58.4f) < 1e-5f);
+  CHECK(std::fabs(official_hidden_line_center_y(35) - 30.3f) < 1e-5f);
+  // Offset 0 sits at the far spawn (screen top). Raising NoteStartOffset
+  // walks the plate toward the judgeline (larger percent).
+  CHECK(official_hidden_line_center_percent(0) < 0.02f);
+  CHECK(official_hidden_line_center_percent(35) > official_hidden_line_center_percent(0));
+  CHECK(official_hidden_line_center_percent(100) > official_hidden_line_center_percent(35));
+  CHECK(official_hidden_line_center_percent(35) > 0.06f);
+  CHECK(official_hidden_line_center_percent(35) < 0.10f);
+  // Mask bottom is visibleY, not the StartLine center (+0.4).
+  CHECK(std::fabs(official_lane_mask_bottom_y(0) - 58.0f) < 1e-5f);
+  CHECK(std::fabs(official_lane_mask_bottom_y(35) - official_note_visible_position_y(35)) <
+        1e-5f);
+  CHECK(official_lane_mask_bottom_percent(0) > official_hidden_line_center_percent(0));
+  CHECK(official_lane_mask_bottom_percent(35) > official_hidden_line_center_percent(35));
+}
+
+void test_official_split_tip_span_matches_sprite_cap() {
+  CHECK(std::fabs(kOfficialSplitLineSpriteTipFrac - (45.0f / 256.0f)) < 1e-6f);
+  CHECK(std::fabs(official_split_line_tip_world() - 12.15f) < 1e-3f);
+  CHECK(std::fabs(official_split_line_texture_tip_world() - 3.456f) < 1e-3f);
+  CHECK(std::fabs(official_split_visible_tip_span(0.0f, 1.0f, false) - (45.0f / 256.0f)) < 1e-5f);
+  const float z180 = official_split_visible_tip_span(0.0f, 1.0f, true);
+  CHECK(z180 > 0.40f);
+  CHECK(z180 < 0.70f);
+  CHECK(std::fabs(official_start_line_sprite_height(0) - kOfficialStartLineSpriteHeight) < 1e-5f);
+  CHECK(official_start_line_sprite_height(0) > 4.9f);
+  CHECK(official_start_line_sprite_height(90) < 0.75f);
+}
+
+void test_official_split_fade_in_visible_hits_screen_before_clip_end() {
+  // Official fadeIn is cubic localScale.y projected through LaneGroup Rx=60°
+  // + perspective FOV 50. z=180 starts at camera top (percent 0) and
+  // accelerates toward the bottom; identity starts below the lens and the
+  // remaining far sliver creeps in. Not sirius_ease, not 69/8, not 2.5/2.56.
+  CHECK(official_split_fade_in_from_tip_end(0.09f) < 0.05f);
+  CHECK(official_split_fade_in_from_tip_end(0.50f) > 0.28f);
+  CHECK(official_split_fade_in_from_tip_end(0.50f) < 0.45f);
+  CHECK(official_split_fade_in_from_tip_end(0.83f) >= 0.99f);
+  CHECK(std::fabs(official_split_fade_in_from_tip_end(1.0f) - 1.0f) < 1e-5f);
+  const float first =
+      official_split_fade_in_from_tip_end(0.2f) - official_split_fade_in_from_tip_end(0.0f);
+  const float last =
+      official_split_fade_in_from_tip_end(0.7f) - official_split_fade_in_from_tip_end(0.5f);
+  CHECK(last > first);
+
+  CHECK(official_split_fade_in_from_judge_start(0.09f) > 0.25f);
+  CHECK(official_split_fade_in_from_judge_start(0.09f) < 0.50f);
+  CHECK(official_split_fade_in_from_judge_start(0.50f) < 0.08f);
+  CHECK(official_split_fade_in_from_judge_start(0.09f) < 0.70f);
+
+  PreviewConfig cfg;
+  SplitLaneSimulator sim(cfg);
+  MusicTiming timing;
+  timing.bpm = 60.0;
+  timing.ticks_per_quarter = 480;
+
+  auto make_split = [](int32_t color) {
+    NotationNote note;
+    note.start_tick = 4800;
+    note.end_tick = 9600;
+    note.gimmick_type = GimmickType::Split3;
+    note.scratch_length = color;
+    return note;
+  };
+
+  const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  const auto identity = make_split(10390);
+  const auto tip = make_split(10518);
+
+  PreviewSplitLaneInstance early_id;
+  PreviewSplitLaneInstance early_tip;
+  sim.fill_instance(early_id, identity, timing, start_ms - 910);  // t=0.09
+  sim.fill_instance(early_tip, tip, timing, start_ms - 910);
+  CHECK(early_id.split_percent_start > 0.25f);
+  CHECK(early_id.split_percent_start < 0.50f);
+  CHECK(early_tip.split_percent_end < 0.05f);
+  CHECK(std::fabs(early_id.split_percent_start - (1.0f - early_tip.split_percent_end)) > 0.10f);
+
+  PreviewSplitLaneInstance mid_id;
+  PreviewSplitLaneInstance mid_tip;
+  sim.fill_instance(mid_id, identity, timing, start_ms - 500);
+  sim.fill_instance(mid_tip, tip, timing, start_ms - 500);
+  CHECK(std::fabs(mid_id.split_percent_start - official_split_fade_in_from_judge_start(0.5f)) <
+        0.01f);
+  CHECK(std::fabs(mid_tip.split_percent_end - official_split_fade_in_from_tip_end(0.5f)) < 0.01f);
+  CHECK(mid_tip.split_percent_end > mid_id.split_percent_start);
+
+  PreviewSplitLaneInstance late_id;
+  PreviewSplitLaneInstance late_tip;
+  sim.fill_instance(late_id, identity, timing, start_ms - 170);  // t=0.83
+  sim.fill_instance(late_tip, tip, timing, start_ms - 170);
+  CHECK(late_id.split_percent_start < 0.02f);
+  CHECK(late_tip.split_percent_end > 0.98f);
+}
+
+void test_official_split_fade_in_scale_is_playfield_coverage() {
+  // Asset cubic is still the Unity localScale.y curve. Preview percent uses
+  // official_split_fade_in_from_tip_end (tilt+FOV), not this cubic alone.
+  CHECK(official_split_fade_in_scale(0.09f) < 0.25f);
+  CHECK(std::fabs(official_split_fade_in_scale(0.5f) - 0.788010f) < 0.002f);
+
+  PreviewConfig cfg;
+  SplitLaneSimulator sim(cfg);
+  MusicTiming timing;
+  timing.bpm = 60.0;
+  timing.ticks_per_quarter = 480;
+
+  NotationNote tip;
+  tip.start_tick = 4800;
+  tip.end_tick = 9600;
+  tip.gimmick_type = GimmickType::Split3;
+  tip.scratch_length = 10518;
+
+  const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  PreviewSplitLaneInstance tip_mid;
+  sim.fill_instance(tip_mid, tip, timing, start_ms - 500);  // t=0.5
+  CHECK_EQ(tip_mid.split_anim_phase, 0);
+  CHECK(tip_mid.split_percent_start < 0.02f);
+  CHECK(std::fabs(tip_mid.split_percent_end - official_split_fade_in_visible(0.5f)) < 0.02f);
+}
+
+void test_official_split_fade_out_is_300ms_smoothstep_from_end() {
+  // Official SplitEffect_fadeOut_anim (1.96.0 animators.bundle): m_Color.a keys
+  // at t=0 (1) and t=0.3 (0). Cubic is 1 - smoothstep(u), u=t/0.3.
+  // Hide starts at EndMilliseconds — not start+1500.
+  CHECK(std::fabs(PreviewConfig{}.split_line_animation_end_sec - 0.3f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_out_alpha(0.0f) - 1.0f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_out_alpha(0.25f) - 0.84375f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_out_alpha(0.5f) - 0.5f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_out_alpha(1.0f) - 0.0f) < 1e-5f);
+
+  PreviewConfig cfg;
+  SplitLaneSimulator sim(cfg);
+
+  MusicTiming timing;
+  timing.bpm = 60.0;
+  timing.ticks_per_quarter = 480;
+
+  NotationNote note;
+  note.start_tick = 4800;  // 10s
+  note.end_tick = 5280;    // 11s — 1000ms span, below the old 1500ms pad
+  note.gimmick_type = GimmickType::Split3;
+  note.scratch_length = 10390;
+
+  const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  const int64_t end_ms = tick_to_milliseconds(5280, timing);
+  CHECK_EQ(end_ms - start_ms, 1000);
+
+  PreviewSplitLaneInstance at_end;
+  sim.fill_instance(at_end, note, timing, end_ms);
+  CHECK_EQ(at_end.split_anim_phase, 1);
+  CHECK(std::fabs(at_end.split_line_alpha - 1.0f) < 0.02f);
+
+  PreviewSplitLaneInstance quarter;
+  sim.fill_instance(quarter, note, timing, end_ms + 75);
+  CHECK_EQ(quarter.split_anim_phase, 2);
+  CHECK(std::fabs(quarter.split_line_alpha - 0.84375f) < 0.02f);
+
+  PreviewSplitLaneInstance mid;
+  sim.fill_instance(mid, note, timing, end_ms + 150);
+  CHECK_EQ(mid.split_anim_phase, 2);
+  CHECK(std::fabs(mid.split_line_alpha - 0.5f) < 0.02f);
+
+  CHECK(sim.is_split_active(note, timing, end_ms + 299));
+  CHECK(!sim.is_split_active(note, timing, end_ms + 300));
+  CHECK(!sim.is_split_active(note, timing, start_ms + 1500));
 }
 
 void test_split_color_slot_mirrors_linehight_z180() {
@@ -1884,6 +2220,8 @@ void test_hold_head_partial_overlap_single_free_run() {
   CHECK(added != nullptr);
   CHECK_EQ(added->lane, 2);
   CHECK_EQ(added->width, 2);
+  // Auto-generated partial heads are not recognized as the body's pair.
+  CHECK(!paired_hold_head_for(doc, *doc.find_note(2)).has_value());
 }
 
 void test_hold_head_partial_overlap_multiple_free_runs_skipped() {
@@ -1924,6 +2262,7 @@ void test_hold_head_partial_overlap_with_prior_hold_tail() {
   CHECK(head.has_value());
   CHECK_EQ(head->lane, 6);
   CHECK_EQ(head->width, 2);
+  CHECK(!hold_head_pairs_with_body(*head, *doc.find_note(2)));
 
   // Fully covered by prior tail → no head.
   ChartDocument doc2;
@@ -2029,13 +2368,108 @@ void test_repair_legacy_scratch_hold_heads() {
   legacy.note_type = NoteType::Normal;  // pre-alignment auto-head
   CHECK(doc.add_note(legacy) == 2);
 
-  CHECK(paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
   CHECK_EQ(repair_legacy_hold_heads(doc), 1);
   auto head = paired_hold_head_for(doc, *doc.find_note(1));
   CHECK(head.has_value());
   CHECK(head->note_type == NoteType::ScratchHoldStart);
   CHECK(is_hold_head_note(*head));
   CHECK_EQ(repair_legacy_hold_heads(doc), 0);
+}
+
+void test_hold_head_pairs_exact_span_and_family() {
+  auto add_body = [](ChartDocument& doc, int32_t id, int32_t tick, int32_t lane, int32_t width,
+                     NoteType type) {
+    NotationNote body = make_tap(tick, lane);
+    body.id = id;
+    body.width = width;
+    body.end_tick = tick + 480;
+    body.note_type = type;
+    CHECK(doc.add_note(body) == id);
+  };
+  auto add_head = [](ChartDocument& doc, int32_t id, int32_t tick, int32_t lane, int32_t width,
+                     NoteType type) {
+    NotationNote head = make_tap(tick, lane);
+    head.id = id;
+    head.width = width;
+    head.end_tick = tick;
+    head.note_type = type;
+    CHECK(doc.add_note(head) == id);
+  };
+
+  // Overlapping but different width / lane is not a pair.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 2, 4, NoteType::Hold);
+    add_head(doc, 2, 0, 4, 2, NoteType::HoldStart);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+    CHECK(!paired_hold_body_for(doc, *doc.find_note(2)).has_value());
+    CHECK(!hold_head_pairs_with_body(*doc.find_note(2), *doc.find_note(1)));
+  }
+
+  // Same span, wrong family: blue body ignores pink/gold-scratch heads.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 3, 2, NoteType::Hold);
+    add_head(doc, 2, 0, 3, 2, NoteType::ScratchHoldStart);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+    add_head(doc, 3, 0, 3, 2, NoteType::ScratchCriticalHoldStart);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
+
+  // Same span, wrong family: purple body ignores blue/gold-blue heads.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 3, 2, NoteType::ScratchHold);
+    add_head(doc, 2, 0, 3, 2, NoteType::HoldStart);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+    add_head(doc, 3, 0, 3, 2, NoteType::CriticalHoldStart);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
+
+  // Blue body accepts blue / gold heads at the exact start span.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 3, 2, NoteType::Hold);
+    add_head(doc, 2, 0, 3, 2, NoteType::HoldStart);
+    auto paired = paired_hold_head_for(doc, *doc.find_note(1));
+    CHECK(paired.has_value());
+    CHECK_EQ(paired->id, 2);
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(2))->id, 1);
+  }
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 3, 2, NoteType::CriticalHold);
+    add_head(doc, 2, 0, 3, 2, NoteType::CriticalHoldStart);
+    CHECK(paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
+
+  // First purple segment uses the same exact-span rule (not JumpScratch cover).
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 3, 2, NoteType::ScratchHold);
+    add_head(doc, 2, 0, 3, 2, NoteType::ScratchHoldStart);
+    CHECK(paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+    CHECK_EQ(paired_hold_head_for(doc, *doc.find_note(1))->id, 2);
+  }
+  {
+    ChartDocument doc;
+    add_body(doc, 1, 0, 3, 2, NoteType::ScratchCriticalHold);
+    add_head(doc, 2, 0, 3, 2, NoteType::ScratchCriticalHoldStart);
+    CHECK(paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
+  {
+    ChartDocument doc;
+    NotationNote body = make_tap(0, 3);
+    body.id = 1;
+    body.width = 2;
+    body.end_tick = 480;
+    body.note_type = NoteType::ScratchHold;
+    set_scratch_hold_end_lanes(body, 3, 7);
+    CHECK(doc.add_note(body) == 1);
+    add_head(doc, 2, 0, 3, 5, NoteType::ScratchHoldStart);  // wider than start span
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
 }
 
 int count_note_type(const ChartDocument& doc, NoteType type) {
@@ -2383,7 +2817,7 @@ void test_sus_export_covered_hold_skips_damage() {
   CHECK_EQ(normals, 1);
 }
 
-// Partial-width hold head must still pair to body on export.
+// Partial-width head does not pair; the body still exports as a headless hold.
 void test_sus_export_partial_hold_head_pairs_body() {
   NotationChart chart;
   chart.timing.bpm = 120.0;
@@ -3535,6 +3969,7 @@ int main() {
   test_hold_head_ignores_body_eighth_and_star_overlap();
   test_scratch_hold_auto_head_is_scratch_hold_start();
   test_repair_legacy_scratch_hold_heads();
+  test_hold_head_pairs_exact_span_and_family();
   test_resolve_convert_scratch_head_stays_official();
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
@@ -3557,7 +3992,17 @@ int main() {
   test_snapshot_large_seek_full_rebuild();
   test_split_gimmick_range_and_combo_includes_heads();
   test_split_appear_phase_before_start_ms();
+  test_official_playfield_visual_lanes_are_six();
+  test_official_playfield_judge_ndc_and_perspective();
+  test_official_calculate_position_y_matches_il2cpp();
+  test_official_setting_value_ranges();
+  test_official_hidden_line_and_note_height_defaults();
+  test_official_split_tip_span_matches_sprite_cap();
   test_split_fadein_direction_from_linehight_z180();
+  test_official_split_fade_in_cubic_and_zero_length();
+  test_official_split_fade_in_visible_hits_screen_before_clip_end();
+  test_official_split_fade_in_scale_is_playfield_coverage();
+  test_official_split_fade_out_is_300ms_smoothstep_from_end();
   test_split_color_slot_mirrors_linehight_z180();
   test_hold_start_visible_with_zero_end_tick();
   test_load_legacy_v1_wdschart();

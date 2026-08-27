@@ -1,3 +1,4 @@
+#include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/edit/edit_viewport.hpp"
 
 #include <cassert>
@@ -79,4 +80,14 @@ int main() {
   const float y_gap_240 = std::abs(viewport.y_at(480) - viewport.y_at(0));
   assert(y_gap_240 < y_gap_120 * 0.55f);
   assert(y_gap_240 > y_gap_120 * 0.45f);
+
+  // Official preview canvas is 16:9 (PlayerSettings 1280×720).
+  {
+    wds::ui::EditorLayouter layouter;
+    const auto official = layouter.compute(1280, 720);
+    assert(std::fabs(wds::ui::EditorLayouter::kPreviewAspect - 16.0f / 9.0f) < 1e-6f);
+    assert(std::fabs(static_cast<float>(official.preview_content.width) /
+                         std::max(1, official.preview_content.height) -
+                     16.0f / 9.0f) < 0.03f);
+  }
 }

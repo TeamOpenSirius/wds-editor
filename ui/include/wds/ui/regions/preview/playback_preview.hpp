@@ -88,10 +88,12 @@ class PlaybackPreviewView {
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
  private:
+  void draw_ingame_background(wds::renderer::DrawBatch& batch);
   void draw_stage(wds::renderer::DrawBatch& batch,
-                  const wds::chart_editor::PreviewSnapshot& snapshot);
+                  const wds::chart_editor::PreviewSnapshot& snapshot,
+                  wds::renderer::TextureId solid_texture);
   void draw_hidden_line(wds::renderer::DrawBatch& batch);
-  // Note-percent at the judgeline-side edge of the Hidden Line; only p >= this is drawn.
+  // Official LaneMask bottom percent (GetNoteVisiblePositionY). z=0 objects cull here.
   float spawn_clip_percent() const noexcept;
   void draw_split_lanes(wds::renderer::DrawBatch& batch, wds::renderer::DrawBatch& additive,
                         const wds::chart_editor::PreviewSnapshot& snapshot);

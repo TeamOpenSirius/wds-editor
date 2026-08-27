@@ -13,11 +13,13 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/note_position_calculator.hpp>
 #include <wds/core/official_chart.hpp>
+#include <wds/core/official_playfield.hpp>
 #include <wds/core/preview_config.hpp>
 #include <wds/core/preview_snapshot.hpp>
 #include <wds/core/preview_snapshot_builder.hpp>
 #include <wds/core/project.hpp>
 #include <wds/core/seekable_clock.hpp>
+#include <wds/core/split_fade.hpp>
 #include <wds/core/split_lane_simulator.hpp>
 #include <wds/core/sus_chart.hpp>
 #include <wds/core/types.hpp>

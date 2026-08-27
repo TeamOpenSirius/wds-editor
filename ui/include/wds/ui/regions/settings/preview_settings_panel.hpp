@@ -37,7 +37,6 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
   int64_t fallback_chart_duration_ms() const;
 
   ChartPreviewPanel& preview_;
-  double speed_ = 5.0;
   float music_gain_ = 1.0f;
   float sfx_gain_ = 1.0f;
   float playback_rate_ = 1.0f;
@@ -45,9 +44,6 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
   bool sfx_muted_ = false;
   std::function<void()> on_persist_;
 
-  wds::interaction::Widget* speed_minus_ = nullptr;
-  wds::interaction::Widget* speed_combo_ = nullptr;
-  wds::interaction::Widget* speed_plus_ = nullptr;
   wds::interaction::Widget* seek_slider_ = nullptr;
   wds::interaction::Widget* music_combo_ = nullptr;
   wds::interaction::Widget* music_mute_ = nullptr;

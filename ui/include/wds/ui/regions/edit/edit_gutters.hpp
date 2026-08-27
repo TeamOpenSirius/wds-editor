@@ -42,8 +42,8 @@ void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept;
 std::vector<int32_t> split_picker_color_ids();
 
 // Split coverage for default-lane-guide hiding. Fade windows are wall-clock
-// seconds (PreviewConfig), never BPM/subdivision ticks — edit and official share
-// the same real-time behavior.
+// seconds (PreviewConfig: official fadeIn 1.0s / fadeOut 0.3s), never
+// BPM/subdivision ticks — edit and preview share the same real-time windows.
 struct SplitCoverageMs {
   int64_t fade_start_ms = 0;
   int64_t fade_end_ms = 0;

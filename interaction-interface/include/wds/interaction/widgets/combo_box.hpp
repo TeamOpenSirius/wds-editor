@@ -25,6 +25,10 @@ class ComboBox : public Widget {
   void set_validator(std::function<bool(const std::string&)> validator) {
     validator_ = std::move(validator);
   }
+  // True while the editable text fails the validator (red outline).
+  bool text_invalid() const noexcept {
+    return static_cast<bool>(validator_) && !validator_(text_);
+  }
 
   // When true, the field is selection-only: click opens the menu, typing is ignored.
   void set_dropdown_only(bool enabled) noexcept { dropdown_only_ = enabled; }

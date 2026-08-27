@@ -7,6 +7,7 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/split_fade.hpp>
 
 #include <wds/interaction/theme.hpp>
 
@@ -279,19 +280,14 @@ std::vector<int32_t> split_picker_color_ids() {
   return wds::chart_render::official_split_color_ids();
 }
 
-namespace {
-int64_t split_fade_ms(float seconds) noexcept {
-  return std::max<int64_t>(
-      1, static_cast<int64_t>(std::llround(static_cast<double>(seconds) * 1000.0)));
-}
-}  // namespace
-
 std::vector<SplitCoverageMs> collect_split_coverage_ms(
     const std::vector<NotationNote>& notes, const wds::chart_editor::MusicTiming& timing,
     const wds::chart_editor::PreviewConfig& preview) {
   std::vector<SplitCoverageMs> out;
-  const int64_t appear_ms = split_fade_ms(preview.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_ms(preview.split_line_animation_end_sec);
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  const int64_t disappear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     SplitCoverageMs range;
@@ -334,18 +330,22 @@ float split_line_opacity_at_ms(const NotationNote& note,
   if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return 0.0f;
   const int64_t start_ms = note.start_ms(timing);
   const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
-  const int64_t appear_ms = split_fade_ms(preview.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_ms(preview.split_line_animation_end_sec);
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  const int64_t disappear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   const int64_t fade_start = start_ms - appear_ms;
   const int64_t fade_end = end_ms + disappear_ms;
   if (time_ms < fade_start || time_ms > fade_end) return 0.0f;
   if (time_ms < start_ms) {
-    return std::clamp(static_cast<float>(time_ms - fade_start) / static_cast<float>(appear_ms),
-                      0.0f, 1.0f);
+    const float t = std::clamp(
+        static_cast<float>(time_ms - fade_start) / static_cast<float>(appear_ms), 0.0f, 1.0f);
+    return wds::chart_editor::official_split_fade_in_scale(t);
   }
   if (time_ms > end_ms) {
-    return std::clamp(static_cast<float>(fade_end - time_ms) / static_cast<float>(disappear_ms),
-                      0.0f, 1.0f);
+    const float t = std::clamp(
+        static_cast<float>(time_ms - end_ms) / static_cast<float>(disappear_ms), 0.0f, 1.0f);
+    return wds::chart_editor::official_split_fade_out_alpha(t);
   }
   return 1.0f;
 }

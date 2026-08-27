@@ -26,6 +26,23 @@
 #include <utility>
 
 namespace wds::ui {
+namespace {
+
+void capture_display_from_preview(const ChartPreviewPanel& preview, EditorUiConfig& cfg) {
+  const auto& visual = preview.preview().config();
+  cfg.note_speed = visual.note_speed;
+  cfg.note_start_offset = visual.note_start_offset;
+  cfg.note_height_level = visual.note_height_level;
+  cfg.split_line_opacity =
+      static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) * 100.0));
+}
+
+void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& cfg) {
+  preview.apply_display_settings(cfg.note_speed, cfg.note_start_offset, cfg.note_height_level,
+                                 cfg.split_line_opacity);
+}
+
+}  // namespace
 
 UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   session_ = std::make_unique<EditorSession>(*chart_preview_);
@@ -69,6 +86,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
     cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
     cfg.shortcuts_initialized = true;
+    capture_display_from_preview(*chart_preview_, cfg);
     width_slots_dialog_->set_config(cfg);
     width_slots_dialog_->open();
   });
@@ -193,6 +211,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       if (cfg.shortcuts_initialized) {
         wds::interaction::set_editor_shortcuts(cfg.shortcuts);
       }
+      apply_display_to_preview(*chart_preview_, cfg);
       bind_editor_shortcuts();
       persist();
     });
@@ -454,6 +473,7 @@ void UiManager::load_ui_config() {
     wds::interaction::set_editor_shortcuts(cfg.shortcuts);
     bind_editor_shortcuts();
   }
+  apply_display_to_preview(*chart_preview_, cfg);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
   if (auto* settings = settings_panel()) settings->apply_config(cfg);
   if (auto* toolbar = toolbar_panel()) toolbar->apply_config(cfg);
@@ -475,6 +495,7 @@ void UiManager::save_ui_config() {
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
+  capture_display_from_preview(*chart_preview_, cfg);
   save_editor_ui_config(config_path_, cfg);
 }
 

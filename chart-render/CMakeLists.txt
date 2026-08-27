@@ -1,5 +1,5 @@
 # Chart-specific visual helpers (stage geometry, skins, note strips).
-# Depends on wds_draw / wds_renderer for DrawBatch + TextureCache; no core/audio.
+# Depends on wds_draw / wds_renderer and official playfield math from wds::core.
 
 add_library(wds_chart_render STATIC
   src/stage_geometry.cpp
@@ -20,6 +20,7 @@ target_link_libraries(wds_chart_render
   PUBLIC
     wds::draw
     wds::renderer
+    wds::core
 )
 
 target_compile_features(wds_chart_render PUBLIC cxx_std_17)

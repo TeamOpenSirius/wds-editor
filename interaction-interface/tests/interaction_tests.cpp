@@ -16,6 +16,7 @@
 #include "wds/interaction/widgets/slider.hpp"
 #include "wds/interaction/widgets/stepper.hpp"
 #include "wds/interaction/widgets/text_field.hpp"
+#include "wds/interaction/validators.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -823,6 +824,65 @@ int main() {
       font.clear_gpu_texture();
       font.clear();
     }
+  }
+
+  // Invalid editable text turns red; blur with a still-invalid value reverts.
+  {
+    ComboBox box;
+    box.set_dropdown_only(false);
+    box.set_items({"2", "4", "8"});
+    box.set_text("4");
+    box.set_validator([](const std::string& text) {
+      return text == "2" || text == "4" || text == "8";
+    });
+    int commits = 0;
+    box.on_commit([&](const std::string&) { ++commits; });
+    expect(!box.text_invalid(), "committed combo text is valid");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_text_input(TextInputEvent{"x"});
+    expect(box.text() == "4x", "combo accepts draft typing");
+    expect(box.text_invalid(), "illegal combo draft is invalid");
+    box.on_blur();
+    expect(box.text() == "4", "invalid combo blur reverts to last committed");
+    expect(!box.text_invalid(), "reverted combo is valid again");
+    expect(commits == 0, "invalid combo blur does not commit");
+
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    box.on_text_input(TextInputEvent{"8"});
+    expect(box.text() == "8", "combo accepts a legal typed value");
+    expect(!box.text_invalid(), "legal combo draft is valid");
+    box.on_blur();
+    expect(box.text() == "8", "valid combo blur keeps the new value");
+    expect(commits == 1, "valid combo blur commits once");
+  }
+  {
+    TextField field;
+    field.set_text("6");
+    field.set_validator([](const std::string& text) {
+      const auto v = parse_positive_int(text);
+      return v.has_value() && *v >= 1 && *v <= 12;
+    });
+    int commits = 0;
+    field.on_commit([&](const std::string&) { ++commits; });
+    expect(!field.text_invalid(), "committed width text is valid");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_text_input(TextInputEvent{"3"});
+    expect(field.text() == "63", "width field accepts draft typing");
+    expect(field.text_invalid(), "out-of-range width draft is invalid");
+    field.on_blur();
+    expect(field.text() == "6", "invalid width blur reverts to last committed");
+    expect(!field.text_invalid(), "reverted width is valid again");
+    expect(commits == 0, "invalid width blur does not commit");
+
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    field.on_text_input(TextInputEvent{"12"});
+    expect(field.text() == "12", "width field accepts a legal typed value");
+    expect(!field.text_invalid(), "legal width draft is valid");
+    field.on_blur();
+    expect(field.text() == "12", "valid width blur keeps the new value");
+    expect(commits == 1, "valid width blur commits once");
   }
 
   return failures == 0 ? 0 : 1;

@@ -58,11 +58,7 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     }
     return {};
   };
-  const std::string p_stage = find_skin({"_STAGE_COVER.png", "Sirius Stage Cover.png"});
-  const std::string p_stage_bg =
-      find_skin({"_STAGE_BOTTOM_BORDER.png", "Sirius Stage Bottom Border.png"});
-  const std::string p_judgeline =
-      queue_optional(cache, dir, {"_JUDGMENT_LINE.png", "Sirius Judgment Line.png"});
+  const std::string p_judgeline = queue_required(cache, dir, "img_ingame_judgment_area3.png");
 
   // Official note set — all required (no fallback).
   const std::string p_bottom = queue_required(cache, dir, "Sirius Note Bottom.png");
@@ -75,29 +71,20 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   const std::string p_tick_b = queue_required(cache, dir, "Sirius Note Tick Blue.png");
   const std::string p_tick_p = queue_required(cache, dir, "Sirius Note Tick Purple.png");
 
-  if (p_stage.empty() || p_judgeline.empty() || p_bottom.empty() || p_red.empty() ||
-      p_yel.empty() || p_blu.empty() || p_pur.empty() || p_sync.empty() || p_arrow.empty() ||
+  if (p_judgeline.empty() || p_bottom.empty() || p_red.empty() || p_yel.empty() ||
+      p_blu.empty() || p_pur.empty() || p_sync.empty() || p_arrow.empty() ||
       p_tick_b.empty() || p_tick_p.empty()) {
     return false;
   }
 
-  const std::string p_hidden = queue_optional(cache, dir, {"Sirius Hidden Line.png"});
+  const std::string p_hidden =
+      queue_optional(cache, dir, {"img_game_common_start_line_500.png"});
   const std::string p_split1 = queue_optional(cache, dir, {"Sirius Split Line _1.png"});
   const std::string p_split2 = queue_optional(cache, dir, {"Sirius Split Line _2.png"});
-  const std::string p_split_t1 =
-      queue_optional(cache, dir, {"Sirius Split Line Transform 1 _1.png"});
-  const std::string p_split_t2 =
-      queue_optional(cache, dir, {"Sirius Split Line Transform 2 _1.png"});
 
   split_lines.queue_all(cache, skins_directory);
 
   const std::string p_auto = queue_optional(cache, dir, {"Sirius Judgment Auto.png"});
-  const std::string p_pp = queue_optional(cache, dir, {"Sirius Judgment Perfect+.png"});
-  const std::string p_flick_c = queue_optional(cache, dir, {"Sirius Flick Circle.png"});
-  const std::string p_flick_s = queue_optional(cache, dir, {"Sirius Flick Star.png"});
-  const std::string p_lin_bg = queue_optional(cache, dir, {"Sirius Linear Background.png"});
-  const std::string p_lin_line = queue_optional(cache, dir, {"Sirius Linear Line.png"});
-  const std::string p_lin_star = queue_optional(cache, dir, {"Sirius Linear Star.png"});
 
   auto queue_bomb_layer = [&](const char* type_dir, const char* layer) -> std::string {
     const fs::path path =
@@ -227,9 +214,6 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     return false;
   }
 
-  stage = p_stage.empty() ? TextureInfo{} : cache.load_standalone_png(p_stage);
-  stage_background =
-      p_stage_bg.empty() ? TextureInfo{} : cache.load_standalone_png(p_stage_bg);
   judgeline = cache.get(p_judgeline);
 
   // Official Texture2D/ingame_bg.png — large plate, keep out of the atlas.
@@ -239,6 +223,15 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     ingame_background = cache.load_standalone_png(p_ingame_bg);
   } else {
     ingame_background = {};
+  }
+
+  // Official img_ingame_lane_border2 — 1115×640, same standalone path as ingame_bg.
+  const std::string p_lane_border = find_skin(
+      {"img_ingame_lane_border2.png", "ingame_lane_border.png"});
+  if (!p_lane_border.empty()) {
+    lane_border = cache.load_standalone_png(p_lane_border);
+  } else {
+    lane_border = {};
   }
 
   note_bottom = cache.get(p_bottom);
@@ -256,17 +249,11 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   hidden_line = cache.get(p_hidden);
   split_line_1 = cache.get(p_split1);
   split_line_2 = cache.get(p_split2);
-  split_line_trans1 = cache.get(p_split_t1);
-  split_line_trans2 = cache.get(p_split_t2);
   split_lines.bind_after_bake(cache, skins_directory);
   judge_auto = cache.get(p_auto);
-  judge_perfect_plus = cache.get(p_pp);
-  flick_circle = cache.get(p_flick_c);
-  flick_star = cache.get(p_flick_s);
-  effect_linear_bg = cache.get(p_lin_bg);
-  effect_linear_line = cache.get(p_lin_line);
-  effect_linear_star = cache.get(p_lin_star);
-  effect_circular = flick_circle ? flick_circle : cache.get(p_flick_s);
+  effect_linear_bg = {};
+  effect_linear_star = {};
+  effect_circular = {};
   bomb_square_normal = cache.get(p_b_sq_n);
   bomb_flare_normal = cache.get(p_b_fl_n);
   bomb_square_critical = cache.get(p_b_sq_c);
@@ -290,7 +277,7 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   hold_slice_border_r = 10.0f;
   note_slice_tex_h = 108.0f;
 
-  return static_cast<bool>(stage) && static_cast<bool>(judgeline) &&
+  return static_cast<bool>(judgeline) &&
          static_cast<bool>(note_bottom) && static_cast<bool>(note_red_top) &&
          static_cast<bool>(note_yellow_top) && static_cast<bool>(note_blue_top) &&
          static_cast<bool>(note_purple_top) && static_cast<bool>(hold_connection_blue) &&

@@ -68,6 +68,9 @@ class ChartPreviewPanel {
 
   // Apply note_speed to both visual and core preview configs and rebuild.
   void set_note_speed(double speed);
+  // Apply official display settings (speed / 挡板 / note 厚度 / 分割线特效透明度).
+  void apply_display_settings(double note_speed, int note_start_offset, int note_height_level,
+                              int split_line_opacity_percent);
   // Reload BGM path (empty clears to wall-clock).
   // When preserve_playback is false, seek to 0 and do not resume play (open/import).
   bool load_music(const std::string& music_path, bool preserve_playback = true);

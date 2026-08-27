@@ -1,6 +1,7 @@
 #pragma once
 
 #include <wds/chart_render/preview_visual_config.hpp>
+#include <wds/core/official_playfield.hpp>
 #include <wds/renderer/draw_types.hpp>
 
 #include <cmath>
@@ -12,10 +13,6 @@ struct JudgelineQuad {
   float lb_x = 0, lb_y = 0, lt_x = 0, lt_y = 0;
   float rb_x = 0, rb_y = 0, rt_x = 0, rt_y = 0;
 };
-
-// Sirius ease from shared/utils.cpp:
-// Remap(pow(1.06,-45), 1.06, 0, 1.06, pow(1.06, 45*(x-1)))
-float sirius_ease(float x) noexcept;
 
 class StageGeometry {
  public:
@@ -58,37 +55,52 @@ class StageGeometry {
   Vec2 lane_full_position(int32_t lane, float percent) const;
   float lane_full_width(int32_t lane, float percent) const;
 
-  // Progress percent from note time (seconds) and now (seconds), matching play utils.
+  // Screen percent (0=top, 1=bottom) from official Y → LaneGroup+FOV50.
   float note_percent(double note_time_sec, double now_sec) const;
+  float judgeline_percent() const noexcept;
 
-  // Half of the judgment-line band height, in note-percent units (p=1 is band center).
+  // Half of the judgment-line band height, in note-percent units.
   float judgeline_half_percent() const noexcept;
 
-  // Sirius Hidden Line center / half-height in note-percent (0=tip). Notes above the
-  // bar are culled; they fade in across [center-half, center+half].
+  // Official StartLine sprite center / half-height in screen percent (0=top).
   float hidden_line_center_percent() const noexcept;
   float hidden_line_half_percent() const noexcept;
+  // Official LaneMask bottom (GetNoteVisiblePositionY). Notes appear here.
+  float lane_mask_bottom_percent() const noexcept;
+  // Content-space Y of that mask edge (horizontal after projection; larger = top).
+  float lane_mask_bottom_content_y() const noexcept;
+  // Official SpriteMask: hide the spawn-side of a projected quad (y > mask).
+  // far_t is the kept fraction along each near→far edge (1 = unclipped).
+  bool clip_quad_outside_lane_mask(Quad& q, float& far_t) const noexcept;
 
   Quad stage_quad() const;
+  // Persistent BG_LaneBorder edge. Pass a logical edge (0 … lane_count);
+  // visual 6-track borders use official_visual_border_edge_index (0,2,…,12).
+  Quad lane_border_quad(int32_t edge_index) const;
   // Half note height along approach axis (percent units), same as note_quad span.
   float note_half_height_percent(int32_t lane, float percent) const;
-  // Flat note on the stage plane (local Z = 0).
+  // Official 0.915×0.64 sprite at the given percent, untilted (layer Z = 0).
   Quad note_quad(int32_t lane, int32_t end_lane, float percent) const;
-  // Same plane footprint, then pinhole-project Unity local Z as height above the plane.
+  // Bottom/Top each project their own sprite with Note Rx + layer Z.
   Quad note_quad(int32_t lane, int32_t end_lane, float percent, float unity_local_z) const;
-  // Flat-note footprint between two percents (near=judgeline side, far=tip side).
+  // Visible sprite strip between two percents (near=judgeline side, far=tip side).
   Quad note_span_quad(int32_t lane, int32_t end_lane, float percent_near, float percent_far,
                       float unity_local_z = 0.0f) const;
   Quad hold_body_quad(int32_t lane, int32_t end_lane, float percent_near,
                       float percent_far) const;
   Quad tick_quad(int32_t lane, int32_t end_lane, float percent) const;
+  // Mid-star: official 1.12×1.12 SoundNote, centered, never stretched to hold width.
+  Quad star_quad(int32_t lane, int32_t end_lane, float percent) const;
   Quad sync_line_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Hit VFX lying on the judgeline band (same vertical span as the judgment line cells).
   Quad effect_quad(int32_t lane, int32_t end_lane) const;
-  // BomSquare frame: same lane-edge taper as the stage, centered on the judgeline.
-  // width_scale multiplies the note span; height_screen is full vertical size in NDC.
+  // BomSquare on JudgeArea (Local alignment): width_scale × note span, height in
+  // official world Y. Corners go through project_judge so the frame tapers.
   Quad bomb_frame_quad(int32_t lane, int32_t end_lane, float width_scale,
-                       float height_screen) const;
+                       float height_unity) const;
+  // BomFlare: RenderAlignment=View, startSize=8, never scaled by note width.
+  // Axis-aligned screen disc at the OnBomb midpoint.
+  Quad bomb_flare_billboard_quad(int32_t lane, int32_t end_lane, float size_unity) const;
   Quad split_line_quad(int32_t boundary_after_lane, float percent_start,
                        float percent_end, float length_override = -1.0f) const;
   Quad split_end_line_quad(float percent_start, float percent_end,
@@ -101,9 +113,12 @@ class StageGeometry {
  private:
   void rebuild_stage();
   void rebuild_panel();
-  // Narrow toward the stage center (not world origin). Multiplying x by high_width is only
-  // valid when the stage is centered on x=0; embedded preview panels break that assumption.
-  float taper_x(float bottom_x) const noexcept;
+  float content_aspect() const noexcept;
+  Vec2 ndc_to_content(wds::chart_editor::OfficialNdc ndc) const noexcept;
+  Vec2 project_judge(float local_x, float judge_y, float local_z = 0.0f) const noexcept;
+  Vec2 project_main(float local_x, float main_y, float local_z = 0.0f) const noexcept;
+  float percent_to_judge_y(float percent) const noexcept;
+  float judge_y_to_percent(float judge_y) const noexcept;
 
   PreviewVisualConfig config_;
   ScreenBounds screen_;

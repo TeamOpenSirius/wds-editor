@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -204,17 +203,34 @@ int32_t flick_scratch_from_directional(int type) {
 
 // Sirius ScratchType from Air on body [body_l, body_r] vs Air span [air_l, air_r].
 int32_t scratch_length_from_air_span(int air_type, int body_l, int body_r, int air_l, int air_r) {
+  int32_t sl = 0;
   if (air_l == body_l && air_r == body_r) {
-    if (air_type == 3) return -(body_r - body_l + 1);
-    if (air_type == 4) return (body_r - body_l + 1);
-    return 0;
+    if (air_type == 3) sl = -(body_r - body_l + 1);
+    else if (air_type == 4) sl = (body_r - body_l + 1);
+  } else if (air_r == body_r && air_l <= body_l) {
+    sl = air_l - body_r - 1;
+  } else if (air_l == body_l && air_r >= body_r) {
+    sl = air_r - body_l + 1;
+  } else {
+    // Air does not share an edge with the body. Encode the union cover with the
+    // official one-sided Sirius span — do not hang air width off the far body
+    // edge (that produced cover_lo < 0 on manosaba JumpScratches).
+    NotationNote probe;
+    probe.lane = body_l;
+    probe.width = std::max(1, body_r - body_l + 1);
+    int lo = std::min(body_l, air_l);
+    int hi = std::max(body_r, air_r);
+    lo = std::max(lo, 0);
+    hi = std::min(hi, 11);
+    set_scratch_hold_end_lanes(probe, lo, hi);
+    sl = probe.scratch_length;
+    if (sl == 0) {
+      const int w = std::max(1, hi - lo + 1);
+      if (air_type == 3) sl = -w;
+      else if (air_type == 4) sl = w;
+    }
   }
-  if (air_r == body_r && air_l <= body_l) return air_l - body_r - 1;
-  if (air_l == body_l && air_r >= body_r) return air_r - body_l + 1;
-  // Fallback: prefer Air direction with Air width.
-  if (air_type == 3) return -(air_r - air_l + 1);
-  if (air_type == 4) return (air_r - air_l + 1);
-  return 0;
+  return sl;
 }
 
 int air_type_from_scratch_length(int32_t scratch_length) {
@@ -856,6 +872,13 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
           set_scratch_hold_end_lanes(body, body_lane, body_lane + body_width - 1);
           body.scratch_length = 0;
         }
+        auto [lo, hi] = get_scratch_end_lane_range(body);
+        if (lo < 0 || hi > 11) {
+          lo = std::max(lo, 0);
+          hi = std::min(hi, 11);
+          set_scratch_hold_end_lanes(body, std::min(lo, body.lane),
+                                     std::max(hi, body.end_lane()));
+        }
       } else {
         body.note_type = critical_cover ? NoteType::CriticalHold : NoteType::Hold;
       }
@@ -1361,11 +1384,6 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   };
 
   // Index hold bodies by start for pairing with heads.
-  auto notes_overlap = [](const NotationNote& a, const NotationNote& b) {
-    return a.lane <= b.end_lane() && b.lane <= a.end_lane();
-  };
-  auto same_tick = [](int32_t a, int32_t b) { return a == b; };
-
   struct HoldEmit {
     const NotationNote* head = nullptr;
     const NotationNote* body = nullptr;
@@ -1407,8 +1425,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     bool attached = false;
     for (auto& h : holds) {
       if (h.body != nullptr || h.head == nullptr) continue;
-      // Partial-width heads share start tick and overlap lanes (not necessarily lane==).
-      if (same_tick(h.head->start_tick, n.start_tick) && notes_overlap(*h.head, n)) {
+      if (hold_head_pairs_with_body(*h.head, n)) {
         h.body = &n;
         attached = true;
         break;

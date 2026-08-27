@@ -185,7 +185,7 @@ int run_editor(int argc, char** argv) {
   }
 
   wds::ui::UiWindow window;
-  if (!window.create(1280, 734, "WDS Editor")) {
+  if (!window.create(1280, 720, "WDS Editor")) {
     wds::ui::StartupDependencyReport deps;
     deps.missing.push_back("无法创建窗口");
     glfwTerminate();

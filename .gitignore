@@ -42,8 +42,9 @@ compile_commands.json
 /VulkanSDK/
 /sonolus-sirius-engine/
 
-# Local Unity/IL2CPP dumps (not part of the editor)
-/wds/
+# Official Unity/IL2CPP dumps (local reference only; not part of the editor)
+/wds-code/
+/wds-resources/
 
 # MSI Binary-table dumps (not build inputs; WixUI assets come from wixl-data)
 /Binary/

@@ -33,7 +33,7 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   // Skip default popup walk — speed combo is painted in paint_dropdown() (chrome pass).
   void paint_popup_layers(wds::interaction::UiPainter& painter) const override;
   void paint_modal(wds::interaction::UiPainter& painter) const;
-  // Open scroll-speed dropdown; must be flushed in a later draw pass than paint_modal.
+  // Open combo dropdowns; must be flushed in a later draw pass than paint_modal.
   void paint_dropdown(wds::interaction::UiPainter& painter) const;
   Widget* hit_test(wds::interaction::Vec2 point) override;
   void on_click(const wds::interaction::ClickEvent& event) override;
@@ -52,6 +52,7 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   void refresh_shortcut_conflict_highlights();
   std::optional<std::size_t> first_shortcut_conflict_index() const;
   void ensure_shortcut_row_visible(std::size_t index);
+  void dismiss_combos();
 
   bool open_ = false;
   Tab tab_ = Tab::File;
@@ -80,6 +81,10 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   wds::interaction::Widget* invert_scroll_wheel_ = nullptr;
   wds::interaction::Widget* invert_visible_range_scroll_ = nullptr;
   wds::interaction::Widget* scroll_wheel_speed_ = nullptr;
+  wds::interaction::Widget* note_speed_ = nullptr;
+  wds::interaction::Widget* note_start_offset_ = nullptr;
+  wds::interaction::Widget* note_height_level_ = nullptr;
+  wds::interaction::Widget* split_line_opacity_ = nullptr;
 
   wds::interaction::Widget* confirm_button_ = nullptr;
   wds::interaction::Widget* cancel_button_ = nullptr;

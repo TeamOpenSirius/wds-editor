@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <unordered_set>
 
 namespace wds::ui {
 namespace {
@@ -1434,7 +1435,20 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     if (placed) hold_chain_ids_.insert(placed->id);
   }
   engine_.rebuild_snapshot();
-  select_hold_chain();
+  // Select the new body and auto head as separate notes. Pairing is exact-span
+  // only and must not hide a shortened auto head.
+  std::unordered_set<int32_t> before_ids;
+  for (const auto& n : before) before_ids.insert(n.id);
+  clear_hold_sel_focus();
+  selected_.clear();
+  for (const int32_t id : hold_chain_ids_) selected_.insert(id);
+  for (const auto& n : engine_.document().notes()) {
+    if (before_ids.count(n.id)) continue;
+    if (wds::chart_editor::is_hold_head_note(n) ||
+        wds::chart_editor::is_hold_with_tail(n.note_type)) {
+      selected_.insert(n.id);
+    }
+  }
 
   if (chain_next && placed) {
     hold_chain_prev_id_ = placed->id;

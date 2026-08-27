@@ -329,10 +329,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     };
 
     const auto fade_opacity = [&](float mid_ms) {
-      float o = split_line_opacity_at_ms(note, timing, preview,
-                                        static_cast<int64_t>(std::llround(mid_ms)));
-      // Soften fade ends so translucent bands don't read as hard steps.
-      return o * o * (3.0f - 2.0f * o);
+      return split_line_opacity_at_ms(note, timing, preview,
+                                     static_cast<int64_t>(std::llround(mid_ms)));
     };
 
     const auto paint_fade_range = [&](int64_t range_lo, int64_t range_hi) {
@@ -402,25 +400,15 @@ void ChartEditRenderer::paint_overlays(
   const wds::interaction::Color solo_outline{1.0f, 0.95f, 0.35f, 1.0f};
   const wds::interaction::Color solo_inner{1.0f, 1.0f, 0.85f, 0.95f};
 
-  auto lane_overlap = [](const NotationNote& a, const NotationNote& b) {
-    return a.lane <= b.end_lane() && b.lane <= a.end_lane();
-  };
   auto paired_head = [&](const NotationNote& hold) -> const NotationNote* {
-    if (!wds::chart_editor::is_hold_with_tail(hold.note_type)) return nullptr;
     for (const auto& n : notes) {
-      if (n.id == hold.id || n.start_tick != hold.start_tick || !lane_overlap(n, hold)) continue;
-      if (wds::chart_editor::is_hold_head_note(n)) return &n;
+      if (n.id != hold.id && wds::chart_editor::hold_head_pairs_with_body(n, hold)) return &n;
     }
     return nullptr;
   };
   auto paired_body = [&](const NotationNote& head) -> const NotationNote* {
-    if (!wds::chart_editor::is_hold_head_note(head)) return nullptr;
     for (const auto& n : notes) {
-      if (!wds::chart_editor::is_hold_with_tail(n.note_type) || n.start_tick != head.start_tick ||
-          !lane_overlap(n, head)) {
-        continue;
-      }
-      return &n;
+      if (wds::chart_editor::hold_head_pairs_with_body(head, n)) return &n;
     }
     return nullptr;
   };

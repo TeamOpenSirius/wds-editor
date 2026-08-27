@@ -24,6 +24,10 @@ class TextField : public Widget {
   void set_validator(std::function<bool(const std::string&)> validator) {
     validator_ = std::move(validator);
   }
+  // True while the editable text fails the validator (red outline).
+  bool text_invalid() const noexcept {
+    return static_cast<bool>(validator_) && !validator_(text_);
+  }
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
