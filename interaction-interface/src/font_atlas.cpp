@@ -1,4 +1,5 @@
 #include "wds/interaction/font_atlas.hpp"
+#include "wds/interaction/theme.hpp"
 
 #include <wds/common/utf8_path.hpp>
 
@@ -150,8 +151,12 @@ FontAtlas::Slot FontAtlas::pick_slot(float pixel_size) const noexcept {
   if (!dual_) {
     return Slot::Body;
   }
-  const float d_body = std::abs(pixel_size - baked_body_);
-  const float d_tip = std::abs(pixel_size - baked_tip_);
+  // Draw sizes are logical (window) px; bake sizes are framebuffer px
+  // (logical × content_scale). Compare in FB space so Retina Md (26) binds
+  // the body atlas (52) instead of the tip atlas (26).
+  const float fb_px = pixel_size * std::max(theme::ui_content_scale(), 0.01f);
+  const float d_body = std::abs(fb_px - baked_body_);
+  const float d_tip = std::abs(fb_px - baked_tip_);
   return d_tip < d_body ? Slot::Tip : Slot::Body;
 }
 

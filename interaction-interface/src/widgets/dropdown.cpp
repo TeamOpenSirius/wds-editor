@@ -183,7 +183,8 @@ void Dropdown::on_pointer_down(const PointerDownEvent& event) {
     return;
   }
   open_ = true;
-  menu_scroll_ = 0.0f;
+  menu_scroll_ = popup_menu::scroll_to_show_index(this, abs, items_.size(), selected_index_,
+                                                 placement_of(opens_upward_));
   hover_index_ = -1;
   if (WidgetRoot* root = find_root()) {
     root->note_popup_opened(this);

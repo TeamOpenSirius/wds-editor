@@ -75,6 +75,10 @@ shortcuts.bind("preview", chord, "toggle_play");
 
 MD 深色 token（颜色、圆角、字号）；面板应读 theme 而非硬编码色值。
 
+### 滚轮偏好（进程内）
+
+`invert_scroll_wheel` / `invert_visible_range_scroll` / `scroll_wheel_speed` 见 `<wds/interaction/editor_input.hpp>`。适配器在入队前按「反转时间轴滚轮」取反 delta。速度夹在 0.25–3，NaN / Inf 回 1。宽度槽每位 1–12。手势语义在 [`ui/README.md`](../ui/README.md)。
+
 ## 依赖
 
 - `wds::common`
@@ -82,8 +86,10 @@ MD 深色 token（颜色、圆角、字号）；面板应读 theme 而非硬编�
 
 ## 测试
 
+交叉编译时不编 `wds_interaction_tests`。macOS 门禁见根 README。不要对 `build-win-x86_64` 跑 `ctest`。
+
 ```bash
-ctest -R wds_interaction_tests
+ctest --test-dir build-macos-arm -R wds_interaction_tests --output-on-failure
 ```
 
-覆盖：快捷键 namespace、按钮、Slider、手势与平台修饰键。
+覆盖：快捷键 namespace、按钮、Slider、滚轮速度夹取、手势与平台修饰键。

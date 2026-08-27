@@ -66,7 +66,7 @@ class UiWindow {
   int windowed_x_ = 80;
   int windowed_y_ = 80;
   int windowed_w_ = 1280;
-  int windowed_h_ = 734;
+  int windowed_h_ = 720;
 };
 
 }  // namespace wds::ui

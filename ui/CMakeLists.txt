@@ -7,6 +7,7 @@ add_library(wds_ui STATIC
   src/startup_deps.cpp
   src/editor_session.cpp
   src/editor_ui_config.cpp
+  src/timeline_wheel.cpp
   src/native_file_dialog.cpp
   src/layout/editor_layout.cpp
   src/regions/preview/chart_preview_panel.cpp
@@ -24,6 +25,9 @@ add_library(wds_ui STATIC
 )
 if(APPLE)
   target_sources(wds_ui PRIVATE src/macos_menu.mm src/macos_file_dialog.mm)
+  # Per-source only: do not use target_compile_options (would apply to macos_menu.mm
+  # and every other wds_ui TU) and do not replace other files' COMPILE_OPTIONS.
+  set_property(SOURCE src/macos_file_dialog.mm APPEND PROPERTY COMPILE_OPTIONS "-fobjc-arc")
 endif()
 add_library(wds::ui ALIAS wds_ui)
 
@@ -65,14 +69,24 @@ endif()
 target_compile_features(wds_ui PUBLIC cxx_std_17)
 target_compile_definitions(wds_ui PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 
-add_executable(wds_ui_logic_tests tests/edit_viewport_tests.cpp)
+add_executable(wds_ui_logic_tests
+  tests/edit_viewport_tests.cpp
+  src/layout/editor_layout.cpp
+  src/timeline_wheel.cpp
+)
 target_link_libraries(wds_ui_logic_tests PRIVATE wds::core wds::interaction)
 target_include_directories(wds_ui_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
 
 add_executable(wds_note_draw_order_tests tests/note_draw_order_tests.cpp)
 target_link_libraries(wds_note_draw_order_tests PRIVATE wds::chart_render wds::core)
-add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
+
+# Host ctest cannot execute foreign PE binaries; still build the test targets.
+if(NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
+  add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
+else()
+  message(STATUS "Skipping ctest registration for ui tests (cross build)")
+endif()
 
 if(MSVC)
   target_compile_options(wds_ui PRIVATE /W4)
@@ -127,7 +141,9 @@ if(WIN32)
   target_sources(wds_editor PRIVATE "${_wds_editor_rc}")
 endif()
 target_include_directories(wds_editor PRIVATE ${CMAKE_SOURCE_DIR}/renderer/third_party)
-target_link_libraries(wds_editor PRIVATE wds::ui wds::renderer wds::common)
+# wds::ui PUBLIC-links wds::renderer / wds::core (→ wds::common); extra
+# direct links duplicate those .a files on Apple ld.
+target_link_libraries(wds_editor PRIVATE wds::ui)
 if(WDS_UI_GLFW_TARGET)
   target_link_libraries(wds_editor PRIVATE ${WDS_UI_GLFW_TARGET})
 else()

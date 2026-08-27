@@ -2,6 +2,7 @@
 
 #include <wds/common/utf8_path.hpp>
 #include <wds/core/file_io.hpp>
+#include <wds/core/official_playfield.hpp>
 #include <wds/interaction/platform.hpp>
 
 #include <algorithm>
@@ -74,7 +75,25 @@ bool parse_int(const std::string& text, int32_t& out) {
 void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& value) {
   if (key == "note_speed") {
     double v = cfg.note_speed;
-    if (parse_double(value, v)) cfg.note_speed = std::clamp(v, 1.0, 20.0);
+    if (parse_double(value, v)) {
+      cfg.note_speed = wds::chart_editor::official_clamp_note_speed(v);
+    }
+  } else if (key == "note_start_offset") {
+    int32_t v = cfg.note_start_offset;
+    if (parse_int(value, v)) {
+      cfg.note_start_offset = wds::chart_editor::official_clamp_note_start_offset(static_cast<int>(v));
+    }
+  } else if (key == "note_height_level") {
+    int32_t v = cfg.note_height_level;
+    if (parse_int(value, v)) {
+      cfg.note_height_level = wds::chart_editor::official_clamp_note_height_level(static_cast<int>(v));
+    }
+  } else if (key == "split_line_opacity") {
+    int32_t v = cfg.split_line_opacity;
+    if (parse_int(value, v)) {
+      cfg.split_line_opacity =
+          wds::chart_editor::official_clamp_split_effect_line_opacity(static_cast<int>(v));
+    }
   } else if (key == "visible_hectoms") {
     int32_t v = cfg.visible_hectoms;
     if (parse_int(value, v)) cfg.visible_hectoms = std::clamp(v, 1, 1000);
@@ -257,6 +276,9 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
   std::ostringstream out;
   out << "# WDS editor UI preferences\n"
       << "note_speed: " << speed << '\n'
+      << "note_start_offset: " << cfg.note_start_offset << '\n'
+      << "note_height_level: " << cfg.note_height_level << '\n'
+      << "split_line_opacity: " << cfg.split_line_opacity << '\n'
       << "visible_hectoms: " << cfg.visible_hectoms << '\n'
       << "music_volume: " << music << '\n'
       << "music_muted: " << emit_bool(cfg.music_muted) << '\n'

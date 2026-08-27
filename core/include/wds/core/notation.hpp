@@ -6,6 +6,7 @@
 // chart_index.hpp is included for ChartNoteIndex member; it only forward-declares NotationNote.
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -26,10 +27,18 @@ struct TimingPoint {
   bool has_meter = true;
 };
 
+// TPQ upper bound keeps tpq*4*numerator (den=1, num<=32) inside int32.
+inline constexpr int32_t kDefaultTicksPerQuarter = 480;
+inline constexpr int32_t kMaxTicksPerQuarter = std::numeric_limits<int32_t>::max() / 128;
+
+inline bool is_valid_ticks_per_quarter(int32_t tpq) noexcept {
+  return tpq >= 1 && tpq <= kMaxTicksPerQuarter;
+}
+
 struct MusicTiming {
   double bpm = 120.0;
   // Tick-based authoring (preferred over absolute seconds for precision).
-  int32_t ticks_per_quarter = 480;
+  int32_t ticks_per_quarter = kDefaultTicksPerQuarter;
   // Chart delay (ms): tick 0 maps to this wall-clock time, so the edit area
   // shows leading blank and notes hit after the song starts. Owned by the
   // project (.wdsproject CHART_DELAY_MS), not the chart file.
@@ -62,6 +71,12 @@ struct NotationNote {
   int32_t end_lane() const noexcept { return lane + width - 1; }
   int64_t start_ms(const MusicTiming& timing) const;
   int64_t end_ms(const MusicTiming& timing) const;
+};
+
+// One item in ChartDocument::apply_note_updates. note.id is forced to id.
+struct NoteUpdate {
+  int32_t id = kAutoNoteId;
+  NotationNote note;
 };
 
 struct ConcurrentLineNote {
@@ -105,6 +120,9 @@ class ChartDocument {
   // Mutations return failure / no-op when read-only.
   int32_t add_note(NotationNote note);  // -1 when rejected
   bool update_note(int32_t id, const NotationNote& note);
+  // Atomic batch of update_note. Empty succeeds without bumping generation.
+  // Rejects the whole batch (no mutation) on read-only, duplicate ids, or unknown ids.
+  bool apply_note_updates(const std::vector<NoteUpdate>& updates);
   bool remove_note(int32_t id);
   std::optional<NotationNote> find_note(int32_t id) const;
 
@@ -139,6 +157,8 @@ class ChartDocument {
   static void normalize_notes_inplace(std::vector<NotationNote>& notes);
   void rebuild_id_index();
   void rebuild_index();
+  // Concurrent-line derivation only — no dirty / generation bump.
+  void derive_concurrent_lines();
   void mark_dirty() noexcept {
     is_dirty_ = true;
     ++content_generation_;

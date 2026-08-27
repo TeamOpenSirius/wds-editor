@@ -2,6 +2,7 @@
 
 #include <wds/common/time.hpp>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace wds::audio {
@@ -45,6 +46,8 @@ class HitSfxPlayer {
   bool play(HitSfxClip clip);
   // Absolute music-stream time. Armed via MIXTIME POS → 1× mixer source.
   bool schedule_at(HitSfxClip clip, wds::common::Microseconds music_time);
+  // Read-only pending MIXTIME POS count (0 when detached).
+  size_t pending_sfx_sync_count() const noexcept;
   // Drop pending syncs and cut audible one-shots / Hold (pause, seek, scrub).
   void stop_all();
   void set_hold_looping(bool enabled);

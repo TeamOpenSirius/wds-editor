@@ -108,18 +108,12 @@ UpdateNotesCommand::UpdateNotesCommand(std::unordered_map<int32_t, NotePair> cha
                                        std::string label)
     : changes_(std::move(changes)), label_(std::move(label)) {}
 bool UpdateNotesCommand::apply(ChartDocument& doc, bool after) {
-  std::vector<int32_t> applied;
+  std::vector<NoteUpdate> updates;
+  updates.reserve(changes_.size());
   for (const auto& [id, pair] : changes_) {
-    if (!doc.update_note(id, after ? pair.second : pair.first)) {
-      for (int32_t prior : applied) {
-        const auto& prior_pair = changes_.at(prior);
-        doc.update_note(prior, after ? prior_pair.first : prior_pair.second);
-      }
-      return false;
-    }
-    applied.push_back(id);
+    updates.push_back({id, after ? pair.second : pair.first});
   }
-  return true;
+  return doc.apply_note_updates(updates);
 }
 bool UpdateNotesCommand::execute(ChartDocument& doc) { return apply(doc, true); }
 bool UpdateNotesCommand::undo(ChartDocument& doc) { return apply(doc, false); }

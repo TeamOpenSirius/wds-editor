@@ -3,6 +3,7 @@
 #include "wds/interaction/caret.hpp"
 #include "wds/interaction/popup_menu.hpp"
 #include "wds/interaction/theme.hpp"
+#include "wds/interaction/utf8_edit.hpp"
 #include "wds/interaction/widget_root.hpp"
 
 #include <algorithm>
@@ -10,15 +11,6 @@
 
 namespace wds::interaction {
 namespace {
-
-void pop_utf8_codepoint(std::string& text) {
-  if (text.empty()) return;
-  size_t i = text.size();
-  do {
-    --i;
-  } while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80);
-  text.erase(i);
-}
 
 float chevron_slot_w() noexcept { return std::max(18.0f, theme::px(11.0f)); }
 
@@ -62,15 +54,18 @@ void ComboBox::set_items(std::vector<std::string> items) { items_ = std::move(it
 
 void ComboBox::set_text(std::string text) {
   if (text_ == text && committed_text_ == text) {
+    caret_ = text_.size();
     return;
   }
   text_ = std::move(text);
   committed_text_ = text_;
+  caret_ = text_.size();
 }
 
 void ComboBox::accept_text(std::string text) {
   text_ = std::move(text);
   committed_text_ = text_;
+  caret_ = text_.size();
   if (on_commit_) {
     on_commit_(text_);
   }
@@ -79,10 +74,12 @@ void ComboBox::accept_text(std::string text) {
 void ComboBox::commit_or_revert() {
   if (dropdown_only_) {
     text_ = committed_text_;
+    caret_ = text_.size();
     return;
   }
   if (validator_ && !validator_(text_)) {
     text_ = committed_text_;
+    caret_ = text_.size();
     return;
   }
   if (text_ == committed_text_) {
@@ -126,8 +123,10 @@ void ComboBox::paint_at(UiPainter& painter, float z) const {
   const float z_caret = std::min(z + 0.02f, kZMax);
 
   const Rect abs = absolute_bounds();
-  const Color outline =
-      visual_state_ == WidgetState::Focused ? theme::kPrimary : theme::kOutline;
+  const Color outline = text_invalid()
+                            ? theme::kError
+                            : (visual_state_ == WidgetState::Focused ? theme::kPrimary
+                                                                     : theme::kOutline);
   painter.fill_rect_outline(abs, theme::kSurfaceVariant, outline, theme::kCornerRadiusSm, z_fill);
 
   const Rect text_bounds{abs.x + 4.0f, abs.y, std::max(0.0f, abs.w - chevron_slot_w() - 4.0f),
@@ -137,8 +136,10 @@ void ComboBox::paint_at(UiPainter& painter, float z) const {
   if (!dropdown_only_ && visual_state_ == WidgetState::Focused) {
     const float px = theme::kFontSizeMd;
     const Vec2 size = painter.measure_text(text_, px);
+    const std::string prefix = text_.substr(0, std::min(caret_, text_.size()));
+    const Vec2 prefix_size = painter.measure_text(prefix, px);
     const float text_x = text_bounds.x + std::max(0.0f, (text_bounds.w - size.x) * 0.5f);
-    caret::paint(painter, abs, text_x + size.x, z_caret, caret_blink_t_);
+    caret::paint(painter, abs, text_x + prefix_size.x, z_caret, caret_blink_t_);
   }
 
   paint_chevron(painter, abs, open_, z_text);
@@ -151,10 +152,13 @@ void ComboBox::paint_popup_layer(UiPainter& painter) const {
   const Rect abs = absolute_bounds();
   const auto geom =
       popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_));
-  popup_menu::paint_items(painter, geom, items_, selected_item_index(), hover_index_);
+  const int highlight = popup_menu::nearest_item_index(items_, text_);
+  popup_menu::paint_items(painter, geom, items_, highlight, hover_index_);
 
-  const Color outline =
-      visual_state_ == WidgetState::Focused ? theme::kPrimary : theme::kOutline;
+  const Color outline = text_invalid()
+                            ? theme::kError
+                            : (visual_state_ == WidgetState::Focused ? theme::kPrimary
+                                                                     : theme::kOutline);
   painter.fill_rect_outline(abs, theme::kSurfaceVariant, outline, theme::kCornerRadiusSm,
                             popup_menu::kHostZ);
   const Rect text_bounds{abs.x + 4.0f, abs.y, std::max(0.0f, abs.w - chevron_slot_w() - 4.0f),
@@ -249,7 +253,9 @@ void ComboBox::on_pointer_down(const PointerDownEvent& event) {
       close_own_popup();
     } else {
       open_ = true;
-      menu_scroll_ = 0.0f;
+      menu_scroll_ = popup_menu::scroll_to_show_index(
+          this, abs, items_.size(), popup_menu::nearest_item_index(items_, text_),
+          placement_of(opens_upward_));
       hover_index_ = -1;
       if (WidgetRoot* root = find_root()) {
         root->note_popup_opened(this);
@@ -294,8 +300,23 @@ void ComboBox::on_key_down(const KeyDownEvent& event) {
   if (dropdown_only_) {
     return;
   }
-  if (event.key == KeyCode::Backspace && !text_.empty()) {
-    pop_utf8_codepoint(text_);
+  if (event.key == KeyCode::Left) {
+    caret_ = utf8_edit::prev_offset(text_, caret_);
+    reset_caret_blink();
+    return;
+  }
+  if (event.key == KeyCode::Right) {
+    caret_ = utf8_edit::next_offset(text_, caret_);
+    reset_caret_blink();
+    return;
+  }
+  if (event.key == KeyCode::Backspace && caret_ > 0) {
+    utf8_edit::erase_prev(text_, caret_);
+    reset_caret_blink();
+    return;
+  }
+  if (event.key == KeyCode::Delete && caret_ < text_.size()) {
+    utf8_edit::erase_next(text_, caret_);
     reset_caret_blink();
   }
 }
@@ -311,12 +332,17 @@ void ComboBox::on_text_input(const TextInputEvent& event) {
   if (!enabled_ || dropdown_only_ || visual_state_ != WidgetState::Focused) {
     return;
   }
+  std::string accepted;
+  accepted.reserve(event.text.size());
   for (const char c : event.text) {
     if (c >= 32 && c < 127) {
-      text_.push_back(c);
+      accepted.push_back(c);
     }
   }
-  reset_caret_blink();
+  if (!accepted.empty()) {
+    utf8_edit::insert(text_, caret_, accepted);
+    reset_caret_blink();
+  }
 }
 
 void ComboBox::on_scroll(const ScrollEvent& event) {

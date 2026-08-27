@@ -122,12 +122,26 @@ snapshot.clear_keep_capacity();
 
 ## 构建与测试
 
-请用仓库根目录脚本（勿在 Linux 上做 native 产品 configure）：
+请用仓库根目录脚本（勿在 Linux 上做 native 产品 configure）。命令与交叉策略见根 README 与 [`cmake/CROSS_COMPILE.md`](../cmake/CROSS_COMPILE.md)。
+
+- 单测：`wds_core_tests`、`wds_split_index_tests`。交叉时默认 `WDS_CORE_BUILD_TESTS=OFF`；若显式打开仍可能编译 PE，但 **不** 向 CTest 注册。
+- Linux 宿主只跑 common+core：`./scripts/run-host-core-tests.sh`（不是产品构建，不能代替 macOS 门禁）。
 
 ```bash
-# 仅内核示例（交叉 Win）
-./scripts/build-target.sh win-x86_64 -- -DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_UI=OFF
-ctest --test-dir build-win-x86_64 -R wds_core_tests --output-on-failure
+./scripts/build-target.sh macos-arm
+ctest --test-dir build-macos-arm -R 'wds_core_tests|wds_split_index_tests' --output-on-failure
 ```
 
 样例谱：`tests/fixtures/normalized_chart.wdschart`。
+
+## 基准（默认关）
+
+`WDS_CORE_BUILD_BENCHMARKS=ON` 才编 `wds_core_bench`，**不**注册 CTest，也不是 CI 门禁。先核对与参考实现一致，再报中位数耗时（warmup 3、计时 20 次）：
+
+- 索引更新：N=5000 音符、K=50 次改动；`update_note` 相对 `apply_note_updates` 的 `speed_ratio`
+- combo：2k / 5k / 10k 组 Hold+星（每组 2 个音符）上 `collect_preview_combo_hits` 相对参考收集，以及规模增长比
+
+```bash
+./scripts/build-target.sh macos-arm --no-package -- -DWDS_CORE_BUILD_BENCHMARKS=ON
+./build-macos-arm/core/wds_core_bench
+```

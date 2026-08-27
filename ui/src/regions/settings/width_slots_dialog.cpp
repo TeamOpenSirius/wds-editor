@@ -1,5 +1,6 @@
 #include "wds/ui/regions/settings/width_slots_dialog.hpp"
 
+#include <wds/core/official_playfield.hpp>
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/platform.hpp>
 #include <wds/interaction/shortcuts.hpp>
@@ -15,6 +16,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -79,6 +82,72 @@ void sanitize_width_text(wds::interaction::TextField& field) {
   if (cleaned != field.text()) field.set_text(std::move(cleaned));
 }
 
+std::string format_note_speed(double speed) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%.1f", wds::chart_editor::official_clamp_note_speed(speed));
+  return buf;
+}
+
+const std::vector<std::string>& note_speed_items() {
+  static const std::vector<std::string> kItems = [] {
+    std::vector<std::string> items;
+    items.reserve(25);
+    for (int i = 1; i <= 25; ++i) {
+      items.push_back(format_note_speed(static_cast<double>(i)));
+    }
+    return items;
+  }();
+  return kItems;
+}
+
+const std::vector<std::string>& note_start_offset_items() {
+  static const std::vector<std::string> kItems = [] {
+    std::vector<std::string> items;
+    items.reserve(21);
+    for (int v = 0; v <= 100; v += 5) {
+      items.push_back(std::to_string(v));
+    }
+    return items;
+  }();
+  return kItems;
+}
+
+const std::vector<std::string>& note_height_level_items() {
+  static const std::vector<std::string> kItems = [] {
+    std::vector<std::string> items;
+    items.reserve(10);
+    for (int v = 1; v <= 10; ++v) {
+      items.push_back(std::to_string(v));
+    }
+    return items;
+  }();
+  return kItems;
+}
+
+const std::vector<std::string>& split_line_opacity_items() {
+  static const std::vector<std::string> kItems = [] {
+    std::vector<std::string> items;
+    items.reserve(10);
+    for (int v = 10; v <= 100; v += 10) {
+      items.push_back(std::to_string(v));
+    }
+    return items;
+  }();
+  return kItems;
+}
+
+bool note_speed_text_valid(const std::string& text) {
+  const auto value = wds::interaction::parse_speed(text, wds::chart_editor::kOfficialMinNoteSpeed);
+  return value.has_value() && wds::chart_editor::official_note_speed_valid(*value);
+}
+
+bool stepped_int_text_valid(const std::string& text, bool (*ok)(int)) {
+  const auto value = wds::interaction::parse_non_negative_int(text);
+  return value.has_value() && ok(*value);
+}
+
+constexpr const char* kDisplayComboLabels[4] = {"流速", "挡板高度", "note厚度", "分割线特效透明度"};
+
 }  // namespace
 
 WidthSlotsDialog::WidthSlotsDialog() {
@@ -126,6 +195,33 @@ WidthSlotsDialog::WidthSlotsDialog() {
   auto judge_text = std::make_unique<wds::interaction::Checkbox>("开启判定文字显示");
   show_judgment_text_ = judge_text.get();
   add_child(std::move(judge_text));
+
+  auto make_display_combo = [this](const std::vector<std::string>& items, std::string text,
+                                   std::function<bool(const std::string&)> validator) {
+    auto combo = std::make_unique<wds::interaction::ComboBox>();
+    combo->set_items(items);
+    combo->set_dropdown_only(false);
+    combo->set_opens_upward(false);
+    combo->set_validator(std::move(validator));
+    combo->set_text(std::move(text));
+    auto* raw = combo.get();
+    add_child(std::move(combo));
+    return raw;
+  };
+  note_speed_ = make_display_combo(note_speed_items(), format_note_speed(5.0),
+                                   note_speed_text_valid);
+  note_start_offset_ = make_display_combo(
+      note_start_offset_items(), "0", [](const std::string& text) {
+        return stepped_int_text_valid(text, wds::chart_editor::official_note_start_offset_valid);
+      });
+  note_height_level_ = make_display_combo(
+      note_height_level_items(), "8", [](const std::string& text) {
+        return stepped_int_text_valid(text, wds::chart_editor::official_note_height_level_valid);
+      });
+  split_line_opacity_ = make_display_combo(
+      split_line_opacity_items(), "100", [](const std::string& text) {
+        return stepped_int_text_valid(text, wds::chart_editor::official_split_effect_line_opacity_valid);
+      });
 
   auto invert = std::make_unique<wds::interaction::Checkbox>("反转时间轴滚轮方向");
   invert_scroll_wheel_ = invert.get();
@@ -241,13 +337,23 @@ void WidthSlotsDialog::open() {
   set_tab(Tab::File);
 }
 
+void WidthSlotsDialog::dismiss_combos() {
+  auto dismiss = [](wds::interaction::Widget* widget) {
+    if (widget == nullptr) return;
+    static_cast<wds::interaction::ComboBox*>(widget)->dismiss_popups({-1.0f, -1.0f});
+  };
+  dismiss(scroll_wheel_speed_);
+  dismiss(note_speed_);
+  dismiss(note_start_offset_);
+  dismiss(note_height_level_);
+  dismiss(split_line_opacity_);
+}
+
 void WidthSlotsDialog::close() {
   open_ = false;
   set_visible(false);
   shortcut_scroll_ = 0.0f;
-  if (auto* combo = static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)) {
-    combo->dismiss_popups({-1.0f, -1.0f});
-  }
+  dismiss_combos();
 }
 
 void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
@@ -260,6 +366,14 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
       ->set_checked(cfg.invert_visible_range_scroll);
   static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)
       ->set_text(format_scroll_speed(cfg.scroll_wheel_speed));
+  static_cast<wds::interaction::ComboBox*>(note_speed_)->set_text(format_note_speed(cfg.note_speed));
+  static_cast<wds::interaction::ComboBox*>(note_start_offset_)
+      ->set_text(std::to_string(wds::chart_editor::official_clamp_note_start_offset(cfg.note_start_offset)));
+  static_cast<wds::interaction::ComboBox*>(note_height_level_)
+      ->set_text(std::to_string(wds::chart_editor::official_clamp_note_height_level(cfg.note_height_level)));
+  static_cast<wds::interaction::ComboBox*>(split_line_opacity_)
+      ->set_text(std::to_string(
+          wds::chart_editor::official_clamp_split_effect_line_opacity(cfg.split_line_opacity)));
   for (int i = 0; i < 6; ++i) {
     static_cast<wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
         ->set_text(std::to_string(cfg.width_slots[static_cast<std::size_t>(i)]));
@@ -287,6 +401,39 @@ void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
       static_cast<const wds::interaction::Checkbox*>(invert_visible_range_scroll_)->checked();
   cfg.scroll_wheel_speed = scroll_speed_from_label(
       static_cast<const wds::interaction::ComboBox*>(scroll_wheel_speed_)->text());
+  {
+    const auto& text = static_cast<const wds::interaction::ComboBox*>(note_speed_)->text();
+    if (const auto parsed =
+            wds::interaction::parse_speed(text, wds::chart_editor::kOfficialMinNoteSpeed)) {
+      if (wds::chart_editor::official_note_speed_valid(*parsed)) {
+        cfg.note_speed = *parsed;
+      }
+    }
+  }
+  {
+    const auto& text = static_cast<const wds::interaction::ComboBox*>(note_start_offset_)->text();
+    if (const auto parsed = wds::interaction::parse_non_negative_int(text)) {
+      if (wds::chart_editor::official_note_start_offset_valid(*parsed)) {
+        cfg.note_start_offset = *parsed;
+      }
+    }
+  }
+  {
+    const auto& text = static_cast<const wds::interaction::ComboBox*>(note_height_level_)->text();
+    if (const auto parsed = wds::interaction::parse_positive_int(text)) {
+      if (wds::chart_editor::official_note_height_level_valid(*parsed)) {
+        cfg.note_height_level = *parsed;
+      }
+    }
+  }
+  {
+    const auto& text = static_cast<const wds::interaction::ComboBox*>(split_line_opacity_)->text();
+    if (const auto parsed = wds::interaction::parse_non_negative_int(text)) {
+      if (wds::chart_editor::official_split_effect_line_opacity_valid(*parsed)) {
+        cfg.split_line_opacity = *parsed;
+      }
+    }
+  }
   for (int i = 0; i < 6; ++i) {
     const auto& text =
         static_cast<const wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
@@ -344,10 +491,8 @@ void WidthSlotsDialog::apply_fields() {
 }
 
 void WidthSlotsDialog::set_tab(Tab tab) {
-  if (tab_ == Tab::Input && tab != Tab::Input) {
-    if (auto* combo = static_cast<wds::interaction::ComboBox*>(scroll_wheel_speed_)) {
-      combo->dismiss_popups({-1.0f, -1.0f});
-    }
+  if (tab_ != tab) {
+    dismiss_combos();
   }
   if (tab != Tab::Shortcuts) shortcut_scroll_ = 0.0f;
   tab_ = tab;
@@ -377,6 +522,10 @@ void WidthSlotsDialog::update_tab_visibility() {
   if (sus_auto_convert_) sus_auto_convert_->set_visible(open_ && file);
   if (mute_hold_body_sfx_) mute_hold_body_sfx_->set_visible(open_ && audio);
   if (show_judgment_text_) show_judgment_text_->set_visible(open_ && display);
+  if (note_speed_) note_speed_->set_visible(open_ && display);
+  if (note_start_offset_) note_start_offset_->set_visible(open_ && display);
+  if (note_height_level_) note_height_level_->set_visible(open_ && display);
+  if (split_line_opacity_) split_line_opacity_->set_visible(open_ && display);
   if (invert_scroll_wheel_) invert_scroll_wheel_->set_visible(open_ && input);
   if (invert_visible_range_scroll_) invert_visible_range_scroll_->set_visible(open_ && input);
   if (scroll_wheel_speed_) scroll_wheel_speed_->set_visible(open_ && input);
@@ -430,6 +579,21 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   sus_auto_convert_->set_bounds({body_x, y, body_w, ctrl_h});
   mute_hold_body_sfx_->set_bounds({body_x, y, body_w, ctrl_h});
   show_judgment_text_->set_bounds({body_x, y, body_w, ctrl_h});
+  {
+    const float display_label_w = th::px(208.0f);
+    const float display_label_gap = th::px(4.0f);
+    const float display_combo_w =
+        std::max(th::px(72.0f), (body_w - display_label_w - display_label_gap) / 3.0f);
+    wds::interaction::Widget* display_combos[] = {note_speed_, note_start_offset_,
+                                                  note_height_level_, split_line_opacity_};
+    for (int i = 0; i < 4; ++i) {
+      const float cy = y + static_cast<float>(i + 1) * (ctrl_h + body_gap);
+      if (display_combos[i] != nullptr) {
+        display_combos[i]->set_bounds(
+            {body_x + display_label_w + display_label_gap, cy, display_combo_w, ctrl_h});
+      }
+    }
+  }
 
   // Input: invert checkboxes, then labeled scroll-speed combo.
   invert_scroll_wheel_->set_bounds({body_x, y, body_w, ctrl_h});
@@ -606,6 +770,21 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
     static_cast<const wds::interaction::Checkbox*>(mute_hold_body_sfx_)->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Display) {
     static_cast<const wds::interaction::Checkbox*>(show_judgment_text_)->paint_at(painter, kFieldZ);
+    const float tab_w = th::px(110.0f);
+    const float body_x = content.x + pad + tab_w + gap * 1.5f;
+    const float display_label_w = th::px(208.0f);
+    const float y0 = content.y + pad + title_h + gap;
+    wds::interaction::Widget* display_combos[] = {note_speed_, note_start_offset_,
+                                                  note_height_level_, split_line_opacity_};
+    for (int i = 0; i < 4; ++i) {
+      const float cy = y0 + static_cast<float>(i + 1) * (ctrl_h + body_gap);
+      painter.label({body_x, cy, display_label_w, ctrl_h}, kDisplayComboLabels[i],
+                    th::kOnSurfaceMuted, 0.987f, false, 0.0f, true);
+      if (display_combos[i] != nullptr) {
+        static_cast<const wds::interaction::ComboBox*>(display_combos[i])
+            ->paint_at(painter, kFieldZ);
+      }
+    }
   } else if (tab_ == Tab::Input) {
     static_cast<const wds::interaction::Checkbox*>(invert_scroll_wheel_)->paint_at(painter, kFieldZ);
     static_cast<const wds::interaction::Checkbox*>(invert_visible_range_scroll_)
@@ -634,9 +813,17 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
 }
 
 void WidthSlotsDialog::paint_dropdown(wds::interaction::UiPainter& painter) const {
-  if (!open_ || !visible_ || scroll_wheel_speed_ == nullptr) return;
-  if (tab_ != Tab::Input) return;
-  scroll_wheel_speed_->paint_popup_layer(painter);
+  if (!open_ || !visible_) return;
+  if (tab_ == Tab::Input && scroll_wheel_speed_ != nullptr) {
+    scroll_wheel_speed_->paint_popup_layer(painter);
+    return;
+  }
+  if (tab_ != Tab::Display) return;
+  wds::interaction::Widget* display_combos[] = {note_speed_, note_start_offset_, note_height_level_,
+                                                split_line_opacity_};
+  for (auto* combo : display_combos) {
+    if (combo != nullptr) combo->paint_popup_layer(painter);
+  }
 }
 
 wds::interaction::Widget* WidthSlotsDialog::hit_test(wds::interaction::Vec2 point) {

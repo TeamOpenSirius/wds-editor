@@ -19,6 +19,7 @@ namespace wds::ui {
 class ChartPreviewPanel;
 class EditorSession;
 class ChartEditPanel;
+class PreviewHitWidget;
 class PreviewSettingsPanel;
 class EditorToolbar;
 class StatusBar;
@@ -135,6 +136,8 @@ class UiManager {
   int fb_height_ = 1;
   // Timeline position (ms) when the current play segment started; Space return target.
   int64_t play_anchor_ms_ = 0;
+  ChartEditPanel* edit_panel_ = nullptr;
+  PreviewHitWidget* preview_hit_ = nullptr;
   WidthSlotsDialog* width_slots_dialog_ = nullptr;
   ExportChoiceDialog* export_choice_dialog_ = nullptr;
   ChartAddDialog* chart_add_dialog_ = nullptr;

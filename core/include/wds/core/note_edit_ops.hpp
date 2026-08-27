@@ -48,14 +48,21 @@ bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold);
 // ScratchCriticalHoldStart (instantaneous).
 bool is_hold_head_note(const NotationNote& note) noexcept;
 
+// True when `head` is the official start of `body`: same tick, same start
+// span (lane + width), and family-compatible types. Blue/CriticalHold bodies
+// accept HoldStart / CriticalHoldStart; Scratch* bodies accept
+// ScratchHoldStart / ScratchCriticalHoldStart. First ScratchHold segment
+// uses this same rule (no overlap / JumpScratch matching).
+bool hold_head_pairs_with_body(const NotationNote& head, const NotationNote& body) noexcept;
+
 // Rewrite legacy ScratchHold auto-heads (Normal / Critical / BlueTap) to
 // ScratchHoldStart / ScratchCriticalHoldStart. Returns how many notes changed.
 int repair_legacy_hold_heads(ChartDocument& doc);
 
-// Auto-paired head at the hold body's start (same tick, overlapping lanes), if any.
+// Official paired head at the hold body's start, if any.
 std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
                                                  const NotationNote& hold);
-// Hold body paired with an instantaneous head at the same start, if any.
+// Official hold body paired with an instantaneous head, if any.
 std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
                                                  const NotationNote& head);
 
@@ -71,7 +78,7 @@ std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
 std::optional<NotationNote> parent_hold_for(const ChartDocument& doc, const NotationNote& note);
 
 // Chained ScratchHold neighbors: next starts at this end, has no own head, and
-// prev's end (JumpScratch) covers the union of both bodies. When looking
+// prev's end (JumpScratch) is exactly the union of both bodies. When looking
 // up prev, the previous segment is allowed to have a head.
 std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body);

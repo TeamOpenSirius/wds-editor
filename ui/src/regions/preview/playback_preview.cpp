@@ -9,6 +9,8 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/official_playfield.hpp>
+#include <wds/core/split_fade.hpp>
 #include <wds/ui/note_skin_mapping.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
@@ -64,7 +66,7 @@ using wds::chart_editor::is_split_lane_gimmick;
 double preview_now_sec(const PreviewSnapshot& snapshot, int64_t visual_lead_us = 0) noexcept {
   int64_t us = snapshot.timeline_us;
   if (us == 0 && snapshot.timeline_ms != 0) {
-    us = snapshot.timeline_ms * 1000;
+    us = wds::common::ms_to_us(snapshot.timeline_ms).count();
   }
   return static_cast<double>(us + visual_lead_us) / 1'000'000.0;
 }
@@ -116,12 +118,9 @@ float split_pulse_travel_t(float u) noexcept {
   return std::clamp(sample_hermite_curve(u, kTimes, kValues, kSlopes, 2), 0.0f, 1.0f);
 }
 
-// SplitEffect_all SplitLine alpha envelope (m_ExpressionIndex 68): sharp head, long tail.
+// SplitEffect_all SplitLine alpha envelope (m_ExpressionIndex 68).
 float split_pulse_envelope(float u) noexcept {
-  constexpr float kTimes[] = {0.0f, 0.05f, 1.0f};
-  constexpr float kValues[] = {0.0f, 1.0f, 0.0f};
-  constexpr float kSlopes[] = {25.406168f, 0.06726602f, -2.2623842f};
-  return std::clamp(sample_hermite_curve(u, kTimes, kValues, kSlopes, 3), 0.0f, 1.0f);
+  return wds::chart_render::official_split_line_vfx_alpha(u);
 }
 
 // Tint hit VFX to match the on-screen note family (not Sonolus particle name colors).
@@ -268,6 +267,10 @@ void PlaybackPreviewView::attach_audio(wds::audio::AudioEngine* audio) noexcept 
   hit_sfx_.attach(audio);
 }
 
+size_t PlaybackPreviewView::pending_sfx_sync_count() const noexcept {
+  return hit_sfx_.pending_sfx_sync_count();
+}
+
 void PlaybackPreviewView::shutdown() {
   hit_sfx_.detach();
   sfx_mono_us_ = -1;
@@ -342,8 +345,12 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
     }
   };
 
+  // Opaque ingame_bg must occupy an earlier DrawBatch bucket than the plate.
+  // Depth write is off, so later buckets cover earlier ones. The plate shares
+  // the UI 1×1 solid texture and must not be submitted before the background.
+  draw_ingame_background(batch_);
   merge_overlay(ui_overlay, true);
-  draw_stage(batch_, snapshot);
+  draw_stage(batch_, snapshot, ui_solid_texture);
   draw_split_lanes(batch_, additive_batch_, snapshot);
   draw_concurrent_lines(batch_, snapshot);
   draw_notes(batch_, snapshot);
@@ -369,57 +376,80 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
                      post2, add_scissor_ptr);
 }
 
-void PlaybackPreviewView::draw_stage(DrawBatch& batch, const PreviewSnapshot& snapshot) {
-  // Cover-fit ingame_bg into the full preview panel (gutters included). Quad == panel so
-  // overflow never paints the edit/settings columns; UVs crop the texture instead.
-  if (skin_.ingame_background) {
-    const auto& p = geometry_.panel();
-    const Quad bg{{p.l, p.b}, {p.l, p.t}, {p.r, p.t}, {p.r, p.b}};
-    const auto& tex = skin_.ingame_background;
-    const float tw = std::max(1.0f, static_cast<float>(tex.width));
-    const float th = std::max(1.0f, static_cast<float>(tex.height));
-    const float tex_aspect = tw / th;
-    const float panel_aspect = std::max(p.w, 1e-6f) / std::max(p.h, 1e-6f);
-    float u0 = tex.u0;
-    float u1 = tex.u1;
-    float v0 = tex.v0;
-    float v1 = tex.v1;
-    if (tex_aspect > panel_aspect) {
-      const float visible = panel_aspect / tex_aspect;
-      const float mid = 0.5f * (tex.u0 + tex.u1);
-      const float half = 0.5f * (tex.u1 - tex.u0) * visible;
-      u0 = mid - half;
-      u1 = mid + half;
-    } else {
-      const float visible = tex_aspect / panel_aspect;
-      const float mid = 0.5f * (tex.v0 + tex.v1);
-      const float half = 0.5f * (tex.v1 - tex.v0) * visible;
-      v0 = mid - half;
-      v1 = mid + half;
-    }
-    batch.add_quad(tex.id, bg, -0.98f, 1.0f, u0, v0, u1, v1);
+void PlaybackPreviewView::draw_ingame_background(DrawBatch& batch) {
+  if (!skin_.ingame_background) {
+    return;
   }
+  const auto& p = geometry_.panel();
+  const Quad bg{{p.l, p.b}, {p.l, p.t}, {p.r, p.t}, {p.r, p.b}};
+  const auto& tex = skin_.ingame_background;
+  const float tw = std::max(1.0f, static_cast<float>(tex.width));
+  const float th = std::max(1.0f, static_cast<float>(tex.height));
+  const float tex_aspect = tw / th;
+  const float panel_aspect = std::max(p.w, 1e-6f) / std::max(p.h, 1e-6f);
+  float u0 = tex.u0;
+  float u1 = tex.u1;
+  float v0 = tex.v0;
+  float v1 = tex.v1;
+  if (tex_aspect > panel_aspect) {
+    const float visible = panel_aspect / tex_aspect;
+    const float mid = 0.5f * (tex.u0 + tex.u1);
+    const float half = 0.5f * (tex.u1 - tex.u0) * visible;
+    u0 = mid - half;
+    u1 = mid + half;
+  } else {
+    const float visible = tex_aspect / panel_aspect;
+    const float mid = 0.5f * (tex.v0 + tex.v1);
+    const float half = 0.5f * (tex.v1 - tex.v0) * visible;
+    v0 = mid - half;
+    v1 = mid + half;
+  }
+  batch.add_quad(tex.id, bg, -0.98f, 1.0f, u0, v0, u1, v1);
+}
 
-  const Quad stage = geometry_.stage_quad();
-  // STAGE_COVER fades out/in with split appear/disappear (same windows as Sirius lines).
-  float cover_alpha = 1.0f;
+void PlaybackPreviewView::draw_stage(DrawBatch& batch, const PreviewSnapshot& snapshot,
+                                     TextureId solid_texture) {
+  // BG_Lane / borders / judgeline only. ingame_bg is submitted earlier so its
+  // bucket is behind the plate (Vulkan later-bucket-wins).
+  float border_cover = 1.0f;
   for (const auto& split : snapshot.split_lanes) {
     if (split.should_show && split.split_count > 0) {
-      cover_alpha = std::min(cover_alpha, split.stage_cover_alpha);
+      border_cover = std::min(border_cover, split.stage_cover_alpha);
     }
   }
-  if (skin_.stage && cover_alpha > 0.001f) {
-    batch.add_sprite(skin_.stage, stage, -0.9f, cover_alpha);
+
+  TextureInfo plate{};
+  if (solid_texture != wds::renderer::kInvalidTextureId) {
+    plate = TextureInfo{solid_texture, 1, 1, 0.0f, 0.0f, 1.0f, 1.0f};
+  } else if (skin_.soft_split_line) {
+    plate = skin_.soft_split_line;
   }
-  if (skin_.stage_background) {
-    batch.add_sprite(skin_.stage_background, stage, -0.85f, config_.stage_opacity);
+  // Official BG_Lane stays at LaneAlpha 0.8. Persistent 6-track borders hide
+  // while SplitEffect is on so they do not stack on the colored gimmick lines.
+  if (plate) {
+    batch.add_sprite(plate, geometry_.stage_quad(), -0.9f,
+                     wds::chart_editor::kOfficialBgLaneAlpha, 0.0f, 0.0f, 0.0f);
+  }
+  const int split_opacity_pct = static_cast<int>(
+      std::lround(static_cast<double>(config_.split_line_opacity) * 100.0));
+  const float border_a =
+      wds::chart_editor::official_lane_border_alpha(split_opacity_pct) * border_cover;
+  if (border_a > 0.001f) {
+    if (skin_.lane_border) {
+      batch.add_sprite(skin_.lane_border, geometry_.stage_quad(), -0.88f, border_a);
+    } else if (plate) {
+      for (int32_t v = 0; v < wds::chart_editor::kOfficialVisualBorderEdgeCount; ++v) {
+        const int32_t e =
+            wds::chart_editor::official_visual_border_edge_index(v, config_.lane_count);
+        batch.add_sprite(plate, geometry_.lane_border_quad(e), -0.88f, border_a);
+      }
+    }
   }
 
   const auto& j = geometry_.judgeline();
   Quad jq{{j.lb_x, j.lb_y}, {j.lt_x, j.lt_y}, {j.rt_x, j.rt_y}, {j.rb_x, j.rb_y}};
   batch.add_sprite(skin_.judgeline, jq, -0.7f, 1.0f);
 
-  // Decorative only (official ~0.45). Notes hard-clip at spawn_clip_percent().
   draw_hidden_line(batch);
 }
 
@@ -428,13 +458,16 @@ void PlaybackPreviewView::draw_hidden_line(DrawBatch& batch) {
     return;
   }
   const float p = geometry_.hidden_line_center_percent();
+  // Official StartLine SpriteRenderer.color.a = 1; alpha lives in the sprite
+  // (core ~0.80, edges ~0.50). Do not pre-multiply a second 0.45.
   const float a = std::clamp(config_.hidden_line_alpha, 0.0f, 1.0f);
   batch.add_sprite(skin_.hidden_line, geometry_.hidden_line_quad(p), -0.55f, a);
 }
 
 float PlaybackPreviewView::spawn_clip_percent() const noexcept {
-  // Judgeline-side edge of the Hidden Line band — draw only the part below the bar.
-  return geometry_.hidden_line_center_percent() + geometry_.hidden_line_half_percent();
+  // Official LaneMask bottom = GetNoteVisiblePositionY. Not the StartLine
+  // sprite center (+0.4) and not the plate's judgeline-side half.
+  return geometry_.lane_mask_bottom_percent();
 }
 
 void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive,
@@ -469,7 +502,6 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
   }
   constexpr float kEnvPeakT = 0.05f;  // SplitLine envelope peaks at 5% of the blob.
   const float travel_t = split_pulse_travel_t(band_travel);
-  const float tip_whiten = std::clamp(config_.split_line_tip_whiten, 0.05f, 1.0f);
   const float tip_glow = std::clamp(config_.split_line_tip_glow, 0.0f, 1.0f);
   const int32_t n = config_.lane_count;
 
@@ -483,7 +515,8 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
     const float band_leading = band_peak - kEnvPeakT * band;
     const float p0 = split.split_percent_start;
     const float p1 = split.split_percent_end;
-    const float tip_span = std::max((p1 - p0) * tip_whiten, 1e-4f);
+    const float tip_span =
+        wds::chart_editor::official_split_visible_tip_span(p0, p1, judge_whiten);
 
     auto pulse_mul = [&](float percent) {
       const float t = (percent - band_leading) / band;
@@ -504,12 +537,13 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
     std::vector<float> knots;
     knots.push_back(p0);
     knots.push_back(p1);
-    if (judge_whiten) {
-      knots.push_back(std::clamp(p1 - tip_span * 0.5f, p0, p1));
-      knots.push_back(std::clamp(p1 - tip_span, p0, p1));
-    } else {
-      knots.push_back(std::clamp(p0 + tip_span * 0.5f, p0, p1));
-      knots.push_back(std::clamp(p0 + tip_span, p0, p1));
+    constexpr float kTipKnots[] = {0.0f, 0.05f, 0.15f, 0.3f, 0.45f, 0.6f, 0.75f, 0.9f, 1.0f};
+    for (float kt : kTipKnots) {
+      if (judge_whiten) {
+        knots.push_back(std::clamp(p1 - tip_span * kt, p0, p1));
+      } else {
+        knots.push_back(std::clamp(p0 + tip_span * kt, p0, p1));
+      }
     }
     constexpr float kEnvKnots[] = {0.0f, 0.05f, 0.12f, 0.22f, 0.35f, 0.5f, 0.65f, 0.8f, 1.0f};
     for (float kt : kEnvKnots) {
@@ -556,10 +590,8 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
         batch.add_quad_corners(plate->id, q, -0.6f, a_end, a_end, a_start, a_start, plate->u0,
                                plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0, g0, b0,
                                r0, g0, b0);
-        const float glow_w_a = std::max(0.0f, tip_a - 0.55f) / 0.45f;
-        const float glow_w_b = std::max(0.0f, tip_b - 0.55f) / 0.45f;
-        const float glow_a = tip_glow * glow_w_a;
-        const float glow_b = tip_glow * glow_w_b;
+        const float glow_a = tip_glow * tip_a;
+        const float glow_b = tip_glow * tip_b;
         if (tip_glow > 0.01f && (glow_a > 0.01f || glow_b > 0.01f)) {
           additive.add_quad_corners(plate->id, q, -0.55f, glow_b, glow_b, glow_a, glow_a, plate->u0,
                                     plate->v0, plate->u1, plate->v1, 1.0f, 1.0f, 1.0f);
@@ -596,7 +628,7 @@ void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewS
   for (const auto& line : snapshot.concurrent_lines) {
     const double beat = static_cast<double>(line.milliseconds) / 1000.0;
     const float p = geometry_.note_percent(beat, now);
-    if (p <= 0.0f || p > 1.05f) {
+    if (p <= 0.0f || p > geometry_.judgeline_percent() + 0.02f) {
       continue;
     }
     if (p < spawn_clip_percent()) {
@@ -736,8 +768,9 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
 
   const double start = static_cast<double>(note.start_ms) / 1000.0;
   const double end = static_cast<double>(note.end_ms) / 1000.0;
-  float p_near = std::clamp(geometry_.note_percent(start, now_sec), 0.0f, 1.0f);
-  float p_far = std::clamp(geometry_.note_percent(end, now_sec), 0.0f, 1.0f);
+  const float judge_p = geometry_.judgeline_percent();
+  float p_near = std::clamp(geometry_.note_percent(start, now_sec), 0.0f, judge_p);
+  float p_far = std::clamp(geometry_.note_percent(end, now_sec), 0.0f, judge_p);
   if (p_near < p_far) {
     std::swap(p_near, p_far);
   }
@@ -752,13 +785,12 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
     base_alpha = phase == 1 ? config_.hold_body_holding_alpha : config_.hold_body_alpha;
   }
 
-  // Fade only the ribbon tip inside the judgment-line band (p=1 is center).
-  // Slightly shorter than the full band so the dissolve stays tight.
+  // Fade the ribbon tip inside the judgment-line band.
   const float band =
       std::max(0.001f, geometry_.judgeline_half_percent() * 2.0f * 0.65f);
-  const float fade_lo = 1.0f - band;
+  const float fade_lo = judge_p - band;
 
-  // Hard-clip tip side at the Hidden Line (only draw the part below the bar).
+  // Hard-clip tip side at the official LaneMask bottom (VisibleOutsideMask).
   const float clip_p = spawn_clip_percent();
   if (p_near <= clip_p) {
     return;
@@ -774,7 +806,8 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
 
   // Cap size follows flat-note height in NDC (shared border_scale_from_flat_height).
   auto flat_border_scale = [&](float p) {
-    const Quad ref = geometry_.note_quad(note.lane, note.end_lane, std::clamp(p, 0.0f, 1.0f));
+    const Quad ref = geometry_.note_quad(
+        note.lane, note.end_lane, std::clamp(p, 0.0f, geometry_.judgeline_percent()));
     const float hx0 = ref.lt.x - ref.lb.x;
     const float hy0 = ref.lt.y - ref.lb.y;
     const float hx1 = ref.rt.x - ref.rb.x;
@@ -828,8 +861,7 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
   }
 
   const float p = geometry_.note_percent(beat_sec, now_sec);
-  // Despawn at judgment (like taps); ease can push visual past 1.0 slightly.
-  if (p < -0.05f || p >= 1.0f) {
+  if (p < -0.05f || p >= geometry_.judgeline_percent()) {
     return;
   }
 
@@ -843,17 +875,22 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
   // Bottom/Top share plane footprint; Unity local Z = height, pinhole-projected.
   const float unity_z = bottom_layer ? config_.note_unity_local_z_bottom
                                      : config_.note_unity_local_z_top;
-  const float pc = std::clamp(p, 0.0f, 1.0f);
+  const float pc = std::clamp(p, 0.0f, geometry_.judgeline_percent());
   const float half = geometry_.note_half_height_percent(lane, pc);
   const float p_tip = pc - half;
   const float p_near = pc + half;
-  const float clip_p = spawn_clip_percent();
-  // Only the strip below the Hidden Line — hard clip, not whole-note fade.
-  if (p_near <= clip_p) {
+  // Plane-side reject: if the near edge is still inside the mask on z=0,
+  // both layers are hidden (top is pushed farther into the mask).
+  if (p_near <= spawn_clip_percent()) {
     return;
   }
-  const float p_vis_tip = std::max(p_tip, clip_p);
-  Quad q = geometry_.note_span_quad(lane, end_lane, p_near, p_vis_tip, unity_z);
+  // Project the full sprite (including layer Z), then stencil like official
+  // SpriteMask: a horizontal screen line at GetNoteVisiblePositionY.
+  Quad q = geometry_.note_span_quad(lane, end_lane, p_near, p_tip, unity_z);
+  float far_t = 1.0f;
+  if (!geometry_.clip_quad_outside_lane_mask(q, far_t)) {
+    return;
+  }
   const float z = z_bias + unity_z - static_cast<float>(beat_sec) * 1e-4f;
   const float alpha = note.is_grayed_out ? 0.55f : 1.0f;
   // Cap scale from full note height so borders don't balloon when clipped.
@@ -866,11 +903,8 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
       0.5f * (std::sqrt(hx0 * hx0 + hy0 * hy0) + std::sqrt(hx1 * hx1 + hy1 * hy1));
   const float border_scale =
       wds::chart_render::border_scale_from_flat_height(full_h, skin_);
-  // Crop sprite V to the visible fraction (near=lb=v0 … tip=lt=v1).
-  const float span = std::max(p_near - p_tip, 1e-5f);
-  const float tip_t = (p_vis_tip - p_tip) / span;  // 0=full tip, →1 as tip is clipped away
   const float v_near = layer.v0;
-  const float v_far = layer.v0 + (layer.v1 - layer.v0) * (1.0f - tip_t);
+  const float v_far = layer.v0 + (layer.v1 - layer.v0) * far_t;
   wds::renderer::add_sliced_note_v(batch, layer, q, skin_.note_slice_border_l,
                                    skin_.note_slice_border_r, z, alpha, border_scale, v_near,
                                    v_far);
@@ -884,7 +918,7 @@ void PlaybackPreviewView::draw_tick_note(DrawBatch& batch, const PreviewNoteInst
   }
   const double beat = static_cast<double>(note.start_ms) / 1000.0;
   const float p = geometry_.note_percent(beat, now_sec);
-  if (p < 0.0f || p >= 1.0f) {
+  if (p < 0.0f || p >= geometry_.judgeline_percent()) {
     return;
   }
   if (p < spawn_clip_percent()) {
@@ -892,7 +926,8 @@ void PlaybackPreviewView::draw_tick_note(DrawBatch& batch, const PreviewNoteInst
   }
   // Sirius drawTick: Draw(..., 200000 - beat, 0.5) — above flats, alpha 0.5.
   const float alpha = note.is_grayed_out ? config_.tick_alpha * 0.55f : config_.tick_alpha;
-  batch.add_sprite(sprites.tick, geometry_.tick_quad(note.lane, note.end_lane, p), 0.15f, alpha);
+  const Quad q = geometry_.star_quad(note.lane, note.end_lane, p);
+  batch.add_sprite(sprites.tick, q, 0.15f, alpha);
 }
 
 void PlaybackPreviewView::draw_arrows(DrawBatch& batch, const PreviewNoteInstance& note,
@@ -906,7 +941,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
     return;
   }
   const float p = geometry_.note_percent(beat_sec, now_sec);
-  if (p <= 0.0f || p >= 1.0f) {
+  if (p <= 0.0f || p >= geometry_.judgeline_percent()) {
     return;
   }
   if (p < spawn_clip_percent()) {
@@ -925,7 +960,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
 
   const float unit = geometry_.content_unit();
   const float w = geometry_.lane_width(lane, p);
-  const float w_ref = std::max(geometry_.lane_width(lane, 1.0f), 1e-6f);
+  const float w_ref = std::max(geometry_.lane_width(lane, geometry_.judgeline_percent()), 1e-6f);
   const float multiplier = w / w_ref;
   const Vec2 c1 = geometry_.lane_position(lane, p);
   const Vec2 c2 = geometry_.lane_position(end_lane, p);
@@ -1104,7 +1139,6 @@ BombFxSpec bomb_fx_spec_for(NoteType type, int hit_fx_role, bool jump_scratch_fl
 }
 
 // BombController / *BombEffect.prefab (Light: Square [+ Flare]).
-constexpr float kBombLaneWidthUnity = 0.925f;
 // Square: lengthInSec 0.1, rate 80, startLifetime ∈ [0.3, 0.5] (RandomBetweenTwoConstants).
 constexpr float kSquareEmitSec = 0.1f;
 constexpr float kSquareEmitRate = 80.0f;
@@ -1240,14 +1274,10 @@ void PlaybackPreviewView::draw_hit_effect_at(DrawBatch& batch, int32_t lane, int
   const bool has_bomb = skin_.bomb_light_for(fx.dir, square, flare);
 
   if (has_bomb) {
-    // Lane width at judgeline percent≈1 (near).
-    const float single_lane_w = std::max(geometry_.lane_width(lane, 1.0f), 1e-4f);
-    // Unity→screen via one lane = LaneWidth (Square Y is fixed world units).
-    const float unity_to_screen = single_lane_w / kBombLaneWidthUnity;
-
     if (square && age_sec < kMaxParticleWindow) {
       // BomSquare: lengthInSec 0.1, rateOverTime 80 → ~8 stacked frames.
       // InitializeSquare: startSizeX ∈ [laneCount*0.725, laneCount*0.925].
+      // Prefab startSizeY ∈ [0.5, 0.68]. RenderAlignment=Local on JudgeArea.
       constexpr int kLayers = 8;
       for (int i = 0; i < kLayers; ++i) {
         const float spawn = (static_cast<float>(i) + 0.5f) / kSquareEmitRate;
@@ -1264,50 +1294,36 @@ void PlaybackPreviewView::draw_hit_effect_at(DrawBatch& batch, int32_t lane, int
             lerp01(0.725f / 0.925f, 1.0f, static_cast<float>((i * 3) % 5) / 4.0f);
         const float start_y_unity = lerp01(0.5f, 0.68f, static_cast<float>((i * 2) % 5) / 4.0f);
         const float width_scale = start_x_frac * square_size_x_mul(u);
-        const float height_screen = start_y_unity * unity_to_screen * square_size_y_mul(u);
+        const float height_unity = start_y_unity * square_size_y_mul(u);
         // Official ColorModule linear × startColor.a=1 (~8 additive layers).
         const float a = color_module_alpha(u) * alpha_scale;
         if (a < 0.02f) {
           continue;
         }
         batch.add_sprite(square,
-                         geometry_.bomb_frame_quad(lane, end_lane, width_scale, height_screen),
+                         geometry_.bomb_frame_quad(lane, end_lane, width_scale, height_unity),
                          z + static_cast<float>(i) * 0.0001f, a, tint.r, tint.g, tint.b);
       }
     }
 
     if (fx.flare && flare && age_sec < kFlareLife) {
-      // Axis-aligned disc at the lane-span / judgeline center. Radius is fixed Unity
-      // startSize=8 (Initialize never scales _bombFlare by laneCount / note width).
-      constexpr float kHitP = 1.0f;
-      const Vec2 c_l = geometry_.lane_position(lane, kHitP);
-      const Vec2 c_r = geometry_.lane_position(end_lane, kHitP);
-      const float cx = (c_l.x + c_r.x) * 0.5f;
-      const auto& jline = geometry_.judgeline();
-      const float cy = (jline.lb_y + jline.lt_y) * 0.5f;
-      // Critical burst=4 startColor.a=50/255; Scratch/Flick burst=2 a=150/255. startSize=8.
+      // Critical/Scratch BomFlare: RenderAlignment=View, startSize=8 constant.
+      // Initialize never scales _bombFlare by laneCount / note width.
       const bool scratch_flare = jump_scratch_flare || type == NoteType::Flick;
       const int flare_burst = scratch_flare ? 2 : 4;
       const float flare_start_a = scratch_flare ? (150.0f / 255.0f) : (50.0f / 255.0f);
       for (int i = 0; i < flare_burst; ++i) {
         const float u = age_sec / kFlareLife;
-        // Prefab startSize is constant 8 — no per-burst size jitter.
         const float size_mul = flare_size_mul(u);
-        // Unity size 8 → half 4; unit scale = one lane / LaneWidth (not note span).
-        // Center = OnBomb judgeline anchor (no renderer-pivot stage remap).
-        const float half = 4.0f * unity_to_screen * size_mul;
-        // MobileParticlesAdditive: tex * (startColor * ColorModule). startColor.rgb = 1.
         const FlareGradRgb grad = flare_color_module_rgb(u, scratch_flare);
         const float a = flare_start_a * color_module_alpha(u) * alpha_scale;
         if (a < 0.01f) {
           continue;
         }
-        const Quad fq{{cx - half, cy - half},
-                      {cx - half, cy + half},
-                      {cx + half, cy + half},
-                      {cx + half, cy - half}};
-        batch.add_sprite(flare, fq, z + 0.002f + static_cast<float>(i) * 0.0001f, a, grad.r,
-                         grad.g, grad.b);
+        batch.add_sprite(flare,
+                         geometry_.bomb_flare_billboard_quad(lane, end_lane, 8.0f * size_mul),
+                         z + 0.002f + static_cast<float>(i) * 0.0001f, a, grad.r, grad.g,
+                         grad.b);
       }
     }
     return;
@@ -1490,7 +1506,7 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     const uint64_t key = (static_cast<uint64_t>(snapshot.revision) << 32) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(note_id)) << 2) | kind;
     const int64_t when_ms = music_clock ? transport_hit_ms(hit_ms) : hit_ms;
-    const int64_t when_us = when_ms * 1000;
+    const int64_t when_us = wds::common::ms_to_us(when_ms).count();
 
     if (!arm) {
       // Seek/pause resync: remember hits already at/behind the playhead so resume
@@ -1507,15 +1523,14 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
         mark_hit_sfx_event(key);
         return;
       }
-      if (!mark_hit_sfx_event(key)) {
-        return;
-      }
       // Music byte sync (not display-frame quantized). Engine plays immediately if
       // decode already passed the target so SetSync cannot miss silently.
-      // If arming/play fails (voice limit race, etc.), unmark so a later tick retries.
-      if (!hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)))) {
-        hit_sfx_played_.erase(key);
-      }
+      // TooFar / AtCapacity / SetSyncFailure return false — drop the mark so a
+      // later tick retries instead of permanently skipping the hit. Pass a factory
+      // so already-marked keys do not re-evaluate schedule_at every frame.
+      (void)commit_hit_sfx_schedule(hit_sfx_played_, key, [&] {
+        return hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)));
+      });
       return;
     }
 
@@ -1601,7 +1616,7 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
   const int64_t timeline_us =
       (snapshot.timeline_us != 0 || snapshot.timeline_ms == 0)
           ? snapshot.timeline_us
-          : snapshot.timeline_ms * 1000;
+          : wds::common::ms_to_us(snapshot.timeline_ms).count();
   const int64_t raw_us =
       music_clock ? hit_sfx_.music_position().count() : timeline_us;
 

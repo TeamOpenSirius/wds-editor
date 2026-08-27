@@ -33,6 +33,13 @@ int32_t snap_tick(float tick, const EditGridConfig& cfg) {
                           (static_cast<int64_t>(std::min(i, subdivs)) * beat) / subdivs);
 }
 
+int32_t selection_drag_tick_delta(int32_t anchor_start_tick, int32_t pointer_delta_tick,
+                                  const EditGridConfig& cfg) noexcept {
+  const int32_t snapped =
+      snap_tick(static_cast<float>(std::max(0, anchor_start_tick)), cfg);
+  return snapped + pointer_delta_tick - anchor_start_tick;
+}
+
 int32_t snap_lane(float lane_center, const EditGridConfig& cfg) {
   if (cfg.lane_count <= 0) {
     return 0;

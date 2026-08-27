@@ -18,6 +18,8 @@ namespace wds::interaction {
 //
 // Dual bake: body (Md/Gutter) + tip (Tooltip) sizes share one atlas so each
 // draw size stays near 1:1 and avoids NEAREST mush from large downscales.
+// Bake sizes are framebuffer pixels (logical × content_scale); pick_slot
+// converts the logical draw size before comparing.
 class FontAtlas {
  public:
   struct GlyphQuad {

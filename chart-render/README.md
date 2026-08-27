@@ -56,7 +56,7 @@ const JudgelineQuad& jl = stage.judgeline();
 
 ### `note_strips` / `split_line_skins`
 
-左/中/右音符条带绘制辅助；官方分割线颜色库。
+左/中/右音符条带绘制辅助；分割线色来自官方 `LineColor` 表（`official_split_line_color`），不是 PNG 采样。
 
 ## 与 renderer 的边界
 
@@ -65,6 +65,10 @@ const JudgelineQuad& jl = stage.judgeline();
 | 谱面舞台几何、皮肤语义 | Vulkan 设备、swapchain、通用 DrawBatch |
 | note strip 布局 | Texture 上传底层 |
 
-## 构建
+## 构建与测试
 
-随 `WDS_BUILD_RENDERER=ON` 一起由根 `CMakeLists.txt` 加入；见仓库根 README。
+随 `WDS_BUILD_RENDERER=ON` 一起由根 `CMakeLists.txt` 加入；见仓库根 README。交叉时仍编译 `wds_note_visual_policy_tests` / `wds_split_line_official_colors_tests`，但 **不** 向 CTest 注册。macOS：
+
+```bash
+ctest --test-dir build-macos-arm -R 'wds_note_visual_policy_tests|wds_split_line_official_colors_tests' --output-on-failure
+```

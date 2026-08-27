@@ -6,6 +6,7 @@
 #include "wds/interaction/shortcuts.hpp"
 #include "wds/interaction/ui_painter.hpp"
 #include "wds/interaction/widget_root.hpp"
+#include "wds/interaction/popup_menu.hpp"
 #include "wds/interaction/theme.hpp"
 #include "wds/interaction/widgets/button.hpp"
 #include "wds/interaction/widgets/checkbox.hpp"
@@ -16,11 +17,14 @@
 #include "wds/interaction/widgets/slider.hpp"
 #include "wds/interaction/widgets/stepper.hpp"
 #include "wds/interaction/widgets/text_field.hpp"
+#include "wds/interaction/validators.hpp"
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -180,6 +184,55 @@ int main() {
       expect(std::fabs(cjk.x - tofu.x) > 2.0f, "CJK not rendered as ASCII tofu");
       font.clear();
     }
+  }
+
+  {
+    // Retina: bake sizes are framebuffer px (logical × scale), but draw sizes are
+    // logical. pick_slot must compare them in the same space or body text (26)
+    // binds the tip atlas (26) and NEAREST-upscales 2×.
+    auto& font = FontAtlas::instance();
+    auto try_bake = [&](float body, float tip) {
+      bool baked = false;
+#ifdef WDS_REPO_ROOT
+      baked = font.bake_font_file(std::string(WDS_REPO_ROOT) +
+                                      "/ui/assets/fonts/NotoSansSC-Regular.ttf",
+                                  body, tip);
+#endif
+      if (!baked) {
+        baked = font.bake_font_file("ui/assets/fonts/NotoSansSC-Regular.ttf", body, tip);
+      }
+      if (!baked) {
+        baked = font.bake_system_font(body, tip);
+      }
+      return baked;
+    };
+    const float previous_scale = theme::ui_content_scale();
+    theme::apply_content_scale(2.0f);
+    const auto atlas_span = [](const FontAtlas& f, const std::vector<FontAtlas::GlyphQuad>& quads) {
+      if (quads.empty() || f.atlas_width() <= 0) return 0.0f;
+      return std::fabs(quads[0].u1 - quads[0].u0) * static_cast<float>(f.atlas_width());
+    };
+    std::vector<FontAtlas::GlyphQuad> body_only;
+    std::vector<FontAtlas::GlyphQuad> dual;
+    float span_body = 0.0f;
+    bool ok = try_bake(52.0f, 0.0f);
+    if (ok) {
+      font.ensure_glyphs("W");
+      font.build_quads("W", 0.0f, 0.0f, 26.0f, body_only);
+      span_body = atlas_span(font, body_only);
+      ok = try_bake(52.0f, 26.0f);
+    }
+    if (ok) {
+      font.ensure_glyphs("W");
+      font.build_quads("W", 0.0f, 0.0f, 26.0f, dual);
+      const float span_dual = atlas_span(font, dual);
+      expect(span_body > 8.0f, "retina body-only W has atlas width");
+      expect(span_dual > 8.0f, "retina dual W has atlas width");
+      expect(std::fabs(span_dual - span_body) < 2.0f,
+             "retina Md (26 logical) uses body atlas not tip");
+      font.clear();
+    }
+    theme::apply_content_scale(previous_scale);
   }
 
   Checkbox checkbox("Mute");
@@ -408,10 +461,12 @@ int main() {
     expect(raw->text() == " ", "space still inserts into text field");
   }
 
-  // Editable ComboBox captures; dropdown-only only while menu open.
+  // Editable ComboBox captures only while focused; dropdown-only only while menu open.
   {
     ComboBox editable;
-    expect(editable.captures_keys(), "editable combo captures keys");
+    expect(!editable.captures_keys(), "unfocused editable combo does not capture");
+    editable.set_visual_state(WidgetState::Focused);
+    expect(editable.captures_keys(), "focused editable combo captures keys");
     ComboBox menu_only;
     menu_only.set_dropdown_only(true);
     expect(!menu_only.captures_keys(), "closed dropdown-only does not capture");
@@ -599,6 +654,52 @@ int main() {
     expect(combo_b->text() == "B1", "covered combo value unchanged");
   }
 
+  // Opening a long menu scrolls so the current (or nearest) value is first visible.
+  {
+    expect(popup_menu::nearest_item_index({"2", "4", "8"}, "4") == 1, "exact combo item");
+    expect(popup_menu::nearest_item_index({"2", "4", "8"}, "7") == 2, "nearest numeric item");
+    expect(popup_menu::nearest_item_index({"0%", "25%", "50%"}, "30%") == 1,
+           "nearest percent item");
+    expect(popup_menu::nearest_item_index({"0.25x", "1x", "2x"}, "1.6x") == 2,
+           "nearest rate item");
+    expect(popup_menu::nearest_item_index({"A", "B"}, "C") == -1, "no nearest non-numeric");
+
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+
+    std::vector<std::string> items;
+    items.reserve(20);
+    for (int i = 0; i < 20; ++i) {
+      items.push_back(std::to_string(i));
+    }
+
+    auto drop = std::make_unique<Dropdown>();
+    auto* dropdown = drop.get();
+    dropdown->set_bounds({10, 10, 80, 28});
+    dropdown->set_items(items);
+    dropdown->set_selected_index(12);
+    root.add_child(std::move(drop));
+
+    auto box = std::make_unique<ComboBox>();
+    auto* combo = box.get();
+    combo->set_bounds({120, 10, 80, 28});
+    combo->set_dropdown_only(false);
+    combo->set_items(items);
+    combo->set_text("12.6");
+    root.add_child(std::move(box));
+
+    root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+    expect(dropdown->is_open(), "long dropdown opens");
+    // Field bottom y=38; first visible row is 38–67.
+    root.process_frame(0.016f, {PointerDownEvent{{40, 52}, PointerButton::Left, {}}});
+    expect(dropdown->selected_index() == 12, "dropdown opens scrolled to the current value");
+
+    root.process_frame(0.016f, {PointerDownEvent{{195, 24}, PointerButton::Left, {}}});
+    expect(combo->is_open(), "long combo opens from chevron");
+    root.process_frame(0.016f, {PointerDownEvent{{150, 52}, PointerButton::Left, {}}});
+    expect(combo->text() == "13", "combo opens scrolled to the nearest value");
+  }
+
   {
     ShortcutNamespace ns;
     expect(ns.bind({KeyCode::Space, {}}, [] {}), "clear-test bind");
@@ -636,6 +737,137 @@ int main() {
     expect(box.text() == "测", "combo set_text keeps CJK");
     box.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
     expect(box.text().empty(), "combo backspace removes full CJK codepoint");
+  }
+
+  // Left/Right move the caret so insert and backspace happen at the cursor.
+  {
+    TextField field;
+    field.set_text("abc");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_text_input(TextInputEvent{"X"});
+    expect(field.text() == "aXbc", "text field Left moves caret before insert");
+
+    field.set_text("abc");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    expect(field.text() == "ac", "text field Backspace deletes before caret");
+
+    field.set_text("ab");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Right, {}, false});
+    field.on_text_input(TextInputEvent{"X"});
+    expect(field.text() == "abX", "text field Right returns caret to the end");
+
+    field.set_text("a");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_text_input(TextInputEvent{"X"});
+    expect(field.text() == "Xa", "text field Left clamps at start");
+
+    field.set_text("测试");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_text_input(TextInputEvent{"X"});
+    expect(field.text() == "测X试", "text field Left steps a full CJK codepoint");
+  }
+  {
+    ComboBox box;
+    box.set_dropdown_only(false);
+    box.set_text("abc");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_text_input(TextInputEvent{"X"});
+    expect(box.text() == "aXbc", "combo Left moves caret before insert");
+
+    box.set_text("abc");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    expect(box.text() == "ac", "combo Backspace deletes before caret");
+
+    box.set_text("测试");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_text_input(TextInputEvent{"X"});
+    expect(box.text() == "测X试", "combo Left steps a full CJK codepoint");
+  }
+
+  // Delete removes the codepoint after the caret (not the chart-edit Delete shortcut).
+  {
+    TextField field;
+    field.set_text("abc");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Delete, {}, false});
+    expect(field.text() == "ac", "text field Delete removes after caret");
+
+    field.set_text("abc");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Delete, {}, false});
+    expect(field.text() == "abc", "text field Delete at end is a no-op");
+
+    field.set_text("测试");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    field.on_key_down(KeyDownEvent{KeyCode::Delete, {}, false});
+    expect(field.text() == "测", "text field Delete removes a full CJK codepoint");
+  }
+  {
+    ComboBox box;
+    box.set_dropdown_only(false);
+    box.set_text("abc");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_key_down(KeyDownEvent{KeyCode::Delete, {}, false});
+    expect(box.text() == "ac", "combo Delete removes after caret");
+
+    box.set_text("测试");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Left, {}, false});
+    box.on_key_down(KeyDownEvent{KeyCode::Delete, {}, false});
+    expect(box.text() == "测", "combo Delete removes a full CJK codepoint");
+  }
+
+  // Left / Right / Delete stay chart-edit shortcuts unless a field is focused.
+  {
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 400});
+    auto tf = std::make_unique<TextField>();
+    auto* raw = tf.get();
+    raw->set_bounds({10, 10, 120, 28});
+    raw->set_text("ab");
+    root.add_child(std::move(tf));
+
+    ShortcutManager mgr;
+    auto& ns = mgr.namespace_for("editor");
+    int left = 0, right = 0, del = 0;
+    ns.bind({KeyCode::Left, {}}, [&] { ++left; });
+    ns.bind({KeyCode::Right, {}}, [&] { ++right; });
+    ns.bind({KeyCode::Delete, {}}, [&] { ++del; });
+    mgr.set_active_namespace("editor");
+
+    expect(!raw->captures_keys(), "unfocused text field does not capture keys");
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Left, {}, false}}, &mgr);
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Right, {}, false}}, &mgr);
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Delete, {}, false}}, &mgr);
+    expect(left == 1 && right == 1 && del == 1, "unfocused field leaves chart chords");
+    expect(raw->text() == "ab", "unfocused Delete does not edit text");
+
+    root.process_frame(0.016f, {PointerDownEvent{{20, 20}, PointerButton::Left, {}}});
+    expect(root.focused_widget() == raw, "click focuses text field");
+    expect(raw->captures_keys(), "focused text field captures keys");
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Left, {}, false}}, &mgr);
+    root.process_frame(0.016f, {KeyDownEvent{KeyCode::Delete, {}, false}}, &mgr);
+    expect(left == 1 && del == 1, "focused field suppresses Left/Delete chords");
+    expect(raw->text() == "a", "focused Delete edits text instead of the chart");
   }
 
   // m22: hidden widgets must not keep an active tooltip.
@@ -823,6 +1055,83 @@ int main() {
       font.clear_gpu_texture();
       font.clear();
     }
+  }
+
+  // Invalid editable text turns red; blur with a still-invalid value reverts.
+  {
+    ComboBox box;
+    box.set_dropdown_only(false);
+    box.set_items({"2", "4", "8"});
+    box.set_text("4");
+    box.set_validator([](const std::string& text) {
+      return text == "2" || text == "4" || text == "8";
+    });
+    int commits = 0;
+    box.on_commit([&](const std::string&) { ++commits; });
+    expect(!box.text_invalid(), "committed combo text is valid");
+    box.set_visual_state(WidgetState::Focused);
+    box.on_text_input(TextInputEvent{"x"});
+    expect(box.text() == "4x", "combo accepts draft typing");
+    expect(box.text_invalid(), "illegal combo draft is invalid");
+    box.on_blur();
+    expect(box.text() == "4", "invalid combo blur reverts to last committed");
+    expect(!box.text_invalid(), "reverted combo is valid again");
+    expect(commits == 0, "invalid combo blur does not commit");
+
+    box.set_visual_state(WidgetState::Focused);
+    box.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    box.on_text_input(TextInputEvent{"8"});
+    expect(box.text() == "8", "combo accepts a legal typed value");
+    expect(!box.text_invalid(), "legal combo draft is valid");
+    box.on_blur();
+    expect(box.text() == "8", "valid combo blur keeps the new value");
+    expect(commits == 1, "valid combo blur commits once");
+  }
+  {
+    TextField field;
+    field.set_text("6");
+    field.set_validator([](const std::string& text) {
+      const auto v = parse_positive_int(text);
+      return v.has_value() && *v >= 1 && *v <= 12;
+    });
+    int commits = 0;
+    field.on_commit([&](const std::string&) { ++commits; });
+    expect(!field.text_invalid(), "committed width text is valid");
+    field.set_visual_state(WidgetState::Focused);
+    field.on_text_input(TextInputEvent{"3"});
+    expect(field.text() == "63", "width field accepts draft typing");
+    expect(field.text_invalid(), "out-of-range width draft is invalid");
+    field.on_blur();
+    expect(field.text() == "6", "invalid width blur reverts to last committed");
+    expect(!field.text_invalid(), "reverted width is valid again");
+    expect(commits == 0, "invalid width blur does not commit");
+
+    field.set_visual_state(WidgetState::Focused);
+    field.on_key_down(KeyDownEvent{KeyCode::Backspace, {}, false});
+    field.on_text_input(TextInputEvent{"12"});
+    expect(field.text() == "12", "width field accepts a legal typed value");
+    expect(!field.text_invalid(), "legal width draft is valid");
+    field.on_blur();
+    expect(field.text() == "12", "valid width blur keeps the new value");
+    expect(commits == 1, "valid width blur commits once");
+  }
+
+  {
+    const float previous = scroll_wheel_speed();
+    set_scroll_wheel_speed(0.25f);
+    expect(scroll_wheel_speed() == 0.25f, "scroll speed keeps 0.25");
+    set_scroll_wheel_speed(3.0f);
+    expect(scroll_wheel_speed() == 3.0f, "scroll speed keeps 3");
+    set_scroll_wheel_speed(-1.0f);
+    expect(scroll_wheel_speed() == 0.25f, "negative scroll speed clamps to 0.25");
+    set_scroll_wheel_speed(0.0f);
+    expect(scroll_wheel_speed() == 0.25f, "zero scroll speed clamps to 0.25");
+    set_scroll_wheel_speed(std::numeric_limits<float>::quiet_NaN());
+    expect(scroll_wheel_speed() == 1.0f, "NaN scroll speed becomes 1");
+    expect(std::isfinite(scroll_wheel_speed()), "getter is finite after NaN");
+    set_scroll_wheel_speed(std::numeric_limits<float>::infinity());
+    expect(scroll_wheel_speed() == 1.0f, "Inf scroll speed becomes 1");
+    set_scroll_wheel_speed(previous);
   }
 
   return failures == 0 ? 0 : 1;

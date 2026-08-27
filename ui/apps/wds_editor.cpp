@@ -2,6 +2,7 @@
 #include "wds/ui/startup_deps.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/editor_ui_config.hpp"
+#include "wds/ui/frame_diag.hpp"
 #include "wds/ui/macos_menu.hpp"
 #include "wds/ui/native_file_dialog.hpp"
 #include "wds/ui/ui_manager.hpp"
@@ -83,9 +84,9 @@ void glfw_error_callback(int code, const char* description) {
                description != nullptr ? description : "(null)");
 }
 
-#if WDS_ENABLE_LOGGING
 // Same location as crash logs — avoid fprintf'ing frame diag to the Debug console
 // every second (AllocConsole I/O can invent hitch noise while diagnosing pacing).
+// Opened only when WDS_FRAME_DIAG=1; failure returns nullptr and is not fatal.
 std::filesystem::path resolve_frame_diag_log_path() {
   namespace fs = std::filesystem;
 #if defined(_WIN32)
@@ -128,7 +129,6 @@ FILE* open_frame_diag_log() {
   }
   return fp;
 }
-#endif
 
 int run_editor(int argc, char** argv) {
 #if defined(_WIN32) && WDS_ENABLE_LOGGING
@@ -185,7 +185,7 @@ int run_editor(int argc, char** argv) {
   }
 
   wds::ui::UiWindow window;
-  if (!window.create(1280, 734, "WDS Editor")) {
+  if (!window.create(1280, 720, "WDS Editor")) {
     wds::ui::StartupDependencyReport deps;
     deps.missing.push_back("无法创建窗口");
     glfwTerminate();
@@ -289,8 +289,9 @@ int run_editor(int argc, char** argv) {
     close_teardown_done = true;
   };
 
-  // Diagnostic frame timing (Debug / WDS_ENABLE_LOGGING): average every ~1s.
+  // Diagnostic frame timing: opt-in via WDS_FRAME_DIAG=1 (not WDS_ENABLE_LOGGING).
   // Written to frame-diag.log (not the Debug console) to avoid I/O hitch noise.
+  // Disabled default: no file, no output, no diagnostic clock::now.
   struct FrameDiagAcc {
     int64_t poll_us = 0;
     int64_t resize_us = 0;
@@ -313,15 +314,18 @@ int run_editor(int argc, char** argv) {
     int frames = 0;
     int playing_frames = 0;
     int hitch_count = 0;  // raw wall delta > 25ms (above one 60Hz period)
-    std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point window_start{};
   } frame_diag;
-#if WDS_ENABLE_LOGGING
-  FILE* frame_diag_fp = open_frame_diag_log();
   using clock = std::chrono::steady_clock;
+  const bool frame_diag_on = wds::ui::frame_diag_enabled_from_env();
+  FILE* frame_diag_fp = nullptr;
+  if (frame_diag_on) {
+    frame_diag.window_start = clock::now();
+    frame_diag_fp = open_frame_diag_log();
+  }
   auto elapsed_us = [](clock::time_point t0) {
     return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
   };
-#endif
 
   while (!window.should_close()) {
     const auto now = std::chrono::steady_clock::now();
@@ -334,16 +338,12 @@ int run_editor(int argc, char** argv) {
         std::clamp<int64_t>(raw_delta_us, 0, kMaxWallDeltaUs);
     const float delta_seconds = static_cast<float>(delta_us) * 1.0e-6f;
 
-#if WDS_ENABLE_LOGGING
-    if (raw_delta_us > 25000) {
+    const auto poll_t0 = frame_diag_on ? clock::now() : clock::time_point{};
+    if (frame_diag_on && raw_delta_us > 25000) {
       ++frame_diag.hitch_count;
     }
-    const auto poll_t0 = clock::now();
-#endif
     window.poll_events();
-#if WDS_ENABLE_LOGGING
-    const int64_t poll_us = elapsed_us(poll_t0);
-#endif
+    const int64_t poll_us = frame_diag_on ? elapsed_us(poll_t0) : int64_t{0};
     if (window.should_close()) {
       // Confirmed close (incl. fullscreen + 不保存): leave FS / FSE before any
       // further present or Vulkan destroy — avoids Win32 TDR / 图形输出错误.
@@ -357,34 +357,22 @@ int run_editor(int argc, char** argv) {
     const int logical_h = static_cast<int>(win.y);
     const int fb_w = static_cast<int>(fb.x);
     const int fb_h = static_cast<int>(fb.y);
-#if WDS_ENABLE_LOGGING
-    const auto resize_t0 = clock::now();
-#endif
+    const auto resize_t0 = frame_diag_on ? clock::now() : clock::time_point{};
     ui.resize(logical_w, logical_h, fb_w, fb_h);
-#if WDS_ENABLE_LOGGING
-    const int64_t resize_us = elapsed_us(resize_t0);
-#endif
+    const int64_t resize_us = frame_diag_on ? elapsed_us(resize_t0) : int64_t{0};
 
     auto events = input.queue().events();
     input.queue().clear();
     if (auto* edit = ui.edit_panel()) {
       edit->sync_global_pointer(input.pointer_logical());
     }
-#if WDS_ENABLE_LOGGING
-    const auto tick_t0 = clock::now();
-#endif
+    const auto tick_t0 = frame_diag_on ? clock::now() : clock::time_point{};
     ui.chart_preview().tick(delta_us);
-#if WDS_ENABLE_LOGGING
-    const int64_t tick_us = elapsed_us(tick_t0);
-#endif
+    const int64_t tick_us = frame_diag_on ? elapsed_us(tick_t0) : int64_t{0};
 
-#if WDS_ENABLE_LOGGING
-    const auto update_t0 = clock::now();
-#endif
+    const auto update_t0 = frame_diag_on ? clock::now() : clock::time_point{};
     ui.update(delta_seconds, events);
-#if WDS_ENABLE_LOGGING
-    const int64_t update_us = elapsed_us(update_t0);
-#endif
+    const int64_t update_us = frame_diag_on ? elapsed_us(update_t0) : int64_t{0};
 
     // Discard/Save on the unsaved dialog may set should-close mid-update.
     // Do not present another Vulkan frame onto a closing Win32 surface.
@@ -398,7 +386,7 @@ int run_editor(int argc, char** argv) {
       }
       const auto& preview = ui.chart_preview().preview();
       const auto solid = ui.chart_preview().solid_texture();
-      const auto batch_t0 = std::chrono::steady_clock::now();
+      const auto batch_t0 = frame_diag_on ? clock::now() : clock::time_point{};
       const auto& ui_batch = ui.build_ui_batch(solid, fb_w, fb_h, preview.geometry().screen());
       // Status / dropdown / modal must be post-overlay: main UI batch draws note-skin
       // sprites after rect fills, so in-batch chrome would stay under convert-note artwork.
@@ -410,96 +398,87 @@ int run_editor(int argc, char** argv) {
           post_batch.vertex_count() > 0 ? &post_batch : nullptr;
       const wds::renderer::DrawBatch* chrome =
           chrome_batch.vertex_count() > 0 ? &chrome_batch : nullptr;
-      const auto batch_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now() - batch_t0)
-                                .count();
+      const int64_t batch_us = frame_diag_on ? elapsed_us(batch_t0) : int64_t{0};
 
-      const auto render_t0 = std::chrono::steady_clock::now();
+      const auto render_t0 = frame_diag_on ? clock::now() : clock::time_point{};
       ui.chart_preview().render(&ui_batch, post, chrome);
       // Safe to free atlases replaced mid-frame now that draw_frame has submitted.
       ui.chart_preview().flush_retired_font_textures();
-      const auto render_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - render_t0)
-                                 .count();
+      const int64_t render_us = frame_diag_on ? elapsed_us(render_t0) : int64_t{0};
 
-#if WDS_ENABLE_LOGGING
-      auto& vulkan = ui.chart_preview().preview().vulkan();
-      const int64_t wall = std::max<int64_t>(0, raw_delta_us);
-      frame_diag.wall_us += wall;
-      frame_diag.wall_max_us = std::max(frame_diag.wall_max_us, wall);
-      frame_diag.poll_us += poll_us;
-      frame_diag.resize_us += resize_us;
-      frame_diag.update_us += update_us;
-      frame_diag.update_flush_us += ui.last_update_flush_us();
-      frame_diag.update_bounds_us += ui.last_update_bounds_us();
-      frame_diag.update_layout_us += ui.last_update_layout_us();
-      frame_diag.update_sync_us += ui.last_update_sync_us();
-      frame_diag.update_process_us += ui.last_update_process_us();
-      frame_diag.tick_us += tick_us;
-      frame_diag.ui_batch_us += batch_us;
-      frame_diag.render_us += render_us;
-      frame_diag.fence_us += vulkan.last_fence_wait_us();
-      frame_diag.fence_max_us =
-          std::max(frame_diag.fence_max_us, vulkan.last_fence_wait_us());
-      frame_diag.acquire_us += vulkan.last_acquire_wait_us();
-      frame_diag.present_us += vulkan.last_present_us();
-      frame_diag.submit_us += vulkan.last_gpu_submit_us();
-      ++frame_diag.frames;
-      if (ui.chart_preview().transport().playing()) {
-        ++frame_diag.playing_frames;
-      }
-      const auto diag_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - frame_diag.window_start)
-                                    .count();
-      if (diag_elapsed >= 1000 && frame_diag.frames > 0) {
-        const double n = static_cast<double>(frame_diag.frames);
-        const double elapsed_s = std::max(0.001, static_cast<double>(diag_elapsed) / 1000.0);
-        const double fps = n / elapsed_s;
-        const double accounted_ms =
-            (frame_diag.poll_us + frame_diag.resize_us + frame_diag.update_us +
-             frame_diag.tick_us + frame_diag.ui_batch_us + frame_diag.render_us) /
-            n / 1000.0;
-        char line[896];
-        const int len = std::snprintf(
-            line, sizeof(line),
-            "frame diag: n=%d fps=%.1f playing=%d/%d fs=%d fse=%d "
-            "wall_avg=%.2fms wall_max=%.2fms hitch=%d accounted=%.2fms "
-            "poll=%.2fms resize=%.2fms update=%.2fms "
-            "[flush=%.2f bounds=%.2f layout=%.2f sync=%.2f process=%.2f] "
-            "tick=%.2fms ui_batch=%.2fms render=%.2fms fence=%.2fms fence_max=%.2fms "
-            "acquire=%.2fms submit=%.2fms present=%.2fms fb=%dx%d\n",
-            frame_diag.frames, fps, frame_diag.playing_frames, frame_diag.frames,
-            window.is_fullscreen() ? 1 : 0, vulkan.exclusive_fullscreen_acquired() ? 1 : 0,
-            frame_diag.wall_us / n / 1000.0, frame_diag.wall_max_us / 1000.0,
-            frame_diag.hitch_count, accounted_ms, frame_diag.poll_us / n / 1000.0,
-            frame_diag.resize_us / n / 1000.0, frame_diag.update_us / n / 1000.0,
-            frame_diag.update_flush_us / n / 1000.0, frame_diag.update_bounds_us / n / 1000.0,
-            frame_diag.update_layout_us / n / 1000.0, frame_diag.update_sync_us / n / 1000.0,
-            frame_diag.update_process_us / n / 1000.0, frame_diag.tick_us / n / 1000.0,
-            frame_diag.ui_batch_us / n / 1000.0, frame_diag.render_us / n / 1000.0,
-            frame_diag.fence_us / n / 1000.0, frame_diag.fence_max_us / 1000.0,
-            frame_diag.acquire_us / n / 1000.0, frame_diag.submit_us / n / 1000.0,
-            frame_diag.present_us / n / 1000.0, fb_w, fb_h);
-        if (len > 0 && frame_diag_fp != nullptr) {
-          std::fwrite(line, 1, static_cast<std::size_t>(len), frame_diag_fp);
-          std::fflush(frame_diag_fp);
+      if (frame_diag_on) {
+        auto& vulkan = ui.chart_preview().preview().vulkan();
+        const int64_t wall = std::max<int64_t>(0, raw_delta_us);
+        frame_diag.wall_us += wall;
+        frame_diag.wall_max_us = std::max(frame_diag.wall_max_us, wall);
+        frame_diag.poll_us += poll_us;
+        frame_diag.resize_us += resize_us;
+        frame_diag.update_us += update_us;
+        frame_diag.update_flush_us += ui.last_update_flush_us();
+        frame_diag.update_bounds_us += ui.last_update_bounds_us();
+        frame_diag.update_layout_us += ui.last_update_layout_us();
+        frame_diag.update_sync_us += ui.last_update_sync_us();
+        frame_diag.update_process_us += ui.last_update_process_us();
+        frame_diag.tick_us += tick_us;
+        frame_diag.ui_batch_us += batch_us;
+        frame_diag.render_us += render_us;
+        frame_diag.fence_us += vulkan.last_fence_wait_us();
+        frame_diag.fence_max_us =
+            std::max(frame_diag.fence_max_us, vulkan.last_fence_wait_us());
+        frame_diag.acquire_us += vulkan.last_acquire_wait_us();
+        frame_diag.present_us += vulkan.last_present_us();
+        frame_diag.submit_us += vulkan.last_gpu_submit_us();
+        ++frame_diag.frames;
+        if (ui.chart_preview().transport().playing()) {
+          ++frame_diag.playing_frames;
         }
-        frame_diag = {};
-        frame_diag.window_start = std::chrono::steady_clock::now();
+        const auto diag_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      clock::now() - frame_diag.window_start)
+                                      .count();
+        if (diag_elapsed >= 1000 && frame_diag.frames > 0) {
+          const double n = static_cast<double>(frame_diag.frames);
+          const double elapsed_s = std::max(0.001, static_cast<double>(diag_elapsed) / 1000.0);
+          const double fps = n / elapsed_s;
+          const double accounted_ms =
+              (frame_diag.poll_us + frame_diag.resize_us + frame_diag.update_us +
+               frame_diag.tick_us + frame_diag.ui_batch_us + frame_diag.render_us) /
+              n / 1000.0;
+          char line[896];
+          const int len = std::snprintf(
+              line, sizeof(line),
+              "frame diag: n=%d fps=%.1f playing=%d/%d fs=%d fse=%d "
+              "wall_avg=%.2fms wall_max=%.2fms hitch=%d accounted=%.2fms "
+              "poll=%.2fms resize=%.2fms update=%.2fms "
+              "[flush=%.2f bounds=%.2f layout=%.2f sync=%.2f process=%.2f] "
+              "tick=%.2fms ui_batch=%.2fms render=%.2fms fence=%.2fms fence_max=%.2fms "
+              "acquire=%.2fms submit=%.2fms present=%.2fms fb=%dx%d\n",
+              frame_diag.frames, fps, frame_diag.playing_frames, frame_diag.frames,
+              window.is_fullscreen() ? 1 : 0, vulkan.exclusive_fullscreen_acquired() ? 1 : 0,
+              frame_diag.wall_us / n / 1000.0, frame_diag.wall_max_us / 1000.0,
+              frame_diag.hitch_count, accounted_ms, frame_diag.poll_us / n / 1000.0,
+              frame_diag.resize_us / n / 1000.0, frame_diag.update_us / n / 1000.0,
+              frame_diag.update_flush_us / n / 1000.0, frame_diag.update_bounds_us / n / 1000.0,
+              frame_diag.update_layout_us / n / 1000.0, frame_diag.update_sync_us / n / 1000.0,
+              frame_diag.update_process_us / n / 1000.0, frame_diag.tick_us / n / 1000.0,
+              frame_diag.ui_batch_us / n / 1000.0, frame_diag.render_us / n / 1000.0,
+              frame_diag.fence_us / n / 1000.0, frame_diag.fence_max_us / 1000.0,
+              frame_diag.acquire_us / n / 1000.0, frame_diag.submit_us / n / 1000.0,
+              frame_diag.present_us / n / 1000.0, fb_w, fb_h);
+          if (len > 0 && frame_diag_fp != nullptr) {
+            std::fwrite(line, 1, static_cast<std::size_t>(len), frame_diag_fp);
+            std::fflush(frame_diag_fp);
+          }
+          frame_diag = {};
+          frame_diag.window_start = clock::now();
+        }
       }
-#else
-      (void)batch_us;
-      (void)render_us;
-#endif
     }
   }
 
-#if WDS_ENABLE_LOGGING
   if (frame_diag_fp != nullptr) {
     std::fclose(frame_diag_fp);
     frame_diag_fp = nullptr;
   }
-#endif
 
   if (auto* edit = ui.edit_panel()) {
     edit->set_cursor_setter({});

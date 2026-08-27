@@ -2,6 +2,7 @@
 
 #include <wds/interaction/widget.hpp>
 
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
@@ -25,6 +26,10 @@ class ComboBox : public Widget {
   void set_validator(std::function<bool(const std::string&)> validator) {
     validator_ = std::move(validator);
   }
+  // True while the editable text fails the validator (red outline).
+  bool text_invalid() const noexcept {
+    return static_cast<bool>(validator_) && !validator_(text_);
+  }
 
   // When true, the field is selection-only: click opens the menu, typing is ignored.
   void set_dropdown_only(bool enabled) noexcept { dropdown_only_ = enabled; }
@@ -37,8 +42,10 @@ class ComboBox : public Widget {
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
-  // Editable fields always capture; dropdown-only captures while the menu is open.
-  bool captures_keys() const override { return visible() && (!dropdown_only_ || open_); }
+  // Capture chart-edit chords only while focused. Dropdown-only also needs the menu open.
+  bool captures_keys() const override {
+    return visible() && visual_state() == WidgetState::Focused && (!dropdown_only_ || open_);
+  }
 
   void update(float delta_seconds) override;
   void paint(UiPainter& painter) const override;
@@ -73,6 +80,7 @@ class ComboBox : public Widget {
   float menu_scroll_ = 0.0f;
   int hover_index_ = -1;
   float caret_blink_t_ = 0.0f;
+  std::size_t caret_ = 0;
   CommitHandler on_commit_;
   std::function<bool(const std::string&)> validator_;
 };

@@ -1,7 +1,20 @@
+#include "wds/common/log.hpp"
+#include "wds/ui/frame_diag.hpp"
+#include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/edit/edit_viewport.hpp"
+#include "wds/ui/regions/preview/preview_hit_widget.hpp"
+#define WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
+#include "wds/ui/regions/preview/playback_preview.hpp"
+#include "wds/ui/timeline_wheel.hpp"
+
+#include "wds/interaction/widget_root.hpp"
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <unordered_set>
 
 int main() {
   wds::ui::EditViewport viewport;
@@ -79,4 +92,152 @@ int main() {
   const float y_gap_240 = std::abs(viewport.y_at(480) - viewport.y_at(0));
   assert(y_gap_240 < y_gap_120 * 0.55f);
   assert(y_gap_240 > y_gap_120 * 0.45f);
+
+  // Official preview canvas is 16:9 (PlayerSettings 1280×720).
+  {
+    wds::ui::EditorLayouter layouter;
+    const auto official = layouter.compute(1280, 720);
+    assert(std::fabs(wds::ui::EditorLayouter::kPreviewAspect - 16.0f / 9.0f) < 1e-6f);
+    assert(std::fabs(static_cast<float>(official.preview_content.width) /
+                         std::max(1, official.preview_content.height) -
+                     16.0f / 9.0f) < 0.03f);
+  }
+
+  // Shared wheel math: 20 hectoms / 1x / +1 notch → -100 ms; scales with range and speed.
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 1.0f) == -100);
+  assert(wds::ui::timeline_scrub_delta_ms(-1.0f, 20, 1.0f) == 100);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 40, 1.0f) == -200);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 10, 1.0f) == -50);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 2.0f) == -200);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 0.5f) == -50);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 0.25f) == -25);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 3.0f) == -300);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, -1.0f) == -25);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 0.0f) == -25);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, std::numeric_limits<float>::quiet_NaN()) ==
+         -100);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, std::numeric_limits<float>::infinity()) ==
+         -100);
+  assert(wds::ui::timeline_scrub_delta_ms(0.4f, 20, 1.0f) == -40);
+  assert(wds::ui::timeline_scrub_delta_ms(0.25f, 20, 1.0f) == -25);
+  assert(wds::ui::timeline_scrub_delta_ms(1.0f, 0, 1.0f) == -5);
+  assert(wds::ui::timeline_scrub_delta_ms(0.0f, 20, 1.0f) == 0);
+
+  // Primary+wheel visible range: undo global invert, apply dedicated invert, min 1 step.
+  assert(wds::ui::visible_range_after_wheel(1.0f, 20, false, false) == 19);
+  assert(wds::ui::visible_range_after_wheel(-1.0f, 20, false, false) == 21);
+  assert(wds::ui::visible_range_after_wheel(2.6f, 20, false, false) == 17);
+  assert(wds::ui::visible_range_after_wheel(-2.6f, 20, false, false) == 23);
+  assert(wds::ui::visible_range_after_wheel(0.25f, 20, false, false) == 19);
+  assert(wds::ui::visible_range_after_wheel(-0.25f, 20, false, false) == 21);
+  assert(wds::ui::visible_range_after_wheel(0.0f, 20, false, false) == 20);
+  assert(wds::ui::visible_range_after_wheel(1e-7f, 20, false, false) == 20);
+  assert(wds::ui::visible_range_after_wheel(1.0f, 20, true, false) == 21);
+  assert(wds::ui::visible_range_after_wheel(1.0f, 20, false, true) == 21);
+  assert(wds::ui::visible_range_after_wheel(1.0f, 20, true, true) == 19);
+  assert(wds::ui::visible_range_after_wheel(1.0f, 1, false, false) == 1);
+  assert(wds::ui::visible_range_after_wheel(-1.0f, 1000, false, false) == 1000);
+  assert(wds::ui::visible_range_after_wheel(10.0f, 5, false, false) == 1);
+
+  // PreviewHitWidget: WidgetRoot routes scroll inside bounds; misses outside.
+  {
+    using wds::interaction::ScrollEvent;
+    using wds::interaction::WidgetRoot;
+    using wds::ui::PreviewHitWidget;
+
+    WidgetRoot root;
+    root.set_bounds({0, 0, 400, 300});
+    auto preview = std::make_unique<PreviewHitWidget>();
+    PreviewHitWidget* hit = preview.get();
+    hit->set_bounds({10, 10, 200, 100});
+    int calls = 0;
+    ScrollEvent last{};
+    hit->set_scroll_handler([&](const ScrollEvent& event) {
+      ++calls;
+      last = event;
+    });
+    root.add_child(std::move(preview));
+
+    const ScrollEvent inside{{50, 50}, 0.25f, 1.5f, {true, true, false, false}};
+    root.process_frame(0.016f, {inside});
+    assert(calls == 1);
+    assert(last.position.x == inside.position.x);
+    assert(last.position.y == inside.position.y);
+    assert(last.delta_x == inside.delta_x);
+    assert(last.delta_y == inside.delta_y);
+    assert(last.mods == inside.mods);
+
+    root.process_frame(0.016f, {ScrollEvent{{210, 50}, 0.0f, 1.0f, {}}});
+    root.process_frame(0.016f, {ScrollEvent{{50, 110}, 0.0f, 1.0f, {}}});
+    root.process_frame(0.016f, {ScrollEvent{{5, 50}, 0.0f, 1.0f, {}}});
+    root.process_frame(0.016f, {ScrollEvent{{300, 200}, 0.0f, 1.0f, {}}});
+    assert(calls == 1);
+
+    hit->set_visible(false);
+    root.process_frame(0.016f, {inside});
+    assert(calls == 1);
+    hit->set_visible(true);
+    hit->set_enabled(false);
+    root.process_frame(0.016f, {inside});
+    assert(calls == 1);
+  }
+
+  // Frame diag: only exact "1" enables. Independent of WDS_ENABLE_LOGGING.
+  {
+    using wds::ui::frame_diag_enable_contract;
+    using wds::ui::frame_diag_env_enabled;
+
+    assert(frame_diag_env_enabled("1"));
+    const auto enabled = frame_diag_enable_contract("1");
+    assert(enabled.sample_timing);
+    assert(enabled.open_log_file);
+    assert(enabled.emit_output);
+
+    const char* rejected[] = {
+        nullptr, "",  "0",   "2",    "01",  "10",   "1 ",   " 1",    "1\n",  "1\t",
+        "1\r",   "+", "1.0", "-1",   "true", "TRUE", "True", "yes",   "YES",  "Yes",
+        "on",    "ON", "On",  "false", "FALSE", "one", "enabled", "debug", " 1 ",
+    };
+    for (const char* value : rejected) {
+      assert(!frame_diag_env_enabled(value));
+      const auto contract = frame_diag_enable_contract(value);
+      assert(!contract.sample_timing);
+      assert(!contract.open_log_file);
+      assert(!contract.emit_output);
+    }
+
+    // Compile-time logging must not imply frame diagnostics.
+    (void)WDS_ENABLE_LOGGING;
+    assert(!frame_diag_env_enabled(nullptr));
+    assert(frame_diag_env_enabled("1"));
+  }
+
+  // Music-clock SFX: schedule factory runs only on first mark; failure erases for retry.
+  {
+    using wds::ui::commit_hit_sfx_schedule;
+    std::unordered_set<uint64_t> played;
+    const uint64_t key = 0x100000002ull;
+    int arms = 0;
+
+    assert(!commit_hit_sfx_schedule(played, key, [&] {
+      ++arms;
+      return false;
+    }));
+    assert(arms == 1);
+    assert(played.count(key) == 0);
+
+    assert(commit_hit_sfx_schedule(played, key, [&] {
+      ++arms;
+      return true;
+    }));
+    assert(arms == 2);
+    assert(played.count(key) == 1);
+
+    assert(!commit_hit_sfx_schedule(played, key, [&] {
+      ++arms;
+      return true;
+    }));
+    assert(arms == 2);
+    assert(played.count(key) == 1);
+  }
 }

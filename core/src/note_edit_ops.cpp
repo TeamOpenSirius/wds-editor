@@ -208,6 +208,51 @@ bool is_hold_head_note(const NotationNote& note) noexcept {
   return is_hold_start(note.note_type);
 }
 
+bool hold_head_pairs_with_body(const NotationNote& head, const NotationNote& body) noexcept {
+  if (!is_hold_head_note(head)) return false;
+  if (!is_hold_with_tail(body.note_type) && !is_nontail_hold_body(body.note_type)) {
+    return false;
+  }
+  if (!same_tick(head.start_tick, body.start_tick) || head.lane != body.lane ||
+      head.width != body.width) {
+    return false;
+  }
+  const bool scratch_body = is_scratch_hold_body(body.note_type);
+  switch (head.note_type) {
+    case NoteType::HoldStart:
+    case NoteType::CriticalHoldStart:
+      return !scratch_body;
+    case NoteType::ScratchHoldStart:
+    case NoteType::ScratchCriticalHoldStart:
+      return scratch_body;
+    default:
+      return false;
+  }
+}
+
+namespace {
+
+bool same_start_span(const NotationNote& a, const NotationNote& b) noexcept {
+  return a.lane == b.lane && a.width == b.width;
+}
+
+std::optional<NotationNote> legacy_scratch_head_for(const ChartDocument& doc,
+                                                    const NotationNote& hold) {
+  if (!is_scratch_hold_body(hold.note_type) || !is_hold_with_tail(hold.note_type)) {
+    return std::nullopt;
+  }
+  for (const auto& note : doc.notes()) {
+    if (note.id == hold.id || !is_legacy_scratch_hold_head(note)) continue;
+    if (!same_tick(note.start_tick, hold.start_tick) || !same_start_span(note, hold)) {
+      continue;
+    }
+    return note;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
                                                 const NotationNote& hold) {
   if (!is_hold_with_tail(hold.note_type) || hold.width < 1) return std::nullopt;
@@ -274,48 +319,32 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
 
 std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
                                                  const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type)) return std::nullopt;
-  std::optional<NotationNote> legacy;
-  for (const auto& note : doc.notes()) {
-    if (note.id == hold.id || !same_tick(note.start_tick, hold.start_tick) ||
-        !overlaps(note, hold)) {
-      continue;
-    }
-    if (is_hold_head_note(note)) return note;
-    if (!legacy && is_legacy_scratch_hold_head(note) && is_scratch_hold_body(hold.note_type)) {
-      legacy = note;
-    }
+  if (!is_hold_with_tail(hold.note_type) && !is_nontail_hold_body(hold.note_type)) {
+    return std::nullopt;
   }
-  return legacy;
+  for (const auto& note : doc.notes()) {
+    if (note.id == hold.id) continue;
+    if (hold_head_pairs_with_body(note, hold)) return note;
+  }
+  return std::nullopt;
 }
 
 std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
                                                  const NotationNote& head) {
-  // Accept official heads and legacy ScratchHold auto-heads so convert/sync
-  // still finds the body before repair_legacy_hold_heads runs.
-  if (!is_hold_head_note(head) && !is_legacy_scratch_hold_head(head)) return std::nullopt;
+  if (!is_hold_head_note(head)) return std::nullopt;
   for (const auto& note : doc.notes()) {
-    if (!is_hold_with_tail(note.note_type) || !same_tick(note.start_tick, head.start_tick) ||
-        !overlaps(note, head)) {
-      continue;
-    }
-    if (is_legacy_scratch_hold_head(head) && !is_scratch_hold_body(note.note_type)) {
-      continue;
-    }
-    return note;
+    if (hold_head_pairs_with_body(head, note)) return note;
   }
   return std::nullopt;
 }
 
 bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold) {
   if (!is_hold_with_tail(hold.note_type)) return false;
-  if (auto existing = paired_hold_head_for(doc, hold)) {
-    if (is_legacy_scratch_hold_head(*existing) && is_scratch_hold_body(hold.note_type)) {
-      NotationNote fixed = *existing;
-      fixed.note_type = migrate_legacy_scratch_head_type(*existing, hold);
-      return doc.update_note(fixed.id, fixed);
-    }
-    return true;
+  if (paired_hold_head_for(doc, hold)) return true;
+  if (auto legacy = legacy_scratch_head_for(doc, hold)) {
+    NotationNote fixed = *legacy;
+    fixed.note_type = migrate_legacy_scratch_head_type(*legacy, hold);
+    return doc.update_note(fixed.id, fixed);
   }
   const auto head = make_auto_hold_head(doc, hold);
   if (!head) return false;
@@ -332,8 +361,8 @@ int repair_legacy_hold_heads(ChartDocument& doc) {
     }
   }
   for (const auto& body : bodies) {
-    auto head = paired_hold_head_for(doc, body);
-    if (!head || !is_legacy_scratch_hold_head(*head)) continue;
+    auto head = legacy_scratch_head_for(doc, body);
+    if (!head) continue;
     NotationNote fixed = *head;
     fixed.note_type = migrate_legacy_scratch_head_type(*head, body);
     if (doc.update_note(fixed.id, fixed)) ++repaired;
@@ -481,12 +510,12 @@ namespace {
 
 bool same_chain_tick(int32_t a, int32_t b) noexcept { return a == b; }
 
-// Prev's JumpScratch must cover the union of both bodies (may be wider on one side).
+// Prev's JumpScratch must be exactly the union of both bodies (not merely contain it).
 bool scratch_chain_lanes_connected(const NotationNote& prev, const NotationNote& next) noexcept {
   const int32_t union_left = std::min(prev.lane, next.lane);
   const int32_t union_right = std::max(prev.end_lane(), next.end_lane());
   const auto [cover_lo, cover_hi] = get_scratch_end_lane_range(prev);
-  return cover_lo <= union_left && cover_hi >= union_right;
+  return cover_lo == union_left && cover_hi == union_right;
 }
 
 }  // namespace
@@ -516,7 +545,7 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
     if (note.id == body.id || !is_scratch_hold_body(note.note_type)) continue;
     if (!same_chain_tick(note.end_tick, body.start_tick)) continue;
     // Prev may have its own head (first segment of a chain). Connection is decided
-    // by time abutment + JumpScratch cover containing both bodies.
+    // by time abutment + JumpScratch cover exactly matching both bodies.
     if (!scratch_chain_lanes_connected(note, body)) continue;
     return note;
   }

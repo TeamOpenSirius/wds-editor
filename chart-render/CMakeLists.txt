@@ -1,5 +1,5 @@
 # Chart-specific visual helpers (stage geometry, skins, note strips).
-# Depends on wds_draw / wds_renderer for DrawBatch + TextureCache; no core/audio.
+# Depends on wds_draw / wds_renderer and official playfield math from wds::core.
 
 add_library(wds_chart_render STATIC
   src/stage_geometry.cpp
@@ -20,6 +20,7 @@ target_link_libraries(wds_chart_render
   PUBLIC
     wds::draw
     wds::renderer
+    wds::core
 )
 
 target_compile_features(wds_chart_render PUBLIC cxx_std_17)
@@ -32,8 +33,16 @@ endif()
 
 add_executable(wds_note_visual_policy_tests tests/note_visual_policy_tests.cpp)
 target_link_libraries(wds_note_visual_policy_tests PRIVATE wds::chart_render)
-add_test(NAME wds_note_visual_policy_tests COMMAND wds_note_visual_policy_tests)
 
 add_executable(wds_split_line_official_colors_tests tests/split_line_official_colors_tests.cpp)
 target_link_libraries(wds_split_line_official_colors_tests PRIVATE wds::chart_render)
-add_test(NAME wds_split_line_official_colors_tests COMMAND wds_split_line_official_colors_tests)
+target_compile_definitions(wds_split_line_official_colors_tests PRIVATE
+  WDS_TEST_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+
+# Host ctest cannot execute foreign PE binaries; still build the test targets.
+if(NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME wds_note_visual_policy_tests COMMAND wds_note_visual_policy_tests)
+  add_test(NAME wds_split_line_official_colors_tests COMMAND wds_split_line_official_colors_tests)
+else()
+  message(STATUS "Skipping ctest registration for chart-render tests (cross build)")
+endif()

@@ -1,11 +1,14 @@
 #include "wds/renderer/vulkan_renderer.hpp"
+#include "wds/renderer/descriptor_pool_policy.hpp"
 #include "wds/renderer/log.hpp"
+#include "wds/renderer/upload_result.hpp"
 
 #include <wds/common/utf8_path.hpp>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,11 +35,13 @@ struct GpuTexture {
   VkDeviceMemory memory = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet descriptor = VK_NULL_HANDLE;
+  VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
   int width = 0;
   int height = 0;
   bool alive = false;
   bool nearest = false;  // UI font atlases — avoid LINEAR soft-fringe emboldening.
   uint64_t retire_after_seq = 0;  // 0 = not retiring; GPU-free when frame_seq >= this
+  uint64_t sampled_seq = 0;       // 0 = never bound in a submitted draw
 };
 
 uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props) {
@@ -140,7 +145,17 @@ void ortho_rh(float l, float r, float b, float t, float n, float f, float* out16
 }  // namespace
 
 struct VulkanRenderer::Impl {
+  std::function<VkSurfaceKHR(VkInstance)> create_surface;
   std::function<void(int* width, int* height)> framebuffer_size;
+  WsiRecoverAction last_wsi_action = WsiRecoverAction::None;
+  struct PendingUpload {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+    TextureId texture_id = kInvalidTextureId;
+  };
+  std::vector<PendingUpload> pending_uploads;
 #if defined(_WIN32)
   std::function<HMONITOR()> win32_monitor;
 #endif
@@ -199,14 +214,19 @@ struct VulkanRenderer::Impl {
   VkPipeline pipeline_additive = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkSampler sampler_nearest = VK_NULL_HANDLE;
-  VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+  struct DescriptorPoolBlock {
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    uint32_t capacity = 0;
+    uint32_t live = 0;
+  };
+  std::vector<DescriptorPoolBlock> descriptor_blocks;
 
   VkCommandPool command_pool = VK_NULL_HANDLE;
+  VkCommandPool upload_command_pool = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> command_buffers{};
   std::array<VkSemaphore, kMaxFramesInFlight> image_available{};
   std::array<VkSemaphore, kMaxFramesInFlight> render_finished{};
   std::array<VkFence, kMaxFramesInFlight> in_flight{};
-  VkFence upload_fence = VK_NULL_HANDLE;
   uint32_t frame_index = 0;
   uint64_t frame_seq = 0;
   int preferred_msaa = 1;
@@ -241,16 +261,87 @@ struct VulkanRenderer::Impl {
   bool ensure_frame_vertex_capacity(uint32_t frame, size_t bytes);
   void destroy_frame_vertices();
   TextureId alloc_texture_slot();
+  void release_texture_descriptor(GpuTexture& tex);
   void destroy_gpu_texture_resources(GpuTexture& tex);
   void reap_retired_textures(uint64_t now_seq);
-  bool upload_texture_pixels(GpuTexture& tex, const unsigned char* pixels, int width, int height);
-  bool create_texture_descriptor(GpuTexture& tex);
-  VkCommandBuffer begin_one_time();
-  void end_one_time(VkCommandBuffer cmd);
+  UploadResult upload_texture_pixels(GpuTexture& tex, TextureId id, const unsigned char* pixels,
+                                     int width, int height);
+  bool create_descriptor_block(uint32_t capacity);
+  UploadResult allocate_texture_descriptor(GpuTexture& tex);
+  UploadResult create_texture_descriptor(GpuTexture& tex);
+  UploadResult begin_one_time(VkCommandBuffer* out_cmd);
+  UploadResult end_one_time(VkCommandBuffer cmd, bool* submitted, VkFence* out_fence);
+  bool texture_has_pending_upload(TextureId id) const noexcept;
+  bool reserve_pending_record();
+  void rollback_pending_record();
+  void commit_pending_record(PendingUpload pending);
+  void release_pending_slot(PendingUpload& pending);
+  UploadHealthDelta reap_pending_uploads();
+  void force_release_pending_uploads();
   VkSampleCountFlagBits pick_msaa_samples() const;
+  VkResult device_wait_idle_result();
+
+  bool* path_diag_enabled = nullptr;
+  RendererPathSnapshot* path_diag = nullptr;
+  bool in_apply_msaa = false;
+  int64_t apply_msaa_idle_acc_us = 0;
+
+  bool path_diag_on() const noexcept {
+    return path_diag_enabled != nullptr && *path_diag_enabled && path_diag != nullptr;
+  }
+  void record_path(RendererPathSegment segment, int64_t us) {
+    if (path_diag_on()) {
+      record_path_sample(*path_diag, segment, us);
+    }
+  }
 };
 
-VulkanRenderer::VulkanRenderer() : impl_(std::make_unique<Impl>()) {}
+namespace {
+
+using PathClock = std::chrono::steady_clock;
+
+int64_t path_elapsed_us(PathClock::time_point t0) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(PathClock::now() - t0).count();
+}
+
+struct PathTimer {
+  RendererPathSnapshot* snap = nullptr;
+  RendererPathSegment segment{};
+  PathClock::time_point t0{};
+  bool active = false;
+
+  PathTimer(bool on, RendererPathSnapshot* s, RendererPathSegment seg) noexcept
+      : snap(s), segment(seg), active(on && s != nullptr) {
+    if (active) {
+      t0 = PathClock::now();
+    }
+  }
+  ~PathTimer() {
+    if (active && snap != nullptr) {
+      record_path_sample(*snap, segment, path_elapsed_us(t0));
+    }
+  }
+  PathTimer(const PathTimer&) = delete;
+  PathTimer& operator=(const PathTimer&) = delete;
+};
+
+}  // namespace
+
+VulkanRenderer::VulkanRenderer() : impl_(std::make_unique<Impl>()) { bind_path_diag(); }
+
+void VulkanRenderer::bind_path_diag() noexcept {
+  if (impl_ == nullptr) {
+    return;
+  }
+  impl_->path_diag_enabled = &path_diag_enabled_;
+  impl_->path_diag = &path_diag_;
+}
+
+void VulkanRenderer::set_path_diagnostics_enabled(bool enabled) noexcept {
+  path_diag_enabled_ = enabled;
+}
+
+void VulkanRenderer::reset_path_diagnostics() noexcept { reset_path_snapshot(path_diag_); }
 
 VulkanRenderer::~VulkanRenderer() { destroy(); }
 
@@ -266,6 +357,11 @@ int VulkanRenderer::active_msaa() const noexcept {
 }
 bool VulkanRenderer::apply_msaa(int samples) {
   set_preferred_msaa(samples);
+  if (health_ == RendererHealth::SurfaceLost) {
+    if (!recover_surface_and_swapchain() || health_ != RendererHealth::Ready) {
+      return false;
+    }
+  }
   if (!ready_ || impl_ == nullptr || impl_->device == VK_NULL_HANDLE) {
     return true;
   }
@@ -274,23 +370,49 @@ bool VulkanRenderer::apply_msaa(int samples) {
   if (next == impl_->msaa_samples) {
     return true;
   }
+
+  int fb_w = 0, fb_h = 0;
+  if (impl_->framebuffer_size) {
+    impl_->framebuffer_size(&fb_w, &fb_h);
+  }
+  if (!apply_msaa_may_teardown(fb_w, fb_h)) {
+    apply_zero_extent_now();
+    return apply_msaa_zero_extent_ok();
+  }
+
   WDS_LOG("apply_msaa %u -> %u\n", static_cast<unsigned>(impl_->msaa_samples),
           static_cast<unsigned>(next));
-  vkDeviceWaitIdle(impl_->device);
+  PathTimer timed(path_diag_enabled_, &path_diag_, RendererPathSegment::ApplyMsaa);
+  impl_->in_apply_msaa = true;
+  impl_->apply_msaa_idle_acc_us = 0;
+  auto finish_msaa = [&](bool ok) {
+    impl_->in_apply_msaa = false;
+    if (impl_->path_diag_on()) {
+      impl_->record_path(RendererPathSegment::ApplyMsaaIdleWait, impl_->apply_msaa_idle_acc_us);
+    }
+    return ok;
+  };
+  // Keep vkDeviceWaitIdle: a graphics in-flight fence does not prove the
+  // presentation engine has released swapchain images. Measured far under 8ms.
+  if (!check_device_result(impl_->device_wait_idle_result())) {
+    return finish_msaa(false);
+  }
   impl_->cleanup_swapchain();
   impl_->destroy_render_pass_and_pipelines();
   impl_->msaa_samples = next;
+  auto fail_after_teardown = [&]() {
+    emit_health(apply_msaa_rebuild_failure_event(impl_->last_wsi_action));
+    return finish_msaa(false);
+  };
   if (!impl_->create_render_pass_and_pipelines()) {
-    ready_ = false;
-    return false;
+    return fail_after_teardown();
   }
-  if (!impl_->create_swapchain(width_, height_)) {
-    ready_ = false;
-    return false;
+  if (!impl_->create_swapchain(fb_w, fb_h)) {
+    return fail_after_teardown();
   }
   width_ = static_cast<int>(impl_->swapchain_extent.width);
   height_ = static_cast<int>(impl_->swapchain_extent.height);
-  return true;
+  return finish_msaa(true);
 }
 
 
@@ -299,7 +421,8 @@ void VulkanRenderer::Impl::cleanup_swapchain_resources_keep_handle() {
   if (device == VK_NULL_HANDLE) {
     return;
   }
-  vkDeviceWaitIdle(device);
+  // Presentation may still own swapchain images; graphics fences are insufficient.
+  (void)device_wait_idle_result();
   for (auto fb : framebuffers) {
     if (fb) vkDestroyFramebuffer(device, fb, nullptr);
   }
@@ -384,34 +507,204 @@ void VulkanRenderer::Impl::cleanup_swapchain() {
   }
 }
 
-VkCommandBuffer VulkanRenderer::Impl::begin_one_time() {
+UploadResult VulkanRenderer::Impl::begin_one_time(VkCommandBuffer* out_cmd) {
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  if (out_cmd != nullptr) {
+    *out_cmd = VK_NULL_HANDLE;
+  }
   VkCommandBufferAllocateInfo alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  alloc.commandPool = command_pool;
+  alloc.commandPool = upload_command_pool;
   alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   alloc.commandBufferCount = 1;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  vkAllocateCommandBuffers(device, &alloc, &cmd);
+  const UploadResult allocated =
+      make_upload_result(vkAllocateCommandBuffers(device, &alloc, &cmd),
+                         UploadStage::CommandAllocate);
+  if (!allocated.ok()) {
+    return allocated;
+  }
+  if (out_cmd != nullptr) {
+    *out_cmd = cmd;
+  }
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(cmd, &begin);
-  return cmd;
+  const UploadResult begun =
+      make_upload_result(vkBeginCommandBuffer(cmd, &begin), UploadStage::CommandBegin);
+  if (upload_begin_should_release_command(begun)) {
+    vkFreeCommandBuffers(device, upload_command_pool, 1, &cmd);
+    if (out_cmd != nullptr) {
+      *out_cmd = VK_NULL_HANDLE;
+    }
+  }
+  return begun;
 }
 
-void VulkanRenderer::Impl::end_one_time(VkCommandBuffer cmd) {
-  vkEndCommandBuffer(cmd);
-  // Fence waits only for this upload CB — avoids stalling the whole graphics queue idle.
-  if (upload_fence == VK_NULL_HANDLE) {
-    VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    vkCreateFence(device, &fence_info, nullptr, &upload_fence);
-  } else {
-    vkResetFences(device, 1, &upload_fence);
+bool VulkanRenderer::Impl::texture_has_pending_upload(TextureId id) const noexcept {
+  if (id == kInvalidTextureId) {
+    return false;
   }
+  for (const auto& pending : pending_uploads) {
+    if (pending.texture_id == id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool VulkanRenderer::Impl::reserve_pending_record() {
+  try {
+    pending_uploads.reserve(pending_uploads.size() + 1);
+    pending_uploads.emplace_back();
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+void VulkanRenderer::Impl::rollback_pending_record() {
+  if (pending_uploads.empty()) {
+    return;
+  }
+  release_pending_slot(pending_uploads.back());
+  pending_uploads.pop_back();
+}
+
+void VulkanRenderer::Impl::commit_pending_record(PendingUpload pending) {
+  if (pending_uploads.empty()) {
+    pending_uploads.push_back(pending);
+    return;
+  }
+  pending_uploads.back() = pending;
+}
+
+void VulkanRenderer::Impl::release_pending_slot(PendingUpload& pending) {
+  if (pending.cmd != VK_NULL_HANDLE && upload_command_pool != VK_NULL_HANDLE &&
+      device != VK_NULL_HANDLE) {
+    vkFreeCommandBuffers(device, upload_command_pool, 1, &pending.cmd);
+  }
+  pending.cmd = VK_NULL_HANDLE;
+  if (pending.staging != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+    vkDestroyBuffer(device, pending.staging, nullptr);
+  }
+  pending.staging = VK_NULL_HANDLE;
+  if (pending.staging_mem != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+    vkFreeMemory(device, pending.staging_mem, nullptr);
+  }
+  pending.staging_mem = VK_NULL_HANDLE;
+  if (pending.fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+    vkDestroyFence(device, pending.fence, nullptr);
+  }
+  pending.fence = VK_NULL_HANDLE;
+  pending.texture_id = kInvalidTextureId;
+}
+
+UploadHealthDelta VulkanRenderer::Impl::reap_pending_uploads() {
+  UploadHealthDelta worst{};
+  if (device == VK_NULL_HANDLE || pending_uploads.empty()) {
+    return worst;
+  }
+  const bool timed = path_diag_on();
+  const auto t0 = timed ? PathClock::now() : PathClock::time_point{};
+  for (size_t i = 0; i < pending_uploads.size();) {
+    PendingUpload& pending = pending_uploads[i];
+    if (pending.fence == VK_NULL_HANDLE) {
+      release_pending_slot(pending);
+      pending_uploads.erase(pending_uploads.begin() + static_cast<std::ptrdiff_t>(i));
+      continue;
+    }
+    const UploadFencePoll poll = classify_upload_fence_status(vkGetFenceStatus(device, pending.fence));
+    if (upload_reap_may_release(poll, false)) {
+      release_pending_slot(pending);
+      pending_uploads.erase(pending_uploads.begin() + static_cast<std::ptrdiff_t>(i));
+      continue;
+    }
+    const UploadHealthDelta delta = upload_fence_poll_health(poll);
+    if (delta.apply) {
+      worst = delta;
+    }
+    ++i;
+  }
+  if (timed) {
+    record_path(RendererPathSegment::UploadFenceReap, path_elapsed_us(t0));
+  }
+  return worst;
+}
+
+void VulkanRenderer::Impl::force_release_pending_uploads() {
+  for (auto& pending : pending_uploads) {
+    release_pending_slot(pending);
+  }
+  pending_uploads.clear();
+}
+
+UploadResult VulkanRenderer::Impl::end_one_time(VkCommandBuffer cmd, bool* submitted,
+                                               VkFence* out_fence) {
+  if (submitted != nullptr) {
+    *submitted = false;
+  }
+  if (out_fence != nullptr) {
+    *out_fence = VK_NULL_HANDLE;
+  }
+  auto release_cmd = [&]() {
+    if (cmd != VK_NULL_HANDLE && upload_command_pool != VK_NULL_HANDLE) {
+      vkFreeCommandBuffers(device, upload_command_pool, 1, &cmd);
+      cmd = VK_NULL_HANDLE;
+    }
+  };
+
+  if (cmd == VK_NULL_HANDLE) {
+    return make_upload_result(VK_ERROR_INITIALIZATION_FAILED, UploadStage::CommandEnd);
+  }
+
+  const UploadResult ended =
+      make_upload_result(vkEndCommandBuffer(cmd), UploadStage::CommandEnd);
+  if (!ended.ok()) {
+    if (upload_may_release_command(ended, false, false)) {
+      release_cmd();
+    }
+    return ended;
+  }
+
+  VkFence fence = VK_NULL_HANDLE;
+  VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  const UploadResult fence_r =
+      make_upload_result(vkCreateFence(device, &fence_info, nullptr, &fence),
+                         UploadStage::FenceCreate);
+  if (!fence_r.ok()) {
+    if (upload_may_release_command(fence_r, false, false)) {
+      release_cmd();
+    }
+    return fence_r;
+  }
+
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &cmd;
-  vkQueueSubmit(graphics_queue, 1, &submit, upload_fence);
-  vkWaitForFences(device, 1, &upload_fence, VK_TRUE, UINT64_MAX);
-  vkFreeCommandBuffers(device, command_pool, 1, &cmd);
+  UploadResult submit_r;
+  if (path_diag_on()) {
+    const auto t0 = PathClock::now();
+    submit_r = make_upload_result(vkQueueSubmit(graphics_queue, 1, &submit, fence),
+                                  UploadStage::QueueSubmit);
+    record_path(RendererPathSegment::UploadSubmit, path_elapsed_us(t0));
+  } else {
+    submit_r = make_upload_result(vkQueueSubmit(graphics_queue, 1, &submit, fence),
+                                  UploadStage::QueueSubmit);
+  }
+  if (!submit_r.ok()) {
+    if (upload_may_release_command(submit_r, false, false)) {
+      release_cmd();
+    }
+    if (fence != VK_NULL_HANDLE) {
+      vkDestroyFence(device, fence, nullptr);
+    }
+    return submit_r;
+  }
+  if (submitted != nullptr) {
+    *submitted = true;
+  }
+  if (out_fence != nullptr) {
+    *out_fence = fence;
+  }
+  return {};
 }
 
 bool VulkanRenderer::Impl::create_depth_resources() {
@@ -534,9 +827,32 @@ VkSampleCountFlagBits VulkanRenderer::Impl::pick_msaa_samples() const {
   return VK_SAMPLE_COUNT_1_BIT;
 }
 
+VkResult VulkanRenderer::Impl::device_wait_idle_result() {
+  if (device == VK_NULL_HANDLE) {
+    return VK_SUCCESS;
+  }
+  // Retained: graphics fences do not prove presentation-engine completion.
+  VkResult result = VK_SUCCESS;
+  if (!path_diag_on() || !in_apply_msaa) {
+    result = vkDeviceWaitIdle(device);
+  } else {
+    const auto t0 = PathClock::now();
+    result = vkDeviceWaitIdle(device);
+    apply_msaa_idle_acc_us += path_elapsed_us(t0);
+  }
+  if (result == VK_SUCCESS) {
+    force_release_pending_uploads();
+  }
+  return result;
+}
+
 bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
+  PathTimer timed(path_diag_on(), path_diag, RendererPathSegment::SwapchainRecreate);
+  last_wsi_action = WsiRecoverAction::None;
   VkSurfaceCapabilitiesKHR caps{};
-  if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps) != VK_SUCCESS) {
+  const VkResult caps_r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps);
+  last_wsi_action = classify_wsi_result(caps_r);
+  if (caps_r != VK_SUCCESS) {
     return false;
   }
 
@@ -561,13 +877,24 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     return true;
   }
 
+  auto note_wsi = [&](VkResult result) -> bool {
+    last_wsi_action = classify_wsi_result(result);
+    return result == VK_SUCCESS;
+  };
+
   uint32_t format_count = 0;
-  vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, nullptr);
+  if (!note_wsi(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, nullptr))) {
+    return false;
+  }
   if (format_count == 0) {
+    last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
   std::vector<VkSurfaceFormatKHR> formats(format_count);
-  vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, formats.data());
+  if (!note_wsi(
+          vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, formats.data()))) {
+    return false;
+  }
   VkSurfaceFormatKHR chosen = formats[0];
   for (const auto& f : formats) {
     if (f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_SRGB) {
@@ -577,9 +904,19 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   }
 
   uint32_t present_count = 0;
-  vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &present_count, nullptr);
+  if (!note_wsi(
+          vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &present_count, nullptr))) {
+    return false;
+  }
+  if (present_count == 0) {
+    last_wsi_action = WsiRecoverAction::Fatal;
+    return false;
+  }
   std::vector<VkPresentModeKHR> presents(present_count);
-  vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &present_count, presents.data());
+  if (!note_wsi(vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &present_count,
+                                                         presents.data()))) {
+    return false;
+  }
   // FIFO caps the main loop to the display refresh everywhere. MAILBOX lets the
   // CPU race ahead of scan-out; combined with a per-tick display lead that made
   // preview time run hot then get pulled back by Transport (speed wobble).
@@ -680,7 +1017,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 #endif
 
   VkSwapchainKHR new_swapchain = VK_NULL_HANDLE;
-  if (vkCreateSwapchainKHR(device, &info, nullptr, &new_swapchain) != VK_SUCCESS) {
+  if (!note_wsi(vkCreateSwapchainKHR(device, &info, nullptr, &new_swapchain))) {
     // Keep the previous swapchain if recreation failed.
     WDS_LOG("create_swapchain: vkCreateSwapchainKHR failed\n");
     return false;
@@ -765,9 +1102,15 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 #endif
 
   uint32_t actual = 0;
-  vkGetSwapchainImagesKHR(device, swapchain, &actual, nullptr);
+  if (!note_wsi(vkGetSwapchainImagesKHR(device, swapchain, &actual, nullptr))) {
+    restore_previous();
+    return false;
+  }
   swapchain_images.resize(actual);
-  vkGetSwapchainImagesKHR(device, swapchain, &actual, swapchain_images.data());
+  if (!note_wsi(vkGetSwapchainImagesKHR(device, swapchain, &actual, swapchain_images.data()))) {
+    restore_previous();
+    return false;
+  }
   images_in_flight.assign(actual, VK_NULL_HANDLE);
   WDS_LOG("swapchain images=%u (requested=%u) frames_in_flight=%d min=%u max=%u\n", actual,
           image_count, kMaxFramesInFlight, caps.minImageCount, caps.maxImageCount);
@@ -792,12 +1135,15 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   if (ok) ok = create_framebuffers();
   if (!ok) {
     restore_previous();
+    if (swapchain == VK_NULL_HANDLE) {
+      last_wsi_action = WsiRecoverAction::Fatal;
+    }
     WDS_LOG("create_swapchain: dependent setup failed; kept previous swapchain\n");
     return false;
   }
 
   // Success — wait for in-flight frames before retiring old swapchain resources.
-  vkDeviceWaitIdle(device);
+  (void)device_wait_idle_result();
   for (auto fb : old_framebuffers) {
     if (fb) vkDestroyFramebuffer(device, fb, nullptr);
   }
@@ -893,10 +1239,28 @@ TextureId VulkanRenderer::Impl::alloc_texture_slot() {
   return static_cast<TextureId>(textures.size() - 1);
 }
 
-void VulkanRenderer::Impl::destroy_gpu_texture_resources(GpuTexture& tex) {
-  if (tex.descriptor) {
-    vkFreeDescriptorSets(device, descriptor_pool, 1, &tex.descriptor);
+void VulkanRenderer::Impl::release_texture_descriptor(GpuTexture& tex) {
+  if (tex.descriptor == VK_NULL_HANDLE || device == VK_NULL_HANDLE) {
+    tex.descriptor = VK_NULL_HANDLE;
+    tex.descriptor_pool = VK_NULL_HANDLE;
+    return;
   }
+  const VkDescriptorPool pool = tex.descriptor_pool;
+  if (pool != VK_NULL_HANDLE) {
+    vkFreeDescriptorSets(device, pool, 1, &tex.descriptor);
+    for (auto& block : descriptor_blocks) {
+      if (block.pool == pool) {
+        block.live = descriptor_pool_live_after_free(block.live);
+        break;
+      }
+    }
+  }
+  tex.descriptor = VK_NULL_HANDLE;
+  tex.descriptor_pool = VK_NULL_HANDLE;
+}
+
+void VulkanRenderer::Impl::destroy_gpu_texture_resources(GpuTexture& tex) {
+  release_texture_descriptor(tex);
   if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
   if (tex.image) vkDestroyImage(device, tex.image, nullptr);
   if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
@@ -909,19 +1273,102 @@ void VulkanRenderer::Impl::reap_retired_textures(uint64_t now_seq) {
     if (tex.alive || tex.image == VK_NULL_HANDLE) {
       continue;
     }
-    if (tex.retire_after_seq != 0 && now_seq >= tex.retire_after_seq) {
+    const bool retire_due = tex.retire_after_seq != 0 && now_seq >= tex.retire_after_seq;
+    const bool never_sampled = tex.sampled_seq == 0;
+    const bool upload_in_flight = texture_has_pending_upload(static_cast<TextureId>(i));
+    if (upload_may_destroy_texture_image(upload_in_flight, retire_due || never_sampled, false)) {
       destroy_gpu_texture_resources(tex);
     }
   }
 }
 
-bool VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
+bool VulkanRenderer::Impl::create_descriptor_block(uint32_t capacity) {
+  if (device == VK_NULL_HANDLE || capacity == 0) {
+    return false;
+  }
+  VkDescriptorPoolSize pool_size{};
+  pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  pool_size.descriptorCount = capacity;
+  VkDescriptorPoolCreateInfo dp_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  dp_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+  dp_info.maxSets = capacity;
+  dp_info.poolSizeCount = 1;
+  dp_info.pPoolSizes = &pool_size;
+  DescriptorPoolBlock block;
+  block.capacity = capacity;
+  if (vkCreateDescriptorPool(device, &dp_info, nullptr, &block.pool) != VK_SUCCESS) {
+    return false;
+  }
+  descriptor_blocks.push_back(block);
+  return true;
+}
+
+UploadResult VulkanRenderer::Impl::allocate_texture_descriptor(GpuTexture& tex) {
   VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  alloc.descriptorPool = descriptor_pool;
   alloc.descriptorSetCount = 1;
   alloc.pSetLayouts = &descriptor_layout;
-  if (vkAllocateDescriptorSets(device, &alloc, &tex.descriptor) != VK_SUCCESS) {
-    return false;
+  UploadResult last = make_upload_result(VK_ERROR_OUT_OF_POOL_MEMORY, UploadStage::Descriptor);
+  auto try_block = [&](DescriptorPoolBlock& block) -> UploadResult {
+    alloc.descriptorPool = block.pool;
+    tex.descriptor = VK_NULL_HANDLE;
+    const UploadResult allocated =
+        make_upload_result(vkAllocateDescriptorSets(device, &alloc, &tex.descriptor),
+                           UploadStage::Descriptor);
+    if (allocated.ok()) {
+      tex.descriptor_pool = block.pool;
+      block.live = descriptor_pool_live_after_alloc(block.live, true);
+      return allocated;
+    }
+    tex.descriptor = VK_NULL_HANDLE;
+    tex.descriptor_pool = VK_NULL_HANDLE;
+    return allocated;
+  };
+  for (size_t i = 0; i < descriptor_blocks.size(); ++i) {
+    auto& block = descriptor_blocks[i];
+    const bool more = i + 1 < descriptor_blocks.size();
+    const DescriptorAllocStep step =
+        descriptor_alloc_step_for_block(block.live, block.capacity, more);
+    if (step == DescriptorAllocStep::SkipFull) {
+      continue;
+    }
+    if (step == DescriptorAllocStep::Grow) {
+      break;
+    }
+    last = try_block(block);
+    if (last.ok()) {
+      return last;
+    }
+    if (!descriptor_alloc_try_next_block(last.result)) {
+      return last;
+    }
+  }
+  const uint32_t previous = descriptor_blocks.empty() ? 0u : descriptor_blocks.back().capacity;
+  if (!create_descriptor_block(descriptor_pool_next_capacity(previous))) {
+    return last;
+  }
+  last = try_block(descriptor_blocks.back());
+  if (last.ok() || !descriptor_alloc_try_next_block(last.result)) {
+    return last;
+  }
+  if (!create_descriptor_block(descriptor_pool_next_capacity(descriptor_blocks.back().capacity))) {
+    return last;
+  }
+  return try_block(descriptor_blocks.back());
+}
+
+UploadResult VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
+  UploadResult allocated;
+  if (path_diag_on()) {
+    const auto t0 = PathClock::now();
+    allocated = allocate_texture_descriptor(tex);
+    record_path(RendererPathSegment::DescriptorAllocate, path_elapsed_us(t0));
+  } else {
+    allocated = allocate_texture_descriptor(tex);
+  }
+  if (!allocated.ok()) {
+    tex.descriptor = VK_NULL_HANDLE;
+    tex.descriptor_pool = VK_NULL_HANDLE;
+    return allocated;
   }
   VkDescriptorImageInfo image_info{};
   image_info.sampler = tex.nearest && sampler_nearest != VK_NULL_HANDLE ? sampler_nearest : sampler;
@@ -934,11 +1381,12 @@ bool VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
   write.descriptorCount = 1;
   write.pImageInfo = &image_info;
   vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-  return true;
+  return {};
 }
 
-bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned char* pixels,
-                                                 int width, int height) {
+UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, TextureId id,
+                                                          const unsigned char* pixels, int width,
+                                                          int height) {
   const VkDeviceSize size = static_cast<VkDeviceSize>(width) * height * 4;
 
   VkBuffer staging = VK_NULL_HANDLE;
@@ -954,6 +1402,7 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
     }
   };
   auto cleanup_tex = [&]() {
+    release_texture_descriptor(tex);
     if (tex.view != VK_NULL_HANDLE) {
       vkDestroyImageView(device, tex.view, nullptr);
       tex.view = VK_NULL_HANDLE;
@@ -967,14 +1416,25 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
       tex.memory = VK_NULL_HANDLE;
     }
   };
+  auto fail_staging = [&](UploadResult failed) {
+    cleanup_staging();
+    return failed;
+  };
+  auto fail_all = [&](UploadResult failed) {
+    cleanup_staging();
+    cleanup_tex();
+    return failed;
+  };
 
   {
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.size = size;
     info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device, &info, nullptr, &staging) != VK_SUCCESS) {
-      return false;
+    const UploadResult created =
+        make_upload_result(vkCreateBuffer(device, &info, nullptr, &staging), UploadStage::Buffer);
+    if (!created.ok()) {
+      return created;
     }
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(device, staging, &req);
@@ -985,21 +1445,23 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
           physical, req.memoryTypeBits,
           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     } catch (...) {
-      cleanup_staging();
-      return false;
+      return fail_staging(upload_no_memory_type(UploadStage::Buffer));
     }
-    if (vkAllocateMemory(device, &alloc, nullptr, &staging_mem) != VK_SUCCESS) {
-      cleanup_staging();
-      return false;
+    const UploadResult memory = make_upload_result(
+        vkAllocateMemory(device, &alloc, nullptr, &staging_mem), UploadStage::Buffer);
+    if (!memory.ok()) {
+      return fail_staging(memory);
     }
-    if (vkBindBufferMemory(device, staging, staging_mem, 0) != VK_SUCCESS) {
-      cleanup_staging();
-      return false;
+    const UploadResult bound =
+        make_upload_result(vkBindBufferMemory(device, staging, staging_mem, 0), UploadStage::Bind);
+    if (!bound.ok()) {
+      return fail_staging(bound);
     }
     void* mapped = nullptr;
-    if (vkMapMemory(device, staging_mem, 0, size, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
-      cleanup_staging();
-      return false;
+    const UploadResult mapped_r =
+        make_upload_map_result(vkMapMemory(device, staging_mem, 0, size, 0, &mapped), mapped);
+    if (!mapped_r.ok()) {
+      return fail_staging(mapped_r);
     }
     std::memcpy(mapped, pixels, static_cast<size_t>(size));
     vkUnmapMemory(device, staging_mem);
@@ -1016,9 +1478,10 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
   image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   image_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateImage(device, &image_info, nullptr, &tex.image) != VK_SUCCESS) {
-    cleanup_staging();
-    return false;
+  const UploadResult image = make_upload_result(
+      vkCreateImage(device, &image_info, nullptr, &tex.image), UploadStage::Image);
+  if (!image.ok()) {
+    return fail_staging(image);
   }
   VkMemoryRequirements req{};
   vkGetImageMemoryRequirements(device, tex.image, &req);
@@ -1028,22 +1491,44 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
     alloc.memoryTypeIndex =
         find_memory_type(physical, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   } catch (...) {
-    cleanup_staging();
-    cleanup_tex();
-    return false;
+    return fail_all(upload_no_memory_type(UploadStage::Image));
   }
-  if (vkAllocateMemory(device, &alloc, nullptr, &tex.memory) != VK_SUCCESS) {
-    cleanup_staging();
-    cleanup_tex();
-    return false;
+  const UploadResult image_memory =
+      make_upload_result(vkAllocateMemory(device, &alloc, nullptr, &tex.memory), UploadStage::Image);
+  if (!image_memory.ok()) {
+    return fail_all(image_memory);
   }
-  if (vkBindImageMemory(device, tex.image, tex.memory, 0) != VK_SUCCESS) {
-    cleanup_staging();
-    cleanup_tex();
-    return false;
+  const UploadResult image_bound =
+      make_upload_result(vkBindImageMemory(device, tex.image, tex.memory, 0), UploadStage::Bind);
+  if (!image_bound.ok()) {
+    return fail_all(image_bound);
   }
 
-  VkCommandBuffer cmd = begin_one_time();
+  VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  view_info.image = tex.image;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  view_info.subresourceRange.levelCount = 1;
+  view_info.subresourceRange.layerCount = 1;
+  const UploadResult view =
+      make_upload_result(vkCreateImageView(device, &view_info, nullptr, &tex.view),
+                         UploadStage::View);
+  if (!view.ok()) {
+    return fail_all(view);
+  }
+  tex.width = width;
+  tex.height = height;
+  const UploadResult descriptor = create_texture_descriptor(tex);
+  if (!descriptor.ok()) {
+    return fail_all(descriptor);
+  }
+
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  const UploadResult begun = begin_one_time(&cmd);
+  if (!begun.ok()) {
+    return fail_all(begun);
+  }
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1070,37 +1555,63 @@ bool VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, const unsigned
   barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
                        0, nullptr, 0, nullptr, 1, &barrier);
-  end_one_time(cmd);
-
-  cleanup_staging();
-
-  VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  view_info.image = tex.image;
-  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-  view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  view_info.subresourceRange.levelCount = 1;
-  view_info.subresourceRange.layerCount = 1;
-  if (vkCreateImageView(device, &view_info, nullptr, &tex.view) != VK_SUCCESS) {
-    cleanup_tex();
-    return false;
+  if (!reserve_pending_record()) {
+    if (cmd != VK_NULL_HANDLE && upload_command_pool != VK_NULL_HANDLE) {
+      vkFreeCommandBuffers(device, upload_command_pool, 1, &cmd);
+    }
+    return fail_all(make_upload_result(VK_ERROR_OUT_OF_HOST_MEMORY, UploadStage::QueueSubmit));
   }
-  tex.width = width;
-  tex.height = height;
-  if (!create_texture_descriptor(tex)) {
-    cleanup_tex();
-    return false;
+  bool submitted = false;
+  VkFence fence = VK_NULL_HANDLE;
+  const UploadResult ended = end_one_time(cmd, &submitted, &fence);
+  if (!ended.ok()) {
+    if (submitted && !upload_may_release_command(ended, true, false)) {
+      PendingUpload pending;
+      pending.cmd = cmd;
+      pending.fence = fence;
+      pending.staging = staging;
+      pending.staging_mem = staging_mem;
+      pending.texture_id = id;
+      commit_pending_record(pending);
+      return ended;
+    }
+    rollback_pending_record();
+    if (fence != VK_NULL_HANDLE) {
+      vkDestroyFence(device, fence, nullptr);
+    }
+    return fail_all(ended);
   }
-  return true;
+
+  PendingUpload pending;
+  pending.cmd = cmd;
+  pending.fence = fence;
+  pending.staging = staging;
+  pending.staging_mem = staging_mem;
+  pending.texture_id = id;
+  commit_pending_record(pending);
+  return {};
 }
 
 bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   // Probe surface format (also refreshed by create_swapchain).
   {
     uint32_t format_count = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, nullptr);
-    std::vector<VkSurfaceFormatKHR> formats(format_count);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, formats.data());
+    const VkResult count_r =
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, nullptr);
+    last_wsi_action = classify_wsi_result(count_r);
+    std::vector<VkSurfaceFormatKHR> formats;
+    VkResult data_r = VK_ERROR_INITIALIZATION_FAILED;
+    if (count_r == VK_SUCCESS && format_count > 0) {
+      formats.resize(format_count);
+      data_r = vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &format_count, formats.data());
+      last_wsi_action = classify_wsi_result(data_r);
+    }
+    if (!surface_formats_query_ok(count_r, format_count, data_r)) {
+      if (last_wsi_action == WsiRecoverAction::None) {
+        last_wsi_action = WsiRecoverAction::Fatal;
+      }
+      return false;
+    }
     swapchain_format = formats[0].format;
     for (const auto& f : formats) {
       if (f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_SRGB) {
@@ -1181,6 +1692,7 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
     rp_info.pAttachments = attachments_msaa.data();
   }
   if (vkCreateRenderPass(device, &rp_info, nullptr, &render_pass) != VK_SUCCESS) {
+    last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
 
@@ -1188,11 +1700,13 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   const auto frag_code = read_file(shader_dir + "/textured_quad.frag.spv");
   if (vert_code.empty() || frag_code.empty()) {
     std::fprintf(stderr, "Failed to load SPIR-V from %s\n", shader_dir.c_str());
+    last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
   VkShaderModule vert = create_shader_module(device, vert_code);
   VkShaderModule frag = create_shader_module(device, frag_code);
   if (!vert || !frag) {
+    last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
 
@@ -1299,6 +1813,7 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
                                 &pipeline) != VK_SUCCESS) {
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
+    last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
 
@@ -1316,6 +1831,7 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
                                 &pipeline_additive) != VK_SUCCESS) {
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
+    last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
 
@@ -1350,6 +1866,17 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     std::fprintf(stderr, "VulkanHostSurface missing create_surface / framebuffer_size\n");
     return false;
   }
+  bool committed = false;
+  struct CreateGuard {
+    VulkanRenderer* self = nullptr;
+    bool* committed = nullptr;
+    ~CreateGuard() {
+      if (self != nullptr && committed != nullptr && !*committed) {
+        self->destroy();
+      }
+    }
+  } guard{this, &committed};
+  impl_->create_surface = host.create_surface;
   impl_->framebuffer_size = host.framebuffer_size;
 #if defined(_WIN32)
   impl_->win32_monitor = host.win32_monitor;
@@ -1453,6 +1980,8 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(impl_->physical, &props);
+    std::strncpy(device_name_, props.deviceName, sizeof(device_name_) - 1);
+    device_name_[sizeof(device_name_) - 1] = '\0';
     WDS_LOG("selected GPU='%s' api=%u.%u.%u queue_family=%u msaa=%u\n", props.deviceName,
             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
             VK_VERSION_PATCH(props.apiVersion), impl_->graphics_family,
@@ -1526,6 +2055,14 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     return false;
   }
 
+  VkCommandPoolCreateInfo upload_pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+  upload_pool_info.flags = upload_command_pool_create_flags();
+  upload_pool_info.queueFamilyIndex = impl_->graphics_family;
+  if (vkCreateCommandPool(impl_->device, &upload_pool_info, nullptr,
+                          &impl_->upload_command_pool) != VK_SUCCESS) {
+    return false;
+  }
+
   VkDescriptorSetLayoutBinding binding{};
   binding.binding = 0;
   binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1574,16 +2111,7 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     return false;
   }
 
-  VkDescriptorPoolSize pool_size{};
-  pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  pool_size.descriptorCount = 256;
-  VkDescriptorPoolCreateInfo dp_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  dp_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  dp_info.maxSets = 256;
-  dp_info.poolSizeCount = 1;
-  dp_info.pPoolSizes = &pool_size;
-  if (vkCreateDescriptorPool(impl_->device, &dp_info, nullptr, &impl_->descriptor_pool) !=
-      VK_SUCCESS) {
+  if (!impl_->create_descriptor_block(kDescriptorPoolInitialCapacity)) {
     return false;
   }
 
@@ -1608,9 +2136,14 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
   fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
   for (int i = 0; i < kMaxFramesInFlight; ++i) {
-    vkCreateSemaphore(impl_->device, &sem_info, nullptr, &impl_->image_available[i]);
-    vkCreateSemaphore(impl_->device, &sem_info, nullptr, &impl_->render_finished[i]);
-    vkCreateFence(impl_->device, &fence_info, nullptr, &impl_->in_flight[i]);
+    if (!create_sync_object_ok(
+            vkCreateSemaphore(impl_->device, &sem_info, nullptr, &impl_->image_available[i])) ||
+        !create_sync_object_ok(
+            vkCreateSemaphore(impl_->device, &sem_info, nullptr, &impl_->render_finished[i])) ||
+        !create_sync_object_ok(
+            vkCreateFence(impl_->device, &fence_info, nullptr, &impl_->in_flight[i]))) {
+      return false;
+    }
   }
 
   impl_->textures.resize(1);  // slot 0 unused
@@ -1620,19 +2153,27 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     }
   }
 
-  ready_ = true;
+  emit_health(RendererHealthEvent::Created);
+  committed = true;
   return true;
 }
 
 void VulkanRenderer::destroy() {
   if (!impl_) {
-    ready_ = false;
+    emit_health(RendererHealthEvent::Destroyed);
     return;
   }
-  ready_ = false;
+  emit_health(RendererHealthEvent::Destroyed);
 
   if (impl_->device != VK_NULL_HANDLE) {
-    vkDeviceWaitIdle(impl_->device);
+    const VkResult idle = vkDeviceWaitIdle(impl_->device);
+    const bool wait_ok = idle == VK_SUCCESS;
+    const bool device_lost = idle == VK_ERROR_DEVICE_LOST;
+    // Wait first; device-lost (or last-resort teardown) then releases in-flight
+    // upload cmd/staging. Do not free those while the GPU may still use them.
+    if (upload_destroy_may_release_pending(wait_ok, device_lost) || !wait_ok) {
+      impl_->force_release_pending_uploads();
+    }
 
     for (size_t i = 1; i < impl_->textures.size(); ++i) {
       destroy_texture(static_cast<TextureId>(i));
@@ -1648,10 +2189,6 @@ void VulkanRenderer::destroy() {
         vkDestroySemaphore(impl_->device, impl_->render_finished[i], nullptr);
       if (impl_->in_flight[i]) vkDestroyFence(impl_->device, impl_->in_flight[i], nullptr);
     }
-    if (impl_->upload_fence) {
-      vkDestroyFence(impl_->device, impl_->upload_fence, nullptr);
-      impl_->upload_fence = VK_NULL_HANDLE;
-    }
 
     impl_->cleanup_swapchain();
     if (impl_->pipeline) vkDestroyPipeline(impl_->device, impl_->pipeline, nullptr);
@@ -1660,9 +2197,14 @@ void VulkanRenderer::destroy() {
     if (impl_->render_pass) vkDestroyRenderPass(impl_->device, impl_->render_pass, nullptr);
     if (impl_->sampler) vkDestroySampler(impl_->device, impl_->sampler, nullptr);
     if (impl_->sampler_nearest) vkDestroySampler(impl_->device, impl_->sampler_nearest, nullptr);
-    if (impl_->descriptor_pool) vkDestroyDescriptorPool(impl_->device, impl_->descriptor_pool, nullptr);
+    for (auto& block : impl_->descriptor_blocks) {
+      if (block.pool) vkDestroyDescriptorPool(impl_->device, block.pool, nullptr);
+    }
+    impl_->descriptor_blocks.clear();
     if (impl_->descriptor_layout)
       vkDestroyDescriptorSetLayout(impl_->device, impl_->descriptor_layout, nullptr);
+    if (impl_->upload_command_pool)
+      vkDestroyCommandPool(impl_->device, impl_->upload_command_pool, nullptr);
     if (impl_->command_pool) vkDestroyCommandPool(impl_->device, impl_->command_pool, nullptr);
     vkDestroyDevice(impl_->device, nullptr);
     impl_->device = VK_NULL_HANDLE;
@@ -1679,14 +2221,15 @@ void VulkanRenderer::destroy() {
   }
 
   *impl_ = Impl{};
-  ready_ = false;
+  bind_path_diag();
+  emit_health(RendererHealthEvent::Destroyed);
 }
 
 void VulkanRenderer::device_wait_idle() {
   if (!impl_ || impl_->device == VK_NULL_HANDLE) {
     return;
   }
-  vkDeviceWaitIdle(impl_->device);
+  (void)impl_->device_wait_idle_result();
 }
 
 void VulkanRenderer::set_exclusive_fullscreen_desired(bool desired) {
@@ -1750,6 +2293,19 @@ int64_t VulkanRenderer::last_gpu_submit_us() const noexcept {
   return impl_ != nullptr ? impl_->last_gpu_submit_us : 0;
 }
 
+VulkanRenderer::DescriptorPoolDiagnostics VulkanRenderer::descriptor_pool_diagnostics()
+    const noexcept {
+  DescriptorPoolDiagnostics out;
+  if (impl_ == nullptr) {
+    return out;
+  }
+  out.block_count = static_cast<uint32_t>(impl_->descriptor_blocks.size());
+  for (const auto& block : impl_->descriptor_blocks) {
+    out.live_sets += block.live;
+  }
+  return out;
+}
+
 void VulkanRenderer::release_fullscreen_exclusive() {
   if (!impl_) {
     return;
@@ -1758,28 +2314,191 @@ void VulkanRenderer::release_fullscreen_exclusive() {
   impl_->exclusive_fullscreen_desired = false;
 }
 
-bool VulkanRenderer::resize(int width, int height) {
-  if (!ready_ || impl_ == nullptr) {
+void VulkanRenderer::emit_health(RendererHealthEvent event) noexcept {
+  health_ = apply_renderer_health(health_, event);
+  ready_ = renderer_health_ready(health_);
+}
+
+bool VulkanRenderer::apply_zero_extent_now() noexcept {
+  const bool live = impl_ != nullptr && impl_->swapchain != VK_NULL_HANDLE;
+  health_ = apply_zero_extent(health_, live);
+  ready_ = renderer_health_ready(health_);
+  if (impl_ != nullptr) {
+    impl_->swapchain_occluded = live && health_ == RendererHealth::Occluded;
+  }
+  return live && health_ == RendererHealth::Occluded;
+}
+
+bool VulkanRenderer::apply_swapchain_create_failure() {
+  if (impl_ == nullptr) {
     return false;
   }
-  if (width <= 0 || height <= 0) {
-    // Minimize / fullscreen transition: keep the last good swapchain.
-    impl_->swapchain_occluded = true;
+  const bool live = impl_->swapchain != VK_NULL_HANDLE;
+  const WsiRecoverAction action = impl_->last_wsi_action;
+  const RendererHealth next = apply_swapchain_create_failure_health(health_, action, live);
+  (void)swapchain_create_failure_reports_occluded(action, live);
+  switch (action) {
+    case WsiRecoverAction::RecreateSurfaceAndSwapchain:
+      emit_health(RendererHealthEvent::SurfaceLost);
+      return false;
+    case WsiRecoverAction::DeviceLost:
+      emit_health(RendererHealthEvent::DeviceLost);
+      return false;
+    case WsiRecoverAction::Fatal:
+      emit_health(RendererHealthEvent::Fatal);
+      return false;
+    case WsiRecoverAction::RecreateSwapchain:
+      if (next == RendererHealth::Ready && health_ != RendererHealth::Ready) {
+        emit_health(RendererHealthEvent::RecoveredExtent);
+      }
+      return false;
+    case WsiRecoverAction::None:
+      if (!live) {
+        return apply_zero_extent_now();
+      }
+      break;
+  }
+  return false;
+}
+
+bool VulkanRenderer::check_device_result(VkResult result) noexcept {
+  if (result == VK_SUCCESS) {
     return true;
   }
-  if (!impl_->swapchain_occluded && width == width_ && height == height_ &&
-      impl_->swapchain != VK_NULL_HANDLE) {
-    return true;
+  emit_health(result == VK_ERROR_DEVICE_LOST ? RendererHealthEvent::DeviceLost
+                                            : RendererHealthEvent::Fatal);
+  return false;
+}
+
+bool VulkanRenderer::apply_wsi_action(WsiRecoverAction action) {
+  switch (action) {
+    case WsiRecoverAction::None:
+      return true;
+    case WsiRecoverAction::RecreateSwapchain:
+      return recover_swapchain();
+    case WsiRecoverAction::RecreateSurfaceAndSwapchain:
+      return recover_surface_and_swapchain();
+    case WsiRecoverAction::DeviceLost:
+      emit_health(RendererHealthEvent::DeviceLost);
+      return false;
+    case WsiRecoverAction::Fatal:
+      emit_health(RendererHealthEvent::Fatal);
+      return false;
   }
-  if (!impl_->create_swapchain(width, height)) {
+  emit_health(RendererHealthEvent::Fatal);
+  return false;
+}
+
+bool VulkanRenderer::recover_swapchain() {
+  if (impl_ == nullptr || impl_->device == VK_NULL_HANDLE ||
+      renderer_health_unrecoverable(health_)) {
     return false;
+  }
+  if (health_ == RendererHealth::SurfaceLost) {
+    return recover_surface_and_swapchain();
+  }
+  int w = 0, h = 0;
+  if (impl_->framebuffer_size) {
+    impl_->framebuffer_size(&w, &h);
+  }
+  if (w <= 0 || h <= 0) {
+    return apply_zero_extent_now();
+  }
+  if (!impl_->create_swapchain(w, h)) {
+    return apply_swapchain_create_failure();
   }
   if (impl_->swapchain_occluded) {
-    // Surface still 0×0; previous swapchain retained.
-    return true;
+    return apply_zero_extent_now();
   }
   width_ = static_cast<int>(impl_->swapchain_extent.width);
   height_ = static_cast<int>(impl_->swapchain_extent.height);
+  emit_health(RendererHealthEvent::RecoveredExtent);
+  return true;
+}
+
+bool VulkanRenderer::recover_surface_and_swapchain() {
+  if (impl_ == nullptr || impl_->device == VK_NULL_HANDLE || impl_->instance == VK_NULL_HANDLE ||
+      !impl_->create_surface || renderer_health_unrecoverable(health_)) {
+    emit_health(RendererHealthEvent::SurfaceLost);
+    return false;
+  }
+
+  if (!check_device_result(vkDeviceWaitIdle(impl_->device))) {
+    return false;
+  }
+  impl_->cleanup_swapchain();
+  if (impl_->surface != VK_NULL_HANDLE) {
+    vkDestroySurfaceKHR(impl_->instance, impl_->surface, nullptr);
+    impl_->surface = VK_NULL_HANDLE;
+  }
+
+  impl_->surface = impl_->create_surface(impl_->instance);
+  if (impl_->surface == VK_NULL_HANDLE) {
+    WDS_LOG("recover_surface: create_surface callback failed\n");
+    emit_health(RendererHealthEvent::SurfaceLost);
+    return false;
+  }
+
+  VkBool32 present = VK_FALSE;
+  vkGetPhysicalDeviceSurfaceSupportKHR(impl_->physical, impl_->graphics_family, impl_->surface,
+                                       &present);
+  if (present != VK_TRUE) {
+    WDS_LOG("recover_surface: graphics_family=%u cannot present\n", impl_->graphics_family);
+    emit_health(RendererHealthEvent::SurfaceLost);
+    return false;
+  }
+
+  int w = 0, h = 0;
+  if (impl_->framebuffer_size) {
+    impl_->framebuffer_size(&w, &h);
+  }
+  if (w <= 0 || h <= 0) {
+    // Old swapchain is already gone; 0×0 is not Occluded.
+    return apply_zero_extent_now();
+  }
+  if (!impl_->create_swapchain(w, h)) {
+    if (impl_->last_wsi_action == WsiRecoverAction::DeviceLost ||
+        impl_->last_wsi_action == WsiRecoverAction::Fatal) {
+      return apply_swapchain_create_failure();
+    }
+    emit_health(RendererHealthEvent::SurfaceLost);
+    return false;
+  }
+  if (impl_->swapchain_occluded || impl_->swapchain == VK_NULL_HANDLE) {
+    return apply_zero_extent_now();
+  }
+  width_ = static_cast<int>(impl_->swapchain_extent.width);
+  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  emit_health(RendererHealthEvent::SurfaceRecovered);
+  return true;
+}
+
+bool VulkanRenderer::resize(int width, int height) {
+  if (impl_ == nullptr || renderer_health_unrecoverable(health_)) {
+    return false;
+  }
+  if (health_ == RendererHealth::SurfaceLost) {
+    return recover_surface_and_swapchain();
+  }
+  if (!ready_ && health_ != RendererHealth::Occluded) {
+    return false;
+  }
+  if (width <= 0 || height <= 0) {
+    return apply_zero_extent_now();
+  }
+  if (resize_same_extent_short_circuits(width, height, width_, height_, impl_->swapchain_occluded,
+                                        impl_->swapchain != VK_NULL_HANDLE)) {
+    return true;
+  }
+  if (!impl_->create_swapchain(width, height)) {
+    return apply_swapchain_create_failure();
+  }
+  if (impl_->swapchain_occluded) {
+    return apply_zero_extent_now();
+  }
+  width_ = static_cast<int>(impl_->swapchain_extent.width);
+  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  emit_health(RendererHealthEvent::RecoveredExtent);
   return true;
 }
 
@@ -1789,11 +2508,32 @@ TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int
   if (!ready_ || pixels == nullptr || width <= 0 || height <= 0) {
     return info;
   }
+  const UploadHealthDelta reap = impl_->reap_pending_uploads();
+  if (reap.apply) {
+    emit_health(reap.event);
+    if (!ready_) {
+      return info;
+    }
+  }
+  impl_->reap_retired_textures(impl_->frame_seq);
+  PathTimer timed(path_diag_enabled_, &path_diag_, RendererPathSegment::CreateTextureRgba);
   const TextureId id = impl_->alloc_texture_slot();
   GpuTexture& tex = impl_->textures[id];
   tex.nearest = nearest;
-  if (!impl_->upload_texture_pixels(tex, pixels, width, height)) {
-    tex = GpuTexture{};
+  const UploadResult uploaded = impl_->upload_texture_pixels(tex, id, pixels, width, height);
+  if (!uploaded.ok()) {
+    const UploadHealthDelta delta = upload_health_delta(uploaded.result, uploaded.stage);
+    if (delta.apply) {
+      emit_health(delta.event);
+    }
+    if (impl_->texture_has_pending_upload(id)) {
+      tex.alive = false;
+      tex.retire_after_seq = impl_->frame_seq;
+    } else {
+      impl_->destroy_gpu_texture_resources(tex);
+    }
+    WDS_LOG("create_texture_rgba failed stage=%s result=%d\n", upload_stage_name(uploaded.stage),
+            static_cast<int>(uploaded.result));
     return {};
   }
   info.id = id;
@@ -1828,28 +2568,67 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                 float clear_g, float clear_b, const DrawBatch* additive,
                                 const DrawBatch* post_overlay, const DrawBatch* post_overlay2,
                                 const ScissorRect* additive_scissor) {
-  if (!ready_ || impl_ == nullptr || impl_->swapchain == VK_NULL_HANDLE) {
+  if (impl_ == nullptr || renderer_health_unrecoverable(health_)) {
+    return false;
+  }
+  auto reap_completed_keep_health = [&]() {
+    if (!draw_frame_reaps_completed_uploads_before_zero_extent_return()) {
+      return;
+    }
+    (void)impl_->reap_pending_uploads();
+    if (!draw_frame_zero_extent_reap_applies_health()) {
+      impl_->reap_retired_textures(impl_->frame_seq);
+    }
+  };
+  if (health_ == RendererHealth::SurfaceLost) {
+    if (!recover_surface_and_swapchain()) {
+      return false;
+    }
+    if (health_ != RendererHealth::Ready) {
+      reap_completed_keep_health();
+      return health_ == RendererHealth::Occluded;
+    }
+  }
+  const bool live_swapchain = impl_->swapchain != VK_NULL_HANDLE;
+  if (draw_frame_blocks_before_recovery(health_, ready_, live_swapchain)) {
     return false;
   }
 
   // Recover from minimize / fullscreen 0×0 transitions before acquire.
-  if (impl_->swapchain_occluded) {
+  // ready && swapchain null must reach this block (RecreateSwapchain after teardown).
+  if (impl_->swapchain_occluded || impl_->swapchain == VK_NULL_HANDLE) {
     int w = 0, h = 0;
     if (impl_->framebuffer_size) {
       impl_->framebuffer_size(&w, &h);
     }
     if (w <= 0 || h <= 0) {
-      return true;  // still occluded — skip present
+      reap_completed_keep_health();
+      return apply_zero_extent_now();
     }
     if (!resize(w, h) || impl_->swapchain_occluded || impl_->swapchain == VK_NULL_HANDLE) {
-      return true;
+      reap_completed_keep_health();
+      return health_ == RendererHealth::Occluded;
     }
+  }
+
+  {
+    const UploadHealthDelta reap = impl_->reap_pending_uploads();
+    if (reap.apply) {
+      emit_health(reap.event);
+      if (renderer_health_unrecoverable(health_)) {
+        return false;
+      }
+    }
+    impl_->reap_retired_textures(impl_->frame_seq);
   }
 
   using clock = std::chrono::steady_clock;
   const uint32_t frame = impl_->frame_index;
   const auto fence_t0 = clock::now();
-  vkWaitForFences(impl_->device, 1, &impl_->in_flight[frame], VK_TRUE, UINT64_MAX);
+  if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->in_flight[frame], VK_TRUE,
+                                          UINT64_MAX))) {
+    return false;
+  }
   impl_->last_fence_wait_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - fence_t0).count();
   ++impl_->frame_seq;
@@ -1862,32 +2641,22 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                            &image_index);
   impl_->last_acquire_wait_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - acquire_t0).count();
-  if (acquire == VK_ERROR_OUT_OF_DATE_KHR) {
-    int w = 0, h = 0;
-    if (impl_->framebuffer_size) {
-      impl_->framebuffer_size(&w, &h);
-    }
-    (void)resize(w, h);
-    return true;  // retry next frame
-  }
   impl_->note_fullscreen_exclusive_lost("vkAcquireNextImageKHR", acquire);
-  if (acquire == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
-    int w = 0, h = 0;
-    if (impl_->framebuffer_size) {
-      impl_->framebuffer_size(&w, &h);
-    }
-    (void)resize(w, h);
-    return true;
-  }
-  if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR) {
-    return false;
+  const WsiRecoverAction acquire_action = classify_wsi_result(acquire);
+  bool recreate_swapchain_after_present = false;
+  if (acquire_action == WsiRecoverAction::RecreateSwapchain && acquire == VK_SUBOPTIMAL_KHR) {
+    recreate_swapchain_after_present = true;
+  } else if (acquire_action != WsiRecoverAction::None) {
+    return apply_wsi_action(acquire_action);
   }
 
   // Do not reuse a swapchain image that is still referenced by an in-flight submit.
   if (image_index < impl_->images_in_flight.size() &&
       impl_->images_in_flight[image_index] != VK_NULL_HANDLE) {
-    vkWaitForFences(impl_->device, 1, &impl_->images_in_flight[image_index], VK_TRUE,
-                    UINT64_MAX);
+    if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->images_in_flight[image_index],
+                                            VK_TRUE, UINT64_MAX))) {
+      return false;
+    }
   }
 
   const size_t additive_verts = additive ? additive->vertex_count() : 0;
@@ -1902,13 +2671,18 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     drain.waitSemaphoreCount = 1;
     drain.pWaitSemaphores = &impl_->image_available[frame];
     drain.pWaitDstStageMask = &wait_stage;
-    vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
+    const VkResult drain_r = vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
+    if (!check_device_result(drain_r)) {
+      return false;
+    }
     vkQueueWaitIdle(impl_->graphics_queue);
     return false;
   }
 
   // Reset only once capacity is ensured so a failed path cannot leave the fence unsignaled.
-  vkResetFences(impl_->device, 1, &impl_->in_flight[frame]);
+  if (!check_device_result(vkResetFences(impl_->device, 1, &impl_->in_flight[frame]))) {
+    return false;
+  }
 
   auto& vb = impl_->frame_vertices[frame];
   auto& bucket_first_vertex = impl_->bucket_first_vertex;
@@ -2003,6 +2777,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
           bucket.texture >= impl_->textures.size() || !impl_->textures[bucket.texture].alive) {
         continue;
       }
+      impl_->textures[bucket.texture].sampled_seq = impl_->frame_seq;
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl_->pipeline_layout, 0, 1,
                               &impl_->textures[bucket.texture].descriptor, 0, nullptr);
       vkCmdDraw(cmd, static_cast<uint32_t>(bucket.vertices.size()), 1, first_vertex[bi], 0);
@@ -2049,15 +2824,29 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   submit.signalSemaphoreCount = 1;
   submit.pSignalSemaphores = &impl_->render_finished[frame];
   const auto submit_t0 = clock::now();
-  if (vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]) != VK_SUCCESS) {
+  const VkResult submit_r =
+      vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]);
+  if (submit_r != VK_SUCCESS) {
+    if (submit_r == VK_ERROR_DEVICE_LOST) {
+      emit_health(RendererHealthEvent::DeviceLost);
+      return false;
+    }
+    emit_health(RendererHealthEvent::Fatal);
     // Fence was reset but not submitted — signal it via drain so the next frame wait returns.
     VkPipelineStageFlags drain_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     drain.waitSemaphoreCount = 1;
     drain.pWaitSemaphores = &impl_->image_available[frame];
     drain.pWaitDstStageMask = &drain_stage;
-    vkQueueSubmit(impl_->graphics_queue, 1, &drain, impl_->in_flight[frame]);
-    vkQueueWaitIdle(impl_->graphics_queue);
+    const VkResult drain_r =
+        vkQueueSubmit(impl_->graphics_queue, 1, &drain, impl_->in_flight[frame]);
+    if (drain_r == VK_ERROR_DEVICE_LOST) {
+      emit_health(RendererHealthEvent::DeviceLost);
+      return false;
+    }
+    if (drain_r == VK_SUCCESS) {
+      vkQueueWaitIdle(impl_->graphics_queue);
+    }
     return false;
   }
   impl_->images_in_flight[image_index] = impl_->in_flight[frame];
@@ -2075,19 +2864,15 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->last_present_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - present_t0).count();
   impl_->note_fullscreen_exclusive_lost("vkQueuePresentKHR", present_result);
-  if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR ||
-      present_result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
-    int w = 0, h = 0;
-    if (impl_->framebuffer_size) {
-      impl_->framebuffer_size(&w, &h);
-    }
-    (void)resize(w, h);
-  } else if (present_result == VK_ERROR_SURFACE_LOST_KHR) {
-    impl_->swapchain_occluded = true;
-  }
-
   impl_->frame_index = (frame + 1) % kMaxFramesInFlight;
-  return true;
+  const WsiRecoverAction present_action = classify_wsi_result(present_result);
+  if (present_action == WsiRecoverAction::None) {
+    if (recreate_swapchain_after_present) {
+      return recover_swapchain();
+    }
+    return true;
+  }
+  return apply_wsi_action(present_action);
 }
 
 }  // namespace wds::renderer

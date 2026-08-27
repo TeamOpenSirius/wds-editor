@@ -10,10 +10,10 @@ namespace wds::renderer {
 // Official Sirius note skins under skins/ (Top/Bottom sliced sprites).
 // SkinCatalog::load fails hard if any required note asset is missing.
 struct SkinCatalog {
-  TextureInfo stage;
-  TextureInfo stage_background;
   // Official GameBackground theater plate (curtains / floor / lights).
   TextureInfo ingame_background;
+  // Official BG_LaneBorder sprite (img_ingame_lane_border2).
+  TextureInfo lane_border;
   TextureInfo judgeline;
 
   // Shared bottom + per-color tops (official A_NotesBottom / A_*NotesTop).
@@ -45,21 +45,15 @@ struct SkinCatalog {
   // Fallback when color id has no matching Sirius Split Line skin.
   TextureInfo split_line_1;
   TextureInfo split_line_2;
-  TextureInfo split_line_trans1;
-  TextureInfo split_line_trans2;
 
   SplitLineSkinBank split_lines;
 
   TextureInfo judge_auto;
-  TextureInfo judge_perfect_plus;
-  TextureInfo flick_circle;
-  TextureInfo flick_star;
 
   TextureInfo combo_ap_text;
   TextureInfo combo_ap_digit[10];
 
   TextureInfo effect_linear_bg;
-  TextureInfo effect_linear_line;
   TextureInfo effect_linear_star;
   TextureInfo effect_circular;
 

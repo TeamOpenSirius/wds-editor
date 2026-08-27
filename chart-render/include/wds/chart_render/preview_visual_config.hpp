@@ -1,43 +1,41 @@
 #pragma once
 
+#include <wds/core/official_playfield.hpp>
+#include <wds/core/split_fade.hpp>
+
 #include <cstdint>
 #include <string>
 
 namespace wds::renderer {
 
-// Visual parameters mirrored from sonolus-sirius-engine/engine/shared/constants.cpp
-// (play / watch mode). Geometry uses a trapezoid stage with top narrowed by high_width.
+// Official playfield: LaneGroup Rx=60° + FOV 50, content 16:9.
 struct PreviewVisualConfig {
-  // Options.NoteSpeed equivalent; appearTime = 7.4 / note_speed
+  // Options.NoteSpeed equivalent; appearTime = official CalculateMoveSeconds.
   float note_speed = 5.0f;
 
   // Stage / camera
-  float target_aspect_ratio = 1115.0f / 640.0f;
+  float target_aspect_ratio = wds::chart_editor::kOfficialPreviewAspect;
   bool lock_aspect_ratio = true;
   float extra_width = 1.0f;
   float stage_opacity = 0.8f;
-  float high_width = 0.1f;  // top width / bottom width ratio
-  // Tip sits just above the visible top / hidden bar so notes enter from outside the bar
-  // (not from the screen edge). Fraction of pre-extend stage height.
-  float stage_top_overscan = 0.08f;
+  float stage_top_overscan = 0.0f;
 
-  // Judgment line — slightly lower than Sirius default to use more of the tall panel.
-  float judgeline_margin_bottom = 0.16f;
-  float judgeline_height = 0.133f;
+  // Judgment line thickness in JudgeArea Y (img_ingame_judgment_area3 = 0.72).
+  float judgeline_height = wds::chart_editor::kOfficialJudgeSpriteHeight;
   float judgline_move_length = 0.01f;
 
   // Note / lane visuals
-  int32_t lane_count = 12;  // Sirius playfield uses 12 lanes
+  int32_t lane_count = 12;
   float note_height = 85.0f / 640.0f;
   float note_move_length = 0.02f;
   float note_border_percent = 0.02f;
   // Official prefab ScratchNote/Notes/* localPosition.z (height toward camera = -z).
-  // NotesSprite is ZTest Off but verts still use MVP; we project height with a pinhole
-  // camera (screen-X invariant, approach-axis from perspective divide).
-  float note_unity_local_z_bottom = -0.01f;
-  float note_unity_local_z_top = -0.1f;
-  // Eye height above the stage plane (Unity Δz ≈ 0.09). Larger → thinner near-edge lip.
-  float note_cam_height = 12.0f;
+  float note_unity_local_z_bottom = wds::chart_editor::kOfficialNoteLocalZBottom;
+  float note_unity_local_z_top = wds::chart_editor::kOfficialNoteLocalZTop;
+  // GetNoteHeight level (1..10). Default 8 → Rx = -15°.
+  int note_height_level = wds::chart_editor::kOfficialDefaultNoteHeightLevel;
+  // NoteStartOffset (0..100 step 5). Default 0 → visible Y=58.
+  int note_start_offset = wds::chart_editor::kOfficialDefaultNoteStartOffset;
   float tick_width = 168.0f / 640.0f;
   float tick_height = 112.0f / 640.0f;
   float arrow_width = 80.0f / 640.0f;
@@ -48,9 +46,9 @@ struct PreviewVisualConfig {
   float sync_line_height = 5.0f / 640.0f;
   // Slightly wider than stock so the gaussian glow skirts have screen-space room.
   float split_line_length = 0.048f;
-  // Official SplitEffect Show≈1000ms / Hide≈500ms (Light: lines only, no particles).
+  // Official fadeIn 1.0s; fadeOut alpha 1→0 in 0.3s (Light: lines only).
   float split_line_animation_start = 1.0f;
-  float split_line_animation_end = 0.5f;
+  float split_line_animation_end = 0.3f;
   // Official Initialize: RGB *= settings/100. GameSettings default is 100.
   float split_line_opacity = 1.00f;
   // Mild additive body glow so overlaps with the judgeline brighten (beam, not matte).
@@ -64,16 +62,16 @@ struct PreviewVisualConfig {
   // Peak darkening. SpriteRenderer alpha stays LineColor.a; the streak is a
   // VFX overlay (CheckAlpha 0.5 on an already ~0.4 line ≈ 0.2 extra hole).
   float split_line_pulse_dip = 0.2f;
-  // Tip→white fraction of the *visible* [p0,p1] length (official LineColor lerp to white).
-  float split_line_tip_whiten = 0.82f;
-  // Extra additive bloom on the whitened tip.
-  float split_line_tip_glow = 0.55f;
-  // Upper spawn mask (Sirius Hidden Line / LaneMask band).
-  float hidden_line_height = 0.12f;
-  // Official Hidden Line SpriteRenderer alpha (~0.45); decorative only — notes hard-clip.
-  float hidden_line_alpha = 0.45f;
-  // Added to tip_visible percent (0=tip); larger → bar sits further down the track.
-  float hidden_line_y_offset = 0.12f;
+  // Official SplitLine bright-head: identity uses 45/256 of the visible ribbon;
+  // z=180 projects the same 12.15 wu from the mesh tip (judge end).
+  float split_line_tip_whiten = wds::chart_editor::kOfficialSplitLineSpriteTipFrac;
+  // Official SplitLine output is (1,1,1,1) × expr-68 alpha. No 0.55 gate.
+  float split_line_tip_glow = 1.0f;
+  // Visible 挡板: LaneNoteStartLine.Initialize size.y = rect.height/100
+  // (start_line_500 = 4.98 at offset 0), not prefab m_Size.y=1.
+  float hidden_line_height = wds::chart_editor::kOfficialStartLineSpriteHeight;
+  // Official StartLine renderer alpha is 1; the PNG carries 0.50–0.80.
+  float hidden_line_alpha = 1.0f;
 
   // Note / hold alphas (sonolus-sirius-engine/engine/play/utils.cpp Draw args)
   // drawTick → 0.5; drawHoldEighth → 0.8 / 0.85 while holding; flat notes → 1.0
@@ -115,8 +113,8 @@ struct PreviewVisualConfig {
   // Lower baseline (toward judgeline) than stock 0.2.
   float combo_baseline_y = 0.12f;
 
-  // Longer approach than stock Sirius (7.4) for the deeper tip→judgeline path.
-  float appear_time_base = 10.5f;
+  // Official CalculateMoveSeconds = 7.4167 / note_speed.
+  float appear_time_base = 7.4166667f;
 
   // Directory containing skin PNGs (project-root skins/ by default)
   std::string skins_directory = "skins";
@@ -128,7 +126,9 @@ struct PreviewVisualConfig {
   // Preferred MSAA samples (unified 2× across platforms).
   int msaa_samples = 2;
 
-  float appear_time() const noexcept { return appear_time_base / note_speed; }
+  float appear_time() const noexcept {
+    return wds::chart_editor::official_move_seconds(static_cast<double>(note_speed));
+  }
 };
 
 }  // namespace wds::renderer

@@ -53,6 +53,12 @@ int32_t subdivision_tick_step(const EditGridConfig& cfg);
 // Snap to nearest in-beat subdivision using (i*TPQ)/subdivs (exact on beat edges).
 int32_t snap_tick(float tick, const EditGridConfig& cfg);
 int32_t snap_lane(float lane_center, const EditGridConfig& cfg);
+
+// Tick delta for a multi-note drag: snap the grabbed note onto the subdivision
+// grid, then add the pointer's grid delta. Apply this same value to every note
+// so followers keep their offset from the grabbed note.
+int32_t selection_drag_tick_delta(int32_t anchor_start_tick, int32_t pointer_delta_tick,
+                                  const EditGridConfig& cfg) noexcept;
 int32_t clamp_lane_for_width(int32_t lane, int32_t width, int32_t lane_count);
 bool lane_in_bounds(int32_t lane, int32_t width, int32_t lane_count);
 std::vector<int32_t> beat_ticks_in_range(int32_t start_tick, int32_t end_tick,

@@ -1,5 +1,31 @@
 #pragma once
 
+#include <cstdint>
+#include <unordered_set>
+#include <utility>
+
+namespace wds::ui {
+
+// Music-clock SFX arm. `schedule` is invoked as a factory; callers must pass a
+// callable (not a precomputed bool) so already-marked keys can skip schedule_at.
+// Failure erases the key so TooFar / AtCapacity / SetSyncFailure stay retryable.
+template <typename Schedule>
+bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
+                             Schedule&& schedule) {
+  if (!played.insert(key).second) {
+    return false;
+  }
+  if (!static_cast<bool>(std::forward<Schedule>(schedule)())) {
+    played.erase(key);
+    return false;
+  }
+  return true;
+}
+
+}  // namespace wds::ui
+
+#ifndef WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
+
 #include "wds/ui/regions/preview/hit_sfx_mapping.hpp"
 
 #include "wds/renderer/draw_batch.hpp"
@@ -13,6 +39,7 @@
 
 #include <wds/audio/hit_sfx.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
@@ -41,6 +68,8 @@ class PlaybackPreviewView {
   const wds::renderer::PreviewVisualConfig& config() const noexcept { return config_; }
 
   void attach_audio(wds::audio::AudioEngine* audio) noexcept;
+  // Read-only armed MIXTIME POS count (0 when no audio).
+  size_t pending_sfx_sync_count() const noexcept;
 
   // Chart delay (MusicTiming::offset_ms): chart starts this many ms after music.
   // Note hit times already include the delay; SFX schedule at the same timeline ms
@@ -88,10 +117,12 @@ class PlaybackPreviewView {
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
  private:
+  void draw_ingame_background(wds::renderer::DrawBatch& batch);
   void draw_stage(wds::renderer::DrawBatch& batch,
-                  const wds::chart_editor::PreviewSnapshot& snapshot);
+                  const wds::chart_editor::PreviewSnapshot& snapshot,
+                  wds::renderer::TextureId solid_texture);
   void draw_hidden_line(wds::renderer::DrawBatch& batch);
-  // Note-percent at the judgeline-side edge of the Hidden Line; only p >= this is drawn.
+  // Official LaneMask bottom percent (GetNoteVisiblePositionY). z=0 objects cull here.
   float spawn_clip_percent() const noexcept;
   void draw_split_lanes(wds::renderer::DrawBatch& batch, wds::renderer::DrawBatch& additive,
                         const wds::chart_editor::PreviewSnapshot& snapshot);
@@ -178,3 +209,5 @@ class PlaybackPreviewView {
 };
 
 }  // namespace wds::ui
+
+#endif  // WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY

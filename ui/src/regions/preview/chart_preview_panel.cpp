@@ -3,6 +3,8 @@
 #include "wds/renderer/log.hpp"
 #include "wds/ui/layout/editor_layout.hpp"
 
+#include <wds/core/official_playfield.hpp>
+
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
 
@@ -386,13 +388,30 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
 }
 
 void ChartPreviewPanel::set_note_speed(double speed) {
-  speed = std::max(1.0, speed);
+  const auto& visual = preview_.config();
+  apply_display_settings(speed, visual.note_start_offset, visual.note_height_level,
+                         static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) *
+                                                      100.0)));
+}
+
+void ChartPreviewPanel::apply_display_settings(double note_speed, int note_start_offset,
+                                               int note_height_level,
+                                               int split_line_opacity_percent) {
+  note_speed = wds::chart_editor::official_clamp_note_speed(note_speed);
+  note_start_offset = wds::chart_editor::official_clamp_note_start_offset(note_start_offset);
+  note_height_level = wds::chart_editor::official_clamp_note_height_level(note_height_level);
+  split_line_opacity_percent =
+      wds::chart_editor::official_clamp_split_effect_line_opacity(split_line_opacity_percent);
+
   auto visual = preview_.config();
-  visual.note_speed = static_cast<float>(speed);
+  visual.note_speed = static_cast<float>(note_speed);
+  visual.note_start_offset = note_start_offset;
+  visual.note_height_level = note_height_level;
+  visual.split_line_opacity = static_cast<float>(split_line_opacity_percent) / 100.0f;
   preview_.set_config(visual);
 
   auto core_cfg = engine_.preview_config();
-  core_cfg.note_speed = speed;
+  core_cfg.note_speed = note_speed;
   core_cfg.note_approach_seconds = visual.appear_time();
   engine_.set_preview_config(core_cfg);
 }

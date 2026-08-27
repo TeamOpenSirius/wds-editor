@@ -113,6 +113,28 @@ brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
 | Debug (`--debug`) | `build-<target>-debug/` | 否           | 详细 `WDS_LOG` |
 
 模块开关：`WDS_BUILD_COMMON` / `CORE` / `AUDIO` / `RENDERER` / `INTERACTION` / `UI`（默认均 ON）。
+只关 `RENDERER` 会 FATAL（`INTERACTION` / `UI` 仍依赖它）。core-only 需同时 `-DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_INTERACTION=OFF -DWDS_BUILD_UI=OFF`；只要 core、不要 audio 时再加 `-DWDS_BUILD_AUDIO=OFF`。
+基准默认关、不进 CTest：`WDS_CORE_BUILD_BENCHMARKS`、`WDS_RENDERER_BUILD_BENCHMARKS`。
+
+---
+
+## 测试
+
+当前产品门禁是 **macOS 原生 CTest**。CI `macos-arm` job 顺序为 `--no-package` → `ctest` → `--package-only`：
+
+```bash
+./scripts/build-target.sh macos-arm --no-package
+ctest --test-dir build-macos-arm --output-on-failure
+./scripts/build-target.sh --package-only macos-arm
+```
+
+默认全开模块时会注册：`wds_common_tests`、`wds_core_tests`、`wds_split_index_tests`、`wds_audio_player_tests`、`wds_renderer_tests`、`wds_note_visual_policy_tests`、`wds_split_line_official_colors_tests`、`wds_interaction_tests`、`wds_ui_logic_tests`、`wds_note_draw_order_tests`。
+
+**Linux 宿主交叉出的 Windows PE 不能在该宿主上运行。** 不要对 `build-win-x86_64` 跑 `ctest`（部分测试目标仍可能被编译，但宿主执行的是 PE）。交叉策略见 [`cmake/CROSS_COMPILE.md`](cmake/CROSS_COMPILE.md)。
+
+Linux 上若只需跑 common + core 单测（**不是**产品构建），可用 [`scripts/run-host-core-tests.sh`](scripts/run-host-core-tests.sh)。这不能代替 macOS 门禁，也不等于 Windows 运行时验证。
+
+Windows 本机跑测试尚未覆盖，本文不写未实测结论。
 
 ---
 
@@ -129,8 +151,7 @@ wds-editor/
 ├── ui/                     # 编辑器壳层 + wds_editor 可执行文件
 ├── cmake/                  # 平台默认值与交叉 toolchain
 ├── scripts/                # 构建 / 打包 / 图标
-├── skins/ effects/ icons/  # 运行时资源
-└── docs/                   # 官方 UI 对齐、编辑/预览一致性、复刻路线等
+└── skins/ effects/ icons/  # 运行时资源
 ```
 
 ### 依赖方向（下层不得反向依赖 `ui`）
@@ -185,3 +206,7 @@ interaction action
   → ChartPreviewPanel / PlaybackPreviewView::render(snapshot)
   → DrawBatch → Vulkan present
 ```
+
+预览区滚轮与编辑区共用同一套时间轴手势（scrub / Ctrl/Cmd+滚轮调可见范围），见 [`ui/README.md`](ui/README.md)。
+
+开发诊断（默认关闭，不依赖 `WDS_ENABLE_LOGGING`）：环境变量 **精确** `WDS_FRAME_DIAG=1` 写帧耗时日志，见 [`ui/README.md`](ui/README.md)。异步上传 / descriptor 块链见 [`renderer/README.md`](renderer/README.md)；音频恢复退避与 pending SFX sync（10s / 4096）见 [`audio-player/README.md`](audio-player/README.md)。

@@ -15,6 +15,12 @@ namespace wds::ui {
 // Legacy fallback / one-shot migrate: <exe_dir>/config/config.yml
 struct EditorUiConfig {
   double note_speed = 5.0;
+  // Official NoteStartOffset (0..100 step 5).
+  int note_start_offset = 0;
+  // Official NoteHeight / GetNoteHeight level (1..10).
+  int note_height_level = 8;
+  // Official SplitEffectLineOpacity (10..100 step 10).
+  int split_line_opacity = 100;
   int32_t visible_hectoms = 20;
   float music_volume = 1.0f;
   bool music_muted = false;
