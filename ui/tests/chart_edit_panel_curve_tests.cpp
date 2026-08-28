@@ -57,14 +57,19 @@ using wds::ui::CurveFillSelection;
 using wds::ui::CurveTemplate;
 using wds::ui::UiManager;
 
-Modifiers curve_mods() {
+Modifiers primary_mods() {
   Modifiers mods;
-  mods.shift = true;
 #ifdef __APPLE__
   mods.super = true;
 #else
   mods.control = true;
 #endif
+  return mods;
+}
+
+Modifiers curve_mods() {
+  Modifiers mods = primary_mods();
+  mods.shift = true;
   return mods;
 }
 
@@ -690,24 +695,28 @@ void test_dialog_confirm_keeps_toolbar_fill_and_delete_falls_back() {
   CHECK_EQ(dropdown->selected_label(), std::string(kEmptyCurveTemplateLabel));
 }
 
-void test_primary_wheel_updates_pointer_playhead_grid_then_ghosts() {
+void test_exact_primary_wheel_updates_visible_range_and_playhead_grid() {
+  Harness h;
+  const auto pos = h.at_tick_lane(480, 2);
+  const int32_t before = h.panel.viewport().grid().visible_hectoms;
+  const float judgeline = h.panel.viewport().judgeline_y();
+  h.panel.on_scroll(wds::interaction::ScrollEvent{pos, 0.0f, 1.0f, primary_mods()});
+  CHECK(h.panel.viewport().grid().visible_hectoms != before);
+  CHECK(std::fabs(h.panel.viewport().y_at(0) - judgeline) < 1.0f);
+}
+
+void test_curve_fill_wheel_does_not_change_visible_range() {
   Harness h;
   h.enter_hold(true, 0, 480, 2);
   h.press_curve();
   CHECK(h.panel.curve_mode_active());
   const auto pos = h.at_tick_lane(480, 2);
   const int32_t before = h.panel.viewport().grid().visible_hectoms;
-  const float judgeline = h.panel.viewport().judgeline_y();
   h.panel.on_scroll(wds::interaction::ScrollEvent{pos, 0.0f, 1.0f, curve_mods()});
-  CHECK(h.panel.viewport().grid().visible_hectoms != before);
-  CHECK(std::fabs(h.panel.viewport().y_at(0) - judgeline) < 1.0f);
+  CHECK_EQ(h.panel.viewport().grid().visible_hectoms, before);
+  CHECK(h.panel.curve_mode_active());
   const auto ghosts = h.panel.curve_ghost_notes();
   CHECK(!ghosts.empty());
-  int32_t last_end = 0;
-  for (const auto& n : ghosts) {
-    if (n.note_type == NoteType::ScratchHold) last_end = std::max(last_end, n.end_tick);
-  }
-  CHECK_EQ(last_end, h.panel.viewport().tick_at(pos.y));
 }
 
 void test_plain_primary_does_not_clear_hold_draft_during_draw() {
@@ -742,7 +751,8 @@ int main() {
   test_template_direction_change_and_missing_linear();
   test_ui_manager_pushes_selection();
   test_dialog_confirm_keeps_toolbar_fill_and_delete_falls_back();
-  test_primary_wheel_updates_pointer_playhead_grid_then_ghosts();
+  test_exact_primary_wheel_updates_visible_range_and_playhead_grid();
+  test_curve_fill_wheel_does_not_change_visible_range();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

@@ -1236,6 +1236,23 @@ int main() {
     expect(suppress_idle_placement_ghost(primary_only, false), "idle primary hides ghost");
     expect(!suppress_idle_placement_ghost(primary_only, true), "drawing primary keeps ghost");
     expect(!suppress_idle_placement_ghost(Modifiers{}, false), "idle without primary keeps ghost");
+
+    expect(is_visible_range_wheel_modifiers(primary_only),
+           "exact primary wheel adjusts visible range");
+    expect(!is_visible_range_wheel_modifiers(curve),
+           "Shift+primary wheel does not adjust visible range");
+    expect(!is_visible_range_wheel_modifiers(with_alt),
+           "Alt+primary wheel does not adjust visible range");
+    expect(!is_visible_range_wheel_modifiers(Modifiers{}),
+           "plain wheel does not adjust visible range");
+    Modifiers extra_primary = primary_only;
+#ifdef __APPLE__
+    extra_primary.control = true;
+#else
+    extra_primary.super = true;
+#endif
+    expect(!is_visible_range_wheel_modifiers(extra_primary),
+           "extra modifier blocks visible-range wheel");
   }
 
   return failures == 0 ? 0 : 1;

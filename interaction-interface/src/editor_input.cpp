@@ -18,6 +18,17 @@ bool is_primary_modifier(const Modifiers& mods) noexcept {
   return primary_modifier_down(mods);
 }
 
+bool is_visible_range_wheel_modifiers(const Modifiers& mods) noexcept {
+  if (!is_primary_modifier(mods) || mods.shift || mods.alt) {
+    return false;
+  }
+#ifdef __APPLE__
+  return !mods.control;
+#else
+  return !mods.super;
+#endif
+}
+
 bool is_toggle_select(const PointerDownEvent& event) noexcept {
   return is_left(event.button) && is_primary_modifier(event.mods);
 }

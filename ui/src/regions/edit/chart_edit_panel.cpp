@@ -4639,8 +4639,10 @@ void ChartEditPanel::handle_timeline_wheel(const wds::interaction::ScrollEvent& 
   active_mods_ = event.mods;
 
   // Fixed gesture: Ctrl+wheel (Cmd+wheel on macOS) adjusts visible range
-  // (not in shortcut settings). Default: scroll up shrinks the window (zoom in).
-  if (wds::interaction::is_primary_modifier(event.mods)) {
+  // only when that is the sole modifier (not in shortcut settings).
+  // Shift+Ctrl/Cmd is curve fill and must not zoom.
+  // Default: scroll up shrinks the window (zoom in).
+  if (wds::interaction::is_visible_range_wheel_modifiers(event.mods)) {
     auto grid = viewport_.grid();
     const int32_t before = grid.visible_hectoms;
     const int32_t next = visible_range_after_wheel(
