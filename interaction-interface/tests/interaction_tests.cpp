@@ -235,6 +235,51 @@ int main() {
     theme::apply_content_scale(previous_scale);
   }
 
+  {
+    // Half-scale Latin: 'n' (y1=0) and 'u' (y1=1 AA fringe) must share a baseline.
+    auto& font = FontAtlas::instance();
+    const float previous_scale = theme::ui_content_scale();
+    theme::apply_content_scale(2.0f);
+    bool baked = false;
+#ifdef WDS_REPO_ROOT
+    baked = font.bake_font_file(std::string(WDS_REPO_ROOT) +
+                                    "/ui/assets/fonts/NotoSansSC-Regular.ttf",
+                                52.0f, 32.0f);
+#endif
+    if (!baked) {
+      baked = font.bake_font_file("ui/assets/fonts/NotoSansSC-Regular.ttf", 52.0f, 32.0f);
+    }
+    if (baked) {
+      font.ensure_glyphs("InOutLinear");
+      std::vector<FontAtlas::GlyphQuad> inout;
+      font.build_quads("InOut", 0.0f, 0.0f, 26.0f, inout);
+      expect(inout.size() == 5, "InOut emits 5 Latin glyphs");
+      if (inout.size() == 5) {
+        const float n_bot = inout[1].dst.y + inout[1].dst.h;
+        const float u_bot = inout[3].dst.y + inout[3].dst.h;
+        expect(std::fabs(n_bot - u_bot) < 0.51f, "n and u share a baseline at half bake scale");
+      }
+      std::vector<FontAtlas::GlyphQuad> linear;
+      font.build_quads("Linear", 0.0f, 0.0f, 26.0f, linear);
+      expect(linear.size() == 6, "Linear emits 6 Latin glyphs");
+      if (linear.size() == 6) {
+        const float L_bot = linear[0].dst.y + linear[0].dst.h;
+        const float i_bot = linear[1].dst.y + linear[1].dst.h;
+        expect(std::fabs(L_bot - i_bot) < 0.51f, "L and i share a baseline at half bake scale");
+      }
+      std::vector<FontAtlas::GlyphQuad> desc;
+      font.build_quads("gypj", 0.0f, 0.0f, 26.0f, desc);
+      expect(desc.size() == 4, "gypj emits 4 Latin glyphs");
+      if (desc.size() == 4) {
+        const float g_bot = desc[0].dst.y + desc[0].dst.h;
+        const float y_bot = desc[1].dst.y + desc[1].dst.h;
+        expect(std::fabs(g_bot - y_bot) < 0.51f, "g and y share a descender baseline");
+      }
+      font.clear();
+    }
+    theme::apply_content_scale(previous_scale);
+  }
+
   Checkbox checkbox("Mute");
   checkbox.set_bounds({0, 0, 100, 24});
   checkbox.on_click(ClickEvent{{5, 5}, PointerButton::Left, {}, 1});
@@ -1132,6 +1177,65 @@ int main() {
     set_scroll_wheel_speed(std::numeric_limits<float>::infinity());
     expect(scroll_wheel_speed() == 1.0f, "Inf scroll speed becomes 1");
     set_scroll_wheel_speed(previous);
+  }
+
+  {
+    Modifiers curve;
+    curve.shift = true;
+#ifdef __APPLE__
+    curve.super = true;
+#else
+    curve.control = true;
+#endif
+    expect(is_curve_fill_modifiers(curve), "Shift+primary activates curve fill");
+    expect(is_curve_fill_modifier_press(KeyDownEvent{KeyCode::Unknown, curve, false}),
+           "non-repeat Shift+primary is a curve-fill press");
+    expect(!is_curve_fill_modifier_press(KeyDownEvent{KeyCode::Unknown, curve, true}),
+           "repeat Shift+primary is not a new curve-fill press");
+
+    Modifiers shift_only;
+    shift_only.shift = true;
+    expect(!is_curve_fill_modifiers(shift_only), "Shift without primary does not activate");
+
+    Modifiers primary_only = primary;
+    expect(!is_curve_fill_modifiers(primary_only), "primary without Shift does not activate");
+
+    Modifiers with_alt = curve;
+    with_alt.alt = true;
+    expect(!is_curve_fill_modifiers(with_alt), "Alt blocks curve fill");
+
+    Modifiers wrong_primary;
+    wrong_primary.shift = true;
+#ifdef __APPLE__
+    wrong_primary.control = true;
+#else
+    wrong_primary.super = true;
+#endif
+    expect(!is_curve_fill_modifiers(wrong_primary),
+           "non-platform primary with Shift does not activate");
+
+    expect(is_curve_fill_placement_allowed(true, true),
+           "PlaceHoldBody ScratchHold may enter curve fill");
+    expect(!is_curve_fill_placement_allowed(false, true),
+           "Idle / ordinary notes must not enter curve fill");
+    expect(!is_curve_fill_placement_allowed(true, false),
+           "non-Scratch hold must not enter curve fill");
+    expect(!is_curve_fill_placement_allowed(false, false),
+           "idle non-scratch must not enter curve fill");
+
+    expect(is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Left, curve}),
+           "left down confirms");
+    expect(!is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Right, curve}),
+           "right down does not confirm");
+    expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, curve}),
+           "right up confirms");
+    expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, curve}),
+           "left up does not confirm");
+    expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, {}}),
+           "right up without chord does not confirm");
+    expect(suppress_idle_placement_ghost(primary_only, false), "idle primary hides ghost");
+    expect(!suppress_idle_placement_ghost(primary_only, true), "drawing primary keeps ghost");
+    expect(!suppress_idle_placement_ghost(Modifiers{}, false), "idle without primary keeps ghost");
   }
 
   return failures == 0 ? 0 : 1;

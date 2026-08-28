@@ -230,8 +230,8 @@ void UiWindow::set_fullscreen(bool enable) {
     apply_aspect_ratio(false);
     glfwSetWindowMonitor(window_, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
   } else {
-    const int w = have_windowed_rect_ ? windowed_w_ : 1280;
-    const int h = have_windowed_rect_ ? windowed_h_ : 720;
+    const int w = have_windowed_rect_ ? windowed_w_ : kDefaultWindowWidth;
+    const int h = have_windowed_rect_ ? windowed_h_ : kDefaultWindowHeight;
     const int x = have_windowed_rect_ ? windowed_x_ : 80;
     const int y = have_windowed_rect_ ? windowed_y_ : 80;
     glfwSetWindowMonitor(window_, nullptr, x, y, w, h, 0);
@@ -250,8 +250,8 @@ void UiWindow::prepare_for_teardown() {
 #else
   // Exclusive fullscreen (glfwSetWindowMonitor) — leave video mode before Vulkan dies.
   if (is_fullscreen()) {
-    const int w = have_windowed_rect_ ? windowed_w_ : 1280;
-    const int h = have_windowed_rect_ ? windowed_h_ : 720;
+    const int w = have_windowed_rect_ ? windowed_w_ : kDefaultWindowWidth;
+    const int h = have_windowed_rect_ ? windowed_h_ : kDefaultWindowHeight;
     const int x = have_windowed_rect_ ? windowed_x_ : 80;
     const int y = have_windowed_rect_ ? windowed_y_ : 80;
     glfwSetWindowMonitor(window_, nullptr, x, y, w, h, 0);

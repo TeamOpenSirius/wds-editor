@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -70,6 +71,213 @@ bool parse_int(const std::string& text, int32_t& out) {
   } catch (...) {
     return false;
   }
+}
+
+bool parse_u64(const std::string& text, std::uint64_t& out) {
+  try {
+    const auto t = trim(text);
+    if (t.empty() || t[0] == '-') return false;
+    size_t idx = 0;
+    const unsigned long long v = std::stoull(t, &idx, 10);
+    if (idx == 0) return false;
+    out = static_cast<std::uint64_t>(v);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::string encode_curve_name_hex(const std::string& name) {
+  static const char kDigits[] = "0123456789abcdef";
+  std::string hex;
+  hex.resize(name.size() * 2);
+  for (std::size_t i = 0; i < name.size(); ++i) {
+    const unsigned char b = static_cast<unsigned char>(name[i]);
+    hex[i * 2] = kDigits[b >> 4];
+    hex[i * 2 + 1] = kDigits[b & 0xF];
+  }
+  return hex;
+}
+
+bool decode_curve_name_hex(const std::string& hex, std::string& out) {
+  if (hex.size() % 2 != 0) return false;
+  auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  std::string decoded;
+  decoded.reserve(hex.size() / 2);
+  for (std::size_t i = 0; i < hex.size(); i += 2) {
+    const int hi = nibble(hex[i]);
+    const int lo = nibble(hex[i + 1]);
+    if (hi < 0 || lo < 0) return false;
+    decoded.push_back(static_cast<char>((hi << 4) | lo));
+  }
+  out = std::move(decoded);
+  return true;
+}
+
+wds::chart_editor::EasingAlgorithm parse_easing_algorithm(const std::string& text) {
+  const auto t = trim(text);
+  if (t == "linear") return wds::chart_editor::EasingAlgorithm::Linear;
+  if (t == "poly") return wds::chart_editor::EasingAlgorithm::Poly;
+  if (t == "exp") return wds::chart_editor::EasingAlgorithm::Exp;
+  if (t == "sine") return wds::chart_editor::EasingAlgorithm::Sine;
+  return wds::chart_editor::EasingAlgorithm::Linear;
+}
+
+const char* easing_algorithm_to_string(wds::chart_editor::EasingAlgorithm algorithm) {
+  switch (algorithm) {
+    case wds::chart_editor::EasingAlgorithm::Poly:
+      return "poly";
+    case wds::chart_editor::EasingAlgorithm::Exp:
+      return "exp";
+    case wds::chart_editor::EasingAlgorithm::Sine:
+      return "sine";
+    case wds::chart_editor::EasingAlgorithm::Linear:
+    default:
+      return "linear";
+  }
+}
+
+wds::chart_editor::EasingDirection parse_easing_direction(const std::string& text) {
+  const auto t = trim(text);
+  if (t == "in") return wds::chart_editor::EasingDirection::In;
+  if (t == "out") return wds::chart_editor::EasingDirection::Out;
+  if (t == "inout") return wds::chart_editor::EasingDirection::InOut;
+  if (t == "outin") return wds::chart_editor::EasingDirection::OutIn;
+  return wds::chart_editor::EasingDirection::In;
+}
+
+const char* easing_direction_to_string(wds::chart_editor::EasingDirection direction) {
+  switch (direction) {
+    case wds::chart_editor::EasingDirection::Out:
+      return "out";
+    case wds::chart_editor::EasingDirection::InOut:
+      return "inout";
+    case wds::chart_editor::EasingDirection::OutIn:
+      return "outin";
+    case wds::chart_editor::EasingDirection::In:
+    default:
+      return "in";
+  }
+}
+
+struct CurveTemplateSlot {
+  std::uint64_t id = 0;
+  bool has_id = false;
+  std::string name;
+  bool has_name = false;
+  wds::chart_editor::EasingAlgorithm algorithm = wds::chart_editor::EasingAlgorithm::Linear;
+  bool has_algorithm = false;
+  double parameter = 0.0;
+  bool has_parameter = false;
+};
+
+struct CurveLoadState {
+  bool has_count = false;
+  int32_t count = 0;
+  bool has_selected = false;
+  std::uint64_t selected_id = 0;
+  bool has_direction = false;
+  wds::chart_editor::EasingDirection direction = wds::chart_editor::EasingDirection::In;
+  std::unordered_map<int32_t, CurveTemplateSlot> slots;
+};
+
+bool parse_curve_template_index_field(const std::string& key, int32_t& index, std::string& field) {
+  static const std::string kPrefix = "curve_template_";
+  if (key.rfind(kPrefix, 0) != 0) return false;
+  const std::string rest = key.substr(kPrefix.size());
+  const auto us = rest.find('_');
+  if (us == std::string::npos || us == 0) return false;
+  const std::string idx_s = rest.substr(0, us);
+  if (idx_s.find_first_not_of("0123456789") != std::string::npos) return false;
+  try {
+    size_t n = 0;
+    const long v = std::stol(idx_s, &n, 10);
+    if (n != idx_s.size() || v < 0) return false;
+    index = static_cast<int32_t>(v);
+    field = rest.substr(us + 1);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+void apply_curve_key(CurveLoadState& state, const std::string& key, const std::string& value) {
+  if (key == "curve_template_count") {
+    int32_t v = 0;
+    if (parse_int(value, v)) {
+      state.has_count = true;
+      state.count = std::clamp(v, 0, static_cast<int32_t>(kMaxCurveTemplates));
+    }
+    return;
+  }
+  if (key == "curve_selected_template_id") {
+    std::uint64_t v = 0;
+    if (parse_u64(value, v)) {
+      state.has_selected = true;
+      state.selected_id = v;
+    }
+    return;
+  }
+  if (key == "curve_selected_direction") {
+    state.has_direction = true;
+    state.direction = parse_easing_direction(value);
+    return;
+  }
+  int32_t index = 0;
+  std::string field;
+  if (!parse_curve_template_index_field(key, index, field)) return;
+  if (index < 0 || static_cast<std::size_t>(index) >= kMaxCurveTemplates) return;
+  CurveTemplateSlot& slot = state.slots[index];
+  if (field == "id") {
+    std::uint64_t v = 0;
+    if (parse_u64(value, v)) {
+      slot.has_id = true;
+      slot.id = v;
+    }
+  } else if (field == "name_hex") {
+    slot.has_name = true;
+    std::string decoded;
+    if (decode_curve_name_hex(trim(value), decoded)) {
+      slot.name = std::move(decoded);
+    } else {
+      slot.name.clear();
+    }
+  } else if (field == "algorithm") {
+    slot.has_algorithm = true;
+    slot.algorithm = parse_easing_algorithm(value);
+  } else if (field == "parameter") {
+    double v = 0.0;
+    if (parse_double(value, v)) {
+      slot.has_parameter = true;
+      slot.parameter = v;
+    }
+  }
+}
+
+void apply_curve_load(EditorUiConfig& cfg, const CurveLoadState& state) {
+  if (state.has_count) {
+    const int32_t n = std::min(state.count, static_cast<int32_t>(kMaxCurveTemplates));
+    cfg.curve_templates.clear();
+    cfg.curve_templates.resize(static_cast<std::size_t>(n));
+    for (int32_t i = 0; i < n; ++i) {
+      const auto it = state.slots.find(i);
+      if (it == state.slots.end()) continue;
+      const CurveTemplateSlot& slot = it->second;
+      CurveTemplate& tmpl = cfg.curve_templates[static_cast<std::size_t>(i)];
+      if (slot.has_id) tmpl.id = slot.id;
+      if (slot.has_name) tmpl.name = slot.name;
+      if (slot.has_algorithm) tmpl.algorithm = slot.algorithm;
+      if (slot.has_parameter) tmpl.parameter = slot.parameter;
+    }
+  }
+  if (state.has_selected) cfg.curve_selected_template_id = state.selected_id;
+  if (state.has_direction) cfg.curve_selected_direction = state.direction;
+  normalize_curve_config(cfg.curve_templates, cfg.curve_selected_template_id);
 }
 
 void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& value) {
@@ -243,6 +451,7 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
 
   EditorUiConfig cfg = out;
   ensure_shortcut_defaults(cfg);
+  CurveLoadState curve_state;
   std::istringstream in(bytes);
   std::string line;
   while (std::getline(in, line)) {
@@ -255,10 +464,27 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
     const std::string key = trim(line.substr(0, colon));
     const std::string value = trim(line.substr(colon + 1));
     if (key.empty()) continue;
-    apply_key(cfg, key, value);
+    if (key.rfind("curve_", 0) == 0) {
+      apply_curve_key(curve_state, key, value);
+    } else {
+      apply_key(cfg, key, value);
+    }
   }
+  apply_curve_load(cfg, curve_state);
   out = cfg;
   return true;
+}
+
+void capture_curve_template_state(const EditorUiConfig& cfg, CurveTemplateUiState& state) {
+  state.templates = cfg.curve_templates;
+  state.selected_id = cfg.curve_selected_template_id;
+  state.direction = cfg.curve_selected_direction;
+}
+
+void apply_curve_template_state(EditorUiConfig& cfg, const CurveTemplateUiState& state) {
+  cfg.curve_templates = state.templates;
+  cfg.curve_selected_template_id = state.selected_id;
+  cfg.curve_selected_direction = state.direction;
 }
 
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
@@ -314,6 +540,32 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
     }
     out << "shortcut_" << wds::interaction::editor_shortcut_id(id) << ": " << text << '\n';
   }
+
+  std::vector<CurveTemplate> templates = cfg.curve_templates;
+  if (templates.size() > kMaxCurveTemplates) {
+    templates.resize(kMaxCurveTemplates);
+  }
+  std::uint64_t selected_id = cfg.curve_selected_template_id;
+  for (auto& tmpl : templates) {
+    normalize_curve_template(tmpl);
+  }
+  if (selected_id == 0 || find_curve_template_by_id(templates, selected_id) == nullptr) {
+    selected_id = 0;
+  }
+  out << "curve_template_count: " << templates.size() << '\n';
+  for (std::size_t i = 0; i < templates.size(); ++i) {
+    const CurveTemplate& tmpl = templates[i];
+    char parameter[64];
+    std::snprintf(parameter, sizeof(parameter), "%.17g", tmpl.parameter);
+    out << "curve_template_" << i << "_id: " << tmpl.id << '\n'
+        << "curve_template_" << i << "_name_hex: " << encode_curve_name_hex(tmpl.name) << '\n'
+        << "curve_template_" << i << "_algorithm: " << easing_algorithm_to_string(tmpl.algorithm)
+        << '\n'
+        << "curve_template_" << i << "_parameter: " << parameter << '\n';
+  }
+  out << "curve_selected_template_id: " << selected_id << '\n'
+      << "curve_selected_direction: " << easing_direction_to_string(cfg.curve_selected_direction)
+      << '\n';
 
   return wds::chart_editor::write_text_atomic(path, out.str()).error ==
          wds::chart_editor::SerializeError::Ok;

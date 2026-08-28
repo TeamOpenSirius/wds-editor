@@ -52,7 +52,11 @@ void Dropdown::set_items(std::vector<std::string> items) {
 }
 
 void Dropdown::set_selected_index(int index) noexcept {
-  if (index < 0 || index >= static_cast<int>(items_.size())) {
+  if (index < 0) {
+    selected_index_ = -1;
+    return;
+  }
+  if (index >= static_cast<int>(items_.size())) {
     selected_index_ = items_.empty() ? -1 : 0;
     return;
   }
@@ -60,9 +64,8 @@ void Dropdown::set_selected_index(int index) noexcept {
 }
 
 const std::string& Dropdown::selected_label() const {
-  static const std::string kEmpty;
   if (selected_index_ < 0 || selected_index_ >= static_cast<int>(items_.size())) {
-    return kEmpty;
+    return placeholder_;
   }
   return items_[static_cast<std::size_t>(selected_index_)];
 }

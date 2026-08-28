@@ -9,6 +9,9 @@ struct GLFWwindow;
 
 namespace wds::ui {
 
+inline constexpr int kDefaultWindowWidth = 1280;
+inline constexpr int kDefaultWindowHeight = 800;
+
 class UiWindow {
  public:
   // Return false to abort the close (GLFW close flag is cleared).
@@ -65,8 +68,8 @@ class UiWindow {
   bool have_windowed_rect_ = false;
   int windowed_x_ = 80;
   int windowed_y_ = 80;
-  int windowed_w_ = 1280;
-  int windowed_h_ = 720;
+  int windowed_w_ = kDefaultWindowWidth;
+  int windowed_h_ = kDefaultWindowHeight;
 };
 
 }  // namespace wds::ui

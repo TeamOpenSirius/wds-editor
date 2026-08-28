@@ -68,19 +68,52 @@ EditorToolbar::EditorToolbar(EditorSession& session, ChartEditPanel& edit)
     : session_(session), edit_(edit) {
   using wds::interaction::Icon;
 
-  const std::array actions = {
-      std::pair{Icon::Open, Action::Open},         std::pair{Icon::Save, Action::Save},
-      std::pair{Icon::Import, Action::Import},     std::pair{Icon::Export, Action::Export},
-      std::pair{Icon::Settings, Action::Settings}, std::pair{Icon::Music, Action::Music},
-      std::pair{Icon::Undo, Action::Undo},         std::pair{Icon::Redo, Action::Redo},
+  const auto icon_for = [](EditorToolbarAction spec) {
+    switch (spec) {
+      case EditorToolbarAction::Open:
+        return Icon::Open;
+      case EditorToolbarAction::Save:
+        return Icon::Save;
+      case EditorToolbarAction::Import:
+        return Icon::Import;
+      case EditorToolbarAction::Export:
+        return Icon::Export;
+      case EditorToolbarAction::Music:
+        return Icon::Music;
+      case EditorToolbarAction::Settings:
+        return Icon::Settings;
+      case EditorToolbarAction::CurveTemplates:
+      case EditorToolbarAction::Check:
+        break;
+    }
+    return Icon::None;
   };
-  const std::array<const char*, 8> action_tips = {
-      "打开工程", "保存工程", "导入谱面（只读）", "导出谱面",
-      "编辑器设置", "导入音乐", "撤销", "重做"};
-  for (std::size_t i = 0; i < actions.size(); ++i) {
-    auto button = std::make_unique<IconButton>(actions[i].first);
-    button->set_tooltip(action_tips[i]);
-    button->on_click([this, action = actions[i].second] { run(action); });
+  const auto run_for = [](EditorToolbarAction spec) {
+    switch (spec) {
+      case EditorToolbarAction::Open:
+        return Action::Open;
+      case EditorToolbarAction::Save:
+        return Action::Save;
+      case EditorToolbarAction::Import:
+        return Action::Import;
+      case EditorToolbarAction::Export:
+        return Action::Export;
+      case EditorToolbarAction::Music:
+        return Action::Music;
+      case EditorToolbarAction::CurveTemplates:
+        return Action::CurveTemplates;
+      case EditorToolbarAction::Check:
+        return Action::Check;
+      case EditorToolbarAction::Settings:
+        return Action::Settings;
+    }
+    return Action::Open;
+  };
+  for (std::size_t i = 0; i < kEditorToolbarActionOrder.size(); ++i) {
+    const auto spec = kEditorToolbarActionOrder[i];
+    auto button = std::make_unique<IconButton>(icon_for(spec));
+    button->set_tooltip(kEditorToolbarTooltips[i]);
+    button->on_click([this, action = run_for(spec)] { run(action); });
     action_buttons_[i] = button.get();
     add_child(std::move(button));
   }
@@ -192,6 +225,31 @@ EditorToolbar::EditorToolbar(EditorSession& session, ChartEditPanel& edit)
   split_width_checkbox_ = split_follow.get();
   add_child(std::move(split_follow));
 
+  curve_controller_.set_on_changed([this](const CurveFillSelection& selection) {
+    if (on_curve_fill_changed_) on_curve_fill_changed_(selection);
+    notify_persist();
+  });
+  auto curve = std::make_unique<wds::interaction::Dropdown>();
+  curve->set_placeholder(kEmptyCurveTemplateLabel);
+  curve->set_opens_upward(true);
+  curve->on_select([this](int index, const std::string&) {
+    if (curve_state_ == nullptr) return;
+    curve_controller_.select_dropdown_index(*curve_state_, index);
+    apply_curve_view();
+  });
+  curve_dropdown_ = curve.get();
+  add_child(std::move(curve));
+  for (int i = 0; i < 4; ++i) {
+    auto button = std::make_unique<wds::interaction::Button>(kCurveDirectionLabels[static_cast<std::size_t>(i)]);
+    button->on_click([this, i] {
+      if (curve_state_ == nullptr) return;
+      curve_controller_.select_direction_index(*curve_state_, i);
+      apply_curve_view();
+    });
+    direction_buttons_[static_cast<std::size_t>(i)] = button.get();
+    add_child(std::move(button));
+  }
+
   const std::array convert_actions = {
       Action::ConvertTap,        Action::ConvertCritical,   Action::ConvertHoldStart,
       Action::ConvertHold,       Action::ConvertFlickLeft,  Action::ConvertFlick,
@@ -265,11 +323,9 @@ void EditorToolbar::load_action_icons(wds::renderer::VulkanRenderer& vulkan,
   if (!icons_directory_.empty()) {
     const fs::path dir = wds::common::path_from_utf8(icons_directory_);
     // Matches icons/*.svg (import-audio replaces the old music.png).
-    const std::array<const char*, 8> names = {"open",     "save",         "import", "export",
-                                              "settings", "import-audio", "undo",   "redo"};
-    for (std::size_t i = 0; i < names.size(); ++i) {
-      const fs::path svg = dir / (std::string(names[i]) + ".svg");
-      const fs::path png = dir / (std::string(names[i]) + ".png");
+    for (std::size_t i = 0; i < kEditorToolbarIconStems.size(); ++i) {
+      const fs::path svg = dir / (std::string(kEditorToolbarIconStems[i]) + ".svg");
+      const fs::path png = dir / (std::string(kEditorToolbarIconStems[i]) + ".png");
       wds::renderer::TextureInfo tex{};
       const std::string svg_utf8 = wds::common::path_to_utf8(svg);
       const std::string png_utf8 = wds::common::path_to_utf8(png);
@@ -368,7 +424,6 @@ void EditorToolbar::apply_convert_skins() {
 
 void EditorToolbar::run(Action action) {
   using wds::chart_editor::NoteType;
-  auto& engine = session_.engine();
   switch (action) {
     case Action::Open:
       if (on_open_) {
@@ -431,11 +486,11 @@ void EditorToolbar::run(Action action) {
         session_.report_status("导入音乐已取消", StatusLevel::Info);
       }
       break;
-    case Action::Undo:
-      engine.undo();
+    case Action::CurveTemplates:
+      if (on_curve_templates_) on_curve_templates_();
       break;
-    case Action::Redo:
-      engine.redo();
+    case Action::Check:
+      if (on_check_) on_check_();
       break;
     case Action::ConvertTap:
       edit_.convert_selected(NoteType::Normal);
@@ -492,6 +547,33 @@ void EditorToolbar::sync_checkboxes() const {
   }
 }
 
+void EditorToolbar::apply_curve_view() const {
+  if (curve_dropdown_ == nullptr) return;
+  auto* dropdown = static_cast<wds::interaction::Dropdown*>(curve_dropdown_);
+  dropdown->set_items(curve_controller_.dropdown_labels());
+  dropdown->set_selected_index(curve_controller_.selected_dropdown_index());
+  const int selected_dir = curve_controller_.selected_direction_index();
+  for (int i = 0; i < 4; ++i) {
+    auto* button = static_cast<wds::interaction::Button*>(direction_buttons_[static_cast<std::size_t>(i)]);
+    if (button == nullptr) continue;
+    button->set_tone(i == selected_dir ? wds::interaction::ButtonTone::Confirm
+                                       : wds::interaction::ButtonTone::Default);
+  }
+}
+
+void EditorToolbar::sync_curve_controls() const {
+  if (curve_state_ == nullptr) return;
+  curve_controller_.refresh_from(*curve_state_);
+  apply_curve_view();
+}
+
+void EditorToolbar::refresh_curve_controls() { sync_curve_controls(); }
+
+CurveFillSelection EditorToolbar::curve_fill_selection() const {
+  if (curve_state_ == nullptr) return {};
+  return make_curve_fill_selection(*curve_state_);
+}
+
 void EditorToolbar::notify_persist() const {
   if (on_persist_) on_persist_();
 }
@@ -504,6 +586,7 @@ void EditorToolbar::apply_config(const EditorUiConfig& cfg) {
   edit_.set_split_width_follow(cfg.split_width_follow);
   sync_numeric_fields();
   sync_checkboxes();
+  sync_curve_controls();
 }
 
 void EditorToolbar::capture_config(EditorUiConfig& cfg) const {
@@ -523,21 +606,27 @@ void EditorToolbar::layout(const wds::interaction::Rect& parent_bounds) {
   ensure_action_icons_resolution(b.w);
 
   const float half_w = std::max(1.0f, (b.w - pad * 2.0f - gap) * 0.5f);
-  const float icon = estimate_toolbar_icon_px(b.w);
+
+  const auto cols = compute_toolbar_control_layout(b.w);
+  const float u0 = pause_at_current_checkbox_ != nullptr
+                       ? toolbar_checkbox_required_width(
+                             static_cast<wds::interaction::Checkbox*>(pause_at_current_checkbox_)
+                                 ->label())
+                       : 0.0f;
+  const float u1 = split_width_checkbox_ != nullptr
+                       ? toolbar_checkbox_required_width(
+                             static_cast<wds::interaction::Checkbox*>(split_width_checkbox_)->label())
+                       : 0.0f;
+  const bool stacked = toolbar_checkboxes_need_stack(cols, u0, u1);
+  const auto vert = compute_toolbar_control_vertical(b.w, b.h, stacked);
+  const float icon = vert.icon;
   const float pitch = icon + gap;
   const float grid_h = icon * 2.0f + gap;
-  const float icon_block_h = grid_h + gap;
-  const float ctrl_y0 = icon_block_h;
-  const float ctrl_h_avail = std::max(1.0f, b.h - ctrl_y0);
-
-  // 3 rows: free height split evenly across top / gap / gap / bottom (4 slots).
-  constexpr float kRows = 3.0f;
-  constexpr float kSlots = kRows + 1.0f;
-  const float free = std::max(0.0f, ctrl_h_avail - ctrl_h * kRows);
-  const float slot = free / kSlots;
-  const float y_a = ctrl_y0 + slot;
-  const float y_b = y_a + ctrl_h + slot;
-  const float y_c = y_b + ctrl_h + slot;
+  const float icon_block_h = vert.icon_block_h;
+  const float y_a = vert.y_delay;
+  const float y_b = vert.y_range;
+  const float y_curve = vert.y_curve;
+  const float y_c = vert.y_checkbox;
 
   const auto place_icon_grid = [&](float x0, std::array<wds::interaction::Widget*, 8>& buttons) {
     const float grid_w = icon * 4.0f + gap * 3.0f;
@@ -553,20 +642,14 @@ void EditorToolbar::layout(const wds::interaction::Rect& parent_bounds) {
   place_icon_grid(pad, action_buttons_);
   place_icon_grid(pad + half_w + gap, convert_buttons_);
 
-  // Two equal horizontal halves; each group's label+cluster (and checkbox) centers in its half.
-  const float label_w = th::kLabelW4;
+  const float label_w = cols.label_w;
   const float step_w = th::kStepButtonW;
-  float cluster_w = th::kControlClusterW;
-  const float full_w = std::max(1.0f, b.w - pad * 2.0f);
-  const float col_w = std::max(1.0f, (full_w - gap) * 0.5f);
-  while (label_w + cluster_w > col_w && cluster_w > th::px(60.0f)) {
-    cluster_w -= th::px(2.0f);
-  }
+  const float cluster_w = cols.cluster_w;
   const float group_w = label_w + cluster_w;
-  const float col0 = pad + std::max(0.0f, (col_w - group_w) * 0.5f);
-  const float col1 = pad + col_w + gap + std::max(0.0f, (col_w - group_w) * 0.5f);
-  const float field_in_step = std::max(th::px(32.0f), cluster_w - step_w * 2.0f - gap * 2.0f);
-  const float field_in_chart = std::max(th::px(32.0f), cluster_w - step_w - gap);
+  const float col0 = cols.col_x[0] + std::max(0.0f, (cols.col_w[0] - group_w) * 0.5f);
+  const float col1 = cols.col_x[1] + std::max(0.0f, (cols.col_w[1] - group_w) * 0.5f);
+  const float field_in_step = cols.field_in_step;
+  const float field_in_chart = cols.field_in_chart;
 
   delay_field_->set_bounds({col0 + label_w, y_a, cluster_w, ctrl_h});
   chart_dropdown_->set_bounds({col1 + label_w, y_a, field_in_chart, ctrl_h});
@@ -584,25 +667,22 @@ void EditorToolbar::layout(const wds::interaction::Rect& parent_bounds) {
   place_step(col0, tick_minus_, tick_combo_, tick_plus_);
   place_step(col1, division_minus_, division_combo_, division_plus_);
 
-  // Each checkbox+caption centers in the same half as its input column.
-  wds::interaction::UiPainter measure_painter;
-  auto unit_w = [&](wds::interaction::Widget* w) {
-    auto* cb = static_cast<wds::interaction::Checkbox*>(w);
-    const float side = std::clamp(ctrl_h * 0.72f, th::px(9.0f), th::px(14.0f));
-    return side + th::px(5.0f) + measure_painter.measure_text(cb->label(), th::kFontSizeMd).x +
-           th::px(4.0f);
-  };
-  const float u0 = pause_at_current_checkbox_ ? unit_w(pause_at_current_checkbox_) : 0.0f;
-  const float u1 = split_width_checkbox_ ? unit_w(split_width_checkbox_) : 0.0f;
-  const float half0_x = pad;
-  const float half1_x = pad + col_w + gap;
+  const auto curve_row = compute_toolbar_curve_row_layout(cols, y_curve, ctrl_h);
+  if (curve_dropdown_ != nullptr) {
+    curve_dropdown_->set_bounds(curve_row.dropdown);
+  }
+  for (int i = 0; i < 4; ++i) {
+    auto* button = direction_buttons_[static_cast<std::size_t>(i)];
+    if (button == nullptr) continue;
+    button->set_bounds(curve_row.dirs[static_cast<std::size_t>(i)]);
+  }
+
+  const auto boxes = compute_toolbar_checkbox_layout(cols, u0, u1, y_c, ctrl_h);
   if (pause_at_current_checkbox_ != nullptr) {
-    pause_at_current_checkbox_->set_bounds(
-        {half0_x + std::max(0.0f, (col_w - u0) * 0.5f), y_c, u0, ctrl_h});
+    pause_at_current_checkbox_->set_bounds({boxes.x0, boxes.y0, boxes.w0, boxes.h0});
   }
   if (split_width_checkbox_ != nullptr) {
-    split_width_checkbox_->set_bounds(
-        {half1_x + std::max(0.0f, (col_w - u1) * 0.5f), y_c, u1, ctrl_h});
+    split_width_checkbox_->set_bounds({boxes.x1, boxes.y1, boxes.w1, boxes.h1});
   }
 
   Widget::layout(parent_bounds);
@@ -613,37 +693,38 @@ void EditorToolbar::paint(wds::interaction::UiPainter& painter) const {
   namespace th = wds::interaction::theme;
   painter.fill_rect(b, th::kSurface);
 
-  const float gap = th::kUiGap;
   const float pad = th::kUiPad;
   const float ctrl_h = th::kControlHeight;
   const float split_x = b.x + b.w * 0.5f;
 
-  const float icon = estimate_toolbar_icon_px(b.w);
-  const float grid_h = icon * 2.0f + gap;
-  const float icon_block_h = grid_h + gap;
-  const float ctrl_y0 = b.y + icon_block_h;
-  const float ctrl_h_avail = std::max(1.0f, b.h - icon_block_h);
-  constexpr float kRows = 3.0f;
-  constexpr float kSlots = kRows + 1.0f;
-  const float free = std::max(0.0f, ctrl_h_avail - ctrl_h * kRows);
-  const float slot = free / kSlots;
-  const float y_a = ctrl_y0 + slot;
-  const float y_b = y_a + ctrl_h + slot;
+  const auto paint_cols = compute_toolbar_control_layout(b.w);
+  const float paint_u0 =
+      pause_at_current_checkbox_ != nullptr
+          ? toolbar_checkbox_required_width(
+                static_cast<wds::interaction::Checkbox*>(pause_at_current_checkbox_)->label())
+          : 0.0f;
+  const float paint_u1 =
+      split_width_checkbox_ != nullptr
+          ? toolbar_checkbox_required_width(
+                static_cast<wds::interaction::Checkbox*>(split_width_checkbox_)->label())
+          : 0.0f;
+  const bool stacked = toolbar_checkboxes_need_stack(paint_cols, paint_u0, paint_u1);
+  const auto vert = compute_toolbar_control_vertical(b.w, b.h, stacked);
+  const auto curve_row = compute_toolbar_curve_row_layout(paint_cols, vert.y_curve, ctrl_h);
+  const float icon_block_h = vert.icon_block_h;
+  const float y_a = b.y + vert.y_delay;
+  const float y_b = b.y + vert.y_range;
 
   painter.fill_rect({split_x - 0.5f, b.y, 1.0f, icon_block_h}, th::kOutline);
   painter.fill_rect({b.x + pad, b.y + icon_block_h - 0.5f, std::max(1.0f, b.w - pad * 2.0f), 1.0f},
                     th::kOutline);
 
-  const float label_w = th::kLabelW4;
-  float cluster_w = th::kControlClusterW;
-  const float full_w = std::max(1.0f, b.w - pad * 2.0f);
-  const float col_w = std::max(1.0f, (full_w - gap) * 0.5f);
-  while (label_w + cluster_w > col_w && cluster_w > th::px(60.0f)) {
-    cluster_w -= th::px(2.0f);
-  }
+  const auto cols = paint_cols;
+  const float label_w = cols.label_w;
+  const float cluster_w = cols.cluster_w;
   const float group_w = label_w + cluster_w;
-  const float col0 = b.x + pad + std::max(0.0f, (col_w - group_w) * 0.5f);
-  const float col1 = b.x + pad + col_w + gap + std::max(0.0f, (col_w - group_w) * 0.5f);
+  const float col0 = b.x + cols.col_x[0] + std::max(0.0f, (cols.col_w[0] - group_w) * 0.5f);
+  const float col1 = b.x + cols.col_x[1] + std::max(0.0f, (cols.col_w[1] - group_w) * 0.5f);
 
   // Left-align tips in the label column so stacked labels share one left edge.
   painter.label({col0, y_a, label_w, ctrl_h}, "谱面延迟", th::kOnSurfaceMuted, 0.9f, false, 0.0f,
@@ -654,6 +735,9 @@ void EditorToolbar::paint(wds::interaction::UiPainter& painter) const {
                 true);
   painter.label({col1, y_b, label_w, ctrl_h}, "拍内分割", th::kOnSurfaceMuted, 0.9f, false, 0.0f,
                 true);
+  painter.label({b.x + curve_row.label.x, b.y + curve_row.label.y, curve_row.label.w,
+                 curve_row.label.h},
+                "曲线选择", th::kOnSurfaceMuted, 0.9f, false, 0.0f, true);
 
   const bool editable = !session_.read_only();
   action_buttons_[1]->set_enabled(editable);
@@ -666,6 +750,7 @@ void EditorToolbar::paint(wds::interaction::UiPainter& painter) const {
   for (auto* button : convert_buttons_) button->set_enabled(editable);
 
   sync_numeric_fields();
+  sync_curve_controls();
   auto* chart = static_cast<wds::interaction::Dropdown*>(chart_dropdown_);
   std::vector<std::string> charts;
   for (std::size_t i = 0; i < session_.chart_count(); ++i)
@@ -683,6 +768,10 @@ void EditorToolbar::paint(wds::interaction::UiPainter& painter) const {
   tick_combo_->paint(painter);
   division_combo_->paint(painter);
   chart_dropdown_->paint(painter);
+  if (curve_dropdown_ != nullptr) curve_dropdown_->paint(painter);
+  for (auto* button : direction_buttons_) {
+    if (button != nullptr) button->paint(painter);
+  }
   if (pause_at_current_checkbox_ != nullptr) pause_at_current_checkbox_->paint(painter);
   if (split_width_checkbox_ != nullptr) split_width_checkbox_->paint(painter);
 }

@@ -214,8 +214,9 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
                               const std::vector<EditGhost>& extra_ghosts,
                               const std::optional<wds::interaction::Rect>& marquee,
                               const wds::renderer::SkinCatalog* skin,
-                              bool show_beat_grid,
-                              int32_t highlighted_split_note_id) const {
+              bool show_beat_grid,
+              int32_t highlighted_split_note_id,
+              const std::vector<int32_t>& error_ticks) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f, 0.86f);
   const auto& grid = viewport.grid();
@@ -374,6 +375,17 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     if (note.id != highlighted_split_note_id) continue;
     paint_one_split(note, kSplitLineHighlightW, true);
+  }
+
+  // Over the beat/lane grid, under skinned notes (separate later batch).
+  if (!error_ticks.empty()) {
+    painter.reserve_rects(error_ticks.size());
+    for (int32_t tick : error_ticks) {
+      const float y = viewport.y_at(tick);
+      if (y < b.y || y > b.bottom()) continue;
+      painter.fill_rect({b.x, y - kChartErrorMarkerThickness * 0.5f, b.w, kChartErrorMarkerThickness},
+                        kChartErrorMarkerColor, 0.0f, 0.907f);
+    }
   }
 
   (void)selected;

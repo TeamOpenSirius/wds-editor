@@ -64,6 +64,9 @@ class Widget {
   virtual Widget* hit_test_popup_host(Vec2 point);
   // Full-screen (or region) modal that must receive hits instead of widgets behind it.
   virtual bool is_interaction_modal() const { return false; }
+  // WidgetRoot calls this on a visible interaction-modal child before shortcuts
+  // and before the focused widget. Return true to consume the key.
+  virtual bool intercept_modal_key_down(const KeyDownEvent&) { return false; }
   // When true, hit_test_popup(_host) must not search siblings behind this widget.
   virtual bool blocks_interaction_behind(Vec2 point) const;
   // Close popups that do not contain `point`. Returns true if any popup closed.

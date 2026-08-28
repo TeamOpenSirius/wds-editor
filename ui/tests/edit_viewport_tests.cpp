@@ -2,6 +2,7 @@
 #include "wds/ui/frame_diag.hpp"
 #include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/edit/edit_viewport.hpp"
+#include "wds/ui/window.hpp"
 #include "wds/ui/regions/preview/preview_hit_widget.hpp"
 #define WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
 #include "wds/ui/regions/preview/playback_preview.hpp"
@@ -101,6 +102,37 @@ int main() {
     assert(std::fabs(static_cast<float>(official.preview_content.width) /
                          std::max(1, official.preview_content.height) -
                      16.0f / 9.0f) < 0.03f);
+  }
+
+  assert(wds::ui::kDefaultWindowWidth == 1280);
+  assert(wds::ui::kDefaultWindowHeight == 800);
+  {
+    namespace th = wds::interaction::theme;
+    wds::ui::EditorLayouter layouter;
+    const auto def = layouter.compute(1280, 800);
+    assert(def.regions.preview.x == 0.0f);
+    assert(def.regions.toolbar.y + 0.01f >= def.regions.settings.y + def.regions.settings.h);
+    assert(def.regions.edit.x + 0.01f >= def.regions.preview.w);
+    assert(def.regions.status.y + 0.01f >= def.regions.edit.h);
+    const float left_w = def.regions.toolbar.w;
+    const float icon = wds::ui::estimate_toolbar_icon_px(left_w);
+    assert(icon > th::kMinIconPx + 0.5f);
+    const float icon_block = icon * 2.0f + th::kUiGap * 2.0f;
+    assert(def.regions.toolbar.h + 0.01f >= icon_block + th::kControlHeight * 4.0f);
+    assert(def.regions.toolbar.h + def.regions.settings.h + 0.01f >=
+           icon_block + th::kUiPad * 4.0f + th::kControlHeight * 7.0f);
+    const wds::ui::LeftColumnMetrics col =
+        wds::ui::compute_left_column_metrics(left_w, def.regions.settings.h + def.regions.toolbar.h);
+    assert(std::fabs(col.icon - icon) < 0.01f);
+    assert(std::fabs(col.icon_block_h - icon_block) < 0.01f);
+  }
+  {
+    wds::ui::EditorLayouter layouter;
+    const auto crushed = layouter.compute(1280, 480);
+    assert(crushed.regions.toolbar.h > 1.0f);
+    assert(crushed.regions.settings.h > 1.0f);
+    assert(crushed.regions.preview.bottom() <= crushed.regions.settings.y + 0.01f);
+    assert(crushed.regions.settings.bottom() <= crushed.regions.toolbar.y + 0.01f);
   }
 
   // Shared wheel math: 20 hectoms / 1x / +1 notch → -100 ms; scales with range and speed.

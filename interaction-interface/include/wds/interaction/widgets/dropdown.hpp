@@ -17,6 +17,9 @@ class Dropdown : public Widget {
   void set_items(std::vector<std::string> items);
   const std::vector<std::string>& items() const noexcept { return items_; }
 
+  void set_placeholder(std::string text) { placeholder_ = std::move(text); }
+  const std::string& placeholder() const noexcept { return placeholder_; }
+
   void set_selected_index(int index) noexcept;
   int selected_index() const noexcept { return selected_index_; }
   const std::string& selected_label() const;
@@ -42,6 +45,7 @@ class Dropdown : public Widget {
 
  private:
   std::vector<std::string> items_;
+  std::string placeholder_;
   int selected_index_ = -1;
   bool open_ = false;
   bool opens_upward_ = false;

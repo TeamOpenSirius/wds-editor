@@ -18,12 +18,11 @@ EditorLayoutResult EditorLayouter::compute(int framebuffer_width,
   const float work_h = std::max(1.0f, H - status_h);
   const float min_edit_w = th::kMinEditW;
   const float min_preview_w = th::kMinPreviewW;
-  // Reserve enough for icon grid + min top/bottom bands before fitting preview.
-  const float min_settings = pad * 2.0f + ctrl_h * 2.0f + gap * 2.0f;
-  const float min_ctrl = pad * 2.0f + ctrl_h * 3.0f + gap * 2.0f;
-  const float min_icon_est = th::kMinIconPx * 2.0f + gap * 2.0f;
-  const float min_below = min_icon_est + min_settings + min_ctrl;
-  const float max_preview_h = std::max(1.0f, work_h - min_below);
+  const auto min_below_squeeze = [&](float lw) {
+    const float icon = estimate_toolbar_icon_px(lw);
+    const float icon_block_h = icon * 2.0f + gap * 2.0f;
+    return icon_block_h + (pad * 2.0f + ctrl_h * 2.0f) + (pad * 2.0f + ctrl_h * 5.0f);
+  };
 
   const float fill = std::clamp(kStageWidthFill, 0.80f, 1.0f);
   const float scale = std::clamp(kPreviewScale, 1.0f, 1.2f);
@@ -31,6 +30,7 @@ EditorLayoutResult EditorLayouter::compute(int framebuffer_width,
   float edit_w = std::clamp(W * kEditFrac, min_edit_w, W * kMaxEditFrac);
   edit_w = std::min(edit_w, W - min_preview_w);
   float left_budget = std::max(min_preview_w, W - edit_w);
+  float max_preview_h = std::max(1.0f, work_h - min_below_squeeze(left_budget));
 
   float stage_w = left_budget * fill * scale;
   float stage_h = stage_w / kPreviewAspect;
@@ -39,16 +39,16 @@ EditorLayoutResult EditorLayouter::compute(int framebuffer_width,
     stage_w = stage_h * kPreviewAspect;
   }
 
-  float left_w = stage_w / fill;
+  // Hug the 16:9 stage when it is larger than the split, but never shrink the
+  // left column below the horizontal budget — height-capped stages letterbox.
+  float left_w = std::max(stage_w / fill, left_budget);
   left_w = std::clamp(left_w, min_preview_w, W - min_edit_w);
+  max_preview_h = std::max(1.0f, work_h - min_below_squeeze(left_w));
   stage_w = std::min(stage_w, left_w * fill);
   stage_h = stage_w / kPreviewAspect;
   if (stage_h > max_preview_h) {
     stage_h = max_preview_h;
     stage_w = stage_h * kPreviewAspect;
-    left_w = std::clamp(stage_w / fill, min_preview_w, W - min_edit_w);
-    stage_w = std::min(stage_w, left_w * fill);
-    stage_h = stage_w / kPreviewAspect;
   }
   edit_w = std::max(min_edit_w, W - left_w);
 

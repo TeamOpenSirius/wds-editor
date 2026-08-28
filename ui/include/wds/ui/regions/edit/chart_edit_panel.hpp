@@ -1,6 +1,7 @@
 #pragma once
 
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
+#include "wds/ui/toolbar_curve_selection.hpp"
 
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/edit_history.hpp>
@@ -97,6 +98,16 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Delete one note under the pointer; drops it from the selection if present.
   bool delete_note_at(wds::interaction::Vec2 point);
 
+  void set_curve_fill_selection(CurveFillSelection selection);
+  CurveFillSelection curve_fill_selection() const noexcept { return curve_fill_selection_; }
+  bool curve_mode_active() const noexcept { return curve_mode_active_; }
+  std::vector<wds::chart_editor::NotationNote> curve_ghost_notes() const;
+
+  // Persistent overlap markers. Replaces the previous set; empty ticks clear.
+  // Cleared when document content_generation differs from `content_generation`.
+  void set_error_ticks(std::vector<int32_t> ticks, uint64_t content_generation);
+  const std::vector<int32_t>& error_ticks() const noexcept;
+
   bool wants_focus() const override { return true; }
   // Timing / split modals own the keyboard so Space/Delete/arrows do not hit global chords.
   bool captures_keys() const override { return has_modal_popup(); }
@@ -176,7 +187,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Edit pane plus a small leave slop — beyond this Idle ghosts must hide.
   bool pointer_in_edit_ghost_zone(wds::interaction::Vec2 point) const;
   // Live-update hold_draft_ end (and chain lane) from pointer under current scroll.
-  void sync_hold_draft_to_pointer();
+  // WriteLivePrevCover also pushes the previous JumpScratch cover into the document
+  // (ordinary chain preview). LocalDraftOnly updates draft/ghost only.
+  enum class HoldDraftSync { LocalDraftOnly, WriteLivePrevCover };
+  void sync_hold_draft_to_pointer(
+      HoldDraftSync sync = HoldDraftSync::WriteLivePrevCover);
   void finish_place_gesture(const wds::interaction::PointerUpEvent& event);
   void finish_marquee(wds::interaction::Vec2 end);
   // Marquee in tick/lane space so scroll during drag can extend past the view.
@@ -230,11 +245,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool sync_chain_prev_tail_cover();
   // True when hold_draft_ + prev body can form a Sirius JumpScratch cover.
   bool chain_draft_cover_representable() const noexcept;
-  // Snap hold_draft_.lane onto a JumpScratch-legal chain lane near desired_lane_f,
-  // then sync the previous cover. If no legal lane exists for this width, keeps the
-  // chain armed, restores prev, and shows a disconnected-style ghost preview.
-  // Returns true when the live chain cover is active.
-  bool snap_hold_draft_chain_lane_and_sync(float desired_lane_f);
+  // Snap hold_draft_.lane onto a JumpScratch-legal chain lane near desired_lane_f.
+  // WriteLivePrevCover also writes/restores the previous cover in the document.
+  // LocalDraftOnly only updates local draft + link-preview flags.
+  // Returns true when the (local or live) chain cover is representable.
+  bool snap_hold_draft_chain_lane_and_sync(
+      float desired_lane_f, HoldDraftSync sync = HoldDraftSync::WriteLivePrevCover);
   wds::interaction::SwipeDirection update_place_swipe(wds::interaction::Vec2 pointer);
 
   bool handle_popup_pointer_down(const wds::interaction::PointerDownEvent& event);
@@ -261,11 +277,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool active_split_highlight_is_end() const noexcept;
   void layout_popup_rects() const;
   wds::interaction::Rect overlay_host_bounds() const;
+  void sync_error_ticks() const;
 
   wds::chart_editor::ChartEditorEngine& engine_;
   mutable EditViewport viewport_;
   ChartEditRenderer renderer_;
   const wds::renderer::SkinCatalog* skin_ = nullptr;
+  mutable std::vector<int32_t> error_ticks_;
+  mutable uint64_t error_ticks_generation_ = 0;
+  mutable bool error_ticks_armed_ = false;
   mutable wds::interaction::Rect left_gutter_{};
   mutable wds::interaction::Rect right_gutter_{};       // BPM / meter
   mutable wds::interaction::Rect measure_gutter_{};     // measure index (far right)
@@ -429,6 +449,18 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   HoldSelLayer hold_sel_layer_ = HoldSelLayer::None;
   int32_t hold_sel_body_id_ = -1;
+
+  void sync_curve_mode();
+  void refresh_curve_ghosts();
+  void cancel_curve_fill();
+  bool commit_curve_fill();
+
+  CurveFillSelection curve_fill_selection_{};
+  bool curve_mode_active_ = false;
+  bool curve_dismissed_ = false;
+  int32_t curve_origin_tick_ = 0;
+  int32_t curve_origin_lane_ = 0;
+  std::vector<GhostNote> curve_ghosts_{};
 };
 
 }  // namespace wds::ui
