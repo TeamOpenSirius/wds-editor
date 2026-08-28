@@ -958,8 +958,8 @@ void test_bass_sfx_sync_fixture() {
   engine.clear_scheduled_sfx();
   if (engine.play_music()) {
     const auto heard = engine.position();
-    const auto near = Microseconds{heard.count() + 2000};
-    const bool armed = engine.schedule_sfx_at(HitSfxClip::Perfect, near);
+    const auto near_target = Microseconds{heard.count() + 2000};
+    const bool armed = engine.schedule_sfx_at(HitSfxClip::Perfect, near_target);
     const size_t pending = engine.pending_sfx_sync_count();
     if (armed && pending == 0) {
       expect(armed, "CallbackConsumed returns true so UI keeps key");

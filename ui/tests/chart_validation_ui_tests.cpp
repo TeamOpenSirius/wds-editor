@@ -152,10 +152,10 @@ void test_renderer_draws_visible_markers_without_expiry() {
   CHECK_EQ(count_error_marker_rects(painter, viewport.y_at(0)), 1);
   CHECK_EQ(count_error_marker_rects(painter, viewport.y_at(480)), 1);
 
-  const std::vector<int32_t> far = {48000};
+  const std::vector<int32_t> offscreen_ticks = {48000};
   wds::interaction::UiPainter offscreen;
   renderer.paint(offscreen, viewport, timing, {}, preview, selected, std::nullopt, {}, std::nullopt,
-                 nullptr, true, -1, far);
+                 nullptr, true, -1, offscreen_ticks);
   int yellow = 0;
   for (const auto& rect : offscreen.rects()) {
     if (color_near(rect.color, kChartErrorMarkerColor) &&
