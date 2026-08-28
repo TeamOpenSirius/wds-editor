@@ -117,6 +117,15 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
   if (focused_ != nullptr && !focused_->visible()) {
     clear_focus();
   }
+  if (std::holds_alternative<KeyDownEvent>(event)) {
+    const auto& key = std::get<KeyDownEvent>(event);
+    for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
+      Widget* child = it->get();
+      if (child == nullptr || !child->visible() || !child->enabled()) continue;
+      if (!child->is_interaction_modal()) continue;
+      if (child->intercept_modal_key_down(key)) return;
+    }
+  }
   if (std::holds_alternative<KeyDownEvent>(event) && shortcuts != nullptr) {
     // Focused shortcut/text capture widgets must see keys before global chords.
     const bool capture_keys =

@@ -145,8 +145,15 @@ copy_fonts() {
   fi
 }
 
+strip_retired_toolbar_icons() {
+  local dest="$1"
+  rm -f "${dest}/undo.svg" "${dest}/redo.svg" "${dest}/undo.png" "${dest}/redo.png"
+}
+
 copy_icons() {
   local stage="$1" build_dir="$2"
+  # Wipe first: cp -a into an existing dest is a merge and can keep deleted undo/redo.
+  rm -rf "${stage}/icons"
   if [[ -d "${build_dir}/ui/icons" ]]; then
     mkdir -p "${stage}/icons"
     cp -a "${build_dir}/ui/icons/." "${stage}/icons/"
@@ -156,6 +163,7 @@ copy_icons() {
   else
     die "toolbar icons missing (expected build ui/icons or repo icons/)"
   fi
+  strip_retired_toolbar_icons "${stage}/icons"
 }
 
 # App icon derived from logo.png (see scripts/generate-app-icons.sh).
@@ -1364,6 +1372,7 @@ stage_win_debug() {
   if [[ ! -d "${stage}/icons" ]] || [[ -z "$(ls -A "${stage}/icons" 2>/dev/null || true)" ]]; then
     copy_icons "$stage" "$build_dir"
   fi
+  strip_retired_toolbar_icons "${stage}/icons"
   copy_bass_runtime "$stage" win-x86_64
 
   # Prefer already-extracted / staged vulkan-1.dll; otherwise download components zip.

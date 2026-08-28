@@ -38,6 +38,20 @@ bool is_place_button(PointerButton button) noexcept;
 bool is_left_button(PointerButton button) noexcept;
 bool is_right_button(PointerButton button) noexcept;
 
+// ScratchHold curve-fill chord: Shift + platform primary (Cmd on macOS, Ctrl
+// elsewhere). Alt, or a missing Shift/primary, must not activate.
+bool is_curve_fill_modifiers(const Modifiers& mods) noexcept;
+// Key-down edge for the chord. Repeat events are not a new transition.
+bool is_curve_fill_modifier_press(const KeyDownEvent& event) noexcept;
+// ChartEditPanel may enter curve fill only in PlaceHoldBody + ScratchHold.
+bool is_curve_fill_placement_allowed(bool place_hold_body, bool scratch_hold) noexcept;
+// Primary left-click while the chord is held; takes precedence over star/chain.
+bool is_curve_fill_confirm(const PointerDownEvent& event) noexcept;
+// Right-button release while the chord is held commits the same curve batch.
+bool is_curve_fill_confirm(const PointerUpEvent& event) noexcept;
+// Idle marquee (plain Primary) hides the placement ghost; drawing does not.
+bool suppress_idle_placement_ghost(const Modifiers& mods, bool note_drawing) noexcept;
+
 // --- Placement gestures -----------------------------------------------------
 
 enum class PlaceIntent {

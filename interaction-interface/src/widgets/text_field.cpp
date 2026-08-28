@@ -53,14 +53,20 @@ void TextField::paint_at(UiPainter& painter, float z) const {
   const float z_caret = std::min(z + 0.02f, kZMax);
 
   const Rect abs = absolute_bounds();
-  const bool focused = visual_state_ == WidgetState::Focused;
-  const Color fill = focused ? theme::kSurface : theme::kSurfaceVariant;
-  const Color outline = text_invalid() ? theme::kError : (focused ? theme::kPrimary : theme::kOutline);
+  const bool focused = enabled_ && visual_state_ == WidgetState::Focused;
+  const Color washed = theme::kSurfaceVariant.lerp(Color{0.92f, 0.92f, 0.94f, 1.0f}, 0.42f);
+  const Color fill = !enabled_ ? washed : (focused ? theme::kSurface : theme::kSurfaceVariant);
+  const Color outline = text_invalid() ? theme::kError
+                       : !enabled_    ? washed.lerp(theme::kOutline, 0.35f)
+                       : focused      ? theme::kPrimary
+                                      : theme::kOutline;
   painter.fill_rect_outline(abs, fill, outline, theme::kCornerRadiusSm, z_fill);
   // When focused, skip placeholder so the caret is not covered by muted hint text.
   const bool show_placeholder = text_.empty() && !focused;
   const std::string& shown = show_placeholder ? placeholder_ : text_;
-  const Color color = show_placeholder ? theme::kOnSurfaceMuted : theme::kOnSurface;
+  const Color color = !enabled_          ? theme::kOnSurfaceMuted.lerp(Color{1.0f, 1.0f, 1.0f, 1.0f}, 0.35f)
+                    : show_placeholder ? theme::kOnSurfaceMuted
+                                       : theme::kOnSurface;
   painter.label(abs, shown, color, z_text);
 
   if (focused) {

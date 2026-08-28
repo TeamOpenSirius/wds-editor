@@ -3,6 +3,7 @@
 #include <wds/core/chart_index.hpp>
 #include <wds/core/chart_serializer.hpp>
 #include <wds/core/chart_session.hpp>
+#include <wds/core/easing.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/edit_history.hpp>
 #include <wds/core/detail/start_ms_avl_index.hpp>
@@ -13,6 +14,7 @@
 #include <wds/core/official_chart.hpp>
 #include <wds/core/official_playfield.hpp>
 #include <wds/core/note_position_calculator.hpp>
+#include <wds/core/scratch_hold_curve.hpp>
 #include <wds/core/split_fade.hpp>
 #include <wds/core/split_lane_simulator.hpp>
 #include <wds/core/sus_chart.hpp>
@@ -5652,6 +5654,538 @@ void test_hold_combo_production_matches_reference_random() {
   }
 }
 
+MusicTiming make_curve_timing_4_4() {
+  MusicTiming timing;
+  timing.ticks_per_quarter = 480;
+  timing.bpm = 120.0;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(timing);
+  return timing;
+}
+
+void test_easing_formulas_and_directions() {
+  const double half_sqrt2 = 0.5 * std::sqrt(2.0);
+
+  CHECK(apply_easing(0.3, EasingAlgorithm::Linear, EasingDirection::In, 7.0) == 0.3);
+  CHECK(apply_easing(0.3, EasingAlgorithm::Linear, EasingDirection::Out, 7.0) == 0.3);
+  CHECK(apply_easing(0.3, EasingAlgorithm::Linear, EasingDirection::InOut, 7.0) == 0.3);
+  CHECK(apply_easing(0.3, EasingAlgorithm::Linear, EasingDirection::OutIn, 7.0) == 0.3);
+
+  CHECK(std::fabs(apply_easing(0.5, EasingAlgorithm::Poly, EasingDirection::In, 1.0) - 0.25) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.5, EasingAlgorithm::Exp, EasingDirection::In, 1.0) -
+                  (std::expm1(0.5) / std::expm1(1.0))) < 1e-15);
+  CHECK(std::fabs(apply_easing(0.5, EasingAlgorithm::Sine, EasingDirection::In, 9.0) -
+                  (1.0 - half_sqrt2)) < 1e-12);
+
+  CHECK(std::fabs(apply_easing(0.5, EasingAlgorithm::Poly, EasingDirection::Out, 1.0) - 0.75) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.25, EasingAlgorithm::Poly, EasingDirection::Out, 1.0) - 0.4375) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.5, EasingAlgorithm::Sine, EasingDirection::Out, 0.0) - half_sqrt2) <
+        1e-12);
+  CHECK(std::fabs(apply_easing(0.5, EasingAlgorithm::Exp, EasingDirection::Out, 1.0) -
+                  (1.0 - std::expm1(0.5) / std::expm1(1.0))) < 1e-15);
+
+  CHECK(std::fabs(apply_easing(0.25, EasingAlgorithm::Poly, EasingDirection::InOut, 1.0) - 0.125) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.75, EasingAlgorithm::Poly, EasingDirection::InOut, 1.0) - 0.875) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.25, EasingAlgorithm::Sine, EasingDirection::InOut, 0.0) -
+                  0.5 * (1.0 - half_sqrt2)) < 1e-12);
+  CHECK(std::fabs(apply_easing(0.75, EasingAlgorithm::Sine, EasingDirection::InOut, 0.0) -
+                  (1.0 - 0.5 * (1.0 - half_sqrt2))) < 1e-12);
+
+  CHECK(std::fabs(apply_easing(0.25, EasingAlgorithm::Poly, EasingDirection::OutIn, 1.0) - 0.375) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.75, EasingAlgorithm::Poly, EasingDirection::OutIn, 1.0) - 0.625) <
+        1e-15);
+  CHECK(std::fabs(apply_easing(0.25, EasingAlgorithm::Sine, EasingDirection::OutIn, 0.0) -
+                  0.5 * half_sqrt2) < 1e-12);
+  CHECK(std::fabs(apply_easing(0.75, EasingAlgorithm::Sine, EasingDirection::OutIn, 0.0) -
+                  (0.5 + 0.5 * (1.0 - half_sqrt2))) < 1e-12);
+}
+
+void test_easing_p0_and_invalid_parameters() {
+  const double t = 0.37;
+  const EasingDirection directions[] = {EasingDirection::In, EasingDirection::Out,
+                                        EasingDirection::InOut, EasingDirection::OutIn};
+  for (const auto direction : directions) {
+    CHECK(apply_easing(t, EasingAlgorithm::Poly, direction, 0.0) == t);
+    CHECK(apply_easing(t, EasingAlgorithm::Exp, direction, 0.0) == t);
+    CHECK(apply_easing(t, EasingAlgorithm::Linear, direction, 0.0) == t);
+  }
+
+  CHECK(apply_easing(t, EasingAlgorithm::Poly, EasingDirection::In,
+                     std::numeric_limits<double>::quiet_NaN()) == t);
+  CHECK(apply_easing(t, EasingAlgorithm::Exp, EasingDirection::Out,
+                     std::numeric_limits<double>::infinity()) == t);
+  CHECK(apply_easing(t, EasingAlgorithm::Poly, EasingDirection::InOut,
+                     -std::numeric_limits<double>::infinity()) == t);
+  CHECK(apply_easing(t, EasingAlgorithm::Exp, EasingDirection::OutIn, -4.0) == t);
+
+  const double at_20 = apply_easing(0.4, EasingAlgorithm::Poly, EasingDirection::In, 20.0);
+  CHECK(apply_easing(0.4, EasingAlgorithm::Poly, EasingDirection::In, 99.0) == at_20);
+  CHECK(apply_easing(0.4, EasingAlgorithm::Exp, EasingDirection::In, 25.0) ==
+        apply_easing(0.4, EasingAlgorithm::Exp, EasingDirection::In, 20.0));
+}
+
+void test_easing_endpoints_and_monotonicity() {
+  const EasingAlgorithm algorithms[] = {EasingAlgorithm::Linear, EasingAlgorithm::Poly,
+                                        EasingAlgorithm::Exp, EasingAlgorithm::Sine};
+  const EasingDirection directions[] = {EasingDirection::In, EasingDirection::Out,
+                                        EasingDirection::InOut, EasingDirection::OutIn};
+  const double parameters[] = {0.0, 1.0, 3.0, 20.0};
+  for (const auto algorithm : algorithms) {
+    for (const auto direction : directions) {
+      for (const double p : parameters) {
+        CHECK(apply_easing(0.0, algorithm, direction, p) == 0.0);
+        CHECK(apply_easing(1.0, algorithm, direction, p) == 1.0);
+        CHECK(apply_easing(-2.0, algorithm, direction, p) == 0.0);
+        CHECK(apply_easing(3.0, algorithm, direction, p) == 1.0);
+        CHECK(apply_easing(std::numeric_limits<double>::quiet_NaN(), algorithm, direction, p) ==
+              0.0);
+        double prev = apply_easing(0.0, algorithm, direction, p);
+        for (int i = 1; i <= 100; ++i) {
+          const double y = apply_easing(static_cast<double>(i) / 100.0, algorithm, direction, p);
+          CHECK(y + 1e-12 >= prev);
+          CHECK(y >= 0.0 && y <= 1.0);
+          prev = y;
+        }
+      }
+    }
+  }
+}
+
+void test_scratch_hold_curve_empty_ranges() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_center = 2.0;
+  req.end_center = 6.0;
+  req.width = 1;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+
+  req.start_tick = 100;
+  req.end_tick = 100;
+  CHECK(generate_scratch_hold_curve(req, timing).empty());
+  CHECK(scratch_hold_curve_boundaries(req.start_tick, req.end_tick, timing,
+                                      req.subdivisions_per_beat)
+            .empty());
+
+  req.end_tick = 40;
+  CHECK(generate_scratch_hold_curve(req, timing).empty());
+  CHECK(scratch_hold_curve_boundaries(100, 40, timing, 4).empty());
+}
+
+void test_scratch_hold_curve_meter_aware_boundaries() {
+  MusicTiming timing = make_curve_timing_4_4();
+  const auto on_grid = scratch_hold_curve_boundaries(0, 480, timing, 4);
+  CHECK_EQ(static_cast<int32_t>(on_grid.size()), 5);
+  CHECK_EQ(on_grid.front(), 0);
+  CHECK_EQ(on_grid[1], 120);
+  CHECK_EQ(on_grid[2], 240);
+  CHECK_EQ(on_grid[3], 360);
+  CHECK_EQ(on_grid.back(), 480);
+
+  const auto off_grid = scratch_hold_curve_boundaries(0, 200, timing, 4);
+  CHECK_EQ(off_grid.front(), 0);
+  CHECK_EQ(off_grid.back(), 200);
+  CHECK(std::find(off_grid.begin(), off_grid.end(), 120) != off_grid.end());
+  CHECK(std::find(off_grid.begin(), off_grid.end(), 240) == off_grid.end());
+
+  // Denominator 8 halves beat length (480 → 240). Numerator-only 3/4 would not.
+  const auto flat = scratch_hold_curve_boundaries(1800, 2200, timing, 4);
+  CHECK_EQ(static_cast<int32_t>(flat.size()), 5);
+  CHECK(flat == (std::vector<int32_t>{1800, 1920, 2040, 2160, 2200}));
+  CHECK(std::find(flat.begin(), flat.end(), 1980) == flat.end());
+
+  timing.points.push_back(TimingPoint{1920, 120.0, 4, 8, false, true});
+  normalize_timing_points(timing);
+  const std::vector<int32_t> meter_expected{1800, 1920, 1980, 2040, 2100, 2160, 2200};
+  const auto meter = scratch_hold_curve_boundaries(1800, 2200, timing, 4);
+  CHECK(meter == meter_expected);
+  CHECK(meter != flat);
+  CHECK(std::find(meter.begin(), meter.end(), 1980) != meter.end());
+  CHECK(std::find(meter.begin(), meter.end(), 2100) != meter.end());
+  CHECK(scratch_hold_curve_boundaries(1800, 2200, timing, 4) == meter);
+
+  ScratchHoldCurveRequest req;
+  req.start_tick = 1800;
+  req.end_tick = 2200;
+  req.start_center = 0.0;
+  req.end_center = 6.0;
+  req.width = 1;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  const auto generated = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(generated.size()), 6);
+  CHECK_EQ(generated[0].start_tick, 1800);
+  CHECK_EQ(generated[1].start_tick, 1920);
+  CHECK_EQ(generated[2].start_tick, 1980);
+  CHECK_EQ(generated.back().end_tick, 2200);
+  CHECK(generate_scratch_hold_curve(req, timing).size() == generated.size());
+}
+
+void test_scratch_hold_curve_lane_clamping() {
+  CHECK_EQ(scratch_hold_curve_left_lane(0.0, 1.5, 8.5, 2, 12, EasingAlgorithm::Linear,
+                                       EasingDirection::In, 0.0),
+           1);
+  CHECK_EQ(scratch_hold_curve_left_lane(1.0, 1.5, 8.5, 2, 12, EasingAlgorithm::Linear,
+                                       EasingDirection::In, 0.0),
+           8);
+  CHECK_EQ(scratch_hold_curve_left_lane(1.0, 1.5, 20.0, 2, 12, EasingAlgorithm::Linear,
+                                       EasingDirection::In, 0.0),
+           10);
+  CHECK_EQ(scratch_hold_curve_left_lane(0.0, -4.0, 3.0, 3, 12, EasingAlgorithm::Linear,
+                                       EasingDirection::In, 0.0),
+           0);
+  CHECK_EQ(scratch_hold_curve_left_lane(0.5, 0.0, 4.0, 1, 12, EasingAlgorithm::Poly,
+                                       EasingDirection::In, 1.0),
+           1);
+}
+
+void test_scratch_hold_curve_one_and_multiple_segments() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_tick = 15;
+  req.end_tick = 90;
+  req.start_center = 2.5;
+  req.end_center = 6.5;
+  req.width = 2;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  req.algorithm = EasingAlgorithm::Linear;
+  req.direction = EasingDirection::In;
+
+  const auto one = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(one.size()), 1);
+  CHECK_EQ(one[0].start_tick, 15);
+  CHECK_EQ(one[0].end_tick, 90);
+  CHECK_EQ(one[0].lane, 6);
+  CHECK_EQ(one[0].width, 2);
+  CHECK_EQ(one[0].scratch_length, 0);
+  const auto one_cover = get_scratch_end_lane_range(one[0]);
+  CHECK_EQ(one_cover.first, 6);
+  CHECK_EQ(one_cover.second, 7);
+
+  req.start_tick = 0;
+  req.end_tick = 480;
+  req.start_center = 0.0;
+  req.end_center = 4.0;
+  req.width = 1;
+  const auto many = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(many.size()), 4);
+  CHECK_EQ(many[0].lane, 0);
+  CHECK_EQ(many[1].lane, 1);
+  CHECK_EQ(many[2].lane, 3);
+  CHECK_EQ(many[3].lane, 4);
+  CHECK_EQ(many[0].start_tick, 0);
+  CHECK_EQ(many[0].end_tick, 120);
+  CHECK_EQ(many[3].end_tick, 480);
+  CHECK_EQ(many[3].scratch_length, 0);
+  for (size_t i = 0; i + 1 < many.size(); ++i) {
+    CHECK_EQ(many[i].end_tick, many[i + 1].start_tick);
+    NotationNote prev = many[i];
+    prev.scratch_length = 0;
+    NotationNote next = many[i + 1];
+    next.scratch_length = 0;
+    sync_scratch_chain_joint(prev, next);
+    CHECK_EQ(many[i].scratch_length, prev.scratch_length);
+  }
+
+  req.start_center = 2.5;
+  req.end_center = 6.5;
+  req.width = 2;
+  const auto wide = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(wide.size()), 4);
+  CHECK_EQ(wide[0].lane, 2);
+  CHECK_EQ(wide[1].lane, 3);
+  CHECK_EQ(wide[2].lane, 5);
+  CHECK_EQ(wide[3].lane, 6);
+  CHECK_EQ(wide.back().scratch_length, 0);
+  for (size_t i = 0; i + 1 < wide.size(); ++i) {
+    NotationNote prev = wide[i];
+    prev.scratch_length = 0;
+    NotationNote next = wide[i + 1];
+    next.scratch_length = 0;
+    sync_scratch_chain_joint(prev, next);
+    CHECK_EQ(wide[i].scratch_length, prev.scratch_length);
+  }
+}
+
+bool note_fields_eq(const NotationNote& a, const NotationNote& b) {
+  return a.id == b.id && a.start_tick == b.start_tick && a.end_tick == b.end_tick &&
+         a.note_type == b.note_type && a.lane == b.lane && a.width == b.width &&
+         a.gimmick_type == b.gimmick_type && a.scratch_length == b.scratch_length;
+}
+
+bool note_vectors_eq(const std::vector<NotationNote>& a, const std::vector<NotationNote>& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!note_fields_eq(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+int count_type_in(const std::vector<NotationNote>& notes, NoteType type) {
+  int n = 0;
+  for (const auto& note : notes) {
+    if (note.note_type == type) ++n;
+  }
+  return n;
+}
+
+NotationNote make_scratch_body(int32_t id, int32_t start, int32_t end, int32_t lane,
+                               int32_t width) {
+  NotationNote note;
+  note.id = id;
+  note.start_tick = start;
+  note.end_tick = end;
+  note.lane = lane;
+  note.width = width;
+  note.note_type = NoteType::ScratchHold;
+  return note;
+}
+
+void test_scratch_hold_curve_commit_rejects_empty() {
+  ScratchHoldCurveCommitInput input;
+  input.ticks_per_quarter = 480;
+  CHECK(!build_scratch_hold_curve_commit(input).has_value());
+}
+
+void test_scratch_hold_curve_commit_new_chain_head_and_tail() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_tick = 0;
+  req.end_tick = 480;
+  req.start_center = 0.0;
+  req.end_center = 4.0;
+  req.width = 1;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  const auto bodies = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(bodies.size()), 4);
+  CHECK_EQ(bodies.back().end_tick, 480);
+
+  ScratchHoldCurveCommitInput input;
+  input.generated_bodies = bodies;
+  input.include_head = true;
+  input.ticks_per_quarter = 480;
+  const auto commit = build_scratch_hold_curve_commit(input);
+  CHECK(commit.has_value());
+  CHECK(commit->before.empty());
+  CHECK_EQ(count_type_in(commit->after, NoteType::ScratchHold), 4);
+  CHECK_EQ(count_type_in(commit->after, NoteType::ScratchHoldStart), 1);
+  int32_t last_end = -1;
+  for (const auto& note : commit->after) {
+    if (note.note_type != NoteType::ScratchHold) continue;
+    last_end = std::max(last_end, note.end_tick);
+    CHECK(note.end_tick <= 480);
+  }
+  CHECK_EQ(last_end, 480);
+
+  ChartDocument doc;
+  doc.set_timing(timing);
+  EditHistory history;
+  CHECK(history.execute(
+      std::make_unique<SetNotesCommand>(commit->before, commit->after, "Place curve hold"), doc));
+  CHECK_EQ(history.can_undo(), true);
+  CHECK_EQ(history.can_redo(), false);
+  const auto after_notes = doc.notes();
+  CHECK(history.undo(doc));
+  CHECK(note_vectors_eq(doc.notes(), commit->before));
+  CHECK_EQ(history.can_undo(), false);
+  CHECK_EQ(history.can_redo(), true);
+  CHECK(history.redo(doc));
+  CHECK(note_vectors_eq(doc.notes(), after_notes));
+}
+
+void test_scratch_hold_curve_commit_extend_updates_prev_no_second_head() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  NotationNote prev = make_scratch_body(1, 0, 480, 2, 1);
+  NotationNote head;
+  head.id = 2;
+  head.start_tick = 0;
+  head.end_tick = 0;
+  head.lane = 2;
+  head.width = 1;
+  head.note_type = NoteType::ScratchHoldStart;
+
+  ScratchHoldCurveRequest req;
+  req.start_tick = 480;
+  req.end_tick = 960;
+  req.start_center = 2.0;
+  req.end_center = 6.0;
+  req.width = 1;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  const auto bodies = generate_scratch_hold_curve(req, timing);
+  CHECK(!bodies.empty());
+  CHECK_EQ(bodies.back().end_tick, 960);
+
+  ScratchHoldCurveCommitInput input;
+  input.notes = {head, prev};
+  input.generated_bodies = bodies;
+  input.previous_body_id = 1;
+  input.previous_body_original = prev;
+  input.include_head = false;
+  input.ticks_per_quarter = 480;
+  const auto commit = build_scratch_hold_curve_commit(input);
+  CHECK(commit.has_value());
+  CHECK_EQ(count_type_in(commit->after, NoteType::ScratchHoldStart), 1);
+  CHECK_EQ(count_type_in(commit->after, NoteType::ScratchHold),
+           1 + static_cast<int>(bodies.size()));
+
+  const NotationNote* updated_prev = nullptr;
+  for (const auto& note : commit->after) {
+    if (note.id == 1) updated_prev = &note;
+  }
+  CHECK(updated_prev != nullptr);
+  NotationNote expected_prev = prev;
+  sync_scratch_chain_joint(expected_prev, bodies.front());
+  CHECK_EQ(updated_prev->scratch_length, expected_prev.scratch_length);
+  CHECK(updated_prev->gimmick_type == expected_prev.gimmick_type);
+  const auto cover = get_scratch_end_lane_range(*updated_prev);
+  CHECK_EQ(cover.first, std::min(prev.lane, bodies.front().lane));
+  CHECK_EQ(cover.second, std::max(prev.end_lane(), bodies.front().end_lane()));
+
+  ChartDocument doc;
+  doc.set_timing(timing);
+  CHECK(doc.set_notes({head, prev}));
+  auto seeded = with_recomputed_hold_eighths(doc.notes(), prev, 480);
+  CHECK(count_type_in(seeded, NoteType::HoldEighth) > 0);
+  CHECK(doc.set_notes(seeded));
+  ScratchHoldCurveRequest exec_req = req;
+  exec_req.subdivisions_per_beat = 1;
+  input.notes = doc.notes();
+  input.generated_bodies = generate_scratch_hold_curve(exec_req, timing);
+  CHECK_EQ(static_cast<int32_t>(input.generated_bodies.size()), 1);
+  const auto exec_commit = build_scratch_hold_curve_commit(input);
+  CHECK(exec_commit.has_value());
+  CHECK(count_type_in(exec_commit->after, NoteType::HoldEighth) >
+        count_type_in(exec_commit->before, NoteType::HoldEighth));
+  EditHistory history;
+  CHECK(history.execute(std::make_unique<SetNotesCommand>(
+      exec_commit->before, exec_commit->after, "Place curve hold"),
+                        doc));
+  CHECK_EQ(history.can_undo(), true);
+  const auto after_exec = doc.notes();
+  CHECK(history.undo(doc));
+  CHECK(note_vectors_eq(doc.notes(), exec_commit->before));
+  CHECK_EQ(count_type_in(doc.notes(), NoteType::HoldEighth),
+           count_type_in(exec_commit->before, NoteType::HoldEighth));
+  CHECK(history.redo(doc));
+  CHECK(note_vectors_eq(doc.notes(), after_exec));
+  CHECK_EQ(count_type_in(doc.notes(), NoteType::HoldEighth),
+           count_type_in(after_exec, NoteType::HoldEighth));
+}
+
+void test_scratch_hold_curve_commit_hold_eighths_one_command() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_tick = 0;
+  req.end_tick = 960;
+  req.start_center = 0.0;
+  req.end_center = 0.0;
+  req.width = 1;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 1;
+  const auto bodies = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(bodies.size()), 2);
+
+  ScratchHoldCurveCommitInput input;
+  input.generated_bodies = bodies;
+  input.include_head = true;
+  input.ticks_per_quarter = 480;
+  const auto commit = build_scratch_hold_curve_commit(input);
+  CHECK(commit.has_value());
+  CHECK(count_type_in(commit->after, NoteType::HoldEighth) > 0);
+
+  ChartDocument doc;
+  doc.set_timing(timing);
+  EditHistory history;
+  CHECK(history.execute(
+      std::make_unique<SetNotesCommand>(commit->before, commit->after, "Place curve hold"), doc));
+  const auto after_notes = doc.notes();
+  const int eighths = count_note_type(doc, NoteType::HoldEighth);
+  CHECK(eighths > 0);
+  CHECK(history.undo(doc));
+  CHECK_EQ(count_note_type(doc, NoteType::HoldEighth), 0);
+  CHECK(note_vectors_eq(doc.notes(), commit->before));
+  CHECK(history.redo(doc));
+  CHECK_EQ(count_note_type(doc, NoteType::HoldEighth), eighths);
+  CHECK(note_vectors_eq(doc.notes(), after_notes));
+}
+
+void test_scratch_hold_curve_normalizes_hold_top_centers_not_mouse() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_tick = 0;
+  req.end_tick = 480;
+  req.start_center = 0.0;
+  req.end_center = 5.4;  // raw mouse; last hold snaps to lane 5
+  req.width = 1;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  req.algorithm = EasingAlgorithm::Linear;
+  req.direction = EasingDirection::In;
+
+  const auto notes = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(notes.size()), 4);
+  CHECK_EQ(notes.front().end_tick, 120);
+  CHECK_EQ(notes.back().end_tick, 480);
+  CHECK_EQ(notes.front().lane, 0);
+  CHECK_EQ(notes.back().lane, 5);
+
+  const double first_top_center = scratch_hold_lane_center(notes.front().lane, req.width);
+  const double last_top_center = scratch_hold_lane_center(notes.back().lane, req.width);
+  CHECK(std::abs(last_top_center - req.end_center) > 1e-6);
+
+  const int32_t first_top = notes.front().end_tick;
+  const int32_t last_top = notes.back().end_tick;
+  for (const auto& note : notes) {
+    const double t =
+        last_top == first_top
+            ? 1.0
+            : static_cast<double>(note.end_tick - first_top) /
+                  static_cast<double>(last_top - first_top);
+    CHECK_EQ(note.lane, scratch_hold_curve_left_lane(t, first_top_center, last_top_center,
+                                                    req.width, req.lane_count, req.algorithm,
+                                                    req.direction, req.parameter));
+  }
+
+  // Mouse-aimed lerp 0→5.4 puts body 2 at lane 4; hold-top lerp 0→5 puts it at 3.
+  CHECK_EQ(notes[1].lane, 2);
+  CHECK_EQ(notes[2].lane, 3);
+}
+
+void test_scratch_hold_curve_terminal_end_cap() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_tick = 0;
+  req.end_tick = 480;
+  req.start_center = 2.5;
+  req.end_center = 6.5;
+  req.width = 2;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  req.algorithm = EasingAlgorithm::Linear;
+  req.direction = EasingDirection::In;
+
+  const auto notes = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(notes.back().end_tick, 480);
+  CHECK_EQ(notes.back().scratch_length, 0);
+  const int32_t end_left =
+      scratch_hold_curve_left_lane(1.0, req.start_center, req.end_center, req.width, req.lane_count,
+                                   req.algorithm, req.direction, req.parameter);
+  CHECK_EQ(end_left, 6);
+  CHECK_EQ(notes.back().lane, 6);
+  const auto cover = get_scratch_end_lane_range(notes.back());
+  CHECK_EQ(cover.first, 6);
+  CHECK_EQ(cover.second, 7);
+}
+
 void test_public_mutation_generation_semantics_unchanged() {
   ChartDocument doc;
   doc.mark_saved();
@@ -5695,6 +6229,19 @@ int main() {
   test_snap_scratch_chain_next_lane_splits_illegal_zone();
   test_snap_scratch_hold_segment_lane_avoids_both_side_cover();
   test_sync_scratch_chain_joint_exact_union();
+  test_easing_formulas_and_directions();
+  test_easing_p0_and_invalid_parameters();
+  test_easing_endpoints_and_monotonicity();
+  test_scratch_hold_curve_empty_ranges();
+  test_scratch_hold_curve_meter_aware_boundaries();
+  test_scratch_hold_curve_lane_clamping();
+  test_scratch_hold_curve_one_and_multiple_segments();
+  test_scratch_hold_curve_normalizes_hold_top_centers_not_mouse();
+  test_scratch_hold_curve_terminal_end_cap();
+  test_scratch_hold_curve_commit_rejects_empty();
+  test_scratch_hold_curve_commit_new_chain_head_and_tail();
+  test_scratch_hold_curve_commit_extend_updates_prev_no_second_head();
+  test_scratch_hold_curve_commit_hold_eighths_one_command();
   test_scratch_hold_segment_horizontal_move_keeps_chain();
   test_scratch_chain_joint_direction();
   test_scratch_hold_chain_requires_exact_jump_scratch_cover();

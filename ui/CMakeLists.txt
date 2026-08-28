@@ -7,6 +7,8 @@ add_library(wds_ui STATIC
   src/startup_deps.cpp
   src/editor_session.cpp
   src/editor_ui_config.cpp
+  src/curve_template.cpp
+  src/toolbar_curve_selection.cpp
   src/timeline_wheel.cpp
   src/native_file_dialog.cpp
   src/layout/editor_layout.cpp
@@ -17,6 +19,7 @@ add_library(wds_ui STATIC
   src/regions/edit/edit_gutters.cpp
   src/regions/settings/preview_settings_panel.cpp
   src/regions/settings/width_slots_dialog.cpp
+  src/regions/settings/curve_templates_dialog.cpp
   src/regions/settings/export_choice_dialog.cpp
   src/regions/settings/chart_add_dialog.cpp
   src/regions/settings/unsaved_changes_dialog.cpp
@@ -80,10 +83,64 @@ target_include_directories(wds_ui_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 add_executable(wds_note_draw_order_tests tests/note_draw_order_tests.cpp)
 target_link_libraries(wds_note_draw_order_tests PRIVATE wds::chart_render wds::core)
 
+add_executable(wds_ui_config_tests
+  tests/editor_ui_config_tests.cpp
+  src/editor_ui_config.cpp
+  src/curve_template.cpp
+)
+target_link_libraries(wds_ui_config_tests PRIVATE wds::core wds::interaction)
+target_include_directories(wds_ui_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(MSVC)
+  target_compile_options(wds_ui_config_tests PRIVATE /utf-8)
+endif()
+
+add_executable(wds_curve_templates_dialog_tests
+  tests/curve_templates_dialog_tests.cpp
+  src/regions/settings/curve_templates_dialog.cpp
+  src/curve_template.cpp
+)
+target_link_libraries(wds_curve_templates_dialog_tests PRIVATE wds::core wds::interaction)
+target_include_directories(wds_curve_templates_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(MSVC)
+  target_compile_options(wds_curve_templates_dialog_tests PRIVATE /utf-8)
+endif()
+
+add_executable(wds_editor_toolbar_tests
+  tests/editor_toolbar_tests.cpp
+)
+target_link_libraries(wds_editor_toolbar_tests PRIVATE wds::ui)
+target_include_directories(wds_editor_toolbar_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(MSVC)
+  target_compile_options(wds_editor_toolbar_tests PRIVATE /utf-8)
+endif()
+
+add_executable(wds_chart_edit_panel_curve_tests
+  tests/chart_edit_panel_curve_tests.cpp
+)
+target_link_libraries(wds_chart_edit_panel_curve_tests PRIVATE wds::ui)
+target_include_directories(wds_chart_edit_panel_curve_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(MSVC)
+  target_compile_options(wds_chart_edit_panel_curve_tests PRIVATE /utf-8)
+endif()
+
+add_executable(wds_chart_validation_ui_tests
+  tests/chart_validation_ui_tests.cpp
+)
+target_link_libraries(wds_chart_validation_ui_tests PRIVATE wds::ui)
+target_include_directories(wds_chart_validation_ui_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(MSVC)
+  target_compile_options(wds_chart_validation_ui_tests PRIVATE /utf-8)
+endif()
+
 # Host ctest cannot execute foreign PE binaries; still build the test targets.
 if(NOT CMAKE_CROSSCOMPILING)
   add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
   add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
+  add_test(NAME wds_ui_config_tests COMMAND wds_ui_config_tests)
+  add_test(NAME wds_curve_templates_dialog_tests COMMAND wds_curve_templates_dialog_tests)
+  add_test(NAME wds_editor_toolbar_tests COMMAND wds_editor_toolbar_tests)
+  add_test(NAME wds_chart_edit_panel_curve_tests COMMAND wds_chart_edit_panel_curve_tests)
+  add_test(NAME wds_chart_validation_ui_tests COMMAND wds_chart_validation_ui_tests)
 else()
   message(STATUS "Skipping ctest registration for ui tests (cross build)")
 endif()
@@ -235,6 +292,7 @@ endif()
 set(_wds_icons_dir "${CMAKE_SOURCE_DIR}/icons")
 if(EXISTS "${_wds_icons_dir}/open.svg")
   add_custom_command(TARGET wds_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:wds_editor>/icons"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:wds_editor>/icons"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${_wds_icons_dir}" "$<TARGET_FILE_DIR:wds_editor>/icons"

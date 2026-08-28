@@ -63,6 +63,13 @@ class FontAtlas {
   const wds::renderer::TextureInfo& texture() const noexcept { return texture_; }
 
   Vec2 measure(const std::string& text, float pixel_size) const noexcept;
+  // Visible ink relative to the typographic line top used by build_quads.
+  // Returns false when there is no drawable ink (then top=0, bottom=pixel_size).
+  bool ink_vertical_bounds(const std::string& text, float pixel_size, float& ink_top,
+                           float& ink_bottom) const noexcept;
+  // Shared baseline shift for every string at `pixel_size` (not per-string ink).
+  // Positive moves the line down; typically a small negative optical correction.
+  float line_nudge(float pixel_size) const noexcept;
   void build_quads(const std::string& text, float x, float y, float pixel_size,
                    std::vector<GlyphQuad>& out) const;
 
@@ -76,7 +83,7 @@ class FontAtlas {
 
   struct BakedChar {
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    float xoff = 0, yoff = 0, xadvance = 0;
+    float xoff = 0, yoff = 0, y1off = 0, xadvance = 0;
   };
 
   struct FontInfo;
@@ -84,7 +91,8 @@ class FontAtlas {
   bool pack_codepoint(int codepoint);
   bool pack_codepoint_into(Slot slot, int codepoint);
   bool pack_codepoint_from(const FontInfo& face, float face_scale, int codepoint,
-                           std::unordered_map<int, BakedChar>& out);
+                           std::unordered_map<int, BakedChar>& out, bool mild_coverage);
+  void refresh_line_nudge();
   void try_load_fallback_font(const std::string& primary_path);
   struct GlyphRef {
     const BakedChar* c = nullptr;
@@ -123,6 +131,7 @@ class FontAtlas {
   bool pixels_dirty_ = false;
   bool dual_ = false;
   bool mild_sharpen_ = false;
+  float line_nudge_at_body_ = 0.0f;
 };
 
 }  // namespace wds::interaction

@@ -3,6 +3,9 @@
 
 add_library(wds_core STATIC
     src/notation.cpp
+    src/easing.cpp
+    src/scratch_hold_curve.cpp
+    src/chart_validation.cpp
     src/timing_map.cpp
     src/edit_grid.cpp
     src/edit_history.cpp
@@ -72,6 +75,18 @@ if(WDS_CORE_BUILD_TESTS)
       add_test(NAME wds_split_index_tests COMMAND wds_split_index_tests)
     else()
       message(STATUS "Skipping ctest registration for wds_split_index_tests (cross build)")
+    endif()
+
+    add_executable(wds_chart_validation_tests tests/chart_validation_tests.cpp)
+    target_link_libraries(wds_chart_validation_tests PRIVATE wds_core)
+    target_include_directories(wds_chart_validation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    if(MSVC)
+        target_compile_options(wds_chart_validation_tests PRIVATE /utf-8)
+    endif()
+    if(NOT CMAKE_CROSSCOMPILING)
+      add_test(NAME wds_chart_validation_tests COMMAND wds_chart_validation_tests)
+    else()
+      message(STATUS "Skipping ctest registration for wds_chart_validation_tests (cross build)")
     endif()
 endif()
 

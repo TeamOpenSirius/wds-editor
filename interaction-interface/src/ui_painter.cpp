@@ -196,17 +196,17 @@ std::string wrap_text_to_width(FontAtlas& font, const std::string& text, float p
 // One size for every wrap label in the same host rect — scale with the cell,
 // never shrink per string (long tips wrap instead).
 float resolve_wrapped_px(const Rect& bounds, float requested) {
-  if (requested > 0.0f) {
-    return requested;
-  }
-  return theme::tooltip_px_for_host(std::min(bounds.w, bounds.h));
+  const float raw =
+      requested > 0.0f ? requested : theme::tooltip_px_for_host(std::min(bounds.w, bounds.h));
+  // Snap to the tip bake bucket so NEAREST samples 1:1 instead of a soft scale.
+  return theme::tooltip_bake_bucket(raw);
 }
 
 void draw_centered_lines(UiPainter& painter, const Rect& bounds, const std::string& wrapped,
                          const Color& color, float z, float pixel_size) {
   auto& font = FontAtlas::instance();
   const Vec2 block = font.measure(wrapped, pixel_size);
-  float y = bounds.y + std::max(0.0f, (bounds.h - block.y) * 0.5f);
+  float y = bounds.y + std::max(0.0f, (bounds.h - block.y) * 0.5f) + font.line_nudge(pixel_size);
   std::size_t start = 0;
   while (start <= wrapped.size()) {
     const std::size_t end = wrapped.find('\n', start);
@@ -404,7 +404,7 @@ void UiPainter::label(const Rect& bounds, const std::string& text, const Color& 
     const Vec2 size = font.measure(text, px);
     const float x =
         left_align ? bounds.x + 2.0f : bounds.x + std::max(0.0f, (bounds.w - size.x) * 0.5f);
-    const float y = bounds.y + std::max(0.0f, (bounds.h - size.y) * 0.5f);
+    const float y = bounds.y + (bounds.h - size.y) * 0.5f + font.line_nudge(px);
     if (font.ready()) {
       this->text({x, y, bounds.w, bounds.h}, text, color, z, px);
     } else {

@@ -74,6 +74,30 @@ bool is_place_button(PointerButton button) noexcept {
 bool is_left_button(PointerButton button) noexcept { return is_left(button); }
 bool is_right_button(PointerButton button) noexcept { return is_right(button); }
 
+bool is_curve_fill_modifiers(const Modifiers& mods) noexcept {
+  return mods.shift && is_primary_modifier(mods) && !mods.alt;
+}
+
+bool is_curve_fill_modifier_press(const KeyDownEvent& event) noexcept {
+  return !event.repeat && is_curve_fill_modifiers(event.mods);
+}
+
+bool is_curve_fill_placement_allowed(bool place_hold_body, bool scratch_hold) noexcept {
+  return place_hold_body && scratch_hold;
+}
+
+bool is_curve_fill_confirm(const PointerDownEvent& event) noexcept {
+  return is_left(event.button) && is_curve_fill_modifiers(event.mods);
+}
+
+bool is_curve_fill_confirm(const PointerUpEvent& event) noexcept {
+  return is_right(event.button) && is_curve_fill_modifiers(event.mods);
+}
+
+bool suppress_idle_placement_ghost(const Modifiers& mods, bool note_drawing) noexcept {
+  return is_primary_modifier(mods) && !note_drawing;
+}
+
 bool is_vertical_swipe(SwipeDirection swipe) noexcept {
   return swipe == SwipeDirection::Up || swipe == SwipeDirection::Down;
 }

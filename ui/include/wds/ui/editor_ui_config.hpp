@@ -1,10 +1,13 @@
 #pragma once
 
+#include "wds/ui/curve_template.hpp"
+
 #include <wds/interaction/editor_shortcuts.hpp>
 
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace wds::ui {
 
@@ -48,6 +51,11 @@ struct EditorUiConfig {
   // User-configurable editor chords (defaults match built-in bindings).
   std::array<wds::interaction::ShortcutChord, wds::interaction::kEditorShortcutCount> shortcuts{};
   bool shortcuts_initialized = false;
+  // Curve-fill templates (config.yml only; chart files are unchanged). ID 0 = empty.
+  std::vector<CurveTemplate> curve_templates;
+  std::uint64_t curve_selected_template_id = 0;
+  wds::chart_editor::EasingDirection curve_selected_direction =
+      wds::chart_editor::EasingDirection::In;
 };
 
 // Resolves the platform config path (creates nothing; save may create dirs).
@@ -59,5 +67,11 @@ std::string resolve_editor_config_path(const char* argv0);
 // of open, but partially parsed keys still apply when the file exists.
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out);
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg);
+
+// Copy curve-fill fields between persisted config and the live UiManager state
+// used by later dialog/toolbar code. Settings/toolbar capture must call apply
+// before save so templates, selected ID, and direction are not replaced by defaults.
+void capture_curve_template_state(const EditorUiConfig& cfg, CurveTemplateUiState& state);
+void apply_curve_template_state(EditorUiConfig& cfg, const CurveTemplateUiState& state);
 
 }  // namespace wds::ui
