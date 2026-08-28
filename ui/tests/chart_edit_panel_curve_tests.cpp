@@ -250,9 +250,9 @@ void test_tail_at_pointer_one_and_multiple_segments() {
   CHECK_EQ(bodies, 1);
   CHECK_EQ(last_end, short_end);
 
-  const auto far = h.at_tick_lane(480, 8);
-  h.panel.on_pointer_move(PointerMoveEvent{far, curve_mods()});
-  const int32_t far_end = h.panel.viewport().tick_at(far.y);
+  const auto distant_pos = h.at_tick_lane(480, 8);
+  h.panel.on_pointer_move(PointerMoveEvent{distant_pos, curve_mods()});
+  const int32_t far_end = h.panel.viewport().tick_at(distant_pos.y);
   bodies = 0;
   last_end = -1;
   for (const auto& note : h.panel.curve_ghost_notes()) {
@@ -464,8 +464,8 @@ void test_new_chain_head_vs_extend_and_prev_cover() {
   h.panel.on_pointer_down(PointerDownEvent{h.at_tick_lane(480, 2), PointerButton::Left, {}});
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 1);
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHoldStart), 1);
-  const auto far = h.at_tick_lane(960, 6);
-  h.panel.on_pointer_move(PointerMoveEvent{far, {}});
+  const auto distant_pos = h.at_tick_lane(960, 6);
+  h.panel.on_pointer_move(PointerMoveEvent{distant_pos, {}});
   h.press_curve();
   CHECK(h.panel.curve_mode_active());
   const auto before_curve = h.engine.document().notes();
@@ -475,7 +475,7 @@ void test_new_chain_head_vs_extend_and_prev_cover() {
   }
   CHECK(prev_id >= 0);
   const int ghost_bodies = count_type(h.panel.curve_ghost_notes(), NoteType::ScratchHold);
-  h.panel.on_pointer_down(PointerDownEvent{far, PointerButton::Left, curve_mods()});
+  h.panel.on_pointer_down(PointerDownEvent{distant_pos, PointerButton::Left, curve_mods()});
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHoldStart), 1);
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), ghost_bodies);
   const auto prev = h.engine.document().find_note(prev_id);
