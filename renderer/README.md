@@ -87,7 +87,7 @@ ctest --test-dir build-macos-arm -R wds_renderer_tests --output-on-failure
 
 `WDS_RENDERER_BUILD_BENCHMARKS=ON` 且找到 GLFW 时编 `wds_renderer_path_bench`。隐藏窗口、无手动点击；面向宿主 Vulkan（macOS 上会优先探测 Homebrew MoltenVK ICD）。**不**进 CTest，也不是 CI 门禁。
 
-无 GLFW / 无 Vulkan / `create` 失败时打印 `UNMEASURED` 并以 0 退出。测得到时打印 font 2048²、skin 4096² 上传（含 async submit / fence wait / reap / descriptor）、swapchain resize、MSAA，以及 descriptor 300 创建 + 100 回收。主线程 upload 或 wait 的 P95 **信息门**为 8ms（超出只打印 `EXCEEDS`，不当作产品 CTest）。
+无 GLFW / 无 Vulkan / `create` 失败时打印 `UNMEASURED` 并以 0 退出。测得到时打印 font 2048²、skin 4096² 上传（含 async submit / fence wait / reap / descriptor）、swapchain resize、MSAA，以及 descriptor 300 创建 + 100 回收。主线程 upload 或 wait 的 P95 **信息门**为 8ms（超出只打印 `EXCEEDS`，不当作产品 CTest）。首帧以及 atlas/图标 rebake 后的下一帧可能出现 `upload_fence_wait`（`draw_frame` 在采样前 drain pending）；稳态 pending 为空时该 wait 为 no-op。
 
 ```bash
 ./scripts/build-target.sh macos-arm --no-package -- -DWDS_RENDERER_BUILD_BENCHMARKS=ON

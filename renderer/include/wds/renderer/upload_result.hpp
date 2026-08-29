@@ -180,6 +180,43 @@ inline constexpr bool upload_destroy_may_release_pending(bool wait_completed,
   return wait_completed || device_lost;
 }
 
+// Blocking drain of pending upload fences: reap staging only after wait succeeds.
+inline constexpr bool wait_pending_uploads_reaps_after_ok_wait(VkResult wait) noexcept {
+  return wait == VK_SUCCESS;
+}
+
+inline constexpr bool wait_pending_uploads_holds_staging_on_failure(VkResult wait) noexcept {
+  return wait != VK_SUCCESS;
+}
+
+// Windows ICDs (and some mapped-memory budgets) fail vkMapMemory on a 32MiB
+// HOST_VISIBLE allocation. Cap each staging map/alloc; large images use several.
+inline constexpr VkDeviceSize kHostVisibleMapChunkBytes = 4ull * 1024ull * 1024ull;
+
+inline constexpr VkDeviceSize staging_copy_chunk_bytes(VkDeviceSize row_bytes) noexcept {
+  if (row_bytes == 0) {
+    return kHostVisibleMapChunkBytes;
+  }
+  if (row_bytes >= kHostVisibleMapChunkBytes) {
+    return row_bytes;
+  }
+  return (kHostVisibleMapChunkBytes / row_bytes) * row_bytes;
+}
+
+inline constexpr uint32_t staging_copy_chunk_count(VkDeviceSize image_bytes,
+                                                   VkDeviceSize chunk_bytes) noexcept {
+  if (chunk_bytes == 0) {
+    return 0;
+  }
+  return static_cast<uint32_t>((image_bytes + chunk_bytes - 1) / chunk_bytes);
+}
+
+// Device create persistently maps per-frame vertex rings. Some Windows ICDs refuse
+// a further vkMapMemory (MEMORY_MAP_FAILED) until those maps are released.
+inline constexpr bool texture_upload_unmaps_persistent_vertex_maps() noexcept {
+  return true;
+}
+
 inline constexpr bool upload_may_destroy_texture_image(bool upload_in_flight, bool retire_due,
                                                        bool queue_idle_proven) noexcept {
   if (queue_idle_proven) {

@@ -225,9 +225,10 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
   // Tip slot follows the current toolbar cell so fullscreen tips stay sharp.
   const float init_tip = toolbar_tip_logical_px(0.0f);
   font_bake_tip_bucket_ = th::tooltip_bake_bucket(init_tip);
-  if (!bake_ui_font(ui_font_body_bake_px(font_bake_tier_),
-                    ui_font_tip_bake_px(font_bake_tier_, init_tip),
-                    ui_font_mild_sharpen(font_bake_tier_))) {
+  const bool font_ok = bake_ui_font(ui_font_body_bake_px(font_bake_tier_),
+                                    ui_font_tip_bake_px(font_bake_tier_, init_tip),
+                                    ui_font_mild_sharpen(font_bake_tier_));
+  if (!font_ok) {
     std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
   }
 

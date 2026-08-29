@@ -240,12 +240,14 @@ bool PlaybackPreviewView::initialize(GLFWwindow* window, const PreviewVisualConf
 #endif
 
   vulkan_.set_preferred_msaa(config_.msaa_samples);
-  if (!vulkan_.create(host)) {
+  const bool vk_ok = vulkan_.create(host);
+  if (!vk_ok) {
     WDS_LOG("vulkan_.create failed\n");
     return false;
   }
   textures_.set_renderer(&vulkan_);
-  if (!skin_.load(textures_, config_.skins_directory)) {
+  const bool skin_ok = skin_.load(textures_, config_.skins_directory);
+  if (!skin_ok) {
     WDS_LOG("skin_.load failed dir=%s\n", config_.skins_directory.c_str());
     shutdown();
     return false;

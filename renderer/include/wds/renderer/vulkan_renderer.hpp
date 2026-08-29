@@ -186,6 +186,20 @@ inline constexpr bool draw_frame_reaps_completed_uploads_before_zero_extent_retu
   return true;
 }
 
+// Host drain before the graphics submit that samples newly published textures.
+// create_texture_rgba stays asynchronous (no per-texture wait).
+inline constexpr bool draw_frame_waits_pending_uploads_before_sample() noexcept {
+  return true;
+}
+
+inline constexpr bool create_texture_rgba_waits_upload_fence() noexcept {
+  return false;
+}
+
+inline constexpr bool wait_pending_uploads_is_noop(bool has_pending) noexcept {
+  return !has_pending;
+}
+
 inline constexpr bool draw_frame_zero_extent_reap_applies_health() noexcept {
   return false;
 }
@@ -452,8 +466,11 @@ class VulkanRenderer {
 
   // Upload a standalone RGBA8 texture (full UV 0..1). Also used by atlas bake.
   // Submit is asynchronous: a successful queue submit publishes TextureInfo
-  // immediately. The same graphics queue orders a later draw submit after this
-  // upload. Staging/cmd/fence are reaped with non-blocking vkGetFenceStatus.
+  // immediately (no per-texture host wait). Staging is filled in ≤4MiB host maps
+  // after temporarily unmapping the persistent vertex rings (some Windows ICDs
+  // refuse a 4th vkMapMemory with VK_ERROR_MEMORY_MAP_FAILED).
+  // The same graphics queue orders a later draw submit after this upload.
+  // draw_frame blocking-drains any still-pending upload fences before sampling.
   // `nearest`: UI font atlases — NEAREST avoids LINEAR fringe that reads as bold text.
   TextureInfo create_texture_rgba(const unsigned char* pixels, int width, int height,
                                   bool nearest = false);

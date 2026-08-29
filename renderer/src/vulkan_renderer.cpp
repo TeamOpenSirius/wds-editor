@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace wds::renderer {
@@ -44,15 +45,169 @@ struct GpuTexture {
   uint64_t sampled_seq = 0;       // 0 = never bound in a submitted draw
 };
 
-uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props) {
+uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props,
+                          VkMemoryPropertyFlags avoid_props = 0) {
   VkPhysicalDeviceMemoryProperties mem{};
   vkGetPhysicalDeviceMemoryProperties(phys, &mem);
-  for (uint32_t i = 0; i < mem.memoryTypeCount; ++i) {
-    if ((type_bits & (1u << i)) && (mem.memoryTypes[i].propertyFlags & props) == props) {
-      return i;
+  const auto first_match = [&](bool apply_avoid) -> int {
+    for (uint32_t i = 0; i < mem.memoryTypeCount; ++i) {
+      if ((type_bits & (1u << i)) == 0) {
+        continue;
+      }
+      const VkMemoryPropertyFlags flags = mem.memoryTypes[i].propertyFlags;
+      if ((flags & props) != props) {
+        continue;
+      }
+      if (apply_avoid && avoid_props != 0 && (flags & avoid_props) != 0) {
+        continue;
+      }
+      return static_cast<int>(i);
+    }
+    return -1;
+  };
+  if (avoid_props != 0) {
+    const int idx = first_match(true);
+    if (idx >= 0) {
+      return static_cast<uint32_t>(idx);
     }
   }
+  const int idx = first_match(false);
+  if (idx >= 0) {
+    return static_cast<uint32_t>(idx);
+  }
   throw std::runtime_error("No suitable Vulkan memory type");
+}
+
+struct HostStaging {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+
+void destroy_host_staging(VkDevice device, HostStaging& staging) {
+  if (device == VK_NULL_HANDLE) {
+    staging = {};
+    return;
+  }
+  if (staging.buffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(device, staging.buffer, nullptr);
+  }
+  if (staging.memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, staging.memory, nullptr);
+  }
+  staging = {};
+}
+
+std::vector<uint32_t> host_visible_memory_types(VkPhysicalDevice phys, uint32_t type_bits) {
+  VkPhysicalDeviceMemoryProperties mem{};
+  vkGetPhysicalDeviceMemoryProperties(phys, &mem);
+  std::vector<uint32_t> ranked;
+  auto consider = [&](bool want_coherent, bool avoid_device_local) {
+    for (uint32_t i = 0; i < mem.memoryTypeCount; ++i) {
+      if ((type_bits & (1u << i)) == 0) {
+        continue;
+      }
+      const VkMemoryPropertyFlags flags = mem.memoryTypes[i].propertyFlags;
+      if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+        continue;
+      }
+      const bool coherent = (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+      const bool device_local = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+      if (want_coherent != coherent) {
+        continue;
+      }
+      if (avoid_device_local && device_local) {
+        continue;
+      }
+      if (std::find(ranked.begin(), ranked.end(), i) == ranked.end()) {
+        ranked.push_back(i);
+      }
+    }
+  };
+  consider(true, true);
+  consider(true, false);
+  consider(false, true);
+  consider(false, false);
+  return ranked;
+}
+
+UploadResult create_filled_host_staging(VkDevice device, VkPhysicalDevice physical,
+                                        VkDeviceSize bytes, const void* src, HostStaging* out) {
+  if (out == nullptr || src == nullptr || bytes == 0) {
+    return make_upload_result(VK_ERROR_INITIALIZATION_FAILED, UploadStage::Buffer);
+  }
+  HostStaging staging{};
+  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  info.size = bytes;
+  info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  const UploadResult created =
+      make_upload_result(vkCreateBuffer(device, &info, nullptr, &staging.buffer),
+                         UploadStage::Buffer);
+  if (!created.ok()) {
+    return created;
+  }
+  VkMemoryRequirements req{};
+  vkGetBufferMemoryRequirements(device, staging.buffer, &req);
+  const std::vector<uint32_t> types = host_visible_memory_types(physical, req.memoryTypeBits);
+  if (types.empty()) {
+    destroy_host_staging(device, staging);
+    return upload_no_memory_type(UploadStage::Buffer);
+  }
+
+  VkPhysicalDeviceMemoryProperties mem_props{};
+  vkGetPhysicalDeviceMemoryProperties(physical, &mem_props);
+  UploadResult last_fail = upload_no_memory_type(UploadStage::Buffer);
+  for (uint32_t type_index : types) {
+    if (staging.buffer == VK_NULL_HANDLE) {
+      const UploadResult recreated =
+          make_upload_result(vkCreateBuffer(device, &info, nullptr, &staging.buffer),
+                             UploadStage::Buffer);
+      if (!recreated.ok()) {
+        return recreated;
+      }
+      vkGetBufferMemoryRequirements(device, staging.buffer, &req);
+    }
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = type_index;
+    const UploadResult memory = make_upload_result(
+        vkAllocateMemory(device, &alloc, nullptr, &staging.memory), UploadStage::Buffer);
+    if (!memory.ok()) {
+      last_fail = memory;
+      staging.memory = VK_NULL_HANDLE;
+      continue;
+    }
+    const UploadResult bound =
+        make_upload_result(vkBindBufferMemory(device, staging.buffer, staging.memory, 0),
+                           UploadStage::Bind);
+    if (!bound.ok()) {
+      last_fail = bound;
+      vkFreeMemory(device, staging.memory, nullptr);
+      staging.memory = VK_NULL_HANDLE;
+      continue;
+    }
+    void* mapped = nullptr;
+    const VkResult map_r = vkMapMemory(device, staging.memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+    const UploadResult mapped_r = make_upload_map_result(map_r, mapped);
+    if (!mapped_r.ok()) {
+      last_fail = mapped_r;
+      destroy_host_staging(device, staging);
+      continue;
+    }
+    std::memcpy(mapped, src, static_cast<size_t>(bytes));
+    const VkMemoryPropertyFlags flags = mem_props.memoryTypes[type_index].propertyFlags;
+    if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+      VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+      range.memory = staging.memory;
+      range.size = VK_WHOLE_SIZE;
+      vkFlushMappedMemoryRanges(device, 1, &range);
+    }
+    vkUnmapMemory(device, staging.memory);
+    *out = staging;
+    return {};
+  }
+  destroy_host_staging(device, staging);
+  return last_fail;
 }
 
 bool looks_like_shader_dir(const std::filesystem::path& dir) {
@@ -151,8 +306,7 @@ struct VulkanRenderer::Impl {
   struct PendingUpload {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+    std::vector<HostStaging> staging;
     TextureId texture_id = kInvalidTextureId;
   };
   std::vector<PendingUpload> pending_uploads;
@@ -259,6 +413,8 @@ struct VulkanRenderer::Impl {
   bool create_render_pass_and_pipelines();
   void destroy_render_pass_and_pipelines();
   bool ensure_frame_vertex_capacity(uint32_t frame, size_t bytes);
+  void unmap_frame_vertices();
+  bool remap_frame_vertices();
   void destroy_frame_vertices();
   TextureId alloc_texture_slot();
   void release_texture_descriptor(GpuTexture& tex);
@@ -277,6 +433,7 @@ struct VulkanRenderer::Impl {
   void commit_pending_record(PendingUpload pending);
   void release_pending_slot(PendingUpload& pending);
   UploadHealthDelta reap_pending_uploads();
+  UploadHealthDelta wait_pending_uploads();
   void force_release_pending_uploads();
   VkSampleCountFlagBits pick_msaa_samples() const;
   VkResult device_wait_idle_result();
@@ -582,14 +739,10 @@ void VulkanRenderer::Impl::release_pending_slot(PendingUpload& pending) {
     vkFreeCommandBuffers(device, upload_command_pool, 1, &pending.cmd);
   }
   pending.cmd = VK_NULL_HANDLE;
-  if (pending.staging != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-    vkDestroyBuffer(device, pending.staging, nullptr);
+  for (auto& block : pending.staging) {
+    destroy_host_staging(device, block);
   }
-  pending.staging = VK_NULL_HANDLE;
-  if (pending.staging_mem != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-    vkFreeMemory(device, pending.staging_mem, nullptr);
-  }
-  pending.staging_mem = VK_NULL_HANDLE;
+  pending.staging.clear();
   if (pending.fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
     vkDestroyFence(device, pending.fence, nullptr);
   }
@@ -625,6 +778,39 @@ UploadHealthDelta VulkanRenderer::Impl::reap_pending_uploads() {
   }
   if (timed) {
     record_path(RendererPathSegment::UploadFenceReap, path_elapsed_us(t0));
+  }
+  return worst;
+}
+
+UploadHealthDelta VulkanRenderer::Impl::wait_pending_uploads() {
+  UploadHealthDelta worst{};
+  if (device == VK_NULL_HANDLE || pending_uploads.empty()) {
+    return worst;
+  }
+  std::vector<VkFence> fences;
+  fences.reserve(pending_uploads.size());
+  for (const auto& pending : pending_uploads) {
+    if (pending.fence != VK_NULL_HANDLE) {
+      fences.push_back(pending.fence);
+    }
+  }
+  if (!fences.empty()) {
+    const bool timed = path_diag_on();
+    const auto t0 = timed ? PathClock::now() : PathClock::time_point{};
+    const VkResult wait = vkWaitForFences(device, static_cast<uint32_t>(fences.size()),
+                                          fences.data(), VK_TRUE, UINT64_MAX);
+    if (timed) {
+      record_path(RendererPathSegment::UploadFenceWait, path_elapsed_us(t0));
+    }
+    const UploadHealthDelta wait_health = upload_health_delta(wait, UploadStage::Wait);
+    if (wait_health.apply) {
+      // DeviceLost / Fatal: do not reap staging while the GPU may still own it.
+      return wait_health;
+    }
+  }
+  const UploadHealthDelta reap = reap_pending_uploads();
+  if (reap.apply) {
+    worst = reap;
   }
   return worst;
 }
@@ -841,6 +1027,7 @@ VkResult VulkanRenderer::Impl::device_wait_idle_result() {
     apply_msaa_idle_acc_us += path_elapsed_us(t0);
   }
   if (result == VK_SUCCESS) {
+    // Idle proves the upload queue is done; only then drop staging/cmd/fence.
     force_release_pending_uploads();
   }
   return result;
@@ -1202,9 +1389,39 @@ bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t b
     return false;
   }
   vkBindBufferMemory(device, slot.buffer, slot.memory, 0);
-  vkMapMemory(device, slot.memory, 0, capacity, 0, &slot.mapped);
+  slot.mapped = nullptr;
+  if (vkMapMemory(device, slot.memory, 0, VK_WHOLE_SIZE, 0, &slot.mapped) != VK_SUCCESS ||
+      slot.mapped == nullptr) {
+    return false;
+  }
   slot.capacity_bytes = capacity;
   return true;
+}
+
+void VulkanRenderer::Impl::unmap_frame_vertices() {
+  for (auto& slot : frame_vertices) {
+    if (slot.mapped != nullptr && slot.memory != VK_NULL_HANDLE) {
+      vkUnmapMemory(device, slot.memory);
+      slot.mapped = nullptr;
+    }
+  }
+}
+
+bool VulkanRenderer::Impl::remap_frame_vertices() {
+  bool ok = true;
+  for (auto& slot : frame_vertices) {
+    if (slot.mapped != nullptr || slot.memory == VK_NULL_HANDLE || slot.buffer == VK_NULL_HANDLE) {
+      continue;
+    }
+    void* mapped = nullptr;
+    if (vkMapMemory(device, slot.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS ||
+        mapped == nullptr) {
+      ok = false;
+      continue;
+    }
+    slot.mapped = mapped;
+  }
+  return ok;
 }
 
 void VulkanRenderer::Impl::destroy_frame_vertices() {
@@ -1387,19 +1604,18 @@ UploadResult VulkanRenderer::Impl::create_texture_descriptor(GpuTexture& tex) {
 UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, TextureId id,
                                                           const unsigned char* pixels, int width,
                                                           int height) {
-  const VkDeviceSize size = static_cast<VkDeviceSize>(width) * height * 4;
+  const VkDeviceSize image_bytes = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4;
+  const VkDeviceSize row_bytes = static_cast<VkDeviceSize>(width) * 4;
+  const VkDeviceSize chunk_bytes = staging_copy_chunk_bytes(row_bytes);
+  const uint32_t rows_per_chunk =
+      row_bytes == 0 ? 0u : static_cast<uint32_t>(chunk_bytes / row_bytes);
 
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+  std::vector<HostStaging> staging_blocks;
   auto cleanup_staging = [&]() {
-    if (staging != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, staging, nullptr);
-      staging = VK_NULL_HANDLE;
+    for (auto& block : staging_blocks) {
+      destroy_host_staging(device, block);
     }
-    if (staging_mem != VK_NULL_HANDLE) {
-      vkFreeMemory(device, staging_mem, nullptr);
-      staging_mem = VK_NULL_HANDLE;
-    }
+    staging_blocks.clear();
   };
   auto cleanup_tex = [&]() {
     release_texture_descriptor(tex);
@@ -1426,45 +1642,44 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
     return failed;
   };
 
-  {
-    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    info.size = size;
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    const UploadResult created =
-        make_upload_result(vkCreateBuffer(device, &info, nullptr, &staging), UploadStage::Buffer);
-    if (!created.ok()) {
-      return created;
+  if (pixels == nullptr || width <= 0 || height <= 0 || rows_per_chunk == 0) {
+    return make_upload_result(VK_ERROR_INITIALIZATION_FAILED, UploadStage::Buffer);
+  }
+
+  unmap_frame_vertices();
+  struct RemapVertices {
+    Impl* impl = nullptr;
+    bool ok = true;
+    explicit RemapVertices(Impl* i) : impl(i) {}
+    ~RemapVertices() {
+      if (impl != nullptr) {
+        ok = impl->remap_frame_vertices();
+      }
     }
-    VkMemoryRequirements req{};
-    vkGetBufferMemoryRequirements(device, staging, &req);
-    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    alloc.allocationSize = req.size;
-    try {
-      alloc.memoryTypeIndex = find_memory_type(
-          physical, req.memoryTypeBits,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    } catch (...) {
-      return fail_staging(upload_no_memory_type(UploadStage::Buffer));
+  } remap_guard(this);
+
+  std::vector<VkBufferImageCopy> copy_regions;
+  copy_regions.reserve(staging_copy_chunk_count(image_bytes, chunk_bytes));
+  int y = 0;
+  while (y < height) {
+    const int rows = std::min(static_cast<int>(rows_per_chunk), height - y);
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(rows) * row_bytes;
+    HostStaging block{};
+    const UploadResult filled = create_filled_host_staging(
+        device, physical, bytes,
+        pixels + static_cast<size_t>(y) * static_cast<size_t>(row_bytes), &block);
+    if (!filled.ok()) {
+      destroy_host_staging(device, block);
+      return fail_staging(filled);
     }
-    const UploadResult memory = make_upload_result(
-        vkAllocateMemory(device, &alloc, nullptr, &staging_mem), UploadStage::Buffer);
-    if (!memory.ok()) {
-      return fail_staging(memory);
-    }
-    const UploadResult bound =
-        make_upload_result(vkBindBufferMemory(device, staging, staging_mem, 0), UploadStage::Bind);
-    if (!bound.ok()) {
-      return fail_staging(bound);
-    }
-    void* mapped = nullptr;
-    const UploadResult mapped_r =
-        make_upload_map_result(vkMapMemory(device, staging_mem, 0, size, 0, &mapped), mapped);
-    if (!mapped_r.ok()) {
-      return fail_staging(mapped_r);
-    }
-    std::memcpy(mapped, pixels, static_cast<size_t>(size));
-    vkUnmapMemory(device, staging_mem);
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, y, 0};
+    region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(rows), 1};
+    copy_regions.push_back(region);
+    staging_blocks.push_back(block);
+    y += rows;
   }
 
   VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -1543,11 +1758,10 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
                        nullptr, 0, nullptr, 1, &barrier);
 
-  VkBufferImageCopy region{};
-  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  region.imageSubresource.layerCount = 1;
-  region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-  vkCmdCopyBufferToImage(cmd, staging, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+  for (size_t i = 0; i < staging_blocks.size(); ++i) {
+    vkCmdCopyBufferToImage(cmd, staging_blocks[i].buffer, tex.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_regions[i]);
+  }
 
   barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1569,8 +1783,7 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
       PendingUpload pending;
       pending.cmd = cmd;
       pending.fence = fence;
-      pending.staging = staging;
-      pending.staging_mem = staging_mem;
+      pending.staging = std::move(staging_blocks);
       pending.texture_id = id;
       commit_pending_record(pending);
       return ended;
@@ -1585,8 +1798,7 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
   PendingUpload pending;
   pending.cmd = cmd;
   pending.fence = fence;
-  pending.staging = staging;
-  pending.staging_mem = staging_mem;
+  pending.staging = std::move(staging_blocks);
   pending.texture_id = id;
   commit_pending_record(pending);
   return {};
@@ -2612,9 +2824,11 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   }
 
   {
-    const UploadHealthDelta reap = impl_->reap_pending_uploads();
-    if (reap.apply) {
-      emit_health(reap.event);
+    // Drain still-in-flight uploads before this frame samples them. Empty
+    // pending is a no-op so the steady-state present path stays cheap.
+    const UploadHealthDelta pending = impl_->wait_pending_uploads();
+    if (pending.apply) {
+      emit_health(pending.event);
       if (renderer_health_unrecoverable(health_)) {
         return false;
       }

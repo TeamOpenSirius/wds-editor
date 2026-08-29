@@ -55,7 +55,10 @@ using wds::renderer::kDescriptorPoolInitialCapacity;
 using wds::renderer::kDescriptorPoolSecondCapacity;
 using wds::renderer::draw_frame_blocks_before_recovery;
 using wds::renderer::draw_frame_reaps_completed_uploads_before_zero_extent_return;
+using wds::renderer::draw_frame_waits_pending_uploads_before_sample;
 using wds::renderer::draw_frame_zero_extent_reap_applies_health;
+using wds::renderer::create_texture_rgba_waits_upload_fence;
+using wds::renderer::wait_pending_uploads_is_noop;
 using wds::renderer::next_frame_recovers_swapchain;
 using wds::renderer::surface_formats_query_ok;
 using wds::renderer::swapchain_create_failure_reports_occluded;
@@ -97,6 +100,12 @@ using wds::renderer::upload_publish_texture_after_submit;
 using wds::renderer::upload_reap_may_release;
 using wds::renderer::upload_slot_reusable_after_failure;
 using wds::renderer::upload_submit_failure_recycles_slot;
+using wds::renderer::wait_pending_uploads_holds_staging_on_failure;
+using wds::renderer::wait_pending_uploads_reaps_after_ok_wait;
+using wds::renderer::kHostVisibleMapChunkBytes;
+using wds::renderer::staging_copy_chunk_bytes;
+using wds::renderer::staging_copy_chunk_count;
+using wds::renderer::texture_upload_unmaps_persistent_vertex_maps;
 using wds::renderer::UploadFencePoll;
 using wds::renderer::upload_stage_name;
 using wds::renderer::UploadHealthDelta;
@@ -406,6 +415,29 @@ void test_atlas_rebake_and_font_replace_hold_async_upload() {
   CHECK(upload_publish_texture_after_submit(true));
 }
 
+void test_staging_copy_chunks_cap_host_maps() {
+  CHECK(staging_copy_chunk_bytes(16384) == kHostVisibleMapChunkBytes);
+  CHECK(staging_copy_chunk_count(4096ull * 2048ull * 4ull, kHostVisibleMapChunkBytes) == 8);
+  CHECK(staging_copy_chunk_count(64ull * 64ull * 4ull, staging_copy_chunk_bytes(64ull * 4ull)) == 1);
+  CHECK(staging_copy_chunk_bytes(kHostVisibleMapChunkBytes + 16) == kHostVisibleMapChunkBytes + 16);
+  CHECK(texture_upload_unmaps_persistent_vertex_maps());
+}
+
+void test_draw_frame_drains_pending_uploads_before_sample() {
+  CHECK(draw_frame_waits_pending_uploads_before_sample());
+  CHECK(!create_texture_rgba_waits_upload_fence());
+  CHECK(wait_pending_uploads_is_noop(false));
+  CHECK(!wait_pending_uploads_is_noop(true));
+  CHECK(wait_pending_uploads_reaps_after_ok_wait(VK_SUCCESS));
+  CHECK(!wait_pending_uploads_reaps_after_ok_wait(VK_ERROR_DEVICE_LOST));
+  CHECK(!wait_pending_uploads_reaps_after_ok_wait(VK_TIMEOUT));
+  CHECK(wait_pending_uploads_holds_staging_on_failure(VK_ERROR_DEVICE_LOST));
+  CHECK(wait_pending_uploads_holds_staging_on_failure(VK_TIMEOUT));
+  CHECK(!wait_pending_uploads_holds_staging_on_failure(VK_SUCCESS));
+  CHECK(!upload_reap_may_release(UploadFencePoll::Pending, false));
+  CHECK(!upload_destroy_may_release_pending(false, false));
+}
+
 void test_failed_create_returns_invalid_texture_info() {
   // Real Vk device faults are not injected here; callers must treat a failed
   // UploadResult as "do not publish TextureInfo". The empty handle is the
@@ -437,6 +469,8 @@ void run_upload_result_tests() {
   test_destroy_retire_skips_in_flight_upload();
   test_unsampled_destroyed_texture_frees_after_upload();
   test_atlas_rebake_and_font_replace_hold_async_upload();
+  test_staging_copy_chunks_cap_host_maps();
+  test_draw_frame_drains_pending_uploads_before_sample();
   test_stage_names_are_distinct_and_non_empty();
   test_failed_create_returns_invalid_texture_info();
 }
@@ -830,6 +864,7 @@ void test_msaa_resize_retain_device_wait_idle() {
 void test_draw_frame_reaps_before_zero_extent_or_occluded_return() {
   CHECK(draw_frame_reaps_completed_uploads_before_zero_extent_return());
   CHECK(!draw_frame_zero_extent_reap_applies_health());
+  CHECK(draw_frame_waits_pending_uploads_before_sample());
 }
 
 void test_descriptor_full_block_is_skipped_then_grows() {

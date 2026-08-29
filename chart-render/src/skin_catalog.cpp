@@ -277,13 +277,12 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   hold_slice_border_r = 10.0f;
   note_slice_tex_h = 108.0f;
 
-  return static_cast<bool>(judgeline) &&
-         static_cast<bool>(note_bottom) && static_cast<bool>(note_red_top) &&
-         static_cast<bool>(note_yellow_top) && static_cast<bool>(note_blue_top) &&
-         static_cast<bool>(note_purple_top) && static_cast<bool>(hold_connection_blue) &&
-         static_cast<bool>(hold_connection_purple) && static_cast<bool>(sync_line) &&
-         static_cast<bool>(scratch_arrow) && static_cast<bool>(tick_blue) &&
-         static_cast<bool>(tick_purple);
+  return static_cast<bool>(judgeline) && static_cast<bool>(note_bottom) &&
+         static_cast<bool>(note_red_top) && static_cast<bool>(note_yellow_top) &&
+         static_cast<bool>(note_blue_top) && static_cast<bool>(note_purple_top) &&
+         static_cast<bool>(hold_connection_blue) && static_cast<bool>(hold_connection_purple) &&
+         static_cast<bool>(sync_line) && static_cast<bool>(scratch_arrow) &&
+         static_cast<bool>(tick_blue) && static_cast<bool>(tick_purple);
 }
 
 bool SkinCatalog::bomb_light_for(const char* type_dir, TextureInfo& square,
