@@ -2,6 +2,7 @@
 
 add_library(wds_common STATIC
   src/crash_handler.cpp
+  src/crash_input_journal.cpp
   src/utf8_path.cpp
 )
 add_library(wds::common ALIAS wds_common)
@@ -14,7 +15,7 @@ target_include_directories(wds_common
 target_compile_features(wds_common PUBLIC cxx_std_17)
 
 if(WIN32)
-  # CaptureStackBackTrace lives in kernel32 (pulled transitively); no dbghelp needed.
+  # StackWalk64 is loaded from dbghelp at crash time; kernel32/user32 are always present.
   target_link_libraries(wds_common PUBLIC kernel32 user32)
 elseif(APPLE)
   # backtrace() is in libSystem.

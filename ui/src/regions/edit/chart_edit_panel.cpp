@@ -67,6 +67,17 @@ bool apply_note_map(wds::chart_editor::ChartDocument& doc,
 ChartEditPanel::ChartEditPanel(wds::chart_editor::ChartEditorEngine& engine) : engine_(engine) {
 }
 
+void ChartEditPanel::trace_snapshot(wds::common::CrashTraceSnap& snap) const {
+  snap.mask = wds::common::kCrashSnapTimeline | wds::common::kCrashSnapHectoms |
+              wds::common::kCrashSnapEditMode | wds::common::kCrashSnapGhost |
+              wds::common::kCrashSnapRevision;
+  snap.timeline_ms = engine_.timeline_ms();
+  snap.visible_hectoms = viewport_.grid().visible_hectoms;
+  snap.edit_mode = static_cast<std::uint8_t>(mode_);
+  snap.ghost = ghost_.visible ? 1 : 0;
+  snap.doc_revision = engine_.snapshot().revision;
+}
+
 void ChartEditPanel::set_grid(wds::chart_editor::EditGridConfig grid) {
   viewport_.set_grid(grid);
   if (curve_mode_active_) refresh_curve_ghosts();

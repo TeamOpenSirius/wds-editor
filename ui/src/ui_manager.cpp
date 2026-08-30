@@ -19,6 +19,7 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/notation.hpp>
 
+#include <wds/common/crash_input_journal.hpp>
 #include <wds/common/time.hpp>
 
 #include <wds/interaction/editor_input.hpp>
@@ -78,6 +79,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       edit_panel_->handle_timeline_wheel(event);
     }
   });
+  preview_hit_->set_trace_peer(edit_panel_);
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
   auto status = std::make_unique<StatusBar>();
@@ -242,6 +244,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       }
       apply_display_to_preview(*chart_preview_, cfg);
       bind_editor_shortcuts();
+      wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
       persist();
     });
   }
@@ -552,6 +555,7 @@ void UiManager::load_ui_config() {
   apply_display_to_preview(*chart_preview_, cfg);
   capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
+  wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
   if (auto* settings = settings_panel()) settings->apply_config(cfg);
   if (auto* toolbar = toolbar_panel()) {
     toolbar->apply_config(cfg);
@@ -574,6 +578,7 @@ void UiManager::save_ui_config() {
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
+  cfg.allow_crash_log_sensitive = wds::common::journal_allow_sensitive();
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
   capture_display_from_preview(*chart_preview_, cfg);

@@ -141,6 +141,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void on_key_up(const wds::interaction::KeyUpEvent& event) override;
   void on_text_input(const wds::interaction::TextInputEvent& event) override;
 
+  const char* trace_name() const override { return "ChartEditPanel"; }
+  void trace_snapshot(wds::common::CrashTraceSnap& snap) const override;
+  std::uint8_t trace_drag_mode() const override { return static_cast<std::uint8_t>(mode_); }
+
  private:
   enum class Mode {
     Idle,

@@ -1,5 +1,7 @@
 #include "wds/ui/macos_menu.hpp"
 
+#include <wds/common/crash_input_journal.hpp>
+
 #ifdef __APPLE__
 
 #import <AppKit/AppKit.h>
@@ -28,9 +30,12 @@ NSWindow* cocoa_window(GLFWwindow* window) {
 }  // namespace
 
 void invoke_fullscreen_menu_handler() {
+  wds::common::journal_begin_event(wds::common::CrashInputKind::Menu, 0, 0, 0, 0, 0, 0, 0, 0);
+  wds::common::journal_set_route("MacosMenu", wds::common::CrashRouteVia::Menu);
   if (g_fullscreen_handler) {
     g_fullscreen_handler();
   }
+  wds::common::journal_end_event();
 }
 
 void clear_fullscreen_menu_shortcut() {

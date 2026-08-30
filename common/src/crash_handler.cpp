@@ -1,7 +1,10 @@
 #include "wds/common/crash_handler.hpp"
+#include "wds/common/crash_input_journal.hpp"
 
 #include <atomic>
+#include <cstdarg>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +18,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <dbghelp.h>
+#include <tlhelp32.h>
 #else
 #include <execinfo.h>
 #include <fcntl.h>
@@ -49,6 +54,47 @@ SignalHandler g_prev_abrt = SIG_DFL;
 SignalHandler g_prev_fpe = SIG_DFL;
 SignalHandler g_prev_ill = SIG_DFL;
 SignalHandler g_prev_bus = SIG_DFL;
+
+void asafe_write_bytes(int fd, const char* data, std::size_t n) {
+  if (fd < 0 || data == nullptr || n == 0) return;
+  (void)::write(fd, data, n);
+}
+
+void asafe_write_cstr_fd(int fd, const char* s) {
+  if (fd < 0 || s == nullptr) return;
+  std::size_t n = 0;
+  while (s[n] != '\0' && n < kMsgCap) {
+    ++n;
+  }
+  asafe_write_bytes(fd, s, n);
+}
+
+void asafe_write_uint_fd(int fd, std::uint64_t v) {
+  char buf[24];
+  int i = 23;
+  buf[i] = '\0';
+  if (v == 0) {
+    buf[--i] = '0';
+  } else {
+    while (v > 0 && i > 0) {
+      buf[--i] = static_cast<char>('0' + (v % 10));
+      v /= 10;
+    }
+  }
+  asafe_write_cstr_fd(fd, buf + i);
+}
+
+void emit_journal_fd(void* ctx, const char* data, std::size_t n) {
+  asafe_write_bytes(static_cast<int>(reinterpret_cast<std::intptr_t>(ctx)), data, n);
+}
+
+void write_privacy_and_uptime_fd(int fd) {
+  asafe_write_cstr_fd(fd, "privacy_sensitive: ");
+  asafe_write_cstr_fd(fd, journal_allow_sensitive() ? "1" : "0");
+  asafe_write_cstr_fd(fd, "\nuptime_ms: ");
+  asafe_write_uint_fd(fd, journal_uptime_ms());
+  asafe_write_cstr_fd(fd, "\n");
+}
 #endif
 
 void append_cstr(char* dst, std::size_t cap, const char* src) {
@@ -156,18 +202,173 @@ void format_timestamp(char* out, std::size_t cap) {
 }
 
 #if defined(_WIN32)
-void append_stack_win(HANDLE file) {
-  void* frames[64] = {};
-  const USHORT n = ::CaptureStackBackTrace(0, 64, frames, nullptr);
-  char line[128];
-  for (USHORT i = 0; i < n; ++i) {
-    const int len =
-        std::snprintf(line, sizeof(line), "  #%u %p\n", static_cast<unsigned>(i), frames[i]);
-    if (len > 0) {
-      DWORD written = 0;
-      ::WriteFile(file, line, static_cast<DWORD>(len), &written, nullptr);
-    }
+void write_win_text(HANDLE file, const char* text) {
+  if (file == INVALID_HANDLE_VALUE || text == nullptr) return;
+  const DWORD n = static_cast<DWORD>(std::strlen(text));
+  if (n == 0) return;
+  DWORD written = 0;
+  ::WriteFile(file, text, n, &written, nullptr);
+}
+
+void write_win_fmt(HANDLE file, const char* fmt, ...) {
+  char buf[768];
+  va_list args;
+  va_start(args, fmt);
+  const int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  if (n > 0) {
+    write_win_text(file, buf);
   }
+}
+
+void append_module_for_addr(HANDLE file, const char* label, const void* addr) {
+  if (addr == nullptr) {
+    write_win_fmt(file, "%s: (null)\n", label);
+    return;
+  }
+  HMODULE hm = nullptr;
+  if (!::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCSTR>(addr), &hm) ||
+      hm == nullptr) {
+    write_win_fmt(file, "%s: %p (module unknown)\n", label, addr);
+    return;
+  }
+  char name[MAX_PATH] = {};
+  ::GetModuleFileNameA(hm, name, MAX_PATH);
+  char shown[MAX_PATH] = {};
+  journal_copy_path(shown, sizeof(shown), name);
+  const auto base = reinterpret_cast<uintptr_t>(hm);
+  const auto off = reinterpret_cast<uintptr_t>(addr) - base;
+  write_win_fmt(file, "%s: %p  %s+0x%llx\n", label, addr, shown,
+                static_cast<unsigned long long>(off));
+}
+
+void append_modules_win(HANDLE file) {
+  write_win_text(file, "--- modules ---\n");
+  HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+                                           ::GetCurrentProcessId());
+  if (snap == INVALID_HANDLE_VALUE) {
+    write_win_text(file, "  (CreateToolhelp32Snapshot failed)\n");
+    return;
+  }
+  MODULEENTRY32W me{};
+  me.dwSize = sizeof(me);
+  int count = 0;
+  if (::Module32FirstW(snap, &me)) {
+    do {
+      char name[MAX_PATH] = {};
+      ::WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1, name, MAX_PATH, nullptr, nullptr);
+      write_win_fmt(file, "  %p-%p  %s\n", static_cast<void*>(me.modBaseAddr),
+                    static_cast<void*>(me.modBaseAddr + me.modBaseSize), name);
+      ++count;
+    } while (count < 64 && ::Module32NextW(snap, &me));
+  }
+  ::CloseHandle(snap);
+}
+
+void append_exception_stack_win(HANDLE file, CONTEXT* ctx) {
+  write_win_text(file, "--- stack ---\n");
+  if (ctx == nullptr) {
+    write_win_text(file, "  (no context)\n");
+    return;
+  }
+  HMODULE dbg = ::LoadLibraryW(L"dbghelp.dll");
+  if (dbg == nullptr) {
+    write_win_text(file, "  (dbghelp.dll not loaded)\n");
+    return;
+  }
+  using SymInitFn = BOOL(WINAPI*)(HANDLE, PCSTR, BOOL);
+  using StackWalkFn = BOOL(WINAPI*)(DWORD, HANDLE, HANDLE, LPSTACKFRAME64, PVOID, PREAD_PROCESS_MEMORY_ROUTINE64,
+                                    PFUNCTION_TABLE_ACCESS_ROUTINE64, PGET_MODULE_BASE_ROUTINE64,
+                                    PTRANSLATE_ADDRESS_ROUTINE64);
+  using SymFnTableFn = PVOID(WINAPI*)(HANDLE, DWORD64);
+  using SymBaseFn = DWORD64(WINAPI*)(HANDLE, DWORD64);
+  auto sym_init = reinterpret_cast<SymInitFn>(::GetProcAddress(dbg, "SymInitialize"));
+  auto walk = reinterpret_cast<StackWalkFn>(::GetProcAddress(dbg, "StackWalk64"));
+  auto fn_table = reinterpret_cast<SymFnTableFn>(::GetProcAddress(dbg, "SymFunctionTableAccess64"));
+  auto mod_base = reinterpret_cast<SymBaseFn>(::GetProcAddress(dbg, "SymGetModuleBase64"));
+  if (sym_init == nullptr || walk == nullptr || fn_table == nullptr || mod_base == nullptr) {
+    write_win_text(file, "  (dbghelp exports missing)\n");
+    ::FreeLibrary(dbg);
+    return;
+  }
+  const HANDLE process = ::GetCurrentProcess();
+  const HANDLE thread = ::GetCurrentThread();
+  (void)sym_init(process, nullptr, TRUE);
+  CONTEXT copy = *ctx;
+  STACKFRAME64 frame{};
+#if defined(_M_X64) || defined(__x86_64__)
+  const DWORD machine = IMAGE_FILE_MACHINE_AMD64;
+  frame.AddrPC.Offset = copy.Rip;
+  frame.AddrPC.Mode = AddrModeFlat;
+  frame.AddrStack.Offset = copy.Rsp;
+  frame.AddrStack.Mode = AddrModeFlat;
+  frame.AddrFrame.Offset = copy.Rbp;
+  frame.AddrFrame.Mode = AddrModeFlat;
+#else
+  const DWORD machine = IMAGE_FILE_MACHINE_I386;
+  frame.AddrPC.Offset = copy.Eip;
+  frame.AddrPC.Mode = AddrModeFlat;
+  frame.AddrStack.Offset = copy.Esp;
+  frame.AddrStack.Mode = AddrModeFlat;
+  frame.AddrFrame.Offset = copy.Ebp;
+  frame.AddrFrame.Mode = AddrModeFlat;
+#endif
+  for (unsigned i = 0; i < 48; ++i) {
+    if (!walk(machine, process, thread, &frame, &copy, nullptr, fn_table, mod_base, nullptr)) {
+      break;
+    }
+    if (frame.AddrPC.Offset == 0) {
+      break;
+    }
+    const void* pc = reinterpret_cast<void*>(static_cast<uintptr_t>(frame.AddrPC.Offset));
+    write_win_fmt(file, "  #%u ", i);
+    append_module_for_addr(file, "pc", pc);
+  }
+  ::FreeLibrary(dbg);
+}
+
+void emit_journal_win(void* ctx, const char* data, std::size_t n) {
+  if (ctx == nullptr || data == nullptr || n == 0) return;
+  DWORD written = 0;
+  ::WriteFile(static_cast<HANDLE>(ctx), data, static_cast<DWORD>(n), &written, nullptr);
+}
+
+void append_exception_win(HANDLE file, EXCEPTION_POINTERS* info) {
+  write_win_text(file, "--- exception ---\n");
+  if (info == nullptr || info->ExceptionRecord == nullptr) {
+    write_win_text(file, "  (no EXCEPTION_POINTERS)\n");
+    return;
+  }
+  EXCEPTION_RECORD* rec = info->ExceptionRecord;
+  write_win_fmt(file, "code=0x%08lX address=%p params=%lu\n",
+                static_cast<unsigned long>(rec->ExceptionCode), rec->ExceptionAddress,
+                static_cast<unsigned long>(rec->NumberParameters));
+  if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+    const ULONG_PTR op = rec->ExceptionInformation[0];
+    const char* op_name = op == 0 ? "read" : (op == 1 ? "write" : (op == 8 ? "dep" : "other"));
+    write_win_fmt(file, "access=%s fault=%p\n", op_name,
+                  reinterpret_cast<void*>(rec->ExceptionInformation[1]));
+  }
+  append_module_for_addr(file, "fault_pc", rec->ExceptionAddress);
+  if (info->ContextRecord != nullptr) {
+#if defined(_M_X64) || defined(__x86_64__)
+    write_win_fmt(file, "rip=%p rsp=%p rbp=%p\n",
+                  reinterpret_cast<void*>(info->ContextRecord->Rip),
+                  reinterpret_cast<void*>(info->ContextRecord->Rsp),
+                  reinterpret_cast<void*>(info->ContextRecord->Rbp));
+#endif
+  }
+}
+
+void append_stack_win(HANDLE file, EXCEPTION_POINTERS* info) {
+  append_exception_win(file, info);
+  if (info != nullptr) {
+    append_exception_stack_win(file, info->ContextRecord);
+  }
+  append_modules_win(file);
+  journal_write_text(emit_journal_win, file);
 }
 #else
 void append_stack_posix(int fd) {
@@ -180,7 +381,12 @@ void append_stack_posix(int fd) {
 }
 #endif
 
+#if defined(_WIN32)
+bool write_crash_file(const char* path, const char* kind, const char* detail,
+                      EXCEPTION_POINTERS* info) {
+#else
 bool write_crash_file(const char* path, const char* kind, const char* detail) {
+#endif
   if (path == nullptr || path[0] == '\0') return false;
 #if defined(_WIN32)
   const std::wstring wide = utf8_to_wide(path);
@@ -192,14 +398,17 @@ bool write_crash_file(const char* path, const char* kind, const char* detail) {
                                  "WDS Editor crash report\n"
                                  "kind: %s\n"
                                  "detail: %s\n"
-                                 "--- stack ---\n",
+                                 "privacy_sensitive: %d\n"
+                                 "uptime_ms: %llu\n",
                                  kind != nullptr ? kind : "(unknown)",
-                                 detail != nullptr ? detail : "(none)");
+                                 detail != nullptr ? detail : "(none)",
+                                 journal_allow_sensitive() ? 1 : 0,
+                                 static_cast<unsigned long long>(journal_uptime_ms()));
   if (hlen > 0) {
     DWORD written = 0;
     ::WriteFile(file, header, static_cast<DWORD>(hlen), &written, nullptr);
   }
-  append_stack_win(file);
+  append_stack_win(file, info);
   ::CloseHandle(file);
   return true;
 #else
@@ -210,13 +419,18 @@ bool write_crash_file(const char* path, const char* kind, const char* detail) {
                                  "WDS Editor crash report\n"
                                  "kind: %s\n"
                                  "detail: %s\n"
+                                 "privacy_sensitive: %d\n"
+                                 "uptime_ms: %llu\n"
                                  "--- stack ---\n",
                                  kind != nullptr ? kind : "(unknown)",
-                                 detail != nullptr ? detail : "(none)");
+                                 detail != nullptr ? detail : "(none)",
+                                 journal_allow_sensitive() ? 1 : 0,
+                                 static_cast<unsigned long long>(journal_uptime_ms()));
   if (hlen > 0) {
     (void)::write(fd, header, static_cast<std::size_t>(hlen));
   }
   append_stack_posix(fd);
+  journal_write_text(emit_journal_fd, reinterpret_cast<void*>(static_cast<std::intptr_t>(fd)));
   ::close(fd);
   return true;
 #endif
@@ -317,7 +531,11 @@ void build_user_message(char* out, std::size_t cap, const char* kind, const char
 }
 
 // Non-signal path only: may use heap, snprintf, mkdir, dialogs.
+#if defined(_WIN32)
+void handle_crash(const char* kind, const char* detail, EXCEPTION_POINTERS* info = nullptr) {
+#else
 void handle_crash(const char* kind, const char* detail) {
+#endif
   if (g_handling.test_and_set(std::memory_order_acq_rel)) {
     // Nested crash — bail hard.
 #if defined(_WIN32)
@@ -333,7 +551,11 @@ void handle_crash(const char* kind, const char* detail) {
   format_timestamp(stamp, sizeof(stamp));
   char path[kPathCap];
   make_crash_path(path, sizeof(path), stamp);
+#if defined(_WIN32)
+  const bool wrote = write_crash_file(path, kind, detail, info);
+#else
   const bool wrote = write_crash_file(path, kind, detail);
+#endif
 
   char msg[kMsgCap];
   build_user_message(msg, sizeof(msg), kind, detail, path, wrote);
@@ -348,22 +570,6 @@ void handle_crash(const char* kind, const char* detail) {
 }
 
 #if !defined(_WIN32)
-// Async-signal-safe helpers. Only call open/write/close/backtrace_symbols_fd/_exit.
-// Safe set: write, open, close, backtrace_symbols_fd, signal, raise, _exit.
-void asafe_write(int fd, const char* data, std::size_t n) {
-  if (fd < 0 || data == nullptr || n == 0) return;
-  (void)::write(fd, data, n);
-}
-
-void asafe_write_cstr(int fd, const char* s) {
-  if (fd < 0 || s == nullptr) return;
-  std::size_t n = 0;
-  while (s[n] != '\0' && n < kMsgCap) {
-    ++n;
-  }
-  asafe_write(fd, s, n);
-}
-
 // Signal path: preallocated path + static headers only — no snprintf/malloc/dialog.
 void handle_crash_from_signal(int sig, const char* kind) {
   if (g_handling.test_and_set(std::memory_order_acq_rel)) {
@@ -371,22 +577,25 @@ void handle_crash_from_signal(int sig, const char* kind) {
   }
 
   // File-scope literals only — avoid function-local static init in signal context.
-  asafe_write(STDERR_FILENO, "[wds] FATAL signal: ", 20);
-  asafe_write_cstr(STDERR_FILENO, kind != nullptr ? kind : "signal");
-  asafe_write(STDERR_FILENO, "\n", 1);
+  asafe_write_bytes(STDERR_FILENO, "[wds] FATAL signal: ", 20);
+  asafe_write_cstr_fd(STDERR_FILENO, kind != nullptr ? kind : "signal");
+  asafe_write_bytes(STDERR_FILENO, "\n", 1);
   if (g_signal_crash_path[0] != '\0') {
-    asafe_write(STDERR_FILENO, "[wds] crash log: ", 17);
-    asafe_write_cstr(STDERR_FILENO, g_signal_crash_path);
-    asafe_write(STDERR_FILENO, "\n", 1);
+    asafe_write_bytes(STDERR_FILENO, "[wds] crash log: ", 17);
+    asafe_write_cstr_fd(STDERR_FILENO, g_signal_crash_path);
+    asafe_write_bytes(STDERR_FILENO, "\n", 1);
   }
 
   if (g_signal_crash_path[0] != '\0') {
     const int fd = ::open(g_signal_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
-      asafe_write(fd, kSignalCrashHeader, sizeof(kSignalCrashHeader) - 1);
-      asafe_write_cstr(fd, kind != nullptr ? kind : "signal");
-      asafe_write(fd, "\n--- stack ---\n", 15);
+      asafe_write_bytes(fd, kSignalCrashHeader, sizeof(kSignalCrashHeader) - 1);
+      asafe_write_cstr_fd(fd, kind != nullptr ? kind : "signal");
+      asafe_write_bytes(fd, "\n", 1);
+      write_privacy_and_uptime_fd(fd);
+      asafe_write_bytes(fd, "--- stack ---\n", 14);
       append_stack_posix(fd);
+      journal_write_text(emit_journal_fd, reinterpret_cast<void*>(static_cast<std::intptr_t>(fd)));
       ::close(fd);
     }
   }
@@ -417,7 +626,7 @@ LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* info) {
       info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
   std::snprintf(detail, sizeof(detail), "%s (0x%08lX)", exception_name(code),
                 static_cast<unsigned long>(code));
-  handle_crash("Windows 异常", detail);
+  handle_crash("Windows 异常", detail, info);
   return EXCEPTION_EXECUTE_HANDLER;
 }
 #else

@@ -19,6 +19,8 @@
 #include "wds/interaction/widgets/text_field.hpp"
 #include "wds/interaction/validators.hpp"
 
+#include <wds/common/crash_input_journal.hpp>
+
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -1253,6 +1255,65 @@ int main() {
 #endif
     expect(!is_visible_range_wheel_modifiers(extra_primary),
            "extra modifier blocks visible-range wheel");
+  }
+
+  {
+    using wds::common::CrashEffectId;
+    using wds::common::journal_count;
+    using wds::common::journal_reset_for_test;
+    using wds::common::journal_slot_from_oldest;
+    using wds::common::journal_write_text;
+
+    class NamedScrollWidget : public Widget {
+     public:
+      const char* trace_name() const override { return "NamedScrollWidget"; }
+      void on_scroll(const ScrollEvent&) override { scrolled_ = true; }
+      bool scrolled_ = false;
+    };
+
+    class SnapScrollWidget : public Widget {
+     public:
+      const char* trace_name() const override { return "SnapScrollWidget"; }
+      void trace_snapshot(wds::common::CrashTraceSnap& snap) const override {
+        snap.mask = wds::common::kCrashSnapPopupScroll;
+        snap.popup_scroll = scroll_;
+      }
+      void on_scroll(const ScrollEvent& event) override { scroll_ += event.delta_y; }
+      float scroll_ = 0.0f;
+    };
+
+    journal_reset_for_test();
+    WidgetRoot route_root;
+    route_root.set_bounds({0, 0, 200, 200});
+    auto named = std::make_unique<NamedScrollWidget>();
+    named->set_bounds({0, 0, 200, 200});
+    route_root.add_child(std::move(named));
+    route_root.process_frame(0.016f, {ScrollEvent{{40, 40}, 0.0f, -1.0f, {}}}, nullptr);
+    expect(journal_count() == 1, "scroll opens one journal slot");
+    const auto* slot = journal_slot_from_oldest(0);
+    expect(slot != nullptr && slot->route_target != nullptr &&
+               std::string(slot->route_target) == "NamedScrollWidget",
+           "scroll route uses trace_name");
+
+    journal_reset_for_test();
+    WidgetRoot snap_root;
+    snap_root.set_bounds({0, 0, 200, 200});
+    auto snap = std::make_unique<SnapScrollWidget>();
+    snap->set_bounds({0, 0, 200, 200});
+    snap_root.add_child(std::move(snap));
+    snap_root.process_frame(0.016f, {ScrollEvent{{40, 40}, 0.0f, 3.0f, {}}}, nullptr);
+    expect(journal_count() == 1, "snapshot scroll opens one slot");
+    const auto* snap_slot = journal_slot_from_oldest(0);
+    expect(snap_slot != nullptr && snap_slot->effect_count == 1 &&
+               snap_slot->effects[0].id == CrashEffectId::PopupScroll,
+           "trace_snapshot diff records popup_scroll without leaf log");
+    std::string dump;
+    journal_write_text(
+        [](void* ctx, const char* data, std::size_t n) {
+          static_cast<std::string*>(ctx)->append(data, n);
+        },
+        &dump);
+    expect(dump.find("popup_scroll") != std::string::npos, "dump shows popup_scroll effect");
   }
 
   return failures == 0 ? 0 : 1;

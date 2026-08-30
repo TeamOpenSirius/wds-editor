@@ -12,7 +12,7 @@
 
 namespace wds::ui {
 
-// Settings modal with left tabs: 文件 / 音频 / 输入 / 显示 / 快捷键宽 / 快捷键设置.
+// Settings modal with left tabs: 文件 / 音频 / 输入 / 显示 / 快捷键宽 / 快捷键设置 / 隐私.
 class WidthSlotsDialog final : public wds::interaction::Widget {
  public:
   WidthSlotsDialog();
@@ -39,8 +39,14 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   void on_click(const wds::interaction::ClickEvent& event) override;
   void on_scroll(const wds::interaction::ScrollEvent& event) override;
 
+  const char* trace_name() const override { return "WidthSlotsDialog"; }
+  void trace_snapshot(wds::common::CrashTraceSnap& snap) const override {
+    snap.mask = wds::common::kCrashSnapShortcutScroll;
+    snap.shortcut_list_scroll = shortcut_scroll_;
+  }
+
  private:
-  enum class Tab { File, Audio, Input, Display, Width, Shortcuts };
+  enum class Tab { File, Audio, Input, Display, Width, Shortcuts, Privacy };
 
   void sync_fields_from_state();
   void apply_fields();
@@ -66,6 +72,7 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   wds::interaction::Rect tab_display_bounds_{};
   wds::interaction::Rect tab_width_bounds_{};
   wds::interaction::Rect tab_shortcuts_bounds_{};
+  wds::interaction::Rect tab_privacy_bounds_{};
   wds::interaction::Rect shortcut_list_bounds_{};
   float shortcut_scroll_ = 0.0f;
 
@@ -86,6 +93,7 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   wds::interaction::Widget* note_height_level_ = nullptr;
   wds::interaction::Widget* split_line_opacity_ = nullptr;
   wds::interaction::Widget* msaa_samples_ = nullptr;
+  wds::interaction::Widget* allow_crash_log_sensitive_ = nullptr;
 
   wds::interaction::Widget* confirm_button_ = nullptr;
   wds::interaction::Widget* cancel_button_ = nullptr;

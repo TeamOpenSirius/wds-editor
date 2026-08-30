@@ -271,6 +271,10 @@ WidthSlotsDialog::WidthSlotsDialog() {
   scroll_wheel_speed_ = speed.get();
   add_child(std::move(speed));
 
+  auto privacy = std::make_unique<wds::interaction::Checkbox>("允许崩溃日志记录真实文本与文件路径");
+  allow_crash_log_sensitive_ = privacy.get();
+  add_child(std::move(privacy));
+
   auto confirm = std::make_unique<wds::interaction::Button>("确认");
   confirm->set_tone(wds::interaction::ButtonTone::Confirm);
   confirm->on_click([this] { try_confirm(); });
@@ -408,6 +412,8 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
           wds::chart_editor::official_clamp_split_effect_line_opacity(cfg.split_line_opacity)));
   static_cast<wds::interaction::ComboBox*>(msaa_samples_)
       ->set_text(format_msaa_samples(cfg.msaa_samples));
+  static_cast<wds::interaction::Checkbox*>(allow_crash_log_sensitive_)
+      ->set_checked(cfg.allow_crash_log_sensitive);
   for (int i = 0; i < 6; ++i) {
     static_cast<wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
         ->set_text(std::to_string(cfg.width_slots[static_cast<std::size_t>(i)]));
@@ -470,6 +476,8 @@ void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
   }
   cfg.msaa_samples = msaa_samples_from_label(
       static_cast<const wds::interaction::ComboBox*>(msaa_samples_)->text());
+  cfg.allow_crash_log_sensitive =
+      static_cast<const wds::interaction::Checkbox*>(allow_crash_log_sensitive_)->checked();
   for (int i = 0; i < 6; ++i) {
     const auto& text =
         static_cast<const wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
@@ -543,6 +551,7 @@ void WidthSlotsDialog::update_tab_visibility() {
   const bool input = tab_ == Tab::Input;
   const bool display = tab_ == Tab::Display;
   const bool shortcuts = tab_ == Tab::Shortcuts;
+  const bool privacy = tab_ == Tab::Privacy;
   for (auto* f : fields_) {
     if (f) f->set_visible(open_ && width);
   }
@@ -566,6 +575,7 @@ void WidthSlotsDialog::update_tab_visibility() {
   if (invert_scroll_wheel_) invert_scroll_wheel_->set_visible(open_ && input);
   if (invert_visible_range_scroll_) invert_visible_range_scroll_->set_visible(open_ && input);
   if (scroll_wheel_speed_) scroll_wheel_speed_->set_visible(open_ && input);
+  if (allow_crash_log_sensitive_) allow_crash_log_sensitive_->set_visible(open_ && privacy);
 }
 
 void WidthSlotsDialog::clamp_shortcut_scroll() {
@@ -588,7 +598,7 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   const float tab_w = th::px(110.0f);
   const float panel_w = std::min(th::px(600.0f), std::max(th::px(400.0f), host.w * 0.52f));
   const float min_panel_h =
-      pad * 2.0f + title_h + gap + ctrl_h * 6.0f + body_gap * 5.0f + btn_h + gap;
+      pad * 2.0f + title_h + gap + ctrl_h * 7.0f + body_gap * 6.0f + btn_h + gap;
   // Prefer ~80% of window height so shortcut settings can list many bindings.
   const float panel_h = std::clamp(host.h * 0.80f, min_panel_h, host.h * 0.92f);
   content_bounds_ = {(host.w - panel_w) * 0.5f, (host.h - panel_h) * 0.5f, panel_w, panel_h};
@@ -607,6 +617,8 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   tab_width_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
   tab_y += ctrl_h + tab_gap;
   tab_shortcuts_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
+  tab_y += ctrl_h + tab_gap;
+  tab_privacy_bounds_ = {tab_x, tab_y, tab_w, ctrl_h};
 
   const float body_x = content_bounds_.x + pad + tab_w + gap * 1.5f;
   const float body_w = content_bounds_.right() - pad - body_x;
@@ -635,6 +647,9 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
 
   // Input: invert checkboxes, then labeled scroll-speed combo.
   invert_scroll_wheel_->set_bounds({body_x, y, body_w, ctrl_h});
+  if (allow_crash_log_sensitive_) {
+    allow_crash_log_sensitive_->set_bounds({body_x, y, body_w, ctrl_h});
+  }
   const float range_y = y + ctrl_h + body_gap;
   invert_visible_range_scroll_->set_bounds({body_x, range_y, body_w, ctrl_h});
   const float speed_y = range_y + ctrl_h + body_gap;
@@ -753,6 +768,7 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
   paint_tab(tab_display_bounds_, "显示", tab_ == Tab::Display);
   paint_tab(tab_width_bounds_, "快捷键宽", tab_ == Tab::Width);
   paint_tab(tab_shortcuts_bounds_, "快捷键设置", tab_ == Tab::Shortcuts);
+  paint_tab(tab_privacy_bounds_, "隐私", tab_ == Tab::Privacy);
 
   if (tab_ == Tab::Width) {
     const float tab_w = th::px(110.0f);
@@ -835,6 +851,9 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
     painter.label({body_x, speed_y, th::px(140.0f), ctrl_h}, "时间轴滚轮速度",
                   th::kOnSurfaceMuted, 0.987f, false, 0.0f, true);
     static_cast<const wds::interaction::ComboBox*>(scroll_wheel_speed_)->paint_at(painter, kFieldZ);
+  } else if (tab_ == Tab::Privacy) {
+    static_cast<const wds::interaction::Checkbox*>(allow_crash_log_sensitive_)
+        ->paint_at(painter, kFieldZ);
   } else if (tab_ == Tab::Shortcuts) {
     for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
       auto* field = shortcut_fields_[i];
@@ -959,6 +978,10 @@ void WidthSlotsDialog::on_click(const wds::interaction::ClickEvent& event) {
   }
   if (hit_tab(tab_shortcuts_bounds_)) {
     set_tab(Tab::Shortcuts);
+    return;
+  }
+  if (hit_tab(tab_privacy_bounds_)) {
+    set_tab(Tab::Privacy);
     return;
   }
 

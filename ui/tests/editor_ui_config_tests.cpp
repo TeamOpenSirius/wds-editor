@@ -511,6 +511,33 @@ void test_save_truncates_in_memory_over_max() {
   CHECK_EQ(loaded.curve_selected_template_id, static_cast<std::uint64_t>(0));
 }
 
+void test_allow_crash_log_sensitive_default_and_round_trip() {
+  EditorUiConfig defaults;
+  CHECK(!defaults.allow_crash_log_sensitive);
+
+  const auto missing = temp_config_path("privacy_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK(!loaded_missing.allow_crash_log_sensitive);
+
+  EditorUiConfig cfg;
+  cfg.allow_crash_log_sensitive = true;
+  const auto path = temp_config_path("privacy_on.yml");
+  CHECK(save_editor_ui_config(path.string(), cfg));
+  EditorUiConfig loaded;
+  CHECK(load_editor_ui_config(path.string(), loaded));
+  CHECK(loaded.allow_crash_log_sensitive);
+
+  EditorUiConfig off;
+  off.allow_crash_log_sensitive = false;
+  const auto off_path = temp_config_path("privacy_off.yml");
+  CHECK(save_editor_ui_config(off_path.string(), off));
+  EditorUiConfig loaded_off;
+  CHECK(load_editor_ui_config(off_path.string(), loaded_off));
+  CHECK(!loaded_off.allow_crash_log_sensitive);
+}
+
 }  // namespace
 
 int main() {
@@ -528,6 +555,7 @@ int main() {
   test_over_cap_indexed_slots_ignored();
   test_settings_save_preserves_curve_state();
   test_save_truncates_in_memory_over_max();
+  test_allow_crash_log_sensitive_default_and_round_trip();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;
