@@ -2,6 +2,7 @@
 
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/official_playfield.hpp>
 
 #include <wds/interaction/types.hpp>
 
@@ -24,8 +25,6 @@ class EditViewport {
   static constexpr float kNoteHeightFactor = 85.0f / 640.0f;
   // Vertical stretch for flattened note / judgeline skins.
   static constexpr float kVerticalStretch = 2.0f;  // was 1.5; ×4/3 thicker edit notes/judgeline
-  // Tiny gap inside lane edges so notes don't cover the 1px lane guides.
-  static constexpr float kNoteLaneGapPx = 1.0f;
   static constexpr int32_t kMsPerHectom = wds::chart_editor::EditLeadIn::kMsPerHectom;
 
   void set_bounds(wds::interaction::Rect bounds) { bounds_ = bounds; }
@@ -106,7 +105,18 @@ class EditViewport {
     // ~60% of prior thickness (notes keep kVerticalStretch unchanged).
     return std::clamp(bounds_.h * 0.133f * 0.35f * kVerticalStretch * 0.6f, 7.0f, 26.0f);
   }
-  float note_inset_px(int32_t /*width*/) const { return kNoteLaneGapPx; }
+  float tap_visual_world_width(int32_t width) const {
+    return wds::chart_editor::official_tap_visual_width(
+        wds::chart_editor::official_note_width(std::max(1, width)));
+  }
+  float hold_visual_world_width(int32_t width) const {
+    return wds::chart_editor::official_hold_line_visual_width(
+        wds::chart_editor::official_note_width(std::max(1, width)));
+  }
+  float note_inset_px(int32_t width) const { return visual_inset_px(width, tap_visual_world_width(width)); }
+  float hold_inset_px(int32_t width) const {
+    return visual_inset_px(width, hold_visual_world_width(width));
+  }
 
   // Screen rect of a Sound / ScratchSound mid-star (square ~note_h, centered in lanes).
   wds::interaction::Rect mid_star_screen_rect(const wds::chart_editor::NotationNote& note) const {
@@ -142,6 +152,13 @@ class EditViewport {
   const wds::chart_editor::EditGridConfig& grid() const noexcept { return grid_; }
 
  private:
+  float visual_inset_px(int32_t width, float visual_world) const {
+    const float notation = wds::chart_editor::official_note_width(std::max(1, width));
+    const float full = lane_width(width);
+    const float visual_px = full * (visual_world / std::max(notation, 1e-6f));
+    return std::max(0.0f, (full - visual_px) * 0.5f);
+  }
+
   wds::interaction::Rect bounds_{};
   wds::chart_editor::EditGridConfig grid_{};
   wds::chart_editor::MusicTiming timing_{};

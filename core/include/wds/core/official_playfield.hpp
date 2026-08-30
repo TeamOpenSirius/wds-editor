@@ -16,6 +16,11 @@ inline constexpr float kOfficialCameraFovDeg = 50.0f;
 inline constexpr float kOfficialJudgeAreaY = -3.9f;
 inline constexpr float kOfficialNoteWidthPerLane = 0.915f;
 inline constexpr float kOfficialLaneBorderWidth = 0.01f;
+// GameConfig._noteMarginWidth / _holdNoteLineAdditionalWidth. Applied to
+// SpriteRenderer.size.x only — notation / GetNotePositionX stay full width.
+inline constexpr float kOfficialNoteMarginWidth = 0.15f;
+inline constexpr float kOfficialHoldNoteLineAdditionalWidth = 0.10f;
+inline constexpr float kOfficialNoteSpritePpu = 100.0f;
 inline constexpr float kOfficialNoteSpriteHeight = 0.64f;
 inline constexpr float kOfficialNoteLocalZBottom = -0.01f;
 inline constexpr float kOfficialNoteLocalZTop = -0.1f;
@@ -221,6 +226,25 @@ inline float official_note_width(int32_t lane_count,
   const int32_t n = std::max(1, lane_count);
   return static_cast<float>(n) * note_width_per_lane +
          static_cast<float>(n - 1) * lane_border_width;
+}
+
+inline float official_tap_visual_width(float notation_width) noexcept {
+  return notation_width - kOfficialNoteMarginWidth;
+}
+
+inline float official_hold_line_visual_width(float notation_width) noexcept {
+  return notation_width - kOfficialNoteMarginWidth + kOfficialHoldNoteLineAdditionalWidth;
+}
+
+// Unity SpriteRenderer Sliced: corner world size = border_px / PPU (constant).
+inline float official_sliced_cap_world(float border_px,
+                                       float ppu = kOfficialNoteSpritePpu) noexcept {
+  return border_px / std::max(ppu, 1e-6f);
+}
+
+inline float official_sliced_cap_fraction(float border_px, float dest_world_width,
+                                          float ppu = kOfficialNoteSpritePpu) noexcept {
+  return official_sliced_cap_world(border_px, ppu) / std::max(dest_world_width, 1e-6f);
 }
 
 // Official 1-based laneNumber. Center of a note that starts at that lane.

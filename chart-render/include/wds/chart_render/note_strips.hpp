@@ -11,16 +11,17 @@ namespace wds::renderer {
 // border_l / border_r are source pixels (A_*Notes* → 65 on 268×108, PPU 100;
 // HoldLongNotes → 10 on 157×33, PPU 100).
 //
-// Cap size = border_px * border_scale_px, in the SAME units as the quad edges
-// (NDC after rect_to_quad / stage projection — not framebuffer pixels).
-// When border_scale_px < 0, scale = (quad vertical length) / tex_height (flat notes).
-// Hold ribbons must pass flat-note height in that same space, not hold length.
+// When dest_world_width > 0: cap fraction = (border_px / PPU) / dest_world_width.
+// Unity keeps that world size even if the two caps overlap (no shrink-to-fit).
+//
+// Otherwise cap size = border_px * border_scale_px in dest units (edit timeline).
+// When border_scale_px < 0, scale = (quad vertical length) / tex_height.
 //
 // alpha_near applies to lb/rb; alpha_far to lt/rt (preview hold tip fade).
 void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
                      float border_l_px, float border_r_px, float z, float alpha_near,
                      float alpha_far, float border_scale_px = -1.0f, float r = 1.0f,
-                     float g = 1.0f, float b = 1.0f);
+                     float g = 1.0f, float b = 1.0f, float dest_world_width = 0.0f);
 
 inline void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
                             float border_l_px, float border_r_px, float z, float alpha,
@@ -34,6 +35,7 @@ inline void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Q
 void add_sliced_note_v(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
                        float border_l_px, float border_r_px, float z, float alpha,
                        float border_scale_px, float v_near_atlas, float v_far_atlas,
-                       float r = 1.0f, float g = 1.0f, float b = 1.0f);
+                       float r = 1.0f, float g = 1.0f, float b = 1.0f,
+                       float dest_world_width = 0.0f);
 
 }  // namespace wds::renderer

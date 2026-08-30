@@ -806,28 +806,18 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
     return base_alpha * std::clamp(1.0f - (p - fade_lo) / band, 0.0f, 1.0f);
   };
 
-  // Cap size follows flat-note height in NDC (shared border_scale_from_flat_height).
-  auto flat_border_scale = [&](float p) {
-    const Quad ref = geometry_.note_quad(
-        note.lane, note.end_lane, std::clamp(p, 0.0f, geometry_.judgeline_percent()));
-    const float hx0 = ref.lt.x - ref.lb.x;
-    const float hy0 = ref.lt.y - ref.lb.y;
-    const float hx1 = ref.rt.x - ref.rb.x;
-    const float hy1 = ref.rt.y - ref.rb.y;
-    const float dh =
-        0.5f * (std::sqrt(hx0 * hx0 + hy0 * hy0) + std::sqrt(hx1 * hx1 + hy1 * hy1));
-    return wds::chart_render::border_scale_from_flat_height(dh, skin_);
-  };
+  const float hold_world_w = wds::chart_editor::official_hold_line_visual_width(
+      wds::chart_editor::official_span_width(note.lane, note.end_lane));
 
-  // hold_body_quad: lb/rb at percent_near, lt/rt at percent_far.
   // Official HoldLongNotes: SpriteRenderer Sliced, m_Border L/R = 10 on 157-wide art.
+  // Cap world = 10/100; dest_world_width drives overlap (no dest_h / tex_h).
   auto emit = [&](float lo, float hi) {
     if (hi <= lo) return;
     add_sliced_note(batch, sprites.connection,
-                    geometry_.hold_body_quad(note.lane, note.end_lane, hi, lo),
+                    geometry_.hold_line_quad(note.lane, note.end_lane, hi, lo),
                     skin_.hold_slice_border_l, skin_.hold_slice_border_r, -0.25f, alpha_at(hi),
-                    alpha_at(lo), flat_border_scale(hi), sprites.connection_r,
-                    sprites.connection_g, sprites.connection_b);
+                    alpha_at(lo), -1.0f, sprites.connection_r, sprites.connection_g,
+                    sprites.connection_b, hold_world_w);
   };
 
   if (p_near <= fade_lo) {
@@ -895,21 +885,13 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
   }
   const float z = z_bias + unity_z - static_cast<float>(beat_sec) * 1e-4f;
   const float alpha = note.is_grayed_out ? 0.55f : 1.0f;
-  // Cap scale from full note height so borders don't balloon when clipped.
-  const Quad full_q = geometry_.note_quad(lane, end_lane, pc, unity_z);
-  const float hx0 = full_q.lt.x - full_q.lb.x;
-  const float hy0 = full_q.lt.y - full_q.lb.y;
-  const float hx1 = full_q.rt.x - full_q.rb.x;
-  const float hy1 = full_q.rt.y - full_q.rb.y;
-  const float full_h =
-      0.5f * (std::sqrt(hx0 * hx0 + hy0 * hy0) + std::sqrt(hx1 * hx1 + hy1 * hy1));
-  const float border_scale =
-      wds::chart_render::border_scale_from_flat_height(full_h, skin_);
+  const float tap_world_w = wds::chart_editor::official_tap_visual_width(
+      wds::chart_editor::official_span_width(lane, end_lane));
   const float v_near = layer.v0;
   const float v_far = layer.v0 + (layer.v1 - layer.v0) * far_t;
   wds::renderer::add_sliced_note_v(batch, layer, q, skin_.note_slice_border_l,
-                                   skin_.note_slice_border_r, z, alpha, border_scale, v_near,
-                                   v_far);
+                                   skin_.note_slice_border_r, z, alpha, -1.0f, v_near, v_far,
+                                   1.0f, 1.0f, 1.0f, tap_world_w);
 }
 
 void PlaybackPreviewView::draw_tick_note(DrawBatch& batch, const PreviewNoteInstance& note,

@@ -9,7 +9,7 @@ namespace {
 
 using wds::chart_render::AnimatedArrowLayoutParams;
 using wds::chart_render::StaticArrowLayoutParams;
-using wds::chart_render::border_scale_from_flat_height;
+using wds::chart_render::border_scale_from_ppu;
 using wds::chart_render::hold_tail_layers;
 using wds::chart_render::layout_animated_scratch_arrows;
 using wds::chart_render::layout_static_scratch_arrows;
@@ -17,12 +17,24 @@ using wds::chart_render::scratch_arrow_sides;
 using wds::renderer::SkinCatalog;
 using wds::renderer::TextureId;
 
-void test_border_scale_uses_flat_height_not_pixels_mixed() {
-  // NDC-sized flat height (typical note quad ~0.05–0.2); must not use raw px.
-  const float scale = border_scale_from_flat_height(0.108f, 108.0f);
-  assert(std::abs(scale - 0.001f) < 1e-6f);
-  const float wide = border_scale_from_flat_height(0.216f, 108.0f);
-  assert(std::abs(wide - 0.002f) < 1e-6f);
+void test_border_scale_from_ppu_matches_unity_corners() {
+  // dest units per source pixel = dest_w / (world_w * PPU).
+  // 65px @ 100 ppu on a 0.765-wide note → each cap is 0.65/0.765 of dest_w.
+  const float dest_w = 0.8639f;
+  const float world_w = 0.765f;
+  const float scale = border_scale_from_ppu(dest_w, world_w, 100.0f);
+  const float cap = 65.0f * scale;
+  assert(std::abs(cap - dest_w * (0.65f / 0.765f)) < 1e-5f);
+  assert(cap * 2.0f > dest_w);
+}
+
+void test_sliced_caps_overlap_instead_of_shrinking() {
+  using wds::chart_render::sliced_cap_layout;
+  const auto layout = sliced_cap_layout(65.0f, 65.0f, 0.765f, 100.0f);
+  assert(layout.bl > 0.84f);
+  assert(layout.br > 0.84f);
+  assert(layout.bl + layout.br > 1.0f);
+  assert(!layout.emit_middle);
 }
 
 void test_scratch_arrow_sides() {
@@ -84,7 +96,8 @@ void test_hold_tail_layers() {
 }  // namespace
 
 int main() {
-  test_border_scale_uses_flat_height_not_pixels_mixed();
+  test_border_scale_from_ppu_matches_unity_corners();
+  test_sliced_caps_overlap_instead_of_shrinking();
   test_scratch_arrow_sides();
   test_static_arrows_respect_sides();
   test_animated_arrows_bidirectional_half_density();

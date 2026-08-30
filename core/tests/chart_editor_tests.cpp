@@ -1375,6 +1375,31 @@ void test_official_playfield_visual_lanes_are_six() {
   CHECK(std::fabs(official_lane_border_alpha(100) - 51.0f / 255.0f) < 1e-5f);
 }
 
+void test_official_note_visual_width_subtracts_margin() {
+  // TapNoteEntity.SetActive: size.x = notationWidth - NoteMarginWidth (0.15).
+  // HoldNoteObject.Set: size.x = notationWidth - 0.15 + HoldNoteLineAdditionalWidth (0.10).
+  CHECK(std::fabs(kOfficialNoteMarginWidth - 0.15f) < 1e-6f);
+  CHECK(std::fabs(kOfficialHoldNoteLineAdditionalWidth - 0.10f) < 1e-6f);
+  CHECK(std::fabs(kOfficialNoteSpritePpu - 100.0f) < 1e-6f);
+
+  const float one = official_note_width(1);
+  CHECK(std::fabs(one - 0.915f) < 1e-6f);
+  CHECK(std::fabs(official_tap_visual_width(one) - 0.765f) < 1e-6f);
+  CHECK(std::fabs(official_hold_line_visual_width(one) - 0.865f) < 1e-6f);
+
+  const float four = official_note_width(4);
+  CHECK(std::fabs(official_tap_visual_width(four) - (four - 0.15f)) < 1e-6f);
+
+  const float gap = (kOfficialNoteWidthPerLane + kOfficialLaneBorderWidth) -
+                    official_tap_visual_width(one);
+  CHECK(std::fabs(gap - 0.16f) < 1e-6f);
+
+  // Unity Sliced corners: border_px / PPU, not dest_h / tex_h.
+  CHECK(std::fabs(official_sliced_cap_world(65.0f) - 0.65f) < 1e-6f);
+  CHECK(std::fabs(official_sliced_cap_fraction(65.0f, 0.765f) - (0.65f / 0.765f)) < 1e-6f);
+  CHECK(official_sliced_cap_fraction(65.0f, 0.765f) > 0.5f);
+}
+
 void test_official_playfield_judge_ndc_and_perspective() {
   CHECK(std::fabs(kOfficialPreviewAspect - 16.0f / 9.0f) < 1e-6f);
   CHECK(kOfficialDefaultScreenWidth == 1280);
@@ -6295,6 +6320,7 @@ int main() {
   test_hold_combo_production_matches_reference_random();
   test_split_appear_phase_before_start_ms();
   test_official_playfield_visual_lanes_are_six();
+  test_official_note_visual_width_subtracts_margin();
   test_official_playfield_judge_ndc_and_perspective();
   test_official_calculate_position_y_matches_il2cpp();
   test_official_setting_value_ranges();

@@ -1,8 +1,10 @@
 #pragma once
 
 #include <wds/chart_render/skin_catalog.hpp>
+#include <wds/core/official_playfield.hpp>
 #include <wds/renderer/texture.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -18,6 +20,29 @@ inline float border_scale_from_flat_height(float flat_height, float note_slice_t
 inline float border_scale_from_flat_height(float flat_height,
                                           const wds::renderer::SkinCatalog& skin) noexcept {
   return border_scale_from_flat_height(flat_height, skin.note_slice_tex_h);
+}
+
+// dest units per source pixel so cap_world = border_px / PPU maps onto dest_w.
+inline float border_scale_from_ppu(float dest_w, float dest_world_width,
+                                   float ppu = wds::chart_editor::kOfficialNoteSpritePpu) noexcept {
+  return dest_w / (std::max(dest_world_width, 1e-6f) * std::max(ppu, 1e-6f));
+}
+
+struct SlicedCapLayout {
+  float bl = 0.0f;
+  float br = 0.0f;
+  bool emit_middle = true;
+};
+
+// Unity Sliced corners stay border_px/PPU even when they overlap (no shrink-to-fit).
+inline SlicedCapLayout sliced_cap_layout(
+    float border_l_px, float border_r_px, float dest_world_width,
+    float ppu = wds::chart_editor::kOfficialNoteSpritePpu) noexcept {
+  SlicedCapLayout out;
+  out.bl = wds::chart_editor::official_sliced_cap_fraction(border_l_px, dest_world_width, ppu);
+  out.br = wds::chart_editor::official_sliced_cap_fraction(border_r_px, dest_world_width, ppu);
+  out.emit_middle = (out.bl + out.br) < 1.0f - 1e-5f;
+  return out;
 }
 
 // Hold end-cap tops: ScratchHold → purple; regular Hold → blue. Shared bottom.

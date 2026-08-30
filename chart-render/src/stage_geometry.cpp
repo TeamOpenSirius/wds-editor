@@ -26,10 +26,12 @@ using wds::chart_editor::official_note_local_y;
 using wds::chart_editor::official_note_visible_position_y;
 using wds::chart_editor::official_percent_to_judge_y;
 using wds::chart_editor::official_percent_to_main_y;
+using wds::chart_editor::official_hold_line_visual_width;
 using wds::chart_editor::official_span_center_x;
 using wds::chart_editor::official_span_left_x;
 using wds::chart_editor::official_span_right_x;
 using wds::chart_editor::official_span_width;
+using wds::chart_editor::official_tap_visual_width;
 using wds::chart_editor::project_judge_xyz;
 using wds::chart_editor::project_main_xyz;
 using wds::chart_editor::project_note_layer;
@@ -326,7 +328,7 @@ Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent) con
 Quad StageGeometry::note_quad(int32_t lane, int32_t end_lane, float percent,
                               float unity_local_z) const {
   const float y = percent_to_judge_y(percent);
-  const float w = official_span_width(lane, end_lane);
+  const float w = official_tap_visual_width(official_span_width(lane, end_lane));
   const float x = 0.5f * (official_span_left_x(lane, end_lane) + official_span_right_x(lane, end_lane));
   const float h = kOfficialNoteSpriteHeight;
   const float tilt = official_note_height_rotation_x(config_.note_height_level);
@@ -347,7 +349,7 @@ Quad StageGeometry::note_span_quad(int32_t lane, int32_t end_lane, float percent
   const float y_near = percent_to_judge_y(percent_near);
   const float y_far = percent_to_judge_y(percent_far);
   const float y = 0.5f * (y_near + y_far);
-  const float w = official_span_width(lane, end_lane);
+  const float w = official_tap_visual_width(official_span_width(lane, end_lane));
   const float x = 0.5f * (official_span_left_x(lane, end_lane) + official_span_right_x(lane, end_lane));
   const float tilt = official_note_height_rotation_x(config_.note_height_level);
   const float aspect = content_aspect();
@@ -375,6 +377,20 @@ Quad StageGeometry::hold_body_quad(int32_t lane, int32_t end_lane, float percent
   q.rb = project_judge(right, y0);
   q.lt = project_judge(left, y1);
   q.rt = project_judge(right, y1);
+  return q;
+}
+
+Quad StageGeometry::hold_line_quad(int32_t lane, int32_t end_lane, float percent_near,
+                                   float percent_far) const {
+  const float y0 = percent_to_judge_y(percent_near);
+  const float y1 = percent_to_judge_y(percent_far);
+  const float cx = official_span_center_x(lane, end_lane);
+  const float half = official_hold_line_visual_width(official_span_width(lane, end_lane)) * 0.5f;
+  Quad q;
+  q.lb = project_judge(cx - half, y0);
+  q.rb = project_judge(cx + half, y0);
+  q.lt = project_judge(cx - half, y1);
+  q.rt = project_judge(cx + half, y1);
   return q;
 }
 
