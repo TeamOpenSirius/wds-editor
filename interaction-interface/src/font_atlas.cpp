@@ -514,10 +514,12 @@ void FontAtlas::build_quads(const std::string& text, float x, float y, float pix
     const float origin =
         std::floor(line_y + slot_ascent(slot) * (pixel_size / std::max(slot_baked(slot), 1.0f)) +
                    0.5f);
+    // Outline yoff keeps a shared baseline (Retina Latin n/u). Quad *height* must
+    // match the atlas bitmap or NEAREST vertically compresses glyphs on 1× (Win).
+    const float bitmap_h = (g.c->y1 - g.c->y0) * glyph_scale;
     const float gw = (g.c->x1 - g.c->x0) * glyph_scale;
     const float gy = origin + std::floor(g.c->yoff * glyph_scale + 0.5f);
-    const float g_bottom = origin + std::floor(g.c->y1off * glyph_scale + 0.5f);
-    const float gh = std::max(1.0f, g_bottom - gy);
+    const float gh = std::max(1.0f, std::floor(bitmap_h + 0.5f));
     const float gx = std::floor(pen_x + g.c->xoff * glyph_scale + 0.5f);
     if (gw > 0.0f && gh > 0.0f) {
       GlyphQuad q;
