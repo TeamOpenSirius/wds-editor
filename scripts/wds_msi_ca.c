@@ -1,7 +1,14 @@
-/* Immediate MSI custom action: apply shortcut feature states from CREATE_* props.
+/* Immediate MSI custom action: apply shortcut feature/component states from CREATE_*.
  *
- * Built as a MinGW DLL for wixl Binary/DllEntry. Runs after MigrateFeatureStates so
- * UI AddLocal/Remove (or registry prefs on silent installs) win over migrated state.
+ * Built as a MinGW DLL for wixl Binary/DllEntry.
+ *
+ * Scheduled twice in InstallExecuteSequence:
+ *   1) After FileCost / before CostFinalize — so ABSENT↔LOCAL is costed correctly
+ *   2) After MigrateFeatureStates slot — so upgrade feature migration cannot discard
+ *      the choice (package-target.sh also removes MigrateFeatureStates entirely)
+ *
+ * Sets both Feature and Component action states: post-CostFinalize MsiSetFeatureState
+ * alone often fails to install a previously-absent shortcut component.
  *
  * Entry must be stdcall and listed in the .def / -Wl,--kill-at for undecorated names.
  */
@@ -22,14 +29,18 @@ static int prop_is_one(MSIHANDLE hInstall, const WCHAR* name) {
   return buf[0] == L'1';
 }
 
+static void apply_shortcut(MSIHANDLE hInstall, const WCHAR* feature,
+                           const WCHAR* component, int enabled) {
+  const INSTALLSTATE state =
+      enabled ? INSTALLSTATE_LOCAL : INSTALLSTATE_ABSENT;
+  MsiSetFeatureStateW(hInstall, feature, state);
+  MsiSetComponentStateW(hInstall, component, state);
+}
+
 __declspec(dllexport) UINT __stdcall ApplyShortcutFeatureStates(MSIHANDLE hInstall) {
-  const INSTALLSTATE desk =
-      prop_is_one(hInstall, L"CREATE_DESKTOP_SHORTCUT") ? INSTALLSTATE_LOCAL
-                                                         : INSTALLSTATE_ABSENT;
-  const INSTALLSTATE start =
-      prop_is_one(hInstall, L"CREATE_STARTMENU_SHORTCUT") ? INSTALLSTATE_LOCAL
-                                                           : INSTALLSTATE_ABSENT;
-  MsiSetFeatureStateW(hInstall, L"DesktopFeature", desk);
-  MsiSetFeatureStateW(hInstall, L"StartMenuFeature", start);
+  apply_shortcut(hInstall, L"DesktopFeature", L"DesktopShortcut",
+                 prop_is_one(hInstall, L"CREATE_DESKTOP_SHORTCUT"));
+  apply_shortcut(hInstall, L"StartMenuFeature", L"ApplicationShortcut",
+                 prop_is_one(hInstall, L"CREATE_STARTMENU_SHORTCUT"));
   return ERROR_SUCCESS;
 }
