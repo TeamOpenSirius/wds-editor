@@ -719,6 +719,94 @@ void test_curve_fill_wheel_does_not_change_visible_range() {
   CHECK(!ghosts.empty());
 }
 
+const NotationNote* find_note_id(const std::vector<NotationNote>& notes, int32_t id) {
+  for (const auto& note : notes) {
+    if (note.id == id) return &note;
+  }
+  return nullptr;
+}
+
+int32_t add_hold_body(Harness& h, NoteType type, int32_t start, int32_t end, int32_t lane,
+                      int32_t width, int32_t cover_left = -1, int32_t cover_right = -1) {
+  NotationNote body;
+  body.note_type = type;
+  body.start_tick = start;
+  body.end_tick = end;
+  body.lane = lane;
+  body.width = width;
+  if (type == NoteType::ScratchHold) {
+    body.gimmick_type = wds::chart_editor::GimmickType::JumpScratch;
+    const int32_t left = cover_left >= 0 ? cover_left : lane;
+    const int32_t right = cover_right >= 0 ? cover_right : lane + width - 1;
+    wds::chart_editor::set_scratch_hold_end_lanes(body, left, right);
+  }
+  const int32_t id = h.engine.add_note(body);
+  CHECK(id >= 0);
+  return id;
+}
+
+void test_hold_tail_adjust_follows_playback_resync() {
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+  const auto grab = h.at_tick_lane(960, 4);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  const auto* before = find_note_id(h.engine.document().notes(), id);
+  CHECK(before != nullptr);
+  CHECK_EQ(before->start_tick, 0);
+  CHECK_EQ(before->end_tick, 960);
+
+  h.panel.sync_to_timeline_ms(800.0);
+  h.panel.resync_pointer_overlays();
+
+  const int32_t expected = h.panel.viewport().tick_at(grab.y);
+  CHECK(expected != 960);
+  const auto* after = find_note_id(h.engine.document().notes(), id);
+  CHECK(after != nullptr);
+  CHECK_EQ(after->start_tick, 0);
+  CHECK_EQ(after->end_tick, expected);
+}
+
+void test_jumpscratch_end_adjust_follows_wheel_resync() {
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::ScratchHold, 0, 960, 3, 3);
+  const auto grab = h.at_tick_lane(960, 4);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  const auto* before = find_note_id(h.engine.document().notes(), id);
+  CHECK(before != nullptr);
+  CHECK_EQ(before->end_tick, 960);
+
+  h.panel.on_scroll(wds::interaction::ScrollEvent{grab, 0.0f, -4.0f, {}});
+
+  const int32_t expected = h.panel.viewport().tick_at(grab.y);
+  CHECK(expected != 960);
+  const auto* after = find_note_id(h.engine.document().notes(), id);
+  CHECK(after != nullptr);
+  CHECK_EQ(after->start_tick, 0);
+  CHECK_EQ(after->end_tick, expected);
+}
+
+void test_jumpscratch_joint_adjust_follows_playback_resync() {
+  Harness h;
+  const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+  const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  const auto grab = h.at_tick_lane(480, 2);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+
+  h.panel.sync_to_timeline_ms(400.0);
+  h.panel.resync_pointer_overlays();
+
+  const int32_t joint = h.panel.viewport().tick_at(grab.y);
+  CHECK(joint != 480);
+  const auto* prev = find_note_id(h.engine.document().notes(), prev_id);
+  const auto* next = find_note_id(h.engine.document().notes(), next_id);
+  CHECK(prev != nullptr);
+  CHECK(next != nullptr);
+  CHECK_EQ(prev->start_tick, 0);
+  CHECK_EQ(prev->end_tick, joint);
+  CHECK_EQ(next->start_tick, joint);
+  CHECK_EQ(next->end_tick, 960);
+}
+
 void test_plain_primary_does_not_clear_hold_draft_during_draw() {
   Harness h;
   h.enter_hold(true, 0, 480, 2);
@@ -753,6 +841,9 @@ int main() {
   test_dialog_confirm_keeps_toolbar_fill_and_delete_falls_back();
   test_exact_primary_wheel_updates_visible_range_and_playhead_grid();
   test_curve_fill_wheel_does_not_change_visible_range();
+  test_hold_tail_adjust_follows_playback_resync();
+  test_jumpscratch_end_adjust_follows_wheel_resync();
+  test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

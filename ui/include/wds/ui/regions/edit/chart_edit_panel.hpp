@@ -207,6 +207,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_move_selection_to_pointer(wds::interaction::Vec2 point);
   // Live-update DragSplitEdge from a pointer so scroll-without-move still tracks.
   void sync_split_edge_to_pointer(wds::interaction::Vec2 point);
+  // Live-update AdjustHoldTime (hold tail / JumpScratch hinge) from a pointer
+  // so wheel scrub and playback keep the grabbed edge under the cursor.
+  void sync_hold_adjust_to_pointer(wds::interaction::Vec2 point);
   // Middle-button interrupt: drop in-progress place / hold draft. For chained
   // ScratchHold, discards only the current segment and keeps the previous as end.
   void cancel_placement();
