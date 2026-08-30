@@ -733,6 +733,15 @@ PY
     || die "msibuild failed to patch SecureCustomProperties"
   echo "Patched SecureCustomProperties (CREATE_* UI→Execute)"
 
+  # MigrateFeatureStates (after CostFinalize) re-applies the previous product's
+  # shortcut feature states and defeats AddLocal for previously-absent shortcuts.
+  # ProductFeature is Level=1 and always installed; shortcut features are driven by
+  # CREATE_* via ApplyShortcutFeatureStatesPreCost before CostFinalize.
+  msibuild "$msi_path" -q \
+    "DELETE FROM InstallExecuteSequence WHERE Action='MigrateFeatureStates'" \
+    || die "msibuild failed to remove MigrateFeatureStates"
+  echo "Removed MigrateFeatureStates (shortcut feature selection)"
+
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
   # used to look like "missing BrowseDlg" when libmsi was not loadable.
@@ -759,6 +768,10 @@ PY
     die "MSI missing UpdateDlg in InstallUISequence"
   grep -q $'ProductLanguage\t1033' <<<"${props}" || \
     die "MSI ProductLanguage is not 1033 (UI language mismatch risk)"
+  grep -Fq $'[CREATE_DESKTOP_SHORTCUT]\t0\tNOT CREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
+    die "MSI missing explicit CREATE_DESKTOP_SHORTCUT=0 on uncheck"
+  grep -Fq $'[CREATE_STARTMENU_SHORTCUT]\t0\tNOT CREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
+    die "MSI missing explicit CREATE_STARTMENU_SHORTCUT=0 on uncheck"
   grep -Fq $'AddLocal\tDesktopFeature\tCREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing conditional AddLocal for DesktopFeature"
   grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
@@ -778,6 +791,8 @@ PY
     die "MSI missing ApplyDesktopPrefFromReg custom action"
   grep -Fq 'PersistDesktopShortcutOn' <<<"${customs}" || \
     die "MSI missing PersistDesktopShortcutOn custom action"
+  grep -Fq 'ApplyShortcutFeatureStatesPreCost' <<<"${customs}" || \
+    die "MSI missing ApplyShortcutFeatureStatesPreCost custom action"
   grep -Fq 'ApplyShortcutFeatureStates' <<<"${customs}" || \
     die "MSI missing ApplyShortcutFeatureStates custom action"
   grep -Fq $'CREATE_DESKTOP_SHORTCUT' <<<"${props}" || \
@@ -791,8 +806,20 @@ PY
   local exe_seq=""
   exe_seq="$(msiinfo_export "$msi_path" InstallExecuteSequence | tr -d '\r')" || \
     die "msiinfo failed: InstallExecuteSequence"
+  grep -Fq 'ApplyShortcutFeatureStatesPreCost' <<<"${exe_seq}" || \
+    die "MSI missing ApplyShortcutFeatureStatesPreCost in InstallExecuteSequence"
   grep -Fq 'ApplyShortcutFeatureStates' <<<"${exe_seq}" || \
     die "MSI missing ApplyShortcutFeatureStates in InstallExecuteSequence"
+  grep -Fq 'MigrateFeatureStates' <<<"${exe_seq}" && \
+    die "MSI still schedules MigrateFeatureStates (blocks shortcut ABSENT→LOCAL)"
+  # PreCost must run after FileCost and before CostFinalize.
+  local precost_seq filecost_seq cost_seq
+  precost_seq="$(awk -F'\t' '$1=="ApplyShortcutFeatureStatesPreCost"{print $3; exit}' <<<"${exe_seq}")"
+  filecost_seq="$(awk -F'\t' '$1=="FileCost"{print $3; exit}' <<<"${exe_seq}")"
+  cost_seq="$(awk -F'\t' '$1=="CostFinalize"{print $3; exit}' <<<"${exe_seq}")"
+  [[ -n "${precost_seq}" && -n "${filecost_seq}" && -n "${cost_seq}" \
+      && "${precost_seq}" -gt "${filecost_seq}" && "${precost_seq}" -lt "${cost_seq}" ]] || \
+    die "ApplyShortcutFeatureStatesPreCost (${precost_seq:-unset}) must be after FileCost (${filecost_seq:-unset}) and before CostFinalize (${cost_seq:-unset})"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
   grep -q 'FindDesktopShortcutPref' <<<"${regs}" || \

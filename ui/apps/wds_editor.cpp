@@ -243,8 +243,10 @@ int run_editor(int argc, char** argv) {
   const auto toggle_fullscreen = [&window, &ui] {
     auto& vulkan = ui.chart_preview().preview().vulkan();
     if (window.is_fullscreen()) {
-      // Leave: release FSE while still exclusive, then restore windowed mode.
-      vulkan.release_fullscreen_exclusive();
+      // Leave: rebuild swapchain without FSE while still on the exclusive monitor,
+      // then restore the windowed placement. Releasing FSE then immediately changing
+      // display mode can hang Win WSI inside the next create_swapchain.
+      vulkan.set_exclusive_fullscreen_desired(false);
       window.set_fullscreen(false);
     } else {
       // Enter: take the monitor / Space first, then ask Vulkan for FSE (Win).

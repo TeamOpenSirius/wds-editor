@@ -623,6 +623,9 @@ void VulkanRenderer::Impl::release_fullscreen_exclusive_internal() {
     fse_acquired = false;
     return;
   }
+  // Present must be idle before vkReleaseFullScreenExclusiveModeEXT; otherwise Win
+  // drivers can hang on the next swapchain recreate after leaving exclusive mode.
+  (void)device_wait_idle_result();
   const VkResult r = release_fse(device, swapchain);
   if (r != VK_SUCCESS) {
     WDS_LOG("vkReleaseFullScreenExclusiveModeEXT failed result=%d\n", static_cast<int>(r));
@@ -1036,6 +1039,14 @@ VkResult VulkanRenderer::Impl::device_wait_idle_result() {
 bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   PathTimer timed(path_diag_on(), path_diag, RendererPathSegment::SwapchainRecreate);
   last_wsi_action = WsiRecoverAction::None;
+#if defined(_WIN32)
+  // Drain GPU/presentation before FSE release + vkCreateSwapchainKHR. Rapid
+  // exclusive-monitor toggles otherwise hang inside the Win32 WSI path with no
+  // recoverable error.
+  if (swapchain != VK_NULL_HANDLE) {
+    (void)device_wait_idle_result();
+  }
+#endif
   VkSurfaceCapabilitiesKHR caps{};
   const VkResult caps_r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps);
   last_wsi_action = classify_wsi_result(caps_r);

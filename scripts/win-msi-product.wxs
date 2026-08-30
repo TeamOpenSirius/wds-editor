@@ -7,8 +7,11 @@
 
   Language must stay 1033 to match wixl Template summary (x64;1033).
   Shortcut features are toggled via AddLocal/Remove ControlEvents (wixl lacks
-  Component/Feature Condition), then re-applied in Execute by
-  ApplyShortcutFeatureStates (DLL CA) so MigrateFeatureStates cannot wipe them.
+  Component/Feature Condition), then applied in Execute by
+  ApplyShortcutFeatureStates (DLL CA) before CostFinalize and again after
+  MigrateFeatureStates. ShortcutsDlg also writes CREATE_*="0" when unchecked so
+  SecureCustomProperties can pass the off state (empty props do not overwrite
+  the Property-table default "1" in elevated Execute).
 
   Upgrades:
   - Same UpgradeCode + MajorUpgrade removes the previous product (single ARP entry).
@@ -18,7 +21,8 @@
 
   wixl does not honor Property/@Secure for SecureCustomProperties (and setting that
   property in the .wxs crashes wixl). package-target.sh patches the Property table
-  after wixl so CREATE_* survive the UI→Execute handoff.
+  after wixl so CREATE_* survive the UI→Execute handoff, and drops
+  MigrateFeatureStates so upgrade migration cannot pin shortcuts at ABSENT.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -119,8 +123,11 @@
     <CustomAction Id="PersistStartMenuShortcutOff"
                   Property="WDS_STARTMENU_SHORTCUT_PREF"
                   Value="0"/>
-    <!-- After MigrateFeatureStates: force Desktop/StartMenu features from CREATE_*. -->
+    <!-- Same DLL entry, two sequence slots (MSI allows one Action Id per sequence). -->
     <Binary Id="WdsMsiCa" SourceFile="$(var.SourceDir)/wds_msi_ca.dll"/>
+    <CustomAction Id="ApplyShortcutFeatureStatesPreCost"
+                  BinaryKey="WdsMsiCa"
+                  DllEntry="ApplyShortcutFeatureStates"/>
     <CustomAction Id="ApplyShortcutFeatureStates"
                   BinaryKey="WdsMsiCa"
                   DllEntry="ApplyShortcutFeatureStates"/>
@@ -161,8 +168,11 @@
       <Custom Action="ApplyStartMenuPrefLegacyOff" After="ApplyStartMenuPrefFromReg">
         UILevel=2 AND NOT WDS_REG_STARTMENU_PREF AND WDS_PREVIOUS_INSTALL AND NOT WDS_REG_STARTMENU_LEGACY AND NOT Installed
       </Custom>
-      <!-- Re-apply after MigrateFeatureStates so upgrade feature migration cannot
-           discard ShortcutsDlg AddLocal/Remove (or silent registry prefs). -->
+      <!-- After FileCost / before CostFinalize so ABSENT→LOCAL is costed; again
+           after migration slot as belt-and-suspenders (MigrateFeatureStates dropped). -->
+      <Custom Action="ApplyShortcutFeatureStatesPreCost" After="FileCost">
+        NOT Installed
+      </Custom>
       <Custom Action="ApplyShortcutFeatureStates" After="MigrateFeatureStates">
         NOT Installed
       </Custom>
@@ -200,9 +210,10 @@
                   Icon="WdsEditorIcon"
                   IconIndex="0"/>
         <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall"/>
-        <RegistryValue Root="HKCU"
+        <!-- perMachine: KeyPath in HKLM (legacy MSIs used HKCU; AppSearch still reads it). -->
+        <RegistryValue Root="HKLM"
                        Key="Software\WDS\Editor"
-                       Name="StartMenuShortcut"
+                       Name="StartMenuShortcutInstalled"
                        Type="integer"
                        Value="1"
                        KeyPath="yes"/>
@@ -218,9 +229,9 @@
                   WorkingDirectory="INSTALLDIR"
                   Icon="WdsEditorIcon"
                   IconIndex="0"/>
-        <RegistryValue Root="HKCU"
+        <RegistryValue Root="HKLM"
                        Key="Software\WDS\Editor"
-                       Name="DesktopShortcut"
+                       Name="DesktopShortcutInstalled"
                        Type="integer"
                        Value="1"
                        KeyPath="yes"/>
