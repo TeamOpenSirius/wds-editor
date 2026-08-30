@@ -30,6 +30,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -356,19 +357,71 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
     }
   };
 
+  using clock = std::chrono::steady_clock;
+  auto elapsed = [](clock::time_point t0) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
+  };
+  PreviewBuildTimings build{};
+  build.note_count = static_cast<uint32_t>(snapshot.notes.size());
+  const auto build_t0 = clock::now();
+
   // Opaque ingame_bg must occupy an earlier DrawBatch bucket than the plate.
   // Depth write is off, so later buckets cover earlier ones. The plate shares
   // the UI 1×1 solid texture and must not be submitted before the background.
-  draw_ingame_background(batch_);
-  merge_overlay(ui_overlay, true);
-  draw_stage(batch_, snapshot, ui_solid_texture);
-  draw_split_lanes(batch_, additive_batch_, snapshot);
-  draw_concurrent_lines(batch_, snapshot);
-  draw_notes(batch_, snapshot);
-  draw_hit_effects(additive_batch_, snapshot);
-  draw_timing_effect(batch_, snapshot);
-  draw_combo(batch_, snapshot);
-  merge_overlay(ui_overlay, false);
+  {
+    const auto t0 = clock::now();
+    draw_ingame_background(batch_);
+    build.bg_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    merge_overlay(ui_overlay, true);
+    build.overlay_solid_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_stage(batch_, snapshot, ui_solid_texture);
+    build.stage_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_split_lanes(batch_, additive_batch_, snapshot);
+    build.split_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_concurrent_lines(batch_, snapshot);
+    build.concurrent_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_notes(batch_, snapshot);
+    build.notes_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_hit_effects(additive_batch_, snapshot);
+    build.hit_fx_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_timing_effect(batch_, snapshot);
+    build.timing_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    draw_combo(batch_, snapshot);
+    build.combo_us = elapsed(t0);
+  }
+  {
+    const auto t0 = clock::now();
+    merge_overlay(ui_overlay, false);
+    build.overlay_sprite_us = elapsed(t0);
+  }
+  build.total_us = elapsed(build_t0);
+  build.verts = static_cast<uint32_t>(batch_.vertex_count() + additive_batch_.vertex_count());
+  build.buckets = static_cast<uint32_t>(batch_.buckets.size() + additive_batch_.buckets.size());
+  last_build_ = build;
 
   const DrawBatch* post =
       (modal_overlay != nullptr && modal_overlay->vertex_count() > 0) ? modal_overlay : nullptr;

@@ -449,6 +449,35 @@ class VulkanRenderer {
   int64_t last_present_us() const noexcept;
   int64_t last_gpu_submit_us() const noexcept;
 
+  // Per-phase draw_frame costs + swapchain/MSAA snapshot (always updated).
+  struct DrawFrameTimings {
+    int64_t upload_wait_us = 0;
+    int64_t fence_wait_us = 0;
+    int64_t acquire_wait_us = 0;
+    int64_t image_fence_wait_us = 0;
+    int64_t vb_copy_us = 0;
+    int64_t cmd_record_us = 0;
+    int64_t submit_us = 0;
+    int64_t present_us = 0;
+    int64_t total_us = 0;
+    uint32_t vertex_count = 0;
+    uint32_t bucket_count = 0;
+    uint32_t swapchain_images = 0;
+    uint32_t min_swapchain_images = 0;
+    uint32_t max_swapchain_images = 0;
+    uint32_t pending_uploads = 0;
+    int present_mode = 0;
+    int msaa = 1;
+    int fb_w = 0;
+    int fb_h = 0;
+    int device_type = 0;
+    bool presented = false;
+  };
+  DrawFrameTimings last_draw_timings() const noexcept;
+  int device_type() const noexcept;
+  uint32_t swapchain_image_count() const noexcept;
+  int present_mode() const noexcept;
+
   // Opt-in segmented path timings (µs). Off by default — no extra clocks.
   void set_path_diagnostics_enabled(bool enabled) noexcept;
   bool path_diagnostics_enabled() const noexcept { return path_diag_enabled_; }

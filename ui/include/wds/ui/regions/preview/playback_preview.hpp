@@ -118,6 +118,25 @@ class PlaybackPreviewView {
   wds::renderer::TextureCache& textures() noexcept { return textures_; }
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
+  // Last preview CPU build costs (µs). Always updated in render().
+  struct PreviewBuildTimings {
+    int64_t bg_us = 0;
+    int64_t overlay_solid_us = 0;
+    int64_t stage_us = 0;
+    int64_t split_us = 0;
+    int64_t concurrent_us = 0;
+    int64_t notes_us = 0;
+    int64_t hit_fx_us = 0;
+    int64_t timing_us = 0;
+    int64_t combo_us = 0;
+    int64_t overlay_sprite_us = 0;
+    int64_t total_us = 0;
+    uint32_t note_count = 0;
+    uint32_t verts = 0;
+    uint32_t buckets = 0;
+  };
+  PreviewBuildTimings last_build_timings() const noexcept { return last_build_; }
+
  private:
   void draw_ingame_background(wds::renderer::DrawBatch& batch);
   void draw_stage(wds::renderer::DrawBatch& batch,
@@ -193,6 +212,7 @@ class PlaybackPreviewView {
   // Indices into snapshot.notes: GenerateNoteId order reversed (bottom-most first).
   std::vector<size_t> notes_draw_indices_;
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
+  PreviewBuildTimings last_build_{};
   bool ready_ = false;
   bool mute_hold_body_sfx_ = false;
   bool show_judgment_text_ = false;

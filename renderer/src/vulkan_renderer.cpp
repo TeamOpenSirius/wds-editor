@@ -3,6 +3,7 @@
 #include "wds/renderer/log.hpp"
 #include "wds/renderer/upload_result.hpp"
 
+#include <wds/common/debug_session_log.hpp>
 #include <wds/common/utf8_path.hpp>
 
 #include <algorithm>
@@ -343,10 +344,11 @@ struct VulkanRenderer::Impl {
   PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR get_surface_caps2 = nullptr;
 #endif
   // Last draw_frame WSI / submit timing (µs).
-  int64_t last_fence_wait_us = 0;
-  int64_t last_acquire_wait_us = 0;
-  int64_t last_present_us = 0;
-  int64_t last_gpu_submit_us = 0;
+  VulkanRenderer::DrawFrameTimings last_draw{};
+  int present_mode = static_cast<int>(VK_PRESENT_MODE_FIFO_KHR);
+  uint32_t min_swapchain_images = 0;
+  uint32_t max_swapchain_images = 0;
+  int device_type = 0;
   void release_fullscreen_exclusive_internal();
   void note_fullscreen_exclusive_lost(const char* where, VkResult result);
 
@@ -569,7 +571,19 @@ bool VulkanRenderer::apply_msaa(int samples) {
   }
   width_ = static_cast<int>(impl_->swapchain_extent.width);
   height_ = static_cast<int>(impl_->swapchain_extent.height);
-  return finish_msaa(true);
+  const bool ok = finish_msaa(true);
+  // #region agent log
+  {
+    char data[512];
+    std::snprintf(data, sizeof(data),
+                  "{\"ok\":%d,\"msaa\":%d,\"fbW\":%d,\"fbH\":%d,\"applyUs\":%lld,\"idleUs\":%lld}",
+                  ok ? 1 : 0, static_cast<int>(impl_->msaa_samples), width_, height_,
+                  static_cast<long long>(path_diag_.last.apply_msaa_us),
+                  static_cast<long long>(path_diag_.last.apply_msaa_idle_wait_us));
+    wds::common::debug_session_log("vulkan_renderer.cpp:apply_msaa", "apply_msaa_done", "H1", data);
+  }
+  // #endregion
+  return ok;
 }
 
 
@@ -1119,6 +1133,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   // CPU race ahead of scan-out; combined with a per-tick display lead that made
   // preview time run hot then get pulled back by Transport (speed wobble).
   VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
+  this->present_mode = static_cast<int>(present_mode);
   (void)presents;
 
   // Request triple buffering when the surface allows it (minImageCount is often 2).
@@ -1310,8 +1325,23 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     return false;
   }
   images_in_flight.assign(actual, VK_NULL_HANDLE);
+  min_swapchain_images = caps.minImageCount;
+  max_swapchain_images = caps.maxImageCount;
   WDS_LOG("swapchain images=%u (requested=%u) frames_in_flight=%d min=%u max=%u\n", actual,
           image_count, kMaxFramesInFlight, caps.minImageCount, caps.maxImageCount);
+  // #region agent log
+  {
+    char data[768];
+    std::snprintf(data, sizeof(data),
+                  "{\"requested\":%u,\"actual\":%u,\"min\":%u,\"max\":%u,\"presentMode\":%d,"
+                  "\"msaa\":%d,\"fbW\":%u,\"fbH\":%u,\"deviceType\":%d}",
+                  image_count, actual, caps.minImageCount, caps.maxImageCount, this->present_mode,
+                  static_cast<int>(msaa_samples), swapchain_extent.width, swapchain_extent.height,
+                  device_type);
+    wds::common::debug_session_log("vulkan_renderer.cpp:create_swapchain", "swapchain_created",
+                                   "H1,H2,H4", data);
+  }
+  // #endregion
 
   swapchain_views.resize(swapchain_images.size());
   bool ok = true;
@@ -2205,6 +2235,7 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     vkGetPhysicalDeviceProperties(impl_->physical, &props);
     std::strncpy(device_name_, props.deviceName, sizeof(device_name_) - 1);
     device_name_[sizeof(device_name_) - 1] = '\0';
+    impl_->device_type = static_cast<int>(props.deviceType);
     WDS_LOG("selected GPU='%s' api=%u.%u.%u queue_family=%u msaa=%u\n", props.deviceName,
             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
             VK_VERSION_PATCH(props.apiVersion), impl_->graphics_family,
@@ -2501,19 +2532,35 @@ bool VulkanRenderer::exclusive_fullscreen_acquired() const noexcept {
 }
 
 int64_t VulkanRenderer::last_fence_wait_us() const noexcept {
-  return impl_ != nullptr ? impl_->last_fence_wait_us : 0;
+  return impl_ != nullptr ? impl_->last_draw.fence_wait_us : 0;
 }
 
 int64_t VulkanRenderer::last_acquire_wait_us() const noexcept {
-  return impl_ != nullptr ? impl_->last_acquire_wait_us : 0;
+  return impl_ != nullptr ? impl_->last_draw.acquire_wait_us : 0;
 }
 
 int64_t VulkanRenderer::last_present_us() const noexcept {
-  return impl_ != nullptr ? impl_->last_present_us : 0;
+  return impl_ != nullptr ? impl_->last_draw.present_us : 0;
 }
 
 int64_t VulkanRenderer::last_gpu_submit_us() const noexcept {
-  return impl_ != nullptr ? impl_->last_gpu_submit_us : 0;
+  return impl_ != nullptr ? impl_->last_draw.submit_us : 0;
+}
+
+VulkanRenderer::DrawFrameTimings VulkanRenderer::last_draw_timings() const noexcept {
+  return impl_ != nullptr ? impl_->last_draw : DrawFrameTimings{};
+}
+
+int VulkanRenderer::device_type() const noexcept {
+  return impl_ != nullptr ? impl_->device_type : 0;
+}
+
+uint32_t VulkanRenderer::swapchain_image_count() const noexcept {
+  return impl_ != nullptr ? static_cast<uint32_t>(impl_->swapchain_images.size()) : 0;
+}
+
+int VulkanRenderer::present_mode() const noexcept {
+  return impl_ != nullptr ? impl_->present_mode : static_cast<int>(VK_PRESENT_MODE_FIFO_KHR);
 }
 
 VulkanRenderer::DescriptorPoolDiagnostics VulkanRenderer::descriptor_pool_diagnostics()
@@ -2834,28 +2881,48 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     }
   }
 
+  using clock = std::chrono::steady_clock;
+  auto elapsed = [](clock::time_point t0) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
+  };
+  const auto draw_t0 = clock::now();
+  auto& timing = impl_->last_draw;
+  timing = {};
+  timing.pending_uploads = static_cast<uint32_t>(impl_->pending_uploads.size());
+  timing.present_mode = impl_->present_mode;
+  timing.msaa = static_cast<int>(impl_->msaa_samples);
+  timing.fb_w = static_cast<int>(impl_->swapchain_extent.width);
+  timing.fb_h = static_cast<int>(impl_->swapchain_extent.height);
+  timing.device_type = impl_->device_type;
+  timing.swapchain_images = static_cast<uint32_t>(impl_->swapchain_images.size());
+  timing.min_swapchain_images = impl_->min_swapchain_images;
+  timing.max_swapchain_images = impl_->max_swapchain_images;
+
   {
     // Drain still-in-flight uploads before this frame samples them. Empty
     // pending is a no-op so the steady-state present path stays cheap.
+    const auto upload_t0 = clock::now();
     const UploadHealthDelta pending = impl_->wait_pending_uploads();
+    timing.upload_wait_us = elapsed(upload_t0);
     if (pending.apply) {
       emit_health(pending.event);
       if (renderer_health_unrecoverable(health_)) {
+        timing.total_us = elapsed(draw_t0);
         return false;
       }
     }
     impl_->reap_retired_textures(impl_->frame_seq);
   }
 
-  using clock = std::chrono::steady_clock;
   const uint32_t frame = impl_->frame_index;
   const auto fence_t0 = clock::now();
   if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->in_flight[frame], VK_TRUE,
                                           UINT64_MAX))) {
+    timing.fence_wait_us = elapsed(fence_t0);
+    timing.total_us = elapsed(draw_t0);
     return false;
   }
-  impl_->last_fence_wait_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - fence_t0).count();
+  timing.fence_wait_us = elapsed(fence_t0);
   ++impl_->frame_seq;
   impl_->reap_retired_textures(impl_->frame_seq);
 
@@ -2864,8 +2931,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   VkResult acquire = vkAcquireNextImageKHR(impl_->device, impl_->swapchain, UINT64_MAX,
                                            impl_->image_available[frame], VK_NULL_HANDLE,
                                            &image_index);
-  impl_->last_acquire_wait_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - acquire_t0).count();
+  timing.acquire_wait_us = elapsed(acquire_t0);
   impl_->note_fullscreen_exclusive_lost("vkAcquireNextImageKHR", acquire);
   const WsiRecoverAction acquire_action = classify_wsi_result(acquire);
   bool recreate_swapchain_after_present = false;
@@ -2878,10 +2944,14 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   // Do not reuse a swapchain image that is still referenced by an in-flight submit.
   if (image_index < impl_->images_in_flight.size() &&
       impl_->images_in_flight[image_index] != VK_NULL_HANDLE) {
+    const auto img_t0 = clock::now();
     if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->images_in_flight[image_index],
                                             VK_TRUE, UINT64_MAX))) {
+      timing.image_fence_wait_us = elapsed(img_t0);
+      timing.total_us = elapsed(draw_t0);
       return false;
     }
+    timing.image_fence_wait_us = elapsed(img_t0);
   }
 
   const size_t additive_verts = additive ? additive->vertex_count() : 0;
@@ -2889,6 +2959,11 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   const size_t post2_verts = post_overlay2 ? post_overlay2->vertex_count() : 0;
   const size_t total_verts = batch.vertex_count() + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
+  timing.vertex_count = static_cast<uint32_t>(total_verts);
+  timing.bucket_count = static_cast<uint32_t>(
+      batch.buckets.size() + (additive ? additive->buckets.size() : 0) +
+      (post_overlay ? post_overlay->buckets.size() : 0) +
+      (post_overlay2 ? post_overlay2->buckets.size() : 0));
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
     // Fence still signaled (not reset yet). Drain the acquire semaphore only.
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
@@ -2929,6 +3004,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     post2_first_vertex.reserve(post_overlay2->buckets.size());
   }
   {
+    const auto copy_t0 = clock::now();
     auto* dst = static_cast<DrawVertex*>(vb.mapped);
     uint32_t cursor = 0;
     auto copy_buckets = [&](const DrawBatch& src, std::vector<uint32_t>& first_vertex) {
@@ -2951,8 +3027,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     if (post_overlay2) {
       copy_buckets(*post_overlay2, post2_first_vertex);
     }
+    timing.vb_copy_us = elapsed(copy_t0);
   }
 
+  const auto cmd_t0 = clock::now();
   VkCommandBuffer cmd = impl_->command_buffers[frame];
   vkResetCommandBuffer(cmd, 0);
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -3038,6 +3116,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
 
   vkCmdEndRenderPass(cmd);
   vkEndCommandBuffer(cmd);
+  timing.cmd_record_us = elapsed(cmd_t0);
 
   VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -3075,8 +3154,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     return false;
   }
   impl_->images_in_flight[image_index] = impl_->in_flight[frame];
-  impl_->last_gpu_submit_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - submit_t0).count();
+  timing.submit_us = elapsed(submit_t0);
 
   VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
   present.waitSemaphoreCount = 1;
@@ -3086,8 +3164,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   present.pImageIndices = &image_index;
   const auto present_t0 = clock::now();
   VkResult present_result = vkQueuePresentKHR(impl_->graphics_queue, &present);
-  impl_->last_present_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - present_t0).count();
+  timing.present_us = elapsed(present_t0);
+  timing.presented = present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR;
+  timing.total_us = elapsed(draw_t0);
   impl_->note_fullscreen_exclusive_lost("vkQueuePresentKHR", present_result);
   impl_->frame_index = (frame + 1) % kMaxFramesInFlight;
   const WsiRecoverAction present_action = classify_wsi_result(present_result);

@@ -12,6 +12,7 @@
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 
 #include "wds/common/crash_handler.hpp"
+#include "wds/common/debug_session_log.hpp"
 #include "wds/interaction/events.hpp"
 #include "wds/interaction/glfw_input_adapter.hpp"
 #include "wds/interaction/widget_root.hpp"
@@ -305,29 +306,89 @@ int run_editor(int argc, char** argv) {
     int64_t update_process_us = 0;
     int64_t tick_us = 0;
     int64_t ui_batch_us = 0;
+    int64_t preview_build_us = 0;
+    int64_t preview_notes_us = 0;
+    int64_t preview_split_us = 0;
+    int64_t preview_hit_fx_us = 0;
     int64_t render_us = 0;
     int64_t fence_us = 0;
     int64_t fence_max_us = 0;
     int64_t acquire_us = 0;
+    int64_t acquire_max_us = 0;
     int64_t present_us = 0;
+    int64_t present_max_us = 0;
     int64_t submit_us = 0;
+    int64_t upload_wait_us = 0;
+    int64_t upload_wait_max_us = 0;
+    int64_t image_fence_us = 0;
+    int64_t image_fence_max_us = 0;
+    int64_t vb_copy_us = 0;
+    int64_t cmd_record_us = 0;
+    int64_t draw_total_us = 0;
+    int64_t draw_total_max_us = 0;
     int64_t wall_us = 0;
     int64_t wall_max_us = 0;
+    uint64_t verts = 0;
+    uint64_t buckets = 0;
+    uint64_t notes = 0;
     int frames = 0;
     int playing_frames = 0;
     int hitch_count = 0;  // raw wall delta > 25ms (above one 60Hz period)
+    int hitch_logged = 0;
     std::chrono::steady_clock::time_point window_start{};
   } frame_diag;
   using clock = std::chrono::steady_clock;
   const bool frame_diag_on = wds::ui::frame_diag_enabled_from_env();
+  // Session 3aea3b: always collect bottleneck NDJSON (1 Hz + hitch frames).
+  const bool bottleneck_log_on = true;
   FILE* frame_diag_fp = nullptr;
   if (frame_diag_on) {
     frame_diag.window_start = clock::now();
     frame_diag_fp = open_frame_diag_log();
   }
+  if (bottleneck_log_on && !frame_diag_on) {
+    frame_diag.window_start = clock::now();
+  }
   auto elapsed_us = [](clock::time_point t0) {
     return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
   };
+  const bool sample_on = frame_diag_on || bottleneck_log_on;
+
+  auto sanitize_name = [](char* s) {
+    if (s == nullptr) {
+      return;
+    }
+    for (; *s != '\0'; ++s) {
+      if (*s == '"' || *s == '\\' || static_cast<unsigned char>(*s) < 32) {
+        *s = '_';
+      }
+    }
+  };
+
+  if (bottleneck_log_on && ui.chart_preview().ready()) {
+    auto& vulkan = ui.chart_preview().preview().vulkan();
+    vulkan.set_path_diagnostics_enabled(true);
+    float csx = 1.0f, csy = 1.0f;
+    glfwGetWindowContentScale(window.handle(), &csx, &csy);
+    const auto win0 = window.window_size();
+    const auto fb0 = window.framebuffer_size();
+    char gpu[256];
+    std::snprintf(gpu, sizeof(gpu), "%s", vulkan.device_name());
+    sanitize_name(gpu);
+    char data[1024];
+    std::snprintf(data, sizeof(data),
+                  "{\"gpu\":\"%s\",\"deviceType\":%d,\"msaa\":%d,\"preferredMsaa\":%d,"
+                  "\"presentMode\":%d,\"swapchainImages\":%u,\"fbW\":%.0f,\"fbH\":%.0f,"
+                  "\"winW\":%.0f,\"winH\":%.0f,\"osScaleX\":%.3f,\"osScaleY\":%.3f,"
+                  "\"fs\":%d,\"fse\":%d}",
+                  gpu, vulkan.device_type(), vulkan.active_msaa(), vulkan.preferred_msaa(),
+                  vulkan.present_mode(), vulkan.swapchain_image_count(), fb0.x, fb0.y, win0.x,
+                  win0.y, csx, csy, window.is_fullscreen() ? 1 : 0,
+                  vulkan.exclusive_fullscreen_acquired() ? 1 : 0);
+    // #region agent log
+    wds::common::debug_session_log("wds_editor.cpp:startup", "renderer_startup", "H1,H2,H4", data);
+    // #endregion
+  }
 
   while (!window.should_close()) {
     const auto now = std::chrono::steady_clock::now();
@@ -340,12 +401,12 @@ int run_editor(int argc, char** argv) {
         std::clamp<int64_t>(raw_delta_us, 0, kMaxWallDeltaUs);
     const float delta_seconds = static_cast<float>(delta_us) * 1.0e-6f;
 
-    const auto poll_t0 = frame_diag_on ? clock::now() : clock::time_point{};
-    if (frame_diag_on && raw_delta_us > 25000) {
+    const auto poll_t0 = sample_on ? clock::now() : clock::time_point{};
+    if (sample_on && raw_delta_us > 25000) {
       ++frame_diag.hitch_count;
     }
     window.poll_events();
-    const int64_t poll_us = frame_diag_on ? elapsed_us(poll_t0) : int64_t{0};
+    const int64_t poll_us = sample_on ? elapsed_us(poll_t0) : int64_t{0};
     if (window.should_close()) {
       // Confirmed close (incl. fullscreen + 不保存): leave FS / FSE before any
       // further present or Vulkan destroy — avoids Win32 TDR / 图形输出错误.
@@ -359,22 +420,22 @@ int run_editor(int argc, char** argv) {
     const int logical_h = static_cast<int>(win.y);
     const int fb_w = static_cast<int>(fb.x);
     const int fb_h = static_cast<int>(fb.y);
-    const auto resize_t0 = frame_diag_on ? clock::now() : clock::time_point{};
+    const auto resize_t0 = sample_on ? clock::now() : clock::time_point{};
     ui.resize(logical_w, logical_h, fb_w, fb_h);
-    const int64_t resize_us = frame_diag_on ? elapsed_us(resize_t0) : int64_t{0};
+    const int64_t resize_us = sample_on ? elapsed_us(resize_t0) : int64_t{0};
 
     auto events = input.queue().events();
     input.queue().clear();
     if (auto* edit = ui.edit_panel()) {
       edit->sync_global_pointer(input.pointer_logical());
     }
-    const auto tick_t0 = frame_diag_on ? clock::now() : clock::time_point{};
+    const auto tick_t0 = sample_on ? clock::now() : clock::time_point{};
     ui.chart_preview().tick(delta_us);
-    const int64_t tick_us = frame_diag_on ? elapsed_us(tick_t0) : int64_t{0};
+    const int64_t tick_us = sample_on ? elapsed_us(tick_t0) : int64_t{0};
 
-    const auto update_t0 = frame_diag_on ? clock::now() : clock::time_point{};
+    const auto update_t0 = sample_on ? clock::now() : clock::time_point{};
     ui.update(delta_seconds, events);
-    const int64_t update_us = frame_diag_on ? elapsed_us(update_t0) : int64_t{0};
+    const int64_t update_us = sample_on ? elapsed_us(update_t0) : int64_t{0};
 
     // Discard/Save on the unsaved dialog may set should-close mid-update.
     // Do not present another Vulkan frame onto a closing Win32 surface.
@@ -388,7 +449,7 @@ int run_editor(int argc, char** argv) {
       }
       const auto& preview = ui.chart_preview().preview();
       const auto solid = ui.chart_preview().solid_texture();
-      const auto batch_t0 = frame_diag_on ? clock::now() : clock::time_point{};
+      const auto batch_t0 = sample_on ? clock::now() : clock::time_point{};
       const auto& ui_batch = ui.build_ui_batch(solid, fb_w, fb_h, preview.geometry().screen());
       // Status / dropdown / modal must be post-overlay: main UI batch draws note-skin
       // sprites after rect fills, so in-batch chrome would stay under convert-note artwork.
@@ -400,16 +461,18 @@ int run_editor(int argc, char** argv) {
           post_batch.vertex_count() > 0 ? &post_batch : nullptr;
       const wds::renderer::DrawBatch* chrome =
           chrome_batch.vertex_count() > 0 ? &chrome_batch : nullptr;
-      const int64_t batch_us = frame_diag_on ? elapsed_us(batch_t0) : int64_t{0};
+      const int64_t batch_us = sample_on ? elapsed_us(batch_t0) : int64_t{0};
 
-      const auto render_t0 = frame_diag_on ? clock::now() : clock::time_point{};
+      const auto render_t0 = sample_on ? clock::now() : clock::time_point{};
       ui.chart_preview().render(&ui_batch, post, chrome);
       // Safe to free atlases replaced mid-frame now that draw_frame has submitted.
       ui.chart_preview().flush_retired_font_textures();
-      const int64_t render_us = frame_diag_on ? elapsed_us(render_t0) : int64_t{0};
+      const int64_t render_us = sample_on ? elapsed_us(render_t0) : int64_t{0};
 
-      if (frame_diag_on) {
+      if (sample_on) {
         auto& vulkan = ui.chart_preview().preview().vulkan();
+        const auto dt = vulkan.last_draw_timings();
+        const auto pb = ui.chart_preview().preview().last_build_timings();
         const int64_t wall = std::max<int64_t>(0, raw_delta_us);
         frame_diag.wall_us += wall;
         frame_diag.wall_max_us = std::max(frame_diag.wall_max_us, wall);
@@ -423,17 +486,65 @@ int run_editor(int argc, char** argv) {
         frame_diag.update_process_us += ui.last_update_process_us();
         frame_diag.tick_us += tick_us;
         frame_diag.ui_batch_us += batch_us;
+        frame_diag.preview_build_us += pb.total_us;
+        frame_diag.preview_notes_us += pb.notes_us;
+        frame_diag.preview_split_us += pb.split_us;
+        frame_diag.preview_hit_fx_us += pb.hit_fx_us;
         frame_diag.render_us += render_us;
-        frame_diag.fence_us += vulkan.last_fence_wait_us();
-        frame_diag.fence_max_us =
-            std::max(frame_diag.fence_max_us, vulkan.last_fence_wait_us());
-        frame_diag.acquire_us += vulkan.last_acquire_wait_us();
-        frame_diag.present_us += vulkan.last_present_us();
-        frame_diag.submit_us += vulkan.last_gpu_submit_us();
+        frame_diag.fence_us += dt.fence_wait_us;
+        frame_diag.fence_max_us = std::max(frame_diag.fence_max_us, dt.fence_wait_us);
+        frame_diag.acquire_us += dt.acquire_wait_us;
+        frame_diag.acquire_max_us = std::max(frame_diag.acquire_max_us, dt.acquire_wait_us);
+        frame_diag.present_us += dt.present_us;
+        frame_diag.present_max_us = std::max(frame_diag.present_max_us, dt.present_us);
+        frame_diag.submit_us += dt.submit_us;
+        frame_diag.upload_wait_us += dt.upload_wait_us;
+        frame_diag.upload_wait_max_us = std::max(frame_diag.upload_wait_max_us, dt.upload_wait_us);
+        frame_diag.image_fence_us += dt.image_fence_wait_us;
+        frame_diag.image_fence_max_us =
+            std::max(frame_diag.image_fence_max_us, dt.image_fence_wait_us);
+        frame_diag.vb_copy_us += dt.vb_copy_us;
+        frame_diag.cmd_record_us += dt.cmd_record_us;
+        frame_diag.draw_total_us += dt.total_us;
+        frame_diag.draw_total_max_us = std::max(frame_diag.draw_total_max_us, dt.total_us);
+        frame_diag.verts += dt.vertex_count;
+        frame_diag.buckets += dt.bucket_count;
+        frame_diag.notes += pb.note_count;
         ++frame_diag.frames;
         if (ui.chart_preview().transport().playing()) {
           ++frame_diag.playing_frames;
         }
+
+        if (bottleneck_log_on && wall > 25000 && frame_diag.hitch_logged < 8) {
+          ++frame_diag.hitch_logged;
+          char hitch[1400];
+          std::snprintf(
+              hitch, sizeof(hitch),
+              "{\"wallUs\":%lld,\"pollUs\":%lld,\"resizeUs\":%lld,\"tickUs\":%lld,"
+              "\"updateUs\":%lld,\"uiBatchUs\":%lld,\"previewBuildUs\":%lld,"
+              "\"notesUs\":%lld,\"splitUs\":%lld,\"hitFxUs\":%lld,\"renderUs\":%lld,"
+              "\"uploadUs\":%lld,\"fenceUs\":%lld,\"acquireUs\":%lld,\"imgFenceUs\":%lld,"
+              "\"vbCopyUs\":%lld,\"cmdUs\":%lld,\"submitUs\":%lld,\"presentUs\":%lld,"
+              "\"drawTotalUs\":%lld,\"msaa\":%d,\"fbW\":%d,\"fbH\":%d,\"verts\":%u,"
+              "\"buckets\":%u,\"notes\":%u,\"swImages\":%u,\"presentMode\":%d}",
+              static_cast<long long>(wall), static_cast<long long>(poll_us),
+              static_cast<long long>(resize_us), static_cast<long long>(tick_us),
+              static_cast<long long>(update_us), static_cast<long long>(batch_us),
+              static_cast<long long>(pb.total_us), static_cast<long long>(pb.notes_us),
+              static_cast<long long>(pb.split_us), static_cast<long long>(pb.hit_fx_us),
+              static_cast<long long>(render_us), static_cast<long long>(dt.upload_wait_us),
+              static_cast<long long>(dt.fence_wait_us), static_cast<long long>(dt.acquire_wait_us),
+              static_cast<long long>(dt.image_fence_wait_us), static_cast<long long>(dt.vb_copy_us),
+              static_cast<long long>(dt.cmd_record_us), static_cast<long long>(dt.submit_us),
+              static_cast<long long>(dt.present_us), static_cast<long long>(dt.total_us), dt.msaa,
+              dt.fb_w, dt.fb_h, dt.vertex_count, dt.bucket_count, pb.note_count,
+              dt.swapchain_images, dt.present_mode);
+          // #region agent log
+          wds::common::debug_session_log("wds_editor.cpp:hitch", "hitch_frame", "H1,H2,H3,H4,H5,H6",
+                                         hitch);
+          // #endregion
+        }
+
         const auto diag_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                       clock::now() - frame_diag.window_start)
                                       .count();
@@ -445,30 +556,70 @@ int run_editor(int argc, char** argv) {
               (frame_diag.poll_us + frame_diag.resize_us + frame_diag.update_us +
                frame_diag.tick_us + frame_diag.ui_batch_us + frame_diag.render_us) /
               n / 1000.0;
-          char line[896];
-          const int len = std::snprintf(
-              line, sizeof(line),
-              "frame diag: n=%d fps=%.1f playing=%d/%d fs=%d fse=%d "
-              "wall_avg=%.2fms wall_max=%.2fms hitch=%d accounted=%.2fms "
-              "poll=%.2fms resize=%.2fms update=%.2fms "
-              "[flush=%.2f bounds=%.2f layout=%.2f sync=%.2f process=%.2f] "
-              "tick=%.2fms ui_batch=%.2fms render=%.2fms fence=%.2fms fence_max=%.2fms "
-              "acquire=%.2fms submit=%.2fms present=%.2fms fb=%dx%d\n",
-              frame_diag.frames, fps, frame_diag.playing_frames, frame_diag.frames,
-              window.is_fullscreen() ? 1 : 0, vulkan.exclusive_fullscreen_acquired() ? 1 : 0,
-              frame_diag.wall_us / n / 1000.0, frame_diag.wall_max_us / 1000.0,
-              frame_diag.hitch_count, accounted_ms, frame_diag.poll_us / n / 1000.0,
-              frame_diag.resize_us / n / 1000.0, frame_diag.update_us / n / 1000.0,
-              frame_diag.update_flush_us / n / 1000.0, frame_diag.update_bounds_us / n / 1000.0,
-              frame_diag.update_layout_us / n / 1000.0, frame_diag.update_sync_us / n / 1000.0,
-              frame_diag.update_process_us / n / 1000.0, frame_diag.tick_us / n / 1000.0,
-              frame_diag.ui_batch_us / n / 1000.0, frame_diag.render_us / n / 1000.0,
-              frame_diag.fence_us / n / 1000.0, frame_diag.fence_max_us / 1000.0,
-              frame_diag.acquire_us / n / 1000.0, frame_diag.submit_us / n / 1000.0,
-              frame_diag.present_us / n / 1000.0, fb_w, fb_h);
-          if (len > 0 && frame_diag_fp != nullptr) {
-            std::fwrite(line, 1, static_cast<std::size_t>(len), frame_diag_fp);
-            std::fflush(frame_diag_fp);
+          if (frame_diag_on) {
+            char line[896];
+            const int len = std::snprintf(
+                line, sizeof(line),
+                "frame diag: n=%d fps=%.1f playing=%d/%d fs=%d fse=%d "
+                "wall_avg=%.2fms wall_max=%.2fms hitch=%d accounted=%.2fms "
+                "poll=%.2fms resize=%.2fms update=%.2fms "
+                "[flush=%.2f bounds=%.2f layout=%.2f sync=%.2f process=%.2f] "
+                "tick=%.2fms ui_batch=%.2fms render=%.2fms fence=%.2fms fence_max=%.2fms "
+                "acquire=%.2fms submit=%.2fms present=%.2fms fb=%dx%d\n",
+                frame_diag.frames, fps, frame_diag.playing_frames, frame_diag.frames,
+                window.is_fullscreen() ? 1 : 0, vulkan.exclusive_fullscreen_acquired() ? 1 : 0,
+                frame_diag.wall_us / n / 1000.0, frame_diag.wall_max_us / 1000.0,
+                frame_diag.hitch_count, accounted_ms, frame_diag.poll_us / n / 1000.0,
+                frame_diag.resize_us / n / 1000.0, frame_diag.update_us / n / 1000.0,
+                frame_diag.update_flush_us / n / 1000.0, frame_diag.update_bounds_us / n / 1000.0,
+                frame_diag.update_layout_us / n / 1000.0, frame_diag.update_sync_us / n / 1000.0,
+                frame_diag.update_process_us / n / 1000.0, frame_diag.tick_us / n / 1000.0,
+                frame_diag.ui_batch_us / n / 1000.0, frame_diag.render_us / n / 1000.0,
+                frame_diag.fence_us / n / 1000.0, frame_diag.fence_max_us / 1000.0,
+                frame_diag.acquire_us / n / 1000.0, frame_diag.submit_us / n / 1000.0,
+                frame_diag.present_us / n / 1000.0, fb_w, fb_h);
+            if (len > 0 && frame_diag_fp != nullptr) {
+              std::fwrite(line, 1, static_cast<std::size_t>(len), frame_diag_fp);
+              std::fflush(frame_diag_fp);
+            }
+          }
+          if (bottleneck_log_on) {
+            char data[1600];
+            std::snprintf(
+                data, sizeof(data),
+                "{\"n\":%d,\"fps\":%.2f,\"playing\":%d,\"fs\":%d,\"fse\":%d,\"msaa\":%d,"
+                "\"fbW\":%d,\"fbH\":%d,\"hitch\":%d,\"wallAvgUs\":%.0f,\"wallMaxUs\":%lld,"
+                "\"pollAvgUs\":%.0f,\"resizeAvgUs\":%.0f,\"tickAvgUs\":%.0f,"
+                "\"updateAvgUs\":%.0f,\"uiBatchAvgUs\":%.0f,\"previewBuildAvgUs\":%.0f,"
+                "\"notesAvgUs\":%.0f,\"splitAvgUs\":%.0f,\"hitFxAvgUs\":%.0f,"
+                "\"renderAvgUs\":%.0f,\"uploadAvgUs\":%.0f,\"uploadMaxUs\":%lld,"
+                "\"fenceAvgUs\":%.0f,\"fenceMaxUs\":%lld,\"acquireAvgUs\":%.0f,"
+                "\"acquireMaxUs\":%lld,\"imgFenceAvgUs\":%.0f,\"imgFenceMaxUs\":%lld,"
+                "\"vbCopyAvgUs\":%.0f,\"cmdAvgUs\":%.0f,\"submitAvgUs\":%.0f,"
+                "\"presentAvgUs\":%.0f,\"presentMaxUs\":%lld,\"drawAvgUs\":%.0f,"
+                "\"drawMaxUs\":%lld,\"vertsAvg\":%.0f,\"notesAvg\":%.0f,"
+                "\"swImages\":%u,\"presentMode\":%d,\"deviceType\":%d}",
+                frame_diag.frames, fps, frame_diag.playing_frames,
+                window.is_fullscreen() ? 1 : 0, vulkan.exclusive_fullscreen_acquired() ? 1 : 0,
+                vulkan.active_msaa(), fb_w, fb_h, frame_diag.hitch_count, frame_diag.wall_us / n,
+                static_cast<long long>(frame_diag.wall_max_us), frame_diag.poll_us / n,
+                frame_diag.resize_us / n, frame_diag.tick_us / n, frame_diag.update_us / n,
+                frame_diag.ui_batch_us / n, frame_diag.preview_build_us / n,
+                frame_diag.preview_notes_us / n, frame_diag.preview_split_us / n,
+                frame_diag.preview_hit_fx_us / n, frame_diag.render_us / n,
+                frame_diag.upload_wait_us / n, static_cast<long long>(frame_diag.upload_wait_max_us),
+                frame_diag.fence_us / n, static_cast<long long>(frame_diag.fence_max_us),
+                frame_diag.acquire_us / n, static_cast<long long>(frame_diag.acquire_max_us),
+                frame_diag.image_fence_us / n, static_cast<long long>(frame_diag.image_fence_max_us),
+                frame_diag.vb_copy_us / n, frame_diag.cmd_record_us / n, frame_diag.submit_us / n,
+                frame_diag.present_us / n, static_cast<long long>(frame_diag.present_max_us),
+                frame_diag.draw_total_us / n, static_cast<long long>(frame_diag.draw_total_max_us),
+                frame_diag.verts / n, frame_diag.notes / n, vulkan.swapchain_image_count(),
+                vulkan.present_mode(), vulkan.device_type());
+            // #region agent log
+            wds::common::debug_session_log("wds_editor.cpp:summary", "frame_summary_1s",
+                                           "H1,H2,H3,H4,H5,H6", data);
+            // #endregion
           }
           frame_diag = {};
           frame_diag.window_start = clock::now();
