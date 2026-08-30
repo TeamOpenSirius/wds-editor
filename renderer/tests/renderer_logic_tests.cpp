@@ -57,6 +57,8 @@ using wds::renderer::draw_frame_blocks_before_recovery;
 using wds::renderer::draw_frame_reaps_completed_uploads_before_zero_extent_return;
 using wds::renderer::draw_frame_waits_pending_uploads_before_sample;
 using wds::renderer::draw_frame_zero_extent_reap_applies_health;
+using wds::renderer::frames_in_flight_for_swapchain;
+using wds::renderer::preferred_swapchain_image_count;
 using wds::renderer::create_texture_rgba_waits_upload_fence;
 using wds::renderer::wait_pending_uploads_is_noop;
 using wds::renderer::next_frame_recovers_swapchain;
@@ -950,6 +952,23 @@ void test_descriptor_chain_300_cross_block_alloc_and_recycle() {
   CHECK(grow[2].live == 1);
 }
 
+void test_preferred_swapchain_image_count_requests_fif_plus_two() {
+  // Win NVIDIA session 3aea3b: min=2 max=8 FIF=3 → 5 (not the old 3).
+  CHECK(preferred_swapchain_image_count(2, 8, 3) == 5);
+  CHECK(preferred_swapchain_image_count(2, 3, 3) == 3);  // Mac clamp
+  CHECK(preferred_swapchain_image_count(2, 4, 3) == 4);
+  CHECK(preferred_swapchain_image_count(3, 3, 3) == 3);
+  CHECK(preferred_swapchain_image_count(1, 0, 3) == 5);  // max 0 = unlimited
+}
+
+void test_frames_in_flight_leaves_one_image_for_present() {
+  CHECK(frames_in_flight_for_swapchain(5, 3) == 3);
+  CHECK(frames_in_flight_for_swapchain(3, 3) == 2);
+  CHECK(frames_in_flight_for_swapchain(2, 3) == 1);
+  CHECK(frames_in_flight_for_swapchain(1, 3) == 1);
+  CHECK(frames_in_flight_for_swapchain(4, 2) == 2);
+}
+
 void run_wsi_health_tests() {
   test_wsi_classify_success_is_none();
   test_wsi_classify_swapchain_rebuild();
@@ -977,6 +996,8 @@ void run_wsi_health_tests() {
   test_resize_same_extent_short_circuits_once();
   test_msaa_resize_retain_device_wait_idle();
   test_draw_frame_reaps_before_zero_extent_or_occluded_return();
+  test_preferred_swapchain_image_count_requests_fif_plus_two();
+  test_frames_in_flight_leaves_one_image_for_present();
   test_descriptor_full_block_is_skipped_then_grows();
   test_descriptor_pool_growth_and_retry_policy();
   test_descriptor_chain_300_cross_block_alloc_and_recycle();

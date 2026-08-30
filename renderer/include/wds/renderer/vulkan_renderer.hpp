@@ -381,6 +381,42 @@ inline constexpr bool retain_device_wait_idle_on_msaa_and_resize() noexcept {
   return true;
 }
 
+// FIFO keeps one image on the scan-out and typically one queued for the next
+// vsync. In-flight submits may still reference `frames_in_flight` images.
+// Request FIF+2 when the surface allows it. Win NVIDIA RTX 3060 (session
+// 3aea3b): 3 images == 3 FIF produced a 0/33ms cadence; imgFence averaged
+// ~15ms (half the frames waited an extra vsync). Mac maxImageCount is often 3
+// and clamps back.
+inline constexpr uint32_t preferred_swapchain_image_count(uint32_t min_images, uint32_t max_images,
+                                                          int frames_in_flight) noexcept {
+  const uint32_t fif = frames_in_flight > 0 ? static_cast<uint32_t>(frames_in_flight) : 1u;
+  uint32_t want = min_images + 1u;
+  if (fif + 2u > want) {
+    want = fif + 2u;
+  }
+  if (max_images > 0 && want > max_images) {
+    want = max_images;
+  }
+  if (want < min_images) {
+    want = min_images;
+  }
+  return want;
+}
+
+// Never occupy every swapchain image with in-flight submits — leave at least
+// one for the presentation engine. 3 images → 2 FIF; 5 images → 3 FIF.
+inline constexpr int frames_in_flight_for_swapchain(uint32_t image_count,
+                                                    int max_frames_in_flight) noexcept {
+  if (max_frames_in_flight < 1) {
+    return 1;
+  }
+  if (image_count <= 1) {
+    return 1;
+  }
+  const int spare = static_cast<int>(image_count - 1u);
+  return spare < max_frames_in_flight ? spare : max_frames_in_flight;
+}
+
 // Window-system binding supplied by the ui layer (GLFW today). Renderer never
 // touches GLFWwindow — only the Vulkan surface and framebuffer size queries.
 struct VulkanHostSurface {
@@ -471,12 +507,14 @@ class VulkanRenderer {
     int fb_w = 0;
     int fb_h = 0;
     int device_type = 0;
+    int frames_in_flight = 0;
     bool presented = false;
   };
   DrawFrameTimings last_draw_timings() const noexcept;
   int device_type() const noexcept;
   uint32_t swapchain_image_count() const noexcept;
   int present_mode() const noexcept;
+  int frames_in_flight() const noexcept;
 
   // Opt-in segmented path timings (µs). Off by default — no extra clocks.
   void set_path_diagnostics_enabled(bool enabled) noexcept;

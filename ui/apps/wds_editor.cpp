@@ -378,12 +378,13 @@ int run_editor(int argc, char** argv) {
     char data[1024];
     std::snprintf(data, sizeof(data),
                   "{\"gpu\":\"%s\",\"deviceType\":%d,\"msaa\":%d,\"preferredMsaa\":%d,"
-                  "\"presentMode\":%d,\"swapchainImages\":%u,\"fbW\":%.0f,\"fbH\":%.0f,"
-                  "\"winW\":%.0f,\"winH\":%.0f,\"osScaleX\":%.3f,\"osScaleY\":%.3f,"
-                  "\"fs\":%d,\"fse\":%d}",
+                  "\"presentMode\":%d,\"swapchainImages\":%u,\"framesInFlight\":%d,"
+                  "\"fbW\":%.0f,\"fbH\":%.0f,\"winW\":%.0f,\"winH\":%.0f,"
+                  "\"osScaleX\":%.3f,\"osScaleY\":%.3f,\"fs\":%d,\"fse\":%d}",
                   gpu, vulkan.device_type(), vulkan.active_msaa(), vulkan.preferred_msaa(),
-                  vulkan.present_mode(), vulkan.swapchain_image_count(), fb0.x, fb0.y, win0.x,
-                  win0.y, csx, csy, window.is_fullscreen() ? 1 : 0,
+                  vulkan.present_mode(), vulkan.swapchain_image_count(), vulkan.frames_in_flight(),
+                  fb0.x, fb0.y, win0.x, win0.y, csx,
+                  csy, window.is_fullscreen() ? 1 : 0,
                   vulkan.exclusive_fullscreen_acquired() ? 1 : 0);
     // #region agent log
     wds::common::debug_session_log("wds_editor.cpp:startup", "renderer_startup", "H1,H2,H4", data);
@@ -526,7 +527,8 @@ int run_editor(int argc, char** argv) {
               "\"uploadUs\":%lld,\"fenceUs\":%lld,\"acquireUs\":%lld,\"imgFenceUs\":%lld,"
               "\"vbCopyUs\":%lld,\"cmdUs\":%lld,\"submitUs\":%lld,\"presentUs\":%lld,"
               "\"drawTotalUs\":%lld,\"msaa\":%d,\"fbW\":%d,\"fbH\":%d,\"verts\":%u,"
-              "\"buckets\":%u,\"notes\":%u,\"swImages\":%u,\"presentMode\":%d}",
+              "\"buckets\":%u,\"notes\":%u,\"swImages\":%u,\"framesInFlight\":%d,"
+              "\"presentMode\":%d}",
               static_cast<long long>(wall), static_cast<long long>(poll_us),
               static_cast<long long>(resize_us), static_cast<long long>(tick_us),
               static_cast<long long>(update_us), static_cast<long long>(batch_us),
@@ -538,7 +540,7 @@ int run_editor(int argc, char** argv) {
               static_cast<long long>(dt.cmd_record_us), static_cast<long long>(dt.submit_us),
               static_cast<long long>(dt.present_us), static_cast<long long>(dt.total_us), dt.msaa,
               dt.fb_w, dt.fb_h, dt.vertex_count, dt.bucket_count, pb.note_count,
-              dt.swapchain_images, dt.present_mode);
+              dt.swapchain_images, dt.frames_in_flight, dt.present_mode);
           // #region agent log
           wds::common::debug_session_log("wds_editor.cpp:hitch", "hitch_frame", "H1,H2,H3,H4,H5,H6",
                                          hitch);
@@ -598,7 +600,7 @@ int run_editor(int argc, char** argv) {
                 "\"vbCopyAvgUs\":%.0f,\"cmdAvgUs\":%.0f,\"submitAvgUs\":%.0f,"
                 "\"presentAvgUs\":%.0f,\"presentMaxUs\":%lld,\"drawAvgUs\":%.0f,"
                 "\"drawMaxUs\":%lld,\"vertsAvg\":%.0f,\"notesAvg\":%.0f,"
-                "\"swImages\":%u,\"presentMode\":%d,\"deviceType\":%d}",
+                "\"swImages\":%u,\"framesInFlight\":%d,\"presentMode\":%d,\"deviceType\":%d}",
                 frame_diag.frames, fps, frame_diag.playing_frames,
                 window.is_fullscreen() ? 1 : 0, vulkan.exclusive_fullscreen_acquired() ? 1 : 0,
                 vulkan.active_msaa(), fb_w, fb_h, frame_diag.hitch_count, frame_diag.wall_us / n,
@@ -615,7 +617,7 @@ int run_editor(int argc, char** argv) {
                 frame_diag.present_us / n, static_cast<long long>(frame_diag.present_max_us),
                 frame_diag.draw_total_us / n, static_cast<long long>(frame_diag.draw_total_max_us),
                 frame_diag.verts / n, frame_diag.notes / n, vulkan.swapchain_image_count(),
-                vulkan.present_mode(), vulkan.device_type());
+                vulkan.frames_in_flight(), vulkan.present_mode(), vulkan.device_type());
             // #region agent log
             wds::common::debug_session_log("wds_editor.cpp:summary", "frame_summary_1s",
                                            "H1,H2,H3,H4,H5,H6", data);
