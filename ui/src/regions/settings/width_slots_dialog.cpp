@@ -146,7 +146,30 @@ bool stepped_int_text_valid(const std::string& text, bool (*ok)(int)) {
   return value.has_value() && ok(*value);
 }
 
-constexpr const char* kDisplayComboLabels[4] = {"流速", "挡板高度", "note厚度", "分割线特效透明度"};
+constexpr const char* kDisplayComboLabels[5] = {"流速", "挡板高度", "note厚度", "分割线特效透明度",
+                                                "抗锯齿"};
+
+const std::vector<std::string>& msaa_items() {
+  static const std::vector<std::string> kItems{"低", "中", "高"};
+  return kItems;
+}
+
+std::string format_msaa_samples(int samples) {
+  switch (clamp_msaa_samples(samples)) {
+    case 1:
+      return "低";
+    case 4:
+      return "高";
+    default:
+      return "中";
+  }
+}
+
+int msaa_samples_from_label(const std::string& label) {
+  if (label == "低") return 1;
+  if (label == "高") return 4;
+  return 2;
+}
 
 }  // namespace
 
@@ -222,6 +245,14 @@ WidthSlotsDialog::WidthSlotsDialog() {
       split_line_opacity_items(), "100", [](const std::string& text) {
         return stepped_int_text_valid(text, wds::chart_editor::official_split_effect_line_opacity_valid);
       });
+
+  auto msaa = std::make_unique<wds::interaction::ComboBox>();
+  msaa->set_items(msaa_items());
+  msaa->set_dropdown_only(true);
+  msaa->set_opens_upward(false);
+  msaa->set_text(format_msaa_samples(2));
+  msaa_samples_ = msaa.get();
+  add_child(std::move(msaa));
 
   auto invert = std::make_unique<wds::interaction::Checkbox>("反转时间轴滚轮方向");
   invert_scroll_wheel_ = invert.get();
@@ -347,6 +378,7 @@ void WidthSlotsDialog::dismiss_combos() {
   dismiss(note_start_offset_);
   dismiss(note_height_level_);
   dismiss(split_line_opacity_);
+  dismiss(msaa_samples_);
 }
 
 void WidthSlotsDialog::close() {
@@ -374,6 +406,8 @@ void WidthSlotsDialog::set_config(const EditorUiConfig& cfg) {
   static_cast<wds::interaction::ComboBox*>(split_line_opacity_)
       ->set_text(std::to_string(
           wds::chart_editor::official_clamp_split_effect_line_opacity(cfg.split_line_opacity)));
+  static_cast<wds::interaction::ComboBox*>(msaa_samples_)
+      ->set_text(format_msaa_samples(cfg.msaa_samples));
   for (int i = 0; i < 6; ++i) {
     static_cast<wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
         ->set_text(std::to_string(cfg.width_slots[static_cast<std::size_t>(i)]));
@@ -434,6 +468,8 @@ void WidthSlotsDialog::capture_config(EditorUiConfig& cfg) const {
       }
     }
   }
+  cfg.msaa_samples = msaa_samples_from_label(
+      static_cast<const wds::interaction::ComboBox*>(msaa_samples_)->text());
   for (int i = 0; i < 6; ++i) {
     const auto& text =
         static_cast<const wds::interaction::TextField*>(fields_[static_cast<std::size_t>(i)])
@@ -526,6 +562,7 @@ void WidthSlotsDialog::update_tab_visibility() {
   if (note_start_offset_) note_start_offset_->set_visible(open_ && display);
   if (note_height_level_) note_height_level_->set_visible(open_ && display);
   if (split_line_opacity_) split_line_opacity_->set_visible(open_ && display);
+  if (msaa_samples_) msaa_samples_->set_visible(open_ && display);
   if (invert_scroll_wheel_) invert_scroll_wheel_->set_visible(open_ && input);
   if (invert_visible_range_scroll_) invert_visible_range_scroll_->set_visible(open_ && input);
   if (scroll_wheel_speed_) scroll_wheel_speed_->set_visible(open_ && input);
@@ -585,8 +622,9 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
     const float display_combo_w =
         std::max(th::px(72.0f), (body_w - display_label_w - display_label_gap) / 3.0f);
     wds::interaction::Widget* display_combos[] = {note_speed_, note_start_offset_,
-                                                  note_height_level_, split_line_opacity_};
-    for (int i = 0; i < 4; ++i) {
+                                                  note_height_level_, split_line_opacity_,
+                                                  msaa_samples_};
+    for (int i = 0; i < 5; ++i) {
       const float cy = y + static_cast<float>(i + 1) * (ctrl_h + body_gap);
       if (display_combos[i] != nullptr) {
         display_combos[i]->set_bounds(
@@ -775,8 +813,9 @@ void WidthSlotsDialog::paint_modal(wds::interaction::UiPainter& painter) const {
     const float display_label_w = th::px(208.0f);
     const float y0 = content.y + pad + title_h + gap;
     wds::interaction::Widget* display_combos[] = {note_speed_, note_start_offset_,
-                                                  note_height_level_, split_line_opacity_};
-    for (int i = 0; i < 4; ++i) {
+                                                  note_height_level_, split_line_opacity_,
+                                                  msaa_samples_};
+    for (int i = 0; i < 5; ++i) {
       const float cy = y0 + static_cast<float>(i + 1) * (ctrl_h + body_gap);
       painter.label({body_x, cy, display_label_w, ctrl_h}, kDisplayComboLabels[i],
                     th::kOnSurfaceMuted, 0.987f, false, 0.0f, true);
@@ -820,7 +859,7 @@ void WidthSlotsDialog::paint_dropdown(wds::interaction::UiPainter& painter) cons
   }
   if (tab_ != Tab::Display) return;
   wds::interaction::Widget* display_combos[] = {note_speed_, note_start_offset_, note_height_level_,
-                                                split_line_opacity_};
+                                                split_line_opacity_, msaa_samples_};
   for (auto* combo : display_combos) {
     if (combo != nullptr) combo->paint_popup_layer(painter);
   }

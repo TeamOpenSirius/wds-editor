@@ -1,5 +1,6 @@
 #include "wds/ui/regions/preview/playback_preview.hpp"
 #include "wds/renderer/log.hpp"
+#include "wds/ui/editor_ui_config.hpp"
 
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
@@ -296,6 +297,14 @@ void PlaybackPreviewView::shutdown() {
 void PlaybackPreviewView::set_config(const PreviewVisualConfig& config) {
   config_ = config;
   geometry_.configure(config_);
+}
+
+void PlaybackPreviewView::apply_msaa(int samples) {
+  config_.msaa_samples = clamp_msaa_samples(samples);
+  if (!ready_) {
+    return;
+  }
+  vulkan_.apply_msaa(config_.msaa_samples);
 }
 
 void PlaybackPreviewView::resize(int framebuffer_width, int framebuffer_height) {

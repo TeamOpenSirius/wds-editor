@@ -24,6 +24,8 @@ struct EditorUiConfig {
   int note_height_level = 8;
   // Official SplitEffectLineOpacity (10..100 step 10).
   int split_line_opacity = 100;
+  // Preferred Vulkan MSAA samples: 1 (低) / 2 (中) / 4 (高). Default matches app 2×.
+  int msaa_samples = 2;
   int32_t visible_hectoms = 20;
   float music_volume = 1.0f;
   bool music_muted = false;
@@ -57,6 +59,11 @@ struct EditorUiConfig {
   wds::chart_editor::EasingDirection curve_selected_direction =
       wds::chart_editor::EasingDirection::In;
 };
+
+// Matches VulkanRenderer::set_preferred_msaa: ≤1 → 1, ≤2 → 2, else 4.
+inline int clamp_msaa_samples(int samples) noexcept {
+  return samples <= 1 ? 1 : (samples <= 2 ? 2 : 4);
+}
 
 // Resolves the platform config path (creates nothing; save may create dirs).
 // Prefers the OS data directory so app updates do not wipe preferences; if that

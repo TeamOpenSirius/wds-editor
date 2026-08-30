@@ -66,6 +66,8 @@ class PlaybackPreviewView {
 
   void set_config(const wds::renderer::PreviewVisualConfig& config);
   const wds::renderer::PreviewVisualConfig& config() const noexcept { return config_; }
+  // Persist preferred MSAA (1 / 2 / 4) and rebuild the swapchain when ready.
+  void apply_msaa(int samples);
 
   void attach_audio(wds::audio::AudioEngine* audio) noexcept;
   // Read-only armed MIXTIME POS count (0 when no audio).

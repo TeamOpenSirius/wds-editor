@@ -42,11 +42,13 @@ void capture_display_from_preview(const ChartPreviewPanel& preview, EditorUiConf
   cfg.note_height_level = visual.note_height_level;
   cfg.split_line_opacity =
       static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) * 100.0));
+  cfg.msaa_samples = visual.msaa_samples;
 }
 
 void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& cfg) {
   preview.apply_display_settings(cfg.note_speed, cfg.note_start_offset, cfg.note_height_level,
                                  cfg.split_line_opacity);
+  preview.preview().apply_msaa(cfg.msaa_samples);
 }
 
 }  // namespace

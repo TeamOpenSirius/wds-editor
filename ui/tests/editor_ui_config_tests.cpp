@@ -38,6 +38,7 @@ using wds::ui::apply_curve_template_state;
 using wds::ui::capture_curve_template_state;
 using wds::ui::find_curve_template_by_id;
 using wds::ui::kMaxCurveTemplates;
+using wds::ui::clamp_msaa_samples;
 using wds::ui::load_editor_ui_config;
 using wds::ui::normalize_curve_config;
 using wds::ui::normalize_curve_template;
@@ -100,6 +101,47 @@ void test_old_config_without_curve_keys() {
   CHECK(cfg.curve_templates.empty());
   CHECK_EQ(cfg.curve_selected_template_id, static_cast<std::uint64_t>(0));
   CHECK(cfg.curve_selected_direction == EasingDirection::In);
+  CHECK_EQ(cfg.msaa_samples, 2);
+}
+
+void test_msaa_samples_default_clamp_and_round_trip() {
+  CHECK_EQ(clamp_msaa_samples(0), 1);
+  CHECK_EQ(clamp_msaa_samples(1), 1);
+  CHECK_EQ(clamp_msaa_samples(2), 2);
+  CHECK_EQ(clamp_msaa_samples(3), 4);
+  CHECK_EQ(clamp_msaa_samples(4), 4);
+  CHECK_EQ(clamp_msaa_samples(8), 4);
+
+  EditorUiConfig defaults;
+  CHECK_EQ(defaults.msaa_samples, 2);
+
+  const auto missing = temp_config_path("msaa_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK_EQ(loaded_missing.msaa_samples, 2);
+
+  for (int samples : {1, 2, 4}) {
+    EditorUiConfig cfg;
+    cfg.msaa_samples = samples;
+    const auto path = temp_config_path(("msaa_" + std::to_string(samples) + ".yml").c_str());
+    CHECK(save_editor_ui_config(path.string(), cfg));
+    EditorUiConfig loaded;
+    CHECK(load_editor_ui_config(path.string(), loaded));
+    CHECK_EQ(loaded.msaa_samples, samples);
+  }
+
+  const auto invalid = temp_config_path("msaa_invalid.yml");
+  CHECK(write_text_atomic(invalid.string(), "msaa_samples: 3\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_invalid;
+  CHECK(load_editor_ui_config(invalid.string(), loaded_invalid));
+  CHECK_EQ(loaded_invalid.msaa_samples, 4);
+
+  const auto zero = temp_config_path("msaa_zero.yml");
+  CHECK(write_text_atomic(zero.string(), "msaa_samples: 0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_zero;
+  CHECK(load_editor_ui_config(zero.string(), loaded_zero));
+  CHECK_EQ(loaded_zero.msaa_samples, 1);
 }
 
 void test_name_round_trip_special_and_chinese() {
@@ -473,6 +515,7 @@ void test_save_truncates_in_memory_over_max() {
 
 int main() {
   test_old_config_without_curve_keys();
+  test_msaa_samples_default_clamp_and_round_trip();
   test_name_round_trip_special_and_chinese();
   test_duplicate_names_distinct_ids_and_order();
   test_invalid_algorithm_direction_and_parameter();

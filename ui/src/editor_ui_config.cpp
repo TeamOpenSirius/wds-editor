@@ -302,6 +302,11 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
       cfg.split_line_opacity =
           wds::chart_editor::official_clamp_split_effect_line_opacity(static_cast<int>(v));
     }
+  } else if (key == "msaa_samples") {
+    int32_t v = cfg.msaa_samples;
+    if (parse_int(value, v)) {
+      cfg.msaa_samples = clamp_msaa_samples(static_cast<int>(v));
+    }
   } else if (key == "visible_hectoms") {
     int32_t v = cfg.visible_hectoms;
     if (parse_int(value, v)) cfg.visible_hectoms = std::clamp(v, 1, 1000);
@@ -505,6 +510,7 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "note_start_offset: " << cfg.note_start_offset << '\n'
       << "note_height_level: " << cfg.note_height_level << '\n'
       << "split_line_opacity: " << cfg.split_line_opacity << '\n'
+      << "msaa_samples: " << clamp_msaa_samples(cfg.msaa_samples) << '\n'
       << "visible_hectoms: " << cfg.visible_hectoms << '\n'
       << "music_volume: " << music << '\n'
       << "music_muted: " << emit_bool(cfg.music_muted) << '\n'
