@@ -2,7 +2,6 @@
 
 add_library(wds_common STATIC
   src/crash_handler.cpp
-  src/debug_session_log.cpp
   src/utf8_path.cpp
 )
 add_library(wds::common ALIAS wds_common)

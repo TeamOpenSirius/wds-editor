@@ -953,7 +953,7 @@ void test_descriptor_chain_300_cross_block_alloc_and_recycle() {
 }
 
 void test_preferred_swapchain_image_count_requests_fif_plus_two() {
-  // Win NVIDIA session 3aea3b: min=2 max=8 FIF=3 → 5 (not the old 3).
+  // min=2 max=8 FIF=3 → 5 (not the old preferred-3 request).
   CHECK(preferred_swapchain_image_count(2, 8, 3) == 5);
   CHECK(preferred_swapchain_image_count(2, 3, 3) == 3);  // Mac clamp
   CHECK(preferred_swapchain_image_count(2, 4, 3) == 4);
