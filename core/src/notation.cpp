@@ -10,54 +10,196 @@
 #include <unordered_set>
 
 namespace wds::chart_editor {
+namespace {
+
+int64_t sat_sub_i64(int64_t a, int64_t b) noexcept {
+  if (b >= 0) {
+    if (a < std::numeric_limits<int64_t>::min() + b) {
+      return std::numeric_limits<int64_t>::min();
+    }
+  } else if (a > std::numeric_limits<int64_t>::max() + b) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return a - b;
+}
+
+int64_t sat_llround_i64(double value) noexcept {
+  if (!std::isfinite(value)) {
+    if (std::isnan(value)) {
+      return 0;
+    }
+    return value > 0.0 ? std::numeric_limits<int64_t>::max()
+                       : std::numeric_limits<int64_t>::min();
+  }
+  constexpr double kMax = static_cast<double>(std::numeric_limits<int64_t>::max());
+  constexpr double kMin = static_cast<double>(std::numeric_limits<int64_t>::min());
+  if (value >= kMax) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  if (value <= kMin) {
+    return std::numeric_limits<int64_t>::min();
+  }
+  return std::llround(value);
+}
+
+int32_t sat_tick_from_double(double value) noexcept {
+  if (std::isnan(value) || value <= 0.0) {
+    return 0;
+  }
+  if (!std::isfinite(value)) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  constexpr double kMax = static_cast<double>(std::numeric_limits<int32_t>::max());
+  if (value >= kMax) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  return static_cast<int32_t>(std::llround(value));
+}
+
+struct NoteIdPlan {
+  bool ok = false;
+  int32_t next_id = 0;
+  std::vector<int32_t> ids;
+};
+
+NoteIdPlan plan_note_ids(const std::vector<NotationNote>& notes, int32_t next_id) {
+  NoteIdPlan plan;
+  plan.next_id = next_id;
+  plan.ids.reserve(notes.size());
+  constexpr int32_t kMaxId = std::numeric_limits<int32_t>::max();
+  std::unordered_set<int32_t> seen;
+  seen.reserve(notes.size());
+  for (const auto& note : notes) {
+    int32_t id = note.id;
+    if (id < 0) {
+      if (plan.next_id == kMaxId) {
+        return plan;
+      }
+      id = plan.next_id++;
+    } else {
+      if (id == kMaxId) {
+        return plan;
+      }
+      if (id >= plan.next_id) {
+        plan.next_id = id + 1;
+      }
+    }
+    if (!seen.insert(id).second) {
+      return plan;
+    }
+    plan.ids.push_back(id);
+  }
+  plan.ok = true;
+  return plan;
+}
+
+bool chart_note_ids_keepable(const std::vector<NotationNote>& notes) {
+  return plan_note_ids(notes, 0).ok;
+}
+
+bool timing_points_are_normalized(const MusicTiming& timing) noexcept {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) {
+    return false;
+  }
+  if (timing.points.front().tick != 0) {
+    return false;
+  }
+  for (size_t i = 1; i < timing.points.size(); ++i) {
+    if (timing.points[i].tick <= timing.points[i - 1].tick) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void ensure_timing_prefix(const MusicTiming& timing) {
+  if (timing.prefix_ms.size() == timing.points.size() && !timing.points.empty()) {
+    return;
+  }
+  rebuild_timing_prefix_ms(timing);
+}
+
+size_t last_index_tick_le(const std::vector<TimingPoint>& pts, int32_t target) {
+  size_t lo = 0;
+  size_t hi = pts.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (pts[mid].tick <= target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo == 0 ? 0 : lo - 1;
+}
+
+size_t last_index_prefix_le(const std::vector<double>& prefix, double remain) {
+  size_t lo = 0;
+  size_t hi = prefix.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (prefix[mid] <= remain) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo == 0 ? 0 : lo - 1;
+}
+
+int64_t tick_to_milliseconds_normalized(int32_t tick, const MusicTiming& timing) {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) {
+    return timing.offset_ms;
+  }
+  ensure_timing_prefix(timing);
+  const auto& pts = timing.points;
+  const int32_t target = std::max(0, tick);
+  const size_t i = last_index_tick_le(pts, target);
+  const double tpq = static_cast<double>(timing.ticks_per_quarter);
+  const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
+  const double rate = 60000.0 / (bpm * tpq);
+  const int64_t dt = static_cast<int64_t>(target) - static_cast<int64_t>(pts[i].tick);
+  const double ms = static_cast<double>(timing.offset_ms) + timing.prefix_ms[i] +
+                    static_cast<double>(dt) * rate;
+  return sat_llround_i64(ms);
+}
+
+int32_t milliseconds_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) {
+    return 0;
+  }
+  const double remain = static_cast<double>(sat_sub_i64(ms, timing.offset_ms));
+  if (!std::isfinite(remain) || remain <= 0.0) {
+    return 0;
+  }
+  ensure_timing_prefix(timing);
+  const auto& pts = timing.points;
+  const size_t i = last_index_prefix_le(timing.prefix_ms, remain);
+  const double tpq = static_cast<double>(timing.ticks_per_quarter);
+  const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
+  const double ms_per_tick = 60000.0 / (bpm * tpq);
+  const double into = remain - timing.prefix_ms[i];
+  return sat_tick_from_double(static_cast<double>(pts[i].tick) + into / ms_per_tick);
+}
+
+}  // namespace
 
 int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing) {
+  if (timing_points_are_normalized(timing)) {
+    return tick_to_milliseconds_normalized(tick, timing);
+  }
   MusicTiming t = timing;
   normalize_timing_points(t);
-  if (t.ticks_per_quarter <= 0 || t.points.empty()) {
-    return t.offset_ms;
-  }
-  const double tpq = static_cast<double>(t.ticks_per_quarter);
-  double ms = static_cast<double>(t.offset_ms);
-  const int32_t target = std::max(0, tick);
-  for (size_t i = 0; i < t.points.size(); ++i) {
-    const int32_t t0 = t.points[i].tick;
-    const bool last = (i + 1 >= t.points.size());
-    const int32_t t1 = last ? std::numeric_limits<int32_t>::max() : t.points[i + 1].tick;
-    if (target <= t0) break;
-    const int32_t use = last ? target : std::min(target, t1);
-    const double bpm = t.points[i].bpm > 0.0 ? t.points[i].bpm : 120.0;
-    ms += static_cast<double>(use - t0) * (60000.0 / (bpm * tpq));
-    if (!last && target <= t1) break;
-  }
-  return static_cast<int64_t>(std::llround(ms));
+  return tick_to_milliseconds_normalized(tick, t);
 }
 
 int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing) {
+  if (timing_points_are_normalized(timing)) {
+    return milliseconds_to_tick_normalized(ms, timing);
+  }
   MusicTiming t = timing;
   normalize_timing_points(t);
-  if (t.ticks_per_quarter <= 0 || t.points.empty()) {
-    return 0;
-  }
-  const double tpq = static_cast<double>(t.ticks_per_quarter);
-  double remain = static_cast<double>(ms - t.offset_ms);
-  if (remain <= 0.0) return 0;
-  for (size_t i = 0; i < t.points.size(); ++i) {
-    const int32_t t0 = t.points[i].tick;
-    const bool last = (i + 1 >= t.points.size());
-    const int32_t t1 = last ? std::numeric_limits<int32_t>::max() : t.points[i + 1].tick;
-    const double bpm = t.points[i].bpm > 0.0 ? t.points[i].bpm : 120.0;
-    const double ms_per_tick = 60000.0 / (bpm * tpq);
-    if (last) {
-      return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(t0) + remain / ms_per_tick)));
-    }
-    const double seg_ms = static_cast<double>(t1 - t0) * ms_per_tick;
-    if (remain <= seg_ms) {
-      return std::max(0, static_cast<int32_t>(std::llround(static_cast<double>(t0) + remain / ms_per_tick)));
-    }
-    remain -= seg_ms;
-  }
-  return std::max(0, t.points.back().tick);
+  return milliseconds_to_tick_normalized(ms, t);
 }
 
 int64_t NotationNote::start_ms(const MusicTiming& timing) const {
@@ -211,13 +353,88 @@ bool is_combo_head_note(const NotationNote& note) noexcept {
   }
 }
 
-}  // namespace
+// Cached mid-stars (HoldEighth / Sound / ScratchSound) keyed by covered lanes.
+// Sirius soft-body judges stay chart-authored; this index only replaces the
+// per-hold double full-table scan.
+struct MidStarRef {
+  size_t index = 0;
+  int64_t start_ms = 0;
+};
 
-void collect_hold_body_judge_times(const NotationNote& hold,
-                                   const std::vector<NotationNote>& notes,
-                                   const MusicTiming& timing,
-                                   std::vector<int64_t>& out_sorted_unique) {
-  out_sorted_unique.clear();
+bool mid_star_ms_less(const MidStarRef& a, const MidStarRef& b) noexcept {
+  return a.start_ms < b.start_ms;
+}
+
+struct MidStarIndex {
+  static constexpr int32_t kLaneBuckets = 12;
+
+  std::vector<MidStarRef> stars;
+  std::vector<std::vector<MidStarRef>> buckets;
+  std::vector<MidStarRef> overflow;
+  std::vector<uint32_t> visit;
+  uint32_t generation = 0;
+
+  uint32_t next_generation() {
+    ++generation;
+    if (generation == 0) {
+      std::fill(visit.begin(), visit.end(), 0u);
+      generation = 1;
+    }
+    return generation;
+  }
+};
+
+bool mid_star_span_indexable(const NotationNote& note, int32_t* lo, int32_t* hi) noexcept {
+  if (note.width <= 0 || note.lane < 0) {
+    return false;
+  }
+  const int64_t last =
+      static_cast<int64_t>(note.lane) + static_cast<int64_t>(note.width) - 1;
+  if (last < static_cast<int64_t>(note.lane) ||
+      last > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+    return false;
+  }
+  *lo = note.lane;
+  *hi = static_cast<int32_t>(last);
+  return true;
+}
+
+void build_mid_star_index(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                          MidStarIndex& index) {
+  index.stars.clear();
+  index.overflow.clear();
+  index.buckets.assign(static_cast<size_t>(MidStarIndex::kLaneBuckets), {});
+  index.visit.assign(notes.size(), 0u);
+  index.generation = 0;
+
+  for (size_t i = 0; i < notes.size(); ++i) {
+    if (!is_hold_mid_star(notes[i].note_type)) {
+      continue;
+    }
+    const MidStarRef ref{i, notes[i].start_ms(timing)};
+    index.stars.push_back(ref);
+    int32_t lo = 0;
+    int32_t hi = 0;
+    if (!mid_star_span_indexable(notes[i], &lo, &hi) || hi >= MidStarIndex::kLaneBuckets) {
+      index.overflow.push_back(ref);
+      continue;
+    }
+    for (int32_t lane = lo; lane <= hi; ++lane) {
+      index.buckets[static_cast<size_t>(lane)].push_back(ref);
+    }
+  }
+
+  for (auto& bucket : index.buckets) {
+    std::sort(bucket.begin(), bucket.end(), mid_star_ms_less);
+  }
+  std::sort(index.overflow.begin(), index.overflow.end(), mid_star_ms_less);
+  std::sort(index.stars.begin(), index.stars.end(), mid_star_ms_less);
+}
+
+void collect_hold_from_index(const NotationNote& hold, const std::vector<NotationNote>& notes,
+                             const MusicTiming& timing, MidStarIndex& index,
+                             std::vector<int64_t>& out_times, std::vector<char>* star_consumed) {
+  out_times.clear();
   if (!is_hold_body(hold.note_type) || is_hold_mid_star(hold.note_type)) {
     return;
   }
@@ -228,70 +445,99 @@ void collect_hold_body_judge_times(const NotationNote& hold,
     return;
   }
 
-  // Sirius: soft body judges are chart mid-stars only (HoldEighth / Sound /
-  // ScratchSound). Do not synthesize eighths — HoldEighth already is that beat.
-  std::vector<int64_t> times;
-  for (const auto& note : notes) {
-    if (!is_hold_mid_star(note.note_type)) {
-      continue;
-    }
-    const int64_t ms = note.start_ms(timing);
-    if (ms <= start || ms >= end) {
-      continue;
-    }
-    if (!lanes_overlap(hold, note)) {
-      continue;
-    }
-    times.push_back(ms);
-  }
-
-  std::sort(times.begin(), times.end());
-  times.erase(std::unique(times.begin(), times.end()), times.end());
-  out_sorted_unique = std::move(times);
-}
-
-PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
-                                        const MusicTiming& timing,
-                                        int64_t preview_time_ms) {
-  PreviewComboState state;
-  std::vector<int64_t> hold_times;
-  std::vector<char> star_consumed(notes.size(), 0);
-
-  auto register_hit = [&](int64_t ms) {
-    if (ms > preview_time_ms) {
+  const uint32_t gen = index.next_generation();
+  auto consider = [&](const MidStarRef& ref) {
+    if (ref.index >= index.visit.size() || ref.index >= notes.size()) {
       return;
     }
-    state.combo += 1;
-    state.last_judge_ms = std::max(state.last_judge_ms, ms);
+    if (index.visit[ref.index] == gen) {
+      return;
+    }
+    if (ref.start_ms <= start || ref.start_ms >= end) {
+      return;
+    }
+    if (!lanes_overlap(hold, notes[ref.index])) {
+      return;
+    }
+    index.visit[ref.index] = gen;
+    out_times.push_back(ref.start_ms);
+    if (star_consumed != nullptr && ref.index < star_consumed->size()) {
+      (*star_consumed)[ref.index] = 1;
+    }
   };
+
+  auto scan_range = [&](const std::vector<MidStarRef>& sorted) {
+    const MidStarRef after_start{0, start};
+    const MidStarRef at_end{0, end};
+    auto first = std::upper_bound(sorted.begin(), sorted.end(), after_start, mid_star_ms_less);
+    const auto last = std::lower_bound(sorted.begin(), sorted.end(), at_end, mid_star_ms_less);
+    for (; first != last; ++first) {
+      consider(*first);
+    }
+  };
+
+  int32_t lo = 0;
+  int32_t hi = 0;
+  if (!mid_star_span_indexable(hold, &lo, &hi)) {
+    scan_range(index.stars);
+  } else {
+    const int32_t last_lane =
+        std::min(hi, static_cast<int32_t>(index.buckets.size()) - 1);
+    for (int32_t lane = lo; lane <= last_lane; ++lane) {
+      scan_range(index.buckets[static_cast<size_t>(lane)]);
+    }
+    scan_range(index.overflow);
+  }
+
+  std::sort(out_times.begin(), out_times.end());
+  out_times.erase(std::unique(out_times.begin(), out_times.end()), out_times.end());
+}
+
+}  // namespace
+
+void collect_hold_body_judge_times(const NotationNote& hold,
+                                   const std::vector<NotationNote>& notes,
+                                   const MusicTiming& timing,
+                                   std::vector<int64_t>& out_sorted_unique) {
+  out_sorted_unique.clear();
+  if (!is_hold_body(hold.note_type) || is_hold_mid_star(hold.note_type)) {
+    return;
+  }
+  const int64_t start = hold.start_ms(timing);
+  const int64_t end = hold.end_ms(timing);
+  if (end <= start) {
+    return;
+  }
+
+  MidStarIndex index;
+  build_mid_star_index(notes, timing, index);
+  collect_hold_from_index(hold, notes, timing, index, out_sorted_unique, nullptr);
+}
+
+void collect_preview_combo_hits(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                                std::vector<int64_t>& out_sorted_hits) {
+  out_sorted_hits.clear();
+  MidStarIndex index;
+  build_mid_star_index(notes, timing, index);
+
+  std::vector<int64_t> hold_times;
+  std::vector<char> star_consumed(notes.size(), 0);
 
   for (size_t i = 0; i < notes.size(); ++i) {
     const auto& note = notes[i];
     if (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) {
-      collect_hold_body_judge_times(note, notes, timing, hold_times);
-      for (int64_t t : hold_times) {
-        register_hit(t);
-      }
-      // Mark mid-stars absorbed by this hold so orphans are not double-counted.
+      collect_hold_from_index(note, notes, timing, index, hold_times, &star_consumed);
+      out_sorted_hits.insert(out_sorted_hits.end(), hold_times.begin(), hold_times.end());
       const int64_t start = note.start_ms(timing);
       const int64_t end = note.end_ms(timing);
-      for (size_t j = 0; j < notes.size(); ++j) {
-        if (!is_hold_mid_star(notes[j].note_type)) {
-          continue;
-        }
-        const int64_t ms = notes[j].start_ms(timing);
-        if (ms > start && ms < end && lanes_overlap(note, notes[j])) {
-          star_consumed[j] = 1;
-        }
-      }
       if (is_hold_with_tail(note.note_type) && end > start) {
-        register_hit(end);
+        out_sorted_hits.push_back(end);
       }
       continue;
     }
 
     if (is_combo_head_note(note)) {
-      register_hit(note.start_ms(timing));
+      out_sorted_hits.push_back(note.start_ms(timing));
     }
   }
 
@@ -302,10 +548,30 @@ PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
     if (is_split_lane_gimmick(notes[i].gimmick_type)) {
       continue;
     }
-    register_hit(notes[i].start_ms(timing));
+    out_sorted_hits.push_back(notes[i].start_ms(timing));
   }
 
+  std::sort(out_sorted_hits.begin(), out_sorted_hits.end());
+}
+
+PreviewComboState combo_from_sorted_hits(const std::vector<int64_t>& sorted_hits,
+                                         int64_t preview_time_ms) {
+  PreviewComboState state;
+  const auto it =
+      std::upper_bound(sorted_hits.begin(), sorted_hits.end(), preview_time_ms);
+  state.combo = static_cast<int32_t>(it - sorted_hits.begin());
+  if (state.combo > 0) {
+    state.last_judge_ms = *(it - 1);
+  }
   return state;
+}
+
+PreviewComboState compute_preview_combo(const std::vector<NotationNote>& notes,
+                                        const MusicTiming& timing,
+                                        int64_t preview_time_ms) {
+  std::vector<int64_t> hits;
+  collect_preview_combo_hits(notes, timing, hits);
+  return combo_from_sorted_hits(hits, preview_time_ms);
 }
 
 bool contributes_to_concurrent_at_start(NoteType type) noexcept {
@@ -395,6 +661,14 @@ bool ChartDocument::set_timing(MusicTiming timing) {
   if (is_read_only()) {
     return false;
   }
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter)) {
+    return false;
+  }
+  for (const auto& point : timing.points) {
+    if (point.tick < 0) {
+      return false;
+    }
+  }
   normalize_timing_points(timing);
   timing_ = std::move(timing);
   rebuild_index();
@@ -424,11 +698,15 @@ int32_t ChartDocument::add_note(NotationNote note) {
   if (is_read_only()) {
     return -1;
   }
+  constexpr int32_t kMaxId = std::numeric_limits<int32_t>::max();
   if (note.id < 0) {
+    if (next_id_ == kMaxId) {
+      return -1;
+    }
     note.id = next_id_++;
   } else {
-    if (id_to_index_.find(note.id) != id_to_index_.end()) {
-      return -1;  // explicit id already present
+    if (note.id == kMaxId || id_to_index_.find(note.id) != id_to_index_.end()) {
+      return -1;  // INT32_MAX would overflow next_id_; explicit id already present
     }
     next_id_ = std::max(next_id_, note.id + 1);
   }
@@ -443,26 +721,43 @@ int32_t ChartDocument::add_note(NotationNote note) {
 }
 
 bool ChartDocument::update_note(int32_t id, const NotationNote& note) {
+  return apply_note_updates({NoteUpdate{id, note}});
+}
+
+bool ChartDocument::apply_note_updates(const std::vector<NoteUpdate>& updates) {
+  if (updates.empty()) {
+    return true;
+  }
   if (is_read_only()) {
     return false;
   }
-  const auto it = id_to_index_.find(id);
-  if (it == id_to_index_.end()) {
-    return false;
+
+  std::unordered_set<int32_t> seen;
+  seen.reserve(updates.size());
+  for (const auto& update : updates) {
+    if (!seen.insert(update.id).second) {
+      return false;
+    }
+    if (id_to_index_.find(update.id) == id_to_index_.end()) {
+      return false;
+    }
   }
 
-  const NotationNote old_note = notes_[it->second];
-  NotationNote updated = note;
-  updated.id = id;
+  for (const auto& update : updates) {
+    const auto it = id_to_index_.find(update.id);
+    const NotationNote old_note = notes_[it->second];
+    NotationNote updated = update.note;
+    updated.id = update.id;
+    index_.on_note_updated(old_note, updated, timing_);
+    notes_[it->second] = updated;
+  }
 
-  index_.on_note_updated(old_note, updated, timing_);
-  notes_[it->second] = updated;
   sort_notes_for_display();
   rebuild_id_index();
-  if (index_.max_hold_span_ms() == 0) {
+  if (index_.hold_span_stale()) {
     rebuild_index();
   }
-  rebuild_concurrent_lines();
+  derive_concurrent_lines();
   mark_dirty();
   return true;
 }
@@ -481,7 +776,7 @@ bool ChartDocument::remove_note(int32_t id) {
   notes_.erase(notes_.begin() + static_cast<std::ptrdiff_t>(it->second));
   sort_notes_for_display();
   rebuild_id_index();
-  if (index_.max_hold_span_ms() == 0) {
+  if (index_.hold_span_stale()) {
     rebuild_index();
   }
   rebuild_concurrent_lines();
@@ -501,22 +796,15 @@ bool ChartDocument::set_notes(std::vector<NotationNote> notes) {
   if (is_read_only()) {
     return false;
   }
-  std::unordered_set<int32_t> seen;
-  seen.reserve(notes.size());
-  for (const auto& note : notes) {
-    if (note.id < 0) continue;
-    if (!seen.insert(note.id).second) {
-      return false;  // duplicate explicit id
-    }
+  const NoteIdPlan plan = plan_note_ids(notes, next_id_);
+  if (!plan.ok || plan.ids.size() != notes.size()) {
+    return false;
   }
   notes_ = std::move(notes);
-  for (auto& note : notes_) {
-    if (note.id < 0) {
-      note.id = next_id_++;
-    } else {
-      next_id_ = std::max(next_id_, note.id + 1);
-    }
+  for (size_t i = 0; i < notes_.size(); ++i) {
+    notes_[i].id = plan.ids[i];
   }
+  next_id_ = plan.next_id;
   sort_notes_for_display();
   rebuild_id_index();
   rebuild_index();
@@ -538,12 +826,16 @@ bool ChartDocument::set_concurrent_lines(std::vector<ConcurrentLineNote> lines) 
   return true;
 }
 
-void ChartDocument::rebuild_concurrent_lines() {
+void ChartDocument::derive_concurrent_lines() {
   concurrent_lines_ = build_concurrent_lines(notes_, timing_);
   std::sort(concurrent_lines_.begin(), concurrent_lines_.end(),
             [](const ConcurrentLineNote& a, const ConcurrentLineNote& b) {
               return a.milliseconds < b.milliseconds;
             });
+}
+
+void ChartDocument::rebuild_concurrent_lines() {
+  derive_concurrent_lines();
   if (is_editable()) {
     mark_dirty();
   }
@@ -571,12 +863,19 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
   concurrent_lines_ = chart.concurrent_lines;
   edit_mode_ = mode;
 
-  next_id_ = 0;
-  for (auto& note : notes_) {
-    if (note.id < 0) {
-      note.id = next_id_++;
-    } else {
-      next_id_ = std::max(next_id_, note.id + 1);
+  if (!chart_note_ids_keepable(notes_)) {
+    normalize_notes_inplace(notes_);
+    next_id_ = notes_.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                   ? std::numeric_limits<int32_t>::max()
+                   : static_cast<int32_t>(notes_.size());
+  } else {
+    next_id_ = 0;
+    for (auto& note : notes_) {
+      if (note.id < 0) {
+        note.id = next_id_++;
+      } else {
+        next_id_ = std::max(next_id_, note.id + 1);
+      }
     }
   }
 

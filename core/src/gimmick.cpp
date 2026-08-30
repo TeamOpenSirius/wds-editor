@@ -1,6 +1,7 @@
 #include <wds/core/gimmick.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace wds::chart_editor {
@@ -39,6 +40,37 @@ bool is_one_direction(GimmickType gimmick) noexcept {
   return gimmick == GimmickType::OneDirection;
 }
 
+int32_t split_color_slot(int32_t scratch_length, int32_t split_count,
+                         int32_t world_index) noexcept {
+  const int32_t n = std::max(split_count, 1);
+  const int32_t world = std::clamp(world_index, 0, n);
+  if (split_fade_grows_from_tip(scratch_length)) {
+    return n - world;
+  }
+  return world;
+}
+
+bool split_fade_grows_from_tip(int32_t scratch_length) noexcept {
+  switch (scratch_length) {
+    case 10392:
+    case 10393:
+    case 10518:
+    case 10631:
+    case 11331:
+    case 11511:
+    case 11591:
+    case 11612:
+    case 11614:
+    case 11616:
+    case 11700:
+    case 11792:
+    case 11805:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::pair<int32_t, int32_t> get_scratch_end_lane_range(const NotationNote& note) noexcept {
   // Official scratchLength is a signed span (Sirius ScratchHoldEnd / JumpScratch).
   // scratchLane   = sl >= 0 ? lane : endLane + sl + 1
@@ -59,6 +91,31 @@ std::pair<int32_t, int32_t> get_jump_scratch_lane_range(const NotationNote& note
     return {note.lane, note.end_lane()};
   }
   return get_scratch_end_lane_range(note);
+}
+
+std::pair<int32_t, int32_t> resolve_end_lane_span(const NotationNote& note) noexcept {
+  std::pair<int32_t, int32_t> range;
+  if (is_scratch_hold_body(note.note_type)) {
+    range = get_scratch_end_lane_range(note);
+  } else if (is_jump_scratch(note.gimmick_type)) {
+    range = get_jump_scratch_lane_range(note);
+  } else {
+    range = {note.lane, note.end_lane()};
+  }
+  const int32_t lo = std::min(range.first, range.second);
+  const int32_t hi = std::max(range.first, range.second);
+  return {lo, std::max(1, hi - lo + 1)};
+}
+
+std::pair<int32_t, int32_t> occupied_lane_span(const NotationNote& note) noexcept {
+  int32_t lo = note.lane;
+  int32_t hi = note.end_lane();
+  if (is_scratch_hold_body(note.note_type)) {
+    const auto range = get_scratch_end_lane_range(note);
+    lo = std::min({lo, range.first, range.second});
+    hi = std::max({hi, range.first, range.second});
+  }
+  return {lo, std::max(1, hi - lo + 1)};
 }
 
 void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t end_right) noexcept {
@@ -105,6 +162,101 @@ bool scratch_hold_end_cover_representable(const NotationNote& body, int32_t cove
   const bool ext_left = cover_left < body.lane;
   const bool ext_right = cover_right > body.end_lane();
   return !(ext_left && ext_right);
+}
+
+int32_t snap_scratch_chain_next_lane(const NotationNote& prev_body, int32_t next_width,
+                                     float desired_lane, int32_t lane_count) noexcept {
+  next_width = std::max(1, next_width);
+  if (lane_count <= 0 || next_width > lane_count) return 0;
+  const int32_t max_lane = lane_count - next_width;
+  const auto clamp_lane = [&](int32_t lane) {
+    return std::clamp(lane, 0, max_lane);
+  };
+  const auto cover_ok = [&](int32_t lane) {
+    if (lane < 0 || lane > max_lane) return false;
+    const int32_t cover_left = std::min(prev_body.lane, lane);
+    const int32_t cover_right = std::max(prev_body.end_lane(), lane + next_width - 1);
+    return scratch_hold_end_cover_representable(prev_body, cover_left, cover_right);
+  };
+
+  // Both-side extension ⟺ open interval (end - W + 1, prev.lane) for next.left.
+  const float illegal_lo = static_cast<float>(prev_body.end_lane() - next_width + 1);
+  const float illegal_hi = static_cast<float>(prev_body.lane);
+  desired_lane = std::clamp(desired_lane, 0.0f, static_cast<float>(max_lane));
+
+  const auto round_lane = [](float lane) {
+    return static_cast<int32_t>(std::lround(lane));
+  };
+
+  if (!(illegal_lo < illegal_hi) || desired_lane <= illegal_lo ||
+      desired_lane >= illegal_hi) {
+    return clamp_lane(round_lane(desired_lane));
+  }
+
+  const float mid = 0.5f * (illegal_lo + illegal_hi);
+  const int32_t left_legal = prev_body.end_lane() - next_width + 1;
+  const int32_t right_legal = prev_body.lane;
+  const int32_t primary = (desired_lane < mid) ? left_legal : right_legal;
+  const int32_t secondary = (primary == left_legal) ? right_legal : left_legal;
+  if (cover_ok(primary)) return primary;
+  if (cover_ok(secondary)) return secondary;
+  return clamp_lane(round_lane(desired_lane));
+}
+
+int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationNote& body,
+                                       const NotationNote* next, float desired_lane,
+                                       int32_t lane_count) noexcept {
+  const int32_t width = std::max(1, body.width);
+  if (lane_count <= 0 || width > lane_count) return 0;
+  const int32_t max_lane = lane_count - width;
+
+  auto legal = [&](int32_t lane) -> bool {
+    if (lane < 0 || lane > max_lane) return false;
+    NotationNote moved = body;
+    moved.lane = lane;
+    if (next == nullptr) {
+      const auto [occ_l, occ_w] = occupied_lane_span(moved);
+      if (occ_l < 0 || occ_l + occ_w > lane_count) return false;
+    }
+    if (prev != nullptr) {
+      const int32_t cover_left = std::min(prev->lane, moved.lane);
+      const int32_t cover_right = std::max(prev->end_lane(), moved.end_lane());
+      if (!scratch_hold_end_cover_representable(*prev, cover_left, cover_right)) return false;
+    }
+    if (next != nullptr) {
+      const int32_t cover_left = std::min(moved.lane, next->lane);
+      const int32_t cover_right = std::max(moved.end_lane(), next->end_lane());
+      if (!scratch_hold_end_cover_representable(moved, cover_left, cover_right)) return false;
+    }
+    return true;
+  };
+
+  int32_t best = -1;
+  float best_dist = 0.0f;
+  int32_t best_orig_dist = 0;
+  for (int32_t lane = 0; lane <= max_lane; ++lane) {
+    if (!legal(lane)) continue;
+    const float dist = std::abs(static_cast<float>(lane) - desired_lane);
+    const int32_t orig_dist = std::abs(lane - body.lane);
+    const bool better =
+        best < 0 || dist < best_dist - 1e-6f ||
+        (std::abs(dist - best_dist) <= 1e-6f &&
+         (orig_dist < best_orig_dist || (orig_dist == best_orig_dist && lane < best)));
+    if (better) {
+      best = lane;
+      best_dist = dist;
+      best_orig_dist = orig_dist;
+    }
+  }
+  if (best >= 0) return best;
+  return std::clamp(static_cast<int32_t>(std::lround(desired_lane)), 0, max_lane);
+}
+
+void sync_scratch_chain_joint(NotationNote& prev, const NotationNote& next) noexcept {
+  const int32_t cover_left = std::min(prev.lane, next.lane);
+  const int32_t cover_right = std::max(prev.end_lane(), next.end_lane());
+  set_scratch_hold_end_lanes(prev, cover_left, cover_right);
+  apply_scratch_chain_joint_direction(prev, next);
 }
 
 int32_t scratch_chain_joint_direction_score(const NotationNote& prev_body,

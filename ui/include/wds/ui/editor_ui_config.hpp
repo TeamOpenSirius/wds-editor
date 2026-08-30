@@ -1,10 +1,13 @@
 #pragma once
 
+#include "wds/ui/curve_template.hpp"
+
 #include <wds/interaction/editor_shortcuts.hpp>
 
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace wds::ui {
 
@@ -15,6 +18,12 @@ namespace wds::ui {
 // Legacy fallback / one-shot migrate: <exe_dir>/config/config.yml
 struct EditorUiConfig {
   double note_speed = 5.0;
+  // Official NoteStartOffset (0..100 step 5).
+  int note_start_offset = 0;
+  // Official NoteHeight / GetNoteHeight level (1..10).
+  int note_height_level = 8;
+  // Official SplitEffectLineOpacity (10..100 step 10).
+  int split_line_opacity = 100;
   int32_t visible_hectoms = 20;
   float music_volume = 1.0f;
   bool music_muted = false;
@@ -26,20 +35,27 @@ struct EditorUiConfig {
   std::array<int, 6> width_slots{{1, 2, 3, 4, 6, 12}};
   // When true, mute looping Hold-body SFX (head/tail/JumpScratch/stars unchanged).
   bool mute_hold_body_sfx = false;
+  // When true, show TimingEffect Auto judgment text during preview auto-hit.
+  bool show_judgment_text = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
-  // When true, negate timeline-scrub wheel deltas (not Shift+wheel visible range).
+  // When true, negate timeline-scrub wheel deltas (not Ctrl/Cmd+wheel visible range).
   bool invert_scroll_wheel = false;
-  // When true, invert Shift+wheel visible-range adjust direction.
+  // When true, invert Ctrl/Cmd+wheel visible-range adjust direction.
   // Independent of invert_scroll_wheel (timeline scrub).
   bool invert_visible_range_scroll = false;
-  // Multiplier for edit-panel timeline scrub only (not Shift+wheel visible range).
+  // Multiplier for edit-panel timeline scrub only (not Ctrl/Cmd+wheel visible range).
   // At visible_hectoms=20, 1x = 100ms/notch (scales proportionally with range).
   // Legacy hardcoded scrub was 50ms/notch at range 20 (= 0.5x). Default is 1x.
   float scroll_wheel_speed = 1.0f;
   // User-configurable editor chords (defaults match built-in bindings).
   std::array<wds::interaction::ShortcutChord, wds::interaction::kEditorShortcutCount> shortcuts{};
   bool shortcuts_initialized = false;
+  // Curve-fill templates (config.yml only; chart files are unchanged). ID 0 = empty.
+  std::vector<CurveTemplate> curve_templates;
+  std::uint64_t curve_selected_template_id = 0;
+  wds::chart_editor::EasingDirection curve_selected_direction =
+      wds::chart_editor::EasingDirection::In;
 };
 
 // Resolves the platform config path (creates nothing; save may create dirs).
@@ -51,5 +67,11 @@ std::string resolve_editor_config_path(const char* argv0);
 // of open, but partially parsed keys still apply when the file exists.
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out);
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg);
+
+// Copy curve-fill fields between persisted config and the live UiManager state
+// used by later dialog/toolbar code. Settings/toolbar capture must call apply
+// before save so templates, selected ID, and direction are not replaced by defaults.
+void capture_curve_template_state(const EditorUiConfig& cfg, CurveTemplateUiState& state);
+void apply_curve_template_state(EditorUiConfig& cfg, const CurveTemplateUiState& state);
 
 }  // namespace wds::ui

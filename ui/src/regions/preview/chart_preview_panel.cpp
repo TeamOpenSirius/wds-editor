@@ -1,6 +1,9 @@
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 
 #include "wds/renderer/log.hpp"
+#include "wds/ui/layout/editor_layout.hpp"
+
+#include <wds/core/official_playfield.hpp>
 
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
@@ -15,15 +18,30 @@
 namespace wds::ui {
 namespace {
 
-constexpr float kFontOversample = 1.25f;
 constexpr int kFallbackDisplayHz = 60;
 
-float ui_font_bake_px(float tier) {
+// Body (Md/Gutter) and tip sizes are baked separately so each draw stays near 1:1.
+float ui_font_body_bake_px(float tier) {
+  namespace th = wds::interaction::theme;
+  const float logical = std::max(th::kFontSizeMd, th::kFontSizeGutter);
+  return std::max(logical * std::max(tier, 1.0f), 16.0f);
+}
+
+float ui_font_tip_bake_px(float tier, float logical_tip_px = 0.0f) {
   namespace th = wds::interaction::theme;
   const float logical =
-      std::max({th::kFontSizeMd, th::kFontSizeGutter, th::kFontSizeTooltip});
-  return std::max(logical * tier * kFontOversample, 32.0f);
+      logical_tip_px > 0.0f ? th::tooltip_bake_bucket(logical_tip_px) : th::kFontSizeTooltip;
+  return std::max(logical * std::max(tier, 1.0f), 12.0f);
 }
+
+float toolbar_tip_logical_px(float left_w_logical) {
+  namespace th = wds::interaction::theme;
+  const float icon = estimate_toolbar_icon_px(left_w_logical);
+  return th::tooltip_px_for_host(std::max(1.0f, icon - th::px(4.0f)));
+}
+
+// Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
+bool ui_font_mild_sharpen(float tier) { return tier <= 1.5f + 0.001f; }
 
 // Prefer the monitor that currently owns the window (fullscreen or windowed).
 GLFWmonitor* monitor_for_window(GLFWwindow* window) {
@@ -113,14 +131,14 @@ void ChartPreviewPanel::warm_ui_font_glyphs() {
       "：；（）、，。！？“”‘’—…·％");
 }
 
-bool ChartPreviewPanel::bake_ui_font(float bake_px) {
+bool ChartPreviewPanel::bake_ui_font(float body_px, float tip_px, bool mild_sharpen) {
   auto& font = wds::interaction::FontAtlas::instance();
   bool font_ok = false;
   if (!ui_font_path_.empty()) {
-    font_ok = font.bake_font_file(ui_font_path_, bake_px);
+    font_ok = font.bake_font_file(ui_font_path_, body_px, tip_px, mild_sharpen);
   }
   if (!font_ok) {
-    font_ok = font.bake_system_font(bake_px);
+    font_ok = font.bake_system_font(body_px, tip_px, mild_sharpen);
   }
   if (!font_ok || font.pixels() == nullptr) {
     return false;
@@ -130,8 +148,8 @@ bool ChartPreviewPanel::bake_ui_font(float bake_px) {
     preview_.vulkan().destroy_texture(ui_font_texture_.id);
     ui_font_texture_ = {};
   }
-  ui_font_texture_ = preview_.vulkan().create_texture_rgba(font.pixels(), font.atlas_width(),
-                                                           font.atlas_height());
+  ui_font_texture_ = preview_.vulkan().create_texture_rgba(
+      font.pixels(), font.atlas_width(), font.atlas_height(), /*nearest=*/true);
   font.set_gpu_texture(ui_font_texture_);
   font.clear_pixels_dirty();
   return static_cast<bool>(ui_font_texture_);
@@ -141,13 +159,20 @@ bool ChartPreviewPanel::ensure_ui_font_scale() {
   if (!ready_) return false;
   namespace th = wds::interaction::theme;
   const float tier = th::content_scale_tier();
-  if (std::abs(tier - font_bake_tier_) < 0.001f) {
+  const float scale = std::max(th::ui_content_scale(), 0.01f);
+  const float left_w = static_cast<float>(std::max(panel_fb_w_, 0)) / scale;
+  const float tip_logical = toolbar_tip_logical_px(left_w);
+  const float tip_bucket = th::tooltip_bake_bucket(tip_logical);
+  if (std::abs(tier - font_bake_tier_) < 0.001f &&
+      std::abs(tip_bucket - font_bake_tip_bucket_) < 0.001f) {
     return false;
   }
-  if (!bake_ui_font(ui_font_bake_px(tier))) {
+  if (!bake_ui_font(ui_font_body_bake_px(tier), ui_font_tip_bake_px(tier, tip_logical),
+                    ui_font_mild_sharpen(tier))) {
     return false;
   }
   font_bake_tier_ = tier;
+  font_bake_tip_bucket_ = tip_bucket;
   return true;
 }
 
@@ -184,6 +209,8 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
     core_cfg.note_approach_seconds = visual.appear_time();
     core_cfg.split_line_animation_start_sec = visual.split_line_animation_start;
     core_cfg.split_line_animation_end_sec = visual.split_line_animation_end;
+    core_cfg.auto_hit_feedback_ms =
+        std::llround(static_cast<double>(visual.effect_duration) * 1000.0);
     engine_.set_preview_config(core_cfg);
   }
 
@@ -193,8 +220,15 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
   ui_font_path_ = ui_font_path;
   namespace th = wds::interaction::theme;
   font_bake_tier_ = th::content_scale_tier();
-  // Layout uses logical font sizes; bake at tier×oversample physical px for HiDPI crispness.
-  if (!bake_ui_font(ui_font_bake_px(font_bake_tier_))) {
+  font_bake_tip_bucket_ = 0.0f;
+  // Dual body+tip bake at logical×tier so Md and Tooltip each stay near 1:1.
+  // Tip slot follows the current toolbar cell so fullscreen tips stay sharp.
+  const float init_tip = toolbar_tip_logical_px(0.0f);
+  font_bake_tip_bucket_ = th::tooltip_bake_bucket(init_tip);
+  const bool font_ok = bake_ui_font(ui_font_body_bake_px(font_bake_tier_),
+                                    ui_font_tip_bake_px(font_bake_tier_, init_tip),
+                                    ui_font_mild_sharpen(font_bake_tier_));
+  if (!font_ok) {
     std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
   }
 
@@ -242,6 +276,7 @@ void ChartPreviewPanel::shutdown() {
   }
   auto& font = wds::interaction::FontAtlas::instance();
   font.clear_gpu_texture();
+  flush_retired_font_textures();
   if (ui_font_texture_) {
     preview_.vulkan().destroy_texture(ui_font_texture_.id);
     ui_font_texture_ = {};
@@ -255,6 +290,9 @@ void ChartPreviewPanel::shutdown() {
   transport_.shutdown();
   window_ = nullptr;
   ready_ = false;
+  font_bake_tier_ = 0.0f;
+  font_bake_tip_bucket_ = 0.0f;
+  panel_fb_w_ = 0;
 }
 
 int64_t ChartPreviewPanel::display_frame_lead_us() const noexcept {
@@ -278,19 +316,39 @@ void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) 
   preview_.geometry().set_content_rect(content_x_, content_y_, content_width_, content_height_);
 }
 
+void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) noexcept {
+  panel_fb_w_ = std::max(0, width);
+  preview_.geometry().set_panel_rect(x, y, width, height);
+}
+
 void ChartPreviewPanel::sync_ui_font_texture() {
   if (!ready_) return;
   ensure_ui_font_scale();
   auto& font = wds::interaction::FontAtlas::instance();
   if (!font.pixels_dirty() || font.pixels() == nullptr) return;
+  // Retire the previous atlas instead of destroying it immediately. Earlier
+  // DrawBatches in this frame may still reference that TextureId through submit.
   if (ui_font_texture_) {
-    preview_.vulkan().destroy_texture(ui_font_texture_.id);
+    retired_font_textures_.push_back(ui_font_texture_);
     ui_font_texture_ = {};
   }
-  ui_font_texture_ = preview_.vulkan().create_texture_rgba(font.pixels(), font.atlas_width(),
-                                                           font.atlas_height());
+  ui_font_texture_ = preview_.vulkan().create_texture_rgba(
+      font.pixels(), font.atlas_width(), font.atlas_height(), /*nearest=*/true);
   font.set_gpu_texture(ui_font_texture_);
   font.clear_pixels_dirty();
+}
+
+void ChartPreviewPanel::flush_retired_font_textures() {
+  if (!ready_) {
+    retired_font_textures_.clear();
+    return;
+  }
+  for (auto& tex : retired_font_textures_) {
+    if (tex) {
+      preview_.vulkan().destroy_texture(tex.id);
+    }
+  }
+  retired_font_textures_.clear();
 }
 
 void ChartPreviewPanel::tick(int64_t delta_us) {
@@ -301,9 +359,8 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   constexpr int64_t kMaxWallDeltaUs = 80000;  // 80 ms
   const int64_t clamped =
       std::clamp(delta_us, int64_t{0}, kMaxWallDeltaUs);
-  // Transport clock only — no display lead. Lead is applied once in render() so
-  // it tracks presented frames (FIFO), not uncapped tick rate; SFX stays on the
-  // music clock via sync_hit_sfx.
+  // Transport clock only — no display lead. Lead is added to the draw clock in
+  // render() so it tracks presented frames (FIFO); SFX stays on the music clock.
   const auto timeline = transport_.poll(clamped);
   engine_.apply_timeline(timeline);
   // Keep SFX chart-delay / lead-in mapping in sync with transport + edit blank.
@@ -322,30 +379,40 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
     return;
   }
   // One scan-out frame of visual lead while playing (does not scale with rate).
-  // Applied here — once per present — not in tick(). Restore committed afterward
-  // so the next update()/edit sync does not inherit the present-only lead (at
-  // 165 Hz that leftover ~6ms offset was a visible one-frame scroll hitch).
+  // Added to the draw clock only — do not apply+rollback the engine snapshot
+  // (that rebuilt combo / notes three times per frame).
   const auto committed = transport_.committed_snapshot();
   const bool playing = committed.state == wds::common::PlaybackState::Playing;
-  if (playing) {
-    auto visual = committed;
-    visual.position += wds::common::Microseconds{display_frame_lead_us()};
-    engine_.apply_timeline(visual);
-  }
-  preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome);
-  if (playing) {
-    engine_.apply_timeline(committed);
-  }
+  const int64_t lead_us = playing ? display_frame_lead_us() : 0;
+  preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome,
+                  lead_us);
 }
 
 void ChartPreviewPanel::set_note_speed(double speed) {
-  speed = std::max(1.0, speed);
+  const auto& visual = preview_.config();
+  apply_display_settings(speed, visual.note_start_offset, visual.note_height_level,
+                         static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) *
+                                                      100.0)));
+}
+
+void ChartPreviewPanel::apply_display_settings(double note_speed, int note_start_offset,
+                                               int note_height_level,
+                                               int split_line_opacity_percent) {
+  note_speed = wds::chart_editor::official_clamp_note_speed(note_speed);
+  note_start_offset = wds::chart_editor::official_clamp_note_start_offset(note_start_offset);
+  note_height_level = wds::chart_editor::official_clamp_note_height_level(note_height_level);
+  split_line_opacity_percent =
+      wds::chart_editor::official_clamp_split_effect_line_opacity(split_line_opacity_percent);
+
   auto visual = preview_.config();
-  visual.note_speed = static_cast<float>(speed);
+  visual.note_speed = static_cast<float>(note_speed);
+  visual.note_start_offset = note_start_offset;
+  visual.note_height_level = note_height_level;
+  visual.split_line_opacity = static_cast<float>(split_line_opacity_percent) / 100.0f;
   preview_.set_config(visual);
 
   auto core_cfg = engine_.preview_config();
-  core_cfg.note_speed = speed;
+  core_cfg.note_speed = note_speed;
   core_cfg.note_approach_seconds = visual.appear_time();
   engine_.set_preview_config(core_cfg);
 }

@@ -63,36 +63,51 @@ Environment (see scripts/env.example):
 EOF
 }
 
+# Force product layers ON unless the caller already passed an explicit -DWDS_BUILD_*=.
+# A prior core-only configure (e.g. -DWDS_BUILD_RENDERER=OFF) leaves those keys OFF in
+# CMakeCache; cmake option() defaults do not override cache, so cmake --build silently
+# skips ui/ and package-target would ship a stale editor. Shared by macos-arm and
+# win-x86_64; must run before either configure.
+apply_product_layer_defaults() {
+  local name flag has_flag
+  local -a product_flags=(
+    WDS_BUILD_COMMON
+    WDS_BUILD_CORE
+    WDS_BUILD_RENDERER
+    WDS_BUILD_AUDIO
+    WDS_BUILD_INTERACTION
+    WDS_BUILD_UI
+  )
+  # bash 3.2 + set -u: unset EXTRA_CMAKE_ARGS must not abort on +=
+  if ! declare -p EXTRA_CMAKE_ARGS >/dev/null 2>&1; then
+    EXTRA_CMAKE_ARGS=()
+  fi
+  for name in "${product_flags[@]}"; do
+    has_flag=0
+    for flag in ${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}; do
+      case "$flag" in
+        *"${name}"=*) has_flag=1; break ;;
+      esac
+    done
+    if [[ "${has_flag}" -eq 0 ]]; then
+      EXTRA_CMAKE_ARGS+=("-D${name}=ON")
+    fi
+  done
+}
+
 # If env.local / WDS_VCPKG_ROOT provided prefix paths, inject them unless already on CLI.
-# Also force product layers ON: a prior core-only configure (e.g. -DWDS_BUILD_RENDERER=OFF)
-# leaves those keys OFF in CMakeCache; cmake option() defaults do not override cache, so
-# cmake --build silently skips ui/ and package-target would ship a stale wds_editor.exe.
 apply_win_env_cmake_defaults() {
   local a
   local has_prefix=0 has_vulkan=0
-  local has_ui=0 has_renderer=0 has_audio=0 has_interaction=0
+  if ! declare -p EXTRA_CMAKE_ARGS >/dev/null 2>&1; then
+    EXTRA_CMAKE_ARGS=()
+  fi
   for a in ${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}; do
     case "$a" in
       *CMAKE_PREFIX_PATH*) has_prefix=1 ;;
       *Vulkan_LIBRARY*) has_vulkan=1 ;;
-      *WDS_BUILD_UI=*) has_ui=1 ;;
-      *WDS_BUILD_RENDERER=*) has_renderer=1 ;;
-      *WDS_BUILD_AUDIO=*) has_audio=1 ;;
-      *WDS_BUILD_INTERACTION=*) has_interaction=1 ;;
     esac
   done
-  if [[ "${has_ui}" -eq 0 ]]; then
-    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_UI=ON")
-  fi
-  if [[ "${has_renderer}" -eq 0 ]]; then
-    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_RENDERER=ON")
-  fi
-  if [[ "${has_audio}" -eq 0 ]]; then
-    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_AUDIO=ON")
-  fi
-  if [[ "${has_interaction}" -eq 0 ]]; then
-    EXTRA_CMAKE_ARGS+=("-DWDS_BUILD_INTERACTION=ON")
-  fi
   if [[ "${has_prefix}" -eq 0 && -n "${WDS_CMAKE_PREFIX_PATH:-}" ]]; then
     EXTRA_CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${WDS_CMAKE_PREFIX_PATH}")
   fi
@@ -109,8 +124,10 @@ check_toolchain() {
   log="$(mktemp "${TMPDIR:-/tmp}/wds-tc-${t}.XXXXXX.log")"
   rm -rf "${build_dir}"
   echo "=== checking ${t} ==="
+  # Renderer-only OFF is FATAL: INTERACTION requires RENDERER, UI requires INTERACTION.
   if cmake -S "${ROOT}" -B "${build_dir}" --toolchain "${tc}" \
-      -DWDS_BUILD_RENDERER=OFF -DWDS_CORE_BUILD_TESTS=OFF -DWDS_CORE_BUILD_EXAMPLE=OFF \
+      -DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_INTERACTION=OFF -DWDS_BUILD_UI=OFF \
+      -DWDS_CORE_BUILD_TESTS=OFF -DWDS_CORE_BUILD_EXAMPLE=OFF \
       >"${log}" 2>&1; then
     echo "OK  ${t}: toolchain usable (configure succeeded for core-only)"
     rm -rf "${build_dir}" "${log}"
@@ -197,8 +214,6 @@ configure_macos_arm() {
     -B "${build_dir}"
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
     -DCMAKE_OSX_ARCHITECTURES=arm64
-    -DWDS_BUILD_INTERACTION=ON
-    -DWDS_BUILD_UI=ON
   )
   if [[ -n "${prefix}" ]]; then
     args+=(-DCMAKE_PREFIX_PATH="${prefix}")
@@ -365,6 +380,7 @@ else
   BUILD_DIR="${ROOT}/build-${TARGET}"
 fi
 
+apply_product_layer_defaults
 if [[ "${TARGET}" == "macos-arm" ]]; then
   # bash 3.2 + set -u: empty "${arr[@]}" is an unbound variable
   configure_macos_arm "${BUILD_DIR}" ${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}

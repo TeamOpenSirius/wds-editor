@@ -31,12 +31,14 @@ constexpr std::size_t kPathCap = 1024;
 constexpr std::size_t kMsgCap = 4096;
 
 char g_log_dir[kPathCap] = {};
+#if !defined(_WIN32)
 // Prebuilt at install time so the signal path never formats paths (not AS-safe).
 char g_signal_crash_path[kPathCap] = {};
 constexpr char kSignalCrashHeader[] =
     "WDS Editor crash report\n"
     "kind: signal\n"
     "detail: ";
+#endif
 std::atomic_flag g_handling = ATOMIC_FLAG_INIT;
 std::mutex g_report_mu;
 

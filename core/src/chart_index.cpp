@@ -11,6 +11,8 @@ void ChartNoteIndex::clear() {
   by_start_ms_.clear();
   split_lane_by_start_ms_.clear();
   max_hold_span_ms_ = 0;
+  max_split_span_ms_ = 0;
+  hold_span_stale_ = false;
 }
 
 void ChartNoteIndex::rebuild(const std::vector<NotationNote>& notes, const MusicTiming& timing) {
@@ -25,6 +27,7 @@ void ChartNoteIndex::rebuild(const std::vector<NotationNote>& notes, const Music
     const int64_t start_ms = note.start_ms(timing);
     start_entries.emplace_back(start_ms, note.id);
     update_hold_span(note, timing);
+    update_split_span(note, timing);
 
     if (is_split_lane_gimmick(note.gimmick_type)) {
       split_entries.emplace_back(start_ms, note.id);
@@ -39,6 +42,7 @@ void ChartNoteIndex::on_note_added(const NotationNote& note, const MusicTiming& 
   const int64_t start_ms = note.start_ms(timing);
   insert_id(note.id, start_ms);
   update_hold_span(note, timing);
+  update_split_span(note, timing);
 
   if (is_split_lane_gimmick(note.gimmick_type)) {
     split_lane_by_start_ms_.insert(start_ms, note.id);
@@ -49,13 +53,17 @@ void ChartNoteIndex::on_note_removed(const NotationNote& note, const MusicTiming
   const int64_t start_ms = note.start_ms(timing);
   remove_id(note.id, start_ms);
 
+  const int64_t span = std::max<int64_t>(0, note.end_ms(timing) - note.start_ms(timing));
   if (is_split_lane_gimmick(note.gimmick_type)) {
     split_lane_by_start_ms_.erase(start_ms, note.id);
+    if (span >= max_split_span_ms_) {
+      hold_span_stale_ = true;
+      max_split_span_ms_ = 0;
+    }
   }
 
-  const int64_t span = std::max<int64_t>(0, note.end_ms(timing) - note.start_ms(timing));
   if (span > 0 && span >= max_hold_span_ms_) {
-    // Max may now be stale; ChartDocument rebuilds when this is zeroed.
+    hold_span_stale_ = true;
     max_hold_span_ms_ = 0;
   }
 }
@@ -70,10 +78,12 @@ void ChartNoteIndex::on_note_updated(const NotationNote& old_note, const Notatio
     insert_id(new_note.id, new_ms);
   }
 
-  if (is_split_lane_gimmick(old_note.gimmick_type)) {
+  const bool old_is_split = is_split_lane_gimmick(old_note.gimmick_type);
+  const bool new_is_split = is_split_lane_gimmick(new_note.gimmick_type);
+  if (old_is_split) {
     split_lane_by_start_ms_.erase(old_ms, old_note.id);
   }
-  if (is_split_lane_gimmick(new_note.gimmick_type)) {
+  if (new_is_split) {
     split_lane_by_start_ms_.insert(new_ms, new_note.id);
   }
 
@@ -82,9 +92,18 @@ void ChartNoteIndex::on_note_updated(const NotationNote& old_note, const Notatio
   const int64_t new_span =
       std::max<int64_t>(0, new_note.end_ms(timing) - new_note.start_ms(timing));
   if (old_span >= max_hold_span_ms_ && new_span < old_span) {
+    hold_span_stale_ = true;
     max_hold_span_ms_ = 0;
   } else {
     update_hold_span(new_note, timing);
+  }
+
+  if (old_is_split && old_span >= max_split_span_ms_ &&
+      (!new_is_split || new_span < old_span)) {
+    hold_span_stale_ = true;
+    max_split_span_ms_ = 0;
+  } else {
+    update_split_span(new_note, timing);
   }
 }
 
@@ -101,12 +120,25 @@ void ChartNoteIndex::update_hold_span(const NotationNote& note, const MusicTimin
   max_hold_span_ms_ = std::max(max_hold_span_ms_, span);
 }
 
+void ChartNoteIndex::update_split_span(const NotationNote& note, const MusicTiming& timing) {
+  if (!is_split_lane_gimmick(note.gimmick_type)) {
+    return;
+  }
+  const int64_t span = std::max<int64_t>(0, note.end_ms(timing) - note.start_ms(timing));
+  max_split_span_ms_ = std::max(max_split_span_ms_, span);
+}
+
 void ChartNoteIndex::query_candidates(int64_t time_ms, int64_t lead_ms, int64_t tail_ms,
                                       std::vector<int32_t>& out_note_ids) const {
   out_note_ids.clear();
 
-  const int64_t lower = time_ms - tail_ms;
-  const int64_t upper = time_ms + lead_ms;
+  const int64_t lead = std::max<int64_t>(0, lead_ms);
+  const int64_t tail = std::max<int64_t>(0, tail_ms);
+  const int64_t lower = sat_sub_i64(time_ms, tail);
+  const int64_t upper = sat_add_i64(time_ms, lead);
+  if (lower > upper) {
+    return;
+  }
 
   by_start_ms_.for_each_in_range(lower, upper, [&](int64_t /*key*/, int32_t note_id) {
     out_note_ids.push_back(note_id);
@@ -120,6 +152,19 @@ void ChartNoteIndex::query_split_lanes_up_to(int64_t time_ms,
   split_lane_by_start_ms_.for_each_up_to(time_ms, [&](int64_t /*key*/, int32_t note_id) {
     out_note_ids.push_back(note_id);
   });
+}
+
+void ChartNoteIndex::query_split_lanes_in_range(int64_t lower_ms, int64_t upper_ms,
+                                                std::vector<int32_t>& out_note_ids) const {
+  out_note_ids.clear();
+  if (lower_ms > upper_ms) {
+    return;
+  }
+
+  split_lane_by_start_ms_.for_each_in_range(lower_ms, upper_ms,
+                                            [&](int64_t /*key*/, int32_t note_id) {
+                                              out_note_ids.push_back(note_id);
+                                            });
 }
 
 }  // namespace wds::chart_editor

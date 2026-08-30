@@ -63,26 +63,30 @@ inline LeftColumnMetrics compute_left_column_metrics(float left_w, float rest_h)
   const float grid_h = m.icon * 2.0f + gap;
   m.icon_block_h = grid_h + gap;  // tight band around the 2×4 grids
 
-  // After the icon band is fixed, split leftover: slightly less to settings
-  // (2 rows) than toolbar controls (3 rows).
   const float leftover = std::max(0.0f, rest_h - m.icon_block_h);
 
   constexpr float kTopShare = 0.85f;
   constexpr float kBottomShare = 1.15f;
-  m.settings_h = leftover * (kTopShare / (kTopShare + kBottomShare));
-  m.toolbar_ctrl_h = leftover - m.settings_h;
+  const float std_settings = pad * 2.0f + ctrl_h * 2.0f + gap * 3.0f;
+  const float std_ctrl = pad * 2.0f + ctrl_h * 5.0f + gap * 6.0f;
+  const float squeeze_settings = pad * 2.0f + ctrl_h * 2.0f;
+  const float squeeze_ctrl = pad * 2.0f + ctrl_h * 5.0f;
+  const float std_need = std_settings + std_ctrl;
+  const float squeeze_need = squeeze_settings + squeeze_ctrl;
 
-  const float min_settings = pad * 2.0f + ctrl_h * 2.0f + gap * 2.0f;
-  const float min_ctrl = pad * 2.0f + ctrl_h * 3.0f + gap * 2.0f;
-  if (m.settings_h < min_settings || m.toolbar_ctrl_h < min_ctrl) {
-    const float need = min_settings + min_ctrl;
-    if (leftover >= need) {
-      m.settings_h = min_settings + (leftover - need) * (kTopShare / (kTopShare + kBottomShare));
-      m.toolbar_ctrl_h = leftover - m.settings_h;
-    } else {
-      m.settings_h = leftover * (min_settings / std::max(need, 1.0f));
-      m.toolbar_ctrl_h = leftover - m.settings_h;
-    }
+  if (leftover >= std_need) {
+    const float extra = leftover - std_need;
+    m.settings_h = std_settings + extra * (kTopShare / (kTopShare + kBottomShare));
+    m.toolbar_ctrl_h = leftover - m.settings_h;
+  } else if (leftover >= squeeze_need) {
+    const float span = std_need - squeeze_need;
+    const float t = span > 0.0f ? (leftover - squeeze_need) / span : 1.0f;
+    const float gap_eff = t * gap;
+    m.settings_h = pad * 2.0f + ctrl_h * 2.0f + gap_eff * 3.0f;
+    m.toolbar_ctrl_h = leftover - m.settings_h;
+  } else {
+    m.settings_h = leftover * (squeeze_settings / std::max(squeeze_need, 1.0f));
+    m.toolbar_ctrl_h = leftover - m.settings_h;
   }
 
   m.toolbar_h = m.icon_block_h + m.toolbar_ctrl_h;
@@ -92,8 +96,8 @@ inline LeftColumnMetrics compute_left_column_metrics(float left_w, float rest_h)
 // Outer layouter: computes region bounds and the Vulkan stage content rect.
 class EditorLayouter {
  public:
-  // Sirius stage / track aspect (1115×640).
-  static constexpr float kPreviewAspect = 1115.0f / 640.0f;
+  // Official preview canvas is 16:9 landscape (1280×720).
+  static constexpr float kPreviewAspect = 16.0f / 9.0f;
   // Uniform scale of the fitted stage (slightly larger than the tight fit).
   static constexpr float kPreviewScale = 1.08f;
   // Stage width as a fraction of the preview column (small side gutters).

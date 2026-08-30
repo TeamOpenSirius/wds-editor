@@ -4,14 +4,12 @@
 
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/validators.hpp>
-#include <wds/interaction/widgets/button.hpp>
 #include <wds/interaction/widgets/checkbox.hpp>
 #include <wds/interaction/widgets/combo_box.hpp>
 #include <wds/interaction/widgets/slider.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -19,12 +17,6 @@ namespace wds::ui {
 namespace {
 
 namespace th = wds::interaction::theme;
-
-std::string format_speed(double speed) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%.1f", speed);
-  return buf;
-}
 
 std::string format_volume_pct(int pct) { return std::to_string(pct) + "%"; }
 
@@ -82,7 +74,7 @@ struct SettingsMetrics {
   float y1 = 0.0f;
 };
 
-// Two rows: 流速+seek | 音乐/音效/播放速度.
+// Two rows: seek | 音乐/音效/播放速度.
 // Free height is split evenly across top pad, inter-row gap, and bottom pad.
 SettingsMetrics compute_metrics(const wds::interaction::Rect& b) {
   SettingsMetrics m;
@@ -97,56 +89,12 @@ SettingsMetrics compute_metrics(const wds::interaction::Rect& b) {
 }  // namespace
 
 PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview_(preview) {
-  auto speed_minus = std::make_unique<wds::interaction::Button>("-");
-  speed_minus->on_click([this] {
-    speed_ = std::max(1.0, std::round((speed_ - 0.5) * 10.0) / 10.0);
-    preview_.set_note_speed(speed_);
-    sync_from_state();
-    notify_persist();
-  });
-  speed_minus_ = speed_minus.get();
-  add_child(std::move(speed_minus));
-
-  auto speed = std::make_unique<wds::interaction::ComboBox>();
-  speed->set_items({"3", "5", "7", "9", "11"});
-  speed->set_text(format_speed(speed_));
-  speed->set_validator([](const std::string& text) {
-    const auto value = wds::interaction::parse_speed(text, 1.0);
-    return value.has_value() && *value <= 20.0;
-  });
-  speed->on_commit([this](const std::string& text) {
-    if (auto value = wds::interaction::parse_speed(text, 1.0)) {
-      speed_ = std::min(20.0, std::round(*value * 10.0) / 10.0);
-      preview_.set_note_speed(speed_);
-    }
-    sync_from_state();
-    notify_persist();
-  });
-  speed_combo_ = speed.get();
-  add_child(std::move(speed));
-
-  auto speed_plus = std::make_unique<wds::interaction::Button>("+");
-  speed_plus->on_click([this] {
-    speed_ = std::min(20.0, std::round((speed_ + 0.5) * 10.0) / 10.0);
-    preview_.set_note_speed(speed_);
-    sync_from_state();
-    notify_persist();
-  });
-  speed_plus_ = speed_plus.get();
-  add_child(std::move(speed_plus));
-
-  preview_.set_note_speed(speed_);
-
   auto seek = std::make_unique<wds::interaction::Slider>();
   seek->set_range(0.0f, 1.0f);
   seek->on_change([this](float fraction) {
     int64_t duration = preview_.transport().audio().duration_ms();
     if (duration <= 0) {
-      duration = 1;
-      for (const auto& n : preview_.engine().document().notes()) {
-        duration = std::max(duration, n.end_ms(preview_.engine().document().timing()) + 1);
-        duration = std::max(duration, n.start_ms(preview_.engine().document().timing()) + 1);
-      }
+      duration = fallback_chart_duration_ms();
     }
     duration = std::max<int64_t>(duration, 1);
     preview_.transport().request_seek_ms(static_cast<int64_t>(fraction * duration));
@@ -247,19 +195,16 @@ void PreviewSettingsPanel::notify_persist() const {
 }
 
 void PreviewSettingsPanel::apply_config(const EditorUiConfig& cfg) {
-  speed_ = std::clamp(cfg.note_speed, 1.0, 20.0);
   music_gain_ = std::clamp(cfg.music_volume, 0.0f, 1.0f);
   music_muted_ = cfg.music_muted;
   sfx_gain_ = std::clamp(cfg.sfx_volume, 0.0f, 1.0f);
   sfx_muted_ = cfg.sfx_muted;
-  preview_.set_note_speed(speed_);
   apply_music_gain();
   apply_sfx_gain();
   sync_from_state();
 }
 
 void PreviewSettingsPanel::capture_config(EditorUiConfig& cfg) const {
-  cfg.note_speed = speed_;
   cfg.music_volume = music_gain_;
   cfg.music_muted = music_muted_;
   cfg.sfx_volume = sfx_gain_;
@@ -267,10 +212,6 @@ void PreviewSettingsPanel::capture_config(EditorUiConfig& cfg) const {
 }
 
 void PreviewSettingsPanel::sync_from_state() const {
-  auto* speed = static_cast<wds::interaction::ComboBox*>(speed_combo_);
-  if (speed->visual_state() != wds::interaction::WidgetState::Focused) {
-    speed->set_text(format_speed(speed_));
-  }
   auto* music = static_cast<wds::interaction::ComboBox*>(music_combo_);
   music->set_text(format_volume_pct(music_muted_ ? 0 : volume_to_pct(music_gain_)));
   auto* sfx = static_cast<wds::interaction::ComboBox*>(sfx_combo_);
@@ -279,6 +220,23 @@ void PreviewSettingsPanel::sync_from_state() const {
   rate->set_text(format_rate(playback_rate_));
   static_cast<wds::interaction::Checkbox*>(music_mute_)->set_checked(music_muted_);
   static_cast<wds::interaction::Checkbox*>(sfx_mute_)->set_checked(sfx_muted_);
+}
+
+int64_t PreviewSettingsPanel::fallback_chart_duration_ms() const {
+  const auto& doc = preview_.engine().document();
+  const uint64_t rev = doc.content_generation();
+  if (cached_span_revision_ == rev) {
+    return cached_chart_span_ms_;
+  }
+  int64_t duration = 1;
+  const auto& timing = doc.timing();
+  for (const auto& n : doc.notes()) {
+    duration = std::max(duration, n.end_ms(timing) + 1);
+    duration = std::max(duration, n.start_ms(timing) + 1);
+  }
+  cached_span_revision_ = rev;
+  cached_chart_span_ms_ = std::max<int64_t>(duration, 1);
+  return cached_chart_span_ms_;
 }
 
 void PreviewSettingsPanel::layout(const wds::interaction::Rect& parent_bounds) {
@@ -290,29 +248,16 @@ void PreviewSettingsPanel::layout(const wds::interaction::Rect& parent_bounds) {
 
   const float label2 = th::kLabelW2;
   const float label4 = th::kLabelW4;
-  const float step_w = th::kStepButtonW;
   const float field_w = th::kFieldW;
   const float mute_w = th::kMuteLabelW;
 
-  // Row 0: 流速 stepper, then seek in the remaining width with equal L/R insets.
-  float x = pad + label2;
-  speed_minus_->set_bounds({x, m.y0, step_w, row_h});
-  x += step_w + gap;
-  speed_combo_->set_bounds({x, m.y0, field_w, row_h});
-  x += field_w + gap;
-  speed_plus_->set_bounds({x, m.y0, step_w, row_h});
-  x += step_w;
-
-  const float seek_region_end = b.w - pad;
-  const float seek_available = std::max(0.0f, seek_region_end - x);
+  // Row 0: full-width seek. Row 1: 音乐 / 音效 / 播放速度.
   const float seek_inset = gap;
-  const float seek_w = std::max(th::px(24.0f), seek_available - seek_inset * 2.0f);
+  const float seek_w = std::max(th::px(24.0f), b.w - pad * 2.0f - seek_inset * 2.0f);
   const float seek_y = m.y0 + (row_h - m.seek_h) * 0.5f;
-  seek_slider_->set_bounds({x + seek_inset, seek_y, seek_w, m.seek_h});
-  const float seek_end = x + seek_inset + seek_w;
+  seek_slider_->set_bounds({pad + seek_inset, seek_y, seek_w, m.seek_h});
+  const float seek_end = pad + seek_inset + seek_w;
 
-  // Row 1: 音乐 starts with 流速; 播放速度 ends with the seek bar;
-  // 音效 sits between them with equal gaps, nudged slightly right.
   const float music_group = label2 + field_w + gap + mute_w;
   const float sfx_group = music_group;
   const float rate_group = label4 + field_w;
@@ -340,23 +285,16 @@ void PreviewSettingsPanel::paint(wds::interaction::UiPainter& painter) const {
   const float pad = m.pad;
   const float gap = m.gap;
   const float row_h = m.row_h;
-  const float y0 = b.y + m.y0;
   const float y1 = b.y + m.y1;
 
   const float label2 = th::kLabelW2;
   const float label4 = th::kLabelW4;
-  const float step_w = th::kStepButtonW;
   const float field_w = th::kFieldW;
   const float mute_w = th::kMuteLabelW;
 
-  painter.label({b.x + pad, y0, label2, row_h}, "流速", th::kOnSurfaceMuted);
-
-  // Mirror layout(): 音乐↔流速, 播放速度↔seek end, 音效 centered (+ slight right nudge).
-  float sx = pad + label2 + step_w + gap + field_w + gap + step_w;
   const float seek_inset = gap;
-  const float seek_available = std::max(0.0f, (b.w - pad) - sx);
-  const float seek_w = std::max(th::px(24.0f), seek_available - seek_inset * 2.0f);
-  const float seek_end = b.x + sx + seek_inset + seek_w;
+  const float seek_w = std::max(th::px(24.0f), b.w - pad * 2.0f - seek_inset * 2.0f);
+  const float seek_end = b.x + pad + seek_inset + seek_w;
 
   const float music_group = label2 + field_w + gap + mute_w;
   const float sfx_group = music_group;
@@ -375,12 +313,9 @@ void PreviewSettingsPanel::paint(wds::interaction::UiPainter& painter) const {
   painter.fill_rect({b.x + pad, b.bottom() - 1.0f, std::max(1.0f, b.w - pad * 2.0f), 1.0f},
                     th::kOutline);
 
-  speed_minus_->paint(painter);
-  speed_plus_->paint(painter);
   seek_slider_->paint(painter);
   music_mute_->paint(painter);
   sfx_mute_->paint(painter);
-  speed_combo_->paint(painter);
   music_combo_->paint(painter);
   sfx_combo_->paint(painter);
   rate_combo_->paint(painter);
@@ -394,11 +329,7 @@ void PreviewSettingsPanel::update(float delta_seconds) {
   }
   int64_t duration = preview_.transport().audio().duration_ms();
   if (duration <= 0) {
-    duration = 1;
-    for (const auto& n : preview_.engine().document().notes()) {
-      duration = std::max(duration, n.end_ms(preview_.engine().document().timing()) + 1);
-      duration = std::max(duration, n.start_ms(preview_.engine().document().timing()) + 1);
-    }
+    duration = fallback_chart_duration_ms();
   }
   duration = std::max<int64_t>(duration, 1);
   const float frac = std::clamp(

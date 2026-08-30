@@ -10,11 +10,15 @@
 #include <wds/renderer/draw_batch.hpp>
 #include <wds/renderer/skin_catalog.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <unordered_set>
 #include <vector>
 
 namespace wds::ui {
+
+inline constexpr wds::interaction::Color kChartErrorMarkerColor{1.0f, 0.92f, 0.18f, 0.95f};
+inline constexpr float kChartErrorMarkerThickness = 1.5f;
 
 struct EditGhost {
   wds::chart_editor::NotationNote note;
@@ -37,7 +41,9 @@ class ChartEditRenderer {
              const std::vector<EditGhost>& extra_ghosts = {},
              const std::optional<wds::interaction::Rect>& marquee = std::nullopt,
              const wds::renderer::SkinCatalog* skin = nullptr,
-             bool show_beat_grid = true) const;
+             bool show_beat_grid = true,
+             int32_t highlighted_split_note_id = -1,
+             const std::vector<int32_t>& error_ticks = {}) const;
 
   // Drawn after skinned notes so the highlight sits on top of sprites.
   void paint_overlays(wds::interaction::UiPainter& painter, const EditViewport& viewport,

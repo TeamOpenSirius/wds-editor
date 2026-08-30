@@ -1,6 +1,7 @@
 #pragma once
 
 #include "wds/ui/editor_ui_config.hpp"
+#include "wds/ui/toolbar_curve_selection.hpp"
 
 #include <wds/interaction/widget.hpp>
 #include <wds/renderer/skin_catalog.hpp>
@@ -35,10 +36,21 @@ class EditorToolbar final : public wds::interaction::Widget {
   void set_open_handler(std::function<void()> handler) { on_open_ = std::move(handler); }
   void set_import_handler(std::function<void()> handler) { on_import_ = std::move(handler); }
   void set_chart_add_handler(std::function<void()> handler) { on_chart_add_ = std::move(handler); }
+  void set_curve_templates_handler(std::function<void()> handler) {
+    on_curve_templates_ = std::move(handler);
+  }
+  void set_check_handler(std::function<void()> handler) { on_check_ = std::move(handler); }
+  void set_curve_fill_changed_handler(std::function<void(const CurveFillSelection&)> handler) {
+    on_curve_fill_changed_ = std::move(handler);
+  }
+
+  void bind_curve_state(CurveTemplateUiState* state) { curve_state_ = state; }
+  void refresh_curve_controls();
+  CurveFillSelection curve_fill_selection() const;
 
   void apply_config(const EditorUiConfig& cfg);
   void capture_config(EditorUiConfig& cfg) const;
-  // Refresh toolbar combo after edit-panel Shift+wheel changes visible range.
+  // Refresh toolbar combo after edit-panel Ctrl/Cmd+wheel changes visible range.
   void sync_visible_range_field() const { sync_numeric_fields(); }
 
  private:
@@ -49,8 +61,8 @@ class EditorToolbar final : public wds::interaction::Widget {
     Export,
     Settings,
     Music,
-    Undo,
-    Redo,
+    CurveTemplates,
+    Check,
     ConvertTap,
     ConvertCritical,
     ConvertHoldStart,
@@ -66,6 +78,8 @@ class EditorToolbar final : public wds::interaction::Widget {
   void destroy_owned_icons();
   void sync_numeric_fields() const;
   void sync_checkboxes() const;
+  void sync_curve_controls() const;
+  void apply_curve_view() const;
   void notify_persist() const;
   // Re-rasterize SVGs when content scale or toolbar width needs a larger texture.
   void ensure_action_icons_resolution(float left_w);
@@ -91,12 +105,19 @@ class EditorToolbar final : public wds::interaction::Widget {
   wds::interaction::Widget* division_plus_ = nullptr;
   wds::interaction::Widget* pause_at_current_checkbox_ = nullptr;
   wds::interaction::Widget* split_width_checkbox_ = nullptr;
+  wds::interaction::Widget* curve_dropdown_ = nullptr;
+  std::array<wds::interaction::Widget*, 4> direction_buttons_{};
+  CurveTemplateUiState* curve_state_ = nullptr;
+  mutable CurveToolbarController curve_controller_;
   std::function<void()> on_settings_;
   std::function<void()> on_export_;
   std::function<void()> on_persist_;
   std::function<void()> on_open_;
   std::function<void()> on_import_;
   std::function<void()> on_chart_add_;
+  std::function<void()> on_curve_templates_;
+  std::function<void()> on_check_;
+  std::function<void(const CurveFillSelection&)> on_curve_fill_changed_;
 };
 
 }  // namespace wds::ui

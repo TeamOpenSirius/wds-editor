@@ -8,7 +8,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wds::interaction::popup_menu {
@@ -89,6 +92,76 @@ inline Geometry layout(const Widget* host, const Rect& field_abs, std::size_t it
 inline float clamp_scroll(const Geometry& g, float scroll_px) noexcept {
   const float max_scroll = std::max(0.0f, g.content_h - g.rect.h);
   return std::clamp(scroll_px, 0.0f, max_scroll);
+}
+
+inline std::optional<double> parse_item_number(std::string_view text) noexcept {
+  auto try_parse = [](std::string_view s) -> std::optional<double> {
+    if (s.empty()) {
+      return std::nullopt;
+    }
+    try {
+      std::size_t parsed = 0;
+      const double value = std::stod(std::string(s), &parsed);
+      if (parsed == s.size() && std::isfinite(value)) {
+        return value;
+      }
+    } catch (...) {
+    }
+    return std::nullopt;
+  };
+  if (auto value = try_parse(text)) {
+    return value;
+  }
+  if (!text.empty()) {
+    const char suffix = text.back();
+    if (suffix == '%' || suffix == 'x' || suffix == 'X') {
+      return try_parse(text.substr(0, text.size() - 1));
+    }
+  }
+  return std::nullopt;
+}
+
+inline int nearest_item_index(const std::vector<std::string>& items,
+                              std::string_view text) noexcept {
+  if (items.empty()) {
+    return -1;
+  }
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    if (items[i] == text) {
+      return static_cast<int>(i);
+    }
+  }
+  const auto target = parse_item_number(text);
+  if (!target) {
+    return -1;
+  }
+  int best = -1;
+  double best_delta = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const auto value = parse_item_number(items[i]);
+    if (!value) {
+      continue;
+    }
+    const double delta = std::fabs(*value - *target);
+    if (delta < best_delta) {
+      best_delta = delta;
+      best = static_cast<int>(i);
+    }
+  }
+  return best;
+}
+
+inline float scroll_to_show_index(const Widget* host, const Rect& field_abs,
+                                  std::size_t item_count, int index,
+                                  Placement placement = Placement::Down) noexcept {
+  if (item_count == 0 || index < 0) {
+    return 0.0f;
+  }
+  const Geometry probe = layout(host, field_abs, item_count, 0.0f, placement);
+  if (probe.rect.h < 1.0f || probe.row_h <= 0.0f) {
+    return 0.0f;
+  }
+  return clamp_scroll(probe, static_cast<float>(index) * probe.row_h);
 }
 
 inline int index_at_point(const Geometry& g, Vec2 point, std::size_t item_count) noexcept {

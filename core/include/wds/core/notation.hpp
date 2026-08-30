@@ -6,6 +6,7 @@
 // chart_index.hpp is included for ChartNoteIndex member; it only forward-declares NotationNote.
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -26,10 +27,18 @@ struct TimingPoint {
   bool has_meter = true;
 };
 
+// TPQ upper bound keeps tpq*4*numerator (den=1, num<=32) inside int32.
+inline constexpr int32_t kDefaultTicksPerQuarter = 480;
+inline constexpr int32_t kMaxTicksPerQuarter = std::numeric_limits<int32_t>::max() / 128;
+
+inline bool is_valid_ticks_per_quarter(int32_t tpq) noexcept {
+  return tpq >= 1 && tpq <= kMaxTicksPerQuarter;
+}
+
 struct MusicTiming {
   double bpm = 120.0;
   // Tick-based authoring (preferred over absolute seconds for precision).
-  int32_t ticks_per_quarter = 480;
+  int32_t ticks_per_quarter = kDefaultTicksPerQuarter;
   // Chart delay (ms): tick 0 maps to this wall-clock time, so the edit area
   // shows leading blank and notes hit after the song starts. Owned by the
   // project (.wdsproject CHART_DELAY_MS), not the chart file.
@@ -37,6 +46,9 @@ struct MusicTiming {
   // BPM / meter changes. Always normalized to include a tick-0 anchor.
   // bpm above mirrors points[0].bpm after normalize_timing_points().
   std::vector<TimingPoint> points;
+  // Milliseconds from tick 0 (excluding offset_ms) at each points[i].tick.
+  // Filled by normalize_timing_points / tick↔ms; not part of the file format.
+  mutable std::vector<double> prefix_ms;
 };
 
 // Editor note — field layout mirrors official CSV columns, but times stay in ticks:
@@ -52,12 +64,19 @@ struct NotationNote {
   int32_t lane = 0;   // 0-based (official leftLane is 1-based)
   int32_t width = 1;  // official laneLength
   GimmickType gimmick_type = GimmickType::None;
-  // Official scratchLength: flick/scratch span; JumpScratch span; split color.
+  // Official scratchLength: flick/scratch span; JumpScratch span; split
+  // Addressable SplitEffects/{id} (fadeIn growth follows LineHight rotation).
   int32_t scratch_length = 0;
 
   int32_t end_lane() const noexcept { return lane + width - 1; }
   int64_t start_ms(const MusicTiming& timing) const;
   int64_t end_ms(const MusicTiming& timing) const;
+};
+
+// One item in ChartDocument::apply_note_updates. note.id is forced to id.
+struct NoteUpdate {
+  int32_t id = kAutoNoteId;
+  NotationNote note;
 };
 
 struct ConcurrentLineNote {
@@ -101,6 +120,9 @@ class ChartDocument {
   // Mutations return failure / no-op when read-only.
   int32_t add_note(NotationNote note);  // -1 when rejected
   bool update_note(int32_t id, const NotationNote& note);
+  // Atomic batch of update_note. Empty succeeds without bumping generation.
+  // Rejects the whole batch (no mutation) on read-only, duplicate ids, or unknown ids.
+  bool apply_note_updates(const std::vector<NoteUpdate>& updates);
   bool remove_note(int32_t id);
   std::optional<NotationNote> find_note(int32_t id) const;
 
@@ -135,6 +157,8 @@ class ChartDocument {
   static void normalize_notes_inplace(std::vector<NotationNote>& notes);
   void rebuild_id_index();
   void rebuild_index();
+  // Concurrent-line derivation only — no dirty / generation bump.
+  void derive_concurrent_lines();
   void mark_dirty() noexcept {
     is_dirty_ = true;
     ++content_generation_;
@@ -190,6 +214,13 @@ struct PreviewComboState {
   int32_t combo = 0;
   int64_t last_judge_ms = -1;
 };
+
+// All auto-preview combo hit times, sorted (seek-safe). Hold soft judges come
+// from chart HoldEighth / Sound / ScratchSound only (absorbed once per hold).
+void collect_preview_combo_hits(const std::vector<NotationNote>& notes, const MusicTiming& timing,
+                                std::vector<int64_t>& out_sorted_hits);
+PreviewComboState combo_from_sorted_hits(const std::vector<int64_t>& sorted_hits,
+                                         int64_t preview_time_ms);
 
 // Auto-preview combo up to preview_time_ms (seek-safe). Hold soft judges come
 // from chart HoldEighth / Sound / ScratchSound only (absorbed once per hold).

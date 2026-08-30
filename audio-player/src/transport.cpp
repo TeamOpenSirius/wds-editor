@@ -6,6 +6,12 @@
 
 namespace wds::audio {
 
+namespace {
+
+constexpr int64_t kEndSlopUs = 100000;
+
+}  // namespace
+
 bool Transport::initialize(const std::string& effects_directory, const std::string& music_path) {
   shutdown();
   if (!audio_.initialize(effects_directory, music_path)) {
@@ -19,6 +25,11 @@ bool Transport::initialize(const std::string& effects_directory, const std::stri
   pending_pause_ = false;
   pending_seek_ = false;
   pending_seek_time_ = wds::common::Microseconds{0};
+  music_start_pending_ = false;
+  music_seek_pending_ = false;
+  sought_this_poll_ = false;
+  music_seek_target_ = wds::common::Microseconds{0};
+  recovery_.reset();
   return true;
 }
 
@@ -26,12 +37,16 @@ void Transport::shutdown() {
   audio_.shutdown();
   playing_ = false;
   music_start_pending_ = false;
+  music_seek_pending_ = false;
+  sought_this_poll_ = false;
+  music_seek_target_ = wds::common::Microseconds{0};
   committed_position_ = wds::common::Microseconds{0};
   filtered_audio_us_ = 0;
   audio_filter_valid_ = false;
   pending_play_ = false;
   pending_pause_ = false;
   pending_seek_ = false;
+  recovery_.reset();
 }
 
 void Transport::request_play() {
@@ -91,42 +106,83 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
   pending_seek_ = false;
   pending_play_ = false;
   pending_pause_ = false;
+  sought_this_poll_ = false;
 
-  auto apply_seek = [&]() {
-    committed_position_ = clamp_time(seek_time);
-    filtered_audio_us_ = committed_position_.count();
-    audio_filter_valid_ = true;
-    if (audio_.has_music()) {
-      // Timeline == music clock (chart delay is in note times, not a BGM hold-off).
-      // set_position silences SFX and bumps position_generation_ for UI resync.
-      audio_.set_position(committed_position_);
-      if (playing_ && !audio_.stream_playing()) {
+  auto apply_music_seek = [&](wds::common::Microseconds target) {
+    music_seek_target_ = target;
+    if (audio_.set_position(target)) {
+      committed_position_ = target;
+      filtered_audio_us_ = target.count();
+      music_seek_pending_ = false;
+      sought_this_poll_ = true;
+      return true;
+    }
+    music_seek_pending_ = true;
+    audio_filter_valid_ = false;
+    return false;
+  };
+
+  auto apply_user_seek = [&]() {
+    const auto target = clamp_time(seek_time);
+    recovery_.reset();
+    if (!audio_.has_music()) {
+      committed_position_ = target;
+      filtered_audio_us_ = committed_position_.count();
+      audio_filter_valid_ = true;
+      music_seek_pending_ = false;
+      audio_.begin_timeline_control();
+      return;
+    }
+    if (apply_music_seek(target)) {
+      audio_filter_valid_ = true;
+      if (playing_) {
         music_start_pending_ = true;
       }
     } else {
-      // No BGM: still silence hits and bump control generation so UI releases
-      // its monotonic SFX clock (progress-bar scrub / edit seek).
-      audio_.begin_timeline_control();
+      if (recovery_.try_acquire()) {
+        recovery_.on_failure();
+      }
+      if (playing_) {
+        music_start_pending_ = true;
+        audio_.pause_music();
+      }
+    }
+  };
+
+  auto retry_pending_seek = [&]() {
+    if (!music_seek_pending_ || sought_this_poll_ || want_seek || !audio_.has_music()) {
+      return;
+    }
+    recovery_.add_elapsed(wall_delta_us);
+    if (!recovery_.try_acquire()) {
+      return;
+    }
+    if (apply_music_seek(music_seek_target_)) {
+      if (playing_) {
+        music_start_pending_ = true;
+      }
+    } else {
+      recovery_.on_failure();
     }
   };
 
   if (playing_) {
+    if (want_seek) {
+      apply_user_seek();
+    }
+    retry_pending_seek();
+
     if (audio_.has_music()) {
-      // Audio-primary display clock. Hit SFX is hard-locked to BASS music POS;
-      // the note timeline follows a filtered copy of that clock so ~5ms
-      // UPDATEPERIOD staircases do not show up as hitchy pull-backs.
       const auto raw = clamp_time(audio_.position());
-      constexpr int64_t kHardSnapUs = 100000;  // 100ms — seek / glitch
-      // EMA time constant: several UPDATEPERIODs so steps are rounded off, but
-      // short enough that wall/device drift cannot accumulate over a phrase.
+      constexpr int64_t kHardSnapUs = 100000;
 #if defined(_WIN32)
-      constexpr double kFilterTauUs = 30000.0;  // WASAPI/DWM noisier
+      constexpr double kFilterTauUs = 30000.0;
 #else
       constexpr double kFilterTauUs = 22000.0;
 #endif
-      if (music_start_pending_ || !audio_filter_valid_) {
-        // Audible BGM not started yet — keep UI locked to the paused playhead
-        // so wall time does not drift ahead and then get yanked back.
+      if (music_seek_pending_) {
+        audio_filter_valid_ = false;
+      } else if (music_start_pending_ || !audio_filter_valid_) {
         filtered_audio_us_ = raw.count();
         audio_filter_valid_ = true;
         committed_position_ = raw;
@@ -137,7 +193,6 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
                               static_cast<double>(step_us) *
                               static_cast<double>(playback_rate_)))
                         : int64_t{0};
-        // Predict with wall*rate between BASS quantize steps.
         if (advance_us > 0) {
           filtered_audio_us_ += advance_us;
         }
@@ -146,8 +201,6 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         if (err >= kHardSnapUs || err <= -kHardSnapUs) {
           filtered_audio_us_ = raw.count();
         } else if (step_us > 0) {
-          // alpha = 1 - e^{-dt/tau}: independent of error magnitude, so a 5ms
-          // BASS step bleeds in smoothly instead of a proportional yank.
           const double alpha =
               1.0 - std::exp(-static_cast<double>(step_us) / kFilterTauUs);
           filtered_audio_us_ +=
@@ -159,23 +212,36 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         filtered_audio_us_ = committed_position_.count();
       }
 
-      // Natural end-of-stream: BASS stops near duration — snap and pause.
-      // Do not treat "stopped at t=0 before start" as EOS (play may still be starting).
-      if (!music_start_pending_ && audio_.stream_stopped()) {
+      if (music_seek_pending_) {
+        // Cursor frozen until a seek lands; start_pending may re-seek after sync.
+      } else if (music_start_pending_) {
+        recovery_.add_elapsed(wall_delta_us);
+      } else {
+        const auto health = audio_.stream_health();
         const auto dur = audio_.duration();
-        constexpr int64_t kEndSlopUs = 100000;  // 100ms
         const bool near_end =
             dur.count() > 0 && committed_position_.count() + kEndSlopUs >= dur.count();
-        if (near_end) {
+        const auto kind = classify_stream_recovery(health, near_end);
+        if (kind == StreamRecoveryKind::NaturalEnd) {
           committed_position_ = dur;
           audio_.stop_all_sfx();
           playing_ = false;
           audio_.pause_music();
-        } else {
-          // Failed start or unexpected stop mid-track: re-seek then retry so
-          // play_music is not a no-op when the channel already passed the cursor.
-          audio_.set_position(committed_position_);
-          audio_.play_music();
+          recovery_.reset();
+          music_start_pending_ = false;
+          music_seek_pending_ = false;
+        } else if (kind == StreamRecoveryKind::Recover) {
+          recovery_.add_elapsed(wall_delta_us);
+          if (recovery_.try_acquire()) {
+            if (apply_music_seek(committed_position_)) {
+              music_start_pending_ = true;
+            } else {
+              recovery_.on_failure();
+              music_start_pending_ = true;
+            }
+          }
+        } else if (health == StreamHealth::Playing) {
+          recovery_.reset();
         }
       }
     } else if (wall_delta_us > 0) {
@@ -185,57 +251,46 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
       committed_position_ = clamp_time(committed_position_ + scaled_us);
     }
 
-    if (want_seek) {
-      apply_seek();
-    }
-
     if (want_pause) {
-      // Snap committed clock to BASS before pause so resume does not jump back
-      // to a lagging filtered position.
       if (audio_.has_music()) {
         committed_position_ = clamp_time(audio_.position());
       }
       audio_.pause_music();
-      // Silence hits + bump control generation so UI releases its monotonic SFX clock.
       audio_.begin_timeline_control();
       playing_ = false;
       music_start_pending_ = false;
-      // Re-seed filter on next play from the paused playhead.
+      music_seek_pending_ = false;
+      recovery_.reset();
       filtered_audio_us_ = committed_position_.count();
       audio_filter_valid_ = false;
-    } else if (playing_ && !music_start_pending_ && audio_.has_music() &&
-               !audio_.stream_playing() && !audio_.stream_stopped()) {
-      // Recover stalled channel while still intending to play (and already audible).
-      audio_.set_position(committed_position_);
-      audio_.play_music();
     }
   } else {
     if (want_seek) {
-      apply_seek();
+      apply_user_seek();
     }
+    retry_pending_seek();
 
     if (want_play) {
+      recovery_.reset();
       if (audio_.has_music()) {
+        auto target = committed_position_;
         const auto dur = audio_.duration();
-        constexpr int64_t kEndSlopUs = 100000;
-        if (dur.count() > 0 && committed_position_.count() + kEndSlopUs >= dur.count()) {
-          // Restart from the beginning when pressing play at EOF.
-          committed_position_ = wds::common::Microseconds{0};
+        if (dur.count() > 0 && target.count() + kEndSlopUs >= dur.count()) {
+          target = wds::common::Microseconds{0};
         }
-        // Always re-seek on play after any pause (not only when jumping). A
-        // no-op skip left the decoder/mix frontier in a pause-dependent state so
-        // the first DSP-scheduled hits could land late or with a clipped attack.
-        // set_position also clears any stale DSP SFX queue.
-        audio_.set_position(committed_position_);
-        filtered_audio_us_ = committed_position_.count();
+        filtered_audio_us_ = target.count();
         audio_filter_valid_ = false;
-        // Keep-alive / DEV_NONSTOP keep the device hot; skip heavy warmup on resume.
         music_start_pending_ = true;
+        if (music_seek_pending_) {
+          // Keep the failed user-seek target; do not play from the old cursor.
+        } else if (!apply_music_seek(target)) {
+          recovery_.try_acquire();
+          recovery_.on_failure();
+        }
       } else {
-        // No BGM: still silence hits and bump control generation so UI re-latches
-        // its monotonic SFX clock (same resync contract as set_position with BGM).
         audio_.begin_timeline_control();
         music_start_pending_ = false;
+        music_seek_pending_ = false;
       }
       playing_ = true;
     }
@@ -244,16 +299,44 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
   return committed_snapshot();
 }
 
-void Transport::start_pending_music() {
+bool Transport::start_pending_music() {
   if (!music_start_pending_) {
-    return;
+    return true;
+  }
+  if (!playing_ || !audio_.has_music()) {
+    music_start_pending_ = false;
+    music_seek_pending_ = false;
+    recovery_.reset();
+    return true;
+  }
+  if (music_seek_pending_) {
+    if (!recovery_.try_acquire()) {
+      return false;
+    }
+    if (!audio_.set_position(music_seek_target_)) {
+      recovery_.on_failure();
+      return false;
+    }
+    committed_position_ = music_seek_target_;
+    filtered_audio_us_ = music_seek_target_.count();
+    music_seek_pending_ = false;
+    sought_this_poll_ = true;
+    // Re-seek after UI arming clears just-scheduled POS syncs. Play next tick.
+    return false;
+  }
+  if (!sought_this_poll_ && !recovery_.try_acquire()) {
+    return false;
+  }
+  if (!audio_.play_music() || audio_.stream_health() != StreamHealth::Playing) {
+    if (recovery_.attempt_count() == 0) {
+      (void)recovery_.try_acquire();
+    }
+    recovery_.on_failure();
+    return false;
   }
   music_start_pending_ = false;
-  if (!playing_ || !audio_.has_music()) {
-    return;
-  }
-  // Warmup already ran in poll's want_play path; play_music warms again safely.
-  audio_.play_music();
+  recovery_.on_success();
+  return true;
 }
 
 }  // namespace wds::audio

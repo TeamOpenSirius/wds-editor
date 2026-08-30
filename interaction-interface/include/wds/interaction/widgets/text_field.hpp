@@ -2,6 +2,7 @@
 
 #include <wds/interaction/widget.hpp>
 
+#include <cstddef>
 #include <functional>
 #include <string>
 
@@ -24,11 +25,17 @@ class TextField : public Widget {
   void set_validator(std::function<bool(const std::string&)> validator) {
     validator_ = std::move(validator);
   }
+  // True while the editable text fails the validator (red outline).
+  bool text_invalid() const noexcept {
+    return static_cast<bool>(validator_) && !validator_(text_);
+  }
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
-  // Suppress global editor chords (Space play/pause, Q/W width slots, …) while typing.
-  bool captures_keys() const override { return visible(); }
+  // Suppress chart-edit chords (Left/Right nudge, Delete selection, …) only while focused.
+  bool captures_keys() const override {
+    return visible() && visual_state() == WidgetState::Focused;
+  }
 
   void paint(UiPainter& painter) const override;
   // Same as paint(), with an explicit base z (modal dialogs need z above the panel).
@@ -51,6 +58,7 @@ class TextField : public Widget {
   CommitHandler on_commit_;
   std::function<bool(const std::string&)> validator_;
   float caret_blink_t_ = 0.0f;
+  std::size_t caret_ = 0;
 };
 
 }  // namespace wds::interaction

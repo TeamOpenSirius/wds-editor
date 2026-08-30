@@ -1,5 +1,7 @@
 #include "wds/renderer/texture.hpp"
 
+#include <wds/common/utf8_path.hpp>
+
 #include <png.h>
 
 #define NANOSVG_IMPLEMENTATION
@@ -11,23 +13,21 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <iterator>
+#include <functional>
+#include <limits>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace wds::renderer {
 namespace {
 
 // Read whole file into a mutable buffer (nsvgParse overwrites its input).
-// Prefer this over nsvgParseFromFile so Windows Unicode paths work via ifstream.
+// Prefer this over nsvgParseFromFile so Windows Unicode/UTF-8 install paths work.
 bool read_file_bytes(const std::string& path, std::vector<char>& out) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    return false;
-  }
-  out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-  if (out.empty()) {
+  if (!wds::common::read_file_bytes(path, out) || out.empty()) {
     return false;
   }
   out.push_back('\0');
@@ -55,7 +55,7 @@ bool svg_raster_looks_like_icon(const unsigned char* pixels, int width, int heig
 
 bool load_png_rgba8(const std::string& path, std::vector<unsigned char>& out, int& width,
                     int& height) {
-  FILE* fp = std::fopen(path.c_str(), "rb");
+  FILE* fp = wds::common::fopen_utf8(path, "rb");
   if (fp == nullptr) {
     return false;
   }
@@ -134,6 +134,24 @@ int next_pow2(int v) {
     p *= 2;
   }
   return p;
+}
+
+bool rgba8_byte_count(int width, int height, size_t& out_bytes) {
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  const size_t w = static_cast<size_t>(width);
+  const size_t h = static_cast<size_t>(height);
+  constexpr size_t kMax = std::numeric_limits<size_t>::max();
+  if (h != 0 && w > kMax / h) {
+    return false;
+  }
+  const size_t pixels = w * h;
+  if (pixels > kMax / 4u) {
+    return false;
+  }
+  out_bytes = pixels * 4u;
+  return true;
 }
 
 struct PackRect {
@@ -280,7 +298,87 @@ TextureInfo create_texture_from_svg(VulkanRenderer& renderer, const std::string&
   return renderer.create_texture_rgba(flipped.data(), width, height);
 }
 
+TextureCache::TextureCache(VulkanRenderer* renderer) : renderer_(renderer) {}
+
+TextureCache::TextureCache(TextureCacheBackend backend) : backend_(std::move(backend)) {}
+
+void TextureCache::set_renderer(VulkanRenderer* renderer) {
+  renderer_ = renderer;
+  backend_ = {};
+}
+
+void commit_standalone_records(std::unordered_set<std::string>& keys,
+                               std::vector<TextureId>& ids,
+                               std::unordered_map<std::string, TextureInfo>& cache,
+                               const std::string& path, const TextureInfo& info,
+                               const std::function<void(int)>& before_step) {
+  bool inserted_key = false;
+  bool pushed_id = false;
+  bool emplaced_cache = false;
+  try {
+    if (before_step) {
+      before_step(0);
+    }
+    inserted_key = keys.insert(path).second;
+    if (before_step) {
+      before_step(1);
+    }
+    ids.push_back(info.id);
+    pushed_id = true;
+    if (before_step) {
+      before_step(2);
+    }
+    emplaced_cache = cache.emplace(path, info).second;
+  } catch (...) {
+    if (emplaced_cache) {
+      cache.erase(path);
+    }
+    if (pushed_id) {
+      ids.pop_back();
+    }
+    if (inserted_key) {
+      keys.erase(path);
+    }
+    throw;
+  }
+}
+
 TextureCache::~TextureCache() { clear(); }
+
+bool TextureCache::backend_enabled() const {
+  return static_cast<bool>(backend_.ready) && static_cast<bool>(backend_.create) &&
+         static_cast<bool>(backend_.destroy);
+}
+
+bool TextureCache::gpu_ready() const {
+  if (backend_enabled()) {
+    return backend_.ready();
+  }
+  return renderer_ != nullptr && renderer_->ready();
+}
+
+TextureInfo TextureCache::gpu_create(const unsigned char* pixels, int width, int height) {
+  if (backend_enabled()) {
+    return backend_.create(pixels, width, height);
+  }
+  if (renderer_ == nullptr) {
+    return {};
+  }
+  return renderer_->create_texture_rgba(pixels, width, height);
+}
+
+void TextureCache::gpu_destroy(TextureId id) {
+  if (id == kInvalidTextureId) {
+    return;
+  }
+  if (backend_enabled()) {
+    backend_.destroy(id);
+    return;
+  }
+  if (renderer_ != nullptr) {
+    renderer_->destroy_texture(id);
+  }
+}
 
 bool TextureCache::queue_png(const std::string& path) {
   if (pending_.count(path) || cache_.count(path)) {
@@ -291,7 +389,7 @@ bool TextureCache::queue_png(const std::string& path) {
     return false;
   }
   pending_.emplace(path, std::move(image));
-  baked_ = false;
+  needs_rebake_ = true;
   return true;
 }
 
@@ -300,8 +398,8 @@ bool TextureCache::queue_rgba(const std::string& key, std::vector<unsigned char>
   if (key.empty() || width <= 0 || height <= 0) {
     return false;
   }
-  const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
-  if (pixels.size() != expected) {
+  size_t expected = 0;
+  if (!rgba8_byte_count(width, height, expected) || pixels.size() != expected) {
     return false;
   }
   CpuImage image;
@@ -309,15 +407,15 @@ bool TextureCache::queue_rgba(const std::string& key, std::vector<unsigned char>
   image.width = width;
   image.height = height;
   pending_[key] = std::move(image);
-  baked_ = false;
+  needs_rebake_ = true;
   return true;
 }
 
 bool TextureCache::bake_atlas() {
-  if (renderer_ == nullptr || !renderer_->ready()) {
+  if (!gpu_ready()) {
     return false;
   }
-  if (pending_.empty() && baked_ && atlas_id_ != kInvalidTextureId) {
+  if (!needs_rebake_ && baked_ && atlas_id_ != kInvalidTextureId) {
     return true;
   }
   if (pending_.empty()) {
@@ -328,17 +426,25 @@ bool TextureCache::bake_atlas() {
   std::vector<PackRect> rects;
   rects.reserve(pending_.size());
   for (auto& kv : pending_) {
+    if (standalone_keys_.count(kv.first) != 0) {
+      continue;
+    }
     PackRect r;
     r.path = &kv.first;
     r.width = kv.second.width;
     r.height = kv.second.height;
     rects.push_back(r);
   }
+  if (rects.empty()) {
+    return false;
+  }
 
   int atlas_w = 512;
   int atlas_h = 512;
   bool packed = false;
-  for (int attempt = 0; attempt < 6; ++attempt) {
+  // Soft-expanded split lines (8×256 × ~1k) need up to 4096×4096; keep headroom for
+  // 8192×4096 before giving up (MoltenVK / desktop limits are typically ≥8192).
+  for (int attempt = 0; attempt < 10; ++attempt) {
     auto try_rects = rects;
     if (shelf_pack(try_rects, atlas_w, atlas_h, kPadding)) {
       rects = std::move(try_rects);
@@ -352,73 +458,137 @@ bool TextureCache::bake_atlas() {
     }
   }
   if (!packed) {
+    std::fprintf(stderr,
+                 "TextureCache::bake_atlas: shelf pack failed after growing to %dx%d (%zu sprites)\n",
+                 atlas_w, atlas_h, rects.size());
     return false;
   }
 
-  std::vector<unsigned char> atlas(static_cast<size_t>(atlas_w) * atlas_h * 4, 0);
-  for (const auto& r : rects) {
-    const CpuImage& src = pending_[*r.path];
-    for (int y = 0; y < r.height; ++y) {
-      const unsigned char* src_row =
-          src.pixels.data() + static_cast<size_t>(y) * src.width * 4;
-      unsigned char* dst_row =
-          atlas.data() + (static_cast<size_t>(r.y + y) * atlas_w + r.x) * 4;
-      std::memcpy(dst_row, src_row, static_cast<size_t>(r.width) * 4);
-    }
-    // Bleed edge pixels 1px into padding so bilinear filtering doesn't sample
-    // black atlas zeros (which darkens translucent sprites).
-    auto px = [&](int x, int y) -> unsigned char* {
-      x = std::clamp(x, 0, atlas_w - 1);
-      y = std::clamp(y, 0, atlas_h - 1);
-      return atlas.data() + (static_cast<size_t>(y) * atlas_w + x) * 4;
-    };
-    auto copy4 = [](unsigned char* d, const unsigned char* s) {
-      d[0] = s[0];
-      d[1] = s[1];
-      d[2] = s[2];
-      d[3] = s[3];
-    };
-    for (int y = 0; y < r.height; ++y) {
-      copy4(px(r.x - 1, r.y + y), px(r.x, r.y + y));
-      copy4(px(r.x + r.width, r.y + y), px(r.x + r.width - 1, r.y + y));
-    }
-    for (int x = -1; x <= r.width; ++x) {
-      copy4(px(r.x + x, r.y - 1), px(r.x + std::clamp(x, 0, r.width - 1), r.y));
-      copy4(px(r.x + x, r.y + r.height),
-            px(r.x + std::clamp(x, 0, r.width - 1), r.y + r.height - 1));
-    }
+  size_t atlas_bytes = 0;
+  if (!rgba8_byte_count(atlas_w, atlas_h, atlas_bytes)) {
+    return false;
   }
 
-  if (atlas_id_ != kInvalidTextureId) {
-    renderer_->destroy_texture(atlas_id_);
-    atlas_id_ = kInvalidTextureId;
+  std::vector<unsigned char> atlas;
+  std::unordered_map<std::string, TextureInfo> new_cache;
+  try {
+    atlas.assign(atlas_bytes, 0);
+    for (const auto& r : rects) {
+      const CpuImage& src = pending_[*r.path];
+      for (int y = 0; y < r.height; ++y) {
+        const unsigned char* src_row =
+            src.pixels.data() + static_cast<size_t>(y) * src.width * 4;
+        unsigned char* dst_row =
+            atlas.data() + (static_cast<size_t>(r.y + y) * atlas_w + r.x) * 4;
+        std::memcpy(dst_row, src_row, static_cast<size_t>(r.width) * 4);
+      }
+      // Bleed edge pixels 1px into padding so bilinear filtering doesn't sample
+      // black atlas zeros (which darkens translucent sprites).
+      auto px = [&](int x, int y) -> unsigned char* {
+        x = std::clamp(x, 0, atlas_w - 1);
+        y = std::clamp(y, 0, atlas_h - 1);
+        return atlas.data() + (static_cast<size_t>(y) * atlas_w + x) * 4;
+      };
+      auto copy4 = [](unsigned char* d, const unsigned char* s) {
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+        d[3] = s[3];
+      };
+      for (int y = 0; y < r.height; ++y) {
+        copy4(px(r.x - 1, r.y + y), px(r.x, r.y + y));
+        copy4(px(r.x + r.width, r.y + y), px(r.x + r.width - 1, r.y + y));
+      }
+      for (int x = -1; x <= r.width; ++x) {
+        copy4(px(r.x + x, r.y - 1), px(r.x + std::clamp(x, 0, r.width - 1), r.y));
+        copy4(px(r.x + x, r.y + r.height),
+              px(r.x + std::clamp(x, 0, r.width - 1), r.y + r.height - 1));
+      }
+    }
+
+    if (backend_enabled() && backend_.before_atlas_cpu_cache) {
+      backend_.before_atlas_cpu_cache();
+    }
+
+    new_cache.reserve(standalone_keys_.size() + rects.size());
+    for (const auto& key : standalone_keys_) {
+      const auto it = cache_.find(key);
+      if (it != cache_.end()) {
+        new_cache.emplace(key, it->second);
+      }
+    }
+
+    const float inv_w = 1.0f / static_cast<float>(atlas_w);
+    const float inv_h = 1.0f / static_cast<float>(atlas_h);
+    for (const auto& r : rects) {
+      if (standalone_keys_.count(*r.path) != 0) {
+        continue;
+      }
+      TextureInfo info;
+      info.id = kInvalidTextureId;
+      info.width = r.width;
+      info.height = r.height;
+      // Half-texel inset to reduce linear filtering bleed.
+      info.u0 = (static_cast<float>(r.x) + 0.5f) * inv_w;
+      info.v0 = (static_cast<float>(r.y) + 0.5f) * inv_h;
+      info.u1 = (static_cast<float>(r.x + r.width) - 0.5f) * inv_w;
+      info.v1 = (static_cast<float>(r.y + r.height) - 0.5f) * inv_h;
+      new_cache.emplace(*r.path, info);
+    }
+  } catch (...) {
+    return false;
   }
 
-  TextureInfo atlas_tex = renderer_->create_texture_rgba(atlas.data(), atlas_w, atlas_h);
+  TextureInfo atlas_tex = gpu_create(atlas.data(), atlas_w, atlas_h);
   if (!atlas_tex) {
     return false;
   }
-  atlas_id_ = atlas_tex.id;
 
-  cache_.clear();
-  const float inv_w = 1.0f / static_cast<float>(atlas_w);
-  const float inv_h = 1.0f / static_cast<float>(atlas_h);
-  for (const auto& r : rects) {
-    TextureInfo info;
-    info.id = atlas_id_;
-    info.width = r.width;
-    info.height = r.height;
-    // Half-texel inset to reduce linear filtering bleed.
-    info.u0 = (static_cast<float>(r.x) + 0.5f) * inv_w;
-    info.v0 = (static_cast<float>(r.y) + 0.5f) * inv_h;
-    info.u1 = (static_cast<float>(r.x + r.width) - 0.5f) * inv_w;
-    info.v1 = (static_cast<float>(r.y + r.height) - 0.5f) * inv_h;
-    cache_.emplace(*r.path, info);
+  for (auto& kv : new_cache) {
+    if (kv.second.id == kInvalidTextureId) {
+      kv.second.id = atlas_tex.id;
+    }
   }
 
-  pending_.clear();
+  const TextureId old_atlas = atlas_id_;
+  atlas_id_ = atlas_tex.id;
+  cache_.swap(new_cache);
   baked_ = true;
+  needs_rebake_ = false;
+  if (old_atlas != kInvalidTextureId) {
+    gpu_destroy(old_atlas);
+  }
   return true;
+}
+
+TextureInfo TextureCache::load_standalone_png(const std::string& path) {
+  if (!gpu_ready() || path.empty()) {
+    return {};
+  }
+  const auto it = cache_.find(path);
+  if (it != cache_.end()) {
+    return it->second;
+  }
+  CpuImage image;
+  if (!load_png_rgba8(path, image.pixels, image.width, image.height) || image.width <= 0 ||
+      image.height <= 0) {
+    return {};
+  }
+  TextureInfo info = gpu_create(image.pixels.data(), image.width, image.height);
+  if (!info) {
+    return {};
+  }
+  try {
+    std::function<void(int)> hook;
+    if (backend_enabled()) {
+      hook = backend_.before_standalone_commit;
+    }
+    commit_standalone_records(standalone_keys_, standalone_ids_, cache_, path, info, hook);
+  } catch (...) {
+    gpu_destroy(info.id);
+    return {};
+  }
+  return info;
 }
 
 TextureInfo TextureCache::get(const std::string& path) const {
@@ -430,13 +600,24 @@ TextureInfo TextureCache::get(const std::string& path) const {
 }
 
 void TextureCache::clear() {
-  if (renderer_ != nullptr && atlas_id_ != kInvalidTextureId) {
-    renderer_->destroy_texture(atlas_id_);
+  std::unordered_set<TextureId> destroyed;
+  auto destroy_once = [&](TextureId id) {
+    if (id == kInvalidTextureId || !destroyed.insert(id).second) {
+      return;
+    }
+    gpu_destroy(id);
+  };
+  destroy_once(atlas_id_);
+  for (TextureId id : standalone_ids_) {
+    destroy_once(id);
   }
   atlas_id_ = kInvalidTextureId;
+  standalone_ids_.clear();
+  standalone_keys_.clear();
   pending_.clear();
   cache_.clear();
   baked_ = false;
+  needs_rebake_ = false;
 }
 
 }  // namespace wds::renderer

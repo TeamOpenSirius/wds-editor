@@ -33,32 +33,30 @@ class IconButton : public Widget {
   Icon icon() const noexcept { return icon_; }
   void set_sprite(wds::renderer::TextureInfo sprite) noexcept {
     sprite_ = sprite;
-    strip_left_ = {};
-    strip_right_ = {};
     connection_ = {};
     arrow_ = {};
     preview_style_ = NotePreviewStyle::Flat;
     flick_mode_ = FlickArrowMode::None;
+    connection_tint_ = {1.0f, 1.0f, 1.0f, 1.0f};
+    note_preview_ = false;
   }
-  void clear_sprite() noexcept { sprite_ = {}; }
-  void set_note_strip(wds::renderer::TextureInfo left, wds::renderer::TextureInfo middle,
-                      wds::renderer::TextureInfo right) noexcept {
-    strip_left_ = left;
-    sprite_ = middle;
-    strip_right_ = right;
+  void clear_sprite() noexcept {
+    sprite_ = {};
+    note_preview_ = false;
   }
-  void set_note_preview(NotePreviewStyle style, wds::renderer::TextureInfo left,
-                        wds::renderer::TextureInfo middle, wds::renderer::TextureInfo right,
+  // Official flat note: single Top sprite (+ optional arrow). Hold: connection + RGB tint.
+  void set_note_preview(NotePreviewStyle style, wds::renderer::TextureInfo top,
                         wds::renderer::TextureInfo connection = {},
                         wds::renderer::TextureInfo arrow = {},
-                        FlickArrowMode flick = FlickArrowMode::None) noexcept {
+                        FlickArrowMode flick = FlickArrowMode::None,
+                        Color connection_tint = {1.0f, 1.0f, 1.0f, 1.0f}) noexcept {
+    note_preview_ = true;
     preview_style_ = style;
-    strip_left_ = left;
-    sprite_ = middle;
-    strip_right_ = right;
+    sprite_ = top;
     connection_ = connection;
     arrow_ = arrow;
     flick_mode_ = flick;
+    connection_tint_ = connection_tint;
   }
   void set_label(std::string label) { label_ = std::move(label); }
   void on_click(ClickHandler handler) { on_click_ = std::move(handler); }
@@ -72,12 +70,12 @@ class IconButton : public Widget {
  private:
   Icon icon_;
   wds::renderer::TextureInfo sprite_{};
-  wds::renderer::TextureInfo strip_left_{};
-  wds::renderer::TextureInfo strip_right_{};
   wds::renderer::TextureInfo connection_{};
   wds::renderer::TextureInfo arrow_{};
+  Color connection_tint_{1.0f, 1.0f, 1.0f, 1.0f};
   NotePreviewStyle preview_style_ = NotePreviewStyle::Flat;
   FlickArrowMode flick_mode_ = FlickArrowMode::None;
+  bool note_preview_ = false;
   std::string label_;
   ClickHandler on_click_;
   bool pressed_ = false;

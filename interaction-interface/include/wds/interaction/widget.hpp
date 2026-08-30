@@ -43,6 +43,8 @@ class Widget {
 
   // WidgetRoot overrides; used to clear focus when a focused child is hidden.
   virtual class WidgetRoot* as_root() noexcept { return nullptr; }
+  // Walk parents to the WidgetRoot, or nullptr if not mounted under one.
+  class WidgetRoot* find_root() noexcept;
 
   const std::vector<std::unique_ptr<Widget>>& children() const noexcept { return children_; }
 
@@ -58,8 +60,25 @@ class Widget {
   virtual Widget* hit_test(Vec2 point);
   // Open popup menus (dropdown lists) — tested before normal hit targets.
   virtual Widget* hit_test_popup(Vec2 point);
+  // Dropdown/combo field under `point` (ignores open menus covering the field).
+  virtual Widget* hit_test_popup_host(Vec2 point);
+  // Full-screen (or region) modal that must receive hits instead of widgets behind it.
+  virtual bool is_interaction_modal() const { return false; }
+  // WidgetRoot calls this on a visible interaction-modal child before shortcuts
+  // and before the focused widget. Return true to consume the key.
+  virtual bool intercept_modal_key_down(const KeyDownEvent&) { return false; }
+  // When true, hit_test_popup(_host) must not search siblings behind this widget.
+  virtual bool blocks_interaction_behind(Vec2 point) const;
   // Close popups that do not contain `point`. Returns true if any popup closed.
   virtual bool dismiss_popups(Vec2 point);
+  // Force-close this widget's own popup (not descendants).
+  virtual void close_own_popup() {}
+  // Force-close this widget's popup and all descendant popups.
+  void close_popups();
+  // Close every popup in this subtree except `keep`.
+  void close_popups_except(Widget* keep);
+  // Walk to the root and close every other open popup (mutual exclusion on open).
+  void close_sibling_popups();
   virtual bool wants_focus() const { return false; }
   virtual bool is_focusable() const { return false; }
   // When true, WidgetRoot routes KeyDown to this widget before ShortcutManager.

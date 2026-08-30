@@ -11,16 +11,20 @@ namespace wds::chart_editor {
 
 // Sliding Universal Score (SUS) — Ched / ChedPlus authoring for World Dai Star (Sirius).
 //
-// Ched ground truth (see sonolus-sirius-engine chart_edit + sus2txt):
+// Import ground truth is sonolus-sirius-engine sus2txt (#5 Air geometry):
 // - All Hold / ScratchHold ribbons are Slide #3 (Sirius does not parse #2).
-// - Blue Hold vs purple ScratchHold is distinguished by a paired Flick+Air at the
-//   slide end (#1 type 3 + #5). Air alone or Flick alone is illegal and ignored.
+// - Blue vs purple is decided by #5 at the slide end (or mid #5 cuts). #1 type 3
+//   is Ched decoration and is never emitted as a note.
+// - Start #5 on the body or an adjacent sus2txt span → addStart=false (no pink
+//   head). Start #5 with no end/mid #5 → shouldUnscratch back to blue Hold + head.
 // - Critical gold head = Critical tap (#1 type 2) covering the slide start.
 // - Damage (#1 type 4) at start → intentional headless; at end → Nontail (import
 //   may degrade to a tailed Hold and record a warning).
 // - Slide mid (#3 type 3) → Sound / ScratchSound by parent hold family.
-// - Mid paired Flick+Air on a slide → JumpScratch split into multiple ScratchHolds.
-// - #TIL01 = split-lane gimmick; #TIL00 HiSpeed is ignored (editor cannot author).
+// - Mid #5 on the exact body span → JumpScratch split (SoundPurple).
+// - scratch_length != 0 → GimmickType::JumpScratch.
+// - #TIL01 export must be `#TIL01: "` (colon-space) so sus2txt can parse it.
+//   #TIL00 HiSpeed is ignored (editor cannot author).
 // - Legacy #2 Hold channels from older WDS exports import as blue Hold.
 // - Ched 12-key pad: export L→L+2; import auto-detects offset 2 for the 2..d window.
 // - HoldEighth is never written (would become Sound stars on re-import).

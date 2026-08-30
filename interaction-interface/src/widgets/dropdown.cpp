@@ -2,6 +2,7 @@
 
 #include "wds/interaction/popup_menu.hpp"
 #include "wds/interaction/theme.hpp"
+#include "wds/interaction/widget_root.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -51,7 +52,11 @@ void Dropdown::set_items(std::vector<std::string> items) {
 }
 
 void Dropdown::set_selected_index(int index) noexcept {
-  if (index < 0 || index >= static_cast<int>(items_.size())) {
+  if (index < 0) {
+    selected_index_ = -1;
+    return;
+  }
+  if (index >= static_cast<int>(items_.size())) {
     selected_index_ = items_.empty() ? -1 : 0;
     return;
   }
@@ -59,15 +64,18 @@ void Dropdown::set_selected_index(int index) noexcept {
 }
 
 const std::string& Dropdown::selected_label() const {
-  static const std::string kEmpty;
   if (selected_index_ < 0 || selected_index_ >= static_cast<int>(items_.size())) {
-    return kEmpty;
+    return placeholder_;
   }
   return items_[static_cast<std::size_t>(selected_index_)];
 }
 
 void Dropdown::paint(UiPainter& painter) const {
   if (!visible_) {
+    return;
+  }
+  // While open, paint_popup_layer owns the host chrome so text is not alpha-stacked.
+  if (open_) {
     return;
   }
   const Rect abs = absolute_bounds();
@@ -105,6 +113,13 @@ Widget* Dropdown::hit_test_popup(Vec2 point) {
   return geom.rect.contains(point) ? this : nullptr;
 }
 
+Widget* Dropdown::hit_test_popup_host(Vec2 point) {
+  if (!visible_ || !enabled_) {
+    return nullptr;
+  }
+  return absolute_bounds().contains(point) ? this : nullptr;
+}
+
 Widget* Dropdown::hit_test(Vec2 point) {
   if (!visible_ || !enabled_) {
     return nullptr;
@@ -115,6 +130,18 @@ Widget* Dropdown::hit_test(Vec2 point) {
   return absolute_bounds().contains(point) ? this : nullptr;
 }
 
+void Dropdown::close_own_popup() {
+  if (!open_) {
+    return;
+  }
+  open_ = false;
+  menu_scroll_ = 0.0f;
+  hover_index_ = -1;
+  if (WidgetRoot* root = find_root()) {
+    root->note_popup_closed(this);
+  }
+}
+
 bool Dropdown::dismiss_popups(Vec2 point) {
   bool closed = false;
   const Rect abs = absolute_bounds();
@@ -123,9 +150,7 @@ bool Dropdown::dismiss_popups(Vec2 point) {
           ? popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_))
           : popup_menu::Geometry{};
   if (open_ && !abs.contains(point) && !geom.rect.contains(point)) {
-    open_ = false;
-    menu_scroll_ = 0.0f;
-    hover_index_ = -1;
+    close_own_popup();
     closed = true;
   }
   return Widget::dismiss_popups(point) || closed;
@@ -147,9 +172,7 @@ void Dropdown::on_pointer_down(const PointerDownEvent& event) {
           on_select_(index, items_[static_cast<std::size_t>(index)]);
         }
       }
-      open_ = false;
-      menu_scroll_ = 0.0f;
-      hover_index_ = -1;
+      close_own_popup();
       return;
     }
   }
@@ -158,12 +181,18 @@ void Dropdown::on_pointer_down(const PointerDownEvent& event) {
     return;
   }
 
-  open_ = !open_;
   if (open_) {
-    menu_scroll_ = 0.0f;
-    hover_index_ = -1;
+    close_own_popup();
+    return;
+  }
+  open_ = true;
+  menu_scroll_ = popup_menu::scroll_to_show_index(this, abs, items_.size(), selected_index_,
+                                                 placement_of(opens_upward_));
+  hover_index_ = -1;
+  if (WidgetRoot* root = find_root()) {
+    root->note_popup_opened(this);
   } else {
-    hover_index_ = -1;
+    close_sibling_popups();
   }
 }
 

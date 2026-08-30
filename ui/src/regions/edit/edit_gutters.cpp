@@ -2,9 +2,12 @@
 
 #include "wds/ui/regions/edit/edit_viewport.hpp"
 
+#include <wds/chart_render/preview_visual_config.hpp>
+#include <wds/chart_render/split_line_official_colors.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/split_fade.hpp>
 
 #include <wds/interaction/theme.hpp>
 
@@ -25,18 +28,130 @@ using wds::interaction::Rect;
 using wds::interaction::Vec2;
 
 float gutter_font_px() { return wds::interaction::theme::kFontSizeGutter; }
-float split_label_h() { return wds::interaction::theme::px(28.0f); }
+float split_label_h() { return wds::interaction::theme::px(10.0f); }
 float timing_label_h() { return wds::interaction::theme::px(28.0f); }
 float split_band_gap() { return wds::interaction::theme::px(1.0f); }
 float gutter_label_pad() { return wds::interaction::theme::px(2.0f); }
+float split_column_gap() { return wds::interaction::theme::px(2.0f); }
+float split_leader_lane() { return wds::interaction::theme::px(3.0f); }
+float split_hot_pad() { return wds::interaction::theme::px(2.0f); }
 constexpr float kLineSnapPx = 8.0f;
+constexpr int kSplitColumns = 2;
+constexpr int kStackGuard = 64;
 
 bool rects_overlap(const Rect& a, const Rect& b) noexcept {
   return a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y;
 }
 
-constexpr Color kSplitStartColor{0.22f, 0.48f, 0.95f, 1.0f};
-constexpr Color kSplitEndColor{0.92f, 0.28f, 0.28f, 1.0f};
+struct SplitCols {
+  float h = 10.0f;
+  float band_gap = 1.0f;
+  float step = 11.0f;
+  float chip_w = 1.0f;
+  float chip_x[kSplitColumns] = {0.0f, 0.0f};
+};
+
+SplitCols make_split_cols(const Rect& gutter) {
+  SplitCols c;
+  c.h = split_label_h();
+  c.band_gap = split_band_gap();
+  c.step = c.h + c.band_gap;
+  const float pad = gutter_label_pad();
+  const float col_gap = split_column_gap();
+  const float lane = split_leader_lane();
+  const float inner = std::max(1.0f, gutter.w - pad * 2.0f);
+  const float col_w = std::max(1.0f, (inner - col_gap) * 0.5f);
+  c.chip_w = std::max(1.0f, col_w - lane);
+  // Left chip flush left; right chip flush right. Inner edge is the leader lane.
+  c.chip_x[0] = gutter.x + pad;
+  c.chip_x[1] = gutter.x + pad + col_w + col_gap + (col_w - c.chip_w);
+  return c;
+}
+
+int column_overlap_count(const std::vector<GutterLabelHit>& placed, int col, const Rect& cand) {
+  int n = 0;
+  for (const auto& p : placed) {
+    if (p.column != col) continue;
+    if (rects_overlap(p.bounds, cand)) ++n;
+  }
+  return n;
+}
+
+GutterLabelHit assign_split_slot(const SplitCols& cols, int32_t note_id, bool is_start,
+                                 int32_t anchor_tick, float anchor_y,
+                                 const std::vector<GutterLabelHit>& placed) {
+  const float natural_y =
+      is_start ? anchor_y - cols.h - cols.band_gap : anchor_y + cols.band_gap;
+  const float dir = is_start ? -1.0f : 1.0f;
+  auto rect_at = [&](int col, float y) {
+    return Rect{cols.chip_x[col], y, cols.chip_w, cols.h};
+  };
+
+  int sibling_col = -1;
+  if (note_id >= 0) {
+    for (const auto& p : placed) {
+      if (p.note_id == note_id) {
+        sibling_col = p.column;
+        break;
+      }
+    }
+  }
+
+  auto stack_steps = [&](int col) {
+    Rect cand = rect_at(col, natural_y);
+    int steps = 0;
+    while (column_overlap_count(placed, col, cand) > 0 && steps < kStackGuard) {
+      cand.y += dir * cols.step;
+      ++steps;
+    }
+    return steps;
+  };
+  auto corridor_count = [&](int col) {
+    const float span = cols.step * static_cast<float>(kStackGuard) + cols.h;
+    const Rect corridor = is_start
+                              ? Rect{cols.chip_x[col], natural_y - span + cols.h, cols.chip_w, span}
+                              : Rect{cols.chip_x[col], natural_y, cols.chip_w, span};
+    return column_overlap_count(placed, col, corridor);
+  };
+
+  int col = 0;
+  if (sibling_col >= 0) {
+    // Start/end of the same split stay in one column so they stay visually paired.
+    col = sibling_col;
+  } else if (column_overlap_count(placed, 0, rect_at(0, natural_y)) == 0) {
+    col = 0;  // same row, both empty (or left empty) → left
+  } else if (column_overlap_count(placed, 1, rect_at(1, natural_y)) == 0) {
+    col = 1;
+  } else {
+    const int s0 = stack_steps(0);
+    const int s1 = stack_steps(1);
+    if (s1 < s0) {
+      col = 1;
+    } else if (s0 < s1) {
+      col = 0;
+    } else {
+      const int n0 = corridor_count(0);
+      const int n1 = corridor_count(1);
+      col = n1 < n0 ? 1 : 0;  // equal stack row → left
+    }
+  }
+
+  Rect bounds = rect_at(col, natural_y);
+  int guard = 0;
+  while (column_overlap_count(placed, col, bounds) > 0 && guard++ < kStackGuard) {
+    bounds.y += dir * cols.step;
+  }
+
+  GutterLabelHit hit;
+  hit.note_id = note_id;
+  hit.is_start = is_start;
+  hit.anchor_tick = anchor_tick;
+  hit.anchor_y = anchor_y;
+  hit.column = col;
+  hit.bounds = bounds;
+  return hit;
+}
+
 constexpr Color kBpmLabelColor{0.48f, 0.30f, 0.14f, 0.96f};
 constexpr Color kMeterLabelColor{0.10f, 0.38f, 0.24f, 0.96f};
 constexpr Color kSubdivLineColor{0.28f, 0.30f, 0.34f, 0.75f};
@@ -145,37 +260,34 @@ Color split_color_for_id(int32_t color_id) noexcept {
   return {r + m, g + m, b + m, 1.0f};
 }
 
-Color split_slot_color(int32_t color_id, int32_t line_slot,
-                       const wds::renderer::SkinCatalog* skin) noexcept {
-  if (skin != nullptr) {
-    const auto suffixes = skin->split_lines.suffixes_for(color_id);
-    if (suffixes.size() > 1) {
-      const size_t idx =
-          static_cast<size_t>(line_slot < 0 ? 0 : line_slot) % suffixes.size();
-      uint32_t h = 2166136261u;
-      for (unsigned char c : suffixes[idx]) {
-        h ^= c;
-        h *= 16777619u;
-      }
-      return split_color_for_id(static_cast<int32_t>(h & 0x7fffffff));
-    }
+Color split_slot_color(int32_t color_id, int32_t world_index, int32_t split_count,
+                       const wds::renderer::SkinCatalog* /*skin*/) noexcept {
+  const int32_t official =
+      wds::chart_editor::split_color_slot(color_id, split_count, world_index);
+  float sr = 1.0f, sg = 1.0f, sb = 1.0f, sa = 1.0f;
+  if (wds::chart_render::official_split_line_color(color_id, official, sr, sg, sb, sa)) {
+    return {sr, sg, sb, sa};
   }
   return split_color_for_id(color_id);
 }
 
-namespace {
-int64_t split_fade_ms(float seconds) noexcept {
-  return std::max<int64_t>(
-      1, static_cast<int64_t>(std::llround(static_cast<double>(seconds) * 1000.0)));
+void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept {
+  const float k = wds::renderer::PreviewVisualConfig{}.split_line_opacity;
+  wds::chart_render::apply_split_line_opacity(c.r, c.g, c.b, c.a, k, 1.0f);
 }
-}  // namespace
+
+std::vector<int32_t> split_picker_color_ids() {
+  return wds::chart_render::official_split_color_ids();
+}
 
 std::vector<SplitCoverageMs> collect_split_coverage_ms(
     const std::vector<NotationNote>& notes, const wds::chart_editor::MusicTiming& timing,
     const wds::chart_editor::PreviewConfig& preview) {
   std::vector<SplitCoverageMs> out;
-  const int64_t appear_ms = split_fade_ms(preview.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_ms(preview.split_line_animation_end_sec);
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  const int64_t disappear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     SplitCoverageMs range;
@@ -218,18 +330,22 @@ float split_line_opacity_at_ms(const NotationNote& note,
   if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return 0.0f;
   const int64_t start_ms = note.start_ms(timing);
   const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
-  const int64_t appear_ms = split_fade_ms(preview.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_ms(preview.split_line_animation_end_sec);
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  const int64_t disappear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   const int64_t fade_start = start_ms - appear_ms;
   const int64_t fade_end = end_ms + disappear_ms;
   if (time_ms < fade_start || time_ms > fade_end) return 0.0f;
   if (time_ms < start_ms) {
-    return std::clamp(static_cast<float>(time_ms - fade_start) / static_cast<float>(appear_ms),
-                      0.0f, 1.0f);
+    const float t = std::clamp(
+        static_cast<float>(time_ms - fade_start) / static_cast<float>(appear_ms), 0.0f, 1.0f);
+    return wds::chart_editor::official_split_fade_in_scale(t);
   }
   if (time_ms > end_ms) {
-    return std::clamp(static_cast<float>(fade_end - time_ms) / static_cast<float>(disappear_ms),
-                      0.0f, 1.0f);
+    const float t = std::clamp(
+        static_cast<float>(time_ms - end_ms) / static_cast<float>(disappear_ms), 0.0f, 1.0f);
+    return wds::chart_editor::official_split_fade_out_alpha(t);
   }
   return 1.0f;
 }
@@ -394,42 +510,36 @@ void paint_split_gutter(wds::interaction::UiPainter& painter, const EditViewport
     paint_horizontal_grid(painter, viewport, gutter);
   }
 
-  const auto hits = build_split_label_hits(viewport, gutter, notes);
-  for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
-    const auto& hit = *it;
-    const Color c = hit.is_start ? kSplitStartColor : kSplitEndColor;
-    // Bands only — text is painted in ChartEditPanel::paint_overlays so it stays
-    // above skinned notes (avoids a second mismatched font size).
-    painter.fill_rect(hit.bounds, c, 3.0f, 0.94f);
-    painter.fill_rect(hit.bounds.inset(1.0f, 1.0f), {0.08f, 0.08f, 0.10f, 0.40f}, 2.0f, 0.941f);
-  }
+  // Compact chips + leader lines are painted in ChartEditPanel::paint_overlays
+  // so they stay above skinned notes.
+  (void)notes;
 }
 
 void paint_split_lane_preview(wds::interaction::UiPainter& painter, const Rect& area,
                               int32_t split_count, int32_t color_id,
                               const wds::renderer::SkinCatalog* skin) {
-  painter.fill_rect(area, {0.02f, 0.03f, 0.05f, 1.0f}, 2.0f, 0.996f);
   constexpr int32_t kLanes = 12;
   // Only effect split boundaries — no gray default lane dividers.
   std::vector<int32_t> mids;
   split_boundaries_12(split_count, mids);
-  const float line_w = std::clamp(area.w / static_cast<float>(kLanes) * 0.35f, 3.0f, 8.0f);
+  const float line_w = std::clamp(area.w / static_cast<float>(kLanes) * 0.14f, 1.5f, 2.5f);
+  // Edge lines are centered on area.x / area.right; widen the black plate so the
+  // soft sprite does not composite over the gray cell.
+  const float bg_pad_x = line_w * 0.5f + 1.0f;
+  const Rect bg{area.x - bg_pad_x, area.y, area.w + bg_pad_x * 2.0f, area.h};
+  painter.fill_rect(bg, {0.02f, 0.03f, 0.05f, 1.0f}, 2.0f, 0.996f);
 
   auto draw_edge = [&](int32_t edge_lane, int32_t slot) {
     const float x = std::floor(area.x + static_cast<float>(edge_lane) * area.w /
                                             static_cast<float>(kLanes) +
                                 0.5f);
     const Rect line{x - line_w * 0.5f, area.y + 2.0f, line_w, area.h - 4.0f};
-    auto c = split_slot_color(color_id, slot, skin);
+    auto c = split_slot_color(color_id, slot, split_count, skin);
+    if (c.a < 0.02f) return;
+    apply_official_split_rgb_opacity(c);
     if (skin != nullptr && skin->soft_split_line) {
       painter.sprite(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, 0.997f);
       return;
-    }
-    if (skin != nullptr) {
-      if (const auto* tex = skin->split_lines.texture_for(color_id, slot, /*steady*/ 1)) {
-        painter.sprite(line, *tex, {1.0f, 1.0f, 1.0f, 1.0f}, 0.997f);
-        return;
-      }
     }
     painter.fill_rect(line, c, 1.0f, 0.997f);
   };
@@ -439,42 +549,49 @@ void paint_split_lane_preview(wds::interaction::UiPainter& painter, const Rect& 
   draw_edge(kLanes, std::max(1, split_count));
 }
 
+Rect split_label_hot_bounds(const GutterLabelHit& hit) {
+  const float pad = split_hot_pad();
+  return {hit.bounds.x, hit.bounds.y - pad, hit.bounds.w, hit.bounds.h + pad * 2.0f};
+}
+
 std::vector<GutterLabelHit> build_split_label_hits(const EditViewport& viewport, const Rect& gutter,
                                                    const std::vector<NotationNote>& notes) {
-  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
-  const float label_x = gutter.x + gutter_label_pad();
-  std::vector<GutterLabelHit> out;
+  const SplitCols cols = make_split_cols(gutter);
+  const float view_pad = cols.h * 8.0f;
+
+  struct Draft {
+    int32_t note_id = -1;
+    bool is_start = true;
+    int32_t anchor_tick = 0;
+    float anchor_y = 0.0f;
+  };
+  std::vector<Draft> drafts;
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     const int32_t start_tick = note.start_tick;
     const int32_t end_tick = std::max(note.start_tick, note.end_tick);
     const float y0 = viewport.y_at(note.start_tick);
     const float y1 = viewport.y_at(end_tick);
-    // Upper band = start, lower band = end. No anti-overlap offsets.
-    if (y0 >= gutter.y - split_label_h() * 2.0f && y0 <= gutter.bottom() + split_label_h()) {
-      GutterLabelHit hit;
-      hit.note_id = note.id;
-      hit.is_start = true;
-      hit.anchor_tick = start_tick;
-      hit.bounds = {label_x, y0 - split_label_h() - split_band_gap(), label_w, split_label_h()};
-      out.push_back(hit);
+    if (y0 >= gutter.y - view_pad && y0 <= gutter.bottom() + view_pad) {
+      drafts.push_back({note.id, true, start_tick, y0});
     }
-    if (y1 >= gutter.y - split_label_h() && y1 <= gutter.bottom() + split_label_h() * 2.0f &&
+    if (y1 >= gutter.y - view_pad && y1 <= gutter.bottom() + view_pad &&
         note.end_tick > note.start_tick) {
-      GutterLabelHit hit;
-      hit.note_id = note.id;
-      hit.is_start = false;
-      hit.anchor_tick = end_tick;
-      hit.bounds = {label_x, y1 + split_band_gap(), label_w, split_label_h()};
-      out.push_back(hit);
+      drafts.push_back({note.id, false, end_tick, y1});
     }
   }
   // Ascending time: hit-test prefers earlier; paint should reverse-iterate.
-  std::sort(out.begin(), out.end(), [](const GutterLabelHit& a, const GutterLabelHit& b) {
+  std::sort(drafts.begin(), drafts.end(), [](const Draft& a, const Draft& b) {
     if (a.anchor_tick != b.anchor_tick) return a.anchor_tick < b.anchor_tick;
-    if (a.is_start != b.is_start) return a.is_start;  // start before end at same tick
+    if (a.is_start != b.is_start) return a.is_start;
     return a.note_id < b.note_id;
   });
+
+  std::vector<GutterLabelHit> out;
+  out.reserve(drafts.size());
+  for (const auto& d : drafts) {
+    out.push_back(assign_split_slot(cols, d.note_id, d.is_start, d.anchor_tick, d.anchor_y, out));
+  }
   return out;
 }
 
@@ -534,11 +651,13 @@ std::optional<int32_t> timing_measure_tick_at(const EditViewport& viewport, cons
   return measure;
 }
 
+GutterLabelHit split_start_placement(const EditViewport& viewport, const Rect& gutter, int32_t tick,
+                                     const std::vector<GutterLabelHit>& existing) {
+  return assign_split_slot(make_split_cols(gutter), -1, true, tick, viewport.y_at(tick), existing);
+}
+
 Rect split_start_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
-  const float label_w = std::max(1.0f, gutter.w - gutter_label_pad() * 2.0f);
-  const float label_x = gutter.x + gutter_label_pad();
-  const float y = viewport.y_at(tick);
-  return {label_x, y - split_label_h() - split_band_gap(), label_w, split_label_h()};
+  return split_start_placement(viewport, gutter, tick, {}).bounds;
 }
 
 Rect bpm_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {

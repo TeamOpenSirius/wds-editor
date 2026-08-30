@@ -5,7 +5,9 @@
 #include "wds/ui/native_file_dialog.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
+#include "wds/ui/regions/preview/preview_hit_widget.hpp"
 #include "wds/ui/regions/settings/chart_add_dialog.hpp"
+#include "wds/ui/regions/settings/curve_templates_dialog.hpp"
 #include "wds/ui/regions/settings/export_choice_dialog.hpp"
 #include "wds/ui/regions/settings/preview_settings_panel.hpp"
 #include "wds/ui/regions/settings/unsaved_changes_dialog.hpp"
@@ -13,7 +15,11 @@
 #include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 
+#include <wds/core/chart_validation.hpp>
 #include <wds/core/edit_grid.hpp>
+#include <wds/core/notation.hpp>
+
+#include <wds/common/time.hpp>
 
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/theme.hpp>
@@ -23,9 +29,27 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace wds::ui {
+namespace {
+
+void capture_display_from_preview(const ChartPreviewPanel& preview, EditorUiConfig& cfg) {
+  const auto& visual = preview.preview().config();
+  cfg.note_speed = visual.note_speed;
+  cfg.note_start_offset = visual.note_start_offset;
+  cfg.note_height_level = visual.note_height_level;
+  cfg.split_line_opacity =
+      static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) * 100.0));
+}
+
+void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& cfg) {
+  preview.apply_display_settings(cfg.note_speed, cfg.note_start_offset, cfg.note_height_level,
+                                 cfg.split_line_opacity);
+}
+
+}  // namespace
 
 UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   session_ = std::make_unique<EditorSession>(*chart_preview_);
@@ -33,14 +57,24 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     set_status(std::move(text), level);
   });
 
-  // Child order: toolbar → settings → edit → status → dialogs (topmost).
+  // Child order: toolbar → settings → preview_hit → edit → status → dialogs.
+  // Later siblings win reverse hit-test, so edit full-window modals and dialogs
+  // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
+  edit_panel_ = edit.get();
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
   edit->set_visible_range_changed_handler([this] {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
     }
-    save_ui_config();
+    request_save_ui_config(false);
+  });
+  auto preview_hit = std::make_unique<PreviewHitWidget>();
+  preview_hit_ = preview_hit.get();
+  preview_hit_->set_scroll_handler([this](const wds::interaction::ScrollEvent& event) {
+    if (edit_panel_ != nullptr) {
+      edit_panel_->handle_timeline_wheel(event);
+    }
   });
   auto toolbar = std::make_unique<EditorToolbar>(*session_, *edit);
   auto settings = std::make_unique<PreviewSettingsPanel>(*chart_preview_);
@@ -48,6 +82,8 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   status_bar_ = status.get();
   auto width_dialog = std::make_unique<WidthSlotsDialog>();
   width_slots_dialog_ = width_dialog.get();
+  auto curve_dialog = std::make_unique<CurveTemplatesDialog>();
+  curve_templates_dialog_ = curve_dialog.get();
   auto export_dialog = std::make_unique<ExportChoiceDialog>();
   export_choice_dialog_ = export_dialog.get();
   auto chart_add = std::make_unique<ChartAddDialog>();
@@ -62,12 +98,14 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (auto* toolbar_panel = this->toolbar_panel()) toolbar_panel->capture_config(cfg);
     cfg.width_slots = wds::interaction::width_slot_values_const();
     cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
+    cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
     cfg.sus_auto_convert = session_->sus_auto_convert();
     cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
     cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
     cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
     cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
     cfg.shortcuts_initialized = true;
+    capture_display_from_preview(*chart_preview_, cfg);
     width_slots_dialog_->set_config(cfg);
     width_slots_dialog_->open();
   });
@@ -96,6 +134,12 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   });
   toolbar->set_chart_add_handler([this] {
     if (chart_add_dialog_ != nullptr) chart_add_dialog_->open();
+  });
+  toolbar->bind_curve_state(&curve_template_state_);
+  toolbar->set_curve_templates_handler([this] { open_curve_templates_dialog(); });
+  toolbar->set_check_handler([this] { check_chart_errors(); });
+  toolbar->set_curve_fill_changed_handler([this](const CurveFillSelection&) {
+    push_curve_fill_selection();
   });
   chart_add->on_create_new([this] {
     if (!session_->read_only()) {
@@ -169,9 +213,11 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   });
   root_.add_child(std::move(toolbar));
   root_.add_child(std::move(settings));
+  root_.add_child(std::move(preview_hit));
   root_.add_child(std::move(edit));
   root_.add_child(std::move(status));
   root_.add_child(std::move(width_dialog));
+  root_.add_child(std::move(curve_dialog));
   root_.add_child(std::move(export_dialog));
   root_.add_child(std::move(chart_add));
   root_.add_child(std::move(unsaved));
@@ -185,14 +231,33 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       width_slots_dialog_->capture_config(cfg);
       session_->set_sus_auto_convert(cfg.sus_auto_convert);
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+      chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
       wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
       if (cfg.shortcuts_initialized) {
         wds::interaction::set_editor_shortcuts(cfg.shortcuts);
       }
+      apply_display_to_preview(*chart_preview_, cfg);
       bind_editor_shortcuts();
       persist();
+    });
+  }
+  if (curve_templates_dialog_ != nullptr) {
+    curve_templates_dialog_->set_on_confirmed([this](const CurveTemplateUiState& working) {
+      const auto fill_id = curve_template_state_.selected_id;
+      const auto direction = curve_template_state_.direction;
+      curve_template_state_.templates = working.templates;
+      curve_template_state_.selected_id = fill_id;
+      curve_template_state_.direction = direction;
+      if (curve_template_state_.selected_id != 0 &&
+          find_curve_template_by_id(curve_template_state_.templates,
+                                    curve_template_state_.selected_id) == nullptr) {
+        curve_template_state_.selected_id = 0;
+      }
+      if (auto* toolbar_panel = this->toolbar_panel()) toolbar_panel->refresh_curve_controls();
+      push_curve_fill_selection();
+      request_save_ui_config(true);
     });
   }
   if (auto* settings_panel = this->settings_panel()) {
@@ -204,6 +269,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
 
   shortcuts_.set_active_namespace("editor");
   bind_editor_shortcuts();
+  push_curve_fill_selection();
 }
 
 void UiManager::bind_editor_shortcuts() {
@@ -296,10 +362,7 @@ void UiManager::bind_editor_shortcuts() {
   // still updates the edit panel (widget key path only reaches the focused widget).
   for (int slot = 0; slot < 6; ++slot) {
     editor.bind(chord_width_slot(slot), [this, slot] {
-      if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
-      if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
-      if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
-      if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
+      if (has_blocking_modal_dialog()) return;
       if (auto* panel = edit_panel()) {
         panel->set_default_width(width_slot_values_const()[static_cast<std::size_t>(slot)]);
       }
@@ -308,37 +371,27 @@ void UiManager::bind_editor_shortcuts() {
   // Playback rate presets (default F1–F4 → 0.25x / 0.5x / 0.75x / 1x).
   for (int slot = 0; slot < 4; ++slot) {
     editor.bind(chord_playback_rate_slot(slot), [this, slot] {
-      if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
-      if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
-      if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
-      if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
+      if (has_blocking_modal_dialog()) return;
       const auto rate = playback_rate_for_slot(slot);
       if (!rate) return;
       if (auto* settings = settings_panel()) settings->set_playback_rate(*rate);
     });
   }
   editor.bind(chord_toggle_sfx_mute(), [this] {
-    if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) return;
-    if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) return;
-    if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) return;
-    if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) return;
+    if (has_blocking_modal_dialog()) return;
     if (auto* settings = settings_panel()) settings->toggle_sfx_mute();
   });
 }
 
-UiManager::~UiManager() = default;
-
-ChartEditPanel* UiManager::edit_panel() noexcept {
-  const auto& children = root_.children();
-  if (children.size() < 3) return nullptr;
-  return static_cast<ChartEditPanel*>(children[2].get());
+UiManager::~UiManager() {
+  if (ui_config_dirty_) {
+    save_ui_config();
+  }
 }
 
-const ChartEditPanel* UiManager::edit_panel() const noexcept {
-  const auto& children = root_.children();
-  if (children.size() < 3) return nullptr;
-  return static_cast<const ChartEditPanel*>(children[2].get());
-}
+ChartEditPanel* UiManager::edit_panel() noexcept { return edit_panel_; }
+
+const ChartEditPanel* UiManager::edit_panel() const noexcept { return edit_panel_; }
 
 EditorToolbar* UiManager::toolbar_panel() noexcept {
   const auto& children = root_.children();
@@ -359,6 +412,52 @@ void UiManager::set_status(std::string text, StatusLevel level) {
 }
 
 WidthSlotsDialog* UiManager::width_slots_dialog() noexcept { return width_slots_dialog_; }
+
+CurveTemplatesDialog* UiManager::curve_templates_dialog() noexcept {
+  return curve_templates_dialog_;
+}
+
+void UiManager::open_curve_templates_dialog() {
+  if (curve_templates_dialog_ == nullptr) return;
+  curve_templates_dialog_->open(curve_template_state_);
+}
+
+void UiManager::check_chart_errors() {
+  auto& engine = session_->engine();
+  const auto result = wds::chart_editor::find_note_overlaps(engine.document().notes());
+  const uint64_t generation = engine.document().content_generation();
+  if (edit_panel_ != nullptr) {
+    edit_panel_->set_error_ticks(result.error_ticks, generation);
+  }
+  if (result.error_ticks.empty()) {
+    set_status("未发现音符重叠", StatusLevel::Info);
+  } else {
+    const int32_t first_tick = result.error_ticks.front();
+    const int64_t ms =
+        wds::chart_editor::tick_to_milliseconds(first_tick, engine.document().timing());
+    chart_preview_->transport().request_pause();
+    chart_preview_->transport().request_seek_ms(ms);
+    wds::common::TimelineSnapshot snap;
+    snap.position = wds::common::ms_to_us(ms);
+    snap.state = wds::common::PlaybackState::Paused;
+    engine.apply_timeline(snap);
+    set_status("发现 " + std::to_string(result.error_ticks.size()) + " 处音符重叠（" +
+                   std::to_string(result.pairs.size()) + " 组），已跳转到 tick " +
+                   std::to_string(first_tick),
+               StatusLevel::Warning);
+  }
+  if (on_check_chart_) on_check_chart_();
+}
+
+CurveFillSelection UiManager::curve_fill_selection() const {
+  return make_curve_fill_selection(curve_template_state_);
+}
+
+void UiManager::push_curve_fill_selection() {
+  const CurveFillSelection selection = curve_fill_selection();
+  if (edit_panel_ != nullptr) edit_panel_->set_curve_fill_selection(selection);
+  if (on_curve_fill_changed_) on_curve_fill_changed_(selection);
+}
 
 ExportChoiceDialog* UiManager::export_choice_dialog() noexcept { return export_choice_dialog_; }
 
@@ -440,6 +539,7 @@ void UiManager::load_ui_config() {
   wds::interaction::set_width_slot_values(cfg.width_slots);
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+  chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
   wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -447,33 +547,74 @@ void UiManager::load_ui_config() {
     wds::interaction::set_editor_shortcuts(cfg.shortcuts);
     bind_editor_shortcuts();
   }
+  apply_display_to_preview(*chart_preview_, cfg);
+  capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
   if (auto* settings = settings_panel()) settings->apply_config(cfg);
-  if (auto* toolbar = toolbar_panel()) toolbar->apply_config(cfg);
+  if (auto* toolbar = toolbar_panel()) {
+    toolbar->apply_config(cfg);
+    toolbar->refresh_curve_controls();
+  }
+  push_curve_fill_selection();
 }
 
 void UiManager::save_ui_config() {
+  ui_config_dirty_ = false;
+  ui_config_dirty_us_ = 0;
   if (config_path_.empty()) return;
   EditorUiConfig cfg;
   if (auto* settings = settings_panel()) settings->capture_config(cfg);
   if (auto* toolbar = toolbar_panel()) toolbar->capture_config(cfg);
   cfg.width_slots = wds::interaction::width_slot_values_const();
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
+  cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
+  capture_display_from_preview(*chart_preview_, cfg);
+  apply_curve_template_state(cfg, curve_template_state_);
   save_editor_ui_config(config_path_, cfg);
+}
+
+void UiManager::request_save_ui_config(bool immediate) {
+  if (immediate) {
+    save_ui_config();
+    return;
+  }
+  ui_config_dirty_ = true;
+  ui_config_dirty_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+}
+
+void UiManager::flush_pending_ui_config() {
+  if (!ui_config_dirty_) {
+    return;
+  }
+  const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  if (now_us - ui_config_dirty_us_ >= 500000) {
+    save_ui_config();
+  }
 }
 
 void UiManager::resize(int logical_width, int logical_height, int framebuffer_width,
                        int framebuffer_height) {
-  width_ = std::max(1, logical_width);
-  height_ = std::max(1, logical_height);
-  fb_width_ = std::max(1, framebuffer_width);
-  fb_height_ = std::max(1, framebuffer_height);
+  const int w = std::max(1, logical_width);
+  const int h = std::max(1, logical_height);
+  const int fb_w = std::max(1, framebuffer_width);
+  const int fb_h = std::max(1, framebuffer_height);
+  if (w == width_ && h == height_ && fb_w == fb_width_ && fb_h == fb_height_) {
+    return;
+  }
+  width_ = w;
+  height_ = h;
+  fb_width_ = fb_w;
+  fb_height_ = fb_h;
 
   const EditorLayoutResult computed = layouter_.compute(width_, height_);
   layout_ = computed.regions;
@@ -491,19 +632,44 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
       static_cast<int>(std::lround(static_cast<float>(computed.preview_content.y) * s)),
       round_fb(static_cast<float>(computed.preview_content.width)),
       round_fb(static_cast<float>(computed.preview_content.height)));
+  // Full preview column — background cover fills this without spilling into edit.
+  chart_preview_->set_panel_bounds(
+      static_cast<int>(std::lround(layout_.preview.x * s)),
+      static_cast<int>(std::lround(layout_.preview.y * s)),
+      round_fb(layout_.preview.w), round_fb(layout_.preview.h));
 }
 
 void UiManager::apply_region_bounds() {
-  const auto& children = root_.children();
-  if (children.size() >= 4) {
-    children[0]->set_bounds(layout_.toolbar);
-    children[1]->set_bounds(layout_.settings);
-    children[2]->set_bounds(layout_.edit);
-    children[3]->set_bounds(layout_.status);
+  if (auto* toolbar = toolbar_panel()) {
+    toolbar->set_bounds(layout_.toolbar);
   }
-  // Modal dialogs cover the whole window.
-  for (std::size_t i = 4; i < children.size(); ++i) {
-    children[i]->set_bounds(root_.bounds());
+  if (auto* settings = settings_panel()) {
+    settings->set_bounds(layout_.settings);
+  }
+  if (preview_hit_ != nullptr) {
+    preview_hit_->set_bounds(layout_.preview);
+  }
+  if (edit_panel_ != nullptr) {
+    edit_panel_->set_bounds(layout_.edit);
+  }
+  if (status_bar_ != nullptr) {
+    status_bar_->set_bounds(layout_.status);
+  }
+  // Modal dialogs cover the whole window (later siblings win reverse hit-test).
+  if (width_slots_dialog_ != nullptr) {
+    width_slots_dialog_->set_bounds(root_.bounds());
+  }
+  if (curve_templates_dialog_ != nullptr) {
+    curve_templates_dialog_->set_bounds(root_.bounds());
+  }
+  if (export_choice_dialog_ != nullptr) {
+    export_choice_dialog_->set_bounds(root_.bounds());
+  }
+  if (chart_add_dialog_ != nullptr) {
+    chart_add_dialog_->set_bounds(root_.bounds());
+  }
+  if (unsaved_changes_dialog_ != nullptr) {
+    unsaved_changes_dialog_->set_bounds(root_.bounds());
   }
 }
 
@@ -544,6 +710,7 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   t0 = clock::now();
   root_.process_frame(delta_seconds, events, &shortcuts_);
   last_update_process_us_ = phase_us(t0);
+  flush_pending_ui_config();
 }
 
 void UiManager::paint(wds::interaction::UiPainter& painter) const { root_.paint(painter); }
@@ -559,14 +726,8 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
                                                           const wds::renderer::ScreenBounds& screen) {
   ui_batch_.clear();
   if (auto* edit = edit_panel()) {
-    // Final scroll sample for this frame (post-transport tick), then re-snap
-    // placement ghosts to the stationary pointer under the new viewport.
-    double sync_ms = session_->engine().timeline_us() / 1000.0;
-    if (chart_preview_ != nullptr &&
-        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
-      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
-    }
-    edit->sync_to_timeline_ms(sync_ms);
+    // Viewport already synced in update() after transport tick; only re-snap
+    // placement ghosts to the stationary pointer under the current viewport.
     edit->resync_pointer_overlays();
   }
   wds::interaction::UiPainter painter;
@@ -578,7 +739,7 @@ const wds::renderer::DrawBatch& UiManager::build_ui_batch(wds::renderer::Texture
     prepare_painter(overlay);
     edit->paint_overlays(overlay);
   }
-  // One upload after all paints may have packed on-demand glyphs.
+  // Upload after paints packed on-demand glyphs; flush resolves font TextureId live.
   chart_preview_->sync_ui_font_texture();
   painter.flush_to(ui_batch_, solid_texture, fb_w, fb_h, screen);
   if (const auto* edit = edit_panel()) {
@@ -599,7 +760,6 @@ const wds::renderer::DrawBatch& UiManager::build_popup_batch(
   if (painter.rects().empty() && painter.front_rects().empty() && painter.sprites().empty()) {
     return popup_batch_;
   }
-  chart_preview_->sync_ui_font_texture();
   painter.flush_to(popup_batch_, solid_texture, fb_w, fb_h, screen);
   return popup_batch_;
 }
@@ -620,6 +780,9 @@ const wds::renderer::DrawBatch& UiManager::build_modal_batch(
   if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) {
     width_slots_dialog_->paint_modal(modal);
   }
+  if (curve_templates_dialog_ != nullptr && curve_templates_dialog_->is_open()) {
+    curve_templates_dialog_->paint_modal(modal);
+  }
   if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) {
     export_choice_dialog_->paint_modal(modal);
   }
@@ -630,7 +793,6 @@ const wds::renderer::DrawBatch& UiManager::build_modal_batch(
     unsaved_changes_dialog_->paint_modal(modal);
   }
   if (!modal.rects().empty() || !modal.front_rects().empty() || !modal.sprites().empty()) {
-    chart_preview_->sync_ui_font_texture();
     modal.flush_to(modal_batch_, solid_texture, fb_w, fb_h, screen);
   }
   return modal_batch_;
@@ -672,25 +834,87 @@ const wds::renderer::DrawBatch& UiManager::build_modal_chrome_batch(
 const wds::renderer::DrawBatch& UiManager::build_post_overlay_batch(
     wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
     const wds::renderer::ScreenBounds& screen) {
+  // Clear every reused batch at the start of the frame. UiPainter::flush_to and
+  // DrawBatch::append_from only append; clearing only when a layer is empty left
+  // prior-frame popup/modal verts in place for as long as any menu stayed open.
   post_overlay_batch_.clear();
-  // Modal scrim first, then dropdown popups — otherwise menus open inside a modal
-  // (export format combo) are drawn under the 55% dim and look transparent.
-  if (has_modal_popup()) {
-    post_overlay_batch_.append_from(build_modal_batch(solid_texture, fb_w, fb_h, screen));
+  modal_batch_.clear();
+  popup_batch_.clear();
+
+  // Paint all post-overlay layers first, then one atlas upload before any flush
+  // so mid-frame destroy cannot invalidate an earlier DrawBatch TextureId.
+  wds::interaction::UiPainter status;
+  bool have_status = false;
+  if (status_bar_ != nullptr) {
+    prepare_painter(status);
+    status_bar_->paint_overlay(status);
+    have_status =
+        !status.rects().empty() || !status.front_rects().empty() || !status.sprites().empty();
   }
-  post_overlay_batch_.append_from(build_popup_batch(solid_texture, fb_w, fb_h, screen));
+
+  wds::interaction::UiPainter modal;
+  bool have_modal = false;
+  if (has_modal_popup()) {
+    prepare_painter(modal);
+    const auto* edit = edit_panel();
+    if (edit != nullptr && edit->has_modal_popup()) {
+      edit->paint_popups(modal);
+    }
+    if (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) {
+      width_slots_dialog_->paint_modal(modal);
+    }
+    if (curve_templates_dialog_ != nullptr && curve_templates_dialog_->is_open()) {
+      curve_templates_dialog_->paint_modal(modal);
+    }
+    if (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) {
+      export_choice_dialog_->paint_modal(modal);
+    }
+    if (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) {
+      chart_add_dialog_->paint_modal(modal);
+    }
+    if (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open()) {
+      unsaved_changes_dialog_->paint_modal(modal);
+    }
+    have_modal =
+        !modal.rects().empty() || !modal.front_rects().empty() || !modal.sprites().empty();
+  }
+
+  wds::interaction::UiPainter popup;
+  prepare_painter(popup);
+  root_.paint_popup_layers(popup);
+  const bool have_popup =
+      !popup.rects().empty() || !popup.front_rects().empty() || !popup.sprites().empty();
+
+  if (have_status || have_modal || have_popup) {
+    chart_preview_->sync_ui_font_texture();
+  }
+  // Flush straight into the cleared post batch (status → modal → popup). No
+  // intermediate scratch+append_from: that path previously cleared scratch only
+  // when a layer was absent, so open menus accumulated every frame.
+  if (have_status) {
+    status.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+  }
+  if (have_modal) {
+    modal.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+  }
+  if (have_popup) {
+    popup.flush_to(post_overlay_batch_, solid_texture, fb_w, fb_h, screen);
+  }
   return post_overlay_batch_;
+}
+
+bool UiManager::has_blocking_modal_dialog() const noexcept {
+  return (width_slots_dialog_ != nullptr && width_slots_dialog_->is_open()) ||
+         (curve_templates_dialog_ != nullptr && curve_templates_dialog_->is_open()) ||
+         (export_choice_dialog_ != nullptr && export_choice_dialog_->is_open()) ||
+         (chart_add_dialog_ != nullptr && chart_add_dialog_->is_open()) ||
+         (unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open());
 }
 
 bool UiManager::has_modal_popup() const noexcept {
   const auto* edit = edit_panel();
   const bool edit_modal = edit != nullptr && edit->has_modal_popup();
-  const bool width_modal = width_slots_dialog_ != nullptr && width_slots_dialog_->is_open();
-  const bool export_modal = export_choice_dialog_ != nullptr && export_choice_dialog_->is_open();
-  const bool chart_add_modal = chart_add_dialog_ != nullptr && chart_add_dialog_->is_open();
-  const bool unsaved_modal =
-      unsaved_changes_dialog_ != nullptr && unsaved_changes_dialog_->is_open();
-  return edit_modal || width_modal || export_modal || chart_add_modal || unsaved_modal;
+  return edit_modal || has_blocking_modal_dialog();
 }
 
 }  // namespace wds::ui

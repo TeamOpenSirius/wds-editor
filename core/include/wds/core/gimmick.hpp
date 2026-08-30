@@ -23,6 +23,18 @@ SplitLaneType get_split_lane_type(GimmickType gimmick) noexcept;
 bool is_jump_scratch(GimmickType gimmick) noexcept;
 bool is_one_direction(GimmickType gimmick) noexcept;
 
+// Official SplitEffects/{id} fadeIn grows LineHight.localScale.y 0→1 (shared clip).
+// Initialize does not reset LineHight rotation. Prefabs whose LineHight is
+// rotated 180° about Z grow from the tip (preview percent 0); identity grows
+// from the judge line (percent 1). Client 1.96.0 is frozen — these IDs are the
+// complete z=180 set. Not gimmickType, not scratch_length % 2.
+bool split_fade_grows_from_tip(int32_t scratch_length) noexcept;
+
+// Official Line[i] index for a left-to-right world slot (0 = leftmost).
+// LineHight z=180 flips world X, so world_index maps to split_count - world_index.
+int32_t split_color_slot(int32_t scratch_length, int32_t split_count,
+                         int32_t world_index) noexcept;
+
 // Sirius ScratchHoldEnd / JumpScratch end span from scratchLength (signed):
 //   sl == 0 → [lane, endLane] (bidirectional arrows)
 //   sl > 0  → [lane, lane+sl-1] (right arrows)
@@ -31,6 +43,14 @@ std::pair<int32_t, int32_t> get_scratch_end_lane_range(const NotationNote& note)
 
 // JumpScratch gimmick: same span formula; otherwise returns the body lane range.
 std::pair<int32_t, int32_t> get_jump_scratch_lane_range(const NotationNote& note) noexcept;
+
+// Single entry for edit draw + preview snapshot: ScratchHold body end span, else
+// JumpScratch gimmick span, else body [lane, endLane]. Returns {lane, width}.
+std::pair<int32_t, int32_t> resolve_end_lane_span(const NotationNote& note) noexcept;
+
+// Inclusive occupied [lane, width] for playfield bounds: body union ScratchHold
+// JumpScratch / end-cap cover. Other notes use the body span only.
+std::pair<int32_t, int32_t> occupied_lane_span(const NotationNote& note) noexcept;
 
 // Encode ScratchHold end lanes into scratch_length. End is clamped to fully cover
 // the body. Equal span → 0 (call apply_scratch_chain_joint_direction for joint
@@ -42,6 +62,28 @@ void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t en
 // at most one side — i.e. Sirius scratchLength can encode the exact cover.
 bool scratch_hold_end_cover_representable(const NotationNote& body, int32_t cover_left,
                                           int32_t cover_right) noexcept;
+
+// Snap a chained next ScratchHold's left lane so the JumpScratch cover of `prev_body`
+// stays Sirius-representable. Lanes that would extend both sides of `prev_body` form
+// an open illegal interval; that interval is split at its midpoint and desired positions
+// adsorb to the nearest legal lane on the left / right. `desired_lane` may be fractional
+// (pointer-derived left edge). Result is clamped to [0, lane_count - next_width].
+int32_t snap_scratch_chain_next_lane(const NotationNote& prev_body, int32_t next_width,
+                                     float desired_lane, int32_t lane_count) noexcept;
+
+// Snap a chained ScratchHold *segment* left-lane while dragging it horizontally.
+// `prev` / `next` are the time-abutting neighbors (omit `next` when this is the
+// chain terminal — its JumpScratch span stays encoded on `body` and must remain
+// in playfield). Illegal lanes are those where a joint JumpScratch would extend
+// both sides of its owner body. Among legal lanes, pick nearest to `desired_lane`;
+// ties go to the lane closer to `body.lane`, then the lower lane.
+int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationNote& body,
+                                       const NotationNote* next, float desired_lane,
+                                       int32_t lane_count) noexcept;
+
+// Set `prev`'s JumpScratch to the exact union of `prev` and `next` bodies, then
+// re-encode joint direction. Caller must pass a Sirius-representable pair.
+void sync_scratch_chain_joint(NotationNote& prev, const NotationNote& next) noexcept;
 
 // Chain-joint JumpScratch direction from adjacent body edges (not the terminal end-cap).
 // Each side: next more-left → -1, same → 0, more-right → +1. Sum of left+right scores:

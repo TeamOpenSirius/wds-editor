@@ -19,7 +19,10 @@ class StatusBar final : public wds::interaction::Widget {
   const std::string& message() const noexcept { return text_; }
   StatusLevel level() const noexcept { return level_; }
 
+  // Tree paint is a no-op: the bar is drawn in the post-overlay pass so it
+  // occludes edit-area note skins (depth write off; skins append after solid UI).
   void paint(wds::interaction::UiPainter& painter) const override;
+  void paint_overlay(wds::interaction::UiPainter& painter) const;
 
  private:
   std::string text_;

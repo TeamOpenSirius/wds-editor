@@ -3,6 +3,7 @@
 #include "wds/interaction/platform.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace wds::interaction {
 namespace {
@@ -15,6 +16,17 @@ bool is_middle(PointerButton button) noexcept { return button == PointerButton::
 
 bool is_primary_modifier(const Modifiers& mods) noexcept {
   return primary_modifier_down(mods);
+}
+
+bool is_visible_range_wheel_modifiers(const Modifiers& mods) noexcept {
+  if (!is_primary_modifier(mods) || mods.shift || mods.alt) {
+    return false;
+  }
+#ifdef __APPLE__
+  return !mods.control;
+#else
+  return !mods.super;
+#endif
 }
 
 bool is_toggle_select(const PointerDownEvent& event) noexcept {
@@ -72,6 +84,30 @@ bool is_place_button(PointerButton button) noexcept {
 
 bool is_left_button(PointerButton button) noexcept { return is_left(button); }
 bool is_right_button(PointerButton button) noexcept { return is_right(button); }
+
+bool is_curve_fill_modifiers(const Modifiers& mods) noexcept {
+  return mods.shift && is_primary_modifier(mods) && !mods.alt;
+}
+
+bool is_curve_fill_modifier_press(const KeyDownEvent& event) noexcept {
+  return !event.repeat && is_curve_fill_modifiers(event.mods);
+}
+
+bool is_curve_fill_placement_allowed(bool place_hold_body, bool scratch_hold) noexcept {
+  return place_hold_body && scratch_hold;
+}
+
+bool is_curve_fill_confirm(const PointerDownEvent& event) noexcept {
+  return is_left(event.button) && is_curve_fill_modifiers(event.mods);
+}
+
+bool is_curve_fill_confirm(const PointerUpEvent& event) noexcept {
+  return is_right(event.button) && is_curve_fill_modifiers(event.mods);
+}
+
+bool suppress_idle_placement_ghost(const Modifiers& mods, bool note_drawing) noexcept {
+  return is_primary_modifier(mods) && !note_drawing;
+}
 
 bool is_vertical_swipe(SwipeDirection swipe) noexcept {
   return swipe == SwipeDirection::Up || swipe == SwipeDirection::Down;
@@ -160,8 +196,12 @@ void set_invert_visible_range_scroll(bool enabled) noexcept {
 float scroll_wheel_speed() noexcept { return scroll_wheel_speed_storage(); }
 
 void set_scroll_wheel_speed(float speed) noexcept {
-  if (speed < 0.25f) speed = 0.25f;
-  if (speed > 3.0f) speed = 3.0f;
+  if (!std::isfinite(speed)) {
+    speed = 1.0f;
+  } else {
+    if (speed < 0.25f) speed = 0.25f;
+    if (speed > 3.0f) speed = 3.0f;
+  }
   scroll_wheel_speed_storage() = speed;
 }
 

@@ -4,6 +4,7 @@
 
 #include <wds/interaction/widget.hpp>
 
+#include <cstdint>
 #include <functional>
 
 namespace wds::ui {
@@ -33,9 +34,9 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
   void apply_playback_rate();
   void sync_from_state() const;
   void notify_persist() const;
+  int64_t fallback_chart_duration_ms() const;
 
   ChartPreviewPanel& preview_;
-  double speed_ = 5.0;
   float music_gain_ = 1.0f;
   float sfx_gain_ = 1.0f;
   float playback_rate_ = 1.0f;
@@ -43,14 +44,14 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
   bool sfx_muted_ = false;
   std::function<void()> on_persist_;
 
-  wds::interaction::Widget* speed_minus_ = nullptr;
-  wds::interaction::Widget* speed_combo_ = nullptr;
-  wds::interaction::Widget* speed_plus_ = nullptr;
   wds::interaction::Widget* seek_slider_ = nullptr;
   wds::interaction::Widget* music_combo_ = nullptr;
   wds::interaction::Widget* music_mute_ = nullptr;
   wds::interaction::Widget* sfx_combo_ = nullptr;
   wds::interaction::Widget* sfx_mute_ = nullptr;
   wds::interaction::Widget* rate_combo_ = nullptr;
+
+  mutable uint64_t cached_span_revision_ = ~uint64_t{0};
+  mutable int64_t cached_chart_span_ms_ = 1;
 };
 }  // namespace wds::ui

@@ -52,6 +52,8 @@ tl.apply(snap);              // 与 audio Transport / core 对齐
 - `Microseconds`：内部精度
 - `PlaybackState`：`Playing` / `Paused`
 - `TimelineSnapshot`：`{ position, state }` — audio `Transport::poll` 与 core `apply_timeline` 的契约类型
+- `ms_to_us`：在 `int64` 边界饱和，不溢出；C++ `/` 朝零截断，最后可精确换算的毫秒是 `INT64_MIN/1000` 与 `INT64_MAX/1000`
+- `us_to_ms_floor` / `us_to_ms_round`：后者按绝对值 ≥500µs 远离零取整，极值同样不溢出
 
 ### 日志（`<wds/common/log.hpp>`）
 
@@ -64,6 +66,8 @@ tl.apply(snap);              // 与 audio Transport / core 对齐
 
 ## 测试
 
+交叉编译时不编 `wds_common_tests`。macOS 产品门禁见仓库根 README；Linux 宿主仅测 common+core 可用 `scripts/run-host-core-tests.sh`。不要对 `build-win-x86_64` 跑 `ctest`。
+
 ```bash
-ctest -R wds_common_tests
+ctest --test-dir build-macos-arm -R wds_common_tests --output-on-failure
 ```

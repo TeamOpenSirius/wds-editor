@@ -193,11 +193,20 @@ std::string wrap_text_to_width(FontAtlas& font, const std::string& text, float p
   return out;
 }
 
+// One size for every wrap label in the same host rect — scale with the cell,
+// never shrink per string (long tips wrap instead).
+float resolve_wrapped_px(const Rect& bounds, float requested) {
+  const float raw =
+      requested > 0.0f ? requested : theme::tooltip_px_for_host(std::min(bounds.w, bounds.h));
+  // Snap to the tip bake bucket so NEAREST samples 1:1 instead of a soft scale.
+  return theme::tooltip_bake_bucket(raw);
+}
+
 void draw_centered_lines(UiPainter& painter, const Rect& bounds, const std::string& wrapped,
                          const Color& color, float z, float pixel_size) {
   auto& font = FontAtlas::instance();
   const Vec2 block = font.measure(wrapped, pixel_size);
-  float y = bounds.y + std::max(0.0f, (bounds.h - block.y) * 0.5f);
+  float y = bounds.y + std::max(0.0f, (bounds.h - block.y) * 0.5f) + font.line_nudge(pixel_size);
   std::size_t start = 0;
   while (start <= wrapped.size()) {
     const std::size_t end = wrapped.find('\n', start);
@@ -289,7 +298,15 @@ void UiPainter::sprite(const Rect& bounds, const wds::renderer::TextureInfo& tex
   if (!texture || bounds.w <= 0.0f || bounds.h <= 0.0f) {
     return;
   }
-  sprites_.push_back({bounds, texture, tint, z, flip_x});
+  sprites_.push_back({bounds, texture, tint, z, flip_x, false});
+}
+
+void UiPainter::sprite_vfade(const Rect& bounds, const wds::renderer::TextureInfo& texture,
+                             const Color& tint, float z, float alpha_bottom, float alpha_top) {
+  if (!texture || bounds.w <= 0.0f || bounds.h <= 0.0f) {
+    return;
+  }
+  sprites_.push_back({bounds, texture, tint, z, false, false, alpha_bottom, alpha_top});
 }
 
 namespace {
@@ -349,7 +366,11 @@ void UiPainter::text(const Rect& bounds, const std::string& text, const Color& c
       glyph.v0 = q.v0;
       glyph.u1 = q.u1;
       glyph.v1 = q.v1;
-      sprite(q.dst, glyph, color, z);
+      if (q.dst.w <= 0.0f || q.dst.h <= 0.0f) {
+        continue;
+      }
+      // font_atlas: resolve GPU id at flush after sync_ui_font_texture.
+      sprites_.push_back({q.dst, glyph, color, z, false, true});
     }
     return;
   }
@@ -367,30 +388,10 @@ void UiPainter::label(const Rect& bounds, const std::string& text, const Color& 
   font.ensure_glyphs(text);
   if (font.ready() || font.atlas_width() > 0) {
     const float max_w = std::max(1.0f, bounds.w - 4.0f);
-    const float max_h = std::max(1.0f, bounds.h - 4.0f);
 
     if (wrap) {
-#if defined(_WIN32)
-      // Prefer larger tips on 1× so bake≈draw; avoid crushing to ~7px mush.
-      const float kMinReadable = theme::px(11.0f);
-      const float height_frac = 0.55f;
-#else
-      const float kMinReadable = theme::px(7.0f);
-      const float height_frac = 0.42f;
-#endif
-      float tip_px =
-          std::clamp(std::min(max_h * height_frac, theme::kFontSizeTooltip), kMinReadable,
-                     theme::kFontSizeTooltip);
-      if (pixel_size > 0.0f) {
-        tip_px = pixel_size;
-      }
-      std::string wrapped = wrap_text_to_width(font, text, tip_px, max_w);
-      Vec2 size = font.measure(wrapped, tip_px);
-      for (int guard = 0; guard < 8 && size.y > max_h && tip_px > kMinReadable; ++guard) {
-        tip_px = std::max(kMinReadable, tip_px * 0.88f);
-        wrapped = wrap_text_to_width(font, text, tip_px, max_w);
-        size = font.measure(wrapped, tip_px);
-      }
+      const float tip_px = resolve_wrapped_px(bounds, pixel_size);
+      const std::string wrapped = wrap_text_to_width(font, text, tip_px, max_w);
       if (font.ready()) {
         draw_centered_lines(*this, bounds, wrapped, color, z, tip_px);
       } else {
@@ -403,7 +404,7 @@ void UiPainter::label(const Rect& bounds, const std::string& text, const Color& 
     const Vec2 size = font.measure(text, px);
     const float x =
         left_align ? bounds.x + 2.0f : bounds.x + std::max(0.0f, (bounds.w - size.x) * 0.5f);
-    const float y = bounds.y + std::max(0.0f, (bounds.h - size.y) * 0.5f);
+    const float y = bounds.y + (bounds.h - size.y) * 0.5f + font.line_nudge(px);
     if (font.ready()) {
       this->text({x, y, bounds.w, bounds.h}, text, color, z, px);
     } else {
@@ -453,6 +454,7 @@ void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::Texture
     }
   };
   emit_rects(rects_);
+  const wds::renderer::TextureId font_id = FontAtlas::instance().texture().id;
   for (const auto& sprite : sprites_) {
     auto quad = rect_to_quad(sprite.bounds, framebuffer_width, framebuffer_height, screen);
     float u0 = sprite.texture.u0;
@@ -462,8 +464,21 @@ void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::Texture
     if (sprite.flip_x) {
       std::swap(u0, u1);
     }
-    batch.add_quad(sprite.texture.id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
-                   sprite.tint.g, sprite.tint.b);
+    const wds::renderer::TextureId tex_id =
+        sprite.font_atlas ? font_id : sprite.texture.id;
+    if (sprite.font_atlas &&
+        (font_id == wds::renderer::kInvalidTextureId || !FontAtlas::instance().texture())) {
+      continue;
+    }
+    if (sprite.alpha_bottom >= 0.0f || sprite.alpha_top >= 0.0f) {
+      const float a_bot = sprite.alpha_bottom >= 0.0f ? sprite.alpha_bottom : sprite.tint.a;
+      const float a_top = sprite.alpha_top >= 0.0f ? sprite.alpha_top : sprite.tint.a;
+      batch.add_quad_corners(tex_id, quad, sprite.z, a_bot, a_bot, a_top, a_top, u0, v0, u1, v1,
+                             sprite.tint.r, sprite.tint.g, sprite.tint.b);
+    } else {
+      batch.add_quad(tex_id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
+                     sprite.tint.g, sprite.tint.b);
+    }
   }
   emit_rects(front_rects_);
 }

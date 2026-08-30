@@ -4,6 +4,7 @@
 #include "wds/ui/resource_paths.hpp"
 
 #include <wds/audio/audio_engine.hpp>
+#include <wds/common/utf8_path.hpp>
 
 #include <cstdlib>
 #include <cstdio>
@@ -16,8 +17,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#elif defined(__APPLE__)
-#include <mach-o/dyld.h>
 #else
 #include <dlfcn.h>
 #endif
@@ -27,37 +26,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-fs::path exe_dir_from_argv0(const char* argv0) {
-  std::error_code ec;
-#if defined(__APPLE__)
-  // Prefer the real Mach-O path — argv[0] can be wrong under LaunchServices /
-  // App Translocation / odd shells, which then breaks bundled ICD discovery.
-  uint32_t size = 0;
-  _NSGetExecutablePath(nullptr, &size);
-  if (size > 0) {
-    std::string buf(size, '\0');
-    if (_NSGetExecutablePath(buf.data(), &size) == 0) {
-      buf.resize(std::strlen(buf.c_str()));
-      const fs::path resolved = fs::weakly_canonical(fs::path(buf), ec);
-      if (!ec && !resolved.empty()) {
-        return resolved.parent_path();
-      }
-      return fs::path(buf).lexically_normal().parent_path();
-    }
-  }
-#endif
-  if (argv0 == nullptr || argv0[0] == '\0') {
-    return {};
-  }
-  fs::path exe = fs::path(argv0);
-  if (!exe.is_absolute()) {
-    exe = fs::current_path(ec) / exe;
-  }
-  if (ec) {
-    return {};
-  }
-  return exe.lexically_normal().parent_path();
-}
+using wds::common::executable_dir;
+using wds::common::path_from_utf8;
+using wds::common::path_to_utf8;
 
 bool is_regular(const fs::path& p) {
   std::error_code ec;
@@ -78,12 +49,14 @@ bool any_exists(std::initializer_list<fs::path> paths) {
   return false;
 }
 
+#if defined(__APPLE__)
 bool looks_like_macos_app(const fs::path& exe_dir) {
   // .../Something.app/Contents/MacOS
   const auto macos = exe_dir.filename();
   const auto contents = exe_dir.parent_path().filename();
   return macos == "MacOS" && contents == "Contents";
 }
+#endif
 
 void require_resource_dir(StartupDependencyReport& report, const std::string& resolved,
                           const char* label, bool (*looks_ok)(const std::string&)) {
@@ -115,6 +88,7 @@ void check_bass_runtime(StartupDependencyReport& report, const fs::path& exe_dir
 #endif
 }
 
+#if defined(__APPLE__)
 fs::path bundled_moltenvk_icd(const fs::path& exe_dir) {
   // Loader auto-discovery path for .app bundles. Must live under Resources/
   // (not Contents/MacOS/) so codesign can seal the bundle.
@@ -131,6 +105,7 @@ fs::path bundled_moltenvk_icd(const fs::path& exe_dir) {
   }
   return {};
 }
+#endif
 
 void check_vulkan_runtime_files(StartupDependencyReport& report, const fs::path& exe_dir) {
 #if defined(__APPLE__)
@@ -197,7 +172,7 @@ std::string StartupDependencyReport::format_message() const {
 
 void prepare_macos_vulkan_environment(const char* argv0) {
 #if defined(__APPLE__)
-  const fs::path exe_dir = exe_dir_from_argv0(argv0);
+  const fs::path exe_dir = executable_dir(argv0);
   if (!looks_like_macos_app(exe_dir)) {
     return;
   }
@@ -210,7 +185,8 @@ void prepare_macos_vulkan_environment(const char* argv0) {
   // and vkCreateInstance fails with VK_ERROR_INCOMPATIBLE_DRIVER (-9).
   std::error_code ec;
   const fs::path abs_icd = fs::weakly_canonical(icd, ec);
-  const std::string icd_utf8 = (!ec && !abs_icd.empty() ? abs_icd : icd).string();
+  const std::string icd_utf8 =
+      path_to_utf8(!ec && !abs_icd.empty() ? abs_icd : icd);
   ::setenv("VK_ICD_FILENAMES", icd_utf8.c_str(), 1);
   ::setenv("VK_DRIVER_FILES", icd_utf8.c_str(), 1);
 #else
@@ -220,7 +196,7 @@ void prepare_macos_vulkan_environment(const char* argv0) {
 
 StartupDependencyReport check_startup_dependencies(const char* argv0) {
   StartupDependencyReport report;
-  const fs::path exe_dir = exe_dir_from_argv0(argv0);
+  const fs::path exe_dir = executable_dir(argv0);
 
   check_bass_runtime(report, exe_dir);
   check_vulkan_runtime_files(report, exe_dir);
@@ -230,8 +206,9 @@ StartupDependencyReport check_startup_dependencies(const char* argv0) {
                        looks_like_effects_dir);
 
   const std::string icons = resolve_icons_dir(argv0);
-  if (icons.empty() || !is_dir(icons) ||
-      !(is_regular(fs::path(icons) / "open.svg") || is_regular(fs::path(icons) / "open.png"))) {
+  const fs::path icons_path = path_from_utf8(icons);
+  if (icons.empty() || !is_dir(icons_path) ||
+      !(is_regular(icons_path / "open.svg") || is_regular(icons_path / "open.png"))) {
     report.missing.push_back("icons 工具栏图标（open.svg / open.png）");
   }
 

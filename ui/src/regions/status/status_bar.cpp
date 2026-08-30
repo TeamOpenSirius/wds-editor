@@ -14,7 +14,11 @@ void StatusBar::set_message(std::string text, StatusLevel level) {
   level_ = level;
 }
 
-void StatusBar::paint(wds::interaction::UiPainter& painter) const {
+void StatusBar::paint(wds::interaction::UiPainter& /*painter*/) const {
+  // See paint_overlay — drawn after edit skins in UiManager::build_post_overlay_batch.
+}
+
+void StatusBar::paint_overlay(wds::interaction::UiPainter& painter) const {
   const auto b = absolute_bounds();
   painter.fill_rect(b, th::kSurface);
   // Top hairline separates the bar from edit/preview.

@@ -58,6 +58,34 @@ Windows MSI uses [msitools](https://wiki.gnome.org/msitools) `wixl` on the Linux
 
 `wds_editor` needs **target** GLFW in the prefix (e.g. vcpkg `glfw3:x64-mingw-static`). Missing GLFW skips the editor with a status message.
 
+## Tests: native CTest vs cross-compile
+
+The product test gate is **macOS native CTest**. CI `macos-arm` order is `--no-package` → `ctest` → `--package-only`:
+
+```bash
+./scripts/build-target.sh macos-arm --no-package
+ctest --test-dir build-macos-arm --output-on-failure
+./scripts/build-target.sh --package-only macos-arm
+```
+
+| Host / target | CTest | What happens |
+|---------------|-------|----------------|
+| **macOS arm64 native** (`macos-arm`) | Run on the host | After `./scripts/build-target.sh macos-arm --no-package`, use `ctest --test-dir build-macos-arm --output-on-failure`, then `./scripts/build-target.sh --package-only macos-arm`. Binaries are host-native. |
+| **Linux → Windows** (`win-x86_64`) | Do **not** run | Cross-compile (and package) only. The Linux host cannot execute those PE binaries. Do not run `ctest` against `build-win-x86_64`. |
+
+When `CMAKE_CROSSCOMPILING`:
+
+- `common` / `audio-player` / `interaction-interface` skip **building** their test targets.
+- `core` / `renderer` / `chart-render` / `ui` may still **build** test executables, but `add_test` is skipped (host `ctest` cannot launch PE). Cross builds also default `WDS_CORE_BUILD_TESTS=OFF`.
+
+Linux host, common+core unit tests only (not a product configure, not a Windows runtime check):
+
+```bash
+./scripts/run-host-core-tests.sh
+```
+
+Opt-in benches (`WDS_CORE_BUILD_BENCHMARKS`, `WDS_RENDERER_BUILD_BENCHMARKS`) are **not** CTest and are not run on the Linux packaging host. Renderer path bench expects a host Vulkan/GLFW window (validated on macOS / MoltenVK). This document does not claim Windows-native test or bench results.
+
 ## Installing toolchains (Linux host → Windows)
 
 ```bash
@@ -82,8 +110,13 @@ WDS_VCPKG_ROOT="/path/to/vcpkg"
 
 ```bash
 ./scripts/build-target.sh win-x86_64
-# core only:
-./scripts/build-target.sh win-x86_64 -- -DWDS_BUILD_RENDERER=OFF
+# core-only: renderer + interaction + ui must all be OFF (renderer-only OFF is FATAL).
+./scripts/build-target.sh win-x86_64 -- \
+  -DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_INTERACTION=OFF -DWDS_BUILD_UI=OFF
+# core without audio:
+./scripts/build-target.sh win-x86_64 -- \
+  -DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_INTERACTION=OFF -DWDS_BUILD_UI=OFF \
+  -DWDS_BUILD_AUDIO=OFF
 ```
 
 ## Native macOS (arm64)

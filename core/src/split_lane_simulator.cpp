@@ -1,13 +1,13 @@
 #include <wds/core/split_lane_simulator.hpp>
 
+#include <wds/core/split_fade.hpp>
+
 #include <algorithm>
 #include <cmath>
 
 namespace wds::chart_editor {
 
 namespace {
-
-constexpr int64_t kMinSplitLaneShowingMs = 1500;
 
 const NotationNote* find_note_by_id(const std::vector<NotationNote>& notes, int32_t id) {
   for (const auto& note : notes) {
@@ -16,10 +16,6 @@ const NotationNote* find_note_by_id(const std::vector<NotationNote>& notes, int3
     }
   }
   return nullptr;
-}
-
-int64_t sec_to_ms(float sec) {
-  return std::max<int64_t>(0, static_cast<int64_t>(std::llround(static_cast<double>(sec) * 1000.0)));
 }
 
 }  // namespace
@@ -35,13 +31,12 @@ bool SplitLaneSimulator::is_split_active(const NotationNote& note, const MusicTi
   }
 
   const int64_t start_ms = note.start_ms(timing);
-  const int64_t end_ms = note.end_ms(timing);
-  const int64_t visible_end = std::max(end_ms, start_ms + kMinSplitLaneShowingMs);
-  const int64_t appear_ms = sec_to_ms(config_.split_line_animation_start_sec);
-  const int64_t disappear_ms = sec_to_ms(config_.split_line_animation_end_sec);
+  const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
+  const int64_t appear_ms = split_fade_sec_to_ms(config_.split_line_animation_start_sec);
+  const int64_t disappear_ms = split_fade_sec_to_ms(config_.split_line_animation_end_sec);
 
-  // Match Sirius SplitLine: spawn at beat-appear, despawn at endBeat+disappear.
-  return preview_time_ms >= start_ms - appear_ms && preview_time_ms < visible_end + disappear_ms;
+  // Official: fadeIn starts at start−Show; fadeOut starts at EndMilliseconds.
+  return preview_time_ms >= start_ms - appear_ms && preview_time_ms < end_ms + disappear_ms;
 }
 
 void SplitLaneSimulator::fill_instance(PreviewSplitLaneInstance& out, const NotationNote& note,
@@ -49,32 +44,41 @@ void SplitLaneSimulator::fill_instance(PreviewSplitLaneInstance& out, const Nota
                                        int64_t preview_time_ms) const {
   const int32_t split_count = get_split_count(note.gimmick_type);
   const int64_t start_ms = note.start_ms(timing);
-  const int64_t end_ms = note.end_ms(timing);
-  const int64_t visible_end = std::max(end_ms, start_ms + kMinSplitLaneShowingMs);
+  const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
   out.apply_identity(note.id, split_count, get_split_lane_type(note.gimmick_type),
-                     note.scratch_length, start_ms, visible_end);
-  out.apply_state(/*show=*/true, preview_time_ms < visible_end,
+                     note.scratch_length, start_ms, end_ms);
+  out.apply_state(/*show=*/true, preview_time_ms < end_ms,
                   config_.lane_count + split_count);
 
-  const int64_t appear_ms = std::max<int64_t>(1, sec_to_ms(config_.split_line_animation_start_sec));
-  const int64_t disappear_ms = std::max<int64_t>(1, sec_to_ms(config_.split_line_animation_end_sec));
+  const int64_t appear_ms = split_fade_sec_to_ms(config_.split_line_animation_start_sec);
+  const int64_t disappear_ms = split_fade_sec_to_ms(config_.split_line_animation_end_sec);
 
   if (preview_time_ms < start_ms) {
-    // Appear: drawAppearLine(t) with t = now - (beat - appear), p = 1 - t/appear
-    // Uses Transform 1 sprites (preview extra=1).
-    const float t =
-        static_cast<float>(preview_time_ms - (start_ms - appear_ms)) / static_cast<float>(appear_ms);
-    const float p = 1.0f - std::clamp(t, 0.0f, 1.0f);
-    out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/p, /*percent_end=*/1.0f,
-                        /*cover_alpha=*/p, /*anim_phase=*/0);
-  } else if (preview_time_ms <= visible_end) {
+    // Official clip: LineHight.localScale.y cubic. Screen percent is that
+    // local-Y tip projected through LaneGroup Rx=60° + perspective FOV 50.
+    const float t = std::clamp(
+        static_cast<float>(preview_time_ms - (start_ms - appear_ms)) /
+            static_cast<float>(appear_ms),
+        0.0f, 1.0f);
+    if (split_fade_grows_from_tip(note.scratch_length)) {
+      const float end = official_split_fade_in_from_tip_end(t);
+      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/end,
+                          /*cover_alpha=*/1.0f - end, /*anim_phase=*/0);
+    } else {
+      const float start = official_split_fade_in_from_judge_start(t);
+      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/start, /*percent_end=*/1.0f,
+                          /*cover_alpha=*/start, /*anim_phase=*/0);
+    }
+  } else if (preview_time_ms <= end_ms) {
     out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
                         /*cover_alpha=*/0.0f, /*anim_phase=*/1);
   } else {
-    // Disappear: a = 1 - t/disappear; Transform 2 sprites (preview extra=2).
-    const float t =
-        static_cast<float>(preview_time_ms - visible_end) / static_cast<float>(disappear_ms);
-    const float a = 1.0f - std::clamp(t, 0.0f, 1.0f);
+    // Official SplitEffect_fadeOut_anim: full geometry, m_Color.a 1→0 over 0.3s
+    // (1 − smoothstep). Hide starts at EndMilliseconds.
+    const float t = std::clamp(
+        static_cast<float>(preview_time_ms - end_ms) / static_cast<float>(disappear_ms),
+        0.0f, 1.0f);
+    const float a = official_split_fade_out_alpha(t);
     out.apply_animation(/*line_alpha=*/a, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
                         /*cover_alpha=*/1.0f - a, /*anim_phase=*/2);
   }

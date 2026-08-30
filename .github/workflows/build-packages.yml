@@ -82,7 +82,7 @@ jobs:
           name: wds-win-x86_64
           path: dist/wds-win-x86_64.msi
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   macos-arm:
     name: macos-arm
@@ -105,10 +105,16 @@ jobs:
           .venv/bin/pip install dmgbuild pillow
           echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Build and package
+      - name: Build
+        run: ./scripts/build-target.sh macos-arm --no-package
+
+      - name: Test
+        run: ctest --test-dir build-macos-arm --output-on-failure
+
+      - name: Package
         run: |
           export PATH="${{ github.workspace }}/.venv/bin:$PATH"
-          ./scripts/build-target.sh macos-arm
+          ./scripts/build-target.sh --package-only macos-arm
 
       - name: Upload DMG
         uses: actions/upload-artifact@v6
@@ -116,7 +122,7 @@ jobs:
           name: wds-macos-arm
           path: dist/wds-macos-arm.dmg
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   release:
     name: Publish GitHub Release

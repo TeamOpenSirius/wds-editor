@@ -27,8 +27,10 @@ Copy scripts/env.example → scripts/env.local and set WDS_VCPKG_ROOT, then:
 
   ./scripts/build-target.sh win-x86_64
 
-  # or core only:
-  ./scripts/build-target.sh win-x86_64 -- -DWDS_BUILD_RENDERER=OFF
+  # or core only (renderer + interaction + ui OFF; renderer-only OFF is FATAL):
+  ./scripts/build-target.sh win-x86_64 -- \
+    -DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_INTERACTION=OFF -DWDS_BUILD_UI=OFF
+  # core without audio: add -DWDS_BUILD_AUDIO=OFF
 
 vcpkg triplet: x64-mingw-static (install libpng zlib glfw3 vulkan-loader).
 ]=])

@@ -22,9 +22,9 @@ audio-player/
 ├── src/
 ├── tests/
 └── third_party/bass/
-    ├── include/bass.h
-    ├── macos-arm/libbass.dylib
-    └── win-x86_64/bass.dll + bass.lib
+    ├── include/bass.h + bassmix.h
+    ├── macos-arm/libbass.dylib + libbassmix.dylib
+    └── win-x86_64/bass.dll + bassmix.dll (+ .lib)
 ```
 
 CMake：`wds_audio_player`（别名 `wds::audio_player`）。  
@@ -55,7 +55,11 @@ transport.start_pending_music();            // 武装 SFX 后再真正出声
 | `poll(wall_delta_us)` | 返回 `wds::common::TimelineSnapshot` |
 | `set_chart_offset_ms` | 谱面相对音乐延迟（UI 用；播放头仍与音乐 1:1） |
 | `set_playback_rate` | 预览时钟与 BGM 速率；SFX 采样率保持 1× |
+| `start_pending_music` | 武装 SFX 后再出声；退避未到时返回 false |
+| `recovery_attempt_count` / `recovery_pending` | 流恢复诊断 |
 | `audio()` | 访问底层 `AudioEngine` |
+
+BGM 停滞 / 非自然结束停止时，`Transport` 用墙钟退避重试：第一次立即，之后 50 → 100 → 200 → 400 → 800 → 1000ms（封顶）。自然播完不走恢复。`int64` 墙钟累加饱和，不溢出。
 
 ### `AudioEngine`
 
@@ -63,21 +67,29 @@ transport.start_pending_music();            // 武装 SFX 后再真正出声
 
 ### `HitSfxPlayer`
 
-按判定结果播放 `effects/` 下音效；由 preview 映射表调度。
+按判定结果播放 `effects/` 下音效；由 preview 映射表调度。`pending_sfx_sync_count()` 与 `AudioEngine` 同一计数。暂停 / seek / scrub 会清掉 pending 并切断 one-shot / Hold。
+
+### Pending SFX sync（10s / 4096）
+
+未来 POS sync 只武装 **heard 之后 10s 以内**（含恰好 10s），且 pending **最多 4096**。再远为 TooFar，满员为 AtCapacity；二者都不永久占「已播放」标记，下一 tick 可重试。TooFar 优先于满员。已到期或过去的 hit 立即播，不占 pending 名额。`target−heard` 用饱和减法，避免 `int64` 溢出。
+
+诊断：看 `pending_sfx_sync_count()`；seek 后应为 0。Debug 下 `ChannelSetSync` 失败会 `WDS_LOG`。
 
 ## 依赖与平台
 
-| 目标 | BASS 路径 |
+| 目标 | BASS / BASSmix 路径 |
 |------|-----------|
-| `macos-arm` | `third_party/bass/macos-arm/libbass.dylib` |
-| `win-x86_64` | `third_party/bass/win-x86_64/bass.dll` |
+| `macos-arm` | `third_party/bass/macos-arm/libbass.dylib` + `libbassmix.dylib` |
+| `win-x86_64` | `third_party/bass/win-x86_64/bass.dll` + `bassmix.dll` |
 
 Linux **不是**产品目标（无 BASS linux 二进制）；在 Linux 主机上请交叉编译 Windows。
 
 ## 测试
 
+交叉编译时不编 `wds_audio_player_tests`。macOS 门禁见根 README。不要对 `build-win-x86_64` 跑 `ctest`。
+
 ```bash
-ctest -R wds_audio_player_tests
+ctest --test-dir build-macos-arm -R wds_audio_player_tests --output-on-failure
 ```
 
 关闭测试：`-DWDS_AUDIO_BUILD_TESTS=OFF`。

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio_engine.hpp"
+#include "recovery_backoff.hpp"
 
 #include <wds/common/timeline.hpp>
 
@@ -53,7 +54,14 @@ class Transport {
   wds::common::TimelineSnapshot poll(int64_t wall_delta_us);
 
   // Begin audible BGM after hit-SFX schedules have been armed for this play request.
-  void start_pending_music();
+  // True when there is nothing left to start (already started, or no pending work).
+  // False when start is still pending (play failed or backoff has not elapsed).
+  bool start_pending_music();
+
+  bool music_start_pending() const noexcept { return music_start_pending_; }
+  bool music_seek_pending() const noexcept { return music_seek_pending_; }
+  int recovery_attempt_count() const noexcept { return recovery_.attempt_count(); }
+  bool recovery_pending() const noexcept { return recovery_.pending(); }
 
   wds::common::TimelineSnapshot committed_snapshot() const noexcept;
   wds::common::Microseconds committed_position() const noexcept { return committed_position_; }
@@ -64,8 +72,12 @@ class Transport {
   wds::common::Microseconds clamp_time(wds::common::Microseconds time) const;
 
   AudioEngine audio_;
+  RecoveryBackoff recovery_;
   bool playing_ = false;
   bool music_start_pending_ = false;
+  bool music_seek_pending_ = false;
+  bool sought_this_poll_ = false;
+  wds::common::Microseconds music_seek_target_{0};
   wds::common::Microseconds committed_position_{0};
   // EMA of BASS music position used as the smooth audio master (µs).
   int64_t filtered_audio_us_ = 0;
