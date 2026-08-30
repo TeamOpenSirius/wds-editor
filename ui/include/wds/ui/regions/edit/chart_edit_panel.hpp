@@ -35,7 +35,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_grid(wds::chart_editor::EditGridConfig grid);
   // Seek transport so edit scroll stays locked to preview playhead.
   void set_seek_ms(std::function<void(int64_t)> seek) { seek_ms_ = std::move(seek); }
-  // Fired after exact Ctrl/Cmd+wheel changes visible_hectoms (sync toolbar + persist).
+  // Fired after exact Option+wheel changes visible_hectoms (sync toolbar + persist).
   void set_visible_range_changed_handler(std::function<void()> handler) {
     on_visible_range_changed_ = std::move(handler);
   }

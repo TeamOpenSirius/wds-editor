@@ -146,14 +146,16 @@ void ComboBox::paint_at(UiPainter& painter, float z) const {
 }
 
 void ComboBox::paint_popup_layer(UiPainter& painter) const {
-  if (!visible_ || !open_ || items_.empty()) {
+  if (!visible_ || !open_) {
     return;
   }
   const Rect abs = absolute_bounds();
-  const auto geom =
-      popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_));
-  const int highlight = popup_menu::nearest_item_index(items_, text_);
-  popup_menu::paint_items(painter, geom, items_, highlight, hover_index_);
+  if (!items_.empty()) {
+    const auto geom =
+        popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_));
+    const int highlight = popup_menu::nearest_item_index(items_, text_);
+    popup_menu::paint_items(painter, geom, items_, highlight, hover_index_);
+  }
 
   const Color outline = text_invalid()
                             ? theme::kError

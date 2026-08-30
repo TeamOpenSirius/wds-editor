@@ -50,7 +50,7 @@ class EditorToolbar final : public wds::interaction::Widget {
 
   void apply_config(const EditorUiConfig& cfg);
   void capture_config(EditorUiConfig& cfg) const;
-  // Refresh toolbar combo after edit-panel Ctrl/Cmd+wheel changes visible range.
+  // Refresh toolbar combo after edit-panel Option+wheel changes visible range.
   void sync_visible_range_field() const { sync_numeric_fields(); }
 
  private:

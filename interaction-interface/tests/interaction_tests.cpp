@@ -566,6 +566,86 @@ int main() {
            "closing one menu must not close unrelated popups");
   }
 
+  // Empty Dropdown / ComboBox: stay open with host+chevron, no item list.
+  {
+    const auto paints_menu_panel = [](const UiPainter& painter, const Rect& host) {
+      for (const auto& r : painter.rects()) {
+        const bool outside =
+            r.bounds.y >= host.bottom() - 0.5f || r.bounds.bottom() <= host.y + 0.5f;
+        if (outside && r.bounds.w >= host.w - 1.0f &&
+            r.bounds.h >= theme::kControlHeight - 1.0f) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    {
+      WidgetRoot root;
+      root.set_bounds({0, 0, 400, 400});
+      auto drop = std::make_unique<Dropdown>();
+      auto* dropdown = drop.get();
+      dropdown->set_bounds({10, 10, 80, 28});
+      dropdown->set_placeholder("(empty)");
+      root.add_child(std::move(drop));
+
+      root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+      expect(dropdown->is_open(), "empty dropdown stays open");
+      expect(dropdown->hit_test_popup({40, 50}) == nullptr, "empty dropdown has no popup list");
+
+      UiPainter idle;
+      dropdown->paint(idle);
+      expect(idle.rects().empty(), "open empty dropdown paint() skips host");
+
+      UiPainter popup;
+      dropdown->paint_popup_layer(popup);
+      expect(!popup.rects().empty(), "open empty dropdown paints host on popup layer");
+      expect(!paints_menu_panel(popup, dropdown->absolute_bounds()),
+             "empty dropdown popup layer has no menu panel");
+
+      root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+      expect(!dropdown->is_open(), "empty dropdown toggles closed on host click");
+
+      root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+      expect(dropdown->is_open(), "empty dropdown reopens");
+      root.process_frame(0.016f, {PointerDownEvent{{200, 200}, PointerButton::Left, {}}});
+      expect(!dropdown->is_open(), "click outside dismisses empty dropdown");
+    }
+
+    {
+      WidgetRoot root;
+      root.set_bounds({0, 0, 400, 400});
+      auto box = std::make_unique<ComboBox>();
+      auto* combo = box.get();
+      combo->set_bounds({10, 10, 80, 28});
+      combo->set_dropdown_only(true);
+      combo->set_text("(empty)");
+      root.add_child(std::move(box));
+
+      root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+      expect(combo->is_open(), "empty combo stays open");
+      expect(combo->hit_test_popup({40, 50}) == nullptr, "empty combo has no popup list");
+
+      UiPainter idle;
+      combo->paint(idle);
+      expect(idle.rects().empty(), "open empty combo paint() skips host");
+
+      UiPainter popup;
+      combo->paint_popup_layer(popup);
+      expect(!popup.rects().empty(), "open empty combo paints host on popup layer");
+      expect(!paints_menu_panel(popup, combo->absolute_bounds()),
+             "empty combo popup layer has no menu panel");
+
+      root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+      expect(!combo->is_open(), "empty combo toggles closed on chevron click");
+
+      root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+      expect(combo->is_open(), "empty combo reopens");
+      root.process_frame(0.016f, {PointerDownEvent{{200, 200}, PointerButton::Left, {}}});
+      expect(!combo->is_open(), "click outside dismisses empty combo");
+    }
+  }
+
   // Side-by-side editable ComboBoxes (toolbar-style): open via chevron only.
   {
     WidgetRoot root;
@@ -1239,12 +1319,22 @@ int main() {
     expect(!suppress_idle_placement_ghost(primary_only, true), "drawing primary keeps ghost");
     expect(!suppress_idle_placement_ghost(Modifiers{}, false), "idle without primary keeps ghost");
 
-    expect(is_visible_range_wheel_modifiers(primary_only),
-           "exact primary wheel adjusts visible range");
+    Modifiers option_only;
+    option_only.alt = true;
+    expect(is_visible_range_wheel_modifiers(option_only),
+           "Option wheel adjusts visible range");
+    expect(!is_visible_range_wheel_modifiers(primary_only),
+           "primary wheel does not adjust visible range");
     expect(!is_visible_range_wheel_modifiers(curve),
            "Shift+primary wheel does not adjust visible range");
-    expect(!is_visible_range_wheel_modifiers(with_alt),
-           "Alt+primary wheel does not adjust visible range");
+    Modifiers shift_option = option_only;
+    shift_option.shift = true;
+    expect(!is_visible_range_wheel_modifiers(shift_option),
+           "Shift+Option wheel does not adjust visible range");
+    Modifiers option_primary = primary_only;
+    option_primary.alt = true;
+    expect(!is_visible_range_wheel_modifiers(option_primary),
+           "Option+primary wheel does not adjust visible range");
     expect(!is_visible_range_wheel_modifiers(Modifiers{}),
            "plain wheel does not adjust visible range");
     Modifiers extra_primary = primary_only;

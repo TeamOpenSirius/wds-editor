@@ -653,7 +653,7 @@ void WidthSlotsDialog::layout_content(const wds::interaction::Rect& host) {
   const float range_y = y + ctrl_h + body_gap;
   invert_visible_range_scroll_->set_bounds({body_x, range_y, body_w, ctrl_h});
   const float speed_y = range_y + ctrl_h + body_gap;
-  // Label: 时间轴滚轮速度 — only timeline scrub, not Ctrl/Cmd+wheel visible range.
+  // Label: 时间轴滚轮速度 — only timeline scrub, not Option+wheel visible range.
   const float speed_label_w = th::px(140.0f);
   const float speed_label_gap = th::px(4.0f);
   const float combo_x = body_x + speed_label_w + speed_label_gap;

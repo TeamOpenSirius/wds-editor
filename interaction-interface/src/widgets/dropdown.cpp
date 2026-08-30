@@ -87,15 +87,18 @@ void Dropdown::paint(UiPainter& painter) const {
 }
 
 void Dropdown::paint_popup_layer(UiPainter& painter) const {
-  if (!visible_ || !open_ || items_.empty()) {
+  if (!visible_ || !open_) {
     return;
   }
   const Rect abs = absolute_bounds();
-  const auto geom =
-      popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_));
-  popup_menu::paint_items(painter, geom, items_, selected_index_, hover_index_);
+  if (!items_.empty()) {
+    const auto geom =
+        popup_menu::layout(this, abs, items_.size(), menu_scroll_, placement_of(opens_upward_));
+    popup_menu::paint_items(painter, geom, items_, selected_index_, hover_index_);
+  }
 
   // Redraw host field above menu contents (scrolled rows must not cover the value).
+  // Empty lists still paint the host so open_ flips the chevron without vanishing.
   painter.fill_rect_outline(abs, theme::kSurfaceVariant, theme::kOutline, theme::kCornerRadiusSm,
                             popup_menu::kHostZ);
   const Rect text_bounds{abs.x + 4.0f, abs.y, std::max(0.0f, abs.w - chevron_slot_w() - 4.0f),

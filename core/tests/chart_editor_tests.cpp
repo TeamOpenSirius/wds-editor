@@ -1375,6 +1375,21 @@ void test_official_playfield_visual_lanes_are_six() {
   CHECK(std::fabs(official_lane_border_alpha(100) - 51.0f / 255.0f) < 1e-5f);
 }
 
+void test_official_judge_sprite_pink_peaks_sit_on_track_edges() {
+  // img_ingame_judgment_area3 is Simple-draw at native px/PPU. The outer pink
+  // stroke peaks (columns 5 and 1113) must land on the 12-lane outer edges.
+  // Squashing the quad to BG_Lane 11.11 pulls those peaks inward.
+  const float native_w = static_cast<float>(kOfficialJudgeSpritePixelWidth) / kOfficialNoteSpritePpu;
+  CHECK(std::fabs(kOfficialJudgeSpriteWidth - native_w) < 1e-5f);
+
+  auto peak_world_x = [](float peak_px) {
+    const float w = static_cast<float>(kOfficialJudgeSpritePixelWidth);
+    return (peak_px + 0.5f) / w * kOfficialJudgeSpriteWidth - 0.5f * kOfficialJudgeSpriteWidth;
+  };
+  CHECK(std::fabs(peak_world_x(5.0f) - official_lane_edge_x(0)) < 0.01f);
+  CHECK(std::fabs(peak_world_x(1113.0f) - official_lane_edge_x(12)) < 0.01f);
+}
+
 void test_official_note_visual_width_subtracts_margin() {
   // TapNoteEntity.SetActive: size.x = notationWidth - NoteMarginWidth (0.15).
   // HoldNoteObject.Set: size.x = notationWidth - 0.15 + HoldNoteLineAdditionalWidth (0.10).
@@ -6345,6 +6360,7 @@ int main() {
   test_hold_combo_production_matches_reference_random();
   test_split_appear_phase_before_start_ms();
   test_official_playfield_visual_lanes_are_six();
+  test_official_judge_sprite_pink_peaks_sit_on_track_edges();
   test_official_note_visual_width_subtracts_margin();
   test_official_concurrent_line_is_full_notation_sliced();
   test_official_playfield_judge_ndc_and_perspective();

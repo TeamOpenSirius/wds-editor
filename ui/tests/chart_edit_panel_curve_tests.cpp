@@ -67,6 +67,12 @@ Modifiers primary_mods() {
   return mods;
 }
 
+Modifiers option_mods() {
+  Modifiers mods;
+  mods.alt = true;
+  return mods;
+}
+
 Modifiers curve_mods() {
   Modifiers mods = primary_mods();
   mods.shift = true;
@@ -695,14 +701,22 @@ void test_dialog_confirm_keeps_toolbar_fill_and_delete_falls_back() {
   CHECK_EQ(dropdown->selected_label(), std::string(kEmptyCurveTemplateLabel));
 }
 
-void test_exact_primary_wheel_updates_visible_range_and_playhead_grid() {
+void test_exact_option_wheel_updates_visible_range_and_playhead_grid() {
   Harness h;
   const auto pos = h.at_tick_lane(480, 2);
   const int32_t before = h.panel.viewport().grid().visible_hectoms;
   const float judgeline = h.panel.viewport().judgeline_y();
-  h.panel.on_scroll(wds::interaction::ScrollEvent{pos, 0.0f, 1.0f, primary_mods()});
+  h.panel.on_scroll(wds::interaction::ScrollEvent{pos, 0.0f, 1.0f, option_mods()});
   CHECK(h.panel.viewport().grid().visible_hectoms != before);
   CHECK(std::fabs(h.panel.viewport().y_at(0) - judgeline) < 1.0f);
+}
+
+void test_primary_wheel_does_not_change_visible_range() {
+  Harness h;
+  const auto pos = h.at_tick_lane(480, 2);
+  const int32_t before = h.panel.viewport().grid().visible_hectoms;
+  h.panel.on_scroll(wds::interaction::ScrollEvent{pos, 0.0f, 1.0f, primary_mods()});
+  CHECK_EQ(h.panel.viewport().grid().visible_hectoms, before);
 }
 
 void test_curve_fill_wheel_does_not_change_visible_range() {
@@ -839,7 +853,8 @@ int main() {
   test_template_direction_change_and_missing_linear();
   test_ui_manager_pushes_selection();
   test_dialog_confirm_keeps_toolbar_fill_and_delete_falls_back();
-  test_exact_primary_wheel_updates_visible_range_and_playhead_grid();
+  test_exact_option_wheel_updates_visible_range_and_playhead_grid();
+  test_primary_wheel_does_not_change_visible_range();
   test_curve_fill_wheel_does_not_change_visible_range();
   test_hold_tail_adjust_follows_playback_resync();
   test_jumpscratch_end_adjust_follows_wheel_resync();

@@ -19,9 +19,8 @@ inline constexpr float kEditorSwipeMinDistancePx = 16.0f;
 // --- Modifiers / pointer predicates -----------------------------------------
 
 bool is_primary_modifier(const Modifiers& mods) noexcept;
-// Visible-range wheel: platform primary only (Cmd on macOS, Ctrl elsewhere).
-// Extra modifiers (Shift/Alt/the other primary) must not zoom — Shift+primary
-// is the curve-fill chord.
+// Visible-range wheel: Option only (mods.alt; Windows/Linux is Alt).
+// Extra modifiers (Shift/primary) must not zoom — Shift+primary is curve-fill.
 bool is_visible_range_wheel_modifiers(const Modifiers& mods) noexcept;
 
 bool is_toggle_select(const PointerDownEvent& event) noexcept;
@@ -95,7 +94,7 @@ bool set_width_slot_values(const std::array<int, 6>& values) noexcept;  // each 
 // When true, GlfwInputAdapter negates scroll deltas before enqueue.
 bool invert_scroll_wheel() noexcept;
 void set_invert_scroll_wheel(bool enabled) noexcept;
-// When true, invert exact Ctrl/Cmd+wheel visible-range direction (independent of invert_scroll_wheel).
+// When true, invert Option+wheel visible-range direction (independent of invert_scroll_wheel).
 bool invert_visible_range_scroll() noexcept;
 void set_invert_visible_range_scroll(bool enabled) noexcept;
 // Edit-panel wheel timeline scrub multiplier (at visible range 20, 1x ≈ 100ms/notch).

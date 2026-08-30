@@ -207,6 +207,6 @@ interaction action
   → DrawBatch → Vulkan present
 ```
 
-预览区滚轮与编辑区共用同一套时间轴手势（scrub / Ctrl/Cmd+滚轮调可见范围），见 [`ui/README.md`](ui/README.md)。
+预览区滚轮与编辑区共用同一套时间轴手势（scrub / Option+滚轮调可见范围），见 [`ui/README.md`](ui/README.md)。
 
 开发诊断（默认关闭，不依赖 `WDS_ENABLE_LOGGING`）：环境变量 **精确** `WDS_FRAME_DIAG=1` 写帧耗时日志，见 [`ui/README.md`](ui/README.md)。异步上传 / descriptor 块链见 [`renderer/README.md`](renderer/README.md)；音频恢复退避与 pending SFX sync（10s / 4096）见 [`audio-player/README.md`](audio-player/README.md)。

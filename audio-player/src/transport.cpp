@@ -135,14 +135,14 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     }
     if (apply_music_seek(target)) {
       audio_filter_valid_ = true;
-      if (playing_) {
+      if (playing_ && !want_pause) {
         music_start_pending_ = true;
       }
     } else {
       if (recovery_.try_acquire()) {
         recovery_.on_failure();
       }
-      if (playing_) {
+      if (playing_ && !want_pause) {
         music_start_pending_ = true;
         audio_.pause_music();
       }
@@ -158,7 +158,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
       return;
     }
     if (apply_music_seek(music_seek_target_)) {
-      if (playing_) {
+      if (playing_ && !want_pause) {
         music_start_pending_ = true;
       }
     } else {
@@ -172,7 +172,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     }
     retry_pending_seek();
 
-    if (audio_.has_music()) {
+    if (!want_pause && audio_.has_music()) {
       const auto raw = clamp_time(audio_.position());
       constexpr int64_t kHardSnapUs = 100000;
 #if defined(_WIN32)
@@ -244,7 +244,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
           recovery_.reset();
         }
       }
-    } else if (wall_delta_us > 0) {
+    } else if (!want_pause && wall_delta_us > 0) {
       const auto scaled_us = wds::common::Microseconds{
           static_cast<int64_t>(std::llround(static_cast<double>(wall_delta_us) *
                                             static_cast<double>(playback_rate_)))};
@@ -252,7 +252,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     }
 
     if (want_pause) {
-      if (audio_.has_music()) {
+      if (audio_.has_music() && !sought_this_poll_) {
         committed_position_ = clamp_time(audio_.position());
       }
       audio_.pause_music();

@@ -19,14 +19,7 @@ bool is_primary_modifier(const Modifiers& mods) noexcept {
 }
 
 bool is_visible_range_wheel_modifiers(const Modifiers& mods) noexcept {
-  if (!is_primary_modifier(mods) || mods.shift || mods.alt) {
-    return false;
-  }
-#ifdef __APPLE__
-  return !mods.control;
-#else
-  return !mods.super;
-#endif
+  return mods.alt && !mods.shift && !mods.control && !mods.super;
 }
 
 bool is_toggle_select(const PointerDownEvent& event) noexcept {

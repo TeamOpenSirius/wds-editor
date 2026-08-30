@@ -60,12 +60,14 @@ inline constexpr float kOfficialBgLaneAlpha = 0.8f;
 inline constexpr float kOfficialIngameBgWidth = 1920.0f;
 inline constexpr float kOfficialIngameBgHeight = 1180.0f;
 // img_ingame_judgment_area3: 1119×72 @ 100 ppu, Simple draw (native 11.19×0.72).
-// Prefab m_Size.y=0.08 is stale (LaneMask height). Width stays 11.11 to match
-// BG_Lane / BG_LaneBorder. Physics outline is 12 cells.
+// Prefab m_Size.y=0.08 is stale (LaneMask height). Keep native width — the
+// outer pink stroke peaks (px 5 / 1113) sit on the 12-lane edges (±5.545).
+// Squashing to BG_Lane 11.11 pulls those peaks inward.
 inline constexpr int kOfficialJudgeSpritePixelWidth = 1119;
 inline constexpr int kOfficialJudgeSpritePixelHeight = 72;
 inline constexpr float kOfficialJudgeSpriteHeight = 0.72f;
-inline constexpr float kOfficialJudgeSpriteWidth = 11.11f;
+inline constexpr float kOfficialJudgeSpriteWidth =
+    static_cast<float>(kOfficialJudgeSpritePixelWidth) / kOfficialNoteSpritePpu;
 inline constexpr float kOfficialMaxNoteVisiblePositionY = 4.45f;
 inline constexpr int kOfficialNoteVisibleTimeRate1 = 5000;
 inline constexpr int kOfficialNoteVisibleTimeRate2 = 3;

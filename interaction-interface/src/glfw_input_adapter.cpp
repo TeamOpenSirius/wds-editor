@@ -246,7 +246,7 @@ void GlfwInputAdapter::scroll_callback(GLFWwindow* window, double xoffset, doubl
   double cy = 0.0;
   glfwGetCursorPos(window, &cx, &cy);
   self->pointer_ = to_logical(cx, cy);
-  // Scroll callbacks do not carry modifier bits — sample keys so Ctrl/Cmd+wheel etc. work.
+  // Scroll callbacks do not carry modifier bits — sample keys so Option+wheel etc. work.
   self->mods_ = mods_from_glfw_keys(window);
   float dx = static_cast<float>(xoffset);
   float dy = static_cast<float>(yoffset);
