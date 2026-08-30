@@ -4,6 +4,15 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+
+#define CHECK(cond)                                                                          \
+  do {                                                                                       \
+    if (!(cond)) {                                                                           \
+      std::fprintf(stderr, "CHECK failed: %s (%s:%d)\n", #cond, __FILE__, __LINE__);         \
+      std::abort();                                                                          \
+    }                                                                                        \
+  } while (0)
 
 namespace {
 
@@ -28,13 +37,23 @@ void test_border_scale_from_ppu_matches_unity_corners() {
   assert(cap * 2.0f > dest_w);
 }
 
-void test_sliced_caps_overlap_instead_of_shrinking() {
+void test_sliced_caps_shrink_when_they_cannot_fit() {
   using wds::chart_render::sliced_cap_layout;
-  const auto layout = sliced_cap_layout(65.0f, 65.0f, 0.765f, 100.0f);
-  assert(layout.bl > 0.84f);
-  assert(layout.br > 0.84f);
-  assert(layout.bl + layout.br > 1.0f);
-  assert(!layout.emit_middle);
+  // Temporary approximation (not Unity Sliced): 1-wide tap is 0.765, each
+  // border_px/PPU cap is 0.65, so 1.30 > 0.765. Scale both caps by
+  // 0.765/1.30 so they sit side-by-side instead of overlapping.
+  const auto narrow = sliced_cap_layout(65.0f, 65.0f, 0.765f, 100.0f);
+  CHECK(std::abs(narrow.bl - 0.5f) < 1e-5f);
+  CHECK(std::abs(narrow.br - 0.5f) < 1e-5f);
+  CHECK(narrow.bl + narrow.br <= 1.0f + 1e-5f);
+  CHECK(!narrow.emit_middle);
+
+  const float four = 4.0f * 0.915f + 3.0f * 0.01f - 0.15f;
+  const auto wide = sliced_cap_layout(65.0f, 65.0f, four, 100.0f);
+  const float raw = 0.65f / four;
+  CHECK(std::abs(wide.bl - raw) < 1e-5f);
+  CHECK(std::abs(wide.br - raw) < 1e-5f);
+  CHECK(wide.emit_middle);
 }
 
 void test_scratch_arrow_sides() {
@@ -97,7 +116,7 @@ void test_hold_tail_layers() {
 
 int main() {
   test_border_scale_from_ppu_matches_unity_corners();
-  test_sliced_caps_overlap_instead_of_shrinking();
+  test_sliced_caps_shrink_when_they_cannot_fit();
   test_scratch_arrow_sides();
   test_static_arrows_respect_sides();
   test_animated_arrows_bidirectional_half_density();

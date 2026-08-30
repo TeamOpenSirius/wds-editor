@@ -819,7 +819,8 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
       wds::chart_editor::official_span_width(note.lane, note.end_lane));
 
   // Official HoldLongNotes: SpriteRenderer Sliced, m_Border L/R = 10 on 157-wide art.
-  // Cap world = 10/100; dest_world_width drives overlap (no dest_h / tex_h).
+  // Cap world = 10/100 via dest_world_width (no dest_h / tex_h).
+  // Temporary approximation: sliced_cap_layout shrinks caps if they cannot fit.
   auto emit = [&](float lo, float hi) {
     if (hi <= lo) return;
     add_sliced_note(batch, sprites.connection,

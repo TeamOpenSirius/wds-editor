@@ -12,7 +12,8 @@ namespace wds::renderer {
 // HoldLongNotes → 10 on 157×33, PPU 100).
 //
 // When dest_world_width > 0: cap fraction = (border_px / PPU) / dest_world_width.
-// Unity keeps that world size even if the two caps overlap (no shrink-to-fit).
+// Temporary approximation: if the two caps cannot fit, shrink them
+// proportionally instead of overlapping (see sliced_cap_layout).
 //
 // Otherwise cap size = border_px * border_scale_px in dest units (edit timeline).
 // When border_scale_px < 0, scale = (quad vertical length) / tex_height.

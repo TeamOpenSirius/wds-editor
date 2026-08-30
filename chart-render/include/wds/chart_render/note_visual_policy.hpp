@@ -34,13 +34,23 @@ struct SlicedCapLayout {
   bool emit_middle = true;
 };
 
-// Unity Sliced corners stay border_px/PPU even when they overlap (no shrink-to-fit).
+// Temporary approximation (not Unity SpriteRenderer Sliced):
+// Official corners stay border_px/PPU and overlap when they cannot fit
+// (1-wide tap: 0.65+0.65 > 0.765). Overlapping opaque caps hide the left
+// decoration. Until Unity's mesh/compositing is dumped, shrink both caps
+// proportionally so they sit side-by-side (uGUI GetAdjustedBorders style).
 inline SlicedCapLayout sliced_cap_layout(
     float border_l_px, float border_r_px, float dest_world_width,
     float ppu = wds::chart_editor::kOfficialNoteSpritePpu) noexcept {
   SlicedCapLayout out;
   out.bl = wds::chart_editor::official_sliced_cap_fraction(border_l_px, dest_world_width, ppu);
   out.br = wds::chart_editor::official_sliced_cap_fraction(border_r_px, dest_world_width, ppu);
+  const float sum = out.bl + out.br;
+  if (sum > 1.0f - 1e-5f && sum > 1e-6f) {
+    const float s = 1.0f / sum;
+    out.bl *= s;
+    out.br *= s;
+  }
   out.emit_middle = (out.bl + out.br) < 1.0f - 1e-5f;
   return out;
 }

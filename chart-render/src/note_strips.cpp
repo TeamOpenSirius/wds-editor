@@ -96,7 +96,7 @@ void add_sliced_note_impl(DrawBatch& batch, const TextureInfo& sprite, const Qua
     batch.add_quad_corners(sprite.id, Quad{lb, lt, lt_m, lb_m}, z, a_lb, a_rb_m, a_lt, a_rt_m, u0,
                            v0, u_l, v1, r, g, b);
   }
-  // Middle stretch (skipped when Unity-style caps overlap).
+  // Middle stretch (skipped when caps fill the dest after shrink-to-fit).
   if (emit_middle) {
     const Vec2 lb_m = lerp2(lb, rb, bl);
     const Vec2 lt_m = lerp2(lt, rt, bl);
