@@ -56,6 +56,19 @@ void test_sliced_caps_shrink_when_they_cannot_fit() {
   CHECK(wide.emit_middle);
 }
 
+void test_concurrent_line_sliced_caps_stay_four_pixels() {
+  using wds::chart_render::sliced_cap_layout;
+  // NoteConcurrentLine m_Border L/R=4 @ 100 ppu → 0.04wu each. A 4-lane
+  // notation span (~3.69) must keep those caps and still emit a solid middle.
+  const float four = 4.0f * 0.915f + 3.0f * 0.01f;
+  const auto layout = sliced_cap_layout(4.0f, 4.0f, four, 100.0f);
+  const float raw = 0.04f / four;
+  CHECK(std::abs(layout.bl - raw) < 1e-5f);
+  CHECK(std::abs(layout.br - raw) < 1e-5f);
+  CHECK(layout.emit_middle);
+  CHECK(layout.bl + layout.br < 0.05f);
+}
+
 void test_scratch_arrow_sides() {
   assert(scratch_arrow_sides(-3).draw_left && !scratch_arrow_sides(-3).draw_right);
   assert(!scratch_arrow_sides(4).draw_left && scratch_arrow_sides(4).draw_right);
@@ -117,6 +130,7 @@ void test_hold_tail_layers() {
 int main() {
   test_border_scale_from_ppu_matches_unity_corners();
   test_sliced_caps_shrink_when_they_cannot_fit();
+  test_concurrent_line_sliced_caps_stay_four_pixels();
   test_scratch_arrow_sides();
   test_static_arrows_respect_sides();
   test_animated_arrows_bidirectional_half_density();

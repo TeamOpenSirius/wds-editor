@@ -1400,6 +1400,31 @@ void test_official_note_visual_width_subtracts_margin() {
   CHECK(official_sliced_cap_fraction(65.0f, 0.765f) > 0.5f);
 }
 
+void test_official_concurrent_line_is_full_notation_sliced() {
+  // ConcurrentLineNote.prefab + NoteConcurrentLine.asset:
+  // Sliced 12×8 @ 100 ppu, m_Border L/R=4 T/B=3, m_Size.y=0.1, local Rx=90°.
+  // Spawn sets size.x = GetNoteWidth (no NoteMarginWidth), so the bar is
+  // notation-wide and peeks past tap sides (tap = notation − 0.15).
+  CHECK_EQ(kOfficialConcurrentLineSpriteWidthPx, 12);
+  CHECK_EQ(kOfficialConcurrentLineSpriteHeightPx, 8);
+  CHECK(std::fabs(kOfficialConcurrentLineBorderL - 4.0f) < 1e-6f);
+  CHECK(std::fabs(kOfficialConcurrentLineBorderR - 4.0f) < 1e-6f);
+  CHECK(std::fabs(kOfficialConcurrentLineSpriteHeight - 0.1f) < 1e-6f);
+  CHECK(std::fabs(kOfficialConcurrentLineLocalRotationX - 90.0f) < 1e-6f);
+
+  const float one = official_note_width(1);
+  const float four = official_note_width(4);
+  CHECK(std::fabs(official_concurrent_line_visual_width(one) - one) < 1e-6f);
+  CHECK(std::fabs(official_concurrent_line_visual_width(four) - four) < 1e-6f);
+  CHECK(official_concurrent_line_visual_width(one) - official_tap_visual_width(one) > 0.14f);
+
+  // End-cap world size stays 4/100; stretching a long line must not elongate the fade.
+  CHECK(std::fabs(official_sliced_cap_world(kOfficialConcurrentLineBorderL) - 0.04f) < 1e-6f);
+  const float cap = official_sliced_cap_fraction(kOfficialConcurrentLineBorderL, four);
+  CHECK(cap < 0.03f);
+  CHECK(cap * 2.0f + 0.5f < 1.0f);
+}
+
 void test_official_playfield_judge_ndc_and_perspective() {
   CHECK(std::fabs(kOfficialPreviewAspect - 16.0f / 9.0f) < 1e-6f);
   CHECK(kOfficialDefaultScreenWidth == 1280);
@@ -6321,6 +6346,7 @@ int main() {
   test_split_appear_phase_before_start_ms();
   test_official_playfield_visual_lanes_are_six();
   test_official_note_visual_width_subtracts_margin();
+  test_official_concurrent_line_is_full_notation_sliced();
   test_official_playfield_judge_ndc_and_perspective();
   test_official_calculate_position_y_matches_il2cpp();
   test_official_setting_value_ranges();

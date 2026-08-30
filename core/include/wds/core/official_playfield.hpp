@@ -20,6 +20,14 @@ inline constexpr float kOfficialLaneBorderWidth = 0.01f;
 // SpriteRenderer.size.x only — notation / GetNotePositionX stay full width.
 inline constexpr float kOfficialNoteMarginWidth = 0.15f;
 inline constexpr float kOfficialHoldNoteLineAdditionalWidth = 0.10f;
+// ConcurrentLineNote.prefab: Sliced NoteConcurrentLine (12×8 @ 100 ppu,
+// m_Border L/R=4 T/B=3), m_Size.y=0.1, local Rx=90°. size.x = GetNoteWidth.
+inline constexpr int kOfficialConcurrentLineSpriteWidthPx = 12;
+inline constexpr int kOfficialConcurrentLineSpriteHeightPx = 8;
+inline constexpr float kOfficialConcurrentLineBorderL = 4.0f;
+inline constexpr float kOfficialConcurrentLineBorderR = 4.0f;
+inline constexpr float kOfficialConcurrentLineSpriteHeight = 0.1f;
+inline constexpr float kOfficialConcurrentLineLocalRotationX = 90.0f;
 inline constexpr float kOfficialNoteSpritePpu = 100.0f;
 inline constexpr float kOfficialNoteSpriteHeight = 0.64f;
 inline constexpr float kOfficialNoteLocalZBottom = -0.01f;
@@ -234,6 +242,11 @@ inline float official_tap_visual_width(float notation_width) noexcept {
 
 inline float official_hold_line_visual_width(float notation_width) noexcept {
   return notation_width - kOfficialNoteMarginWidth + kOfficialHoldNoteLineAdditionalWidth;
+}
+
+// Concurrent line: full notation width (no tap margin), so it peeks past note sides.
+inline float official_concurrent_line_visual_width(float notation_width) noexcept {
+  return notation_width;
 }
 
 // Unity SpriteRenderer Sliced: corner world size = border_px / PPU (constant).

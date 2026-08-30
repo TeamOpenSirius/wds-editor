@@ -95,6 +95,7 @@ class StageGeometry {
   Quad tick_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Mid-star: official 1.12×1.12 SoundNote, centered, never stretched to hold width.
   Quad star_quad(int32_t lane, int32_t end_lane, float percent) const;
+  // Official ConcurrentLine: notation-wide × 0.1, Rx=90° on JudgeArea (no tap margin).
   Quad sync_line_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Hit VFX lying on the judgeline band (same vertical span as the judgment line cells).
   Quad effect_quad(int32_t lane, int32_t end_lane) const;

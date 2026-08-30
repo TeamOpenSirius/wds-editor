@@ -2,6 +2,7 @@
 
 #include <wds/chart_render/split_soft_profile.hpp>
 #include <wds/common/utf8_path.hpp>
+#include <wds/core/official_playfield.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -275,6 +276,8 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   note_slice_border_r = 65.0f;
   hold_slice_border_l = 10.0f;
   hold_slice_border_r = 10.0f;
+  sync_slice_border_l = wds::chart_editor::kOfficialConcurrentLineBorderL;
+  sync_slice_border_r = wds::chart_editor::kOfficialConcurrentLineBorderR;
   note_slice_tex_h = 108.0f;
 
   return static_cast<bool>(judgeline) && static_cast<bool>(note_bottom) &&

@@ -7,6 +7,7 @@ namespace wds::renderer {
 
 namespace {
 
+using wds::chart_editor::kOfficialConcurrentLineLocalRotationX;
 using wds::chart_editor::kOfficialNoteSpriteHeight;
 using wds::chart_editor::kOfficialSoundNoteLocalZ;
 using wds::chart_editor::kOfficialSoundNoteSpriteSize;
@@ -26,6 +27,7 @@ using wds::chart_editor::official_note_local_y;
 using wds::chart_editor::official_note_visible_position_y;
 using wds::chart_editor::official_percent_to_judge_y;
 using wds::chart_editor::official_percent_to_main_y;
+using wds::chart_editor::official_concurrent_line_visual_width;
 using wds::chart_editor::official_hold_line_visual_width;
 using wds::chart_editor::official_span_center_x;
 using wds::chart_editor::official_span_left_x;
@@ -418,8 +420,21 @@ Quad StageGeometry::star_quad(int32_t lane, int32_t end_lane, float percent) con
 }
 
 Quad StageGeometry::sync_line_quad(int32_t lane, int32_t end_lane, float percent) const {
-  const float half = judgeline_half_percent() * 0.35f;
-  return hold_body_quad(lane, end_lane, percent + half, percent - half);
+  const float y = percent_to_judge_y(percent);
+  const float w = official_concurrent_line_visual_width(official_span_width(lane, end_lane));
+  const float x = official_span_center_x(lane, end_lane);
+  const float half = std::max(config_.sync_line_height, 1e-4f) * 0.5f;
+  const float aspect = content_aspect();
+  auto corner = [&](float sx, float sy) {
+    return ndc_to_content(
+        project_note_layer(x, y, sx, sy, 0.0f, kOfficialConcurrentLineLocalRotationX, aspect));
+  };
+  Quad q;
+  q.lb = corner(-w * 0.5f, -half);
+  q.rb = corner(w * 0.5f, -half);
+  q.lt = corner(-w * 0.5f, half);
+  q.rt = corner(w * 0.5f, half);
+  return q;
 }
 
 Quad StageGeometry::effect_quad(int32_t lane, int32_t end_lane) const {

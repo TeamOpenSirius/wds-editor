@@ -43,7 +43,8 @@ struct PreviewVisualConfig {
   float arrow_percent = 1.6f;
   // Sirius constants.cpp: alpha = 1 - 0.8 * Mod(i + times.now * arrowSpeed, num) / num
   float arrow_speed = 20.0f;
-  float sync_line_height = 5.0f / 640.0f;
+  // ConcurrentLineNote.prefab m_Size.y (NoteConcurrentLine is 8px @ 100 ppu).
+  float sync_line_height = wds::chart_editor::kOfficialConcurrentLineSpriteHeight;
   // Slightly wider than stock so the gaussian glow skirts have screen-space room.
   float split_line_length = 0.048f;
   // Official fadeIn 1.0s; fadeOut alpha 1→0 in 0.3s (Light: lines only).

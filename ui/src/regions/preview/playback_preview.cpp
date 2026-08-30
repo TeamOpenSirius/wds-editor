@@ -646,8 +646,12 @@ void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewS
       continue;
     }
     const int32_t end_lane = line.start_lane + std::max(1, line.width) - 1;
-    batch.add_sprite(skin_.sync_line, geometry_.sync_line_quad(line.start_lane, end_lane, p), -0.5f,
-                     0.8f);
+    const float world_w = wds::chart_editor::official_concurrent_line_visual_width(
+        wds::chart_editor::official_span_width(line.start_lane, end_lane));
+    // Official ConcurrentLineNote: Sliced 12×8, m_Border L/R=4, color a=1.
+    add_sliced_note(batch, skin_.sync_line, geometry_.sync_line_quad(line.start_lane, end_lane, p),
+                    skin_.sync_slice_border_l, skin_.sync_slice_border_r, -0.5f, 1.0f, 1.0f, -1.0f,
+                    1.0f, 1.0f, 1.0f, world_w);
   }
 }
 
