@@ -1,4 +1,5 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/regions/edit/edit_gutters.hpp"
 #include "wds/ui/regions/settings/curve_templates_dialog.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 #include "wds/ui/ui_manager.hpp"
@@ -1155,6 +1156,24 @@ void test_plain_primary_does_not_clear_hold_draft_during_draw() {
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 1);
 }
 
+void test_split_picker_search_filter() {
+  using wds::ui::filter_split_picker_color_ids;
+  using wds::ui::is_split_picker_search_text_valid;
+  CHECK(is_split_picker_search_text_valid(""));
+  CHECK(is_split_picker_search_text_valid("10"));
+  CHECK(!is_split_picker_search_text_valid("1a"));
+  CHECK(!is_split_picker_search_text_valid("123456789"));
+  const auto all = filter_split_picker_color_ids("");
+  CHECK(!all.empty());
+  const auto ones = filter_split_picker_color_ids("1");
+  CHECK(!ones.empty());
+  CHECK(ones.size() < all.size());
+  for (int32_t id : ones) {
+    CHECK(std::to_string(id).find('1') != std::string::npos);
+  }
+  CHECK(filter_split_picker_color_ids("00000").empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1190,6 +1209,7 @@ int main() {
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
+  test_split_picker_search_filter();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

@@ -274,8 +274,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void open_split_picker(int32_t tick);
   void open_split_picker_for_edit(int32_t note_id);
   void scroll_split_picker_to_color(int32_t color_id);
+  void remember_split_picker_count();
+  void remember_split_picker_color();
+  void apply_split_search_text(const std::string& text);
+  void sync_split_scrollbar_from_pointer(float y);
   void close_split_picker();
   void confirm_split_picker();
+  std::vector<int32_t> split_picker_filtered_ids() const;
   enum class TimingPopupMode { Bpm, Meter };
   void open_bpm_popup(int32_t tick);
   void open_meter_popup(int32_t tick);
@@ -308,6 +313,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable wds::interaction::Rect timing_popup_bounds_{};
   mutable std::vector<wds::interaction::Rect> split_count_buttons_{};
   mutable std::vector<wds::interaction::Rect> split_color_buttons_{};
+  mutable wds::interaction::Rect split_search_label_{};
+  mutable wds::interaction::Rect split_search_field_{};
+  mutable wds::interaction::Rect split_color_list_{};
+  mutable wds::interaction::Rect split_scrollbar_track_{};
+  mutable wds::interaction::Rect split_scrollbar_thumb_{};
   mutable float split_color_row_h_ = 64.0f;
   mutable float split_color_max_scroll_ = 0.0f;
   static constexpr int kSplitColorCols = 3;
@@ -335,6 +345,16 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // >=0 while editing an existing split note; -1 when adding.
   int32_t split_picker_edit_id_ = -1;
   float split_color_scroll_ = 0.0f;
+  std::string split_search_text_;
+  bool split_search_focused_ = false;
+  float split_search_caret_blink_t_ = 0.0f;
+  bool split_scrollbar_dragging_ = false;
+  float split_scrollbar_grab_offset_ = 0.0f;
+  // Session-only: last confirmed/clicked count + color. Applied once on open
+  // (select + scroll to the remembered ID).
+  bool split_picker_memory_valid_ = false;
+  int32_t split_picker_memory_count_ = 2;
+  int32_t split_picker_memory_color_id_ = 1;
 
   bool timing_popup_open_ = false;
   TimingPopupMode timing_popup_mode_ = TimingPopupMode::Bpm;

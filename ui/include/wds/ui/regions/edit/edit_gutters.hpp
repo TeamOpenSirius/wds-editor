@@ -41,6 +41,10 @@ void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept;
 // Official 1.96.0 SplitEffects IDs for the picker (no PNG / hardcoded fallback).
 std::vector<int32_t> split_picker_color_ids();
 
+// Digits-only (or empty). Empty query returns every official ID.
+bool is_split_picker_search_text_valid(const std::string& text) noexcept;
+std::vector<int32_t> filter_split_picker_color_ids(const std::string& query);
+
 // Split coverage for default-lane-guide hiding. Fade windows are wall-clock
 // seconds (PreviewConfig: official fadeIn 1.0s / fadeOut 0.3s), never
 // BPM/subdivision ticks — edit and preview share the same real-time windows.

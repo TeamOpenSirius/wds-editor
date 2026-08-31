@@ -10,6 +10,7 @@ namespace wds::chart_render {
 
 // Official flat-note sandwich (Unity SpriteRenderer sortingOrder tiers):
 // hold bodies → all bottoms → all tops → mid-stars → arrows.
+// SplitEffect is a compositor pass below this sandwich (not a NoteVisualPass).
 // Pass order is the stacking contract; z is only a fine bias.
 enum class NoteVisualPass : int {
   HoldBody = 0,
