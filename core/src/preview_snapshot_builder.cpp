@@ -101,8 +101,9 @@ bool PreviewSnapshotBuilder::is_concurrent_line_visible(const ConcurrentLineNote
 
 void PreviewSnapshotBuilder::apply_gimmick_position(PreviewNoteInstance& instance,
                                                     const NotationNote& note) const {
-  // Same resolve_end_lane_span as edit draw (ScratchHold / JumpScratch / body).
-  if (is_scratch_hold_body(note.note_type) || is_jump_scratch(note.gimmick_type)) {
+  // Same resolve_end_lane_span as edit draw (any hold-chain body, including a
+  // regular terminal whose gimmick is still None/OneDirection).
+  if (is_hold_chain_body(note.note_type)) {
     const auto [lane, width] = resolve_end_lane_span(note);
     instance.apply_jump_scratch(true, lane, lane + width - 1);
   } else {

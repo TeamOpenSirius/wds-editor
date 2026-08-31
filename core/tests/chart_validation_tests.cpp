@@ -118,6 +118,17 @@ void test_legal_hold_head_body_pairing_is_not_reported() {
   CHECK(result.error_ticks.empty());
 }
 
+void test_legal_regular_hold_chain_joint_is_not_reported() {
+  NotationNote prev = make_note(1, NoteType::Hold, 0, 0, 5, 480);
+  NotationNote next = make_note(2, NoteType::Hold, 480, 0, 6, 960);
+  sync_scratch_chain_joint(prev, next);
+  apply_hold_chain_gimmick(prev);
+  NotationNote head = make_note(3, NoteType::HoldStart, 0, 0, 5);
+  const auto result = find_note_overlaps({head, prev, next});
+  CHECK(result.pairs.empty());
+  CHECK(result.error_ticks.empty());
+}
+
 void test_legal_scratch_hold_chain_joint_is_not_reported() {
   NotationNote prev = make_note(1, NoteType::ScratchHold, 0, 2, 2, 480);
   NotationNote next = make_note(2, NoteType::ScratchHold, 480, 4, 2, 960);
@@ -218,6 +229,7 @@ int main() {
   test_normal_hold_tail_uses_encoded_body_span();
   test_scratch_hold_terminal_tail_uses_end_span();
   test_legal_hold_head_body_pairing_is_not_reported();
+  test_legal_regular_hold_chain_joint_is_not_reported();
   test_legal_scratch_hold_chain_joint_is_not_reported();
   test_unrelated_tap_on_legal_scratch_joint_is_reported();
   test_three_note_collision_unique_sorted_pairs();

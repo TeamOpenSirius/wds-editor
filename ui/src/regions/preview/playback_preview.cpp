@@ -723,8 +723,7 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
       continue;
     }
     const NoteSprites sprites = sprites_for(skin_, note->note_type);
-    if (sprites.is_scratch_family || note->uses_jump_scratch_position ||
-        note->note_type == NoteType::Flick) {
+    if (sprites.is_scratch_family || note->note_type == NoteType::Flick) {
       draw_arrows(batch, *note, now, now);
     }
   }
@@ -1039,11 +1038,14 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
     if (with_tail && note.end_ms > note.start_ms) {
       const double t0 = static_cast<double>(note.end_ms) / 1000.0;
       if (t0 <= now) {
-        const bool jump_flare =
+        const bool use_jump_span =
             note.uses_jump_scratch_position || is_jump_scratch(note.gimmick_type);
+        const bool jump_flare =
+            use_jump_span &&
+            (is_scratch_hold_body(note.note_type) || note.note_type == NoteType::Flick);
         int32_t fx_lane = note.lane;
         int32_t fx_end = note.end_lane;
-        if (jump_flare) {
+        if (use_jump_span) {
           fx_lane = note.jump_scratch_lane_from;
           fx_end = note.jump_scratch_lane_to;
         }

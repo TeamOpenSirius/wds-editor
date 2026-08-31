@@ -44,12 +44,13 @@ std::pair<int32_t, int32_t> get_scratch_end_lane_range(const NotationNote& note)
 // JumpScratch gimmick: same span formula; otherwise returns the body lane range.
 std::pair<int32_t, int32_t> get_jump_scratch_lane_range(const NotationNote& note) noexcept;
 
-// Single entry for edit draw + preview snapshot: ScratchHold body end span, else
-// JumpScratch gimmick span, else body [lane, endLane]. Returns {lane, width}.
+// Single entry for edit draw + preview snapshot: hold-chain body uses
+// scratch_length end span (regular terminal may still be None/OneDirection);
+// other notes use body [lane, endLane]. Returns {lane, width}.
 std::pair<int32_t, int32_t> resolve_end_lane_span(const NotationNote& note) noexcept;
 
-// Inclusive occupied [lane, width] for playfield bounds: body union ScratchHold
-// JumpScratch / end-cap cover. Other notes use the body span only.
+// Inclusive occupied [lane, width] for playfield bounds: body union hold-chain
+// end-cap cover. Other notes use the body span only.
 std::pair<int32_t, int32_t> occupied_lane_span(const NotationNote& note) noexcept;
 
 // Encode ScratchHold end lanes into scratch_length. End is clamped to fully cover
@@ -84,6 +85,11 @@ int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationN
 // Set `prev`'s JumpScratch to the exact union of `prev` and `next` bodies, then
 // re-encode joint direction. Caller must pass a Sirius-representable pair.
 void sync_scratch_chain_joint(NotationNote& prev, const NotationNote& next) noexcept;
+
+// Official gimmick write-back after a chain joint (call after sync_scratch_chain_joint).
+// Purple: leave gimmick as-is (export promotes None + nonzero sl → JumpScratch).
+// Regular: tail ≠ body → JumpScratch + signed span; tail == body → OneDirection, 0.
+void apply_hold_chain_gimmick(NotationNote& prev) noexcept;
 
 // Chain-joint JumpScratch direction from adjacent body edges (not the terminal end-cap).
 // Each side: next more-left → -1, same → 0, more-right → +1. Sum of left+right scores:

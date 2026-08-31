@@ -310,6 +310,9 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "visible_hectoms") {
     int32_t v = cfg.visible_hectoms;
     if (parse_int(value, v)) cfg.visible_hectoms = std::clamp(v, 1, 1000);
+  } else if (key == "subdivisions_per_beat") {
+    int32_t v = cfg.subdivisions_per_beat;
+    if (parse_int(value, v)) cfg.subdivisions_per_beat = clamp_subdivisions_per_beat(static_cast<int>(v));
   } else if (key == "music_volume") {
     double v = cfg.music_volume;
     if (parse_double(value, v)) cfg.music_volume = static_cast<float>(std::clamp(v, 0.0, 1.0));
@@ -322,6 +325,11 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "sfx_muted") {
     bool v = cfg.sfx_muted;
     if (parse_bool(value, v)) cfg.sfx_muted = v;
+  } else if (key == "playback_rate") {
+    double v = cfg.playback_rate;
+    if (parse_double(value, v)) {
+      cfg.playback_rate = clamp_playback_rate(static_cast<float>(v));
+    }
   } else if (key == "pause_at_current") {
     bool v = cfg.pause_at_current;
     if (parse_bool(value, v)) cfg.pause_at_current = v;
@@ -501,11 +509,14 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
   char music[64];
   char sfx[64];
   char scroll_speed[64];
+  char playback_rate[64];
   std::snprintf(speed, sizeof(speed), "%.1f", cfg.note_speed);
   std::snprintf(music, sizeof(music), "%.2f", static_cast<double>(cfg.music_volume));
   std::snprintf(sfx, sizeof(sfx), "%.2f", static_cast<double>(cfg.sfx_volume));
   std::snprintf(scroll_speed, sizeof(scroll_speed), "%.2f",
                 static_cast<double>(cfg.scroll_wheel_speed));
+  std::snprintf(playback_rate, sizeof(playback_rate), "%.2f",
+                static_cast<double>(clamp_playback_rate(cfg.playback_rate)));
 
   std::ostringstream out;
   out << "# WDS editor UI preferences\n"
@@ -515,10 +526,13 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "split_line_opacity: " << cfg.split_line_opacity << '\n'
       << "msaa_samples: " << clamp_msaa_samples(cfg.msaa_samples) << '\n'
       << "visible_hectoms: " << cfg.visible_hectoms << '\n'
+      << "subdivisions_per_beat: " << clamp_subdivisions_per_beat(cfg.subdivisions_per_beat)
+      << '\n'
       << "music_volume: " << music << '\n'
       << "music_muted: " << emit_bool(cfg.music_muted) << '\n'
       << "sfx_volume: " << sfx << '\n'
       << "sfx_muted: " << emit_bool(cfg.sfx_muted) << '\n'
+      << "playback_rate: " << playback_rate << '\n'
       << "pause_at_current: " << emit_bool(cfg.pause_at_current) << '\n'
       << "split_width_follow: " << emit_bool(cfg.split_width_follow) << '\n'
       << "mute_hold_body_sfx: " << emit_bool(cfg.mute_hold_body_sfx) << '\n'

@@ -60,7 +60,8 @@ std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote>
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
   const bool was_hold = is_hold_with_tail(note.note_type);
   const bool target_hold = is_hold_with_tail(target);
-  const bool was_scratch_hold = is_scratch_hold_body(note.note_type);
+  const bool was_chain = is_hold_chain_body(note.note_type);
+  const bool target_chain = is_hold_chain_body(target);
   const bool target_scratch_hold = is_scratch_hold_body(target);
   const bool split = is_split_lane_gimmick(note.gimmick_type);
 
@@ -72,27 +73,31 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
 
   note.note_type = target;
 
-  // JumpScratch / OneDirection are ScratchHold-family only.
-  if (!target_scratch_hold && (is_jump_scratch(note.gimmick_type) || is_one_direction(note.gimmick_type))) {
+  // JumpScratch / OneDirection stay only on hold-chain bodies.
+  if (!target_chain &&
+      (is_jump_scratch(note.gimmick_type) || is_one_direction(note.gimmick_type))) {
     note.gimmick_type = GimmickType::None;
   }
 
-  // scratch_length: flick/Scratch direction, ScratchHold end span, or split color.
+  // scratch_length: flick/Scratch direction, hold-chain end span, or split color.
   if (!split) {
     if (target == NoteType::Flick) {
-      // ScratchHold stores ±width (or wider JumpScratch spans); collapse to flick ±1.
-      if (was_scratch_hold) {
+      // Hold-chain stores ±width (or wider JumpScratch spans); collapse to flick ±1.
+      if (was_chain) {
         if (note.scratch_length < 0) note.scratch_length = -1;
         else if (note.scratch_length > 0) note.scratch_length = 1;
         else note.scratch_length = 0;
       }
     } else if (target_scratch_hold) {
       // Flick/Scratch encode ±1; ScratchHold equal-width direction uses ±width.
-      if (!was_scratch_hold) {
+      // Hold↔ScratchHold keeps the existing JumpScratch span.
+      if (!was_chain) {
         if (note.scratch_length < 0) note.scratch_length = -std::max(1, note.width);
         else if (note.scratch_length > 0) note.scratch_length = std::max(1, note.width);
         else note.scratch_length = 0;
       }
+    } else if (target_chain) {
+      // Regular hold-chain: keep scratch_length / gimmick.
     } else {
       note.scratch_length = 0;
     }
@@ -274,7 +279,7 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
     if (note.id == hold.id) continue;
     if (is_hold_with_tail(note.note_type)) {
       if (!same_tick(note.end_tick, hold.start_tick)) continue;
-      if (is_scratch_hold_body(note.note_type)) {
+      if (is_hold_chain_body(note.note_type)) {
         const auto [tail_lo, tail_hi] = get_scratch_end_lane_range(note);
         mark_range(occupied, tail_lo, tail_hi);
       } else {
@@ -522,11 +527,12 @@ bool scratch_chain_lanes_connected(const NotationNote& prev, const NotationNote&
 
 std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body) {
-  if (!is_scratch_hold_body(body.note_type) || body.end_tick <= body.start_tick) {
+  if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
   for (const auto& note : doc.notes()) {
-    if (note.id == body.id || !is_scratch_hold_body(note.note_type)) continue;
+    if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
+    if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.start_tick, body.end_tick)) continue;
     // A head at the next start means a new chain, not a continuation.
     if (paired_hold_head_for(doc, note)) continue;
@@ -538,11 +544,12 @@ std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
 
 std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body) {
-  if (!is_scratch_hold_body(body.note_type) || body.end_tick <= body.start_tick) {
+  if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
   for (const auto& note : doc.notes()) {
-    if (note.id == body.id || !is_scratch_hold_body(note.note_type)) continue;
+    if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
+    if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.end_tick, body.start_tick)) continue;
     // Prev may have its own head (first segment of a chain). Connection is decided
     // by time abutment + JumpScratch cover exactly matching both bodies.

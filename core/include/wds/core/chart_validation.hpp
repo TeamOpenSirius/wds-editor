@@ -29,7 +29,7 @@ struct ChartValidationResult {
 // (same helper, which falls back to [lane, width]).
 //
 // Excluded: split gimmicks, HiSpeed/None, hold-body starts, Sound/ScratchSound,
-// HoldEighth. Legal head/body pairs and ScratchHold chain joints are not
+// HoldEighth. Legal head/body pairs and same-family hold-chain joints are not
 // reported merely because structural endpoints coincide.
 //
 // Malformed geometry: width < 1 is clamped to 1; inverted hold duration skips

@@ -314,8 +314,28 @@ int main() {
 
   expect(is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, {true}}, false),
          "normal hold star is shift+right");
-  expect(!is_chain_hold_body(PointerDownEvent{{0, 0}, PointerButton::Right, {}}, false),
-         "normal hold does not chain");
+  {
+    Modifiers curve_chord;
+    curve_chord.shift = true;
+#ifdef __APPLE__
+    curve_chord.super = true;
+#else
+    curve_chord.control = true;
+#endif
+    expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, curve_chord}, false),
+           "curve chord is not a normal hold star");
+    expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Left, curve_chord}, true),
+           "curve chord is not a scratch hold star");
+    Modifiers shift_alt;
+    shift_alt.shift = true;
+    shift_alt.alt = true;
+    expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, shift_alt}, false),
+           "Shift+Alt is not a hold star");
+  }
+  expect(is_chain_hold_body(PointerDownEvent{{0, 0}, PointerButton::Right, {}}, false),
+         "normal hold chains on right");
+  expect(!is_chain_hold_body(PointerDownEvent{{0, 0}, PointerButton::Left, {}}, false),
+         "normal hold does not chain on left");
   expect(is_finish_hold_body(PointerButton::Left, false), "normal hold finishes on left-up");
   expect(!is_finish_hold_body(PointerButton::Right, false),
          "normal hold ignores right-up for finish");
@@ -1300,21 +1320,29 @@ int main() {
            "PlaceHoldBody ScratchHold may enter curve fill");
     expect(!is_curve_fill_placement_allowed(false, true),
            "Idle / ordinary notes must not enter curve fill");
-    expect(!is_curve_fill_placement_allowed(true, false),
-           "non-Scratch hold must not enter curve fill");
+    expect(is_curve_fill_placement_allowed(true, false),
+           "PlaceHoldBody regular hold may enter curve fill");
     expect(!is_curve_fill_placement_allowed(false, false),
            "idle non-scratch must not enter curve fill");
 
     expect(is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Left, curve}),
            "left down confirms");
     expect(!is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Right, curve}),
-           "right down does not confirm");
+           "right down does not confirm scratch curve");
+    expect(is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Right, curve}, false),
+           "right down confirms regular hold curve");
     expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, curve}),
-           "right up confirms");
+           "right up confirms scratch curve");
     expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, curve}),
-           "left up does not confirm");
+           "left up does not confirm scratch curve");
+    expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, curve}, false),
+           "left up confirms regular hold curve");
+    expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, curve}, false),
+           "right up confirms regular hold curve");
     expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, {}}),
            "right up without chord does not confirm");
+    expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, {}}, false),
+           "left up without chord does not confirm regular curve");
     expect(suppress_idle_placement_ghost(primary_only, false), "idle primary hides ghost");
     expect(!suppress_idle_placement_ghost(primary_only, true), "drawing primary keeps ghost");
     expect(!suppress_idle_placement_ghost(Modifiers{}, false), "idle without primary keeps ghost");

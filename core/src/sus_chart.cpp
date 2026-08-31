@@ -142,7 +142,7 @@ bool hold_start_fully_covered(const NotationNote& hold,
     if (note.id == hold.id) continue;
     if (is_hold_with_tail(note.note_type)) {
       if (!same_tick_i(note.end_tick, hold.start_tick)) continue;
-      if (is_scratch_hold_body(note.note_type)) {
+      if (is_hold_chain_body(note.note_type)) {
         const auto [tail_lo, tail_hi] = get_scratch_end_lane_range(note);
         mark_range(occupied, tail_lo, tail_hi);
       } else {

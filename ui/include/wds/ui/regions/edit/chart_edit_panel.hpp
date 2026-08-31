@@ -234,10 +234,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Requires pending_chain_extend_id_ armed on pointer-down.
   void begin_hold_chain_extend();
   // If point is on a selected terminal ScratchHold end-cap, arm pending_chain_extend_id_.
-  void try_arm_pending_chain_extend(wds::interaction::Vec2 point);
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point, bool scratch_family);
   void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
   // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
   void begin_scratch_hold_placement(wds::interaction::Vec2 point);
+  void begin_regular_hold_placement(wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
   // Place a Sound / ScratchSound on an already-selected existing hold body.
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);

@@ -98,18 +98,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   toolbar->set_settings_handler([this] {
     if (width_slots_dialog_ == nullptr) return;
     EditorUiConfig cfg;
-    if (auto* settings_panel = this->settings_panel()) settings_panel->capture_config(cfg);
-    if (auto* toolbar_panel = this->toolbar_panel()) toolbar_panel->capture_config(cfg);
-    cfg.width_slots = wds::interaction::width_slot_values_const();
-    cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
-    cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
-    cfg.sus_auto_convert = session_->sus_auto_convert();
-    cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
-    cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
-    cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
-    cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
-    cfg.shortcuts_initialized = true;
-    capture_display_from_preview(*chart_preview_, cfg);
+    capture_live_ui_config(cfg);
     width_slots_dialog_->set_config(cfg);
     width_slots_dialog_->open();
   });
@@ -564,11 +553,7 @@ void UiManager::load_ui_config() {
   push_curve_fill_selection();
 }
 
-void UiManager::save_ui_config() {
-  ui_config_dirty_ = false;
-  ui_config_dirty_us_ = 0;
-  if (config_path_.empty()) return;
-  EditorUiConfig cfg;
+void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   if (auto* settings = settings_panel()) settings->capture_config(cfg);
   if (auto* toolbar = toolbar_panel()) toolbar->capture_config(cfg);
   cfg.width_slots = wds::interaction::width_slot_values_const();
@@ -583,6 +568,14 @@ void UiManager::save_ui_config() {
   cfg.shortcuts_initialized = true;
   capture_display_from_preview(*chart_preview_, cfg);
   apply_curve_template_state(cfg, curve_template_state_);
+}
+
+void UiManager::save_ui_config() {
+  ui_config_dirty_ = false;
+  ui_config_dirty_us_ = 0;
+  if (config_path_.empty()) return;
+  EditorUiConfig cfg;
+  capture_live_ui_config(cfg);
   save_editor_ui_config(config_path_, cfg);
 }
 

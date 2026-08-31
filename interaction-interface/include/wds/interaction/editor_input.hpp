@@ -30,8 +30,10 @@ bool is_clear_selection_click(const PointerUpEvent& event) noexcept;
 bool is_delete_single_note(const PointerDownEvent& event) noexcept;
 // Middle button during PlaceGesture / PlaceHoldBody cancels the in-progress draw.
 bool is_cancel_placement(const PointerDownEvent& event) noexcept;
-// Hold placement: normal Hold uses Shift+Right for stars and left-up to finish
-// (no chain). ScratchHold swaps left/right and supports chain on Left click.
+// Hold placement: buttons stay swapped. Stars are Shift only — any extra
+// modifier (curve chord, Alt) must not place a star. Normal Hold uses
+// Shift+Right for stars, Right to chain, left-up to finish. ScratchHold uses
+// Shift+Left / Left chain / right-up finish.
 bool is_place_hold_star(const PointerDownEvent& event, bool scratch_hold = false) noexcept;
 bool is_chain_hold_body(const PointerDownEvent& event, bool scratch_hold = false) noexcept;
 bool is_finish_hold_body(PointerButton button, bool scratch_hold) noexcept;
@@ -46,12 +48,14 @@ bool is_right_button(PointerButton button) noexcept;
 bool is_curve_fill_modifiers(const Modifiers& mods) noexcept;
 // Key-down edge for the chord. Repeat events are not a new transition.
 bool is_curve_fill_modifier_press(const KeyDownEvent& event) noexcept;
-// ChartEditPanel may enter curve fill only in PlaceHoldBody + ScratchHold.
+// ChartEditPanel may enter curve fill in PlaceHoldBody (regular or ScratchHold).
 bool is_curve_fill_placement_allowed(bool place_hold_body, bool scratch_hold) noexcept;
-// Primary left-click while the chord is held; takes precedence over star/chain.
-bool is_curve_fill_confirm(const PointerDownEvent& event) noexcept;
-// Right-button release while the chord is held commits the same curve batch.
-bool is_curve_fill_confirm(const PointerUpEvent& event) noexcept;
+// Shared: left-click while the chord is held. Regular Hold also accepts the
+// opposite (right) button + chord. Takes precedence over star/chain.
+bool is_curve_fill_confirm(const PointerDownEvent& event, bool scratch_hold = true) noexcept;
+// Shared: right-up + chord. Regular Hold also commits on draw-button left-up.
+// Default scratch_hold keeps right-up.
+bool is_curve_fill_confirm(const PointerUpEvent& event, bool scratch_hold = true) noexcept;
 // Idle marquee (plain Primary) hides the placement ghost; drawing does not.
 bool suppress_idle_placement_ghost(const Modifiers& mods, bool note_drawing) noexcept;
 

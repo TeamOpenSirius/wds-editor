@@ -71,7 +71,7 @@ std::vector<NotationNote> generate_scratch_hold_curve(const ScratchHoldCurveRequ
           static_cast<double>(last_top - first_top);
     }
     NotationNote note;
-    note.note_type = NoteType::ScratchHold;
+    note.note_type = request.note_type;
     note.start_tick = bounds[i];
     note.end_tick = bounds[i + 1];
     note.lane = scratch_hold_curve_left_lane(

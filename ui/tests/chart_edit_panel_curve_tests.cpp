@@ -6,6 +6,7 @@
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/note_edit_ops.hpp>
 #include <wds/core/scratch_hold_curve.hpp>
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/events.hpp>
@@ -43,6 +44,7 @@ using wds::chart_editor::MusicTiming;
 using wds::chart_editor::NotationNote;
 using wds::chart_editor::NoteType;
 using wds::chart_editor::TimingPoint;
+using wds::interaction::CursorKind;
 using wds::interaction::KeyCode;
 using wds::interaction::KeyDownEvent;
 using wds::interaction::KeyUpEvent;
@@ -198,15 +200,142 @@ void test_mode_guard_ordinary_and_non_scratch() {
     CHECK(!h.panel.curve_mode_active());
     CHECK(h.panel.curve_ghost_notes().empty());
   }
-  {
-    Harness h;
-    h.enter_hold(false, 0, 480, 3);
-    const auto before = h.engine.document().notes();
-    h.press_curve();
-    CHECK(!h.panel.curve_mode_active());
-    CHECK(h.panel.curve_ghost_notes().empty());
-    CHECK(notes_eq(h.engine.document().notes(), before));
+}
+
+void test_regular_hold_shift_right_places_star() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  Modifiers shift_only;
+  shift_only.shift = true;
+  h.panel.on_pointer_down(PointerDownEvent{h.at_tick_lane(240, 3), PointerButton::Right, shift_only});
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+}
+
+void test_regular_hold_curve_right_up_commits_without_star() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  h.press_curve();
+  CHECK(h.panel.curve_mode_active());
+  const int ghost_bodies = count_type(h.panel.curve_ghost_notes(), NoteType::Hold);
+  CHECK(ghost_bodies > 1);
+
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Right, curve_mods()});
+  CHECK(!h.panel.curve_mode_active());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), ghost_bodies);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 0);
+}
+
+void test_regular_hold_curve_right_down_commits_without_star() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  h.press_curve();
+  CHECK(h.panel.curve_mode_active());
+  const int ghost_bodies = count_type(h.panel.curve_ghost_notes(), NoteType::Hold);
+  CHECK(ghost_bodies > 1);
+
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(480, 3), PointerButton::Right, curve_mods()});
+  CHECK(!h.panel.curve_mode_active());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), ghost_bodies);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+}
+
+void test_regular_hold_curve_chord_without_curve_does_not_steal_draw() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  CHECK(!h.panel.curve_mode_active());
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(240, 3), PointerButton::Right, curve_mods()});
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Flick), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Normal), 0);
+}
+
+void test_regular_hold_curve_left_up_commits_ghost_segments() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  h.press_curve();
+  CHECK(h.panel.curve_mode_active());
+  const int ghost_bodies = count_type(h.panel.curve_ghost_notes(), NoteType::Hold);
+  CHECK(ghost_bodies > 1);
+
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, curve_mods()});
+  CHECK(!h.panel.curve_mode_active());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), ghost_bodies);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 0);
+}
+
+void test_regular_hold_curve_fill_generates_hold_bodies() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  const auto before = h.engine.document().notes();
+  CHECK(before.empty());
+  h.press_curve();
+  CHECK(h.panel.curve_mode_active());
+  const auto ghosts = h.panel.curve_ghost_notes();
+  CHECK(!ghosts.empty());
+  CHECK_EQ(count_type(ghosts, NoteType::ScratchHold), 0);
+  CHECK(count_type(ghosts, NoteType::Hold) >= 1);
+  CHECK(notes_eq(h.engine.document().notes(), before));
+
+  const int ghost_bodies = count_type(ghosts, NoteType::Hold);
+  h.panel.on_pointer_down(PointerDownEvent{h.at_tick_lane(480, 3), PointerButton::Left, curve_mods()});
+  CHECK(!h.panel.curve_mode_active());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), ghost_bodies);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 0);
+
+  std::vector<NotationNote> holds;
+  for (const auto& note : h.engine.document().notes()) {
+    if (note.note_type == NoteType::Hold) holds.push_back(note);
   }
+  std::sort(holds.begin(), holds.end(),
+            [](const NotationNote& a, const NotationNote& b) { return a.start_tick < b.start_tick; });
+  for (size_t i = 0; i + 1 < holds.size(); ++i) {
+    CHECK_EQ(holds[i].end_tick, holds[i + 1].start_tick);
+    const auto [lo, hi] = wds::chart_editor::get_scratch_end_lane_range(holds[i]);
+    const int32_t union_l = std::min(holds[i].lane, holds[i + 1].lane);
+    const int32_t union_r = std::max(holds[i].end_lane(), holds[i + 1].end_lane());
+    CHECK_EQ(lo, union_l);
+    CHECK_EQ(hi, union_r);
+    if (lo == holds[i].lane && hi == holds[i].end_lane()) {
+      CHECK(holds[i].gimmick_type == wds::chart_editor::GimmickType::OneDirection);
+      CHECK_EQ(holds[i].scratch_length, 0);
+    } else {
+      CHECK(holds[i].gimmick_type == wds::chart_editor::GimmickType::JumpScratch);
+    }
+  }
+}
+
+void test_regular_hold_right_click_chains_next_segment() {
+  Harness h;
+  h.enter_hold(false, 0, 240, 2);
+  h.panel.on_pointer_down(PointerDownEvent{h.at_tick_lane(240, 2), PointerButton::Right, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 5), {}});
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 5), PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+  std::vector<NotationNote> holds;
+  for (const auto& note : h.engine.document().notes()) {
+    if (note.note_type == NoteType::Hold) holds.push_back(note);
+  }
+  std::sort(holds.begin(), holds.end(),
+            [](const NotationNote& a, const NotationNote& b) { return a.start_tick < b.start_tick; });
+  CHECK_EQ(static_cast<int>(holds.size()), 2);
+  CHECK_EQ(holds[0].end_tick, holds[1].start_tick);
+  const auto next = wds::chart_editor::chained_next_scratch_hold(h.engine.document(), holds[0]);
+  CHECK(next.has_value());
+  if (next) CHECK_EQ(next->id, holds[1].id);
+  CHECK(holds[0].gimmick_type == wds::chart_editor::GimmickType::JumpScratch ||
+        holds[0].gimmick_type == wds::chart_editor::GimmickType::OneDirection);
 }
 
 void test_hot_switch_ghosts_and_no_document_mutation() {
@@ -748,7 +877,7 @@ int32_t add_hold_body(Harness& h, NoteType type, int32_t start, int32_t end, int
   body.end_tick = end;
   body.lane = lane;
   body.width = width;
-  if (type == NoteType::ScratchHold) {
+  if (type == NoteType::ScratchHold || cover_left >= 0 || cover_right >= 0) {
     body.gimmick_type = wds::chart_editor::GimmickType::JumpScratch;
     const int32_t left = cover_left >= 0 ? cover_left : lane;
     const int32_t right = cover_right >= 0 ? cover_right : lane + width - 1;
@@ -757,6 +886,117 @@ int32_t add_hold_body(Harness& h, NoteType type, int32_t start, int32_t end, int
   const int32_t id = h.engine.add_note(body);
   CHECK(id >= 0);
   return id;
+}
+
+Vec2 tail_x_at_end(const Harness& h, const NotationNote& note, float x) {
+  return {x, h.panel.viewport().y_at(note.end_tick)};
+}
+
+float tail_span_right_x(const Harness& h, const NotationNote& note) {
+  const auto range = wds::chart_editor::get_scratch_end_lane_range(note);
+  const float x0 = h.panel.viewport().x_at(range.first);
+  return x0 + h.panel.viewport().lane_width(range.second - range.first + 1);
+}
+
+Vec2 tail_outer_right(const Harness& h, const NotationNote& note) {
+  return tail_x_at_end(h, note, tail_span_right_x(h, note) + 3.0f);
+}
+
+Vec2 tail_right_edge_on_note(const Harness& h, const NotationNote& note) {
+  return tail_x_at_end(h, note, tail_span_right_x(h, note) - 1.0f);
+}
+
+Vec2 tail_center_on_note(const Harness& h, const NotationNote& note) {
+  const auto range = wds::chart_editor::get_scratch_end_lane_range(note);
+  const float x0 = h.panel.viewport().x_at(range.first);
+  const float w = h.panel.viewport().lane_width(range.second - range.first + 1);
+  return tail_x_at_end(h, note, x0 + w * 0.5f);
+}
+
+void test_selected_regular_empty_cap_left_click_does_not_arm() {
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1, 3, 7);
+  h.panel.set_selected({id});
+  const auto* note = find_note_id(h.engine.document().notes(), id);
+  CHECK(note != nullptr);
+  const auto edge = tail_outer_right(h, *note);
+  h.panel.on_pointer_down(PointerDownEvent{edge, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{edge, PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  const auto* after = find_note_id(h.engine.document().notes(), id);
+  CHECK(after != nullptr);
+  CHECK(!wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
+}
+
+void test_selected_regular_terminal_left_drag_resizes_tail() {
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1, 3, 7);
+  h.panel.set_selected({id});
+  const auto* before = find_note_id(h.engine.document().notes(), id);
+  CHECK(before != nullptr);
+  const auto orig = wds::chart_editor::get_scratch_end_lane_range(*before);
+  CHECK_EQ(orig.second, 7);
+  const auto grab = tail_right_edge_on_note(h, *before);
+  const auto narrower = h.at_tick_lane(480, 5);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{narrower, {}});
+  h.panel.on_pointer_up(PointerUpEvent{narrower, PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  const auto* after = find_note_id(h.engine.document().notes(), id);
+  CHECK(after != nullptr);
+  const auto got = wds::chart_editor::get_scratch_end_lane_range(*after);
+  CHECK(got.second < orig.second);
+  CHECK(!wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
+}
+
+void test_selected_regular_terminal_tail_shows_resize_cursor() {
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1, 3, 7);
+  const auto* note = find_note_id(h.engine.document().notes(), id);
+  CHECK(note != nullptr);
+  const auto tail_edge = tail_right_edge_on_note(h, *note);
+  const auto tail_mid = tail_center_on_note(h, *note);
+  const auto body_left = Vec2{h.panel.viewport().x_at(note->lane), h.panel.viewport().y_at(240)};
+  const auto body_mid = h.at_tick_lane(240, 3);
+  const auto empty = h.at_tick_lane(720, 10);
+
+  CursorKind cursor = CursorKind::Default;
+  h.panel.set_cursor_setter([&](CursorKind kind) { cursor = kind; });
+
+  h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{tail_edge, {}});
+  CHECK(cursor == CursorKind::ResizeHorizontal);
+  h.panel.on_pointer_move(PointerMoveEvent{tail_mid, {}});
+  CHECK(cursor == CursorKind::ResizeVertical);
+
+  h.panel.set_selected({id});
+  h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
+  CHECK(cursor == CursorKind::Default);
+  h.panel.on_pointer_move(PointerMoveEvent{tail_edge, {}});
+  CHECK(cursor == CursorKind::ResizeHorizontal);
+  h.panel.on_pointer_move(PointerMoveEvent{tail_mid, {}});
+  CHECK(cursor == CursorKind::ResizeVertical);
+
+  h.panel.on_pointer_move(PointerMoveEvent{body_left, {}});
+  CHECK(cursor == CursorKind::ResizeHorizontal);
+  h.panel.on_pointer_move(PointerMoveEvent{body_mid, {}});
+  CHECK(cursor == CursorKind::Default);
+}
+
+void test_selected_scratch_terminal_tail_keeps_resize_cursor() {
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 3, 1, 3, 7);
+  h.panel.set_selected({id});
+  const auto* note = find_note_id(h.engine.document().notes(), id);
+  CHECK(note != nullptr);
+  const auto tail = tail_right_edge_on_note(h, *note);
+  const auto empty = h.at_tick_lane(720, 10);
+
+  CursorKind cursor = CursorKind::Default;
+  h.panel.set_cursor_setter([&](CursorKind kind) { cursor = kind; });
+  h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{tail, {}});
+  CHECK(cursor == CursorKind::ResizeHorizontal);
 }
 
 void test_hold_tail_adjust_follows_playback_resync() {
@@ -844,6 +1084,17 @@ void test_plain_primary_does_not_clear_hold_draft_during_draw() {
 
 int main() {
   test_mode_guard_ordinary_and_non_scratch();
+  test_regular_hold_shift_right_places_star();
+  test_regular_hold_curve_right_up_commits_without_star();
+  test_regular_hold_curve_right_down_commits_without_star();
+  test_regular_hold_curve_chord_without_curve_does_not_steal_draw();
+  test_regular_hold_curve_left_up_commits_ghost_segments();
+  test_regular_hold_curve_fill_generates_hold_bodies();
+  test_regular_hold_right_click_chains_next_segment();
+  test_selected_regular_empty_cap_left_click_does_not_arm();
+  test_selected_regular_terminal_left_drag_resizes_tail();
+  test_selected_regular_terminal_tail_shows_resize_cursor();
+  test_selected_scratch_terminal_tail_keeps_resize_cursor();
   test_hot_switch_ghosts_and_no_document_mutation();
   test_tail_at_pointer_one_and_multiple_segments();
   test_left_click_and_right_up_commit_modifier_release_ordinary();

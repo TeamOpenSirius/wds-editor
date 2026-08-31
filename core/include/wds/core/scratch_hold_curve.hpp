@@ -20,6 +20,7 @@ struct ScratchHoldCurveRequest {
   EasingAlgorithm algorithm = EasingAlgorithm::Linear;
   EasingDirection direction = EasingDirection::In;
   double parameter = 0.0;
+  NoteType note_type = NoteType::ScratchHold;
 };
 
 // Start tick + meter-aware subdivision ticks + mouse end tick. Never emits a

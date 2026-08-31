@@ -4,6 +4,7 @@
 
 #include <wds/interaction/editor_shortcuts.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -27,10 +28,14 @@ struct EditorUiConfig {
   // Preferred Vulkan MSAA samples: 1 (低) / 2 (中) / 4 (高). Default matches app 2×.
   int msaa_samples = 2;
   int32_t visible_hectoms = 20;
+  // Edit-grid beat subdivisions (toolbar; each in [1, 64]).
+  int32_t subdivisions_per_beat = 4;
   float music_volume = 1.0f;
   bool music_muted = false;
   float sfx_volume = 1.0f;
   bool sfx_muted = false;
+  // Preview transport rate (0.25..2). Discrete combo labels snap on apply.
+  float playback_rate = 1.0f;
   bool pause_at_current = false;
   bool split_width_follow = false;
   // Q/W/E/A/S/D place-width slots (each in [1, 12]).
@@ -65,6 +70,14 @@ struct EditorUiConfig {
 // Matches VulkanRenderer::set_preferred_msaa: ≤1 → 1, ≤2 → 2, else 4.
 inline int clamp_msaa_samples(int samples) noexcept {
   return samples <= 1 ? 1 : (samples <= 2 ? 2 : 4);
+}
+
+inline int clamp_subdivisions_per_beat(int value) noexcept {
+  return std::clamp(value, 1, 64);
+}
+
+inline float clamp_playback_rate(float rate) noexcept {
+  return std::clamp(rate, 0.25f, 2.0f);
 }
 
 // Resolves the platform config path (creates nothing; save may create dirs).

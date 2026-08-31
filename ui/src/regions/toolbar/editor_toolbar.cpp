@@ -187,6 +187,7 @@ EditorToolbar::EditorToolbar(EditorSession& session, ChartEditPanel& edit)
     grid.subdivisions_per_beat = std::max(1, grid.subdivisions_per_beat - 1);
     edit_.set_grid(grid);
     sync_numeric_fields();
+    notify_persist();
   });
   division_combo_ =
       add_combo(*this, {"2", "3", "4", "6", "8", "12", "16"},
@@ -201,12 +202,14 @@ EditorToolbar::EditorToolbar(EditorSession& session, ChartEditPanel& edit)
                     edit_.set_grid(grid);
                   }
                   sync_numeric_fields();
+                  notify_persist();
                 });
   division_plus_ = add_step_button(*this, "+", [this] {
     auto grid = edit_.viewport().grid();
     grid.subdivisions_per_beat = std::min(64, grid.subdivisions_per_beat + 1);
     edit_.set_grid(grid);
     sync_numeric_fields();
+    notify_persist();
   });
 
   auto pause_at_current = std::make_unique<wds::interaction::Checkbox>("停止播放后停在当前时间");
@@ -581,6 +584,7 @@ void EditorToolbar::notify_persist() const {
 void EditorToolbar::apply_config(const EditorUiConfig& cfg) {
   auto grid = edit_.viewport().grid();
   grid.visible_hectoms = std::clamp(cfg.visible_hectoms, 1, 1000);
+  grid.subdivisions_per_beat = clamp_subdivisions_per_beat(cfg.subdivisions_per_beat);
   edit_.set_grid(grid);
   edit_.set_pause_at_current(cfg.pause_at_current);
   edit_.set_split_width_follow(cfg.split_width_follow);
@@ -591,6 +595,8 @@ void EditorToolbar::apply_config(const EditorUiConfig& cfg) {
 
 void EditorToolbar::capture_config(EditorUiConfig& cfg) const {
   cfg.visible_hectoms = edit_.viewport().grid().visible_hectoms;
+  cfg.subdivisions_per_beat =
+      clamp_subdivisions_per_beat(edit_.viewport().grid().subdivisions_per_beat);
   cfg.pause_at_current = edit_.pause_at_current();
   cfg.split_width_follow = edit_.split_width_follow();
 }

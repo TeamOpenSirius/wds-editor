@@ -30,6 +30,7 @@ class CurveTemplatesDialog;
 class ExportChoiceDialog;
 class ChartAddDialog;
 class UnsavedChangesDialog;
+struct EditorUiConfig;
 
 // Shell orchestrator: owns the four regions and applies EditorLayouter results.
 class UiManager {
@@ -138,6 +139,8 @@ class UiManager {
 
  private:
   void apply_region_bounds();
+  // Snapshot every persisted pref from live runtime (dialog + toolbar + preview).
+  void capture_live_ui_config(EditorUiConfig& cfg);
   void flush_pending_ui_config();
   void prepare_painter(wds::interaction::UiPainter& painter) const;
   // Clear + rebind the active "editor" shortcut namespace from current chords.

@@ -98,6 +98,8 @@ void test_old_config_without_curve_keys() {
   CHECK(nearly_equal(cfg.note_speed, 7.5));
   CHECK(cfg.music_muted);
   CHECK_EQ(cfg.visible_hectoms, 40);
+  CHECK_EQ(cfg.subdivisions_per_beat, 4);
+  CHECK(std::fabs(cfg.playback_rate - 1.0f) < 1e-5f);
   CHECK(cfg.curve_templates.empty());
   CHECK_EQ(cfg.curve_selected_template_id, static_cast<std::uint64_t>(0));
   CHECK(cfg.curve_selected_direction == EasingDirection::In);
@@ -511,6 +513,34 @@ void test_save_truncates_in_memory_over_max() {
   CHECK_EQ(loaded.curve_selected_template_id, static_cast<std::uint64_t>(0));
 }
 
+void test_subdivisions_and_playback_rate_round_trip() {
+  CHECK_EQ(wds::ui::clamp_subdivisions_per_beat(0), 1);
+  CHECK_EQ(wds::ui::clamp_subdivisions_per_beat(8), 8);
+  CHECK_EQ(wds::ui::clamp_subdivisions_per_beat(100), 64);
+  CHECK(std::fabs(wds::ui::clamp_playback_rate(0.1f) - 0.25f) < 1e-5f);
+  CHECK(std::fabs(wds::ui::clamp_playback_rate(1.5f) - 1.5f) < 1e-5f);
+  CHECK(std::fabs(wds::ui::clamp_playback_rate(3.0f) - 2.0f) < 1e-5f);
+
+  EditorUiConfig cfg;
+  cfg.subdivisions_per_beat = 12;
+  cfg.playback_rate = 0.5f;
+  const auto path = temp_config_path("grid_and_rate.yml");
+  CHECK(save_editor_ui_config(path.string(), cfg));
+  EditorUiConfig loaded;
+  CHECK(load_editor_ui_config(path.string(), loaded));
+  CHECK_EQ(loaded.subdivisions_per_beat, 12);
+  CHECK(std::fabs(loaded.playback_rate - 0.5f) < 1e-5f);
+
+  const auto invalid = temp_config_path("grid_and_rate_clamp.yml");
+  CHECK(write_text_atomic(invalid.string(),
+                          "subdivisions_per_beat: 200\nplayback_rate: 0.05\n")
+            .error == SerializeError::Ok);
+  EditorUiConfig clamped;
+  CHECK(load_editor_ui_config(invalid.string(), clamped));
+  CHECK_EQ(clamped.subdivisions_per_beat, 64);
+  CHECK(std::fabs(clamped.playback_rate - 0.25f) < 1e-5f);
+}
+
 void test_allow_crash_log_sensitive_default_and_round_trip() {
   EditorUiConfig defaults;
   CHECK(!defaults.allow_crash_log_sensitive);
@@ -555,6 +585,7 @@ int main() {
   test_over_cap_indexed_slots_ignored();
   test_settings_save_preserves_curve_state();
   test_save_truncates_in_memory_over_max();
+  test_subdivisions_and_playback_rate_round_trip();
   test_allow_crash_log_sensitive_default_and_round_trip();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
