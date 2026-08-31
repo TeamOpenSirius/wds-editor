@@ -31,6 +31,14 @@ NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& no
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold);
 bool recompute_hold_eighths(ChartDocument& doc);
 
+// Drop every HoldEighth. File I/O never trusts persisted eighths.
+void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept;
+
+// Strip file/stale eighths, then regenerate from every tailed hold (tpq/2 grid;
+// ticks occupied by Sound / ScratchSound stay empty).
+std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationNote> notes,
+                                                           int32_t ticks_per_quarter);
+
 // Pure variant for folding eighths into an undoable SetNotesCommand before/after.
 std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote> notes,
                                                        const NotationNote& hold,

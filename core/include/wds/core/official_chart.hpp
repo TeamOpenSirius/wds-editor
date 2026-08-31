@@ -15,6 +15,7 @@ namespace wds::chart_editor {
 //   startTime     — note/gimmick start in music seconds (beat≡second at BPM 60)
 //   endTime       — hold/split end in seconds; -1 = instantaneous (no duration)
 //   type          — AppConst.NoteType (10/20/80/100/900/…); 0 = gimmick-only (split);
+//                   900 (HoldEighth) is ignored on import and generated on export;
 //                   -1 = HiSpeed (endTime holds speed value; not stored in NotationNote);
 //                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
 //                   editor imports as JumpScratch split / orphan Flick — never stored as 40)

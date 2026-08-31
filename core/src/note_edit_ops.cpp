@@ -57,6 +57,27 @@ std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote>
   return notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
 }
 
+void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept {
+  notes.erase(std::remove_if(notes.begin(), notes.end(),
+                             [](const NotationNote& note) {
+                               return note.note_type == NoteType::HoldEighth;
+                             }),
+              notes.end());
+}
+
+std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationNote> notes,
+                                                           int32_t ticks_per_quarter) {
+  strip_hold_eighths(notes);
+  std::vector<NotationNote> holds;
+  for (const auto& note : notes) {
+    if (is_hold_with_tail(note.note_type)) holds.push_back(note);
+  }
+  for (const auto& hold : holds) {
+    notes = notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
+  }
+  return notes;
+}
+
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
   const bool was_hold = is_hold_with_tail(note.note_type);
   const bool target_hold = is_hold_with_tail(target);

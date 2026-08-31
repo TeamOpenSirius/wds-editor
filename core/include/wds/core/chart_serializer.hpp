@@ -33,6 +33,7 @@ class ChartSerializer {
   // Native .wdschart format (always writes latest).
   // v3 adds TIMING points (BPM + meter). v4 adds has_bpm/has_meter flags on T rows.
   // v1/v2 load creates a default tick-0 point.
+  // HoldEighth is never written; legacy HoldEighth rows are skipped on load.
   static SerializeResult save_to_file(const NotationChart& chart, const std::string& path);
   static SerializeResult load_from_file(const std::string& path, NotationChart& out_chart);
 

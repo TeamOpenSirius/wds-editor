@@ -1820,7 +1820,14 @@ void test_official_chart_import_and_roundtrip() {
   CHECK_EQ(timing.offset_ms, 3019);
 
   const auto& notes = engine.document().notes();
-  CHECK_EQ(static_cast<int32_t>(notes.size()), 13);
+  int authored = 0;
+  int eighths = 0;
+  for (const auto& n : notes) {
+    if (n.note_type == NoteType::HoldEighth) ++eighths;
+    else ++authored;
+  }
+  CHECK_EQ(authored, 12);
+  CHECK(eighths > 0);
 
   // Document sorts by start time — first note is the split at t=0, not CSV row 0.
   const auto& first = notes[0];
@@ -1893,7 +1900,10 @@ void test_official_chart_load_auto() {
   NotationChart chart;
   const auto result = ChartSerializer::load_auto(chart_path.string(), chart);
   CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(static_cast<int32_t>(chart.notes.size()), 13);
+  CHECK_EQ(static_cast<int32_t>(chart.notes.size()), 12);
+  for (const auto& n : chart.notes) {
+    CHECK(n.note_type != NoteType::HoldEighth);
+  }
 }
 
 void test_load_repo_test_official_charts() {
@@ -2253,6 +2263,170 @@ void test_truncated_wdschart_rejected() {
   CHECK_EQ(static_cast<int>(result2.error), static_cast<int>(SerializeError::ParseError));
 }
 
+int count_chart_note_type(const NotationChart& chart, NoteType type) {
+  int n = 0;
+  for (const auto& note : chart.notes) {
+    if (note.note_type == type) ++n;
+  }
+  return n;
+}
+
+int count_doc_note_type(const ChartDocument& doc, NoteType type) {
+  int n = 0;
+  for (const auto& note : doc.notes()) {
+    if (note.note_type == type) ++n;
+  }
+  return n;
+}
+
+// HoldEighth is derived (tpq/2). wdschart never stores it; old files are ignored.
+void test_wdschart_omits_and_ignores_eighths() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  NotationNote hold = make_tap(0, 2);
+  hold.id = 0;
+  hold.width = 2;
+  hold.end_tick = 960;
+  hold.note_type = NoteType::Hold;
+  NotationNote stale;
+  stale.id = 1;
+  stale.start_tick = 120;  // off the auto grid
+  stale.end_tick = 120;
+  stale.lane = 2;
+  stale.width = 2;
+  stale.note_type = NoteType::HoldEighth;
+  chart.notes = {hold, stale};
+
+  const fs::path path = temp_chart_path("no_eighth.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(chart, path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  {
+    std::ifstream in(path);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find(" 900 ") == std::string::npos);
+    CHECK(text.find("NOTES 1\n") != std::string::npos);
+  }
+
+  const fs::path legacy = temp_chart_path("legacy_eighth.wdschart");
+  {
+    std::ofstream out(legacy);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 120 4 4 3\nNOTES 3\n"
+           "N 0 0 0 80 2 2 0 0\n"
+           "N 1 0 960 100 2 2 0 0\n"
+           "N 2 120 120 900 2 2 0 0\n"
+           "CONCURRENT 0\nEND\n";
+  }
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(legacy.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::HoldEighth), 0);
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::Hold), 1);
+  CHECK_EQ(static_cast<int>(loaded.notes.size()), 2);
+
+  ChartEditorEngine engine;
+  CHECK_EQ(static_cast<int>(engine.load_from_file(legacy.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 3);
+  for (const auto& n : engine.document().notes()) {
+    if (n.note_type == NoteType::HoldEighth) {
+      CHECK(n.start_tick != 120);
+    }
+  }
+}
+
+void test_official_ignores_file_eighth_and_export_generates() {
+  const std::string csv =
+      "0.0,2.0,100,1,2,0,0\n"
+      "0.25,-1.0,900,1,2,0,0\n";  // 0.25s is off the tpq/2 grid from 0
+  NotationChart parsed;
+  OfficialChartLoadOptions load_opt;
+  load_opt.convert_lane_to_zero_based = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, parsed, load_opt).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::HoldEighth), 0);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::Hold), 1);
+
+  ChartEditorEngine engine;
+  engine.load_chart(parsed, ChartEditMode::OfficialPreviewOnly);
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 3);
+  for (const auto& n : engine.document().notes()) {
+    if (n.note_type == NoteType::HoldEighth) {
+      CHECK(n.start_tick != 120);
+    }
+  }
+
+  NotationChart hold_only;
+  hold_only.timing.bpm = 60.0;
+  hold_only.timing.ticks_per_quarter = 480;
+  NotationNote hold = make_tap(0, 0);
+  hold.width = 2;
+  hold.end_tick = 960;
+  hold.note_type = NoteType::Hold;
+  hold_only.notes.push_back(hold);
+  std::string out;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(hold_only, out).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(out.find(",900,") != std::string::npos);
+  CHECK(out.find("-1.0,900,") != std::string::npos || out.find("-1,900,") != std::string::npos);
+  int generated = 0;
+  {
+    std::string line;
+    std::istringstream ss(out);
+    while (std::getline(ss, line)) {
+      if (line.find(",900,") != std::string::npos) ++generated;
+    }
+  }
+  CHECK_EQ(generated, 3);
+}
+
+void test_sus_ignores_file_eighth_and_export_generates() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  NotationNote hold = make_tap(0, 2);
+  hold.id = 0;
+  hold.width = 2;
+  hold.end_tick = 960;
+  hold.note_type = NoteType::Hold;
+  chart.notes.push_back(hold);
+
+  SusChartSaveOptions options;
+  options.ched_lane_padding = false;
+  std::string text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
+           static_cast<int>(SerializeError::Ok));
+  bool wrote_invisible_eighth = false;
+  {
+    std::string line;
+    std::istringstream ss(text);
+    while (std::getline(ss, line)) {
+      const auto colon = line.find(':');
+      if (line.size() < 6 || line[0] != '#' || colon == std::string::npos) continue;
+      const std::string header = line.substr(1, colon - 1);
+      if (header.size() < 4 || header[3] != '3') continue;
+      std::string data = line.substr(colon + 1);
+      while (!data.empty() && (data.front() == ' ' || data.front() == '\t')) data.erase(data.begin());
+      for (size_t i = 0; i + 1 < data.size(); i += 2) {
+        if (data[i] == '5') wrote_invisible_eighth = true;
+      }
+    }
+  }
+  CHECK(wrote_invisible_eighth);
+
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::HoldEighth), 0);
+  CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Sound), 0);
+
+  ChartEditorEngine engine;
+  engine.load_chart(loaded.chart, ChartEditMode::OfficialPreviewOnly);
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 3);
+}
+
 void test_official_csv_tempo_map_export() {
   NotationChart chart;
   chart.timing.bpm = 120.0;
@@ -2315,7 +2489,7 @@ void test_official_sound_purple_split_and_row_semantics() {
   CHECK_EQ(scratch_holds, 2);
   CHECK_EQ(jump, 1);
   CHECK_EQ(stars, 1);
-  CHECK_EQ(eighths, 1);
+  CHECK_EQ(eighths, 0);
 
   // Export: HoldEighth endTime=-1; Split leftLane=-1; JumpScratch name when scratch≠0.
   NotationChart export_chart;
@@ -6769,6 +6943,9 @@ int main() {
   test_selection_drag_snaps_only_anchor_tick();
   test_timing_bpm_meter_split_and_prune();
   test_truncated_wdschart_rejected();
+  test_wdschart_omits_and_ignores_eighths();
+  test_official_ignores_file_eighth_and_export_generates();
+  test_sus_ignores_file_eighth_and_export_generates();
   test_official_csv_tempo_map_export();
   test_official_sound_purple_split_and_row_semantics();
   test_migrate_wdschart_scratch_to_flick_script();

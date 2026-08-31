@@ -1035,6 +1035,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     }
   }
 
+  strip_hold_eighths(notes);
   std::sort(notes.begin(), notes.end(), [](const NotationNote& a, const NotationNote& b) {
     if (a.start_tick != b.start_tick) return a.start_tick < b.start_tick;
     if (a.lane != b.lane) return a.lane < b.lane;
@@ -1064,6 +1065,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   normalize_timing_points(timing);
   const int tpq = std::max(1, timing.ticks_per_quarter);
   const int lane_pad = options.ched_lane_padding ? 2 : 0;
+  const std::vector<NotationNote> export_notes =
+      with_all_hold_eighths_recomputed(chart.notes, timing.ticks_per_quarter);
 
   auto sus_lane = [&](int32_t lane) { return std::clamp(lane + lane_pad, 0, 35); };
 
@@ -1072,7 +1075,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   for (const auto& p : timing.points) {
     max_tick = std::max(max_tick, static_cast<int64_t>(p.tick));
   }
-  for (const auto& n : chart.notes) {
+  for (const auto& n : export_notes) {
     max_tick = std::max(max_tick, static_cast<int64_t>(n.start_tick));
     max_tick = std::max(max_tick, static_cast<int64_t>(n.end_tick));
   }
@@ -1327,10 +1330,11 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   };
   std::vector<HoldEmit> holds;
   std::vector<const NotationNote*> mids;
+  std::vector<const NotationNote*> eighths;
   std::vector<const NotationNote*> taps;
 
   // Collect heads first so bodies that appear earlier in `notes` still pair.
-  for (const auto& n : chart.notes) {
+  for (const auto& n : export_notes) {
     if (n.note_type == NoteType::HoldStart || n.note_type == NoteType::CriticalHoldStart ||
         n.note_type == NoteType::ScratchHoldStart ||
         n.note_type == NoteType::ScratchCriticalHoldStart) {
@@ -1340,7 +1344,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) {
       mids.push_back(&n);
     } else if (n.note_type == NoteType::HoldEighth) {
-      // Synthesized grid — never export (would become Sound stars on re-import).
+      eighths.push_back(&n);
     } else if (n.gimmick_type == GimmickType::None || !is_split_lane_gimmick(n.gimmick_type)) {
       // Nontail* bodies are hold ribbons (exported below), not taps — is_hold_with_tail
       // intentionally excludes them for combo/sync, so exclude explicitly here.
@@ -1350,7 +1354,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       }
     }
   }
-  for (const auto& n : chart.notes) {
+  for (const auto& n : export_notes) {
     if (!(n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
           n.note_type == NoteType::ScratchHold || n.note_type == NoteType::ScratchCriticalHold ||
           n.note_type == NoteType::NontailHold || n.note_type == NoteType::NontailCriticalHold ||
@@ -1429,7 +1433,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     // Truly headless (authored without head, start not fully covered) → Damage
     // marker of equal body lane/width. Fully covered / CriticalHold need no marker.
     if (authored_headless && !critical_hold &&
-        !hold_start_fully_covered(*body, chart.notes)) {
+        !hold_start_fully_covered(*body, export_notes)) {
       std::string dmg_suffix = "1";
       dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
       place(dmg_suffix, t0, kSusTapDamage, std::clamp(body->width, 1, 35));
@@ -1450,7 +1454,6 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     }
 
     for (const NotationNote* mid : mids) {
-      if (mid->note_type == NoteType::HoldEighth) continue;
       if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
       if (mid->lane + mid->width <= body->lane || mid->lane >= body->lane + body->width) {
         continue;
@@ -1460,6 +1463,21 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       mid_suffix.push_back(base36_digit(h.channel));
       place(mid_suffix, static_cast<int64_t>(mid->start_tick), 3,
             std::clamp(mid->width, 1, 35));
+    }
+    // Type 5 = invisible mid (already ignored on import; not Sound).
+    for (const NotationNote* eighth : eighths) {
+      if (eighth->start_tick <= body->start_tick || eighth->start_tick >= body->end_tick) {
+        continue;
+      }
+      if (eighth->lane + eighth->width <= body->lane ||
+          eighth->lane >= body->lane + body->width) {
+        continue;
+      }
+      std::string eighth_suffix = "3";
+      eighth_suffix.push_back(base36_digit(sus_lane(eighth->lane)));
+      eighth_suffix.push_back(base36_digit(h.channel));
+      place(eighth_suffix, static_cast<int64_t>(eighth->start_tick), 5,
+            std::clamp(eighth->width, 1, 35));
     }
   }
 
@@ -1496,7 +1514,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       std::snprintf(buf, sizeof(buf), "%d'%04d:%02d.%05d", loc.measure, sub, lines, types);
       til_entries.push_back(buf);
     };
-    for (const auto& n : chart.notes) {
+    for (const auto& n : export_notes) {
       if (!is_split_lane_gimmick(n.gimmick_type)) continue;
       const int lines = std::clamp(get_split_count(n.gimmick_type), 1, 6);
       const int types = std::max(0, n.scratch_length);
