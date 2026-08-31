@@ -3137,6 +3137,14 @@ void test_hold_chain_family_predicates() {
   CHECK(!same_hold_chain_family(NoteType::Hold, NoteType::ScratchHold));
   CHECK(!same_hold_chain_family(NoteType::CriticalHold, NoteType::ScratchCriticalHold));
   CHECK(!same_hold_chain_family(NoteType::Hold, NoteType::NontailHold));
+
+  CHECK_EQ(static_cast<int>(drawn_hold_body_type(false, false)), static_cast<int>(NoteType::Hold));
+  CHECK_EQ(static_cast<int>(drawn_hold_body_type(false, true)),
+           static_cast<int>(NoteType::CriticalHold));
+  CHECK_EQ(static_cast<int>(drawn_hold_body_type(true, false)),
+           static_cast<int>(NoteType::ScratchHold));
+  CHECK_EQ(static_cast<int>(drawn_hold_body_type(true, true)),
+           static_cast<int>(NoteType::ScratchCriticalHold));
 }
 
 void test_occupied_lane_span_includes_hold_jump_scratch() {

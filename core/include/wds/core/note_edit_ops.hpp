@@ -85,9 +85,10 @@ std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
 // Parent hold body for a mid-star / HoldEighth, if any.
 std::optional<NotationNote> parent_hold_for(const ChartDocument& doc, const NotationNote& note);
 
-// Chained ScratchHold neighbors: next starts at this end, has no own head, and
-// prev's end (JumpScratch) is exactly the union of both bodies. When looking
-// up prev, the previous segment is allowed to have a head.
+// Chained hold neighbors (regular or scratch, same family): next starts at this
+// end, has no own head, and prev's current tail exactly covers both bodies.
+// Looking up prev also requires this body to have no head; the previous segment
+// itself may own a head (first segment of a chain).
 std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body);
 std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,

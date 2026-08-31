@@ -249,6 +249,13 @@ int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationN
   return std::clamp(static_cast<int32_t>(std::lround(desired_lane)), 0, max_lane);
 }
 
+bool hold_chain_lanes_connected(const NotationNote& prev, const NotationNote& next) noexcept {
+  const int32_t union_left = std::min(prev.lane, next.lane);
+  const int32_t union_right = std::max(prev.end_lane(), next.end_lane());
+  const auto [cover_lo, cover_hi] = get_scratch_end_lane_range(prev);
+  return cover_lo == union_left && cover_hi == union_right;
+}
+
 void apply_hold_chain_gimmick(NotationNote& prev) noexcept {
   if (!is_hold_chain_body(prev.note_type)) return;
   if (is_scratch_hold_body(prev.note_type)) return;

@@ -244,6 +244,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);
   // Keep placement ghost in sync with hold_draft_ (zero length → Tap / Flick).
   void sync_hold_placement_ghost();
+  // First-segment gold head: Shift was down at mouse press, and this draft is
+  // not a chain continuation. Release after press does not change the lock.
+  bool want_gold_first_hold_segment() const noexcept;
+  // Keep hold_draft_ tinted to the press-time gold-head lock.
+  void sync_drawn_hold_body_type();
+  void apply_gold_first_curve_body(std::vector<wds::chart_editor::NotationNote>& bodies) const;
   // Screen center of the placement note (gesture dx/dy / unlock origin).
   wds::interaction::Vec2 place_note_center() const;
   // Re-apply default_width_ to the locked placement note without chasing the pointer.
@@ -422,6 +428,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Armed on RMB-down over a selected terminal JumpScratch; consumed when the
   // gesture resolves to ScratchHoldBody (chain continue instead of a new hold).
   int32_t pending_chain_extend_id_ = -1;
+  // Locked when PlaceGesture starts: Shift was already down at mouse press.
+  // The same Shift still places stars; releasing it mid-draw does not retint.
+  bool place_gold_head_ = false;
 
   void clear_hold_chain_state();
   void select_hold_chain();

@@ -679,7 +679,8 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         ghost_.note.note_type = NoteType::HoldStart;
         break;
       case PlaceIntent::HoldBody:
-        ghost_.note.note_type = NoteType::Hold;
+        ghost_.note.note_type = wds::chart_editor::drawn_hold_body_type(
+            false, place_gold_head_);
         // Upward only: end cannot go earlier than the press tick.
         ghost_.note.end_tick =
             std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
@@ -696,7 +697,8 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         ghost_.note.scratch_length = 1;
         break;
       case PlaceIntent::ScratchHoldBody:
-        ghost_.note.note_type = NoteType::ScratchHold;
+        ghost_.note.note_type = wds::chart_editor::drawn_hold_body_type(
+            true, place_gold_head_);
         ghost_.note.end_tick =
             std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
         break;
@@ -1041,7 +1043,7 @@ void ChartEditPanel::apply_hold_tail_cover(NotationNote& prev, const NotationNot
 void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*point*/) {
   hold_scratch_ = scratch;
   hold_draft_ = place_anchor_;
-  hold_draft_.note_type = scratch ? NoteType::ScratchHold : NoteType::Hold;
+  hold_draft_.note_type = wds::chart_editor::drawn_hold_body_type(scratch, place_gold_head_);
   // Upward only from the press tick; length follows current pointer (may be zero).
   hold_draft_.end_tick =
       std::max(hold_draft_.start_tick, viewport_.tick_at(pointer_.y));
@@ -1169,6 +1171,24 @@ void ChartEditPanel::begin_regular_hold_placement(wds::interaction::Vec2 point) 
   }
 }
 
+bool ChartEditPanel::want_gold_first_hold_segment() const noexcept {
+  return place_gold_head_ && hold_chain_prev_id_ < 0;
+}
+
+void ChartEditPanel::sync_drawn_hold_body_type() {
+  if (mode_ != Mode::PlaceHoldBody) return;
+  if (hold_chain_prev_id_ >= 0) return;
+  hold_draft_.note_type =
+      wds::chart_editor::drawn_hold_body_type(hold_scratch_, want_gold_first_hold_segment());
+}
+
+void ChartEditPanel::apply_gold_first_curve_body(
+    std::vector<wds::chart_editor::NotationNote>& bodies) const {
+  if (bodies.empty() || !want_gold_first_hold_segment()) return;
+  bodies.front().note_type =
+      wds::chart_editor::drawn_hold_body_type(hold_scratch_, true);
+}
+
 void ChartEditPanel::sync_hold_placement_ghost() {
   const int32_t min_end = hold_draft_.start_tick + min_hold_duration_ticks();
   // Linked chain next starts as a flick-tail adjuster only: no body until the
@@ -1192,6 +1212,7 @@ void ChartEditPanel::sync_hold_placement_ghost() {
 }
 
 void ChartEditPanel::sync_hold_draft_to_pointer(HoldDraftSync sync) {
+  sync_drawn_hold_body_type();
   const int32_t start = hold_draft_.start_tick;
   const int32_t cur = viewport_.tick_at(pointer_.y);
   // Upward only: end may grow later in time, never earlier than the head.
@@ -1417,6 +1438,10 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // Otherwise auto-disconnect: independent hold + head, previous segment restored.
   const bool chain_link =
       hold_chain_prev_id_ >= 0 && chain_draft_cover_representable();
+  if (!chain_link) {
+    hold_draft_.note_type =
+        wds::chart_editor::drawn_hold_body_type(hold_scratch_, place_gold_head_);
+  }
 
   // Isolated / disconnected hold: no JumpScratch or OneDirection leftover.
   // A chain member (including the terminal) encodes official gimmick on the body.
@@ -1553,6 +1578,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
         hold_chain_prev_body_, next.width, viewport_.lane_left_at_f(pointer_.x, next.width),
         viewport_.grid().lane_count);
     next.scratch_length = 0;
+    next.note_type = wds::chart_editor::drawn_hold_body_type(hold_scratch_, false);
     hold_draft_ = next;
     hold_stars_.clear();
     place_swipe_.reset();
@@ -1908,18 +1934,27 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
     int32_t lo = static_cast<int32_t>(anchor_orig.start_tick) + min_dur;
     int32_t hi = std::numeric_limits<int32_t>::max() / 4;
     const NotationNote* next_orig = nullptr;
+    auto is_chained_next = [&](const NotationNote& n) {
+      if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == anchor_orig.id) {
+        return false;
+      }
+      if (!wds::chart_editor::same_hold_chain_family(anchor_orig.note_type, n.note_type)) {
+        return false;
+      }
+      if (n.start_tick != anchor_orig.end_tick) return false;
+      if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) return false;
+      return wds::chart_editor::hold_chain_lanes_connected(anchor_orig, n);
+    };
     if (resize_chain_next_id_ >= 0) {
       auto nit = drag_originals_.find(resize_chain_next_id_);
-      if (nit != drag_originals_.end()) next_orig = &nit->second;
+      if (nit != drag_originals_.end() && is_chained_next(nit->second)) {
+        next_orig = &nit->second;
+      }
     }
     if (!next_orig) {
       for (const auto& [id, n] : drag_originals_) {
         (void)id;
-        if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == anchor_orig.id) {
-          continue;
-        }
-        if (n.start_tick != anchor_orig.end_tick) continue;
-        if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) continue;
+        if (!is_chained_next(n)) continue;
         next_orig = &n;
         break;
       }
@@ -3667,6 +3702,9 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
 
   place_anchor_ = make_base_note(event.position);
   place_swipe_.reset();
+  // Gold vs ordinary head is decided at this press. The same Shift still
+  // places stars; releasing it after this does not retint the hold.
+  place_gold_head_ = event.mods.shift;
   mode_ = Mode::PlaceGesture;
   update_ghost(event.position);
 }
@@ -3854,19 +3892,41 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       return wds::chart_editor::scratch_hold_end_cover_representable(b, cover_l, cover_r);
     };
 
-    // Resolve time-abutting ScratchHold chain neighbors (may load into `working`).
+    // Chain membership is decided on drag-start geometry: same family, time
+    // abutment, and prev's then-current tail exactly covering both bodies.
+    auto original_of = [&](int32_t id, const NotationNote& fallback) -> const NotationNote& {
+      if (auto it = drag_originals_.find(id); it != drag_originals_.end()) return it->second;
+      return fallback;
+    };
+    auto originally_chained = [&](const NotationNote& prev, const NotationNote& next) {
+      const NotationNote& p = original_of(prev.id, prev);
+      const NotationNote& n = original_of(next.id, next);
+      if (!wds::chart_editor::is_hold_chain_body(p.note_type) ||
+          !wds::chart_editor::is_hold_chain_body(n.note_type)) {
+        return false;
+      }
+      if (!wds::chart_editor::same_hold_chain_family(p.note_type, n.note_type)) return false;
+      if (n.start_tick != p.end_tick) return false;
+      return wds::chart_editor::hold_chain_lanes_connected(p, n);
+    };
+    auto later_starts_new_chain = [&](const NotationNote& later) {
+      const NotationNote& later_orig = original_of(later.id, later);
+      if (wds::chart_editor::paired_hold_head_for(engine_.document(), later_orig)) return true;
+      for (const auto& [id, n] : drag_originals_) {
+        (void)id;
+        if (wds::chart_editor::hold_head_pairs_with_body(n, later_orig)) return true;
+      }
+      return false;
+    };
+
+    // Resolve hold-chain neighbors (may load into `working`).
     auto resolve_chained_next = [&](const NotationNote& body,
                                     std::unordered_map<int32_t, NotationNote>& working)
         -> std::optional<NotationNote*> {
       auto is_candidate = [&](const NotationNote& n) {
-        if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == body.id) {
-          return false;
-        }
-        if (!wds::chart_editor::same_hold_chain_family(n.note_type, body.note_type)) {
-          return false;
-        }
-        if (n.start_tick != body.end_tick) return false;
-        if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) return false;
+        if (n.id == body.id) return false;
+        if (!originally_chained(body, n)) return false;
+        if (later_starts_new_chain(n)) return false;
         return true;
       };
       for (auto& [id, n] : working) {
@@ -3892,14 +3952,10 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
                                     std::unordered_map<int32_t, NotationNote>& working)
         -> std::optional<NotationNote*> {
       auto is_candidate = [&](const NotationNote& n) {
-        if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == body.id) {
-          return false;
-        }
-        if (!wds::chart_editor::same_hold_chain_family(n.note_type, body.note_type)) {
-          return false;
-        }
-        if (n.end_tick != body.start_tick) return false;
-        return true;  // prev may own a head
+        if (n.id == body.id) return false;
+        if (!originally_chained(n, body)) return false;
+        if (later_starts_new_chain(body)) return false;
+        return true;
       };
       for (auto& [id, n] : working) {
         (void)id;
@@ -4876,7 +4932,8 @@ void ChartEditPanel::refresh_curve_ghosts() {
   req.direction = curve_fill_selection_.easing.direction;
   req.parameter = curve_fill_selection_.easing.parameter;
   req.note_type = hold_scratch_ ? NoteType::ScratchHold : NoteType::Hold;
-  const auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  apply_gold_first_curve_body(bodies);
   if (bodies.empty()) return;
   if (hold_chain_prev_id_ >= 0) {
     NotationNote prev = hold_chain_prev_body_;
@@ -4920,7 +4977,8 @@ bool ChartEditPanel::commit_curve_fill() {
   req.direction = curve_fill_selection_.easing.direction;
   req.parameter = curve_fill_selection_.easing.parameter;
   req.note_type = hold_scratch_ ? NoteType::ScratchHold : NoteType::Hold;
-  const auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  apply_gold_first_curve_body(bodies);
   wds::chart_editor::ScratchHoldCurveCommitInput input;
   input.notes = engine_.document().notes();
   input.generated_bodies = bodies;

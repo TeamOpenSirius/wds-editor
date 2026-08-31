@@ -82,6 +82,10 @@ int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationN
                                        const NotationNote* next, float desired_lane,
                                        int32_t lane_count) noexcept;
 
+// True when `prev`'s current tail (scratch_length span) is exactly the union of
+// both bodies. Same-family / time abutment are not checked here.
+bool hold_chain_lanes_connected(const NotationNote& prev, const NotationNote& next) noexcept;
+
 // Set `prev`'s JumpScratch to the exact union of `prev` and `next` bodies, then
 // re-encode joint direction. Caller must pass a Sirius-representable pair.
 void sync_scratch_chain_joint(NotationNote& prev, const NotationNote& next) noexcept;
