@@ -30,6 +30,30 @@ inline constexpr float kOfficialConcurrentLineSpriteHeight = 0.1f;
 inline constexpr float kOfficialConcurrentLineLocalRotationX = 90.0f;
 inline constexpr float kOfficialNoteSpritePpu = 100.0f;
 inline constexpr float kOfficialNoteSpriteHeight = 0.64f;
+// FlickNoteEntity / NotesArrowsObject (A_ScratchNotes_Arrow 68×112 @ 100 ppu).
+// NotesLeft/Right localScale = 0.7; ArrowInterval = 0.35; even widths in each
+// pair add +0.01. SetActive count table is width pairs 1-2 .. 11-12.
+inline constexpr float kOfficialArrowSpriteWidth = 0.68f;
+inline constexpr float kOfficialArrowSpriteHeight = 1.12f;
+inline constexpr float kOfficialArrowGroupScale = 0.7f;
+inline constexpr float kOfficialArrowInterval = 0.35f;
+inline constexpr float kOfficialArrowIntervalEvenExtra = 0.01f;
+inline constexpr float kOfficialArrowGroupInset = 0.145f;
+inline constexpr float kOfficialArrowAnimLength = 0.5f;
+
+inline int official_scratch_arrow_count(int32_t lane_width, bool is_jump_scratch) noexcept {
+  const int w = std::clamp(static_cast<int>(lane_width), 1, 12);
+  static constexpr int kFlick[] = {3, 3, 5, 5, 9, 9, 12, 12, 16, 16, 20, 20};
+  static constexpr int kJump[] = {6, 6, 11, 11, 18, 18, 26, 26, 34, 34, 42, 42};
+  return is_jump_scratch ? kJump[w - 1] : kFlick[w - 1];
+}
+
+inline float official_scratch_arrow_interval(int32_t lane_width) noexcept {
+  const int w = std::clamp(static_cast<int>(lane_width), 1, 12);
+  if (w <= 2) return kOfficialArrowInterval;
+  return (w % 2 == 0) ? (kOfficialArrowInterval + kOfficialArrowIntervalEvenExtra)
+                      : kOfficialArrowInterval;
+}
 inline constexpr float kOfficialNoteLocalZBottom = -0.01f;
 inline constexpr float kOfficialNoteLocalZTop = -0.1f;
 // A_SoundNotes / SoundPurpleNotes: 112×112 @ 100 ppu. SoundNote NotesTop Z=-0.05.

@@ -1,10 +1,12 @@
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/chart_render/skin_catalog.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 #define CHECK(cond)                                                                          \
   do {                                                                                       \
@@ -94,21 +96,104 @@ void test_static_arrows_respect_sides() {
   }
 }
 
-void test_animated_arrows_bidirectional_half_density() {
+void test_animated_arrows_bidirectional_uses_same_count_per_side() {
   AnimatedArrowLayoutParams p;
   p.span_left = 0.0f;
   p.span_right = 100.0f;
   p.arrow_w = 10.0f;
+  p.arrow_step = 5.0f;
+  p.arrow_count = 5;
+  p.group_offset = 40.0f;
   p.scratch_length = 0;
-  p.sonolus_num = 8.0f;
   p.anim_time_sec = 0.0f;
   p.arrow_speed = 1.0f;
   auto both = layout_animated_scratch_arrows(p);
   p.scratch_length = 1;
   auto right = layout_animated_scratch_arrows(p);
-  // Bidirectional uses half density per side → fewer arrows than full directional.
-  assert(both.size() < right.size() * 2);
-  assert(!both.empty());
+  // Official: same ActivateArrowSpriteRenderer count; OneDirection hides one GO.
+  CHECK(right.size() == 5);
+  CHECK(both.size() == 10);
+}
+
+void test_official_bidirectional_does_not_cross_center() {
+  // FlickNoteEntity width=4, flick: count 5, interval 0.36, scale 0.7.
+  // Visual note = width - margin = 3.54 → ±1.77. No UV clip.
+  AnimatedArrowLayoutParams p;
+  p.span_left = -1.77f;
+  p.span_right = 1.77f;
+  p.arrow_w = 0.68f * 0.7f;
+  p.arrow_step = 0.36f * 0.7f;
+  p.group_offset = 3.69f * 0.5f - 0.145f;
+  p.arrow_count = 5;
+  p.scratch_length = 0;
+  p.anim_time_sec = 0.0f;
+  p.arrow_speed = 1.0f;
+  const auto both = layout_animated_scratch_arrows(p);
+  CHECK(both.size() == 10);
+  int left_n = 0;
+  int right_n = 0;
+  float left_last = -1e9f;
+  float right_first = 1e9f;
+  for (const auto& a : both) {
+    CHECK(std::abs(a.u0) < 1e-5f);
+    CHECK(std::abs(a.u1 - 1.0f) < 1e-5f);
+    if (a.flip_x) {
+      ++right_n;
+      right_first = std::min(right_first, std::min(a.x0, a.x1));
+    } else {
+      ++left_n;
+      left_last = std::max(left_last, std::max(a.x0, a.x1));
+    }
+  }
+  CHECK(left_n == 5);
+  CHECK(right_n == 5);
+  // Each side stays on its half — the previous fill+clip path stacked both
+  // directions across the whole note (the diamond / X overlap).
+  CHECK(left_last < 0.0f);
+  CHECK(right_first > 0.0f);
+}
+
+void test_one_way_fills_without_tail_or_uv_clip() {
+  AnimatedArrowLayoutParams p;
+  p.span_left = -1.77f;
+  p.span_right = 1.77f;
+  p.arrow_w = 0.68f * 0.7f;
+  p.arrow_step = 0.36f * 0.7f;
+  p.group_offset = 3.69f * 0.5f - 0.145f;
+  p.arrow_count = 5;
+  p.fill_to_far_edge = true;
+  p.scratch_length = -1;
+  p.anim_time_sec = 0.0f;
+  p.arrow_speed = 1.0f;
+  const auto left = layout_animated_scratch_arrows(p);
+  CHECK(left.size() > 5);
+  for (const auto& a : left) {
+    CHECK(!a.flip_x);
+    CHECK(std::abs(a.u0) < 1e-5f);
+    CHECK(std::abs(a.u1 - 1.0f) < 1e-5f);
+    CHECK(std::max(a.x0, a.x1) <= p.span_right + 1e-4f);
+  }
+  // Official first head sits past the near edge (no UV clip).
+  CHECK(std::min(left.front().x0, left.front().x1) < p.span_left);
+  // Last tail stays inside; the chain must reach the far half.
+  CHECK(std::max(left.back().x0, left.back().x1) > 0.0f);
+  CHECK(std::max(left.back().x0, left.back().x1) > p.span_right * 0.5f);
+}
+
+void test_official_scratch_arrow_table() {
+  using wds::chart_editor::official_scratch_arrow_count;
+  using wds::chart_editor::official_scratch_arrow_interval;
+  // FlickNoteEntity.SetActive (dump.cs / libil2cpp): width pairs 1-2..11-12.
+  CHECK(official_scratch_arrow_count(1, false) == 3);
+  CHECK(official_scratch_arrow_count(2, false) == 3);
+  CHECK(official_scratch_arrow_count(4, false) == 5);
+  CHECK(official_scratch_arrow_count(4, true) == 11);
+  CHECK(official_scratch_arrow_count(12, false) == 20);
+  CHECK(official_scratch_arrow_count(12, true) == 42);
+  CHECK(std::abs(official_scratch_arrow_interval(1) - 0.35f) < 1e-6f);
+  CHECK(std::abs(official_scratch_arrow_interval(3) - 0.35f) < 1e-6f);
+  CHECK(std::abs(official_scratch_arrow_interval(4) - 0.36f) < 1e-6f);
+  CHECK(std::abs(official_scratch_arrow_interval(12) - 0.36f) < 1e-6f);
 }
 
 void test_hold_tail_layers() {
@@ -133,7 +218,10 @@ int main() {
   test_concurrent_line_sliced_caps_stay_four_pixels();
   test_scratch_arrow_sides();
   test_static_arrows_respect_sides();
-  test_animated_arrows_bidirectional_half_density();
+  test_animated_arrows_bidirectional_uses_same_count_per_side();
+  test_official_bidirectional_does_not_cross_center();
+  test_one_way_fills_without_tail_or_uv_clip();
+  test_official_scratch_arrow_table();
   test_hold_tail_layers();
   std::puts("note_visual_policy_tests OK");
   return 0;

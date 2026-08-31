@@ -87,6 +87,9 @@ struct ArrowInstance {
   float x1 = 0.0f;
   bool flip_x = false;  // true = right-pointing (UV/geometry mirrored)
   float alpha = 1.0f;
+  // Full sprite U. Official NotesArrows never UV-clip; heads may sit past the note.
+  float u0 = 0.0f;
+  float u1 = 1.0f;
 };
 
 struct StaticArrowLayoutParams {
@@ -100,8 +103,18 @@ struct AnimatedArrowLayoutParams {
   float span_left = 0.0f;
   float span_right = 0.0f;
   float arrow_w = 0.0f;
+  // Official NotesArrows: interval * 0.7 in dest units. 0 → arrow_w * 0.5.
+  float arrow_step = 0.0f;
+  // Official parent |x| from note center (width/2 - 0.145, or jump half-strip).
+  // 0 → first center sits half a sprite inside the active edge.
+  float group_offset = 0.0f;
+  // Official ActivateArrowSpriteRenderer count. 0 → sonolus_num.
+  int32_t arrow_count = 0;
+  // One-way only: keep official step from the head parent until the tail would
+  // pass the far edge. Official has no UV clip; the first head may sit past
+  // the near edge. Bidirectional must stay false (same flick count per side).
+  bool fill_to_far_edge = false;
   int32_t scratch_length = 0;
-  // Sirius: lane_width * (end_lane-lane+1) * arrow_percent / W
   float sonolus_num = 1.0f;
   float anim_time_sec = 0.0f;
   float arrow_speed = 1.0f;

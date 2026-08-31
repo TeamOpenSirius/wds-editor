@@ -961,11 +961,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   const float multiplier = w / w_ref;
   const Vec2 c1 = geometry_.lane_position(lane, p);
   const Vec2 c2 = geometry_.lane_position(end_lane, p);
-  const float W = config_.arrow_width * unit * multiplier;
   const float H = config_.arrow_height * unit * multiplier;
-  if (W <= 1e-5f) {
-    return;
-  }
 
   // Match note_quad horizontal inset (note_move_length) so arrows sit inside the note.
   const float move = config_.note_move_length * unit * multiplier;
@@ -975,23 +971,44 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
     return;
   }
 
-  // Animated arrows (ArrowStyle::Animated); sides/density via note_visual_policy.
+  // Official FlickNoteEntity / NotesArrowsObject. [L,R] is the visible note
+  // (width - margin); world positions use full GetNoteWidth. JumpScratch is
+  // the gimmick flag — hold-end cover lanes are not the jump arrow table.
+  const int32_t lanes = end_lane - lane + 1;
+  const float note_world = wds::chart_editor::official_note_width(lanes);
+  const float visual_world = wds::chart_editor::official_tap_visual_width(note_world);
+  const float world_to_dest = (R - L) / visual_world;
+  const float W = wds::chart_editor::kOfficialArrowSpriteWidth *
+                  wds::chart_editor::kOfficialArrowGroupScale * world_to_dest;
+  if (W <= 1e-5f) {
+    return;
+  }
+
+  const bool jump = wds::chart_editor::is_jump_scratch(note.gimmick_type);
+  const int count = wds::chart_editor::official_scratch_arrow_count(lanes, jump);
+  const float interval = wds::chart_editor::official_scratch_arrow_interval(lanes);
+  const float step_world = interval * wds::chart_editor::kOfficialArrowGroupScale;
+  const float offset_world =
+      jump ? (step_world * static_cast<float>(count) * 0.5f)
+           : (note_world * 0.5f - wds::chart_editor::kOfficialArrowGroupInset);
+
   wds::chart_render::AnimatedArrowLayoutParams params;
   params.span_left = L;
   params.span_right = R;
   params.arrow_w = W;
+  params.arrow_step = step_world * world_to_dest;
+  params.group_offset = offset_world * world_to_dest;
+  params.arrow_count = count;
+  params.fill_to_far_edge = !jump && note.scratch_length != 0;
   params.scratch_length = note.scratch_length;
-  params.sonolus_num =
-      w * static_cast<float>(end_lane - lane + 1) * config_.arrow_percent / W;
+  params.sonolus_num = static_cast<float>(count);
   params.anim_time_sec = static_cast<float>(anim_time_sec);
   params.arrow_speed = config_.arrow_speed;
   for (const auto& inst : wds::chart_render::layout_animated_scratch_arrows(params)) {
     const float y = inst.flip_x ? c2.y : c1.y;
-    const float x0 = inst.x0;
-    const float x1 = inst.x1;
     batch.add_sprite(skin_.scratch_arrow,
-                     Quad{{x0, y}, {x0, y + H * 0.5f}, {x1, y + H * 0.5f}, {x1, y}}, 0.2f,
-                     inst.alpha);
+                     Quad{{inst.x0, y}, {inst.x0, y + H * 0.5f}, {inst.x1, y + H * 0.5f}, {inst.x1, y}},
+                     0.2f, inst.alpha);
   }
 }
 

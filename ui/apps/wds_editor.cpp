@@ -194,6 +194,8 @@ int run_editor(int argc, char** argv) {
   window.set_app_icon_png(wds::ui::resolve_app_icon_png(argv[0]));
 #if defined(_WIN32)
   wds::ui::native_file_dialog::set_owner_window(glfwGetWin32Window(window.handle()));
+#else
+  wds::ui::native_file_dialog::set_owner_window(window.handle());
 #endif
 
   wds::renderer::PreviewVisualConfig visual;

@@ -25,9 +25,11 @@ bool confirm(const std::string& title, const std::string& message);
 // Blocking error alert (single OK). Use for fatal startup dependency failures.
 void alert_error(const std::string& title, const std::string& message);
 
-// On Windows, set the owner HWND for file dialogs / MessageBox so they stay modal to
-// the Vulkan window. Pass nullptr to clear. No-op on other platforms.
-void set_owner_window(void* hwnd);
+// Owner for modal dialogs and post-dialog focus restore.
+// Windows: HWND (also used as IFileDialog / MessageBox owner).
+// macOS / Linux: GLFWwindow* so the key window can be restored after AppKit / zenity.
+// Pass nullptr to clear.
+void set_owner_window(void* platform_handle);
 
 // Three-way prompt for unsaved changes: 保存 / 不保存 / 取消.
 // Cancel (and Escape) aborts the pending action; Discard continues without saving.
