@@ -158,6 +158,7 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
     playback_rate_ = rate_from_label(text);
     apply_playback_rate();
     sync_from_state();
+    notify_persist();
   });
   rate_combo_ = rate.get();
   add_child(std::move(rate));
@@ -181,6 +182,7 @@ void PreviewSettingsPanel::set_playback_rate(float rate) {
   playback_rate_ = rate_from_label(format_rate(rate));
   apply_playback_rate();
   sync_from_state();
+  notify_persist();
 }
 
 void PreviewSettingsPanel::toggle_sfx_mute() {
@@ -199,8 +201,10 @@ void PreviewSettingsPanel::apply_config(const EditorUiConfig& cfg) {
   music_muted_ = cfg.music_muted;
   sfx_gain_ = std::clamp(cfg.sfx_volume, 0.0f, 1.0f);
   sfx_muted_ = cfg.sfx_muted;
+  playback_rate_ = rate_from_label(format_rate(clamp_playback_rate(cfg.playback_rate)));
   apply_music_gain();
   apply_sfx_gain();
+  apply_playback_rate();
   sync_from_state();
 }
 
@@ -209,6 +213,7 @@ void PreviewSettingsPanel::capture_config(EditorUiConfig& cfg) const {
   cfg.music_muted = music_muted_;
   cfg.sfx_volume = sfx_gain_;
   cfg.sfx_muted = sfx_muted_;
+  cfg.playback_rate = clamp_playback_rate(playback_rate_);
 }
 
 void PreviewSettingsPanel::sync_from_state() const {

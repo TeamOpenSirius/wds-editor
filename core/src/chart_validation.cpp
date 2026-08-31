@@ -65,7 +65,8 @@ bool closed_intersect(int32_t a_lo, int32_t a_hi, int32_t b_lo, int32_t b_hi) no
 }
 
 bool scratch_chain_joint(const NotationNote& prev, const NotationNote& next) noexcept {
-  if (!is_scratch_hold_body(prev.note_type) || !is_scratch_hold_body(next.note_type)) {
+  if (!is_hold_chain_body(prev.note_type) || !is_hold_chain_body(next.note_type) ||
+      !same_hold_chain_family(prev.note_type, next.note_type)) {
     return false;
   }
   if (prev.end_tick != next.start_tick || prev.end_tick <= prev.start_tick) return false;

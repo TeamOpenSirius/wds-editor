@@ -95,10 +95,10 @@ std::pair<int32_t, int32_t> get_jump_scratch_lane_range(const NotationNote& note
 
 std::pair<int32_t, int32_t> resolve_end_lane_span(const NotationNote& note) noexcept {
   std::pair<int32_t, int32_t> range;
-  if (is_scratch_hold_body(note.note_type)) {
+  if (is_hold_chain_body(note.note_type)) {
+    // ScratchHold always; regular Hold/CriticalHold use scratch_length even when
+    // gimmick is still None/OneDirection (terminal resize often leaves it so).
     range = get_scratch_end_lane_range(note);
-  } else if (is_jump_scratch(note.gimmick_type)) {
-    range = get_jump_scratch_lane_range(note);
   } else {
     range = {note.lane, note.end_lane()};
   }
@@ -110,7 +110,7 @@ std::pair<int32_t, int32_t> resolve_end_lane_span(const NotationNote& note) noex
 std::pair<int32_t, int32_t> occupied_lane_span(const NotationNote& note) noexcept {
   int32_t lo = note.lane;
   int32_t hi = note.end_lane();
-  if (is_scratch_hold_body(note.note_type)) {
+  if (is_hold_chain_body(note.note_type)) {
     const auto range = get_scratch_end_lane_range(note);
     lo = std::min({lo, range.first, range.second});
     hi = std::max({hi, range.first, range.second});
@@ -134,24 +134,21 @@ void set_scratch_hold_end_lanes(NotationNote& note, int32_t end_left, int32_t en
     // Equal span placeholder; joint tips must call apply_scratch_chain_joint_direction
     // afterward (score → 0 / ±width). Do not try to preserve a prior sign here.
     note.scratch_length = 0;
-    return;
-  }
-  if (ext_right && !ext_left) {
+  } else if (ext_right && !ext_left) {
     note.scratch_length = end_right - note.lane + 1;
-    return;
-  }
-  if (ext_left && !ext_right) {
+  } else if (ext_left && !ext_right) {
     note.scratch_length = end_left - note.end_lane() - 1;
-    return;
-  }
-  // Both sides are not representable; keep the larger one-sided cover.
-  const int32_t right_span = end_right - note.lane + 1;
-  const int32_t left_span = note.end_lane() - end_left + 1;
-  if (right_span >= left_span) {
-    note.scratch_length = right_span;
   } else {
-    note.scratch_length = end_left - note.end_lane() - 1;
+    // Both sides are not representable; keep the larger one-sided cover.
+    const int32_t right_span = end_right - note.lane + 1;
+    const int32_t left_span = note.end_lane() - end_left + 1;
+    if (right_span >= left_span) {
+      note.scratch_length = right_span;
+    } else {
+      note.scratch_length = end_left - note.end_lane() - 1;
+    }
   }
+  apply_hold_chain_gimmick(note);
 }
 
 bool scratch_hold_end_cover_representable(const NotationNote& body, int32_t cover_left,
@@ -252,11 +249,24 @@ int32_t snap_scratch_hold_segment_lane(const NotationNote* prev, const NotationN
   return std::clamp(static_cast<int32_t>(std::lround(desired_lane)), 0, max_lane);
 }
 
+void apply_hold_chain_gimmick(NotationNote& prev) noexcept {
+  if (!is_hold_chain_body(prev.note_type)) return;
+  if (is_scratch_hold_body(prev.note_type)) return;
+  const auto [lo, hi] = get_scratch_end_lane_range(prev);
+  if (lo == prev.lane && hi == prev.end_lane()) {
+    prev.gimmick_type = GimmickType::OneDirection;
+    prev.scratch_length = 0;
+    return;
+  }
+  prev.gimmick_type = GimmickType::JumpScratch;
+}
+
 void sync_scratch_chain_joint(NotationNote& prev, const NotationNote& next) noexcept {
   const int32_t cover_left = std::min(prev.lane, next.lane);
   const int32_t cover_right = std::max(prev.end_lane(), next.end_lane());
   set_scratch_hold_end_lanes(prev, cover_left, cover_right);
   apply_scratch_chain_joint_direction(prev, next);
+  apply_hold_chain_gimmick(prev);
 }
 
 int32_t scratch_chain_joint_direction_score(const NotationNote& prev_body,

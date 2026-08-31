@@ -52,28 +52,17 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
 
   if (pass == NoteVisualPass::HoldBody) {
     if (!hold_body || !sprites.connection) return;
+    const float hold_inset = viewport.hold_inset_px(note.width);
+    const float hold_x = viewport.x_at(note.lane) + hold_inset;
+    const float hold_w = std::max(4.0f, viewport.lane_width(note.width) - hold_inset * 2.0f);
     const float top = std::min(y0, y1);
     const float bottom = std::max(y0, y1);
     const auto body = wds::interaction::rect_to_quad(
-        {x, top, width, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
-    // Cap size must be in the same space as body (NDC). Flat notes use dest_h/tex_h;
-    // measure a same-width note-height quad so we don't mix px with NDC (that made
-    // caps >> width → soft-edge UVs filled both sides).
-    const auto ref = wds::interaction::rect_to_quad(
-        {x, y0 - note_h * 0.5f, width, note_h}, fb_w, fb_h, screen);
-    const auto ndc_len = [](wds::renderer::Vec2 a, wds::renderer::Vec2 b) {
-      const float dx = b.x - a.x;
-      const float dy = b.y - a.y;
-      return std::sqrt(dx * dx + dy * dy);
-    };
-    const float ref_h =
-        0.5f * (ndc_len(ref.lb, ref.lt) + ndc_len(ref.rb, ref.rt));
-    const float border_scale =
-        wds::chart_render::border_scale_from_flat_height(ref_h, skin);
+        {hold_x, top, hold_w, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
     wds::renderer::add_sliced_note(batch, sprites.connection, body, skin.hold_slice_border_l,
-                                   skin.hold_slice_border_r, z, alpha, alpha, border_scale,
+                                   skin.hold_slice_border_r, z, alpha, alpha, -1.0f,
                                    sprites.connection_r, sprites.connection_g,
-                                   sprites.connection_b);
+                                   sprites.connection_b, viewport.hold_visual_world_width(note.width));
     return;
   }
 
@@ -105,8 +94,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   // ScratchHold / JumpScratch end span (shared with preview snapshot).
   int32_t end_lane = note.lane;
   int32_t end_width = note.width;
-  if (hold_body && (wds::chart_editor::is_scratch_hold_body(note.note_type) ||
-                    wds::chart_editor::is_jump_scratch(note.gimmick_type))) {
+  if (hold_body && wds::chart_editor::is_hold_chain_body(note.note_type)) {
     const auto span = wds::chart_editor::resolve_end_lane_span(note);
     end_lane = span.first;
     end_width = span.second;
@@ -147,16 +135,19 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     const float draw_w = std::max(4.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
     const auto head = wds::interaction::rect_to_quad({draw_x, y - note_h * 0.5f, draw_w, note_h},
                                                      fb_w, fb_h, screen);
+    const float tap_world = viewport.tap_visual_world_width(draw_width);
     if (draw_bottom) {
       if (!spr.bottom) return;
       wds::renderer::add_sliced_note(batch, spr.bottom, head, skin.note_slice_border_l,
-                                     skin.note_slice_border_r, z, alpha);
+                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, 1.0f, 1.0f,
+                                     1.0f, tap_world);
       return;
     }
     if (draw_top) {
       if (!spr.top) return;
       wds::renderer::add_sliced_note(batch, spr.top, head, skin.note_slice_border_l,
-                                     skin.note_slice_border_r, z, alpha);
+                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, 1.0f, 1.0f,
+                                     1.0f, tap_world);
       return;
     }
     if (draw_arrow && with_arrow_art) {
@@ -493,21 +484,19 @@ void ChartEditRenderer::paint_overlays(
     // Cover body span and (possibly wider) hold-tail lanes.
     int32_t end_lane = note.lane;
     int32_t end_width = note.width;
-    if (note.end_tick > note.start_tick) {
-      if (wds::chart_editor::is_scratch_hold_body(note.note_type)) {
-        const auto range = wds::chart_editor::get_scratch_end_lane_range(note);
-        end_lane = range.first;
-        end_width = std::max(1, range.second - range.first + 1);
-      } else if (wds::chart_editor::is_jump_scratch(note.gimmick_type)) {
-        const auto range = wds::chart_editor::get_jump_scratch_lane_range(note);
-        end_lane = range.first;
-        end_width = std::max(1, range.second - range.first + 1);
-      }
+    if (note.end_tick > note.start_tick &&
+        wds::chart_editor::is_hold_chain_body(note.note_type)) {
+      const auto span = wds::chart_editor::resolve_end_lane_span(note);
+      end_lane = span.first;
+      end_width = span.second;
     }
     const float x0 = std::min(viewport.x_at(note.lane), viewport.x_at(end_lane));
     const float x1 = std::max(viewport.x_at(note.lane) + viewport.lane_width(note.width),
                               viewport.x_at(end_lane) + viewport.lane_width(end_width));
-    const float inset = viewport.note_inset_px(std::max(note.width, end_width));
+    const float inset =
+        (note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type))
+            ? viewport.hold_inset_px(std::max(note.width, end_width))
+            : viewport.note_inset_px(std::max(note.width, end_width));
     const wds::interaction::Rect box{x0 + inset - kPad, top, (x1 - x0) - inset * 2.0f + kPad * 2.0f,
                                      bottom - top};
     paint_box(box, paired);

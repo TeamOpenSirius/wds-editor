@@ -4,6 +4,9 @@
 #include "types.hpp"
 #include "ui_painter.hpp"
 
+#include <wds/common/crash_input_journal.hpp>
+
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -95,6 +98,21 @@ class Widget {
   virtual void on_key_down(const KeyDownEvent& event);
   virtual void on_key_up(const KeyUpEvent& event);
   virtual void on_text_input(const TextInputEvent& event);
+
+  // Non-virtual entry wrappers: record handler + optional snapshot diff, then on_*.
+  void dispatch_on_pointer_down(const PointerDownEvent& event);
+  void dispatch_on_pointer_up(const PointerUpEvent& event);
+  void dispatch_on_pointer_move(const PointerMoveEvent& event);
+  void dispatch_on_click(const ClickEvent& event);
+  void dispatch_on_double_click(const DoubleClickEvent& event);
+  void dispatch_on_scroll(const ScrollEvent& event);
+  void dispatch_on_key_down(const KeyDownEvent& event);
+  void dispatch_on_key_up(const KeyUpEvent& event);
+  void dispatch_on_text_input(const TextInputEvent& event);
+
+  virtual const char* trace_name() const { return "Widget"; }
+  virtual void trace_snapshot(wds::common::CrashTraceSnap&) const {}
+  virtual std::uint8_t trace_drag_mode() const { return 0; }
   // Called by WidgetRoot when keyboard focus is gained/lost.
   virtual void on_focus() {}
   virtual void on_blur() {}

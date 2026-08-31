@@ -25,9 +25,6 @@ namespace wds::renderer {
 namespace {
 
 constexpr int kMaxFramesInFlight = 3;
-// Prefer triple-buffer FIFO: with 2 images + exclusive fullscreen, a slightly late
-// frame drops to a 0ms/33ms hitch cadence; a third image absorbs one missed vsync.
-constexpr uint32_t kPreferredSwapchainImages = 3;
 // Fixed per-frame host-visible VB capacity (grows only if a frame exceeds this).
 constexpr size_t kRingVertexCapacityBytes = 2 * 1024 * 1024;
 
@@ -382,6 +379,7 @@ struct VulkanRenderer::Impl {
   std::array<VkSemaphore, kMaxFramesInFlight> render_finished{};
   std::array<VkFence, kMaxFramesInFlight> in_flight{};
   uint32_t frame_index = 0;
+  int frames_in_flight = kMaxFramesInFlight;
   uint64_t frame_seq = 0;
   int preferred_msaa = 1;
 
@@ -1121,11 +1119,10 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
   (void)presents;
 
-  // Request triple buffering when the surface allows it (minImageCount is often 2).
-  uint32_t image_count = std::max(caps.minImageCount + 1, kPreferredSwapchainImages);
-  if (caps.maxImageCount > 0 && image_count > caps.maxImageCount) {
-    image_count = caps.maxImageCount;
-  }
+  // FIF+2 when the surface allows it (scan-out + queued + in-flight). Clamped
+  // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.
+  const uint32_t image_count =
+      preferred_swapchain_image_count(caps.minImageCount, caps.maxImageCount, kMaxFramesInFlight);
 
   // Release FSE on the live swapchain before we retire it.
   release_fullscreen_exclusive_internal();
@@ -1310,8 +1307,12 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     return false;
   }
   images_in_flight.assign(actual, VK_NULL_HANDLE);
+  frames_in_flight = frames_in_flight_for_swapchain(actual, kMaxFramesInFlight);
+  if (frame_index >= static_cast<uint32_t>(frames_in_flight)) {
+    frame_index = 0;
+  }
   WDS_LOG("swapchain images=%u (requested=%u) frames_in_flight=%d min=%u max=%u\n", actual,
-          image_count, kMaxFramesInFlight, caps.minImageCount, caps.maxImageCount);
+          image_count, frames_in_flight, caps.minImageCount, caps.maxImageCount);
 
   swapchain_views.resize(swapchain_images.size());
   bool ok = true;
@@ -2784,7 +2785,8 @@ void VulkanRenderer::destroy_texture(TextureId id) {
   }
   // Delay free until in-flight frames that sampled this image have completed.
   // Do not vkDeviceWaitIdle on the UI thread (CJK atlas / DPI hitch).
-  tex.retire_after_seq = impl_->frame_seq + static_cast<uint64_t>(kMaxFramesInFlight);
+  tex.retire_after_seq =
+      impl_->frame_seq + static_cast<uint64_t>(std::max(1, impl_->frames_in_flight));
 }
 
 bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r,
@@ -3089,7 +3091,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->last_present_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - present_t0).count();
   impl_->note_fullscreen_exclusive_lost("vkQueuePresentKHR", present_result);
-  impl_->frame_index = (frame + 1) % kMaxFramesInFlight;
+  const uint32_t fif = static_cast<uint32_t>(std::max(1, impl_->frames_in_flight));
+  impl_->frame_index = (frame + 1) % fif;
   const WsiRecoverAction present_action = classify_wsi_result(present_result);
   if (present_action == WsiRecoverAction::None) {
     if (recreate_swapchain_after_present) {

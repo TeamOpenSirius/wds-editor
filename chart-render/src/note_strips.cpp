@@ -1,4 +1,5 @@
 #include <wds/chart_render/note_strips.hpp>
+#include <wds/chart_render/note_visual_policy.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,7 @@ float dist(Vec2 a, Vec2 b) noexcept {
 void add_sliced_note_impl(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
                           float border_l_px, float border_r_px, float z, float alpha_near,
                           float alpha_far, float border_scale_px, float r, float g, float b,
-                          float v0, float v1) {
+                          float v0, float v1, float dest_world_width) {
   if (!sprite || (alpha_near <= 0.0f && alpha_far <= 0.0f)) {
     return;
   }
@@ -42,22 +43,32 @@ void add_sliced_note_impl(DrawBatch& batch, const TextureInfo& sprite, const Qua
     return;
   }
 
-  // Unity: border world size = border_px / PPU (constant); screen size follows camera
-  // scale. Flat notes: drawn height ↔ full sprite height ⇒ scale = dest_h / tex_h.
-  // Holds: pass flat-note scale so caps stay fixed when the ribbon lengthens.
-  float scale = border_scale_px;
-  if (scale < 0.0f) {
-    scale = dest_h / tex_h;
+  float bl = 0.0f;
+  float br = 0.0f;
+  bool emit_middle = true;
+  if (dest_world_width > 1e-6f) {
+    const auto layout = wds::chart_render::sliced_cap_layout(border_l_px, border_r_px,
+                                                            dest_world_width);
+    bl = layout.bl;
+    br = layout.br;
+    emit_middle = layout.emit_middle;
+  } else {
+    // Edit timeline: height-relative caps, shrink if they cannot fit.
+    float scale = border_scale_px;
+    if (scale < 0.0f) {
+      scale = dest_h / tex_h;
+    }
+    float left_cap = std::max(0.0f, border_l_px) * scale;
+    float right_cap = std::max(0.0f, border_r_px) * scale;
+    if (left_cap + right_cap > dest_w && left_cap + right_cap > 1e-4f) {
+      const float s = dest_w / (left_cap + right_cap);
+      left_cap *= s;
+      right_cap *= s;
+    }
+    bl = left_cap / dest_w;
+    br = right_cap / dest_w;
+    emit_middle = (bl + br) < 1.0f - 1e-5f;
   }
-  float left_cap = std::max(0.0f, border_l_px) * scale;
-  float right_cap = std::max(0.0f, border_r_px) * scale;
-  if (left_cap + right_cap > dest_w && left_cap + right_cap > 1e-4f) {
-    const float s = dest_w / (left_cap + right_cap);
-    left_cap *= s;
-    right_cap *= s;
-  }
-  const float bl = left_cap / dest_w;
-  const float br = right_cap / dest_w;
 
   auto lerp2 = [](Vec2 a, Vec2 b, float t) {
     return Vec2{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
@@ -85,8 +96,8 @@ void add_sliced_note_impl(DrawBatch& batch, const TextureInfo& sprite, const Qua
     batch.add_quad_corners(sprite.id, Quad{lb, lt, lt_m, lb_m}, z, a_lb, a_rb_m, a_lt, a_rt_m, u0,
                            v0, u_l, v1, r, g, b);
   }
-  // Middle stretch
-  {
+  // Middle stretch (skipped when caps fill the dest after shrink-to-fit).
+  if (emit_middle) {
     const Vec2 lb_m = lerp2(lb, rb, bl);
     const Vec2 lt_m = lerp2(lt, rt, bl);
     const Vec2 rb_m = lerp2(rb, lb, br);
@@ -113,17 +124,18 @@ void add_sliced_note_impl(DrawBatch& batch, const TextureInfo& sprite, const Qua
 
 void add_sliced_note(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
                      float border_l_px, float border_r_px, float z, float alpha_near,
-                     float alpha_far, float border_scale_px, float r, float g, float b) {
+                     float alpha_far, float border_scale_px, float r, float g, float b,
+                     float dest_world_width) {
   add_sliced_note_impl(batch, sprite, quad, border_l_px, border_r_px, z, alpha_near, alpha_far,
-                       border_scale_px, r, g, b, sprite.v0, sprite.v1);
+                       border_scale_px, r, g, b, sprite.v0, sprite.v1, dest_world_width);
 }
 
 void add_sliced_note_v(DrawBatch& batch, const TextureInfo& sprite, const Quad& quad,
                        float border_l_px, float border_r_px, float z, float alpha,
                        float border_scale_px, float v_near_atlas, float v_far_atlas, float r,
-                       float g, float b) {
+                       float g, float b, float dest_world_width) {
   add_sliced_note_impl(batch, sprite, quad, border_l_px, border_r_px, z, alpha, alpha,
-                       border_scale_px, r, g, b, v_near_atlas, v_far_atlas);
+                       border_scale_px, r, g, b, v_near_atlas, v_far_atlas, dest_world_width);
 }
 
 }  // namespace wds::renderer

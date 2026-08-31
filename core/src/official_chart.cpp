@@ -441,8 +441,8 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     }
 
     GimmickType gimmick = note.gimmick_type;
-    // sus2txt: any ScratchHold with non-zero scratchLength uses JumpScratch name.
-    if (is_scratch_hold_body(note.note_type) && note.scratch_length != 0 &&
+    // Official: hold-chain body with non-zero scratchLength uses JumpScratch name.
+    if (is_hold_chain_body(note.note_type) && note.scratch_length != 0 &&
         gimmick == GimmickType::None) {
       gimmick = GimmickType::JumpScratch;
     }

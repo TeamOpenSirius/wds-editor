@@ -35,7 +35,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_grid(wds::chart_editor::EditGridConfig grid);
   // Seek transport so edit scroll stays locked to preview playhead.
   void set_seek_ms(std::function<void(int64_t)> seek) { seek_ms_ = std::move(seek); }
-  // Fired after exact Ctrl/Cmd+wheel changes visible_hectoms (sync toolbar + persist).
+  // Fired after exact Option+wheel changes visible_hectoms (sync toolbar + persist).
   void set_visible_range_changed_handler(std::function<void()> handler) {
     on_visible_range_changed_ = std::move(handler);
   }
@@ -141,6 +141,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void on_key_up(const wds::interaction::KeyUpEvent& event) override;
   void on_text_input(const wds::interaction::TextInputEvent& event) override;
 
+  const char* trace_name() const override { return "ChartEditPanel"; }
+  void trace_snapshot(wds::common::CrashTraceSnap& snap) const override;
+  std::uint8_t trace_drag_mode() const override { return static_cast<std::uint8_t>(mode_); }
+
  private:
   enum class Mode {
     Idle,
@@ -207,6 +211,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_move_selection_to_pointer(wds::interaction::Vec2 point);
   // Live-update DragSplitEdge from a pointer so scroll-without-move still tracks.
   void sync_split_edge_to_pointer(wds::interaction::Vec2 point);
+  // Live-update AdjustHoldTime (hold tail / JumpScratch hinge) from a pointer
+  // so wheel scrub and playback keep the grabbed edge under the cursor.
+  void sync_hold_adjust_to_pointer(wds::interaction::Vec2 point);
   // Middle-button interrupt: drop in-progress place / hold draft. For chained
   // ScratchHold, discards only the current segment and keeps the previous as end.
   void cancel_placement();
@@ -227,10 +234,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Requires pending_chain_extend_id_ armed on pointer-down.
   void begin_hold_chain_extend();
   // If point is on a selected terminal ScratchHold end-cap, arm pending_chain_extend_id_.
-  void try_arm_pending_chain_extend(wds::interaction::Vec2 point);
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point, bool scratch_family);
   void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
   // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
   void begin_scratch_hold_placement(wds::interaction::Vec2 point);
+  void begin_regular_hold_placement(wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
   // Place a Sound / ScratchSound on an already-selected existing hold body.
   bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);

@@ -39,6 +39,9 @@ struct SkinCatalog {
   float note_slice_border_r = 65.0f;
   float hold_slice_border_l = 10.0f;
   float hold_slice_border_r = 10.0f;
+  // NoteConcurrentLine: 12×8, m_Border L/R = 4.
+  float sync_slice_border_l = 4.0f;
+  float sync_slice_border_r = 4.0f;
   // Flat note source height; hold caps use note_h_screen / this (same PPU as flats).
   float note_slice_tex_h = 108.0f;
 

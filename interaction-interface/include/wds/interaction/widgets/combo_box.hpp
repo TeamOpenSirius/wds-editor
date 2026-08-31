@@ -65,6 +65,13 @@ class ComboBox : public Widget {
   void on_focus() override;
   void on_blur() override;
 
+  const char* trace_name() const override { return "ComboBox"; }
+  void trace_snapshot(wds::common::CrashTraceSnap& snap) const override {
+    snap.mask = wds::common::kCrashSnapPopupScroll | wds::common::kCrashSnapComboOpen;
+    snap.popup_scroll = menu_scroll_;
+    snap.combo_open = open_ ? 1 : 0;
+  }
+
  private:
   int selected_item_index() const noexcept;
   void commit_or_revert();

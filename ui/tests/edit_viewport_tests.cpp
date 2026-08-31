@@ -2,6 +2,8 @@
 #include "wds/ui/frame_diag.hpp"
 #include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/edit/edit_viewport.hpp"
+
+#include <wds/core/official_playfield.hpp>
 #include "wds/ui/window.hpp"
 #include "wds/ui/regions/preview/preview_hit_widget.hpp"
 #define WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
@@ -13,6 +15,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <unordered_set>
@@ -48,6 +52,39 @@ int main() {
   assert(viewport.lane_at(60, 3) == 5);
   assert(viewport.lane_at(65, 3) == 5);
   assert(viewport.lane_at(119, 3) == 9);
+
+  // Official tap/hold visual width: inset follows (notation − visual) / 2, not 1px.
+  // Always-on (Release strips assert).
+  {
+    using wds::chart_editor::official_hold_line_visual_width;
+    using wds::chart_editor::official_note_width;
+    using wds::chart_editor::official_tap_visual_width;
+    auto require = [](bool ok, const char* msg) {
+      if (!ok) {
+        std::fprintf(stderr, "FAIL edit visual width: %s\n", msg);
+        std::abort();
+      }
+    };
+    const float one = viewport.lane_width(1);
+    const float notation = official_note_width(1);
+    const float tap_visual = official_tap_visual_width(notation);
+    const float hold_visual = official_hold_line_visual_width(notation);
+    const float tap_inset = (one - one * (tap_visual / notation)) * 0.5f;
+    const float hold_inset = (one - one * (hold_visual / notation)) * 0.5f;
+    require(std::abs(viewport.note_inset_px(1) - tap_inset) < 1e-4f, "1-lane tap inset");
+    require(std::abs(viewport.hold_inset_px(1) - hold_inset) < 1e-4f, "1-lane hold inset");
+    require(viewport.hold_inset_px(1) < viewport.note_inset_px(1), "hold inset < tap inset");
+    require(std::abs(viewport.tap_visual_world_width(1) - tap_visual) < 1e-6f, "tap world");
+    require(std::abs(viewport.hold_visual_world_width(1) - hold_visual) < 1e-6f, "hold world");
+
+    const float four = viewport.lane_width(4);
+    const float n4 = official_note_width(4);
+    const float v4 = official_tap_visual_width(n4);
+    require(std::abs(viewport.note_inset_px(4) - (four - four * (v4 / n4)) * 0.5f) < 1e-4f,
+            "4-lane tap inset");
+    require(viewport.note_inset_px(4) / four < viewport.note_inset_px(1) / one,
+            "4-lane inset fraction smaller");
+  }
 
   // Scroll forward by 250 ms → +240 ticks at 120 BPM.
   viewport.scroll_by_ms(250.0f);

@@ -16,6 +16,19 @@ inline constexpr float kOfficialCameraFovDeg = 50.0f;
 inline constexpr float kOfficialJudgeAreaY = -3.9f;
 inline constexpr float kOfficialNoteWidthPerLane = 0.915f;
 inline constexpr float kOfficialLaneBorderWidth = 0.01f;
+// GameConfig._noteMarginWidth / _holdNoteLineAdditionalWidth. Applied to
+// SpriteRenderer.size.x only — notation / GetNotePositionX stay full width.
+inline constexpr float kOfficialNoteMarginWidth = 0.15f;
+inline constexpr float kOfficialHoldNoteLineAdditionalWidth = 0.10f;
+// ConcurrentLineNote.prefab: Sliced NoteConcurrentLine (12×8 @ 100 ppu,
+// m_Border L/R=4 T/B=3), m_Size.y=0.1, local Rx=90°. size.x = GetNoteWidth.
+inline constexpr int kOfficialConcurrentLineSpriteWidthPx = 12;
+inline constexpr int kOfficialConcurrentLineSpriteHeightPx = 8;
+inline constexpr float kOfficialConcurrentLineBorderL = 4.0f;
+inline constexpr float kOfficialConcurrentLineBorderR = 4.0f;
+inline constexpr float kOfficialConcurrentLineSpriteHeight = 0.1f;
+inline constexpr float kOfficialConcurrentLineLocalRotationX = 90.0f;
+inline constexpr float kOfficialNoteSpritePpu = 100.0f;
 inline constexpr float kOfficialNoteSpriteHeight = 0.64f;
 inline constexpr float kOfficialNoteLocalZBottom = -0.01f;
 inline constexpr float kOfficialNoteLocalZTop = -0.1f;
@@ -47,12 +60,14 @@ inline constexpr float kOfficialBgLaneAlpha = 0.8f;
 inline constexpr float kOfficialIngameBgWidth = 1920.0f;
 inline constexpr float kOfficialIngameBgHeight = 1180.0f;
 // img_ingame_judgment_area3: 1119×72 @ 100 ppu, Simple draw (native 11.19×0.72).
-// Prefab m_Size.y=0.08 is stale (LaneMask height). Width stays 11.11 to match
-// BG_Lane / BG_LaneBorder. Physics outline is 12 cells.
+// Prefab m_Size.y=0.08 is stale (LaneMask height). Keep native width — the
+// outer pink stroke peaks (px 5 / 1113) sit on the 12-lane edges (±5.545).
+// Squashing to BG_Lane 11.11 pulls those peaks inward.
 inline constexpr int kOfficialJudgeSpritePixelWidth = 1119;
 inline constexpr int kOfficialJudgeSpritePixelHeight = 72;
 inline constexpr float kOfficialJudgeSpriteHeight = 0.72f;
-inline constexpr float kOfficialJudgeSpriteWidth = 11.11f;
+inline constexpr float kOfficialJudgeSpriteWidth =
+    static_cast<float>(kOfficialJudgeSpritePixelWidth) / kOfficialNoteSpritePpu;
 inline constexpr float kOfficialMaxNoteVisiblePositionY = 4.45f;
 inline constexpr int kOfficialNoteVisibleTimeRate1 = 5000;
 inline constexpr int kOfficialNoteVisibleTimeRate2 = 3;
@@ -221,6 +236,30 @@ inline float official_note_width(int32_t lane_count,
   const int32_t n = std::max(1, lane_count);
   return static_cast<float>(n) * note_width_per_lane +
          static_cast<float>(n - 1) * lane_border_width;
+}
+
+inline float official_tap_visual_width(float notation_width) noexcept {
+  return notation_width - kOfficialNoteMarginWidth;
+}
+
+inline float official_hold_line_visual_width(float notation_width) noexcept {
+  return notation_width - kOfficialNoteMarginWidth + kOfficialHoldNoteLineAdditionalWidth;
+}
+
+// Concurrent line: full notation width (no tap margin), so it peeks past note sides.
+inline float official_concurrent_line_visual_width(float notation_width) noexcept {
+  return notation_width;
+}
+
+// Unity SpriteRenderer Sliced: corner world size = border_px / PPU (constant).
+inline float official_sliced_cap_world(float border_px,
+                                       float ppu = kOfficialNoteSpritePpu) noexcept {
+  return border_px / std::max(ppu, 1e-6f);
+}
+
+inline float official_sliced_cap_fraction(float border_px, float dest_world_width,
+                                          float ppu = kOfficialNoteSpritePpu) noexcept {
+  return official_sliced_cap_world(border_px, ppu) / std::max(dest_world_width, 1e-6f);
 }
 
 // Official 1-based laneNumber. Center of a note that starts at that lane.

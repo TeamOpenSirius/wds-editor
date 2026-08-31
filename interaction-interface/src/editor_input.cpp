@@ -19,14 +19,7 @@ bool is_primary_modifier(const Modifiers& mods) noexcept {
 }
 
 bool is_visible_range_wheel_modifiers(const Modifiers& mods) noexcept {
-  if (!is_primary_modifier(mods) || mods.shift || mods.alt) {
-    return false;
-  }
-#ifdef __APPLE__
-  return !mods.control;
-#else
-  return !mods.super;
-#endif
+  return mods.alt && !mods.shift && !mods.control && !mods.super;
 }
 
 bool is_toggle_select(const PointerDownEvent& event) noexcept {
@@ -54,15 +47,17 @@ bool is_cancel_placement(const PointerDownEvent& event) noexcept {
 }
 
 bool is_place_hold_star(const PointerDownEvent& event, bool scratch_hold) noexcept {
-  // Normal: Shift+Right; ScratchHold: Shift+Left.
+  // Normal: Shift+Right; ScratchHold: Shift+Left. Curve chord is Shift+primary
+  // and must not place a star.
   const bool side = scratch_hold ? is_left(event.button) : is_right(event.button);
-  return side && event.mods.shift;
+  return side && event.mods.shift && !event.mods.control && !event.mods.alt &&
+         !event.mods.super;
 }
 
 bool is_chain_hold_body(const PointerDownEvent& event, bool scratch_hold) noexcept {
-  // Continuous chain is ScratchHold-only (left click). Normal Hold does not chain.
-  if (!scratch_hold) return false;
-  return is_left(event.button) && !event.mods.shift;
+  // ScratchHold chains on Left; regular Hold chains on Right (buttons stay swapped).
+  const bool side = scratch_hold ? is_left(event.button) : is_right(event.button);
+  return side && !event.mods.shift;
 }
 
 bool is_finish_hold_body(PointerButton button, bool scratch_hold) noexcept {
@@ -94,15 +89,20 @@ bool is_curve_fill_modifier_press(const KeyDownEvent& event) noexcept {
 }
 
 bool is_curve_fill_placement_allowed(bool place_hold_body, bool scratch_hold) noexcept {
-  return place_hold_body && scratch_hold;
+  (void)scratch_hold;
+  return place_hold_body;
 }
 
-bool is_curve_fill_confirm(const PointerDownEvent& event) noexcept {
-  return is_left(event.button) && is_curve_fill_modifiers(event.mods);
+bool is_curve_fill_confirm(const PointerDownEvent& event, bool scratch_hold) noexcept {
+  if (!is_curve_fill_modifiers(event.mods)) return false;
+  if (is_left(event.button)) return true;
+  return !scratch_hold && is_right(event.button);
 }
 
-bool is_curve_fill_confirm(const PointerUpEvent& event) noexcept {
-  return is_right(event.button) && is_curve_fill_modifiers(event.mods);
+bool is_curve_fill_confirm(const PointerUpEvent& event, bool scratch_hold) noexcept {
+  if (!is_curve_fill_modifiers(event.mods)) return false;
+  if (is_right(event.button)) return true;
+  return !scratch_hold && is_left(event.button);
 }
 
 bool suppress_idle_placement_ghost(const Modifiers& mods, bool note_drawing) noexcept {

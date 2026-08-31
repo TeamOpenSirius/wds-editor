@@ -38,6 +38,7 @@ using wds::ui::apply_curve_template_state;
 using wds::ui::capture_curve_template_state;
 using wds::ui::find_curve_template_by_id;
 using wds::ui::kMaxCurveTemplates;
+using wds::ui::clamp_msaa_samples;
 using wds::ui::load_editor_ui_config;
 using wds::ui::normalize_curve_config;
 using wds::ui::normalize_curve_template;
@@ -97,9 +98,52 @@ void test_old_config_without_curve_keys() {
   CHECK(nearly_equal(cfg.note_speed, 7.5));
   CHECK(cfg.music_muted);
   CHECK_EQ(cfg.visible_hectoms, 40);
+  CHECK_EQ(cfg.subdivisions_per_beat, 4);
+  CHECK(std::fabs(cfg.playback_rate - 1.0f) < 1e-5f);
   CHECK(cfg.curve_templates.empty());
   CHECK_EQ(cfg.curve_selected_template_id, static_cast<std::uint64_t>(0));
   CHECK(cfg.curve_selected_direction == EasingDirection::In);
+  CHECK_EQ(cfg.msaa_samples, 2);
+}
+
+void test_msaa_samples_default_clamp_and_round_trip() {
+  CHECK_EQ(clamp_msaa_samples(0), 1);
+  CHECK_EQ(clamp_msaa_samples(1), 1);
+  CHECK_EQ(clamp_msaa_samples(2), 2);
+  CHECK_EQ(clamp_msaa_samples(3), 4);
+  CHECK_EQ(clamp_msaa_samples(4), 4);
+  CHECK_EQ(clamp_msaa_samples(8), 4);
+
+  EditorUiConfig defaults;
+  CHECK_EQ(defaults.msaa_samples, 2);
+
+  const auto missing = temp_config_path("msaa_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK_EQ(loaded_missing.msaa_samples, 2);
+
+  for (int samples : {1, 2, 4}) {
+    EditorUiConfig cfg;
+    cfg.msaa_samples = samples;
+    const auto path = temp_config_path(("msaa_" + std::to_string(samples) + ".yml").c_str());
+    CHECK(save_editor_ui_config(path.string(), cfg));
+    EditorUiConfig loaded;
+    CHECK(load_editor_ui_config(path.string(), loaded));
+    CHECK_EQ(loaded.msaa_samples, samples);
+  }
+
+  const auto invalid = temp_config_path("msaa_invalid.yml");
+  CHECK(write_text_atomic(invalid.string(), "msaa_samples: 3\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_invalid;
+  CHECK(load_editor_ui_config(invalid.string(), loaded_invalid));
+  CHECK_EQ(loaded_invalid.msaa_samples, 4);
+
+  const auto zero = temp_config_path("msaa_zero.yml");
+  CHECK(write_text_atomic(zero.string(), "msaa_samples: 0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_zero;
+  CHECK(load_editor_ui_config(zero.string(), loaded_zero));
+  CHECK_EQ(loaded_zero.msaa_samples, 1);
 }
 
 void test_name_round_trip_special_and_chinese() {
@@ -469,10 +513,66 @@ void test_save_truncates_in_memory_over_max() {
   CHECK_EQ(loaded.curve_selected_template_id, static_cast<std::uint64_t>(0));
 }
 
+void test_subdivisions_and_playback_rate_round_trip() {
+  CHECK_EQ(wds::ui::clamp_subdivisions_per_beat(0), 1);
+  CHECK_EQ(wds::ui::clamp_subdivisions_per_beat(8), 8);
+  CHECK_EQ(wds::ui::clamp_subdivisions_per_beat(100), 64);
+  CHECK(std::fabs(wds::ui::clamp_playback_rate(0.1f) - 0.25f) < 1e-5f);
+  CHECK(std::fabs(wds::ui::clamp_playback_rate(1.5f) - 1.5f) < 1e-5f);
+  CHECK(std::fabs(wds::ui::clamp_playback_rate(3.0f) - 2.0f) < 1e-5f);
+
+  EditorUiConfig cfg;
+  cfg.subdivisions_per_beat = 12;
+  cfg.playback_rate = 0.5f;
+  const auto path = temp_config_path("grid_and_rate.yml");
+  CHECK(save_editor_ui_config(path.string(), cfg));
+  EditorUiConfig loaded;
+  CHECK(load_editor_ui_config(path.string(), loaded));
+  CHECK_EQ(loaded.subdivisions_per_beat, 12);
+  CHECK(std::fabs(loaded.playback_rate - 0.5f) < 1e-5f);
+
+  const auto invalid = temp_config_path("grid_and_rate_clamp.yml");
+  CHECK(write_text_atomic(invalid.string(),
+                          "subdivisions_per_beat: 200\nplayback_rate: 0.05\n")
+            .error == SerializeError::Ok);
+  EditorUiConfig clamped;
+  CHECK(load_editor_ui_config(invalid.string(), clamped));
+  CHECK_EQ(clamped.subdivisions_per_beat, 64);
+  CHECK(std::fabs(clamped.playback_rate - 0.25f) < 1e-5f);
+}
+
+void test_allow_crash_log_sensitive_default_and_round_trip() {
+  EditorUiConfig defaults;
+  CHECK(!defaults.allow_crash_log_sensitive);
+
+  const auto missing = temp_config_path("privacy_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK(!loaded_missing.allow_crash_log_sensitive);
+
+  EditorUiConfig cfg;
+  cfg.allow_crash_log_sensitive = true;
+  const auto path = temp_config_path("privacy_on.yml");
+  CHECK(save_editor_ui_config(path.string(), cfg));
+  EditorUiConfig loaded;
+  CHECK(load_editor_ui_config(path.string(), loaded));
+  CHECK(loaded.allow_crash_log_sensitive);
+
+  EditorUiConfig off;
+  off.allow_crash_log_sensitive = false;
+  const auto off_path = temp_config_path("privacy_off.yml");
+  CHECK(save_editor_ui_config(off_path.string(), off));
+  EditorUiConfig loaded_off;
+  CHECK(load_editor_ui_config(off_path.string(), loaded_off));
+  CHECK(!loaded_off.allow_crash_log_sensitive);
+}
+
 }  // namespace
 
 int main() {
   test_old_config_without_curve_keys();
+  test_msaa_samples_default_clamp_and_round_trip();
   test_name_round_trip_special_and_chinese();
   test_duplicate_names_distinct_ids_and_order();
   test_invalid_algorithm_direction_and_parameter();
@@ -485,6 +585,8 @@ int main() {
   test_over_cap_indexed_slots_ignored();
   test_settings_save_preserves_curve_state();
   test_save_truncates_in_memory_over_max();
+  test_subdivisions_and_playback_rate_round_trip();
+  test_allow_crash_log_sensitive_default_and_round_trip();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

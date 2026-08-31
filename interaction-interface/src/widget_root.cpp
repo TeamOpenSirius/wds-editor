@@ -2,7 +2,22 @@
 
 #include "wds/interaction/theme.hpp"
 
+#include <wds/common/crash_input_journal.hpp>
+
 namespace wds::interaction {
+namespace {
+
+std::uint8_t pack_mods(const Modifiers& mods) {
+  return static_cast<std::uint8_t>((mods.shift ? 1 : 0) | (mods.control ? 2 : 0) |
+                                   (mods.alt ? 4 : 0) | (mods.super ? 8 : 0));
+}
+
+void journal_route(Widget* target, wds::common::CrashRouteVia via) {
+  wds::common::journal_set_route(target != nullptr ? target->trace_name() : nullptr, via);
+}
+
+}  // namespace
+
 
 WidgetRoot::WidgetRoot() = default;
 
@@ -119,11 +134,18 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
   }
   if (std::holds_alternative<KeyDownEvent>(event)) {
     const auto& key = std::get<KeyDownEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::KeyDown, 0, 0, 0, 0,
+                                     static_cast<std::int32_t>(key.key), pack_mods(key.mods), 0,
+                                     key.repeat ? 1 : 0);
     for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
       Widget* child = it->get();
       if (child == nullptr || !child->visible() || !child->enabled()) continue;
       if (!child->is_interaction_modal()) continue;
-      if (child->intercept_modal_key_down(key)) return;
+      if (child->intercept_modal_key_down(key)) {
+        journal_route(child, wds::common::CrashRouteVia::Host);
+        wds::common::journal_end_event();
+        return;
+      }
     }
   }
   if (std::holds_alternative<KeyDownEvent>(event) && shortcuts != nullptr) {
@@ -131,6 +153,10 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
     const bool capture_keys =
         focused_ != nullptr && focused_->visible() && focused_->captures_keys();
     if (!capture_keys && shortcuts->dispatch(std::get<KeyDownEvent>(event))) {
+      wds::common::journal_set_route("Shortcut", wds::common::CrashRouteVia::Shortcut);
+      wds::common::journal_set_shortcut(
+          static_cast<std::int32_t>(std::get<KeyDownEvent>(event).key));
+      wds::common::journal_end_event();
       return;
     }
   }
@@ -139,6 +165,9 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
 
   if (std::holds_alternative<PointerDownEvent>(event)) {
     const auto& e = std::get<PointerDownEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::PointerDown, e.position.x,
+                                     e.position.y, 0, 0, 0, pack_mods(e.mods),
+                                     static_cast<std::uint8_t>(e.button), 0);
     Widget* host_hit = hit_test_popup_host(e.position);
     Widget* popup_hit = hit_test_popup(e.position);
 
@@ -150,10 +179,15 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
     // Open menus win over sibling fields they cover. Preferring the host here
     // closed the menu without selecting and opened the field underneath.
     // Field press: prefer the host so editable combos receive chevron toggles.
+    wds::common::CrashRouteVia via = wds::common::CrashRouteVia::HitTest;
     if (host_hit != nullptr && (popup_hit == nullptr || popup_hit == host_hit)) {
       target = host_hit;
+      via = wds::common::CrashRouteVia::Host;
+    } else if (popup_hit != nullptr) {
+      target = popup_hit;
+      via = wds::common::CrashRouteVia::Popup;
     } else {
-      target = popup_hit != nullptr ? popup_hit : hit_test(e.position);
+      target = hit_test(e.position);
     }
 
     // Focus sticks until Enter blur or an explicit click elsewhere.
@@ -165,20 +199,28 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
     capture_ = target;
     press_target_ = target;
     update_hover(e.position);
+    journal_route(target, via);
     if (target != nullptr) {
-      target->on_pointer_down(e);
+      target->dispatch_on_pointer_down(e);
     }
+    wds::common::journal_end_event();
     return;
   }
 
   if (std::holds_alternative<PointerUpEvent>(event)) {
     const auto& e = std::get<PointerUpEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::PointerUp, e.position.x,
+                                     e.position.y, 0, 0, 0, pack_mods(e.mods),
+                                     static_cast<std::uint8_t>(e.button), 0);
     target = capture_ != nullptr ? capture_ : hit_test(e.position);
+    journal_route(target, capture_ != nullptr ? wds::common::CrashRouteVia::Capture
+                                              : wds::common::CrashRouteVia::HitTest);
     if (target != nullptr) {
-      target->on_pointer_up(e);
+      target->dispatch_on_pointer_up(e);
     }
     capture_ = nullptr;
     update_hover(e.position);
+    wds::common::journal_end_event();
     return;
   }
 
@@ -187,48 +229,66 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
     update_hover(e.position);
     target = capture_ != nullptr ? capture_ : hover_;
     if (target != nullptr) {
-      target->on_pointer_move(e);
+      target->dispatch_on_pointer_move(e);
+    } else {
+      wds::common::journal_note_move(e.position.x, e.position.y, 0);
     }
     return;
   }
 
   if (std::holds_alternative<ClickEvent>(event)) {
     const auto& e = std::get<ClickEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::Click, e.position.x,
+                                     e.position.y, 0, 0, 0, pack_mods(e.mods),
+                                     static_cast<std::uint8_t>(e.button), 0);
     // Deliver to the press target — fresh hit-test would click through after a
     // menu-item selection closed the popup on pointer-down.
     target = press_target_;
     press_target_ = nullptr;
+    journal_route(target, wds::common::CrashRouteVia::PressTarget);
     if (target != nullptr) {
-      target->on_click(e);
+      target->dispatch_on_click(e);
     }
+    wds::common::journal_end_event();
     return;
   }
 
   if (std::holds_alternative<DoubleClickEvent>(event)) {
     const auto& e = std::get<DoubleClickEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::DoubleClick, e.position.x,
+                                     e.position.y, 0, 0, 0, pack_mods(e.mods),
+                                     static_cast<std::uint8_t>(e.button), 0);
     // Do not clear press_target_: GlfwInputAdapter emits DoubleClick then Click
     // on the same release. Clearing here would drop the Click (buttons only
     // handle on_click), so rapid re-clicks appeared dead.
     target = press_target_;
+    journal_route(target, wds::common::CrashRouteVia::PressTarget);
     if (target != nullptr) {
-      target->on_double_click(e);
+      target->dispatch_on_double_click(e);
     }
+    wds::common::journal_end_event();
     return;
   }
 
   if (std::holds_alternative<ScrollEvent>(event)) {
     const auto& e = std::get<ScrollEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::Scroll, e.position.x,
+                                     e.position.y, e.delta_x, e.delta_y, 0, pack_mods(e.mods), 0,
+                                     0);
     target = hit_test(e.position);
+    journal_route(target, wds::common::CrashRouteVia::HitTest);
     if (target != nullptr) {
-      target->on_scroll(e);
+      target->dispatch_on_scroll(e);
     }
+    wds::common::journal_end_event();
     return;
   }
 
   if (std::holds_alternative<KeyDownEvent>(event)) {
     const auto& e = std::get<KeyDownEvent>(event);
     if (focused_ != nullptr) {
-      focused_->on_key_down(e);
+      journal_route(focused_, wds::common::CrashRouteVia::Focus);
+      focused_->dispatch_on_key_down(e);
       // Enter / Esc drop Focused — run the same blur path as clicking away.
       if (focused_ != nullptr && focused_->visual_state() != WidgetState::Focused) {
         Widget* was = focused_;
@@ -236,22 +296,32 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
         was->on_blur();
       }
     }
+    wds::common::journal_end_event();
     return;
   }
 
   if (std::holds_alternative<KeyUpEvent>(event)) {
     const auto& e = std::get<KeyUpEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::KeyUp, 0, 0, 0, 0,
+                                     static_cast<std::int32_t>(e.key), pack_mods(e.mods), 0, 0);
     if (focused_ != nullptr) {
-      focused_->on_key_up(e);
+      journal_route(focused_, wds::common::CrashRouteVia::Focus);
+      focused_->dispatch_on_key_up(e);
     }
+    wds::common::journal_end_event();
     return;
   }
 
   if (std::holds_alternative<TextInputEvent>(event)) {
     const auto& e = std::get<TextInputEvent>(event);
+    wds::common::journal_begin_event(wds::common::CrashInputKind::TextInput, 0, 0, 0, 0, 0, 0, 0,
+                                     0);
+    wds::common::journal_set_text(e.text.c_str(), e.text.size());
     if (focused_ != nullptr) {
-      focused_->on_text_input(e);
+      journal_route(focused_, wds::common::CrashRouteVia::Focus);
+      focused_->dispatch_on_text_input(e);
     }
+    wds::common::journal_end_event();
   }
 }
 

@@ -4,6 +4,7 @@
 
 #include <wds/interaction/editor_shortcuts.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -24,11 +25,17 @@ struct EditorUiConfig {
   int note_height_level = 8;
   // Official SplitEffectLineOpacity (10..100 step 10).
   int split_line_opacity = 100;
+  // Preferred Vulkan MSAA samples: 1 (低) / 2 (中) / 4 (高). Default matches app 2×.
+  int msaa_samples = 2;
   int32_t visible_hectoms = 20;
+  // Edit-grid beat subdivisions (toolbar; each in [1, 64]).
+  int32_t subdivisions_per_beat = 4;
   float music_volume = 1.0f;
   bool music_muted = false;
   float sfx_volume = 1.0f;
   bool sfx_muted = false;
+  // Preview transport rate (0.25..2). Discrete combo labels snap on apply.
+  float playback_rate = 1.0f;
   bool pause_at_current = false;
   bool split_width_follow = false;
   // Q/W/E/A/S/D place-width slots (each in [1, 12]).
@@ -39,12 +46,14 @@ struct EditorUiConfig {
   bool show_judgment_text = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
-  // When true, negate timeline-scrub wheel deltas (not Ctrl/Cmd+wheel visible range).
+  // When true, negate timeline-scrub wheel deltas (not Option+wheel visible range).
   bool invert_scroll_wheel = false;
-  // When true, invert Ctrl/Cmd+wheel visible-range adjust direction.
+  // When true, invert Option+wheel visible-range adjust direction.
   // Independent of invert_scroll_wheel (timeline scrub).
   bool invert_visible_range_scroll = false;
-  // Multiplier for edit-panel timeline scrub only (not Ctrl/Cmd+wheel visible range).
+  // When true, crash reports may include typed text and full file paths.
+  bool allow_crash_log_sensitive = false;
+  // Multiplier for edit-panel timeline scrub only (not Option+wheel visible range).
   // At visible_hectoms=20, 1x = 100ms/notch (scales proportionally with range).
   // Legacy hardcoded scrub was 50ms/notch at range 20 (= 0.5x). Default is 1x.
   float scroll_wheel_speed = 1.0f;
@@ -57,6 +66,19 @@ struct EditorUiConfig {
   wds::chart_editor::EasingDirection curve_selected_direction =
       wds::chart_editor::EasingDirection::In;
 };
+
+// Matches VulkanRenderer::set_preferred_msaa: ≤1 → 1, ≤2 → 2, else 4.
+inline int clamp_msaa_samples(int samples) noexcept {
+  return samples <= 1 ? 1 : (samples <= 2 ? 2 : 4);
+}
+
+inline int clamp_subdivisions_per_beat(int value) noexcept {
+  return std::clamp(value, 1, 64);
+}
+
+inline float clamp_playback_rate(float rate) noexcept {
+  return std::clamp(rate, 0.25f, 2.0f);
+}
 
 // Resolves the platform config path (creates nothing; save may create dirs).
 // Prefers the OS data directory so app updates do not wipe preferences; if that

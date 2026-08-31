@@ -3,6 +3,8 @@
 #include "wds/interaction/theme.hpp"
 #include "wds/interaction/widget_root.hpp"
 
+#include <wds/common/crash_input_journal.hpp>
+
 #include <algorithm>
 #include <cmath>
 
@@ -187,5 +189,63 @@ void Widget::on_scroll(const ScrollEvent&) {}
 void Widget::on_key_down(const KeyDownEvent&) {}
 void Widget::on_key_up(const KeyUpEvent&) {}
 void Widget::on_text_input(const TextInputEvent&) {}
+
+namespace {
+
+template <typename Fn>
+void dispatch_with_snap(Widget& widget, wds::common::CrashHandlerId handler, Fn&& invoke) {
+  using wds::common::journal_diff_snap;
+  using wds::common::journal_set_handler;
+  journal_set_handler(handler);
+  wds::common::CrashTraceSnap before;
+  widget.trace_snapshot(before);
+  invoke();
+  wds::common::CrashTraceSnap after;
+  widget.trace_snapshot(after);
+  journal_diff_snap(before, after);
+}
+
+}  // namespace
+
+void Widget::dispatch_on_pointer_down(const PointerDownEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::PointerDown,
+                     [&] { on_pointer_down(event); });
+}
+
+void Widget::dispatch_on_pointer_up(const PointerUpEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::PointerUp,
+                     [&] { on_pointer_up(event); });
+}
+
+void Widget::dispatch_on_pointer_move(const PointerMoveEvent& event) {
+  wds::common::journal_note_move(event.position.x, event.position.y, trace_drag_mode());
+  on_pointer_move(event);
+}
+
+void Widget::dispatch_on_click(const ClickEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::Click, [&] { on_click(event); });
+}
+
+void Widget::dispatch_on_double_click(const DoubleClickEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::DoubleClick,
+                     [&] { on_double_click(event); });
+}
+
+void Widget::dispatch_on_scroll(const ScrollEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::Scroll, [&] { on_scroll(event); });
+}
+
+void Widget::dispatch_on_key_down(const KeyDownEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::KeyDown, [&] { on_key_down(event); });
+}
+
+void Widget::dispatch_on_key_up(const KeyUpEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::KeyUp, [&] { on_key_up(event); });
+}
+
+void Widget::dispatch_on_text_input(const TextInputEvent& event) {
+  dispatch_with_snap(*this, wds::common::CrashHandlerId::TextInput,
+                     [&] { on_text_input(event); });
+}
 
 }  // namespace wds::interaction

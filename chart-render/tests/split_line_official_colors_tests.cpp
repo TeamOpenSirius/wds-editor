@@ -367,6 +367,24 @@ void test_bomb_quads_follow_judge_plane_perspective() {
   CHECK(std::fabs((flare.lt.y - flare.lb.y) - (flare.rb.x - flare.lb.x)) < 1e-5f);
 }
 
+void test_adjacent_tap_notes_leave_official_margin_gap() {
+  wds::renderer::StageGeometry geometry;
+  geometry.configure({});
+  geometry.resize(1280, 720);
+  const float p = geometry.judgeline_percent() - 0.02f;
+  const auto left = geometry.note_quad(5, 5, p);
+  const auto right = geometry.note_quad(6, 6, p);
+  auto width = [](const wds::renderer::Quad& q) {
+    return 0.5f * (std::fabs(q.rb.x - q.lb.x) + std::fabs(q.rt.x - q.lt.x));
+  };
+  const float note_w = width(left);
+  const float gap = 0.5f * ((right.lb.x - left.rb.x) + (right.lt.x - left.rt.x));
+  // Official: visual 0.765, lane pitch 0.925 → gap 0.16 → gap/width ≈ 0.209.
+  // Notation-only path: gap 0.01 → gap/width ≈ 0.011.
+  CHECK(gap / std::max(note_w, 1e-6f) > 0.12f);
+  CHECK(gap > 0.0f);
+}
+
 void test_star_quad_is_centered_official_size_not_span_width() {
   wds::renderer::StageGeometry geometry;
   geometry.configure({});
@@ -383,9 +401,9 @@ void test_star_quad_is_centered_official_size_not_span_width() {
   CHECK(std::fabs(cx(star) - cx(tick)) < 0.03f);
   CHECK(width(star) < width(tick) * 0.40f);
   CHECK(std::fabs(width(star) - width(star_narrow)) < 0.01f);
-  // Official SoundNote 1.12 vs 1-lane note 0.915.
-  CHECK(width(star) > width(one_lane) * 1.05f);
-  CHECK(width(star) < width(one_lane) * 1.40f);
+  // Official SoundNote 1.12 vs 1-lane tap visual 0.765 (notation 0.915 − 0.15).
+  CHECK(width(star) > width(one_lane) * 1.30f);
+  CHECK(width(star) < width(one_lane) * 1.70f);
 }
 
 void test_content_aspect_is_official_16_9() {
@@ -425,6 +443,7 @@ int main() {
   test_official_start_line_png_is_vertical_plate();
   test_official_judgment_png_is_twelve_cells();
   test_bomb_quads_follow_judge_plane_perspective();
+  test_adjacent_tap_notes_leave_official_margin_gap();
   test_star_quad_is_centered_official_size_not_span_width();
   test_content_aspect_is_official_16_9();
   if (g_fails == 0) {

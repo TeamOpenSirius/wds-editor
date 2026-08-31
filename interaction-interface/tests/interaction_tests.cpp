@@ -19,6 +19,8 @@
 #include "wds/interaction/widgets/text_field.hpp"
 #include "wds/interaction/validators.hpp"
 
+#include <wds/common/crash_input_journal.hpp>
+
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -312,8 +314,28 @@ int main() {
 
   expect(is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, {true}}, false),
          "normal hold star is shift+right");
-  expect(!is_chain_hold_body(PointerDownEvent{{0, 0}, PointerButton::Right, {}}, false),
-         "normal hold does not chain");
+  {
+    Modifiers curve_chord;
+    curve_chord.shift = true;
+#ifdef __APPLE__
+    curve_chord.super = true;
+#else
+    curve_chord.control = true;
+#endif
+    expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, curve_chord}, false),
+           "curve chord is not a normal hold star");
+    expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Left, curve_chord}, true),
+           "curve chord is not a scratch hold star");
+    Modifiers shift_alt;
+    shift_alt.shift = true;
+    shift_alt.alt = true;
+    expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, shift_alt}, false),
+           "Shift+Alt is not a hold star");
+  }
+  expect(is_chain_hold_body(PointerDownEvent{{0, 0}, PointerButton::Right, {}}, false),
+         "normal hold chains on right");
+  expect(!is_chain_hold_body(PointerDownEvent{{0, 0}, PointerButton::Left, {}}, false),
+         "normal hold does not chain on left");
   expect(is_finish_hold_body(PointerButton::Left, false), "normal hold finishes on left-up");
   expect(!is_finish_hold_body(PointerButton::Right, false),
          "normal hold ignores right-up for finish");
@@ -562,6 +584,86 @@ int main() {
     expect(root.exclusive_popup() == nullptr, "exclusive cleared on close");
     expect(spy_raw->close_count == closes_before,
            "closing one menu must not close unrelated popups");
+  }
+
+  // Empty Dropdown / ComboBox: stay open with host+chevron, no item list.
+  {
+    const auto paints_menu_panel = [](const UiPainter& painter, const Rect& host) {
+      for (const auto& r : painter.rects()) {
+        const bool outside =
+            r.bounds.y >= host.bottom() - 0.5f || r.bounds.bottom() <= host.y + 0.5f;
+        if (outside && r.bounds.w >= host.w - 1.0f &&
+            r.bounds.h >= theme::kControlHeight - 1.0f) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    {
+      WidgetRoot root;
+      root.set_bounds({0, 0, 400, 400});
+      auto drop = std::make_unique<Dropdown>();
+      auto* dropdown = drop.get();
+      dropdown->set_bounds({10, 10, 80, 28});
+      dropdown->set_placeholder("(empty)");
+      root.add_child(std::move(drop));
+
+      root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+      expect(dropdown->is_open(), "empty dropdown stays open");
+      expect(dropdown->hit_test_popup({40, 50}) == nullptr, "empty dropdown has no popup list");
+
+      UiPainter idle;
+      dropdown->paint(idle);
+      expect(idle.rects().empty(), "open empty dropdown paint() skips host");
+
+      UiPainter popup;
+      dropdown->paint_popup_layer(popup);
+      expect(!popup.rects().empty(), "open empty dropdown paints host on popup layer");
+      expect(!paints_menu_panel(popup, dropdown->absolute_bounds()),
+             "empty dropdown popup layer has no menu panel");
+
+      root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+      expect(!dropdown->is_open(), "empty dropdown toggles closed on host click");
+
+      root.process_frame(0.016f, {PointerDownEvent{{40, 24}, PointerButton::Left, {}}});
+      expect(dropdown->is_open(), "empty dropdown reopens");
+      root.process_frame(0.016f, {PointerDownEvent{{200, 200}, PointerButton::Left, {}}});
+      expect(!dropdown->is_open(), "click outside dismisses empty dropdown");
+    }
+
+    {
+      WidgetRoot root;
+      root.set_bounds({0, 0, 400, 400});
+      auto box = std::make_unique<ComboBox>();
+      auto* combo = box.get();
+      combo->set_bounds({10, 10, 80, 28});
+      combo->set_dropdown_only(true);
+      combo->set_text("(empty)");
+      root.add_child(std::move(box));
+
+      root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+      expect(combo->is_open(), "empty combo stays open");
+      expect(combo->hit_test_popup({40, 50}) == nullptr, "empty combo has no popup list");
+
+      UiPainter idle;
+      combo->paint(idle);
+      expect(idle.rects().empty(), "open empty combo paint() skips host");
+
+      UiPainter popup;
+      combo->paint_popup_layer(popup);
+      expect(!popup.rects().empty(), "open empty combo paints host on popup layer");
+      expect(!paints_menu_panel(popup, combo->absolute_bounds()),
+             "empty combo popup layer has no menu panel");
+
+      root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+      expect(!combo->is_open(), "empty combo toggles closed on chevron click");
+
+      root.process_frame(0.016f, {PointerDownEvent{{85, 24}, PointerButton::Left, {}}});
+      expect(combo->is_open(), "empty combo reopens");
+      root.process_frame(0.016f, {PointerDownEvent{{200, 200}, PointerButton::Left, {}}});
+      expect(!combo->is_open(), "click outside dismisses empty combo");
+    }
   }
 
   // Side-by-side editable ComboBoxes (toolbar-style): open via chevron only.
@@ -1218,31 +1320,49 @@ int main() {
            "PlaceHoldBody ScratchHold may enter curve fill");
     expect(!is_curve_fill_placement_allowed(false, true),
            "Idle / ordinary notes must not enter curve fill");
-    expect(!is_curve_fill_placement_allowed(true, false),
-           "non-Scratch hold must not enter curve fill");
+    expect(is_curve_fill_placement_allowed(true, false),
+           "PlaceHoldBody regular hold may enter curve fill");
     expect(!is_curve_fill_placement_allowed(false, false),
            "idle non-scratch must not enter curve fill");
 
     expect(is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Left, curve}),
            "left down confirms");
     expect(!is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Right, curve}),
-           "right down does not confirm");
+           "right down does not confirm scratch curve");
+    expect(is_curve_fill_confirm(PointerDownEvent{{0, 0}, PointerButton::Right, curve}, false),
+           "right down confirms regular hold curve");
     expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, curve}),
-           "right up confirms");
+           "right up confirms scratch curve");
     expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, curve}),
-           "left up does not confirm");
+           "left up does not confirm scratch curve");
+    expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, curve}, false),
+           "left up confirms regular hold curve");
+    expect(is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, curve}, false),
+           "right up confirms regular hold curve");
     expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Right, {}}),
            "right up without chord does not confirm");
+    expect(!is_curve_fill_confirm(PointerUpEvent{{0, 0}, PointerButton::Left, {}}, false),
+           "left up without chord does not confirm regular curve");
     expect(suppress_idle_placement_ghost(primary_only, false), "idle primary hides ghost");
     expect(!suppress_idle_placement_ghost(primary_only, true), "drawing primary keeps ghost");
     expect(!suppress_idle_placement_ghost(Modifiers{}, false), "idle without primary keeps ghost");
 
-    expect(is_visible_range_wheel_modifiers(primary_only),
-           "exact primary wheel adjusts visible range");
+    Modifiers option_only;
+    option_only.alt = true;
+    expect(is_visible_range_wheel_modifiers(option_only),
+           "Option wheel adjusts visible range");
+    expect(!is_visible_range_wheel_modifiers(primary_only),
+           "primary wheel does not adjust visible range");
     expect(!is_visible_range_wheel_modifiers(curve),
            "Shift+primary wheel does not adjust visible range");
-    expect(!is_visible_range_wheel_modifiers(with_alt),
-           "Alt+primary wheel does not adjust visible range");
+    Modifiers shift_option = option_only;
+    shift_option.shift = true;
+    expect(!is_visible_range_wheel_modifiers(shift_option),
+           "Shift+Option wheel does not adjust visible range");
+    Modifiers option_primary = primary_only;
+    option_primary.alt = true;
+    expect(!is_visible_range_wheel_modifiers(option_primary),
+           "Option+primary wheel does not adjust visible range");
     expect(!is_visible_range_wheel_modifiers(Modifiers{}),
            "plain wheel does not adjust visible range");
     Modifiers extra_primary = primary_only;
@@ -1253,6 +1373,65 @@ int main() {
 #endif
     expect(!is_visible_range_wheel_modifiers(extra_primary),
            "extra modifier blocks visible-range wheel");
+  }
+
+  {
+    using wds::common::CrashEffectId;
+    using wds::common::journal_count;
+    using wds::common::journal_reset_for_test;
+    using wds::common::journal_slot_from_oldest;
+    using wds::common::journal_write_text;
+
+    class NamedScrollWidget : public Widget {
+     public:
+      const char* trace_name() const override { return "NamedScrollWidget"; }
+      void on_scroll(const ScrollEvent&) override { scrolled_ = true; }
+      bool scrolled_ = false;
+    };
+
+    class SnapScrollWidget : public Widget {
+     public:
+      const char* trace_name() const override { return "SnapScrollWidget"; }
+      void trace_snapshot(wds::common::CrashTraceSnap& snap) const override {
+        snap.mask = wds::common::kCrashSnapPopupScroll;
+        snap.popup_scroll = scroll_;
+      }
+      void on_scroll(const ScrollEvent& event) override { scroll_ += event.delta_y; }
+      float scroll_ = 0.0f;
+    };
+
+    journal_reset_for_test();
+    WidgetRoot route_root;
+    route_root.set_bounds({0, 0, 200, 200});
+    auto named = std::make_unique<NamedScrollWidget>();
+    named->set_bounds({0, 0, 200, 200});
+    route_root.add_child(std::move(named));
+    route_root.process_frame(0.016f, {ScrollEvent{{40, 40}, 0.0f, -1.0f, {}}}, nullptr);
+    expect(journal_count() == 1, "scroll opens one journal slot");
+    const auto* slot = journal_slot_from_oldest(0);
+    expect(slot != nullptr && slot->route_target != nullptr &&
+               std::string(slot->route_target) == "NamedScrollWidget",
+           "scroll route uses trace_name");
+
+    journal_reset_for_test();
+    WidgetRoot snap_root;
+    snap_root.set_bounds({0, 0, 200, 200});
+    auto snap = std::make_unique<SnapScrollWidget>();
+    snap->set_bounds({0, 0, 200, 200});
+    snap_root.add_child(std::move(snap));
+    snap_root.process_frame(0.016f, {ScrollEvent{{40, 40}, 0.0f, 3.0f, {}}}, nullptr);
+    expect(journal_count() == 1, "snapshot scroll opens one slot");
+    const auto* snap_slot = journal_slot_from_oldest(0);
+    expect(snap_slot != nullptr && snap_slot->effect_count == 1 &&
+               snap_slot->effects[0].id == CrashEffectId::PopupScroll,
+           "trace_snapshot diff records popup_scroll without leaf log");
+    std::string dump;
+    journal_write_text(
+        [](void* ctx, const char* data, std::size_t n) {
+          static_cast<std::string*>(ctx)->append(data, n);
+        },
+        &dump);
+    expect(dump.find("popup_scroll") != std::string::npos, "dump shows popup_scroll effect");
   }
 
   return failures == 0 ? 0 : 1;

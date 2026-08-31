@@ -1375,6 +1375,71 @@ void test_official_playfield_visual_lanes_are_six() {
   CHECK(std::fabs(official_lane_border_alpha(100) - 51.0f / 255.0f) < 1e-5f);
 }
 
+void test_official_judge_sprite_pink_peaks_sit_on_track_edges() {
+  // img_ingame_judgment_area3 is Simple-draw at native px/PPU. The outer pink
+  // stroke peaks (columns 5 and 1113) must land on the 12-lane outer edges.
+  // Squashing the quad to BG_Lane 11.11 pulls those peaks inward.
+  const float native_w = static_cast<float>(kOfficialJudgeSpritePixelWidth) / kOfficialNoteSpritePpu;
+  CHECK(std::fabs(kOfficialJudgeSpriteWidth - native_w) < 1e-5f);
+
+  auto peak_world_x = [](float peak_px) {
+    const float w = static_cast<float>(kOfficialJudgeSpritePixelWidth);
+    return (peak_px + 0.5f) / w * kOfficialJudgeSpriteWidth - 0.5f * kOfficialJudgeSpriteWidth;
+  };
+  CHECK(std::fabs(peak_world_x(5.0f) - official_lane_edge_x(0)) < 0.01f);
+  CHECK(std::fabs(peak_world_x(1113.0f) - official_lane_edge_x(12)) < 0.01f);
+}
+
+void test_official_note_visual_width_subtracts_margin() {
+  // TapNoteEntity.SetActive: size.x = notationWidth - NoteMarginWidth (0.15).
+  // HoldNoteObject.Set: size.x = notationWidth - 0.15 + HoldNoteLineAdditionalWidth (0.10).
+  CHECK(std::fabs(kOfficialNoteMarginWidth - 0.15f) < 1e-6f);
+  CHECK(std::fabs(kOfficialHoldNoteLineAdditionalWidth - 0.10f) < 1e-6f);
+  CHECK(std::fabs(kOfficialNoteSpritePpu - 100.0f) < 1e-6f);
+
+  const float one = official_note_width(1);
+  CHECK(std::fabs(one - 0.915f) < 1e-6f);
+  CHECK(std::fabs(official_tap_visual_width(one) - 0.765f) < 1e-6f);
+  CHECK(std::fabs(official_hold_line_visual_width(one) - 0.865f) < 1e-6f);
+
+  const float four = official_note_width(4);
+  CHECK(std::fabs(official_tap_visual_width(four) - (four - 0.15f)) < 1e-6f);
+
+  const float gap = (kOfficialNoteWidthPerLane + kOfficialLaneBorderWidth) -
+                    official_tap_visual_width(one);
+  CHECK(std::fabs(gap - 0.16f) < 1e-6f);
+
+  // Unity Sliced corners: border_px / PPU, not dest_h / tex_h.
+  CHECK(std::fabs(official_sliced_cap_world(65.0f) - 0.65f) < 1e-6f);
+  CHECK(std::fabs(official_sliced_cap_fraction(65.0f, 0.765f) - (0.65f / 0.765f)) < 1e-6f);
+  CHECK(official_sliced_cap_fraction(65.0f, 0.765f) > 0.5f);
+}
+
+void test_official_concurrent_line_is_full_notation_sliced() {
+  // ConcurrentLineNote.prefab + NoteConcurrentLine.asset:
+  // Sliced 12×8 @ 100 ppu, m_Border L/R=4 T/B=3, m_Size.y=0.1, local Rx=90°.
+  // Spawn sets size.x = GetNoteWidth (no NoteMarginWidth), so the bar is
+  // notation-wide and peeks past tap sides (tap = notation − 0.15).
+  CHECK_EQ(kOfficialConcurrentLineSpriteWidthPx, 12);
+  CHECK_EQ(kOfficialConcurrentLineSpriteHeightPx, 8);
+  CHECK(std::fabs(kOfficialConcurrentLineBorderL - 4.0f) < 1e-6f);
+  CHECK(std::fabs(kOfficialConcurrentLineBorderR - 4.0f) < 1e-6f);
+  CHECK(std::fabs(kOfficialConcurrentLineSpriteHeight - 0.1f) < 1e-6f);
+  CHECK(std::fabs(kOfficialConcurrentLineLocalRotationX - 90.0f) < 1e-6f);
+
+  const float one = official_note_width(1);
+  const float four = official_note_width(4);
+  CHECK(std::fabs(official_concurrent_line_visual_width(one) - one) < 1e-6f);
+  CHECK(std::fabs(official_concurrent_line_visual_width(four) - four) < 1e-6f);
+  CHECK(official_concurrent_line_visual_width(one) - official_tap_visual_width(one) > 0.14f);
+
+  // End-cap world size stays 4/100; stretching a long line must not elongate the fade.
+  CHECK(std::fabs(official_sliced_cap_world(kOfficialConcurrentLineBorderL) - 0.04f) < 1e-6f);
+  const float cap = official_sliced_cap_fraction(kOfficialConcurrentLineBorderL, four);
+  CHECK(cap < 0.03f);
+  CHECK(cap * 2.0f + 0.5f < 1.0f);
+}
+
 void test_official_playfield_judge_ndc_and_perspective() {
   CHECK(std::fabs(kOfficialPreviewAspect - 16.0f / 9.0f) < 1e-6f);
   CHECK(kOfficialDefaultScreenWidth == 1280);
@@ -2593,6 +2658,21 @@ void test_resolve_end_lane_span_matches_scratch_and_jump() {
   span = resolve_end_lane_span(plain);
   CHECK_EQ(span.first, 5);
   CHECK_EQ(span.second, 3);
+
+  // Terminal regular hold: OneDirection/None + encoded sl must still use the tail
+  // span (last-segment resize does not always rewrite gimmick to JumpScratch).
+  NotationNote terminal = make_tap(0, 2);
+  terminal.width = 2;  // body 2-3
+  terminal.end_tick = 480;
+  terminal.note_type = NoteType::Hold;
+  terminal.gimmick_type = GimmickType::OneDirection;
+  set_scratch_hold_end_lanes(terminal, 2, 6);
+  span = resolve_end_lane_span(terminal);
+  CHECK_EQ(span.first, 2);
+  CHECK_EQ(span.second, 5);  // lanes 2..6
+  const auto occ = occupied_lane_span(terminal);
+  CHECK_EQ(occ.first, 2);
+  CHECK_EQ(occ.second, 5);
 }
 
 void test_snap_scratch_chain_next_lane_splits_illegal_zone() {
@@ -2866,6 +2946,368 @@ void test_scratch_hold_chain_requires_exact_jump_scratch_cover() {
     CHECK(!chained_next_scratch_hold(doc, *doc.find_note(1)).has_value());
     CHECK(!chained_prev_scratch_hold(doc, *doc.find_note(2)).has_value());
   }
+}
+
+void test_hold_chain_family_predicates() {
+  CHECK(is_hold_chain_body(NoteType::Hold));
+  CHECK(is_hold_chain_body(NoteType::CriticalHold));
+  CHECK(is_hold_chain_body(NoteType::ScratchHold));
+  CHECK(is_hold_chain_body(NoteType::ScratchCriticalHold));
+  CHECK(!is_hold_chain_body(NoteType::NontailHold));
+  CHECK(!is_hold_chain_body(NoteType::NontailScratchHold));
+  CHECK(!is_hold_chain_body(NoteType::HoldStart));
+  CHECK(!is_hold_chain_body(NoteType::Normal));
+
+  CHECK(same_hold_chain_family(NoteType::Hold, NoteType::CriticalHold));
+  CHECK(same_hold_chain_family(NoteType::ScratchHold, NoteType::ScratchCriticalHold));
+  CHECK(!same_hold_chain_family(NoteType::Hold, NoteType::ScratchHold));
+  CHECK(!same_hold_chain_family(NoteType::CriticalHold, NoteType::ScratchCriticalHold));
+  CHECK(!same_hold_chain_family(NoteType::Hold, NoteType::NontailHold));
+}
+
+void test_occupied_lane_span_includes_hold_jump_scratch() {
+  NotationNote hold = make_tap(0, 0);
+  hold.width = 6;
+  hold.end_tick = 480;
+  hold.note_type = NoteType::Hold;
+  hold.gimmick_type = GimmickType::JumpScratch;
+  hold.scratch_length = 7;  // [0, 6]
+  const auto occ = occupied_lane_span(hold);
+  CHECK_EQ(occ.first, 0);
+  CHECK_EQ(occ.second, 7);
+
+  NotationNote isolated = hold;
+  isolated.gimmick_type = GimmickType::None;
+  isolated.scratch_length = 0;
+  const auto body = occupied_lane_span(isolated);
+  CHECK_EQ(body.first, 0);
+  CHECK_EQ(body.second, 6);
+}
+
+void test_apply_hold_chain_gimmick_encodes_regular_joint() {
+  NotationNote prev = make_tap(0, 0);
+  prev.width = 5;
+  prev.end_tick = 480;
+  prev.note_type = NoteType::Hold;
+  NotationNote next = make_tap(480, 0);
+  next.width = 6;
+  next.end_tick = 960;
+  next.note_type = NoteType::Hold;
+  sync_scratch_chain_joint(prev, next);
+  CHECK_EQ(static_cast<int>(prev.gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+  CHECK_EQ(prev.scratch_length, 6);
+  apply_hold_chain_gimmick(prev);
+  CHECK_EQ(static_cast<int>(prev.gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+  CHECK_EQ(prev.scratch_length, 6);
+
+  NotationNote same_prev = make_tap(0, 2);
+  same_prev.width = 3;
+  same_prev.end_tick = 480;
+  same_prev.note_type = NoteType::Hold;
+  NotationNote same_next = make_tap(480, 2);
+  same_next.width = 3;
+  same_next.end_tick = 960;
+  same_next.note_type = NoteType::Hold;
+  sync_scratch_chain_joint(same_prev, same_next);
+  apply_hold_chain_gimmick(same_prev);
+  CHECK_EQ(static_cast<int>(same_prev.gimmick_type), static_cast<int>(GimmickType::OneDirection));
+  CHECK_EQ(same_prev.scratch_length, 0);
+
+  NotationNote purple = make_tap(0, 2);
+  purple.width = 2;
+  purple.end_tick = 480;
+  purple.note_type = NoteType::ScratchHold;
+  NotationNote purple_next = make_tap(480, 4);
+  purple_next.width = 2;
+  purple_next.end_tick = 960;
+  purple_next.note_type = NoteType::ScratchHold;
+  sync_scratch_chain_joint(purple, purple_next);
+  const int32_t sl = purple.scratch_length;
+  const auto gimmick = purple.gimmick_type;
+  apply_hold_chain_gimmick(purple);
+  CHECK_EQ(purple.scratch_length, sl);
+  CHECK_EQ(static_cast<int>(purple.gimmick_type), static_cast<int>(gimmick));
+}
+
+void test_regular_hold_chain_and_cross_family_negative() {
+  auto add_hold = [](ChartDocument& doc, int32_t id, NoteType type, int32_t start, int32_t end,
+                     int32_t lane, int32_t width, int32_t cover_left, int32_t cover_right,
+                     GimmickType gimmick) {
+    NotationNote body = make_tap(start, lane);
+    body.id = id;
+    body.width = width;
+    body.end_tick = end;
+    body.note_type = type;
+    body.gimmick_type = gimmick;
+    set_scratch_hold_end_lanes(body, cover_left, cover_right);
+    CHECK_EQ(doc.add_note(body), id);
+  };
+
+  {
+    ChartDocument doc;
+    add_hold(doc, 1, NoteType::Hold, 0, 480, 0, 5, 0, 5, GimmickType::JumpScratch);
+    add_hold(doc, 2, NoteType::Hold, 480, 960, 0, 6, 0, 6, GimmickType::JumpScratch);
+    add_hold(doc, 3, NoteType::Hold, 960, 1440, 0, 7, 0, 7, GimmickType::JumpScratch);
+    add_hold(doc, 4, NoteType::Hold, 1440, 1920, 0, 8, 0, 7, GimmickType::OneDirection);
+    auto tail = doc.find_note(4);
+    CHECK(tail.has_value());
+    tail->scratch_length = 0;
+    tail->gimmick_type = GimmickType::OneDirection;
+    CHECK(doc.update_note(4, *tail));
+
+    const auto n1 = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(n1.has_value());
+    if (n1) CHECK_EQ(n1->id, 2);
+    const auto n2 = chained_next_scratch_hold(doc, *doc.find_note(2));
+    CHECK(n2.has_value());
+    if (n2) CHECK_EQ(n2->id, 3);
+    const auto n3 = chained_next_scratch_hold(doc, *doc.find_note(3));
+    CHECK(n3.has_value());
+    if (n3) CHECK_EQ(n3->id, 4);
+    CHECK(!chained_next_scratch_hold(doc, *doc.find_note(4)).has_value());
+    CHECK(chained_prev_scratch_hold(doc, *doc.find_note(4)).has_value());
+  }
+
+  {
+    ChartDocument doc;
+    add_hold(doc, 1, NoteType::Hold, 0, 480, 0, 4, 0, 3, GimmickType::JumpScratch);
+    add_hold(doc, 2, NoteType::ScratchHold, 480, 960, 0, 4, 0, 3, GimmickType::JumpScratch);
+    CHECK(!chained_next_scratch_hold(doc, *doc.find_note(1)).has_value());
+    CHECK(!chained_prev_scratch_hold(doc, *doc.find_note(2)).has_value());
+  }
+
+  {
+    ChartDocument doc;
+    add_hold(doc, 1, NoteType::Hold, 0, 480, 2, 2, 2, 3, GimmickType::None);
+    add_hold(doc, 2, NoteType::CriticalHold, 480, 960, 2, 2, 2, 3, GimmickType::OneDirection);
+    auto second = doc.find_note(2);
+    second->scratch_length = 0;
+    CHECK(doc.update_note(2, *second));
+    auto first = doc.find_note(1);
+    first->scratch_length = 0;
+    first->gimmick_type = GimmickType::OneDirection;
+    CHECK(doc.update_note(1, *first));
+    const auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, 2);
+  }
+}
+
+void test_convert_note_type_preserves_hold_chain_gimmick() {
+  NotationNote hold = make_tap(480, 1);
+  hold.width = 6;
+  hold.end_tick = 960;
+  hold.note_type = NoteType::Hold;
+  hold.gimmick_type = GimmickType::JumpScratch;
+  hold.scratch_length = 7;
+
+  const NotationNote to_purple = convert_note_type(hold, NoteType::ScratchHold, 480);
+  CHECK_EQ(static_cast<int>(to_purple.note_type), static_cast<int>(NoteType::ScratchHold));
+  CHECK_EQ(static_cast<int>(to_purple.gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+  CHECK_EQ(to_purple.scratch_length, 7);
+
+  const NotationNote to_crit = convert_note_type(hold, NoteType::CriticalHold, 480);
+  CHECK_EQ(static_cast<int>(to_crit.gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+  CHECK_EQ(to_crit.scratch_length, 7);
+
+  const NotationNote to_tap = convert_note_type(hold, NoteType::Normal, 480);
+  CHECK_EQ(static_cast<int>(to_tap.gimmick_type), static_cast<int>(GimmickType::None));
+  CHECK_EQ(to_tap.scratch_length, 0);
+
+  NotationNote purple = hold;
+  purple.note_type = NoteType::ScratchHold;
+  const NotationNote to_hold = convert_note_type(purple, NoteType::Hold, 480);
+  CHECK_EQ(static_cast<int>(to_hold.gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+  CHECK_EQ(to_hold.scratch_length, 7);
+
+  NotationNote one_dir = hold;
+  one_dir.gimmick_type = GimmickType::OneDirection;
+  one_dir.scratch_length = 0;
+  const NotationNote from_od = convert_note_type(one_dir, NoteType::Flick, 480);
+  CHECK_EQ(static_cast<int>(from_od.gimmick_type), static_cast<int>(GimmickType::None));
+}
+
+void test_official_and_wdschart_roundtrip_hold_chain_fragment() {
+  const std::string csv =
+      "20.2105,-1.0,81,1,5,0,0\n"
+      "20.2105,20.2500,101,1,5,JumpScratch,6\n"
+      "20.2500,20.2895,100,1,6,JumpScratch,7\n"
+      "20.2895,20.3289,100,1,7,JumpScratch,8\n"
+      "20.3289,20.3684,100,1,8,OneDirection,0\n"
+      "24.9474,-1.0,81,5,4,0,0\n"
+      "24.9474,25.5000,101,5,4,0,0\n"
+      "25.2632,-1.0,50,1,12,JumpScratch,-12\n"
+      "25.2632,25.5000,110,1,3,0,0\n";
+
+  NotationChart chart;
+  OfficialChartLoadOptions load_opt;
+  load_opt.convert_lane_to_zero_based = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart, load_opt).error),
+           static_cast<int>(SerializeError::Ok));
+
+  int js_holds = 0;
+  int one_dir = 0;
+  int plain_crit = 0;
+  int flick_js = 0;
+  int scratch_holds = 0;
+  for (const auto& n : chart.notes) {
+    if (n.note_type == NoteType::Hold && n.gimmick_type == GimmickType::JumpScratch) ++js_holds;
+    if (n.note_type == NoteType::Hold && n.gimmick_type == GimmickType::OneDirection) {
+      ++one_dir;
+      CHECK_EQ(n.scratch_length, 0);
+      CHECK_EQ(n.lane, 0);
+      CHECK_EQ(n.width, 8);
+    }
+    if (n.note_type == NoteType::CriticalHold && n.gimmick_type == GimmickType::JumpScratch) {
+      CHECK_EQ(n.scratch_length, 6);
+      CHECK_EQ(n.lane, 0);
+      CHECK_EQ(n.width, 5);
+    }
+    if (n.note_type == NoteType::CriticalHold && n.gimmick_type == GimmickType::None) {
+      ++plain_crit;
+      CHECK_EQ(n.scratch_length, 0);
+      CHECK_EQ(n.lane, 4);
+      CHECK_EQ(n.width, 4);
+    }
+    if (n.note_type == NoteType::Flick && n.gimmick_type == GimmickType::JumpScratch) {
+      ++flick_js;
+      CHECK_EQ(n.scratch_length, -12);
+      CHECK_EQ(n.lane, 0);
+      CHECK_EQ(n.width, 12);
+    }
+    if (n.note_type == NoteType::ScratchHold) {
+      ++scratch_holds;
+      CHECK_EQ(static_cast<int>(n.gimmick_type), static_cast<int>(GimmickType::None));
+      CHECK_EQ(n.scratch_length, 0);
+    }
+  }
+  CHECK_EQ(js_holds, 2);
+  CHECK_EQ(one_dir, 1);
+  CHECK_EQ(plain_crit, 1);
+  CHECK_EQ(flick_js, 1);
+  CHECK_EQ(scratch_holds, 1);
+
+  std::string exported;
+  OfficialChartSaveOptions save_opt;
+  save_opt.convert_lane_to_one_based = true;
+  save_opt.use_gimmick_names = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, exported, save_opt).error),
+           static_cast<int>(SerializeError::Ok));
+
+  NotationChart reparsed;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(exported, reparsed, load_opt).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(reparsed.notes.size()), static_cast<int>(chart.notes.size()));
+
+  auto key = [](const NotationNote& n) {
+    return std::tuple{static_cast<int32_t>(n.note_type), n.lane, n.width,
+                      static_cast<int32_t>(n.gimmick_type), n.scratch_length, n.start_tick};
+  };
+  auto a = chart.notes;
+  auto b = reparsed.notes;
+  std::sort(a.begin(), a.end(), [&](const auto& l, const auto& r) { return key(l) < key(r); });
+  std::sort(b.begin(), b.end(), [&](const auto& l, const auto& r) { return key(l) < key(r); });
+  for (size_t i = 0; i < a.size(); ++i) {
+    CHECK_EQ(static_cast<int>(a[i].note_type), static_cast<int>(b[i].note_type));
+    CHECK_EQ(a[i].lane, b[i].lane);
+    CHECK_EQ(a[i].width, b[i].width);
+    CHECK_EQ(static_cast<int>(a[i].gimmick_type), static_cast<int>(b[i].gimmick_type));
+    CHECK_EQ(a[i].scratch_length, b[i].scratch_length);
+    CHECK(std::abs(a[i].start_tick - b[i].start_tick) <= 1);
+    CHECK(std::abs(a[i].end_tick - b[i].end_tick) <= 1);
+  }
+
+  const fs::path path = temp_chart_path("hold_chain_fragment.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(chart, path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart from_wds;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), from_wds).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(from_wds.notes.size()), static_cast<int>(chart.notes.size()));
+  auto c = from_wds.notes;
+  std::sort(c.begin(), c.end(), [&](const auto& l, const auto& r) { return key(l) < key(r); });
+  for (size_t i = 0; i < a.size(); ++i) {
+    CHECK_EQ(static_cast<int>(a[i].note_type), static_cast<int>(c[i].note_type));
+    CHECK_EQ(a[i].lane, c[i].lane);
+    CHECK_EQ(a[i].width, c[i].width);
+    CHECK_EQ(static_cast<int>(a[i].gimmick_type), static_cast<int>(c[i].gimmick_type));
+    CHECK_EQ(a[i].scratch_length, c[i].scratch_length);
+  }
+
+  // Load must not rewrite imported gimmicks when repairing heads / eighths.
+  ChartDocument doc;
+  CHECK(doc.set_timing(chart.timing));
+  CHECK(doc.set_notes(chart.notes));
+  repair_legacy_hold_heads(doc);
+  recompute_hold_eighths(doc);
+  int still_one_dir = 0;
+  int still_plain_crit = 0;
+  for (const auto& n : doc.notes()) {
+    if (n.note_type == NoteType::Hold && n.gimmick_type == GimmickType::OneDirection) {
+      ++still_one_dir;
+    }
+    if (n.note_type == NoteType::CriticalHold && n.gimmick_type == GimmickType::None &&
+        n.width == 4) {
+      ++still_plain_crit;
+    }
+  }
+  CHECK_EQ(still_one_dir, 1);
+  CHECK_EQ(still_plain_crit, 1);
+}
+
+void test_generate_scratch_hold_curve_regular_hold_gimmick() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  ScratchHoldCurveRequest req;
+  req.start_tick = 0;
+  req.end_tick = 480;
+  req.start_center = 0.0;
+  req.end_center = 4.0;
+  req.width = 2;
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 4;
+  req.note_type = NoteType::Hold;
+  const auto bodies = generate_scratch_hold_curve(req, timing);
+  CHECK(bodies.size() >= 2);
+  for (const auto& body : bodies) {
+    CHECK_EQ(static_cast<int>(body.note_type), static_cast<int>(NoteType::Hold));
+  }
+  for (size_t i = 0; i + 1 < bodies.size(); ++i) {
+    const auto [lo, hi] = get_scratch_end_lane_range(bodies[i]);
+    const int32_t union_l = std::min(bodies[i].lane, bodies[i + 1].lane);
+    const int32_t union_r = std::max(bodies[i].end_lane(), bodies[i + 1].end_lane());
+    CHECK_EQ(lo, union_l);
+    CHECK_EQ(hi, union_r);
+    if (lo == bodies[i].lane && hi == bodies[i].end_lane()) {
+      CHECK_EQ(static_cast<int>(bodies[i].gimmick_type), static_cast<int>(GimmickType::OneDirection));
+      CHECK_EQ(bodies[i].scratch_length, 0);
+    } else {
+      CHECK_EQ(static_cast<int>(bodies[i].gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+    }
+  }
+}
+
+void test_regular_hold_jump_scratch_tail_covers_next_head() {
+  ChartDocument doc;
+  NotationNote prev = make_tap(0, 0);
+  prev.id = 1;
+  prev.width = 5;
+  prev.end_tick = 480;
+  prev.note_type = NoteType::Hold;
+  prev.gimmick_type = GimmickType::JumpScratch;
+  prev.scratch_length = 6;
+  CHECK_EQ(doc.add_note(prev), 1);
+
+  NotationNote next = make_tap(480, 0);
+  next.id = 2;
+  next.width = 6;
+  next.end_tick = 960;
+  next.note_type = NoteType::Hold;
+  CHECK_EQ(doc.add_note(next), 2);
+
+  CHECK(!make_auto_hold_head(doc, *doc.find_note(2)).has_value());
 }
 
 void test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body() {
@@ -6245,6 +6687,14 @@ int main() {
   test_scratch_hold_segment_horizontal_move_keeps_chain();
   test_scratch_chain_joint_direction();
   test_scratch_hold_chain_requires_exact_jump_scratch_cover();
+  test_hold_chain_family_predicates();
+  test_occupied_lane_span_includes_hold_jump_scratch();
+  test_apply_hold_chain_gimmick_encodes_regular_joint();
+  test_regular_hold_chain_and_cross_family_negative();
+  test_convert_note_type_preserves_hold_chain_gimmick();
+  test_official_and_wdschart_roundtrip_hold_chain_fragment();
+  test_generate_scratch_hold_curve_regular_hold_gimmick();
+  test_regular_hold_jump_scratch_tail_covers_next_head();
   test_hold_head_suppressed_by_non_body_overlap_not_by_hold_body();
   test_hold_head_partial_overlap_single_free_run();
   test_hold_head_partial_overlap_multiple_free_runs_skipped();
@@ -6295,6 +6745,9 @@ int main() {
   test_hold_combo_production_matches_reference_random();
   test_split_appear_phase_before_start_ms();
   test_official_playfield_visual_lanes_are_six();
+  test_official_judge_sprite_pink_peaks_sit_on_track_edges();
+  test_official_note_visual_width_subtracts_margin();
+  test_official_concurrent_line_is_full_notation_sliced();
   test_official_playfield_judge_ndc_and_perspective();
   test_official_calculate_position_y_matches_il2cpp();
   test_official_setting_value_ranges();

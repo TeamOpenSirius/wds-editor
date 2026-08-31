@@ -576,6 +576,38 @@ void test_pause_seek_play_shutdown_reset(Transport& transport, TestDouble& fake)
   expect(!transport.recovery_pending(), "shutdown resets recovery pending");
 }
 
+void test_seek_then_pause_keeps_seek_target(Transport& transport, TestDouble& fake) {
+  fake.position = Microseconds{1'000'000};
+  fake.health = StreamHealth::Stopped;
+  transport.request_seek_ms(1000);
+  play_and_start(transport);
+  expect(transport.playing(), "playing before return-to-start");
+  expect(transport.committed_ms() == 1000, "play starts at the seek target");
+
+  fake.update_position_on_seek = false;
+  fake.position = Microseconds{1'008'000};
+  transport.request_seek_ms(1000);
+  transport.request_pause();
+  transport.poll(16000);
+  expect(!transport.playing(), "seek+pause pauses");
+  expect(transport.committed_ms() == 1000, "seek+pause keeps the seek target");
+  expect(!transport.music_start_pending(), "seek+pause does not leave start pending");
+}
+
+void test_pause_in_place_follows_audio_position(Transport& transport, TestDouble& fake) {
+  fake.position = Microseconds{1'000'000};
+  fake.health = StreamHealth::Stopped;
+  transport.request_seek_ms(1000);
+  play_and_start(transport);
+  expect(transport.playing(), "playing before pause in place");
+
+  fake.position = Microseconds{2'508'000};
+  transport.request_pause();
+  transport.poll(16000);
+  expect(!transport.playing(), "pause in place pauses");
+  expect(transport.committed_ms() == 2508, "pause without seek follows audio position");
+}
+
 void test_sfx_sync_admit_policy() {
   constexpr int64_t heard = 1'000'000;
   expect(admit_sfx_sync(heard, heard, 0) == SfxSyncAdmit::PastOrDue, "equal is PastOrDue");
@@ -1099,6 +1131,20 @@ int main() {
     TestDouble reset_fake;
     bind_fake_music(reset_t, reset_fake);
     test_pause_seek_play_shutdown_reset(reset_t, reset_fake);
+  }
+  {
+    Transport return_t;
+    TestDouble return_fake;
+    bind_fake_music(return_t, return_fake);
+    test_seek_then_pause_keeps_seek_target(return_t, return_fake);
+    return_t.shutdown();
+  }
+  {
+    Transport here_t;
+    TestDouble here_fake;
+    bind_fake_music(here_t, here_fake);
+    test_pause_in_place_follows_audio_position(here_t, here_fake);
+    here_t.shutdown();
   }
 
   test_bass_sfx_sync_fixture();

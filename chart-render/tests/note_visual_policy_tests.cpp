@@ -4,12 +4,21 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+
+#define CHECK(cond)                                                                          \
+  do {                                                                                       \
+    if (!(cond)) {                                                                           \
+      std::fprintf(stderr, "CHECK failed: %s (%s:%d)\n", #cond, __FILE__, __LINE__);         \
+      std::abort();                                                                          \
+    }                                                                                        \
+  } while (0)
 
 namespace {
 
 using wds::chart_render::AnimatedArrowLayoutParams;
 using wds::chart_render::StaticArrowLayoutParams;
-using wds::chart_render::border_scale_from_flat_height;
+using wds::chart_render::border_scale_from_ppu;
 using wds::chart_render::hold_tail_layers;
 using wds::chart_render::layout_animated_scratch_arrows;
 using wds::chart_render::layout_static_scratch_arrows;
@@ -17,12 +26,47 @@ using wds::chart_render::scratch_arrow_sides;
 using wds::renderer::SkinCatalog;
 using wds::renderer::TextureId;
 
-void test_border_scale_uses_flat_height_not_pixels_mixed() {
-  // NDC-sized flat height (typical note quad ~0.05–0.2); must not use raw px.
-  const float scale = border_scale_from_flat_height(0.108f, 108.0f);
-  assert(std::abs(scale - 0.001f) < 1e-6f);
-  const float wide = border_scale_from_flat_height(0.216f, 108.0f);
-  assert(std::abs(wide - 0.002f) < 1e-6f);
+void test_border_scale_from_ppu_matches_unity_corners() {
+  // dest units per source pixel = dest_w / (world_w * PPU).
+  // 65px @ 100 ppu on a 0.765-wide note → each cap is 0.65/0.765 of dest_w.
+  const float dest_w = 0.8639f;
+  const float world_w = 0.765f;
+  const float scale = border_scale_from_ppu(dest_w, world_w, 100.0f);
+  const float cap = 65.0f * scale;
+  assert(std::abs(cap - dest_w * (0.65f / 0.765f)) < 1e-5f);
+  assert(cap * 2.0f > dest_w);
+}
+
+void test_sliced_caps_shrink_when_they_cannot_fit() {
+  using wds::chart_render::sliced_cap_layout;
+  // Temporary approximation (not Unity Sliced): 1-wide tap is 0.765, each
+  // border_px/PPU cap is 0.65, so 1.30 > 0.765. Scale both caps by
+  // 0.765/1.30 so they sit side-by-side instead of overlapping.
+  const auto narrow = sliced_cap_layout(65.0f, 65.0f, 0.765f, 100.0f);
+  CHECK(std::abs(narrow.bl - 0.5f) < 1e-5f);
+  CHECK(std::abs(narrow.br - 0.5f) < 1e-5f);
+  CHECK(narrow.bl + narrow.br <= 1.0f + 1e-5f);
+  CHECK(!narrow.emit_middle);
+
+  const float four = 4.0f * 0.915f + 3.0f * 0.01f - 0.15f;
+  const auto wide = sliced_cap_layout(65.0f, 65.0f, four, 100.0f);
+  const float raw = 0.65f / four;
+  CHECK(std::abs(wide.bl - raw) < 1e-5f);
+  CHECK(std::abs(wide.br - raw) < 1e-5f);
+  CHECK(wide.emit_middle);
+}
+
+void test_concurrent_line_sliced_caps_stay_four_pixels() {
+  using wds::chart_render::sliced_cap_layout;
+  // NoteConcurrentLine m_Border L/R=4 @ 100 ppu → 0.04wu each. A 4-lane
+  // notation span (~3.69) must keep those caps and still emit a solid middle.
+  const float four = 4.0f * 0.915f + 3.0f * 0.01f;
+  const auto layout = sliced_cap_layout(4.0f, 4.0f, four, 100.0f);
+  const float raw = 0.04f / four;
+  CHECK(std::abs(layout.bl - raw) < 1e-5f);
+  CHECK(std::abs(layout.br - raw) < 1e-5f);
+  CHECK(layout.emit_middle);
+  CHECK(layout.bl + layout.br < 0.05f);
 }
 
 void test_scratch_arrow_sides() {
@@ -84,7 +128,9 @@ void test_hold_tail_layers() {
 }  // namespace
 
 int main() {
-  test_border_scale_uses_flat_height_not_pixels_mixed();
+  test_border_scale_from_ppu_matches_unity_corners();
+  test_sliced_caps_shrink_when_they_cannot_fit();
+  test_concurrent_line_sliced_caps_stay_four_pixels();
   test_scratch_arrow_sides();
   test_static_arrows_respect_sides();
   test_animated_arrows_bidirectional_half_density();

@@ -301,6 +301,23 @@ bool is_scratch_hold_body(NoteType type) noexcept {
   }
 }
 
+bool is_hold_chain_body(NoteType type) noexcept {
+  switch (type) {
+    case NoteType::Hold:
+    case NoteType::CriticalHold:
+    case NoteType::ScratchHold:
+    case NoteType::ScratchCriticalHold:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool same_hold_chain_family(NoteType a, NoteType b) noexcept {
+  if (!is_hold_chain_body(a) || !is_hold_chain_body(b)) return false;
+  return is_scratch_hold_body(a) == is_scratch_hold_body(b);
+}
+
 bool is_tap_family(NoteType type) noexcept {
   switch (type) {
     case NoteType::Normal:

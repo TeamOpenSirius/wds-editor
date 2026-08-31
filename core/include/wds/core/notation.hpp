@@ -188,6 +188,11 @@ bool is_hold_with_tail(NoteType type) noexcept;
 bool is_nontail_hold_body(NoteType type) noexcept;
 // ScratchHold / ScratchCriticalHold / NontailScratch* bodies.
 bool is_scratch_hold_body(NoteType type) noexcept;
+// Hold / CriticalHold / ScratchHold / ScratchCriticalHold — official chain bodies.
+// Excludes Nontail* (no judged tail, not a JumpScratch/OneDirection chain).
+bool is_hold_chain_body(NoteType type) noexcept;
+// Blue/yellow chain together; purple/purple-critical chain together.
+bool same_hold_chain_family(NoteType a, NoteType b) noexcept;
 bool is_tap_family(NoteType type) noexcept;
 
 // Hold soft-judge notes (Sound / ScratchSound / HoldEighth). Not sync contributors.

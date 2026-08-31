@@ -1,9 +1,11 @@
 #include "wds/common/common.hpp"
+#include "wds/common/crash_input_journal.hpp"
 #include "wds/common/utf8_path.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -184,6 +186,109 @@ void test_utf8_install_path_io() {
   fs::remove_all(base, ec);
 }
 
+std::string dump_journal() {
+  std::string out;
+  wds::common::journal_write_text(
+      [](void* ctx, const char* data, std::size_t n) {
+        static_cast<std::string*>(ctx)->append(data, n);
+      },
+      &out);
+  return out;
+}
+
+void test_crash_input_journal() {
+  using namespace wds::common;
+  journal_reset_for_test();
+  CHECK(journal_count() == 0);
+  CHECK(!journal_allow_sensitive());
+
+  for (int i = 0; i < 1000; ++i) {
+    journal_note_move(1.0f + static_cast<float>(i), 2.0f, 3);
+  }
+  CHECK(journal_count() == 0);
+  const CrashInputSlot* pending = journal_pending_move_slot();
+  CHECK(pending != nullptr);
+  CHECK(pending->move_count == 1000);
+  CHECK(pending->move_x == 1000.0f);
+  CHECK(pending->drag_mode == 3);
+
+  journal_begin_event(CrashInputKind::Scroll, 10.0f, 20.0f, 0.0f, -1.0f, 0, 0, 0, 0);
+  journal_set_route("ChartEditPanel", CrashRouteVia::HitTest);
+  CrashTraceSnap before{};
+  before.mask = kCrashSnapTimeline;
+  before.timeline_ms = 100;
+  CrashTraceSnap after{};
+  after.mask = kCrashSnapTimeline;
+  after.timeline_ms = 250;
+  journal_diff_snap(before, after);
+  journal_end_event();
+  CHECK(journal_count() == 1);
+  const CrashInputSlot* first = journal_slot_from_oldest(0);
+  CHECK(first != nullptr);
+  CHECK(first->kind == CrashInputKind::Scroll);
+  CHECK(first->route_target != nullptr);
+  CHECK(std::strcmp(first->route_target, "ChartEditPanel") == 0);
+  CHECK(first->effect_count == 1);
+  CHECK(first->effects[0].id == CrashEffectId::TimelineMs);
+  CHECK(std::strstr(first->text, "---") == nullptr);
+  CHECK(std::strstr(first->text, "kind:") == nullptr);
+
+  journal_note_move(11.0f, 21.0f, 1);
+  journal_note_move(12.0f, 22.0f, 2);
+  CHECK(journal_count() == 1);
+  CHECK(first->move_count == 2);
+  CHECK(first->move_x == 12.0f);
+  CHECK(first->drag_mode == 2);
+
+  const std::string dumped = dump_journal();
+  CHECK(dumped.find("--- input journal ---") != std::string::npos);
+  CHECK(dumped.find("kind=Scroll") != std::string::npos);
+  CHECK(dumped.find("timeline_ms") != std::string::npos);
+  CHECK(dumped.find("moves_since") != std::string::npos);
+
+  journal_reset_for_test();
+  for (int i = 0; i < 101; ++i) {
+    journal_begin_event(CrashInputKind::Click, static_cast<float>(i), 0.0f, 0, 0, 0, 0, 1, 0);
+    journal_end_event();
+  }
+  CHECK(journal_count() == 100);
+  const CrashInputSlot* oldest = journal_slot_from_oldest(0);
+  const CrashInputSlot* newest = journal_slot_from_oldest(99);
+  CHECK(oldest != nullptr && newest != nullptr);
+  CHECK(oldest->x == 1.0f);
+  CHECK(newest->x == 100.0f);
+
+  journal_reset_for_test();
+  journal_set_allow_sensitive(false);
+  journal_begin_event(CrashInputKind::TextInput, 0, 0, 0, 0, 0, 0, 0, 0);
+  journal_set_text("secret-path", 11);
+  journal_end_event();
+  const CrashInputSlot* hidden = journal_slot_from_oldest(0);
+  CHECK(hidden != nullptr);
+  CHECK(hidden->text_len == 11);
+  CHECK(hidden->text[0] == '\0');
+  const std::string redacted = dump_journal();
+  CHECK(redacted.find("secret-path") == std::string::npos);
+  CHECK(redacted.find("text_len=11") != std::string::npos);
+
+  char path_buf[64] = {};
+  journal_copy_path(path_buf, sizeof(path_buf), "/Users/me/charts/song.wds");
+  CHECK(std::strcmp(path_buf, "song.wds") == 0);
+
+  journal_reset_for_test();
+  journal_set_allow_sensitive(true);
+  journal_begin_event(CrashInputKind::TextInput, 0, 0, 0, 0, 0, 0, 0, 0);
+  journal_set_text("secret-path", 11);
+  journal_end_event();
+  const CrashInputSlot* shown = journal_slot_from_oldest(0);
+  CHECK(shown != nullptr);
+  CHECK(std::strcmp(shown->text, "secret-path") == 0);
+  const std::string sensitive = dump_journal();
+  CHECK(sensitive.find("secret-path") != std::string::npos);
+  journal_copy_path(path_buf, sizeof(path_buf), "/Users/me/charts/song.wds");
+  CHECK(std::strcmp(path_buf, "/Users/me/charts/song.wds") == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -191,6 +296,7 @@ int main() {
   test_timeline_advance_guards_and_apply();
   test_microsecond_helpers();
   test_utf8_install_path_io();
+  test_crash_input_journal();
   if (failures != 0) {
     std::fprintf(stderr, "%d common test failure(s)\n", failures);
     return 1;

@@ -79,18 +79,23 @@ class StageGeometry {
   Quad lane_border_quad(int32_t edge_index) const;
   // Half note height along approach axis (percent units), same as note_quad span.
   float note_half_height_percent(int32_t lane, float percent) const;
-  // Official 0.915×0.64 sprite at the given percent, untilted (layer Z = 0).
+  // Official tap visual (notation − 0.15) × 0.64 at the given percent.
   Quad note_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Bottom/Top each project their own sprite with Note Rx + layer Z.
   Quad note_quad(int32_t lane, int32_t end_lane, float percent, float unity_local_z) const;
   // Visible sprite strip between two percents (near=judgeline side, far=tip side).
   Quad note_span_quad(int32_t lane, int32_t end_lane, float percent_near, float percent_far,
                       float unity_local_z = 0.0f) const;
+  // Notation-width ribbon (sync / tick). Hold art uses hold_line_quad.
   Quad hold_body_quad(int32_t lane, int32_t end_lane, float percent_near,
+                      float percent_far) const;
+  // Official HoldLongNotes: notation − 0.15 + 0.10, centered on the span.
+  Quad hold_line_quad(int32_t lane, int32_t end_lane, float percent_near,
                       float percent_far) const;
   Quad tick_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Mid-star: official 1.12×1.12 SoundNote, centered, never stretched to hold width.
   Quad star_quad(int32_t lane, int32_t end_lane, float percent) const;
+  // Official ConcurrentLine: notation-wide × 0.1, Rx=90° on JudgeArea (no tap margin).
   Quad sync_line_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Hit VFX lying on the judgeline band (same vertical span as the judgment line cells).
   Quad effect_quad(int32_t lane, int32_t end_lane) const;
