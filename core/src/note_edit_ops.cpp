@@ -57,6 +57,27 @@ std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote>
   return notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
 }
 
+void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept {
+  notes.erase(std::remove_if(notes.begin(), notes.end(),
+                             [](const NotationNote& note) {
+                               return note.note_type == NoteType::HoldEighth;
+                             }),
+              notes.end());
+}
+
+std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationNote> notes,
+                                                           int32_t ticks_per_quarter) {
+  strip_hold_eighths(notes);
+  std::vector<NotationNote> holds;
+  for (const auto& note : notes) {
+    if (is_hold_with_tail(note.note_type)) holds.push_back(note);
+  }
+  for (const auto& hold : holds) {
+    notes = notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
+  }
+  return notes;
+}
+
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
   const bool was_hold = is_hold_with_tail(note.note_type);
   const bool target_hold = is_hold_with_tail(target);
@@ -515,14 +536,6 @@ namespace {
 
 bool same_chain_tick(int32_t a, int32_t b) noexcept { return a == b; }
 
-// Prev's JumpScratch must be exactly the union of both bodies (not merely contain it).
-bool scratch_chain_lanes_connected(const NotationNote& prev, const NotationNote& next) noexcept {
-  const int32_t union_left = std::min(prev.lane, next.lane);
-  const int32_t union_right = std::max(prev.end_lane(), next.end_lane());
-  const auto [cover_lo, cover_hi] = get_scratch_end_lane_range(prev);
-  return cover_lo == union_left && cover_hi == union_right;
-}
-
 }  // namespace
 
 std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
@@ -536,7 +549,7 @@ std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
     if (!same_chain_tick(note.start_tick, body.end_tick)) continue;
     // A head at the next start means a new chain, not a continuation.
     if (paired_hold_head_for(doc, note)) continue;
-    if (!scratch_chain_lanes_connected(body, note)) continue;
+    if (!hold_chain_lanes_connected(body, note)) continue;
     return note;
   }
   return std::nullopt;
@@ -547,13 +560,15 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
   if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
+  // A head on this body starts a new chain; it is not a continuation.
+  if (paired_hold_head_for(doc, body)) return std::nullopt;
   for (const auto& note : doc.notes()) {
     if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
     if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.end_tick, body.start_tick)) continue;
     // Prev may have its own head (first segment of a chain). Connection is decided
-    // by time abutment + JumpScratch cover exactly matching both bodies.
-    if (!scratch_chain_lanes_connected(note, body)) continue;
+    // by time abutment + prev tail exactly covering both bodies.
+    if (!hold_chain_lanes_connected(note, body)) continue;
     return note;
   }
   return std::nullopt;

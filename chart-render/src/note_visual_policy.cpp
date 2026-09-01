@@ -70,10 +70,43 @@ std::vector<ArrowInstance> layout_animated_scratch_arrows(const AnimatedArrowLay
     return out;
   }
   const auto sides = scratch_arrow_sides(p.scratch_length);
-  // Match Sirius utils.cpp: bidirectional uses half density; directional uses full.
-  const float num =
-      std::max(1.0f, (p.scratch_length == 0) ? p.sonolus_num * 0.5f : p.sonolus_num);
-  const float n = num;
+  // Official NotesArrowsObject: pivot-center sprites, local x = i * interval,
+  // parent scale 0.7, NotesRight Y-180. Flick parent at ±(GetNoteWidth/2 - 0.145).
+  // ActivateArrowSpriteRenderer enables the same count on both arrays; OneDirection
+  // only SetActive's one GO. No UV / sprite-mask clip on the note — the first
+  // head naturally sits ~0.09wu past the notation edge.
+  const float step = (p.arrow_step > 1e-5f) ? p.arrow_step : W * 0.5f;
+  const int table_count = std::max(
+      1, p.arrow_count > 0 ? p.arrow_count
+                           : static_cast<int>(std::lround(std::max(p.sonolus_num, 1.0f))));
+  const float half = W * 0.5f;
+  const float mid = (L + R) * 0.5f;
+  const float offset = (p.group_offset > 1e-5f) ? p.group_offset : ((R - L) * 0.5f - half);
+  const bool fill = p.fill_to_far_edge && (sides.draw_left != sides.draw_right);
+
+  auto count_toward = [&](float parent, bool toward_positive, float far_edge) {
+    if (!fill) {
+      return table_count;
+    }
+    int n = 0;
+    for (int i = 0; i < 64; ++i) {
+      const float cx =
+          parent + (toward_positive ? 1.0f : -1.0f) * static_cast<float>(i) * step;
+      const float tail = toward_positive ? (cx + half) : (cx - half);
+      if (toward_positive && tail > far_edge + 1e-4f) {
+        break;
+      }
+      if (!toward_positive && tail < far_edge - 1e-4f) {
+        break;
+      }
+      n = i + 1;
+    }
+    return std::max(1, n);
+  };
+
+  const int left_count = sides.draw_left ? count_toward(mid - offset, true, R) : 0;
+  const int right_count = sides.draw_right ? count_toward(mid + offset, false, L) : 0;
+  const float n = static_cast<float>(std::max({1, left_count, right_count}));
 
   auto arrow_alpha = [&](float i) {
     const float phase =
@@ -81,20 +114,23 @@ std::vector<ArrowInstance> layout_animated_scratch_arrows(const AnimatedArrowLay
     return 1.0f - 0.8f * phase / n;
   };
 
+  auto emit = [&](float cx, bool flip, int index) {
+    const float x0 = flip ? (cx + half) : (cx - half);
+    const float x1 = flip ? (cx - half) : (cx + half);
+    out.push_back(
+        ArrowInstance{x0, x1, flip, arrow_alpha(static_cast<float>(index + 1)), 0.0f, 1.0f});
+  };
+
   if (sides.draw_left) {
-    for (float i = 1.0f; i < n; i += 1.0f) {
-      const float x0 = L + (i - 1.0f) * W * 0.5f;
-      const float x1 = L + (i + 1.0f) * W * 0.5f;
-      if (x1 > R) break;
-      out.push_back(ArrowInstance{x0, x1, false, arrow_alpha(i)});
+    const float parent = mid - offset;
+    for (int i = 0; i < left_count; ++i) {
+      emit(parent + static_cast<float>(i) * step, false, i);
     }
   }
   if (sides.draw_right) {
-    for (float i = 1.0f; i < n; i += 1.0f) {
-      const float rx0 = R - (i - 1.0f) * W * 0.5f;
-      const float rx1 = R - (i + 1.0f) * W * 0.5f;
-      if (rx1 < L) break;
-      out.push_back(ArrowInstance{rx0, rx1, true, arrow_alpha(i)});
+    const float parent = mid + offset;
+    for (int i = 0; i < right_count; ++i) {
+      emit(parent - static_cast<float>(i) * step, true, i);
     }
   }
   return out;

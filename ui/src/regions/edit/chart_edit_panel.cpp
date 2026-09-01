@@ -13,6 +13,7 @@
 
 #include <wds/interaction/caret.hpp>
 #include <wds/interaction/editor_input.hpp>
+#include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/widget_root.hpp>
 
@@ -21,6 +22,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <string>
 #include <unordered_set>
 
 namespace wds::ui {
@@ -42,6 +44,19 @@ float time_edge_max_px() { return wds::interaction::theme::px(7.0f); }
 float left_gutter_w() { return wds::interaction::theme::px(60.0f); }
 float right_gutter_w() { return wds::interaction::theme::px(52.0f); }
 float measure_gutter_w() { return wds::interaction::theme::px(40.0f); }
+
+float split_search_hint_width() {
+  namespace th = wds::interaction::theme;
+  constexpr const char* kHint = "分割线编号";
+  float w = th::kFontSizeMd * 5.0f;
+  auto& font = wds::interaction::FontAtlas::instance();
+  if (font.atlas_width() > 0) {
+    font.ensure_glyphs(kHint);
+    const float measured = font.measure(kHint, th::kFontSizeMd).x;
+    if (measured > 1.0f) w = measured;
+  }
+  return w;
+}
 
 bool is_visible_mid_star(NoteType type) noexcept {
   return type == NoteType::Sound || type == NoteType::ScratchSound;
@@ -679,7 +694,8 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         ghost_.note.note_type = NoteType::HoldStart;
         break;
       case PlaceIntent::HoldBody:
-        ghost_.note.note_type = NoteType::Hold;
+        ghost_.note.note_type = wds::chart_editor::drawn_hold_body_type(
+            false, place_gold_head_);
         // Upward only: end cannot go earlier than the press tick.
         ghost_.note.end_tick =
             std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
@@ -696,7 +712,8 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         ghost_.note.scratch_length = 1;
         break;
       case PlaceIntent::ScratchHoldBody:
-        ghost_.note.note_type = NoteType::ScratchHold;
+        ghost_.note.note_type = wds::chart_editor::drawn_hold_body_type(
+            true, place_gold_head_);
         ghost_.note.end_tick =
             std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
         break;
@@ -1041,7 +1058,7 @@ void ChartEditPanel::apply_hold_tail_cover(NotationNote& prev, const NotationNot
 void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*point*/) {
   hold_scratch_ = scratch;
   hold_draft_ = place_anchor_;
-  hold_draft_.note_type = scratch ? NoteType::ScratchHold : NoteType::Hold;
+  hold_draft_.note_type = wds::chart_editor::drawn_hold_body_type(scratch, place_gold_head_);
   // Upward only from the press tick; length follows current pointer (may be zero).
   hold_draft_.end_tick =
       std::max(hold_draft_.start_tick, viewport_.tick_at(pointer_.y));
@@ -1169,6 +1186,24 @@ void ChartEditPanel::begin_regular_hold_placement(wds::interaction::Vec2 point) 
   }
 }
 
+bool ChartEditPanel::want_gold_first_hold_segment() const noexcept {
+  return place_gold_head_ && hold_chain_prev_id_ < 0;
+}
+
+void ChartEditPanel::sync_drawn_hold_body_type() {
+  if (mode_ != Mode::PlaceHoldBody) return;
+  if (hold_chain_prev_id_ >= 0) return;
+  hold_draft_.note_type =
+      wds::chart_editor::drawn_hold_body_type(hold_scratch_, want_gold_first_hold_segment());
+}
+
+void ChartEditPanel::apply_gold_first_curve_body(
+    std::vector<wds::chart_editor::NotationNote>& bodies) const {
+  if (bodies.empty() || !want_gold_first_hold_segment()) return;
+  bodies.front().note_type =
+      wds::chart_editor::drawn_hold_body_type(hold_scratch_, true);
+}
+
 void ChartEditPanel::sync_hold_placement_ghost() {
   const int32_t min_end = hold_draft_.start_tick + min_hold_duration_ticks();
   // Linked chain next starts as a flick-tail adjuster only: no body until the
@@ -1192,6 +1227,7 @@ void ChartEditPanel::sync_hold_placement_ghost() {
 }
 
 void ChartEditPanel::sync_hold_draft_to_pointer(HoldDraftSync sync) {
+  sync_drawn_hold_body_type();
   const int32_t start = hold_draft_.start_tick;
   const int32_t cur = viewport_.tick_at(pointer_.y);
   // Upward only: end may grow later in time, never earlier than the head.
@@ -1417,6 +1453,10 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // Otherwise auto-disconnect: independent hold + head, previous segment restored.
   const bool chain_link =
       hold_chain_prev_id_ >= 0 && chain_draft_cover_representable();
+  if (!chain_link) {
+    hold_draft_.note_type =
+        wds::chart_editor::drawn_hold_body_type(hold_scratch_, place_gold_head_);
+  }
 
   // Isolated / disconnected hold: no JumpScratch or OneDirection leftover.
   // A chain member (including the terminal) encodes official gimmick on the body.
@@ -1553,6 +1593,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
         hold_chain_prev_body_, next.width, viewport_.lane_left_at_f(pointer_.x, next.width),
         viewport_.grid().lane_count);
     next.scratch_length = 0;
+    next.note_type = wds::chart_editor::drawn_hold_body_type(hold_scratch_, false);
     hold_draft_ = next;
     hold_stars_.clear();
     place_swipe_.reset();
@@ -1908,18 +1949,27 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
     int32_t lo = static_cast<int32_t>(anchor_orig.start_tick) + min_dur;
     int32_t hi = std::numeric_limits<int32_t>::max() / 4;
     const NotationNote* next_orig = nullptr;
+    auto is_chained_next = [&](const NotationNote& n) {
+      if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == anchor_orig.id) {
+        return false;
+      }
+      if (!wds::chart_editor::same_hold_chain_family(anchor_orig.note_type, n.note_type)) {
+        return false;
+      }
+      if (n.start_tick != anchor_orig.end_tick) return false;
+      if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) return false;
+      return wds::chart_editor::hold_chain_lanes_connected(anchor_orig, n);
+    };
     if (resize_chain_next_id_ >= 0) {
       auto nit = drag_originals_.find(resize_chain_next_id_);
-      if (nit != drag_originals_.end()) next_orig = &nit->second;
+      if (nit != drag_originals_.end() && is_chained_next(nit->second)) {
+        next_orig = &nit->second;
+      }
     }
     if (!next_orig) {
       for (const auto& [id, n] : drag_originals_) {
         (void)id;
-        if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == anchor_orig.id) {
-          continue;
-        }
-        if (n.start_tick != anchor_orig.end_tick) continue;
-        if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) continue;
+        if (!is_chained_next(n)) continue;
         next_orig = &n;
         break;
       }
@@ -2590,18 +2640,37 @@ void ChartEditPanel::layout_popup_rects() const {
                                     count_y, count_w, count_h});
   }
 
+  const float search_h = th::kControlHeight;
+  const float search_y = count_y + count_h + th::px(8.0f);
+  // Hug the painted glyphs and center the hint so leftover column width
+  // does not sit between the text and the field.
+  const float search_label_w = split_search_hint_width() + 4.0f;
+  const float search_label_gap = th::px(6.0f);
+  split_search_label_ = {split_picker_bounds_.x + pad, search_y, search_label_w, search_h};
+  const float search_field_x = split_search_label_.right() + search_label_gap;
+  split_search_field_ = {search_field_x, search_y,
+                         std::max(th::px(48.0f), split_picker_bounds_.right() - pad - search_field_x),
+                         search_h};
+
   const float section_label_h = th::kFontSizeSm + th::px(6.0f);
   const float footer_h = th::kControlHeight + th::px(22.0f);
-  const float list_y = count_y + count_h + section_label_h + th::px(12.0f);
+  const float list_y = search_y + search_h + section_label_h + th::px(12.0f);
   const float list_h = split_picker_bounds_.h - (list_y - split_picker_bounds_.y) - footer_h - pad;
-  const float col_gap = th::px(11.0f);
+  const float scrollbar_w = th::px(10.0f);
+  const float scrollbar_gap = th::px(8.0f);
+  const float list_w =
+      std::max(th::px(48.0f), split_picker_bounds_.w - pad * 2.0f - scrollbar_w - scrollbar_gap);
+  split_color_list_ = {split_picker_bounds_.x + pad, list_y, list_w, std::max(0.0f, list_h)};
+  split_scrollbar_track_ = {split_picker_bounds_.right() - pad - scrollbar_w, list_y, scrollbar_w,
+                            std::max(0.0f, list_h)};
+  const float col_gap = th::px(8.0f);
   const float row_gap = th::px(8.0f);
   // Cap matches prior Mac Retina look (84–128 fb @ 2× ≈ 42–64 logical).
   split_color_row_h_ = std::clamp(list_h / 3.2f, th::px(42.0f), th::px(64.0f));
   split_color_buttons_.clear();
-  std::vector<int32_t> colors = split_picker_color_ids();
+  std::vector<int32_t> colors = split_picker_filtered_ids();
   const float cell_w =
-      (split_picker_bounds_.w - pad * 2.0f - col_gap * static_cast<float>(kSplitColorCols - 1)) /
+      (list_w - col_gap * static_cast<float>(kSplitColorCols - 1)) /
       static_cast<float>(kSplitColorCols);
   const int visible_rows =
       std::max(1, static_cast<int>(std::floor((list_h + row_gap) / split_color_row_h_)));
@@ -2616,11 +2685,21 @@ void ChartEditPanel::layout_popup_rects() const {
       const int idx = (first_row + r) * kSplitColorCols + c;
       if (idx >= static_cast<int>(colors.size())) break;
       split_color_buttons_.push_back(
-          {split_picker_bounds_.x + pad + static_cast<float>(c) * (cell_w + col_gap),
+          {split_color_list_.x + static_cast<float>(c) * (cell_w + col_gap),
            list_y + static_cast<float>(r) * split_color_row_h_, cell_w,
            std::max(th::px(24.0f), split_color_row_h_ - row_gap)});
     }
   }
+  const float thumb_frac =
+      static_cast<float>(visible_rows) / static_cast<float>(std::max(total_rows, 1));
+  const float min_thumb = std::min(split_scrollbar_track_.h, th::px(22.0f));
+  const float thumb_h =
+      std::clamp(split_scrollbar_track_.h * thumb_frac, min_thumb, split_scrollbar_track_.h);
+  const float thumb_travel = std::max(0.0f, split_scrollbar_track_.h - thumb_h);
+  const float thumb_t =
+      split_color_max_scroll_ <= 1e-4f ? 0.0f : scroll / split_color_max_scroll_;
+  split_scrollbar_thumb_ = {split_scrollbar_track_.x, split_scrollbar_track_.y + thumb_travel * thumb_t,
+                            split_scrollbar_track_.w, thumb_h};
 
   const float btn_w = std::min(th::px(120.0f), (split_picker_bounds_.w - pad * 3.0f) * 0.5f);
   const float btn_h = wds::interaction::theme::kControlHeight;
@@ -2690,15 +2769,39 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
       painter.label(split_count_buttons_[i], std::to_string(i + 1), {1, 1, 1, 1}, kZText);
     }
 
+    // Match TextField (谱面延迟): darker fill + purple outline when focused.
+    // fill_rect_outline bumps outline z by 0.001, which clips past the far plane
+    // in this modal band — draw the 1px frame at a safe depth instead.
+    const auto field_bg = [&](const wds::interaction::Rect& r, bool focused, bool invalid) {
+      const Color fill = focused ? th::kSurface : th::kSurfaceVariant;
+      const Color outline = invalid ? th::kError : focused ? th::kPrimary : th::kOutline;
+      painter.fill_rect(r, fill, th::kCornerRadiusSm, kZCtrl);
+      const float zo = kZCtrl + 0.00005f;
+      const float t = 1.0f;
+      painter.fill_rect({r.x, r.y, r.w, t}, outline, 0.0f, zo);
+      painter.fill_rect({r.x, r.bottom() - t, r.w, t}, outline, 0.0f, zo);
+      painter.fill_rect({r.x, r.y, t, r.h}, outline, 0.0f, zo);
+      painter.fill_rect({r.right() - t, r.y, t, r.h}, outline, 0.0f, zo);
+    };
+    painter.label(split_search_label_, "分割线编号", th::kOnSurfaceMuted, kZText);
+    const bool search_invalid = !is_split_picker_search_text_valid(split_search_text_);
+    field_bg(split_search_field_, split_search_focused_, search_invalid);
+    painter.label(split_search_field_, split_search_text_, th::kOnSurface, kZText);
+    if (split_search_focused_) {
+      const float px = th::kFontSizeMd;
+      const auto size = painter.measure_text(split_search_text_, px);
+      const float text_x = split_search_field_.x + std::max(0.0f, (split_search_field_.w - size.x) * 0.5f);
+      wds::interaction::caret::paint(painter, split_search_field_, text_x + size.x, kZText,
+                                     split_search_caret_blink_t_);
+    }
+
     const float section_h = th::kFontSizeSm + th::px(4.0f);
-    const float appearance_y = split_count_buttons_.empty()
-                                   ? split_picker_bounds_.y + title_h + th::px(30.0f)
-                                   : split_count_buttons_.front().bottom() + th::px(5.0f);
+    const float appearance_y = split_search_field_.bottom() + th::px(6.0f);
     painter.label({split_picker_bounds_.x + pad_x, appearance_y, split_picker_bounds_.w - pad_x * 2.0f,
                    section_h},
                   "分割线外观", {0.90f, 0.90f, 0.93f, 1.0f}, kZText);
 
-    std::vector<int32_t> colors = split_picker_color_ids();
+    std::vector<int32_t> colors = split_picker_filtered_ids();
     const float scroll = std::clamp(split_color_scroll_, 0.0f, split_color_max_scroll_);
     const int first_row = std::max(0, static_cast<int>(scroll / split_color_row_h_));
     for (size_t i = 0; i < split_color_buttons_.size(); ++i) {
@@ -2722,6 +2825,10 @@ void ChartEditPanel::paint_popups(wds::interaction::UiPainter& painter) const {
       painter.label({cell.x + th::px(3.0f), cell.bottom() - id_h - th::px(1.5f),
                      cell.w - th::px(6.0f), id_h},
                     std::to_string(color_id), {0.96f, 0.97f, 0.99f, 1.0f}, kZText);
+    }
+    if (split_scrollbar_track_.h > 0.5f) {
+      painter.fill_rect(split_scrollbar_track_, {0.12f, 0.13f, 0.16f, 1.0f}, 4.0f, kZCtrl);
+      painter.fill_rect(split_scrollbar_thumb_, {0.42f, 0.44f, 0.50f, 1.0f}, 4.0f, kZText);
     }
   }
   if (timing_popup_open_) {
@@ -2800,9 +2907,19 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
   split_picker_open_ = true;
   split_picker_edit_id_ = -1;
   split_picker_tick_ = tick;
-  split_picker_count_ = 2;
-  split_picker_color_id_ = 1;
+  split_search_text_.clear();
+  split_search_focused_ = false;
+  split_search_caret_blink_t_ = 0.0f;
+  split_scrollbar_dragging_ = false;
   split_color_scroll_ = 0.0f;
+  if (split_picker_memory_valid_) {
+    split_picker_count_ = std::clamp(split_picker_memory_count_, 1, 6);
+    split_picker_color_id_ = split_picker_memory_color_id_;
+    scroll_split_picker_to_color(split_picker_color_id_);
+  } else {
+    split_picker_count_ = 2;
+    split_picker_color_id_ = 1;
+  }
   close_timing_popup();
   hide_gutter_ghost();
   if (auto* root = find_root()) {
@@ -2810,9 +2927,41 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
   }
 }
 
+std::vector<int32_t> ChartEditPanel::split_picker_filtered_ids() const {
+  return filter_split_picker_color_ids(split_search_text_);
+}
+
+void ChartEditPanel::remember_split_picker_count() {
+  split_picker_memory_valid_ = true;
+  split_picker_memory_count_ = split_picker_count_;
+}
+
+void ChartEditPanel::remember_split_picker_color() {
+  split_picker_memory_valid_ = true;
+  split_picker_memory_color_id_ = split_picker_color_id_;
+}
+
+void ChartEditPanel::apply_split_search_text(const std::string& text) {
+  if (text == split_search_text_) return;
+  if (!is_split_picker_search_text_valid(text)) return;
+  split_search_text_ = text;
+  // Keep the current selection in view when it still matches; otherwise jump to top.
+  scroll_split_picker_to_color(split_picker_color_id_);
+}
+
+void ChartEditPanel::sync_split_scrollbar_from_pointer(float y) {
+  layout_popup_rects();
+  if (split_color_max_scroll_ <= 1e-4f || split_scrollbar_track_.h <= 1e-3f) return;
+  const float thumb_h = split_scrollbar_thumb_.h;
+  const float usable = std::max(1e-3f, split_scrollbar_track_.h - thumb_h);
+  const float t = std::clamp((y - split_scrollbar_grab_offset_ - split_scrollbar_track_.y) / usable,
+                             0.0f, 1.0f);
+  split_color_scroll_ = t * split_color_max_scroll_;
+}
+
 void ChartEditPanel::scroll_split_picker_to_color(int32_t color_id) {
   layout_popup_rects();
-  std::vector<int32_t> colors = split_picker_color_ids();
+  std::vector<int32_t> colors = split_picker_filtered_ids();
   int idx = -1;
   for (size_t i = 0; i < colors.size(); ++i) {
     if (colors[i] == color_id) {
@@ -2825,7 +2974,7 @@ void ChartEditPanel::scroll_split_picker_to_color(int32_t color_id) {
     return;
   }
   const int row = idx / kSplitColorCols;
-  // Keep the selected effect near the top of the visible list.
+  // Keep the remembered / edited effect near the top of the visible list.
   split_color_scroll_ =
       std::clamp(static_cast<float>(row) * split_color_row_h_, 0.0f, split_color_max_scroll_);
 }
@@ -2836,6 +2985,10 @@ void ChartEditPanel::open_split_picker_for_edit(int32_t note_id) {
   split_picker_open_ = true;
   split_picker_edit_id_ = note_id;
   split_picker_tick_ = note->start_tick;
+  split_search_text_.clear();
+  split_search_focused_ = false;
+  split_search_caret_blink_t_ = 0.0f;
+  split_scrollbar_dragging_ = false;
   split_picker_count_ = std::clamp(wds::chart_editor::get_split_count(note->gimmick_type), 1, 6);
   split_picker_color_id_ = note->scratch_length;
   scroll_split_picker_to_color(split_picker_color_id_);
@@ -2849,6 +3002,8 @@ void ChartEditPanel::open_split_picker_for_edit(int32_t note_id) {
 void ChartEditPanel::close_split_picker() {
   split_picker_open_ = false;
   split_picker_edit_id_ = -1;
+  split_search_focused_ = false;
+  split_scrollbar_dragging_ = false;
 }
 
 void ChartEditPanel::confirm_split_picker() {
@@ -2868,6 +3023,8 @@ void ChartEditPanel::confirm_split_picker() {
       changes[split_picker_edit_id_] = {*prev, updated};
       commit_updates(changes, "Edit split");
     }
+    remember_split_picker_count();
+    remember_split_picker_color();
     close_split_picker();
     return;
   }
@@ -2882,6 +3039,8 @@ void ChartEditPanel::confirm_split_picker() {
   note.lane = 0;
   note.width = 12;
   commit_notes({note}, "Add split");
+  remember_split_picker_count();
+  remember_split_picker_color();
   close_split_picker();
 }
 
@@ -3053,10 +3212,30 @@ bool ChartEditPanel::handle_popup_pointer_down(const wds::interaction::PointerDo
     for (size_t i = 0; i < split_count_buttons_.size(); ++i) {
       if (split_count_buttons_[i].contains(event.position)) {
         split_picker_count_ = static_cast<int32_t>(i + 1);
+        remember_split_picker_count();
+        split_search_focused_ = false;
         return true;
       }
     }
-    std::vector<int32_t> colors = split_picker_color_ids();
+    if (split_search_field_.contains(event.position)) {
+      split_search_focused_ = true;
+      split_search_caret_blink_t_ = 0.0f;
+      split_scrollbar_dragging_ = false;
+      return true;
+    }
+    if (split_scrollbar_track_.contains(event.position) && split_color_max_scroll_ > 1e-4f) {
+      split_search_focused_ = false;
+      if (split_scrollbar_thumb_.contains(event.position)) {
+        split_scrollbar_dragging_ = true;
+        split_scrollbar_grab_offset_ = event.position.y - split_scrollbar_thumb_.y;
+      } else {
+        split_scrollbar_dragging_ = true;
+        split_scrollbar_grab_offset_ = split_scrollbar_thumb_.h * 0.5f;
+        sync_split_scrollbar_from_pointer(event.position.y);
+      }
+      return true;
+    }
+    std::vector<int32_t> colors = split_picker_filtered_ids();
     for (size_t i = 0; i < split_color_buttons_.size(); ++i) {
       if (!split_color_buttons_[i].contains(event.position)) continue;
       const float scroll = std::clamp(split_color_scroll_, 0.0f, split_color_max_scroll_);
@@ -3064,9 +3243,12 @@ bool ChartEditPanel::handle_popup_pointer_down(const wds::interaction::PointerDo
       const int idx = first_row * kSplitColorCols + static_cast<int>(i);
       if (idx >= 0 && idx < static_cast<int>(colors.size())) {
         split_picker_color_id_ = colors[static_cast<size_t>(idx)];
+        remember_split_picker_color();
       }
+      split_search_focused_ = false;
       return true;
     }
+    split_search_focused_ = false;
     if (!split_picker_bounds_.contains(event.position)) close_split_picker();
     return true;
   }
@@ -3301,6 +3483,9 @@ void ChartEditPanel::update(float delta_seconds) {
   sync_error_ticks();
   if (timing_popup_open_) {
     timing_caret_blink_t_ += delta_seconds;
+  }
+  if (split_picker_open_ && split_search_focused_) {
+    split_search_caret_blink_t_ += delta_seconds;
   }
   // Prefer global pointer: after leaving the pane, local pointer_ freezes on the
   // last in-bounds sample and must not keep Idle ghosts alive.
@@ -3667,6 +3852,9 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
 
   place_anchor_ = make_base_note(event.position);
   place_swipe_.reset();
+  // Gold vs ordinary head is decided at this press. The same Shift still
+  // places stars; releasing it after this does not retint the hold.
+  place_gold_head_ = event.mods.shift;
   mode_ = Mode::PlaceGesture;
   update_ghost(event.position);
 }
@@ -3676,6 +3864,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     pointer_ = event.position;
     global_pointer_ = event.position;
     active_mods_ = event.mods;
+    if (split_picker_open_ && split_scrollbar_dragging_) {
+      sync_split_scrollbar_from_pointer(event.position.y);
+    }
     return;
   }
   pointer_ = event.position;
@@ -3854,19 +4045,41 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       return wds::chart_editor::scratch_hold_end_cover_representable(b, cover_l, cover_r);
     };
 
-    // Resolve time-abutting ScratchHold chain neighbors (may load into `working`).
+    // Chain membership is decided on drag-start geometry: same family, time
+    // abutment, and prev's then-current tail exactly covering both bodies.
+    auto original_of = [&](int32_t id, const NotationNote& fallback) -> const NotationNote& {
+      if (auto it = drag_originals_.find(id); it != drag_originals_.end()) return it->second;
+      return fallback;
+    };
+    auto originally_chained = [&](const NotationNote& prev, const NotationNote& next) {
+      const NotationNote& p = original_of(prev.id, prev);
+      const NotationNote& n = original_of(next.id, next);
+      if (!wds::chart_editor::is_hold_chain_body(p.note_type) ||
+          !wds::chart_editor::is_hold_chain_body(n.note_type)) {
+        return false;
+      }
+      if (!wds::chart_editor::same_hold_chain_family(p.note_type, n.note_type)) return false;
+      if (n.start_tick != p.end_tick) return false;
+      return wds::chart_editor::hold_chain_lanes_connected(p, n);
+    };
+    auto later_starts_new_chain = [&](const NotationNote& later) {
+      const NotationNote& later_orig = original_of(later.id, later);
+      if (wds::chart_editor::paired_hold_head_for(engine_.document(), later_orig)) return true;
+      for (const auto& [id, n] : drag_originals_) {
+        (void)id;
+        if (wds::chart_editor::hold_head_pairs_with_body(n, later_orig)) return true;
+      }
+      return false;
+    };
+
+    // Resolve hold-chain neighbors (may load into `working`).
     auto resolve_chained_next = [&](const NotationNote& body,
                                     std::unordered_map<int32_t, NotationNote>& working)
         -> std::optional<NotationNote*> {
       auto is_candidate = [&](const NotationNote& n) {
-        if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == body.id) {
-          return false;
-        }
-        if (!wds::chart_editor::same_hold_chain_family(n.note_type, body.note_type)) {
-          return false;
-        }
-        if (n.start_tick != body.end_tick) return false;
-        if (wds::chart_editor::paired_hold_head_for(engine_.document(), n)) return false;
+        if (n.id == body.id) return false;
+        if (!originally_chained(body, n)) return false;
+        if (later_starts_new_chain(n)) return false;
         return true;
       };
       for (auto& [id, n] : working) {
@@ -3892,14 +4105,10 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
                                     std::unordered_map<int32_t, NotationNote>& working)
         -> std::optional<NotationNote*> {
       auto is_candidate = [&](const NotationNote& n) {
-        if (!wds::chart_editor::is_hold_chain_body(n.note_type) || n.id == body.id) {
-          return false;
-        }
-        if (!wds::chart_editor::same_hold_chain_family(n.note_type, body.note_type)) {
-          return false;
-        }
-        if (n.end_tick != body.start_tick) return false;
-        return true;  // prev may own a head
+        if (n.id == body.id) return false;
+        if (!originally_chained(n, body)) return false;
+        if (later_starts_new_chain(body)) return false;
+        return true;
       };
       for (auto& [id, n] : working) {
         (void)id;
@@ -4584,6 +4793,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
 void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event) {
   if (has_modal_popup()) {
     pointer_ = event.position;
+    split_scrollbar_dragging_ = false;
     return;
   }
   pointer_ = event.position;
@@ -4761,6 +4971,13 @@ void ChartEditPanel::on_key_down(const wds::interaction::KeyDownEvent& event) {
     return;
   }
   if (split_picker_open_) {
+    if (split_search_focused_ && event.key == wds::interaction::KeyCode::Backspace) {
+      if (!split_search_text_.empty()) {
+        apply_split_search_text(split_search_text_.substr(0, split_search_text_.size() - 1));
+      }
+      split_search_caret_blink_t_ = 0.0f;
+      return;
+    }
     if (event.key == wds::interaction::KeyCode::Escape) {
       close_split_picker();
     }
@@ -4802,6 +5019,21 @@ void ChartEditPanel::on_key_up(const wds::interaction::KeyUpEvent& event) {
 }
 
 void ChartEditPanel::on_text_input(const wds::interaction::TextInputEvent& event) {
+  if (split_picker_open_ && split_search_focused_ && !event.text.empty()) {
+    std::string next = split_search_text_;
+    bool changed = false;
+    for (char c : event.text) {
+      if (c >= '0' && c <= '9') {
+        next.push_back(c);
+        changed = true;
+      }
+    }
+    if (changed) {
+      apply_split_search_text(next);
+      split_search_caret_blink_t_ = 0.0f;
+    }
+    return;
+  }
   if (!timing_popup_open_ || event.text.empty()) return;
   const bool bpm_mode = timing_popup_mode_ == TimingPopupMode::Bpm;
   std::string* field = bpm_mode                  ? &timing_bpm_text_
@@ -4876,7 +5108,8 @@ void ChartEditPanel::refresh_curve_ghosts() {
   req.direction = curve_fill_selection_.easing.direction;
   req.parameter = curve_fill_selection_.easing.parameter;
   req.note_type = hold_scratch_ ? NoteType::ScratchHold : NoteType::Hold;
-  const auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  apply_gold_first_curve_body(bodies);
   if (bodies.empty()) return;
   if (hold_chain_prev_id_ >= 0) {
     NotationNote prev = hold_chain_prev_body_;
@@ -4920,7 +5153,8 @@ bool ChartEditPanel::commit_curve_fill() {
   req.direction = curve_fill_selection_.easing.direction;
   req.parameter = curve_fill_selection_.easing.parameter;
   req.note_type = hold_scratch_ ? NoteType::ScratchHold : NoteType::Hold;
-  const auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  auto bodies = wds::chart_editor::generate_scratch_hold_curve(req, engine_.document().timing());
+  apply_gold_first_curve_body(bodies);
   wds::chart_editor::ScratchHoldCurveCommitInput input;
   input.notes = engine_.document().notes();
   input.generated_bodies = bodies;

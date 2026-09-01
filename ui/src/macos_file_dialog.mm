@@ -5,6 +5,10 @@
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
+
 #include <cctype>
 #include <string>
 
@@ -67,6 +71,21 @@ NSString* ns_string(const std::string& value) {
 
 void activate_app() {
   [NSApp activateIgnoringOtherApps:YES];
+}
+
+void restore_glfw_key_window(void* glfw_window) {
+  [NSApp activateIgnoringOtherApps:YES];
+  if (glfw_window == nullptr) return;
+  GLFWwindow* gw = static_cast<GLFWwindow*>(glfw_window);
+  NSWindow* nsw = glfwGetCocoaWindow(gw);
+  if (nsw != nil) {
+    [nsw makeKeyAndOrderFront:nil];
+    NSView* view = nsw.contentView;
+    if (view != nil) {
+      [nsw makeFirstResponder:view];
+    }
+  }
+  glfwFocusWindow(gw);
 }
 
 // Prefer fileSystemRepresentation for paths passed to POSIX / libstdc++-style APIs.
@@ -183,6 +202,15 @@ native_file_dialog::SaveDiscardCancel confirm_save_discard_cancel(const std::str
     }
     return native_file_dialog::SaveDiscardCancel::Cancel;
   }
+}
+
+void restore_owner_focus(void* glfw_window) {
+  restore_glfw_key_window(glfw_window);
+  // Panel teardown can steal key status after runModal returns.
+  GLFWwindow* gw = static_cast<GLFWwindow*>(glfw_window);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    restore_glfw_key_window(gw);
+  });
 }
 
 }  // namespace wds::ui::macos_file_dialog

@@ -520,20 +520,21 @@ class VulkanRenderer {
     bool valid() const noexcept { return w > 0 && h > 0; }
   };
 
-  // `batch` uses standard alpha blending; optional `additive` is drawn after with
-  // SRC_ALPHA / ONE (hit particles, glows). Optional post overlays are drawn last
-  // (above additive) — used for modal dialogs. `post_overlay2` draws after
-  // `post_overlay` (e.g. modal footer above list sprites).
-  // When `additive_scissor` is set, only the additive pass is clipped (keeps UI
-  // overlays in `batch` unclipped while hit FX stay inside the preview panel).
+  // Draw order (depth write off → later passes win):
+  //   batch (stage / SplitEffect) → mid_overlay (notes / edit skins) →
+  //   additive (hit VFX) → post_overlay → post_overlay2 (modals).
+  // `additive` uses SRC_ALPHA / ONE. When `additive_scissor` is set, only that
+  // pass is clipped (UI in `batch` / `mid_overlay` stays unclipped).
   // NOTE: DrawBatch::clear() keeps sticky bucket indices, so merging late into
-  // `batch` does NOT guarantee later draw order across textures.
+  // `batch` does NOT guarantee later draw order across textures — use a later
+  // pass instead.
   bool draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r = 0.05f,
                   float clear_g = 0.05f, float clear_b = 0.08f,
                   const DrawBatch* additive = nullptr,
                   const DrawBatch* post_overlay = nullptr,
                   const DrawBatch* post_overlay2 = nullptr,
-                  const ScissorRect* additive_scissor = nullptr);
+                  const ScissorRect* additive_scissor = nullptr,
+                  const DrawBatch* mid_overlay = nullptr);
 
   int framebuffer_width() const noexcept { return width_; }
   int framebuffer_height() const noexcept { return height_; }

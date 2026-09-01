@@ -102,9 +102,9 @@ class PlaybackPreviewView {
   void sync_hit_sfx(const wds::chart_editor::PreviewSnapshot& snapshot);
 
   // ui_solid_texture: 1×1 white used by UiPainter panels. Overlay solids are drawn
-  // under the stage; overlay sprites (and edit-area skins) are drawn above it.
-  // modal_overlay / modal_chrome are submitted via VulkanRenderer::draw_frame post
-  // passes so sticky DrawBatch bucket indices cannot bury them. Chrome draws last.
+  // under the stage; overlay sprites (and edit-area skins) go through mid_overlay
+  // so they stay above SplitEffect. modal_overlay / modal_chrome use post passes
+  // so sticky DrawBatch bucket indices cannot bury them. Chrome draws last.
   void render(const wds::chart_editor::PreviewSnapshot& snapshot,
               const wds::renderer::DrawBatch* ui_overlay = nullptr,
               wds::renderer::TextureId ui_solid_texture = wds::renderer::kInvalidTextureId,
@@ -126,7 +126,7 @@ class PlaybackPreviewView {
   void draw_hidden_line(wds::renderer::DrawBatch& batch);
   // Official LaneMask bottom percent (GetNoteVisiblePositionY). z=0 objects cull here.
   float spawn_clip_percent() const noexcept;
-  void draw_split_lanes(wds::renderer::DrawBatch& batch, wds::renderer::DrawBatch& additive,
+  void draw_split_lanes(wds::renderer::DrawBatch& batch,
                         const wds::chart_editor::PreviewSnapshot& snapshot);
   void draw_concurrent_lines(wds::renderer::DrawBatch& batch,
                              const wds::chart_editor::PreviewSnapshot& snapshot);
@@ -189,6 +189,7 @@ class PlaybackPreviewView {
   wds::renderer::SkinCatalog skin_;
   wds::audio::HitSfxPlayer hit_sfx_;
   wds::renderer::DrawBatch batch_;
+  wds::renderer::DrawBatch notes_batch_;
   wds::renderer::DrawBatch additive_batch_;
   // Indices into snapshot.notes: GenerateNoteId order reversed (bottom-most first).
   std::vector<size_t> notes_draw_indices_;

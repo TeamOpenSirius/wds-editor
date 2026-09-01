@@ -1,4 +1,5 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/regions/edit/edit_gutters.hpp"
 #include "wds/ui/regions/settings/curve_templates_dialog.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 #include "wds/ui/ui_manager.hpp"
@@ -81,6 +82,12 @@ Modifiers curve_mods() {
   return mods;
 }
 
+Modifiers shift_mods() {
+  Modifiers mods;
+  mods.shift = true;
+  return mods;
+}
+
 int count_type(const std::vector<NotationNote>& notes, NoteType type) {
   int n = 0;
   for (const auto& note : notes) {
@@ -133,11 +140,12 @@ struct Harness {
     return panel.viewport().tick_at(at_tick_lane(tick, lane).y);
   }
 
-  bool enter_hold(bool scratch, int32_t start_tick, int32_t end_tick, int32_t lane) {
+  bool enter_hold(bool scratch, int32_t start_tick, int32_t end_tick, int32_t lane,
+                  Modifiers down_mods = {}) {
     const auto origin = at_tick_lane(start_tick, lane);
     const auto tail = at_tick_lane(end_tick, lane);
     const PointerButton button = scratch ? PointerButton::Right : PointerButton::Left;
-    panel.on_pointer_down(PointerDownEvent{origin, button, {}});
+    panel.on_pointer_down(PointerDownEvent{origin, button, down_mods});
     const float nudge = tail.y < origin.y ? -20.0f : 20.0f;
     panel.on_pointer_move(PointerMoveEvent{{origin.x, origin.y + nudge}, {}});
     panel.on_pointer_move(PointerMoveEvent{tail, {}});
@@ -913,6 +921,74 @@ Vec2 tail_center_on_note(const Harness& h, const NotationNote& note) {
   return tail_x_at_end(h, note, x0 + w * 0.5f);
 }
 
+void test_shift_at_press_draws_gold_head_hold_for_both_families() {
+  {
+    Harness h;
+    // Shift only on press; later moves have no Shift (release must not retint).
+    h.enter_hold(false, 0, 480, 3, shift_mods());
+    h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHoldStart), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 0);
+  }
+  {
+    Harness h;
+    h.enter_hold(true, 0, 480, 3, shift_mods());
+    h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Right, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchCriticalHold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchCriticalHoldStart), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 0);
+  }
+}
+
+void test_shift_after_press_does_not_make_gold_head() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3);
+  h.panel.on_key_down(KeyDownEvent{KeyCode::Unknown, shift_mods(), false});
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 3), shift_mods()});
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, shift_mods()});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHold), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHoldStart), 0);
+}
+
+void test_shift_gold_head_still_places_star() {
+  Harness h;
+  h.enter_hold(false, 0, 480, 3, shift_mods());
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(240, 3), PointerButton::Right, shift_mods()});
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHoldStart), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+}
+
+void test_shift_does_not_break_curve_fill_or_chain_second_segment() {
+  {
+    Harness h;
+    h.enter_hold(false, 0, 480, 3, shift_mods());
+    h.press_curve();
+    CHECK(h.panel.curve_mode_active());
+    h.release_curve();
+    h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHoldStart), 1);
+  }
+  {
+    Harness h;
+    h.enter_hold(false, 0, 240, 2, shift_mods());
+    h.panel.on_pointer_down(PointerDownEvent{h.at_tick_lane(240, 2), PointerButton::Right, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 5), {}});
+    h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 5), PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::CriticalHoldStart), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 0);
+  }
+}
+
 void test_selected_regular_empty_cap_left_click_does_not_arm() {
   Harness h;
   const int32_t id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1, 3, 7);
@@ -1080,6 +1156,24 @@ void test_plain_primary_does_not_clear_hold_draft_during_draw() {
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 1);
 }
 
+void test_split_picker_search_filter() {
+  using wds::ui::filter_split_picker_color_ids;
+  using wds::ui::is_split_picker_search_text_valid;
+  CHECK(is_split_picker_search_text_valid(""));
+  CHECK(is_split_picker_search_text_valid("10"));
+  CHECK(!is_split_picker_search_text_valid("1a"));
+  CHECK(!is_split_picker_search_text_valid("123456789"));
+  const auto all = filter_split_picker_color_ids("");
+  CHECK(!all.empty());
+  const auto ones = filter_split_picker_color_ids("1");
+  CHECK(!ones.empty());
+  CHECK(ones.size() < all.size());
+  for (int32_t id : ones) {
+    CHECK(std::to_string(id).find('1') != std::string::npos);
+  }
+  CHECK(filter_split_picker_color_ids("00000").empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1091,6 +1185,10 @@ int main() {
   test_regular_hold_curve_left_up_commits_ghost_segments();
   test_regular_hold_curve_fill_generates_hold_bodies();
   test_regular_hold_right_click_chains_next_segment();
+  test_shift_at_press_draws_gold_head_hold_for_both_families();
+  test_shift_after_press_does_not_make_gold_head();
+  test_shift_gold_head_still_places_star();
+  test_shift_does_not_break_curve_fill_or_chain_second_segment();
   test_selected_regular_empty_cap_left_click_does_not_arm();
   test_selected_regular_terminal_left_drag_resizes_tail();
   test_selected_regular_terminal_tail_shows_resize_cursor();
@@ -1111,6 +1209,7 @@ int main() {
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
+  test_split_picker_search_filter();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

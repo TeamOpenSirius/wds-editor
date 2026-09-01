@@ -287,6 +287,7 @@ void PlaybackPreviewView::shutdown() {
   textures_.clear();
   skin_ = SkinCatalog{};
   batch_.clear();
+  notes_batch_.clear();
   additive_batch_.clear();
   notes_draw_indices_.clear();
   note_draw_order_.clear();
@@ -331,14 +332,17 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   // Transport::start_pending_music() so POS syncs land on a still-paused stream.
 
   batch_.clear();
+  notes_batch_.clear();
   additive_batch_.clear();
-  batch_.reserve_quads(64 + snapshot.notes.size() * 4);
+  batch_.reserve_quads(64 + snapshot.split_lanes.size() * 8);
+  notes_batch_.reserve_quads(64 + snapshot.notes.size() * 4);
   additive_batch_.reserve_quads(16 + snapshot.notes.size() * 4);
 
-  // Depth write is disabled; later draw calls win. DrawBatch::clear() keeps sticky
-  // per-texture bucket indices, so "merge later in this function" does NOT move a
-  // texture later in the frame — use draw_frame's post_overlay for modals instead.
-  auto merge_overlay = [&](const DrawBatch* overlay, bool solid_pass) {
+  // Depth write is disabled; later draw calls / later draw_frame passes win.
+  // DrawBatch::clear() keeps sticky per-texture bucket indices, so "merge later
+  // in this function" does NOT move a texture later in the same batch — notes
+  // and edit skins go to mid_overlay so they stay above SplitEffect.
+  auto merge_overlay = [&](DrawBatch& dest, const DrawBatch* overlay, bool solid_pass) {
     if (overlay == nullptr) {
       return;
     }
@@ -351,7 +355,7 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
       if (is_solid != solid_pass) {
         continue;
       }
-      auto& dst = batch_.bucket_for(bucket.texture);
+      auto& dst = dest.bucket_for(bucket.texture);
       dst.vertices.insert(dst.vertices.end(), bucket.vertices.begin(), bucket.vertices.end());
     }
   };
@@ -360,15 +364,25 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   // Depth write is off, so later buckets cover earlier ones. The plate shares
   // the UI 1×1 solid texture and must not be submitted before the background.
   draw_ingame_background(batch_);
-  merge_overlay(ui_overlay, true);
+  merge_overlay(batch_, ui_overlay, true);
   draw_stage(batch_, snapshot, ui_solid_texture);
-  draw_split_lanes(batch_, additive_batch_, snapshot);
+  draw_split_lanes(batch_, snapshot);
   draw_concurrent_lines(batch_, snapshot);
-  draw_notes(batch_, snapshot);
+
+  // Pin the split plate under edit notes in this pass (same atlas as preview
+  // SplitEffect). Otherwise sticky buckets can place edit split sprites last.
+  if (skin_.soft_split_line) {
+    notes_batch_.bucket_for(skin_.soft_split_line.id);
+  } else if (skin_.split_line_1) {
+    notes_batch_.bucket_for(skin_.split_line_1.id);
+  } else if (skin_.split_line_2) {
+    notes_batch_.bucket_for(skin_.split_line_2.id);
+  }
+  draw_notes(notes_batch_, snapshot);
+  draw_timing_effect(notes_batch_, snapshot);
+  draw_combo(notes_batch_, snapshot);
+  merge_overlay(notes_batch_, ui_overlay, false);
   draw_hit_effects(additive_batch_, snapshot);
-  draw_timing_effect(batch_, snapshot);
-  draw_combo(batch_, snapshot);
-  merge_overlay(ui_overlay, false);
 
   const DrawBatch* post =
       (modal_overlay != nullptr && modal_overlay->vertex_count() > 0) ? modal_overlay : nullptr;
@@ -383,8 +397,9 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
     add_scissor = {px, py, pw, ph};
     add_scissor_ptr = &add_scissor;
   }
+  const DrawBatch* mid = notes_batch_.vertex_count() > 0 ? &notes_batch_ : nullptr;
   vulkan_.draw_frame(batch_, geometry_.screen(), 0.05f, 0.05f, 0.08f, &additive_batch_, post,
-                     post2, add_scissor_ptr);
+                     post2, add_scissor_ptr, mid);
 }
 
 void PlaybackPreviewView::draw_ingame_background(DrawBatch& batch) {
@@ -481,8 +496,7 @@ float PlaybackPreviewView::spawn_clip_percent() const noexcept {
   return geometry_.lane_mask_bottom_percent();
 }
 
-void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive,
-                                           const PreviewSnapshot& snapshot) {
+void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, const PreviewSnapshot& snapshot) {
   if (snapshot.split_lanes.empty()) {
     return;
   }
@@ -601,20 +615,22 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, DrawBatch& additive
         batch.add_quad_corners(plate->id, q, -0.6f, a_end, a_end, a_start, a_start, plate->u0,
                                plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0, g0, b0,
                                r0, g0, b0);
+        // Glow stays in this batch (under notes). Official SplitEffect is behind
+        // flats; the additive pass is reserved for hit VFX after mid_overlay.
         const float glow_a = tip_glow * tip_a;
         const float glow_b = tip_glow * tip_b;
         if (tip_glow > 0.01f && (glow_a > 0.01f || glow_b > 0.01f)) {
-          additive.add_quad_corners(plate->id, q, -0.55f, glow_b, glow_b, glow_a, glow_a, plate->u0,
-                                    plate->v0, plate->u1, plate->v1, 1.0f, 1.0f, 1.0f);
+          batch.add_quad_corners(plate->id, q, -0.55f, glow_b, glow_b, glow_a, glow_a, plate->u0,
+                                 plate->v0, plate->u1, plate->v1, 1.0f, 1.0f, 1.0f);
         }
         const float body_glow = std::clamp(config_.split_line_body_glow, 0.0f, 1.0f);
         if (body_glow > 0.01f) {
           const float bg_a = body_glow * mul_a * (1.0f - tip_a * 0.65f);
           const float bg_b = body_glow * mul_b * (1.0f - tip_b * 0.65f);
           if (bg_a > 0.008f || bg_b > 0.008f) {
-            additive.add_quad_corners(plate->id, q, -0.58f, bg_b, bg_b, bg_a, bg_a, plate->u0,
-                                      plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0,
-                                      g0, b0, r0, g0, b0);
+            batch.add_quad_corners(plate->id, q, -0.58f, bg_b, bg_b, bg_a, bg_a, plate->u0,
+                                   plate->v0, plate->u1, plate->v1, r1, g1, b1, r1, g1, b1, r0,
+                                   g0, b0, r0, g0, b0);
           }
         }
       }
@@ -961,11 +977,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   const float multiplier = w / w_ref;
   const Vec2 c1 = geometry_.lane_position(lane, p);
   const Vec2 c2 = geometry_.lane_position(end_lane, p);
-  const float W = config_.arrow_width * unit * multiplier;
   const float H = config_.arrow_height * unit * multiplier;
-  if (W <= 1e-5f) {
-    return;
-  }
 
   // Match note_quad horizontal inset (note_move_length) so arrows sit inside the note.
   const float move = config_.note_move_length * unit * multiplier;
@@ -975,23 +987,44 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
     return;
   }
 
-  // Animated arrows (ArrowStyle::Animated); sides/density via note_visual_policy.
+  // Official FlickNoteEntity / NotesArrowsObject. [L,R] is the visible note
+  // (width - margin); world positions use full GetNoteWidth. JumpScratch is
+  // the gimmick flag — hold-end cover lanes are not the jump arrow table.
+  const int32_t lanes = end_lane - lane + 1;
+  const float note_world = wds::chart_editor::official_note_width(lanes);
+  const float visual_world = wds::chart_editor::official_tap_visual_width(note_world);
+  const float world_to_dest = (R - L) / visual_world;
+  const float W = wds::chart_editor::kOfficialArrowSpriteWidth *
+                  wds::chart_editor::kOfficialArrowGroupScale * world_to_dest;
+  if (W <= 1e-5f) {
+    return;
+  }
+
+  const bool jump = wds::chart_editor::is_jump_scratch(note.gimmick_type);
+  const int count = wds::chart_editor::official_scratch_arrow_count(lanes, jump);
+  const float interval = wds::chart_editor::official_scratch_arrow_interval(lanes);
+  const float step_world = interval * wds::chart_editor::kOfficialArrowGroupScale;
+  const float offset_world =
+      jump ? (step_world * static_cast<float>(count) * 0.5f)
+           : (note_world * 0.5f - wds::chart_editor::kOfficialArrowGroupInset);
+
   wds::chart_render::AnimatedArrowLayoutParams params;
   params.span_left = L;
   params.span_right = R;
   params.arrow_w = W;
+  params.arrow_step = step_world * world_to_dest;
+  params.group_offset = offset_world * world_to_dest;
+  params.arrow_count = count;
+  params.fill_to_far_edge = !jump && note.scratch_length != 0;
   params.scratch_length = note.scratch_length;
-  params.sonolus_num =
-      w * static_cast<float>(end_lane - lane + 1) * config_.arrow_percent / W;
+  params.sonolus_num = static_cast<float>(count);
   params.anim_time_sec = static_cast<float>(anim_time_sec);
   params.arrow_speed = config_.arrow_speed;
   for (const auto& inst : wds::chart_render::layout_animated_scratch_arrows(params)) {
     const float y = inst.flip_x ? c2.y : c1.y;
-    const float x0 = inst.x0;
-    const float x1 = inst.x1;
     batch.add_sprite(skin_.scratch_arrow,
-                     Quad{{x0, y}, {x0, y + H * 0.5f}, {x1, y + H * 0.5f}, {x1, y}}, 0.2f,
-                     inst.alpha);
+                     Quad{{inst.x0, y}, {inst.x0, y + H * 0.5f}, {inst.x1, y + H * 0.5f}, {inst.x1, y}},
+                     0.2f, inst.alpha);
   }
 }
 

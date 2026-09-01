@@ -21,4 +21,7 @@ void alert_error(const std::string& title, const std::string& message);
 native_file_dialog::SaveDiscardCancel confirm_save_discard_cancel(const std::string& title,
                                                                   const std::string& message);
 
+// After a modal panel, make the GLFW / NSWindow key again (AppKit does not).
+void restore_owner_focus(void* glfw_window);
+
 }  // namespace wds::ui::macos_file_dialog

@@ -26,12 +26,43 @@
 #include <shobjidl.h>
 #endif
 
+#if !defined(__APPLE__) && !defined(_WIN32)
+#include <GLFW/glfw3.h>
+#endif
+
 namespace wds::ui::native_file_dialog {
 namespace {
 
+void* g_owner_handle = nullptr;
+
 #if defined(_WIN32)
-HWND g_owner_hwnd = nullptr;
+HWND owner_hwnd() {
+  return static_cast<HWND>(g_owner_handle);
+}
 #endif
+
+void restore_owner_focus() {
+#if defined(__APPLE__)
+  macos_file_dialog::restore_owner_focus(g_owner_handle);
+#elif defined(_WIN32)
+  HWND hwnd = owner_hwnd();
+  if (hwnd == nullptr) return;
+  if (IsIconic(hwnd)) {
+    ShowWindow(hwnd, SW_RESTORE);
+  }
+  BringWindowToTop(hwnd);
+  SetForegroundWindow(hwnd);
+  SetActiveWindow(hwnd);
+  SetFocus(hwnd);
+#else
+  if (g_owner_handle == nullptr) return;
+  glfwFocusWindow(static_cast<GLFWwindow*>(g_owner_handle));
+#endif
+}
+
+struct DialogFocusGuard {
+  ~DialogFocusGuard() { restore_owner_focus(); }
+};
 
 #if !defined(__APPLE__) && !defined(_WIN32)
 std::string apple_quote(const std::string& value) {
@@ -271,7 +302,7 @@ std::optional<std::string> run_file_dialog(bool save, bool directory, const std:
     }
   }
 
-  hr = dialog->Show(g_owner_hwnd);
+  hr = dialog->Show(owner_hwnd());
   std::optional<std::string> result;
   if (SUCCEEDED(hr)) {
     IShellItem* item = nullptr;
@@ -290,15 +321,12 @@ std::optional<std::string> run_file_dialog(bool save, bool directory, const std:
 
 }  // namespace
 
-void set_owner_window(void* hwnd) {
-#if defined(_WIN32)
-  g_owner_hwnd = static_cast<HWND>(hwnd);
-#else
-  (void)hwnd;
-#endif
+void set_owner_window(void* platform_handle) {
+  g_owner_handle = platform_handle;
 }
 
 std::optional<std::string> open_file(const std::string& title, const Filters& filters) {
+  DialogFocusGuard focus;
 #if defined(__APPLE__)
   return macos_file_dialog::open_file(title, filters);
 #elif defined(_WIN32)
@@ -313,6 +341,7 @@ std::optional<std::string> open_file(const std::string& title, const Filters& fi
 
 std::optional<std::string> save_file(const std::string& title, const std::string& default_name,
                                      const Filters& filters) {
+  DialogFocusGuard focus;
 #if defined(__APPLE__)
   auto path = macos_file_dialog::save_file(title, default_name, filters);
   if (!path) return std::nullopt;
@@ -336,6 +365,7 @@ std::vector<std::string> open_files(const std::string& title, const Filters& fil
 }
 
 std::optional<std::string> choose_directory(const std::string& title) {
+  DialogFocusGuard focus;
 #if defined(__APPLE__)
   return macos_file_dialog::choose_directory(title);
 #elif defined(_WIN32)
@@ -347,13 +377,14 @@ std::optional<std::string> choose_directory(const std::string& title) {
 }
 
 bool confirm(const std::string& title, const std::string& message) {
+  DialogFocusGuard focus;
 #if defined(__APPLE__)
   return macos_file_dialog::confirm(title, message);
 #elif defined(_WIN32)
   const std::wstring title_w = utf8_to_wide(title);
   const std::wstring message_w = utf8_to_wide(message);
   const int result =
-      MessageBoxW(g_owner_hwnd, message_w.c_str(), title_w.c_str(),
+      MessageBoxW(owner_hwnd(), message_w.c_str(), title_w.c_str(),
                   MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
   return result == IDYES;
 #else
@@ -365,12 +396,13 @@ bool confirm(const std::string& title, const std::string& message) {
 }
 
 void alert_error(const std::string& title, const std::string& message) {
+  DialogFocusGuard focus;
 #if defined(__APPLE__)
   macos_file_dialog::alert_error(title, message);
 #elif defined(_WIN32)
   const std::wstring title_w = utf8_to_wide(title);
   const std::wstring message_w = utf8_to_wide(message);
-  MessageBoxW(g_owner_hwnd, message_w.c_str(), title_w.c_str(), MB_OK | MB_ICONERROR | MB_TOPMOST);
+  MessageBoxW(owner_hwnd(), message_w.c_str(), title_w.c_str(), MB_OK | MB_ICONERROR | MB_TOPMOST);
 #else
   // Prefer zenity; fall back to notify-send / stderr if the desktop helper is missing.
   const int status = std::system(("zenity --error --title=" + apple_quote(title) +
@@ -383,12 +415,13 @@ void alert_error(const std::string& title, const std::string& message) {
 }
 
 SaveDiscardCancel confirm_save_discard_cancel(const std::string& title, const std::string& message) {
+  DialogFocusGuard focus;
 #if defined(__APPLE__)
   return macos_file_dialog::confirm_save_discard_cancel(title, message);
 #elif defined(_WIN32)
   const std::wstring title_w = utf8_to_wide(title);
   const std::wstring message_w = utf8_to_wide(message);
-  const int result = MessageBoxW(g_owner_hwnd, message_w.c_str(), title_w.c_str(),
+  const int result = MessageBoxW(owner_hwnd(), message_w.c_str(), title_w.c_str(),
                                  MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON1);
   if (result == IDYES) return SaveDiscardCancel::Save;
   if (result == IDNO) return SaveDiscardCancel::Discard;

@@ -101,9 +101,14 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
     ss << "T " << p.tick << ' ' << p.bpm << ' ' << p.numerator << ' ' << p.denominator << ' '
        << flags << '\n';
   }
-  ss << "NOTES " << chart.notes.size() << '\n';
+  size_t persisted_notes = 0;
+  for (const auto& note : chart.notes) {
+    if (note.note_type != NoteType::HoldEighth) ++persisted_notes;
+  }
+  ss << "NOTES " << persisted_notes << '\n';
 
   for (const auto& note : chart.notes) {
+    if (note.note_type == NoteType::HoldEighth) continue;
     ss << "N " << note.id << ' ' << note.start_tick << ' ' << note.end_tick << ' '
        << static_cast<int32_t>(note.note_type) << ' ' << note.lane << ' ' << note.width << ' '
        << static_cast<int32_t>(note.gimmick_type) << ' ' << note.scratch_length << '\n';
@@ -137,6 +142,7 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   NotationChart chart;
   std::string key;
   size_t note_count = 0;
+  size_t notes_seen = 0;
   size_t concurrent_count = 0;
   size_t timing_count = 0;
   bool saw_timing = false;
@@ -255,8 +261,12 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
         return {SerializeError::ParseError, "duplicate note id"};
       }
 
+      ++notes_seen;
       note.note_type = static_cast<NoteType>(note_type_raw);
       note.gimmick_type = static_cast<GimmickType>(gimmick_raw);
+      if (note.note_type == NoteType::HoldEighth) {
+        continue;
+      }
       chart.notes.push_back(note);
     } else if (key == "CONCURRENT") {
       file >> concurrent_count;
@@ -291,7 +301,7 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   if (saw_timing && chart.timing.points.size() != timing_count) {
     return {SerializeError::ParseError, "TIMING count mismatch"};
   }
-  if (saw_notes && chart.notes.size() != note_count) {
+  if (saw_notes && notes_seen != note_count) {
     return {SerializeError::ParseError, "NOTES count mismatch"};
   }
   if (saw_concurrent && chart.concurrent_lines.size() != concurrent_count) {

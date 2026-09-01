@@ -393,6 +393,7 @@ struct VulkanRenderer::Impl {
 
   // Reused per draw_frame to avoid heap churn on the present path.
   std::vector<uint32_t> bucket_first_vertex;
+  std::vector<uint32_t> mid_first_vertex;
   std::vector<uint32_t> additive_first_vertex;
   std::vector<uint32_t> post_first_vertex;
   std::vector<uint32_t> post2_first_vertex;
@@ -2792,7 +2793,7 @@ void VulkanRenderer::destroy_texture(TextureId id) {
 bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r,
                                 float clear_g, float clear_b, const DrawBatch* additive,
                                 const DrawBatch* post_overlay, const DrawBatch* post_overlay2,
-                                const ScissorRect* additive_scissor) {
+                                const ScissorRect* additive_scissor, const DrawBatch* mid_overlay) {
   if (impl_ == nullptr || renderer_health_unrecoverable(health_)) {
     return false;
   }
@@ -2886,10 +2887,12 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     }
   }
 
+  const size_t mid_verts = mid_overlay ? mid_overlay->vertex_count() : 0;
   const size_t additive_verts = additive ? additive->vertex_count() : 0;
   const size_t post_verts = post_overlay ? post_overlay->vertex_count() : 0;
   const size_t post2_verts = post_overlay2 ? post_overlay2->vertex_count() : 0;
-  const size_t total_verts = batch.vertex_count() + additive_verts + post_verts + post2_verts;
+  const size_t total_verts =
+      batch.vertex_count() + mid_verts + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
     // Fence still signaled (not reset yet). Drain the acquire semaphore only.
@@ -2913,14 +2916,19 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
 
   auto& vb = impl_->frame_vertices[frame];
   auto& bucket_first_vertex = impl_->bucket_first_vertex;
+  auto& mid_first_vertex = impl_->mid_first_vertex;
   auto& additive_first_vertex = impl_->additive_first_vertex;
   auto& post_first_vertex = impl_->post_first_vertex;
   auto& post2_first_vertex = impl_->post2_first_vertex;
   bucket_first_vertex.clear();
+  mid_first_vertex.clear();
   additive_first_vertex.clear();
   post_first_vertex.clear();
   post2_first_vertex.clear();
   bucket_first_vertex.reserve(batch.buckets.size());
+  if (mid_overlay) {
+    mid_first_vertex.reserve(mid_overlay->buckets.size());
+  }
   if (additive) {
     additive_first_vertex.reserve(additive->buckets.size());
   }
@@ -2944,6 +2952,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       }
     };
     copy_buckets(batch, bucket_first_vertex);
+    if (mid_overlay) {
+      copy_buckets(*mid_overlay, mid_first_vertex);
+    }
     if (additive) {
       copy_buckets(*additive, additive_first_vertex);
     }
@@ -3012,6 +3023,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   };
 
   draw_buckets(impl_->pipeline, batch, bucket_first_vertex);
+  if (mid_overlay && mid_verts > 0) {
+    draw_buckets(impl_->pipeline, *mid_overlay, mid_first_vertex);
+  }
   if (additive && additive_verts > 0 && impl_->pipeline_additive) {
     VkRect2D add_scissor = scissor;
     if (additive_scissor != nullptr && additive_scissor->valid()) {

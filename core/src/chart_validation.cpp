@@ -70,10 +70,7 @@ bool scratch_chain_joint(const NotationNote& prev, const NotationNote& next) noe
     return false;
   }
   if (prev.end_tick != next.start_tick || prev.end_tick <= prev.start_tick) return false;
-  const int32_t union_left = std::min(prev.lane, next.lane);
-  const int32_t union_right = std::max(prev.end_lane(), next.end_lane());
-  const auto [cover_lo, cover_hi] = get_scratch_end_lane_range(prev);
-  return cover_lo == union_left && cover_hi == union_right;
+  return hold_chain_lanes_connected(prev, next);
 }
 
 bool is_legal_joint(const OccupancyEvent& a, const OccupancyEvent& b,

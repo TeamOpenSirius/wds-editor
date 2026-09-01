@@ -4,8 +4,19 @@
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
+#include <wds/core/timing_map.hpp>
 
 namespace wds::chart_editor {
+namespace {
+
+NotationChart with_derived_eighths(NotationChart chart) {
+  normalize_timing_points(chart.timing);
+  chart.notes =
+      with_all_hold_eighths_recomputed(std::move(chart.notes), chart.timing.ticks_per_quarter);
+  return chart;
+}
+
+}  // namespace
 
 ChartEditorEngine::ChartEditorEngine(PreviewConfig preview_config)
     : preview_config_(preview_config), snapshot_builder_(preview_config) {}
@@ -25,7 +36,7 @@ void ChartEditorEngine::set_preview_lead_in_visible_ms(int64_t visible_ms) noexc
 }
 
 void ChartEditorEngine::load_chart(const NotationChart& chart, ChartEditMode mode) {
-  document_.load_from_chart(chart, mode);
+  document_.load_from_chart(with_derived_eighths(chart), mode);
   if (!document_.is_read_only()) {
     repair_legacy_hold_heads(document_);
   }
@@ -61,10 +72,7 @@ SerializeResult ChartEditorEngine::load_from_file(const std::string& path) {
     return result;
   }
 
-  document_.load_from_chart(chart, ChartEditMode::Editable);
-  repair_legacy_hold_heads(document_);
-  history_.clear();
-  publish_snapshot();
+  load_chart(chart, ChartEditMode::Editable);
   return result;
 }
 
@@ -135,9 +143,7 @@ SerializeResult ChartEditorEngine::load_official_from_file(const std::string& ch
     return result;
   }
 
-  document_.load_from_chart(chart, ChartEditMode::OfficialPreviewOnly);
-  history_.clear();
-  publish_snapshot();
+  load_chart(chart, ChartEditMode::OfficialPreviewOnly);
   return result;
 }
 
@@ -149,9 +155,7 @@ SerializeResult ChartEditorEngine::load_sus_from_file(const std::string& path,
   if (result.error != SerializeError::Ok) {
     return result;
   }
-  document_.load_from_chart(loaded.chart, ChartEditMode::OfficialPreviewOnly);
-  history_.clear();
-  publish_snapshot();
+  load_chart(loaded.chart, ChartEditMode::OfficialPreviewOnly);
   if (out_meta != nullptr) {
     *out_meta = std::move(loaded.meta);
   }
@@ -170,12 +174,7 @@ SerializeResult ChartEditorEngine::load_auto_from_file(const std::string& path,
     return result;
   }
 
-  document_.load_from_chart(chart, mode);
-  if (mode == ChartEditMode::Editable) {
-    repair_legacy_hold_heads(document_);
-  }
-  history_.clear();
-  publish_snapshot();
+  load_chart(chart, mode);
   return result;
 }
 

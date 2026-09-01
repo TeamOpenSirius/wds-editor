@@ -3,6 +3,7 @@
 #include <wds/core/file_io.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/note_edit_ops.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -329,6 +330,10 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
               "official chart: HiSpeed rows are not supported (line " +
                   std::to_string(line_no) + ")"};
     }
+    // HoldEighth is always recomputed from holds — never take type 900 from the file.
+    if (type_raw == static_cast<int32_t>(NoteType::HoldEighth)) {
+      continue;
+    }
 
     NotationNote note;
     note.id = next_id++;
@@ -418,7 +423,10 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
   ss.setf(std::ios::fixed);
   ss.precision(4);
 
-  for (const auto& note : chart.notes) {
+  const std::vector<NotationNote> notes = with_all_hold_eighths_recomputed(
+      chart.notes, chart.timing.ticks_per_quarter);
+
+  for (const auto& note : notes) {
     const double start_sec = tick_to_seconds(note.start_tick, chart.timing);
 
     // Official: hold body / split write endTime; taps / heads / mid-stars / HoldEighth → -1.

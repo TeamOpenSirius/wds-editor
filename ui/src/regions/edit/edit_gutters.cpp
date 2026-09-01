@@ -280,6 +280,27 @@ std::vector<int32_t> split_picker_color_ids() {
   return wds::chart_render::official_split_color_ids();
 }
 
+bool is_split_picker_search_text_valid(const std::string& text) noexcept {
+  if (text.empty()) return true;
+  if (text.size() > 8) return false;
+  for (char c : text) {
+    if (c < '0' || c > '9') return false;
+  }
+  return true;
+}
+
+std::vector<int32_t> filter_split_picker_color_ids(const std::string& query) {
+  std::vector<int32_t> ids = split_picker_color_ids();
+  if (query.empty()) return ids;
+  std::vector<int32_t> out;
+  out.reserve(ids.size());
+  for (int32_t id : ids) {
+    const std::string s = std::to_string(id);
+    if (s.find(query) != std::string::npos) out.push_back(id);
+  }
+  return out;
+}
+
 std::vector<SplitCoverageMs> collect_split_coverage_ms(
     const std::vector<NotationNote>& notes, const wds::chart_editor::MusicTiming& timing,
     const wds::chart_editor::PreviewConfig& preview) {

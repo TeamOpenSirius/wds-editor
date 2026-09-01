@@ -318,6 +318,11 @@ bool same_hold_chain_family(NoteType a, NoteType b) noexcept {
   return is_scratch_hold_body(a) == is_scratch_hold_body(b);
 }
 
+NoteType drawn_hold_body_type(bool scratch, bool gold_head) noexcept {
+  if (scratch) return gold_head ? NoteType::ScratchCriticalHold : NoteType::ScratchHold;
+  return gold_head ? NoteType::CriticalHold : NoteType::Hold;
+}
+
 bool is_tap_family(NoteType type) noexcept {
   switch (type) {
     case NoteType::Normal:
