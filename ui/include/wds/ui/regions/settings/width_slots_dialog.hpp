@@ -92,6 +92,7 @@ class WidthSlotsDialog final : public wds::interaction::Widget {
   wds::interaction::Widget* note_start_offset_ = nullptr;
   wds::interaction::Widget* note_height_level_ = nullptr;
   wds::interaction::Widget* split_line_opacity_ = nullptr;
+  wds::interaction::Widget* spectrum_display_ = nullptr;
   wds::interaction::Widget* msaa_samples_ = nullptr;
   wds::interaction::Widget* allow_crash_log_sensitive_ = nullptr;
 

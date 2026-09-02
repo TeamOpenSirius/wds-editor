@@ -2651,7 +2651,8 @@ void ChartEditPanel::paint(wds::interaction::UiPainter& painter) const {
   renderer_.paint(painter, viewport_, timing, engine_.document().notes(),
                   engine_.preview_config(), selected_, std::nullopt, {}, std::nullopt, skin_,
                   show_timing_grid, active_split_highlight_id(), error_ticks_,
-                  &offset_violation_ids_, offset_violation_strength());
+                  &offset_violation_ids_, offset_violation_strength(), waveform_,
+                  spectrogram_ ? &spectrogram_ : nullptr, spectrum_mode_);
   // Modals are painted last via paint_popups() from UiManager (above skins).
 }
 

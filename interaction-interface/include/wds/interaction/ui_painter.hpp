@@ -49,6 +49,9 @@ class UiPainter {
                            float thickness = 1.5f, float z = 0.9f);
   void sprite(const Rect& bounds, const wds::renderer::TextureInfo& texture,
               const Color& tint = {1, 1, 1, 1}, float z = 0.92f, bool flip_x = false);
+  // Flushed after opaque backdrop rects (z <= 0.865) and before grid / overlays.
+  void sprite_behind(const Rect& bounds, const wds::renderer::TextureInfo& texture,
+                     const Color& tint = {1, 1, 1, 1}, float z = 0.87f);
   // Vertical alpha gradient: bottom of `bounds` uses alpha_bottom, top uses alpha_top.
   void sprite_vfade(const Rect& bounds, const wds::renderer::TextureInfo& texture,
                     const Color& tint, float z, float alpha_bottom, float alpha_top);
@@ -72,6 +75,7 @@ class UiPainter {
   const std::vector<UiPaintRect>& rects() const noexcept { return rects_; }
   const std::vector<UiPaintRect>& front_rects() const noexcept { return front_rects_; }
   const std::vector<UiPaintSprite>& sprites() const noexcept { return sprites_; }
+  const std::vector<UiPaintSprite>& behind_sprites() const noexcept { return behind_sprites_; }
 
   // Appends into `batch` (does not clear). Callers that rebuild a frame must
   // `batch.clear()` first; otherwise prior verts accumulate across frames.
@@ -83,6 +87,7 @@ class UiPainter {
   std::vector<UiPaintRect> rects_;
   std::vector<UiPaintRect> front_rects_;
   std::vector<UiPaintSprite> sprites_;
+  std::vector<UiPaintSprite> behind_sprites_;
   wds::renderer::TextureInfo soft_disk_{};
 };
 

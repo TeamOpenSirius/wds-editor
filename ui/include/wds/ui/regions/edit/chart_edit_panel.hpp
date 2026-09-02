@@ -85,6 +85,14 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_pause_at_current(bool on) noexcept { pause_at_current_ = on; }
 
   void set_skin(const wds::renderer::SkinCatalog* skin) noexcept { skin_ = skin; }
+  void set_waveform(const wds::audio::WaveformOverview* waveform) noexcept {
+    waveform_ = waveform;
+  }
+  void set_spectrogram(wds::renderer::TextureInfo spectrogram) noexcept {
+    spectrogram_ = spectrogram;
+  }
+  void set_spectrum_mode(EditSpectrumMode mode) noexcept { spectrum_mode_ = mode; }
+  EditSpectrumMode spectrum_mode() const noexcept { return spectrum_mode_; }
 
   // scratch_length: for Flick / ScratchHold direction (-1 left, 0 both, +1 right).
   // Pass nullopt to leave scratch_length to convert_note_type defaults.
@@ -306,6 +314,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable EditViewport viewport_;
   ChartEditRenderer renderer_;
   const wds::renderer::SkinCatalog* skin_ = nullptr;
+  const wds::audio::WaveformOverview* waveform_ = nullptr;
+  wds::renderer::TextureInfo spectrogram_{};
+  EditSpectrumMode spectrum_mode_ = EditSpectrumMode::Envelope;
   mutable std::vector<int32_t> error_ticks_;
   mutable uint64_t error_ticks_generation_ = 0;
   mutable bool error_ticks_armed_ = false;

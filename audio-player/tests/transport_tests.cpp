@@ -4,6 +4,7 @@
 #include "wds/audio/sfx_sync_policy.hpp"
 #include "wds/audio/testing/detail/audio_engine_test_double.hpp"
 #include "wds/audio/transport.hpp"
+#include "wds/audio/waveform_overview.hpp"
 
 #include "bass.h"
 
@@ -1055,6 +1056,47 @@ void test_bass_sfx_sync_fixture() {
   fs::remove_all(root, ec);
 }
 
+void test_waveform_peak_in_range() {
+  wds::audio::WaveformOverview wf(std::vector<float>{0.0f, 0.1f, 1.0f, 0.2f, 0.0f});
+  expect(wf.peak_in_range(2.0, 3.0) > 0.99f, "exact bucket 2");
+  expect(wf.peak_in_range(0.0, 1.0) < 0.01f, "silent first ms");
+  expect(wf.peak_in_range(1.0, 3.5) > 0.99f, "range includes peak");
+  expect(wf.peak_in_range(-40.0, 0.0) == 0.0f, "before audio is empty");
+  expect(wf.peak_in_range(5.0, 9.0) == 0.0f, "after audio is empty");
+  expect(wf.peak_in_range(3.2, 1.8) > 0.99f, "swapped bounds still hit peak");
+}
+
+void test_spectrogram_colors_low_vs_high_freq() {
+  const int bins = 8;
+  const int frames = 4;
+  std::vector<std::uint8_t> mag(static_cast<std::size_t>(bins * frames), 0);
+  mag[0] = 255;  // frame 0, lowest bin
+  mag[static_cast<std::size_t>(bins * 2 + (bins - 1))] = 255;  // frame 2, highest bin
+  wds::audio::WaveformOverview wf;
+  wf.set_spectrogram_for_test(bins, frames, 10.0, std::move(mag));
+  expect(wf.has_spectrogram(), "spectrogram assigned");
+  std::vector<unsigned char> rgba;
+  int w = 0;
+  int h = 0;
+  expect(wf.rasterize_rgba(rgba, w, h), "rasterize ok");
+  expect(w == bins * 2, "width is mirrored stereo");
+  expect(h == frames, "height is frames");
+  const auto px = [&](int x, int y) {
+    const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                           static_cast<std::size_t>(x)) *
+                          4u;
+    return &rgba[i];
+  };
+  expect(px(bins - 1, 0)[3] > 80, "low-freq at center-left");
+  expect(px(bins, 0)[3] > 80, "low-freq at center-right");
+  expect(px(0, 2)[3] > 80, "high-freq at left edge");
+  expect(px(2 * bins - 1, 2)[3] > 80, "high-freq at right edge");
+  expect(static_cast<int>(px(bins - 1, 0)[2]) > static_cast<int>(px(bins - 1, 0)[0]),
+         "center low bin is more blue than red");
+  expect(static_cast<int>(px(0, 2)[0]) > static_cast<int>(px(0, 2)[2]),
+         "edge high bin is more red than blue");
+}
+
 }  // namespace
 
 int main() {
@@ -1191,6 +1233,8 @@ int main() {
     here_t.shutdown();
   }
 
+  test_waveform_peak_in_range();
+  test_spectrogram_colors_low_vs_high_freq();
   test_bass_sfx_sync_fixture();
 
   return failures == 0 ? 0 : 1;

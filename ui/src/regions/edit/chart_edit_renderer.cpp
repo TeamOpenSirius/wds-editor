@@ -213,9 +213,80 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
               int32_t highlighted_split_note_id,
               const std::vector<int32_t>& error_ticks,
               const std::unordered_set<int32_t>* violation_note_ids,
-              float violation_strength) const {
+              float violation_strength,
+              const wds::audio::WaveformOverview* waveform,
+              const wds::renderer::TextureInfo* spectrogram,
+              EditSpectrumMode spectrum_mode) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f, 0.86f);
+  const bool drew_spectrogram = spectrum_mode == EditSpectrumMode::Spectrogram &&
+                                spectrogram != nullptr && static_cast<bool>(*spectrogram) &&
+                                waveform != nullptr && waveform->duration_ms() > 0 && b.h > 0.5f &&
+                                b.w > 1.0f;
+  if (drew_spectrogram) {
+    const float dur = static_cast<float>(waveform->duration_ms());
+    const float view_lo = viewport.ms_at_y(b.bottom());
+    const float view_hi = viewport.ms_at_y(b.y);
+    const float a_lo = std::max(0.0f, view_lo);
+    const float a_hi = std::min(dur, view_hi);
+    if (a_hi > a_lo) {
+      const float y_top = std::clamp(viewport.y_at_ms(a_hi), b.y, b.bottom());
+      const float y_bot = std::clamp(viewport.y_at_ms(a_lo), b.y, b.bottom());
+      if (y_bot > y_top + 0.5f) {
+        wds::renderer::TextureInfo uv = *spectrogram;
+        uv.u0 = 0.0f;
+        uv.u1 = 1.0f;
+        uv.v0 = a_lo / dur;
+        uv.v1 = a_hi / dur;
+        painter.sprite_behind({b.x, y_top, b.w, y_bot - y_top}, uv, {1.0f, 1.0f, 1.0f, 1.0f},
+                              kEditWaveformZ);
+      }
+    }
+  } else if (spectrum_mode == EditSpectrumMode::Envelope && waveform != nullptr &&
+             !waveform->empty() && b.h > 0.5f && b.w > 1.0f) {
+    const int y0 = static_cast<int>(std::floor(b.y));
+    const int y1 = static_cast<int>(std::ceil(b.bottom()));
+    const int rows = std::max(0, y1 - y0);
+    painter.reserve_rects(static_cast<std::size_t>(rows) + 1);
+    const float cx = b.x + b.w * 0.5f;
+    const float max_w = b.w * 0.94f;
+    float run_y = 0.0f;
+    float run_h = 0.0f;
+    float run_w = -1.0f;
+    auto flush_run = [&]() {
+      if (run_w <= 0.5f || run_h <= 0.0f) return;
+      const float top = std::max(run_y, b.y);
+      const float bot = std::min(run_y + run_h, b.bottom());
+      const float h = bot - top;
+      if (h <= 0.0f) return;
+      painter.fill_rect({cx - run_w * 0.5f, top, run_w, h}, kEditWaveformColor, 0.0f,
+                        kEditWaveformZ);
+    };
+    for (int y = y0; y < y1; ++y) {
+      const float py = static_cast<float>(y);
+      const float py1 = py + 1.0f;
+      const float ms_a = viewport.ms_at_y(std::clamp(py, b.y, b.bottom()));
+      const float ms_b = viewport.ms_at_y(std::clamp(py1, b.y, b.bottom()));
+      const float peak = waveform->peak_in_range(static_cast<double>(ms_a),
+                                                 static_cast<double>(ms_b));
+      const float w = std::sqrt(std::clamp(peak, 0.0f, 1.0f)) * max_w;
+      if (w <= 0.5f) {
+        flush_run();
+        run_w = -1.0f;
+        continue;
+      }
+      if (run_w >= 0.0f && std::abs(w - run_w) < 1.0f) {
+        run_h += 1.0f;
+        run_w = std::max(run_w, w);
+      } else {
+        flush_run();
+        run_y = py;
+        run_h = 1.0f;
+        run_w = w;
+      }
+    }
+    flush_run();
+  }
   const auto& grid = viewport.grid();
   // Horizontal beat/subdiv grid (LOD + no per-frame tick vector alloc).
   if (show_beat_grid) {

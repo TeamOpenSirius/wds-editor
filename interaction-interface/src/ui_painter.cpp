@@ -229,6 +229,7 @@ void UiPainter::clear() noexcept {
   rects_.clear();
   front_rects_.clear();
   sprites_.clear();
+  behind_sprites_.clear();
 }
 
 void UiPainter::reserve_rects(std::size_t n) { rects_.reserve(rects_.size() + n); }
@@ -299,6 +300,14 @@ void UiPainter::sprite(const Rect& bounds, const wds::renderer::TextureInfo& tex
     return;
   }
   sprites_.push_back({bounds, texture, tint, z, flip_x, false});
+}
+
+void UiPainter::sprite_behind(const Rect& bounds, const wds::renderer::TextureInfo& texture,
+                              const Color& tint, float z) {
+  if (!texture || bounds.w <= 0.0f || bounds.h <= 0.0f) {
+    return;
+  }
+  behind_sprites_.push_back({bounds, texture, tint, z, false, false});
 }
 
 void UiPainter::sprite_vfade(const Rect& bounds, const wds::renderer::TextureInfo& texture,
@@ -440,8 +449,9 @@ wds::renderer::Quad rect_to_quad(const Rect& rect, int framebuffer_width, int fr
 void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::TextureId solid_texture,
                          int framebuffer_width, int framebuffer_height,
                          const wds::renderer::ScreenBounds& screen) const {
-  auto emit_rects = [&](const std::vector<UiPaintRect>& rects) {
+  auto emit_rects = [&](const std::vector<UiPaintRect>& rects, float z_max, bool invert) {
     for (const auto& rect : rects) {
+      if (invert ? (rect.z <= z_max) : (rect.z > z_max)) continue;
       Rect draw_bounds = rect.bounds;
       if (rect.corner_radius > 0.0f) {
         // Inset in logical px; rect_to_quad applies content scale.
@@ -453,34 +463,44 @@ void UiPainter::flush_to(wds::renderer::DrawBatch& batch, wds::renderer::Texture
                      rect.color.g, rect.color.b);
     }
   };
-  emit_rects(rects_);
-  const wds::renderer::TextureId font_id = FontAtlas::instance().texture().id;
-  for (const auto& sprite : sprites_) {
-    auto quad = rect_to_quad(sprite.bounds, framebuffer_width, framebuffer_height, screen);
-    float u0 = sprite.texture.u0;
-    float v0 = sprite.texture.v0;
-    float u1 = sprite.texture.u1;
-    float v1 = sprite.texture.v1;
-    if (sprite.flip_x) {
-      std::swap(u0, u1);
+  auto emit_sprites = [&](const std::vector<UiPaintSprite>& sprites) {
+    const wds::renderer::TextureId font_id = FontAtlas::instance().texture().id;
+    for (const auto& sprite : sprites) {
+      auto quad = rect_to_quad(sprite.bounds, framebuffer_width, framebuffer_height, screen);
+      float u0 = sprite.texture.u0;
+      float v0 = sprite.texture.v0;
+      float u1 = sprite.texture.u1;
+      float v1 = sprite.texture.v1;
+      if (sprite.flip_x) {
+        std::swap(u0, u1);
+      }
+      const wds::renderer::TextureId tex_id =
+          sprite.font_atlas ? font_id : sprite.texture.id;
+      if (sprite.font_atlas &&
+          (font_id == wds::renderer::kInvalidTextureId || !FontAtlas::instance().texture())) {
+        continue;
+      }
+      if (sprite.alpha_bottom >= 0.0f || sprite.alpha_top >= 0.0f) {
+        const float a_bot = sprite.alpha_bottom >= 0.0f ? sprite.alpha_bottom : sprite.tint.a;
+        const float a_top = sprite.alpha_top >= 0.0f ? sprite.alpha_top : sprite.tint.a;
+        batch.add_quad_corners(tex_id, quad, sprite.z, a_bot, a_bot, a_top, a_top, u0, v0, u1, v1,
+                               sprite.tint.r, sprite.tint.g, sprite.tint.b);
+      } else {
+        batch.add_quad(tex_id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
+                       sprite.tint.g, sprite.tint.b);
+      }
     }
-    const wds::renderer::TextureId tex_id =
-        sprite.font_atlas ? font_id : sprite.texture.id;
-    if (sprite.font_atlas &&
-        (font_id == wds::renderer::kInvalidTextureId || !FontAtlas::instance().texture())) {
-      continue;
-    }
-    if (sprite.alpha_bottom >= 0.0f || sprite.alpha_top >= 0.0f) {
-      const float a_bot = sprite.alpha_bottom >= 0.0f ? sprite.alpha_bottom : sprite.tint.a;
-      const float a_top = sprite.alpha_top >= 0.0f ? sprite.alpha_top : sprite.tint.a;
-      batch.add_quad_corners(tex_id, quad, sprite.z, a_bot, a_bot, a_top, a_top, u0, v0, u1, v1,
-                             sprite.tint.r, sprite.tint.g, sprite.tint.b);
-    } else {
-      batch.add_quad(tex_id, quad, sprite.z, sprite.tint.a, u0, v0, u1, v1, sprite.tint.r,
-                     sprite.tint.g, sprite.tint.b);
-    }
-  }
-  emit_rects(front_rects_);
+  };
+  auto emit_all_rects = [&](const std::vector<UiPaintRect>& rects) {
+    emit_rects(rects, -1.0f, true);
+  };
+  // Backdrop fill (edit playfield black is z=0.86) then spectrogram, then grid/UI.
+  constexpr float kBehindSpriteZ = 0.865f;
+  emit_rects(rects_, kBehindSpriteZ, false);
+  emit_sprites(behind_sprites_);
+  emit_rects(rects_, kBehindSpriteZ, true);
+  emit_sprites(sprites_);
+  emit_all_rects(front_rects_);
 }
 
 }  // namespace wds::interaction

@@ -8,9 +8,41 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wds::ui {
+
+enum class EditSpectrumMode : std::uint8_t {
+  None = 0,
+  Envelope = 1,
+  Spectrogram = 2,
+};
+
+inline EditSpectrumMode clamp_spectrum_display(int value) noexcept {
+  if (value <= 0) return EditSpectrumMode::None;
+  if (value >= 2) return EditSpectrumMode::Spectrogram;
+  return EditSpectrumMode::Envelope;
+}
+
+inline const char* spectrum_display_key(EditSpectrumMode mode) noexcept {
+  switch (mode) {
+    case EditSpectrumMode::None:
+      return "none";
+    case EditSpectrumMode::Spectrogram:
+      return "spectrogram";
+    case EditSpectrumMode::Envelope:
+    default:
+      return "envelope";
+  }
+}
+
+inline EditSpectrumMode spectrum_display_from_key(std::string_view text) noexcept {
+  if (text == "none" || text == "0") return EditSpectrumMode::None;
+  if (text == "spectrogram" || text == "2") return EditSpectrumMode::Spectrogram;
+  if (text == "envelope" || text == "1") return EditSpectrumMode::Envelope;
+  return EditSpectrumMode::Envelope;
+}
 
 // Editor preferences persisted as config/config.yml under the OS data dir:
 //   Windows: %LOCALAPPDATA%\WDS\config\config.yml
@@ -27,6 +59,8 @@ struct EditorUiConfig {
   int split_line_opacity = 100;
   // Preferred Vulkan MSAA samples: 1 (低) / 2 (中) / 4 (高). Default matches app 2×.
   int msaa_samples = 2;
+  // Edit-panel audio backdrop: none / envelope / frequency spectrogram.
+  EditSpectrumMode spectrum_display = EditSpectrumMode::Envelope;
   int32_t visible_hectoms = 20;
   // Edit-grid beat subdivisions (toolbar; each in [1, 64]).
   int32_t subdivisions_per_beat = 4;

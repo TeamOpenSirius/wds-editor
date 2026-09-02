@@ -307,6 +307,12 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
     if (parse_int(value, v)) {
       cfg.msaa_samples = clamp_msaa_samples(static_cast<int>(v));
     }
+  } else if (key == "spectrum_display") {
+    std::string t = trim(value);
+    if (t.size() >= 2 && ((t.front() == '"' && t.back() == '"') || (t.front() == '\'' && t.back() == '\''))) {
+      t = t.substr(1, t.size() - 2);
+    }
+    cfg.spectrum_display = spectrum_display_from_key(t);
   } else if (key == "visible_hectoms") {
     int32_t v = cfg.visible_hectoms;
     if (parse_int(value, v)) cfg.visible_hectoms = std::clamp(v, 1, 1000);
@@ -524,6 +530,7 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "note_start_offset: " << cfg.note_start_offset << '\n'
       << "note_height_level: " << cfg.note_height_level << '\n'
       << "split_line_opacity: " << cfg.split_line_opacity << '\n'
+      << "spectrum_display: " << spectrum_display_key(cfg.spectrum_display) << '\n'
       << "msaa_samples: " << clamp_msaa_samples(cfg.msaa_samples) << '\n'
       << "visible_hectoms: " << cfg.visible_hectoms << '\n'
       << "subdivisions_per_beat: " << clamp_subdivisions_per_beat(cfg.subdivisions_per_beat)
