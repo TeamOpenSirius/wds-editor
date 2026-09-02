@@ -2213,6 +2213,23 @@ void test_edit_grid_and_note_operations() {
   CHECK_EQ(center_notes[1].lane, 5);
   CHECK_EQ(center_notes[1].scratch_length, -1);
 
+  // Center-mirror bounds include ScratchHold tail cover, not just the body.
+  // Body [3,4] + sl=6 → occupied [3,8]; after flip, body [7,8] and tail [3,8].
+  NotationNote wide_hold = make_tap(0, 3);
+  wide_hold.width = 2;
+  wide_hold.end_tick = 480;
+  wide_hold.note_type = NoteType::ScratchHold;
+  wide_hold.scratch_length = 6;
+  std::vector<NotationNote> wide = {wide_hold};
+  mirror_notes_about_center(wide);
+  CHECK_EQ(wide[0].lane, 7);
+  CHECK_EQ(wide[0].scratch_length, -6);
+  {
+    const auto range = get_scratch_end_lane_range(wide[0]);
+    CHECK_EQ(range.first, 3);
+    CHECK_EQ(range.second, 8);
+  }
+
   // Split-lane color id in scratch_length must not be negated.
   NotationNote split = make_tap(0, 2);
   split.gimmick_type = GimmickType::Split2;

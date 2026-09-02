@@ -176,11 +176,16 @@ void mirror_notes(std::vector<NotationNote>& notes, int32_t lane_count) {
 
 void mirror_notes_about_center(std::vector<NotationNote>& notes) {
   if (notes.empty()) return;
-  int32_t left = notes.front().lane;
-  int32_t right = notes.front().end_lane();
+  // Bounds must include hold-chain end-cap cover (JumpScratch / ScratchHold
+  // tail). Body-only min/max leaves a right-extended tail on the wrong side
+  // after scratch_length is negated.
+  const auto [first_lo, first_w] = occupied_lane_span(notes.front());
+  int32_t left = first_lo;
+  int32_t right = first_lo + first_w - 1;
   for (const auto& note : notes) {
-    left = std::min(left, note.lane);
-    right = std::max(right, note.end_lane());
+    const auto [lo, w] = occupied_lane_span(note);
+    left = std::min(left, lo);
+    right = std::max(right, lo + w - 1);
   }
   for (auto& note : notes) {
     note.lane = left + right - note.end_lane();

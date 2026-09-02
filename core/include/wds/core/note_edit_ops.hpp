@@ -14,6 +14,8 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
 // JumpScratch direction·span) so arrows and end covers flip with the body.
 // Split-lane color ids stored in scratch_length are left unchanged.
 void mirror_notes(std::vector<NotationNote>& notes, int32_t lane_count);
+// Same lane flip as mirror_notes, but the axis is the selection's occupied
+// span (body union hold-chain tail cover), not the playfield.
 void mirror_notes_about_center(std::vector<NotationNote>& notes);
 bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick,
                       int32_t min_tick = 0);
