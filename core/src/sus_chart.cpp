@@ -876,6 +876,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         star.note_type = scratch ? NoteType::ScratchSound : NoteType::Sound;
         star.gimmick_type = GimmickType::None;
         star.scratch_length = 0;
+        star.parent_hold_id = body.id;
         notes.push_back(star);
       }
     };
@@ -1454,10 +1455,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     }
 
     for (const NotationNote* mid : mids) {
+      if (mid->parent_hold_id != body->id) continue;
       if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
-      if (mid->lane + mid->width <= body->lane || mid->lane >= body->lane + body->width) {
-        continue;
-      }
       std::string mid_suffix = "3";
       mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
       mid_suffix.push_back(base36_digit(h.channel));
@@ -1466,11 +1465,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     }
     // Type 5 = invisible mid (already ignored on import; not Sound).
     for (const NotationNote* eighth : eighths) {
+      if (eighth->parent_hold_id != body->id) continue;
       if (eighth->start_tick <= body->start_tick || eighth->start_tick >= body->end_tick) {
-        continue;
-      }
-      if (eighth->lane + eighth->width <= body->lane ||
-          eighth->lane >= body->lane + body->width) {
         continue;
       }
       std::string eighth_suffix = "3";

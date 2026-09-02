@@ -71,6 +71,14 @@ bool is_visible_mid_star(NoteType type) noexcept {
   return type == NoteType::Sound || type == NoteType::ScratchSound;
 }
 
+std::optional<NotationNote> bound_parent_hold(
+    const NotationNote& star, const std::unordered_map<int32_t, NotationNote>& next,
+    const wds::chart_editor::ChartDocument& doc) {
+  if (star.parent_hold_id < 0) return std::nullopt;
+  if (auto it = next.find(star.parent_hold_id); it != next.end()) return it->second;
+  return doc.find_note(star.parent_hold_id);
+}
+
 std::vector<wds::chart_editor::NoteUpdate> to_note_updates(
     const std::unordered_map<int32_t, NotationNote>& notes) {
   std::vector<wds::chart_editor::NoteUpdate> updates;
@@ -1291,10 +1299,12 @@ void ChartEditPanel::add_hold_star_at(wds::interaction::Vec2 point) {
   star.start_tick = viewport_.tick_at(point.y);
   star.end_tick = star.start_tick;
   star.scratch_length = 0;
-  GhostNote g{star, true};
+  for (const auto& g : hold_stars_) {
+    if (g.note.start_tick == star.start_tick) return;
+  }
   const int32_t head = std::min(hold_draft_.start_tick, hold_draft_.end_tick);
   const int32_t tail = std::max(hold_draft_.start_tick, hold_draft_.end_tick);
-  g.visible = star.start_tick > head && star.start_tick < tail;
+  GhostNote g{star, star.start_tick > head && star.start_tick < tail};
   hold_stars_.push_back(g);
 }
 
@@ -1338,6 +1348,10 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
     break;
   }
   if (!target) return false;
+  if (wds::chart_editor::hold_has_visible_star_at(engine_.document(), target->id, tick,
+                                                  wds::chart_editor::kNoBoundHoldId)) {
+    return false;
+  }
 
   NotationNote star;
   star.note_type = scratch_hold ? NoteType::ScratchSound : NoteType::Sound;
@@ -1347,6 +1361,7 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
   star.end_tick = tick;
   star.scratch_length = 0;
   star.id = wds::chart_editor::kAutoNoteId;
+  star.parent_hold_id = target->id;
   const auto before = engine_.document().notes();
   auto after = before;
   after.push_back(star);
@@ -1500,17 +1515,26 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
 
   // Auto head: first segment of a chain, or a hold that disconnects on place.
   std::vector<NotationNote> to_add;
+  int32_t next_id = engine_.document().next_note_id();
   if (!chain_link) {
     if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), hold_draft_)) {
+      head->id = next_id++;
       to_add.push_back(*head);
     }
   }
+  hold_draft_.id = next_id++;
   to_add.push_back(hold_draft_);
   for (const auto& star : hold_stars_) {
-    if (star.note.start_tick > hold_draft_.start_tick &&
-        star.note.start_tick < hold_draft_.end_tick) {
-      to_add.push_back(star.note);
+    if (star.note.start_tick <= hold_draft_.start_tick ||
+        star.note.start_tick >= hold_draft_.end_tick) {
+      continue;
     }
+    NotationNote note = star.note;
+    note.id = next_id++;
+    note.parent_hold_id = hold_draft_.id;
+    note.lane = hold_draft_.lane;
+    note.width = hold_draft_.width;
+    to_add.push_back(note);
   }
 
   // Undo baseline restores the previous body before any live chain-tail preview.
@@ -1533,19 +1557,17 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
       break;
     }
   }
-  for (auto n : to_add) {
-    n.id = wds::chart_editor::kAutoNoteId;
+  for (const auto& n : to_add) {
     after.push_back(n);
   }
   // Fold HoldEighths into the same SetNotesCommand so undo/redo stays transactional.
   {
     std::optional<NotationNote> new_hold;
     for (const auto& n : after) {
-      if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
-      if (n.start_tick != hold_draft_.start_tick) continue;
-      if (n.lane != hold_draft_.lane || n.width != hold_draft_.width) continue;
-      new_hold = n;
-      break;
+      if (n.id == hold_draft_.id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
+        new_hold = n;
+        break;
+      }
     }
     if (new_hold) {
       after = wds::chart_editor::with_recomputed_hold_eighths(
@@ -1858,23 +1880,8 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
   for (auto& [id, n] : next) {
     const auto& orig = drag_originals_.at(id);
     if (!is_visible_mid_star(orig.note_type) && orig.note_type != NoteType::HoldEighth) continue;
-    std::optional<NotationNote> parent;
-    for (const auto& [hid, hold_orig] : drag_originals_) {
-      if (!wds::chart_editor::is_hold_with_tail(hold_orig.note_type)) continue;
-      if (orig.start_tick <= hold_orig.start_tick || orig.start_tick >= hold_orig.end_tick) {
-        continue;
-      }
-      const bool attached =
-          (orig.lane <= hold_orig.end_lane() && hold_orig.lane <= orig.end_lane()) ||
-          (orig.lane == hold_orig.lane && orig.width == hold_orig.width);
-      if (!attached) continue;
-      parent = next[hid];
-      break;
-    }
-    if (!parent) {
-      // Parent not in this drag: keep its current lane/width; only star time moves.
-      parent = wds::chart_editor::parent_hold_for(engine_.document(), orig);
-    }
+    std::optional<NotationNote> parent =
+        bound_parent_hold(orig, next, engine_.document());
     if (parent) {
       n.lane = parent->lane;
       n.width = parent->width;
@@ -1882,6 +1889,9 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
       const int32_t hi = parent->end_tick - 1;
       if (lo < hi) {
         n.start_tick = std::clamp(n.start_tick, lo, hi);
+        n.end_tick = n.start_tick;
+      } else if (lo == hi) {
+        n.start_tick = lo;
         n.end_tick = n.start_tick;
       }
     } else {
@@ -1942,27 +1952,8 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
       if (!is_visible_mid_star(orig.note_type) && orig.note_type != NoteType::HoldEighth) {
         continue;
       }
-      auto parent = wds::chart_editor::parent_hold_for(engine_.document(), orig);
-      if (!parent) {
-        // Parent may have moved past the star's original tick — search live holds by
-        // original attachment against drag-start hold snapshots.
-        for (const auto& [hid, hold_orig] : drag_originals_) {
-          if (!wds::chart_editor::is_hold_with_tail(hold_orig.note_type)) continue;
-          if (orig.start_tick <= hold_orig.start_tick || orig.start_tick >= hold_orig.end_tick) {
-            continue;
-          }
-          const bool attached =
-              (orig.lane <= hold_orig.end_lane() && hold_orig.lane <= orig.end_lane()) ||
-              (orig.lane == hold_orig.lane && orig.width == hold_orig.width);
-          if (!attached) continue;
-          parent = engine_.document().find_note(hid);
-          break;
-        }
-      }
+      auto parent = bound_parent_hold(orig, pending, engine_.document());
       if (!parent) continue;
-      if (auto pit = pending.find(parent->id); pit != pending.end()) {
-        parent = pit->second;
-      }
       NotationNote n = orig;
       n.lane = parent->lane;
       n.width = parent->width;
@@ -2074,8 +2065,26 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   engine_.rebuild_snapshot();
 }
 
-void ChartEditPanel::finish_move() {
+void ChartEditPanel::finish_move(bool refresh_eighths) {
+  if (wds::chart_editor::visible_star_tick_conflicts(engine_.document().notes())) {
+    std::vector<wds::chart_editor::NoteUpdate> revert;
+    revert.reserve(drag_originals_.size());
+    for (const auto& [id, before] : drag_originals_) {
+      revert.push_back({id, before});
+    }
+    if (!revert.empty()) {
+      engine_.document().apply_note_updates(revert);
+      engine_.rebuild_snapshot();
+    }
+    drag_originals_.clear();
+    move_scratch_segment_ = false;
+    resize_chain_peer_id_ = -1;
+    resize_chain_next_id_ = -1;
+    mode_ = Mode::Idle;
+    return;
+  }
   std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
+  std::vector<int32_t> eighth_hold_ids;
   for (const auto& [id, before] : drag_originals_) {
     auto cur = engine_.document().find_note(id);
     if (!cur) continue;
@@ -2084,6 +2093,12 @@ void ChartEditPanel::finish_move() {
         cur->scratch_length != before.scratch_length ||
         cur->gimmick_type != before.gimmick_type) {
       changes[id] = {before, *cur};
+      if ((wds::chart_editor::is_hold_with_tail(before.note_type) ||
+           wds::chart_editor::is_hold_with_tail(cur->note_type)) &&
+          (cur->start_tick != before.start_tick || cur->lane != before.lane ||
+           cur->end_tick != before.end_tick || cur->width != before.width)) {
+        eighth_hold_ids.push_back(id);
+      }
     }
   }
   // Revert live edits then apply command (document already mutated during drag).
@@ -2103,6 +2118,24 @@ void ChartEditPanel::finish_move() {
       return;
     }
     commit_updates(changes, "Move notes");
+  }
+  if (refresh_eighths && !eighth_hold_ids.empty()) {
+    const auto before = engine_.document().notes();
+    auto after = before;
+    const int32_t tpq = engine_.document().timing().ticks_per_quarter;
+    for (const int32_t id : eighth_hold_ids) {
+      std::optional<NotationNote> body;
+      for (const auto& n : after) {
+        if (n.id == id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
+          body = n;
+          break;
+        }
+      }
+      if (!body) continue;
+      after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), *body, tpq);
+    }
+    engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+        before, std::move(after), "Refresh hold eighths"));
   }
   drag_originals_.clear();
   move_scratch_segment_ = false;
@@ -2133,11 +2166,16 @@ void ChartEditPanel::finish_hold_adjust() {
   }
   resize_chain_peer_id_ = -1;
   resize_chain_next_id_ = -1;
-  finish_move();
-  {
+  finish_move(false);
+  if (!hold_ids.empty()) {
     const auto before = engine_.document().notes();
-    auto after = before;
-    bool touched = false;
+    for (const int32_t id : hold_ids) {
+      auto body = engine_.document().find_note(id);
+      if (!body || !wds::chart_editor::is_hold_with_tail(body->note_type)) continue;
+      wds::chart_editor::prune_hold_mid_stars(engine_.document(), *body);
+    }
+    auto after = engine_.document().notes();
+    const int32_t tpq = engine_.document().timing().ticks_per_quarter;
     for (const int32_t id : hold_ids) {
       std::optional<NotationNote> body;
       for (const auto& n : after) {
@@ -2147,25 +2185,11 @@ void ChartEditPanel::finish_hold_adjust() {
         }
       }
       if (!body) continue;
-      wds::chart_editor::prune_hold_mid_stars(engine_.document(), *body);
-      after = engine_.document().notes();
-      body.reset();
-      for (const auto& n : after) {
-        if (n.id == id) {
-          body = n;
-          break;
-        }
-      }
-      if (!body) continue;
-      after = wds::chart_editor::with_recomputed_hold_eighths(
-          std::move(after), *body, engine_.document().timing().ticks_per_quarter);
-      touched = true;
+      after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), *body, tpq);
     }
-    if (touched) {
-      // prune_hold_mid_stars mutated outside history — fold its result + eighths together.
-      engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-          before, std::move(after), "Adjust hold eighths"));
-    }
+    // prune_hold_mid_stars mutated outside history — fold its result + eighths together.
+    engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+        before, std::move(after), "Adjust hold eighths"));
   }
   engine_.rebuild_snapshot();
 }
@@ -2420,11 +2444,30 @@ bool ChartEditPanel::paste_at_pointer() {
       shift = std::max(shift, legal - n.end_tick);
     }
   }
+  int32_t next_id = engine_.document().next_note_id();
+  std::unordered_map<int32_t, int32_t> old_to_new;
   for (auto& n : pasted) {
-    n.id = wds::chart_editor::kAutoNoteId;
-    if (shift <= 0) continue;
-    n.start_tick += shift;
-    if (n.end_tick > 0) n.end_tick += shift;
+    if (shift > 0) {
+      n.start_tick += shift;
+      if (n.end_tick > 0) n.end_tick += shift;
+    }
+    if (n.id >= 0) old_to_new[n.id] = next_id;
+    n.id = next_id++;
+  }
+  for (auto& n : pasted) {
+    if (n.parent_hold_id < 0) continue;
+    if (auto it = old_to_new.find(n.parent_hold_id); it != old_to_new.end()) {
+      n.parent_hold_id = it->second;
+    }
+  }
+  if (wds::chart_editor::visible_star_tick_conflicts(pasted)) return false;
+  for (const auto& n : pasted) {
+    if (!is_visible_mid_star(n.note_type) || n.parent_hold_id < 0) continue;
+    if (wds::chart_editor::hold_has_visible_star_at(engine_.document(), n.parent_hold_id,
+                                                    n.start_tick,
+                                                    wds::chart_editor::kNoBoundHoldId)) {
+      return false;
+    }
   }
   const auto before_ids = [&] {
     std::unordered_set<int32_t> ids;
@@ -2489,6 +2532,7 @@ void collect_drag_originals(const wds::chart_editor::ChartDocument& doc,
     if (!n) continue;
     if (wds::chart_editor::is_hold_with_tail(n->note_type)) {
       for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *n)) {
+        if (dep.note_type == NoteType::HoldEighth) continue;
         out.emplace(dep.id, dep);
       }
       if (auto head = wds::chart_editor::paired_hold_head_for(doc, *n)) {
@@ -2498,6 +2542,7 @@ void collect_drag_originals(const wds::chart_editor::ChartDocument& doc,
       if (auto body = wds::chart_editor::paired_hold_body_for(doc, *n)) {
         out.emplace(body->id, *body);
         for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *body)) {
+          if (dep.note_type == NoteType::HoldEighth) continue;
           out.emplace(dep.id, dep);
         }
       }
@@ -2509,6 +2554,7 @@ void append_hold_attached(const wds::chart_editor::ChartDocument& doc, const Not
                           std::unordered_map<int32_t, NotationNote>& out) {
   if (!wds::chart_editor::is_hold_with_tail(hold.note_type)) return;
   for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, hold)) {
+    if (dep.note_type == NoteType::HoldEighth) continue;
     out.emplace(dep.id, dep);
   }
 }
@@ -3877,8 +3923,8 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         move_scratch_segment_ = false;
         resize_chain_peer_id_ = -1;
         resize_chain_next_id_ = -1;
-        // Include HoldEighth / mid-stars / paired head so they track the body and
-        // stay inside the hold span (delete cascade + soft-judge FX depend on that).
+        // Include bound mid-stars / paired head so they track the body.
+        // HoldEighth is regenerated locally after the move, not dragged.
         collect_drag_originals(engine_.document(), selected_, drag_originals_);
         const NotationNote* segment = hit_note;
         std::optional<NotationNote> resolved_body;
@@ -4029,19 +4075,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         if (!is_visible_mid_star(orig.note_type) && orig.note_type != NoteType::HoldEighth) {
           continue;
         }
-        std::optional<NotationNote> parent;
-        for (const auto& [hid, hold_next] : next) {
-          (void)hid;
-          if (!wds::chart_editor::is_hold_with_tail(hold_next.note_type)) continue;
-          const auto hold_orig_it = drag_originals_.find(hold_next.id);
-          if (hold_orig_it == drag_originals_.end()) continue;
-          const auto& hold_orig = hold_orig_it->second;
-          if (orig.start_tick <= hold_orig.start_tick || orig.start_tick >= hold_orig.end_tick) {
-            continue;
-          }
-          parent = hold_next;
-          break;
-        }
+        auto parent = bound_parent_hold(orig, next, engine_.document());
         NotationNote n = orig;
         if (parent) {
           n.lane = parent->lane;

@@ -349,6 +349,12 @@ bool reference_is_combo_head_note(const NotationNote& note) noexcept {
   }
 }
 
+bool reference_mid_star_on_hold(const NotationNote& star, const NotationNote& hold) noexcept {
+  if (!is_hold_mid_star(star.note_type)) return false;
+  if (star.parent_hold_id >= 0) return star.parent_hold_id == hold.id;
+  return reference_lanes_overlap(hold, star);
+}
+
 void reference_collect_hold_body_judge_times(const NotationNote& hold,
                                              const std::vector<NotationNote>& notes,
                                              const MusicTiming& timing,
@@ -371,7 +377,7 @@ void reference_collect_hold_body_judge_times(const NotationNote& hold,
     if (ms <= start || ms >= end) {
       continue;
     }
-    if (!reference_lanes_overlap(hold, note)) {
+    if (!reference_mid_star_on_hold(note, hold)) {
       continue;
     }
     times.push_back(ms);
@@ -399,7 +405,7 @@ void reference_collect_preview_combo_hits(const std::vector<NotationNote>& notes
           continue;
         }
         const int64_t ms = notes[j].start_ms(timing);
-        if (ms > start && ms < end && reference_lanes_overlap(note, notes[j])) {
+        if (ms > start && ms < end && reference_mid_star_on_hold(notes[j], note)) {
           star_consumed[j] = 1;
         }
       }

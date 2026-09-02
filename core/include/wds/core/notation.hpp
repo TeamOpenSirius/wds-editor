@@ -67,6 +67,9 @@ struct NotationNote {
   // Official scratchLength: flick/scratch span; JumpScratch span; split
   // Addressable SplitEffects/{id} (fadeIn growth follows LineHight rotation).
   int32_t scratch_length = 0;
+  // Editor-only: Sound / ScratchSound / HoldEighth parent hold body id.
+  // Not an official CSV column. kNoBoundHoldId = unbound.
+  int32_t parent_hold_id = kNoBoundHoldId;
 
   int32_t end_lane() const noexcept { return lane + width - 1; }
   int64_t start_ms(const MusicTiming& timing) const;
@@ -193,6 +196,8 @@ bool is_hold_start(NoteType type) noexcept;
 bool is_hold_body(NoteType type) noexcept;
 // Hold / CriticalHold / Scratch*Hold — has a judged end note (Sirius HoldEnd).
 bool is_hold_with_tail(NoteType type) noexcept;
+// Tailed or nontail hold body that a mid-star may bind to.
+bool is_bindable_hold_body(NoteType type) noexcept;
 // NontailHold* — duration only, no end note / no end hit VFX.
 bool is_nontail_hold_body(NoteType type) noexcept;
 // ScratchHold / ScratchCriticalHold / NontailScratch* bodies.

@@ -302,6 +302,10 @@ bool is_hold_with_tail(NoteType type) noexcept {
   }
 }
 
+bool is_bindable_hold_body(NoteType type) noexcept {
+  return is_hold_with_tail(type) || is_nontail_hold_body(type);
+}
+
 bool is_nontail_hold_body(NoteType type) noexcept {
   switch (type) {
     case NoteType::NontailHold:
@@ -503,7 +507,12 @@ void collect_hold_from_index(const NotationNote& hold, const std::vector<Notatio
     if (ref.start_ms <= start || ref.start_ms >= end) {
       return;
     }
-    if (!lanes_overlap(hold, notes[ref.index])) {
+    const NotationNote& star = notes[ref.index];
+    if (star.parent_hold_id >= 0) {
+      if (star.parent_hold_id != hold.id) {
+        return;
+      }
+    } else if (!lanes_overlap(hold, star)) {
       return;
     }
     index.visit[ref.index] = gen;

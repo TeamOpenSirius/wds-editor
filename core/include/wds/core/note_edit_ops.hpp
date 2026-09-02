@@ -28,7 +28,7 @@ bool nudge_notes_lane(std::vector<NotationNote>& notes, int32_t delta_lane, int3
 NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& note,
                                 NoteType target) noexcept;
 
-// Replaces generated HoldEighth notes belonging to this hold's span.
+// Replaces HoldEighth notes bound to this hold (unbound open-span fallback).
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold);
 bool recompute_hold_eighths(ChartDocument& doc);
 
@@ -75,7 +75,7 @@ std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
 std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
                                                  const NotationNote& head);
 
-// HoldEighth notes that sit on the same lanes inside (start, end) of `hold`.
+// HoldEighth notes bound to `hold` (unbound fallback: open span + lane overlap).
 std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const NotationNote& hold);
 
 // HoldEighth + visible mid-stars (Sound / ScratchSound) attached to a hold body.
@@ -98,7 +98,20 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
 // Drop Sound / ScratchSound mid-stars that left the hold's open time span / lanes.
 bool prune_hold_mid_stars(ChartDocument& doc, const NotationNote& hold);
 
+// Visible Sound / ScratchSound only. Same bound hold + same tick, excluding `except_note_id`.
+bool hold_has_visible_star_at(const std::vector<NotationNote>& notes, int32_t hold_id,
+                              int32_t tick, int32_t except_note_id);
+bool hold_has_visible_star_at(const ChartDocument& doc, int32_t hold_id, int32_t tick,
+                              int32_t except_note_id);
+
+// True when two bound visible stars share a parent hold id and start_tick.
+bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes);
+
+// v1–v4 wdschart: bind unbound visible stars when type, open span, and exact lanes match.
+void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes);
+
 // Returns copies shifted so the earliest source note starts at snapped anchor_tick.
+// Original ids are kept so callers can remap parent_hold_id after assigning new ids.
 std::vector<NotationNote> paste_notes_aligned(const std::vector<NotationNote>& clipboard,
                                               int32_t anchor_tick,
                                               const EditGridConfig& grid);

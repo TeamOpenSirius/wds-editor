@@ -210,7 +210,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void finish_marquee(wds::interaction::Vec2 end);
   // Marquee in tick/lane space so scroll during drag can extend past the view.
   wds::interaction::Rect marquee_screen_rect(wds::interaction::Vec2 end) const;
-  void finish_move();
+  void finish_move(bool refresh_eighths = true);
   void finish_resize();
   void finish_hold_adjust();
   void finish_hold_body(bool chain_next);
