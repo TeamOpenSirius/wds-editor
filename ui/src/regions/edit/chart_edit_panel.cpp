@@ -89,6 +89,39 @@ std::vector<wds::chart_editor::NoteUpdate> to_note_updates(
   return updates;
 }
 
+void append_unique_notes(std::vector<NotationNote>& out, const NotationNote& note) {
+  for (const auto& existing : out) {
+    if (existing.id == note.id) return;
+  }
+  out.push_back(note);
+}
+
+// Mid-stars / eighths follow hold-body delete, mirror, and copy. Paired
+// heads/bodies never cascade.
+std::vector<NotationNote> notes_with_hold_dependents(
+    const wds::chart_editor::ChartDocument& doc, const std::vector<NotationNote>& roots) {
+  std::vector<NotationNote> notes;
+  for (const auto& note : roots) {
+    append_unique_notes(notes, note);
+    if (!wds::chart_editor::is_hold_with_tail(note.note_type)) continue;
+    for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, note)) {
+      if (wds::chart_editor::is_hold_head_note(dep)) continue;
+      append_unique_notes(notes, dep);
+    }
+  }
+  return notes;
+}
+
+std::vector<NotationNote> selected_with_hold_dependents(
+    const wds::chart_editor::ChartDocument& doc, const std::unordered_set<int32_t>& selected) {
+  std::vector<NotationNote> roots;
+  roots.reserve(selected.size());
+  for (const int32_t id : selected) {
+    if (auto n = doc.find_note(id)) roots.push_back(*n);
+  }
+  return notes_with_hold_dependents(doc, roots);
+}
+
 bool apply_note_map(wds::chart_editor::ChartDocument& doc,
                     const std::unordered_map<int32_t, NotationNote>& notes) {
   return doc.apply_note_updates(to_note_updates(notes));
@@ -2394,10 +2427,7 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
 
 bool ChartEditPanel::mirror_selected(bool about_center) {
   if (!engine_.is_editable() || selected_.empty()) return false;
-  std::vector<NotationNote> notes;
-  for (const int32_t id : selected_) {
-    if (auto n = engine_.document().find_note(id)) notes.push_back(*n);
-  }
+  auto notes = selected_with_hold_dependents(engine_.document(), selected_);
   auto before = notes;
   if (about_center) {
     wds::chart_editor::mirror_notes_about_center(notes);
@@ -2430,10 +2460,7 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
 }
 
 bool ChartEditPanel::copy_selected() {
-  clipboard_.clear();
-  for (const int32_t id : selected_) {
-    if (auto n = engine_.document().find_note(id)) clipboard_.push_back(*n);
-  }
+  clipboard_ = selected_with_hold_dependents(engine_.document(), selected_);
   return !clipboard_.empty();
 }
 
@@ -2494,28 +2521,6 @@ bool ChartEditPanel::paste_at_pointer() {
 }
 
 namespace {
-
-void append_unique_notes(std::vector<NotationNote>& out, const NotationNote& note) {
-  for (const auto& existing : out) {
-    if (existing.id == note.id) return;
-  }
-  out.push_back(note);
-}
-
-// Mid-stars / eighths follow hold-body deletion. Paired heads/bodies never cascade.
-std::vector<NotationNote> notes_with_hold_dependents(
-    const wds::chart_editor::ChartDocument& doc, const std::vector<NotationNote>& roots) {
-  std::vector<NotationNote> notes;
-  for (const auto& note : roots) {
-    append_unique_notes(notes, note);
-    if (!wds::chart_editor::is_hold_with_tail(note.note_type)) continue;
-    for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, note)) {
-      if (wds::chart_editor::is_hold_head_note(dep)) continue;
-      append_unique_notes(notes, dep);
-    }
-  }
-  return notes;
-}
 
 void collect_selected_originals(const wds::chart_editor::ChartDocument& doc,
                                 const std::unordered_set<int32_t>& selected,
@@ -2630,11 +2635,7 @@ std::optional<NotationNote> hold_width_pair_partner(const wds::chart_editor::Cha
 
 bool ChartEditPanel::delete_selected() {
   if (!engine_.is_editable() || selected_.empty()) return false;
-  std::vector<NotationNote> roots;
-  for (const int32_t id : selected_) {
-    if (auto n = engine_.document().find_note(id)) roots.push_back(*n);
-  }
-  const auto notes = notes_with_hold_dependents(engine_.document(), roots);
+  const auto notes = selected_with_hold_dependents(engine_.document(), selected_);
   if (!engine_.execute_command(
           std::make_unique<wds::chart_editor::RemoveNotesCommand>(notes, "Delete"))) {
     return false;

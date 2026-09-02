@@ -1256,6 +1256,80 @@ void test_split_width_follow_unions_overlapping_effects() {
   }
 }
 
+int32_t add_bound_star(Harness& h, int32_t hold_id, int32_t tick, int32_t lane, int32_t width) {
+  NotationNote star;
+  star.note_type = NoteType::Sound;
+  star.start_tick = tick;
+  star.end_tick = tick;
+  star.lane = lane;
+  star.width = width;
+  star.parent_hold_id = hold_id;
+  const int32_t id = h.engine.add_note(star);
+  CHECK(id >= 0);
+  return id;
+}
+
+void test_mirror_and_copy_hold_includes_mid_stars() {
+  // Whole-hold selection is body + head only; stars must still flip / copy.
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    const int32_t head_id = h.engine.add_note(head);
+    CHECK(head_id >= 0);
+    const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+
+    h.panel.set_selected({hold_id, head_id});
+    CHECK(h.panel.mirror_selected(false));
+    CHECK(!h.panel.selected().count(star_id));
+
+    const auto hold = h.engine.document().find_note(hold_id);
+    const auto star = h.engine.document().find_note(star_id);
+    CHECK(hold.has_value() && star.has_value());
+    if (hold && star) {
+      CHECK_EQ(hold->lane, 8);
+      CHECK_EQ(star->lane, 8);
+      CHECK_EQ(star->parent_hold_id, hold_id);
+    }
+  }
+
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    const int32_t head_id = h.engine.add_note(head);
+    CHECK(head_id >= 0);
+    add_bound_star(h, hold_id, 480, 3, 1);
+
+    h.panel.set_selected({hold_id, head_id});
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+    CHECK(h.panel.paste_at_pointer());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 2);
+
+    int bound_stars = 0;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type != NoteType::Sound) continue;
+      const auto parent = h.engine.document().find_note(n.parent_hold_id);
+      CHECK(parent.has_value());
+      if (!parent) continue;
+      CHECK_EQ(static_cast<int>(parent->note_type), static_cast<int>(NoteType::Hold));
+      CHECK_EQ(n.lane, parent->lane);
+      ++bound_stars;
+    }
+    CHECK_EQ(bound_stars, 2);
+  }
+}
+
 void test_split_width_follow_closed_interval_includes_endpoints() {
   using wds::chart_editor::GimmickType;
   // Split3 covers [0, 480], Split2 covers [480, 960]. Tick 480 is in both.
@@ -1324,6 +1398,7 @@ int main() {
   test_split_picker_search_filter();
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();
+  test_mirror_and_copy_hold_includes_mid_stars();
   test_split_width_follow_closed_interval_includes_endpoints();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
