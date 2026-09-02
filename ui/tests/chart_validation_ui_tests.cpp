@@ -11,6 +11,7 @@
 #include <wds/core/types.hpp>
 #include <wds/interaction/ui_painter.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -42,11 +43,13 @@ using wds::chart_editor::TimingPoint;
 using wds::chart_editor::tick_to_milliseconds;
 using wds::ui::ChartEditPanel;
 using wds::ui::ChartEditRenderer;
+using wds::ui::EditSpectrumMode;
 using wds::ui::EditViewport;
 using wds::ui::StatusLevel;
 using wds::ui::UiManager;
 using wds::ui::kChartErrorMarkerColor;
 using wds::ui::kChartErrorMarkerThickness;
+using wds::ui::kEditWaveformColor;
 
 NotationNote make_tap(int32_t tick, int32_t lane, int32_t width = 1) {
   NotationNote note;
@@ -282,6 +285,179 @@ void test_same_tick_multiple_notes_draw_one_yellow_line() {
   CHECK_EQ(count_error_marker_rects(painter, y), 1);
 }
 
+void test_waveform_aligns_with_viewport_ms_and_zoom() {
+  std::vector<float> peaks(4000, 0.0f);
+  peaks[1500] = 1.0f;
+  wds::audio::WaveformOverview waveform(std::move(peaks));
+
+  auto setup = [](EditViewport& viewport, int32_t hectoms, float scroll_ms) {
+    viewport.set_bounds({10.0f, 20.0f, 240.0f, 480.0f});
+    EditGridConfig grid;
+    grid.ticks_per_quarter = 480;
+    grid.visible_hectoms = hectoms;
+    grid.subdivisions_per_beat = 4;
+    grid.lane_count = 12;
+    viewport.set_grid(grid);
+    MusicTiming timing;
+    timing.bpm = 120.0;
+    timing.ticks_per_quarter = 480;
+    timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+    viewport.set_timing(timing);
+    viewport.set_scroll_ms(scroll_ms);
+  };
+
+  auto covers = [](const wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                   float ms) {
+    const float y = viewport.y_at_ms(ms);
+    const auto& b = viewport.bounds();
+    const float cx = b.x + b.w * 0.5f;
+    for (const auto& rect : painter.rects()) {
+      if (!color_near(rect.color, kEditWaveformColor)) continue;
+      if (y < rect.bounds.y - 0.75f || y > rect.bounds.bottom() + 0.75f) continue;
+      if (cx < rect.bounds.x || cx > rect.bounds.right()) continue;
+      return true;
+    }
+    return false;
+  };
+
+  ChartEditRenderer renderer;
+  PreviewConfig preview;
+  std::unordered_set<int32_t> selected;
+
+  EditViewport close;
+  setup(close, 20, 500.0f);
+  wds::interaction::UiPainter close_paint;
+  renderer.paint(close_paint, close, close.timing(), {}, preview, selected, std::nullopt, {},
+                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform);
+  CHECK(covers(close_paint, close, 1500.0f));
+  CHECK(!covers(close_paint, close, 800.0f));
+
+  EditViewport wide;
+  setup(wide, 40, 0.0f);
+  wds::interaction::UiPainter wide_paint;
+  renderer.paint(wide_paint, wide, wide.timing(), {}, preview, selected, std::nullopt, {},
+                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform);
+  CHECK(covers(wide_paint, wide, 1500.0f));
+  const float y_close = close.y_at_ms(1500.0f);
+  const float y_wide = wide.y_at_ms(1500.0f);
+  CHECK(std::fabs(y_close - y_wide) > 8.0f);
+}
+
+void test_spectrogram_uv_follows_viewport_ms() {
+  std::vector<float> peaks(4000, 0.2f);
+  wds::audio::WaveformOverview waveform(std::move(peaks));
+  wds::renderer::TextureInfo tex;
+  tex.id = 1;
+  tex.width = 192;
+  tex.height = 64;
+  tex.u0 = 0.0f;
+  tex.v0 = 0.0f;
+  tex.u1 = 1.0f;
+  tex.v1 = 1.0f;
+
+  auto setup = [](EditViewport& viewport, int32_t hectoms, float scroll_ms) {
+    viewport.set_bounds({10.0f, 20.0f, 240.0f, 480.0f});
+    EditGridConfig grid;
+    grid.ticks_per_quarter = 480;
+    grid.visible_hectoms = hectoms;
+    grid.subdivisions_per_beat = 4;
+    grid.lane_count = 12;
+    viewport.set_grid(grid);
+    MusicTiming timing;
+    timing.bpm = 120.0;
+    timing.ticks_per_quarter = 480;
+    timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+    viewport.set_timing(timing);
+    viewport.set_scroll_ms(scroll_ms);
+  };
+
+  ChartEditRenderer renderer;
+  PreviewConfig preview;
+  std::unordered_set<int32_t> selected;
+  EditViewport viewport;
+  setup(viewport, 20, 500.0f);
+  wds::interaction::UiPainter painter;
+  renderer.paint(painter, viewport, viewport.timing(), {}, preview, selected, std::nullopt, {},
+                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform, &tex,
+                 EditSpectrumMode::Spectrogram);
+  CHECK_EQ(static_cast<int>(painter.behind_sprites().size()), 1);
+  const auto& spr = painter.behind_sprites().front();
+  const float dur = 4000.0f;
+  const auto& b = viewport.bounds();
+  const float a_lo = std::max(0.0f, viewport.ms_at_y(b.bottom()));
+  const float a_hi = std::min(dur, viewport.ms_at_y(b.y));
+  CHECK(std::fabs(spr.texture.v0 - a_lo / dur) < 0.002f);
+  CHECK(std::fabs(spr.texture.v1 - a_hi / dur) < 0.002f);
+  CHECK(spr.texture.v1 > spr.texture.v0);
+
+  EditViewport zoomed;
+  setup(zoomed, 40, 0.0f);
+  wds::interaction::UiPainter zoomed_paint;
+  renderer.paint(zoomed_paint, zoomed, zoomed.timing(), {}, preview, selected, std::nullopt, {},
+                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform, &tex,
+                 EditSpectrumMode::Spectrogram);
+  CHECK_EQ(static_cast<int>(zoomed_paint.behind_sprites().size()), 1);
+  CHECK(std::fabs(zoomed_paint.behind_sprites().front().texture.v1 -
+                  painter.behind_sprites().front().texture.v1) > 0.02f);
+}
+
+void test_spectrum_mode_selects_backdrop() {
+  std::vector<float> peaks(4000, 0.2f);
+  wds::audio::WaveformOverview waveform(std::move(peaks));
+  wds::renderer::TextureInfo tex;
+  tex.id = 1;
+  tex.width = 192;
+  tex.height = 64;
+  tex.u0 = 0.0f;
+  tex.v0 = 0.0f;
+  tex.u1 = 1.0f;
+  tex.v1 = 1.0f;
+
+  EditViewport viewport;
+  viewport.set_bounds({10.0f, 20.0f, 240.0f, 480.0f});
+  EditGridConfig grid;
+  grid.ticks_per_quarter = 480;
+  grid.visible_hectoms = 20;
+  grid.subdivisions_per_beat = 4;
+  grid.lane_count = 12;
+  viewport.set_grid(grid);
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  viewport.set_timing(timing);
+  viewport.set_scroll_ms(500.0f);
+
+  ChartEditRenderer renderer;
+  PreviewConfig preview;
+  std::unordered_set<int32_t> selected;
+  auto paint = [&](EditSpectrumMode mode) {
+    wds::interaction::UiPainter p;
+    renderer.paint(p, viewport, viewport.timing(), {}, preview, selected, std::nullopt, {},
+                   std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform, &tex, mode);
+    return p;
+  };
+
+  const auto none = paint(EditSpectrumMode::None);
+  CHECK(none.behind_sprites().empty());
+  bool none_envelope = false;
+  for (const auto& rect : none.rects()) {
+    if (color_near(rect.color, kEditWaveformColor)) none_envelope = true;
+  }
+  CHECK(!none_envelope);
+
+  const auto envelope = paint(EditSpectrumMode::Envelope);
+  CHECK(envelope.behind_sprites().empty());
+  bool has_envelope = false;
+  for (const auto& rect : envelope.rects()) {
+    if (color_near(rect.color, kEditWaveformColor)) has_envelope = true;
+  }
+  CHECK(has_envelope);
+
+  const auto spec = paint(EditSpectrumMode::Spectrogram);
+  CHECK_EQ(static_cast<int>(spec.behind_sprites().size()), 1);
+}
+
 }  // namespace
 
 int main() {
@@ -292,6 +468,9 @@ int main() {
   test_check_errors_pause_seek_warn_and_replace();
   test_check_warning_counts_unique_ticks_as_locations();
   test_same_tick_multiple_notes_draw_one_yellow_line();
+  test_waveform_aligns_with_viewport_ms_and_zoom();
+  test_spectrogram_uv_follows_viewport_ms();
+  test_spectrum_mode_selects_backdrop();
 
   if (g_failures == 0) {
     std::printf("All chart_validation UI tests passed.\n");

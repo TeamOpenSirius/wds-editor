@@ -67,6 +67,9 @@ struct NotationNote {
   // Official scratchLength: flick/scratch span; JumpScratch span; split
   // Addressable SplitEffects/{id} (fadeIn growth follows LineHight rotation).
   int32_t scratch_length = 0;
+  // Editor-only: Sound / ScratchSound / HoldEighth parent hold body id.
+  // Not an official CSV column. kNoBoundHoldId = unbound.
+  int32_t parent_hold_id = kNoBoundHoldId;
 
   int32_t end_lane() const noexcept { return lane + width - 1; }
   int64_t start_ms(const MusicTiming& timing) const;
@@ -100,7 +103,8 @@ class ChartDocument {
   const MusicTiming& timing() const noexcept { return timing_; }
   // Returns false when OfficialPreviewOnly.
   bool set_timing(MusicTiming timing);
-  // Song-level chart delay. Allowed even in OfficialPreviewOnly (preview alignment).
+  // Song-level chart delay (signed). Allowed even in OfficialPreviewOnly
+  // (preview alignment). Negative offset maps tick 0 before music t=0.
   bool set_offset_ms(int64_t offset_ms);
 
   const std::vector<NotationNote>& notes() const noexcept { return notes_; }
@@ -179,11 +183,21 @@ int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing);
 // Rounded to nearest integer tick (notes are always integer-tick).
 int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing);
 
+// First tick whose music time is >= 0 (tick 0 when offset_ms >= 0).
+int32_t first_legal_note_tick(const MusicTiming& timing);
+// HiSpeed ignored. Playable notes and split gimmicks use [start_ms, end_ms]
+// (split fade-in before start_ms is not a violation).
+bool note_intersects_negative_music_time(const NotationNote& note, const MusicTiming& timing);
+std::vector<int32_t> notes_in_negative_music_time(const std::vector<NotationNote>& notes,
+                                                 const MusicTiming& timing);
+
 bool is_hold_family(NoteType type) noexcept;
 bool is_hold_start(NoteType type) noexcept;
 bool is_hold_body(NoteType type) noexcept;
 // Hold / CriticalHold / Scratch*Hold — has a judged end note (Sirius HoldEnd).
 bool is_hold_with_tail(NoteType type) noexcept;
+// Tailed or nontail hold body that a mid-star may bind to.
+bool is_bindable_hold_body(NoteType type) noexcept;
 // NontailHold* — duration only, no end note / no end hit VFX.
 bool is_nontail_hold_body(NoteType type) noexcept;
 // ScratchHold / ScratchCriticalHold / NontailScratch* bodies.

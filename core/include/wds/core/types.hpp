@@ -97,5 +97,7 @@ enum class ChartEditMode {
 
 // Sentinel for ChartDocument::add_note / set_notes when id should be auto-assigned.
 inline constexpr int32_t kAutoNoteId = -1;
+// Sound / ScratchSound / HoldEighth with no parent hold (official CSV, unmatched legacy).
+inline constexpr int32_t kNoBoundHoldId = -1;
 
 }  // namespace wds::chart_editor

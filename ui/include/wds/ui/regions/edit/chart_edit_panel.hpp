@@ -85,6 +85,14 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_pause_at_current(bool on) noexcept { pause_at_current_ = on; }
 
   void set_skin(const wds::renderer::SkinCatalog* skin) noexcept { skin_ = skin; }
+  void set_waveform(const wds::audio::WaveformOverview* waveform) noexcept {
+    waveform_ = waveform;
+  }
+  void set_spectrogram(wds::renderer::TextureInfo spectrogram) noexcept {
+    spectrogram_ = spectrogram;
+  }
+  void set_spectrum_mode(EditSpectrumMode mode) noexcept { spectrum_mode_ = mode; }
+  EditSpectrumMode spectrum_mode() const noexcept { return spectrum_mode_; }
 
   // scratch_length: for Flick / ScratchHold direction (-1 left, 0 both, +1 right).
   // Pass nullopt to leave scratch_length to convert_note_type defaults.
@@ -107,6 +115,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Cleared when document content_generation differs from `content_generation`.
   void set_error_ticks(std::vector<int32_t> ticks, uint64_t content_generation);
   const std::vector<int32_t>& error_ticks() const noexcept;
+  // Red filter on notes / split bodies after a rejected delay edit (2s solid, 1s fade).
+  void flash_offset_violations(std::vector<int32_t> ids);
 
   bool wants_focus() const override { return true; }
   // Timing / split modals own the keyboard so Space/Delete/arrows do not hit global chords.
@@ -200,7 +210,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void finish_marquee(wds::interaction::Vec2 end);
   // Marquee in tick/lane space so scroll during drag can extend past the view.
   wds::interaction::Rect marquee_screen_rect(wds::interaction::Vec2 end) const;
-  void finish_move();
+  void finish_move(bool refresh_eighths = true);
   void finish_resize();
   void finish_hold_adjust();
   void finish_hold_body(bool chain_next);
@@ -297,14 +307,21 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void layout_popup_rects() const;
   wds::interaction::Rect overlay_host_bounds() const;
   void sync_error_ticks() const;
+  int32_t first_legal_tick() const;
+  float offset_violation_strength() const noexcept;
 
   wds::chart_editor::ChartEditorEngine& engine_;
   mutable EditViewport viewport_;
   ChartEditRenderer renderer_;
   const wds::renderer::SkinCatalog* skin_ = nullptr;
+  const wds::audio::WaveformOverview* waveform_ = nullptr;
+  wds::renderer::TextureInfo spectrogram_{};
+  EditSpectrumMode spectrum_mode_ = EditSpectrumMode::Envelope;
   mutable std::vector<int32_t> error_ticks_;
   mutable uint64_t error_ticks_generation_ = 0;
   mutable bool error_ticks_armed_ = false;
+  std::unordered_set<int32_t> offset_violation_ids_;
+  float offset_violation_elapsed_ = 0.0f;
   mutable wds::interaction::Rect left_gutter_{};
   mutable wds::interaction::Rect right_gutter_{};       // BPM / meter
   mutable wds::interaction::Rect measure_gutter_{};     // measure index (far right)

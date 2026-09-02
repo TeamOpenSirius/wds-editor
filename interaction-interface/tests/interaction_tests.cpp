@@ -1262,6 +1262,19 @@ int main() {
     expect(field.text() == "12", "valid width blur keeps the new value");
     expect(commits == 1, "valid width blur commits once");
   }
+  {
+    expect(parse_signed_int("-1500").value_or(0) == -1500, "signed int parses negatives");
+    expect(parse_signed_int("0").value_or(-1) == 0, "signed int parses zero");
+    expect(!parse_signed_int("1.5").has_value(), "signed int rejects decimals");
+    TextField field;
+    field.set_text("0");
+    field.flash_error(2.0f);
+    expect(field.error_flashing(), "flash_error starts a red outline timer");
+    field.update(1.0f);
+    expect(field.error_flashing(), "flash still active before expiry");
+    field.update(1.5f);
+    expect(!field.error_flashing(), "flash expires after the requested duration");
+  }
 
   {
     const float previous = scroll_wheel_speed();

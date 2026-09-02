@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,14 +19,35 @@ bool overlaps(const NotationNote& a, const NotationNote& b) {
 
 bool same_tick(int32_t a, int32_t b) noexcept { return a == b; }
 
+bool is_visible_hold_mid_star(NoteType type) noexcept {
+  return type == NoteType::Sound || type == NoteType::ScratchSound;
+}
+
+bool star_type_matches_hold(NoteType star, NoteType hold) noexcept {
+  if (!is_bindable_hold_body(hold)) return false;
+  if (star == NoteType::Sound) return !is_scratch_hold_body(hold);
+  if (star == NoteType::ScratchSound) return is_scratch_hold_body(hold);
+  return false;
+}
+
+bool star_matches_hold_for_legacy_bind(const NotationNote& star,
+                                       const NotationNote& hold) noexcept {
+  if (!star_type_matches_hold(star.note_type, hold.note_type)) return false;
+  if (hold.end_tick <= hold.start_tick) return false;
+  if (star.start_tick <= hold.start_tick || star.start_tick >= hold.end_tick) return false;
+  return star.lane == hold.lane && star.width == hold.width;
+}
+
 std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<NotationNote> notes,
                                                             const NotationNote& hold,
                                                             int32_t ticks_per_quarter) {
   if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return notes;
   notes.erase(std::remove_if(notes.begin(), notes.end(),
                              [&](const NotationNote& note) {
-                               return note.note_type == NoteType::HoldEighth &&
-                                      note.start_tick > hold.start_tick &&
+                               if (note.note_type != NoteType::HoldEighth) return false;
+                               if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
+                               if (note.parent_hold_id >= 0) return false;
+                               return note.start_tick > hold.start_tick &&
                                       note.start_tick < hold.end_tick && overlaps(note, hold);
                              }),
               notes.end());
@@ -33,8 +56,11 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
        tick64 += step) {
     const int32_t tick = static_cast<int32_t>(tick64);
     const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
-      return (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) &&
-             same_tick(note.start_tick, tick) && overlaps(note, hold);
+      if (!is_visible_hold_mid_star(note.note_type) || !same_tick(note.start_tick, tick)) {
+        return false;
+      }
+      if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
+      return note.parent_hold_id < 0 && overlaps(note, hold);
     });
     if (!occupied) {
       NotationNote eighth = hold;
@@ -43,6 +69,7 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
       eighth.end_tick = tick;
       eighth.note_type = NoteType::HoldEighth;
       eighth.scratch_length = 0;
+      eighth.parent_hold_id = hold.id >= 0 ? hold.id : kNoBoundHoldId;
       notes.push_back(eighth);
     }
   }
@@ -161,11 +188,22 @@ void mirror_notes_about_center(std::vector<NotationNote>& notes) {
   }
 }
 
-bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick) {
-  for (const auto& note : notes)
-    if (note.start_tick + delta_tick < 0 ||
-        (note.end_tick > 0 && note.end_tick + delta_tick < 0))
+bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick,
+                      int32_t min_tick) {
+  auto time_floor = [&](const NotationNote& note) {
+    if (note.note_type == NoteType::HiSpeed) return 0;
+    if (note.note_type == NoteType::None && !is_split_lane_gimmick(note.gimmick_type)) {
+      return 0;
+    }
+    return min_tick;
+  };
+  for (const auto& note : notes) {
+    const int32_t floor = time_floor(note);
+    if (note.start_tick + delta_tick < floor ||
+        (note.end_tick > 0 && note.end_tick + delta_tick < floor)) {
       return false;
+    }
+  }
   for (auto& note : notes) {
     note.start_tick += delta_tick;
     if (note.end_tick > 0) note.end_tick += delta_tick;
@@ -486,8 +524,14 @@ std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const Notat
   std::vector<NotationNote> out;
   if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
   for (const auto& note : doc.notes()) {
-    if (note.note_type == NoteType::HoldEighth && note.start_tick > hold.start_tick &&
-        note.start_tick < hold.end_tick && overlaps(note, hold)) {
+    if (note.note_type != NoteType::HoldEighth) continue;
+    if (hold.id >= 0 && note.parent_hold_id == hold.id) {
+      out.push_back(note);
+      continue;
+    }
+    if (note.parent_hold_id >= 0) continue;
+    if (note.start_tick > hold.start_tick && note.start_tick < hold.end_tick &&
+        overlaps(note, hold)) {
       out.push_back(note);
     }
   }
@@ -496,18 +540,9 @@ std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const Notat
 
 namespace {
 
-bool is_visible_hold_mid_star(NoteType type) noexcept {
-  return type == NoteType::Sound || type == NoteType::ScratchSound;
-}
-
-bool attached_to_hold_span(const NotationNote& note, const NotationNote& hold) noexcept {
-  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return false;
-  if (note.start_tick <= hold.start_tick || note.start_tick >= hold.end_tick) return false;
-  if (note.note_type == NoteType::HoldEighth || is_visible_hold_mid_star(note.note_type)) {
-    return overlaps(note, hold) ||
-           (note.lane == hold.lane && note.width == hold.width);
-  }
-  return false;
+bool attached_to_hold_by_bind(const NotationNote& note, const NotationNote& hold) noexcept {
+  if (hold.id < 0 || note.parent_hold_id != hold.id) return false;
+  return note.note_type == NoteType::HoldEighth || is_visible_hold_mid_star(note.note_type);
 }
 
 }  // namespace
@@ -515,9 +550,9 @@ bool attached_to_hold_span(const NotationNote& note, const NotationNote& hold) n
 std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
                                                   const NotationNote& hold) {
   std::vector<NotationNote> out;
-  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
   for (const auto& note : doc.notes()) {
-    if (attached_to_hold_span(note, hold)) out.push_back(note);
+    if (attached_to_hold_by_bind(note, hold)) out.push_back(note);
   }
   return out;
 }
@@ -526,10 +561,50 @@ std::optional<NotationNote> parent_hold_for(const ChartDocument& doc, const Nota
   if (!(note.note_type == NoteType::HoldEighth || is_visible_hold_mid_star(note.note_type))) {
     return std::nullopt;
   }
-  for (const auto& hold : doc.notes()) {
-    if (attached_to_hold_span(note, hold)) return hold;
+  if (note.parent_hold_id < 0) return std::nullopt;
+  auto hold = doc.find_note(note.parent_hold_id);
+  if (!hold || !is_bindable_hold_body(hold->note_type)) return std::nullopt;
+  return hold;
+}
+
+bool hold_has_visible_star_at(const std::vector<NotationNote>& notes, int32_t hold_id,
+                              int32_t tick, int32_t except_note_id) {
+  if (hold_id < 0) return false;
+  for (const auto& note : notes) {
+    if (note.id == except_note_id) continue;
+    if (!is_visible_hold_mid_star(note.note_type)) continue;
+    if (note.parent_hold_id != hold_id) continue;
+    if (note.start_tick == tick) return true;
   }
-  return std::nullopt;
+  return false;
+}
+
+bool hold_has_visible_star_at(const ChartDocument& doc, int32_t hold_id, int32_t tick,
+                              int32_t except_note_id) {
+  return hold_has_visible_star_at(doc.notes(), hold_id, tick, except_note_id);
+}
+
+bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes) {
+  std::unordered_map<int64_t, int32_t> seen;
+  for (const auto& note : notes) {
+    if (!is_visible_hold_mid_star(note.note_type) || note.parent_hold_id < 0) continue;
+    const int64_t key = (static_cast<int64_t>(note.parent_hold_id) << 32) |
+                        static_cast<uint32_t>(note.start_tick);
+    auto [it, inserted] = seen.emplace(key, note.id);
+    if (!inserted && it->second != note.id) return true;
+  }
+  return false;
+}
+
+void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes) {
+  for (auto& star : notes) {
+    if (!is_visible_hold_mid_star(star.note_type) || star.parent_hold_id >= 0) continue;
+    for (const auto& hold : notes) {
+      if (hold.id < 0 || !star_matches_hold_for_legacy_bind(star, hold)) continue;
+      star.parent_hold_id = hold.id;
+      break;
+    }
+  }
 }
 
 namespace {
@@ -575,15 +650,13 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
 }
 
 bool prune_hold_mid_stars(ChartDocument& doc, const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type)) return false;
+  if (!is_bindable_hold_body(hold.note_type)) return false;
   std::vector<NotationNote> notes = doc.notes();
   const auto end = std::remove_if(notes.begin(), notes.end(), [&](const NotationNote& note) {
     if (!is_visible_hold_mid_star(note.note_type)) return false;
-    // Remove if it used to belong to this hold's lanes but left the open interval,
-    // or still overlaps lanes but is outside (start, end).
-    const bool same_lanes = overlaps(note, hold) ||
-                            (note.lane == hold.lane && note.width == hold.width);
-    if (!same_lanes) return false;
+    if (note.parent_hold_id != hold.id) return false;
+    const bool same_lanes = note.lane == hold.lane && note.width == hold.width;
+    if (!same_lanes) return true;
     return note.start_tick <= hold.start_tick || note.start_tick >= hold.end_tick;
   });
   if (end == notes.end()) return false;
@@ -606,7 +679,6 @@ std::vector<NotationNote> paste_notes_aligned(const std::vector<NotationNote>& c
   }
   std::vector<NotationNote> result = clipboard;
   for (auto& note : result) {
-    note.id = kAutoNoteId;
     note.start_tick += snapped_anchor - earliest;
     if (note.end_tick > 0) note.end_tick += snapped_anchor - earliest;
   }

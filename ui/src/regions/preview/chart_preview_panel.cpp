@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace wds::ui {
 namespace {
@@ -111,6 +112,7 @@ void ChartPreviewPanel::warm_ui_font_glyphs() {
       "选择导出目录"
       "导出冲突目标目录存在同名文件是否覆盖将跳过冲突文件"
       "文件音频输入快捷键宽快捷键设置"
+      "频谱显示无包络图频率抗锯齿"
       "一档二档三档四档五档六档"
       "播放暂停打开保存撤销重做复制粘贴镜像中心上移下移左移右移删除选中切换全屏宽度播放速度"
       "在当前位置暂停在开始播放位置暂停"
@@ -232,7 +234,8 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
     std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
   }
 
-  transport_.request_seek_ms(0);
+  transport_.request_seek_ms(transport_.chart_start_ms());
+  rebuild_waveform(visual.bgm_path);
   ready_ = true;
   return true;
 }
@@ -286,8 +289,10 @@ void ChartPreviewPanel::shutdown() {
     preview_.vulkan().destroy_texture(solid_texture_.id);
     solid_texture_ = {};
   }
+  destroy_spectrogram_texture();
   preview_.shutdown();
   transport_.shutdown();
+  waveform_.clear();
   window_ = nullptr;
   ready_ = false;
   font_bake_tier_ = 0.0f;
@@ -423,12 +428,15 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   }
   const auto effects = preview_.config().effects_directory;
   const bool was_playing = preserve_playback && transport_.playing();
-  const int64_t pos = preserve_playback ? transport_.committed_ms() : 0;
+  const int64_t pos =
+      preserve_playback ? transport_.committed_ms() : transport_.chart_start_ms();
+  const int64_t kept_offset = transport_.chart_offset_ms();
   transport_.shutdown();
   auto restore_transport = [&](const std::string& path) -> bool {
     if (!transport_.initialize(effects, path)) {
       return false;
     }
+    transport_.set_chart_offset_ms(kept_offset);
     preview_.attach_audio(&transport_.audio());
     transport_.request_seek_ms(pos);
     if (was_playing) {
@@ -439,27 +447,68 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   if (!restore_transport(music_path)) {
     // Never leave the editor without a live Transport — otherwise Space / timeline die.
     (void)restore_transport({});
+    destroy_spectrogram_texture();
+    waveform_.clear();
     return music_path.empty();
   }
   // Non-empty path that failed to decode still leaves a healthy engine (no BGM).
   if (!music_path.empty() && !transport_.audio().has_music()) {
+    destroy_spectrogram_texture();
+    waveform_.clear();
     return false;
   }
   if (!preserve_playback) {
     // load_chart / publish_snapshot may still use the previous SeekableClock time
     // until the next Transport poll — snap the engine immediately.
-    engine_.seek(0);
+    engine_.seek(transport_.chart_start_ms());
   }
+  rebuild_waveform(music_path);
   return true;
+}
+
+void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
+  destroy_spectrogram_texture();
+  if (music_path.empty() || !transport_.audio().has_music()) {
+    waveform_.clear();
+    return;
+  }
+  if (!waveform_.load(music_path)) {
+    WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
+    waveform_.clear();
+    return;
+  }
+  bake_spectrogram_texture();
+}
+
+void ChartPreviewPanel::destroy_spectrogram_texture() {
+  if (!spectrogram_texture_) return;
+  if (preview_.vulkan().ready()) {
+    preview_.vulkan().destroy_texture(spectrogram_texture_.id);
+  }
+  spectrogram_texture_ = {};
+}
+
+void ChartPreviewPanel::bake_spectrogram_texture() {
+  destroy_spectrogram_texture();
+  if (!waveform_.has_spectrogram() || !preview_.vulkan().ready()) return;
+  std::vector<unsigned char> rgba;
+  int w = 0;
+  int h = 0;
+  if (!waveform_.rasterize_rgba(rgba, w, h) || w <= 0 || h <= 0 || rgba.empty()) return;
+  spectrogram_texture_ = preview_.vulkan().create_texture_rgba(rgba.data(), w, h, /*nearest=*/false);
+  if (!spectrogram_texture_) {
+    WDS_LOG("ChartPreviewPanel: spectrogram texture upload failed %dx%d\n", w, h);
+  }
 }
 
 void ChartPreviewPanel::reset_playback() {
   if (!ready_) {
     return;
   }
+  const int64_t start = transport_.chart_start_ms();
   transport_.request_pause();
-  transport_.request_seek_ms(0);
-  engine_.seek(0);
+  transport_.request_seek_ms(start);
+  engine_.seek(start);
 }
 
 bool ChartPreviewPanel::load_chart(const std::string& chart_path,

@@ -35,6 +35,8 @@ class PreviewSettingsPanel final : public wds::interaction::Widget {
   void sync_from_state() const;
   void notify_persist() const;
   int64_t fallback_chart_duration_ms() const;
+  // Inclusive start / exclusive-ish end of the seek slider in music ms.
+  void seek_window_ms(int64_t& start_ms, int64_t& end_ms) const;
 
   ChartPreviewPanel& preview_;
   float music_gain_ = 1.0f;

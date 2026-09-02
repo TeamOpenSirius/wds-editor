@@ -39,6 +39,8 @@ using wds::ui::capture_curve_template_state;
 using wds::ui::find_curve_template_by_id;
 using wds::ui::kMaxCurveTemplates;
 using wds::ui::clamp_msaa_samples;
+using wds::ui::clamp_spectrum_display;
+using wds::ui::EditSpectrumMode;
 using wds::ui::load_editor_ui_config;
 using wds::ui::normalize_curve_config;
 using wds::ui::normalize_curve_template;
@@ -104,6 +106,7 @@ void test_old_config_without_curve_keys() {
   CHECK_EQ(cfg.curve_selected_template_id, static_cast<std::uint64_t>(0));
   CHECK(cfg.curve_selected_direction == EasingDirection::In);
   CHECK_EQ(cfg.msaa_samples, 2);
+  CHECK(cfg.spectrum_display == EditSpectrumMode::Envelope);
 }
 
 void test_msaa_samples_default_clamp_and_round_trip() {
@@ -144,6 +147,43 @@ void test_msaa_samples_default_clamp_and_round_trip() {
   EditorUiConfig loaded_zero;
   CHECK(load_editor_ui_config(zero.string(), loaded_zero));
   CHECK_EQ(loaded_zero.msaa_samples, 1);
+}
+
+void test_spectrum_display_default_and_round_trip() {
+  CHECK(clamp_spectrum_display(-1) == EditSpectrumMode::None);
+  CHECK(clamp_spectrum_display(0) == EditSpectrumMode::None);
+  CHECK(clamp_spectrum_display(1) == EditSpectrumMode::Envelope);
+  CHECK(clamp_spectrum_display(2) == EditSpectrumMode::Spectrogram);
+  CHECK(clamp_spectrum_display(9) == EditSpectrumMode::Spectrogram);
+
+  EditorUiConfig defaults;
+  CHECK(defaults.spectrum_display == EditSpectrumMode::Envelope);
+
+  const auto missing = temp_config_path("spectrum_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK(loaded_missing.spectrum_display == EditSpectrumMode::Envelope);
+
+  const EditSpectrumMode modes[] = {EditSpectrumMode::None, EditSpectrumMode::Envelope,
+                                    EditSpectrumMode::Spectrogram};
+  const char* names[] = {"none", "envelope", "spectrogram"};
+  for (int i = 0; i < 3; ++i) {
+    EditorUiConfig cfg;
+    cfg.spectrum_display = modes[i];
+    const auto path = temp_config_path((std::string("spectrum_") + names[i] + ".yml").c_str());
+    CHECK(save_editor_ui_config(path.string(), cfg));
+    EditorUiConfig loaded;
+    CHECK(load_editor_ui_config(path.string(), loaded));
+    CHECK(loaded.spectrum_display == modes[i]);
+  }
+
+  const auto invalid = temp_config_path("spectrum_invalid.yml");
+  CHECK(write_text_atomic(invalid.string(), "spectrum_display: rainbow\n").error ==
+        SerializeError::Ok);
+  EditorUiConfig loaded_invalid;
+  CHECK(load_editor_ui_config(invalid.string(), loaded_invalid));
+  CHECK(loaded_invalid.spectrum_display == EditSpectrumMode::Envelope);
 }
 
 void test_name_round_trip_special_and_chinese() {
@@ -573,6 +613,7 @@ void test_allow_crash_log_sensitive_default_and_round_trip() {
 int main() {
   test_old_config_without_curve_keys();
   test_msaa_samples_default_clamp_and_round_trip();
+  test_spectrum_display_default_and_round_trip();
   test_name_round_trip_special_and_chinese();
   test_duplicate_names_distinct_ids_and_order();
   test_invalid_algorithm_direction_and_parameter();

@@ -4,6 +4,7 @@ add_library(wds_audio_player STATIC
   src/audio_engine.cpp
   src/transport.cpp
   src/hit_sfx.cpp
+  src/waveform_overview.cpp
 )
 add_library(wds::audio_player ALIAS wds_audio_player)
 

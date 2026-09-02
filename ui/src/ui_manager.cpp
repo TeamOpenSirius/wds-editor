@@ -232,6 +232,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
         wds::interaction::set_editor_shortcuts(cfg.shortcuts);
       }
       apply_display_to_preview(*chart_preview_, cfg);
+      if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
       bind_editor_shortcuts();
       wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
       persist();
@@ -542,6 +543,7 @@ void UiManager::load_ui_config() {
     bind_editor_shortcuts();
   }
   apply_display_to_preview(*chart_preview_, cfg);
+  if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
   capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
@@ -567,6 +569,7 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
   capture_display_from_preview(*chart_preview_, cfg);
+  if (const auto* edit = edit_panel()) cfg.spectrum_display = edit->spectrum_mode();
   apply_curve_template_state(cfg, curve_template_state_);
 }
 
@@ -704,6 +707,10 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
       sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
     }
     edit->sync_to_timeline_ms(sync_ms);
+    if (chart_preview_ != nullptr) {
+      edit->set_waveform(&chart_preview_->waveform());
+      edit->set_spectrogram(chart_preview_->spectrogram_texture());
+    }
   }
   last_update_sync_us_ = phase_us(t0);
 

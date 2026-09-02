@@ -28,12 +28,14 @@ class Transport {
   void request_play();
   void request_pause();
   void request_seek_ms(int64_t time_ms);
-  // Chart delay (MusicTiming::offset_ms): how much later the chart starts than the
-  // music. Note hit times already include this (tick0 → offset). Transport keeps
-  // the value for UI; the playhead stays 1:1 with the music stream (music t=0 at
-  // timeline 0). Hit SFX schedule at note timeline ms on the music clock.
+  // Chart delay (MusicTiming::offset_ms): tick 0 maps to this music time.
+  // Negative offset allows a silent preroll before music t=0.
   void set_chart_offset_ms(int64_t offset_ms) noexcept;
   int64_t chart_offset_ms() const noexcept { return chart_offset_ms_; }
+  // Earliest playable timeline (chart start when offset is negative, else 0).
+  int64_t chart_start_ms() const noexcept {
+    return chart_offset_ms_ < 0 ? chart_offset_ms_ : 0;
+  }
 
   // Preview clock rate (and BGM rate). Hit SFX locks to BASS music POS (1× samples);
   // the committed note timeline must stay phase-locked to that same music clock.

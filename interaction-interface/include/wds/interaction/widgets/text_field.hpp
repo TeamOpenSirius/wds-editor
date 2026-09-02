@@ -2,6 +2,7 @@
 
 #include <wds/interaction/widget.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -29,6 +30,11 @@ class TextField : public Widget {
   bool text_invalid() const noexcept {
     return static_cast<bool>(validator_) && !validator_(text_);
   }
+  // Paint the same red outline as text_invalid() for `seconds`, then expire.
+  void flash_error(float seconds) noexcept {
+    error_flash_remaining_ = std::max(0.0f, seconds);
+  }
+  bool error_flashing() const noexcept { return error_flash_remaining_ > 0.0f; }
 
   bool wants_focus() const override { return true; }
   bool is_focusable() const override { return true; }
@@ -58,6 +64,7 @@ class TextField : public Widget {
   CommitHandler on_commit_;
   std::function<bool(const std::string&)> validator_;
   float caret_blink_t_ = 0.0f;
+  float error_flash_remaining_ = 0.0f;
   std::size_t caret_ = 0;
 };
 

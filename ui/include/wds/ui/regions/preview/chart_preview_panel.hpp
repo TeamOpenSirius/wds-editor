@@ -5,6 +5,7 @@
 #include "wds/renderer/preview_visual_config.hpp"
 
 #include <wds/audio/transport.hpp>
+#include <wds/audio/waveform_overview.hpp>
 
 #include <wds/core/chart_editor_engine.hpp>
 
@@ -74,6 +75,8 @@ class ChartPreviewPanel {
   // Reload BGM path (empty clears to wall-clock).
   // When preserve_playback is false, seek to 0 and do not resume play (open/import).
   bool load_music(const std::string& music_path, bool preserve_playback = true);
+  const wds::audio::WaveformOverview& waveform() const noexcept { return waveform_; }
+  wds::renderer::TextureInfo spectrogram_texture() const noexcept { return spectrogram_texture_; }
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
   void reset_playback();
 
@@ -85,6 +88,9 @@ class ChartPreviewPanel {
                          const std::string& ui_font_path);
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
+  void rebuild_waveform(const std::string& music_path);
+  void destroy_spectrogram_texture();
+  void bake_spectrogram_texture();
   bool bake_ui_font(float body_px, float tip_px, bool mild_sharpen);
   void warm_ui_font_glyphs();
   bool ensure_ui_font_scale();
@@ -92,6 +98,8 @@ class ChartPreviewPanel {
   std::string last_init_error_;
   PlaybackPreviewView preview_;
   wds::audio::Transport transport_;
+  wds::audio::WaveformOverview waveform_;
+  wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;
   wds::renderer::TextureInfo solid_texture_{};
   wds::renderer::TextureInfo ui_font_texture_{};

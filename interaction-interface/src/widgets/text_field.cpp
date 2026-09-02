@@ -33,6 +33,9 @@ void TextField::commit_or_revert() {
 
 void TextField::update(float delta_seconds) {
   Widget::update(delta_seconds);
+  if (error_flash_remaining_ > 0.0f) {
+    error_flash_remaining_ = std::max(0.0f, error_flash_remaining_ - delta_seconds);
+  }
   if (visual_state_ == WidgetState::Focused) {
     caret_blink_t_ += delta_seconds;
   }
@@ -56,7 +59,7 @@ void TextField::paint_at(UiPainter& painter, float z) const {
   const bool focused = enabled_ && visual_state_ == WidgetState::Focused;
   const Color washed = theme::kSurfaceVariant.lerp(Color{0.92f, 0.92f, 0.94f, 1.0f}, 0.42f);
   const Color fill = !enabled_ ? washed : (focused ? theme::kSurface : theme::kSurfaceVariant);
-  const Color outline = text_invalid() ? theme::kError
+  const Color outline = (text_invalid() || error_flashing()) ? theme::kError
                        : !enabled_    ? washed.lerp(theme::kOutline, 0.35f)
                        : focused      ? theme::kPrimary
                                       : theme::kOutline;

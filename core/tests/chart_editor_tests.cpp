@@ -447,6 +447,62 @@ void test_tick_ms_saturates_nan_inf_and_extremes() {
   CHECK_EQ(milliseconds_to_tick(1500, normal), 480);
 }
 
+void test_negative_offset_legal_tick_and_violation_query() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(timing);
+  CHECK_EQ(first_legal_note_tick(timing), 0);
+
+  ChartDocument doc(timing);
+  CHECK(doc.set_offset_ms(-2000));
+  CHECK_EQ(doc.timing().offset_ms, -2000);
+  CHECK_EQ(first_legal_note_tick(doc.timing()), 1920);
+
+  NotationNote tap_early = make_tap(0, 0);
+  tap_early.id = 1;
+  NotationNote tap_ok = make_tap(1920, 1);
+  tap_ok.id = 2;
+  NotationNote hold;
+  hold.id = 3;
+  hold.note_type = NoteType::Hold;
+  hold.start_tick = 1800;
+  hold.end_tick = 2400;
+  hold.lane = 2;
+  hold.width = 1;
+  NotationNote split;
+  split.id = 4;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.start_tick = 1920;
+  split.end_tick = 2880;
+  NotationNote split_early;
+  split_early.id = 5;
+  split_early.note_type = NoteType::None;
+  split_early.gimmick_type = GimmickType::Split3;
+  split_early.start_tick = 0;
+  split_early.end_tick = 480;
+  NotationNote hispeed;
+  hispeed.id = 6;
+  hispeed.note_type = NoteType::HiSpeed;
+  hispeed.start_tick = 0;
+
+  CHECK(note_intersects_negative_music_time(tap_early, doc.timing()));
+  CHECK(!note_intersects_negative_music_time(tap_ok, doc.timing()));
+  CHECK(note_intersects_negative_music_time(hold, doc.timing()));
+  CHECK(!note_intersects_negative_music_time(split, doc.timing()));
+  CHECK(note_intersects_negative_music_time(split_early, doc.timing()));
+  CHECK(!note_intersects_negative_music_time(hispeed, doc.timing()));
+
+  const auto ids = notes_in_negative_music_time(
+      {tap_early, tap_ok, hold, split, split_early, hispeed}, doc.timing());
+  CHECK_EQ(static_cast<int>(ids.size()), 3);
+  CHECK_EQ(ids[0], 1);
+  CHECK_EQ(ids[1], 3);
+  CHECK_EQ(ids[2], 5);
+}
+
 void test_int32_tick_range_measure_and_snap_no_hang() {
   MusicTiming timing;
   timing.bpm = 120.0;
@@ -3983,6 +4039,138 @@ void test_recompute_hold_eighths_respects_fractional_star() {
   CHECK_EQ(eighth_on_star, 0);
 }
 
+void test_star_hold_bind_legacy_uniqueness_and_attachment() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+
+  NotationNote hold_a = make_tap(0, 2);
+  hold_a.id = 0;
+  hold_a.width = 2;
+  hold_a.end_tick = 1920;
+  hold_a.note_type = NoteType::Hold;
+  NotationNote hold_b = make_tap(480, 2);
+  hold_b.id = 1;
+  hold_b.width = 2;
+  hold_b.end_tick = 2400;
+  hold_b.note_type = NoteType::Hold;
+  NotationNote star = make_tap(960, 2);
+  star.id = 2;
+  star.width = 2;
+  star.end_tick = 960;
+  star.note_type = NoteType::Sound;
+  NotationNote scratch_hold = make_tap(0, 5);
+  scratch_hold.id = 3;
+  scratch_hold.width = 1;
+  scratch_hold.end_tick = 1920;
+  scratch_hold.note_type = NoteType::ScratchHold;
+  NotationNote blue_star_on_purple = make_tap(960, 5);
+  blue_star_on_purple.id = 4;
+  blue_star_on_purple.width = 1;
+  blue_star_on_purple.end_tick = 960;
+  blue_star_on_purple.note_type = NoteType::Sound;
+  NotationNote mismatched_width = make_tap(1200, 2);
+  mismatched_width.id = 5;
+  mismatched_width.width = 1;
+  mismatched_width.end_tick = 1200;
+  mismatched_width.note_type = NoteType::Sound;
+  chart.notes = {hold_a, hold_b, star, scratch_hold, blue_star_on_purple, mismatched_width};
+
+  const fs::path path = temp_chart_path("legacy_star_bind.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 1\nT 0 120 4 4 3\nNOTES 6\n";
+    for (const auto& n : chart.notes) {
+      out << "N " << n.id << ' ' << n.start_tick << ' ' << n.end_tick << ' '
+          << static_cast<int32_t>(n.note_type) << ' ' << n.lane << ' ' << n.width << " 0 0\n";
+    }
+    out << "CONCURRENT 0\nEND\n";
+  }
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  const NotationNote* loaded_star = nullptr;
+  const NotationNote* loaded_type_mismatch = nullptr;
+  const NotationNote* loaded_width_mismatch = nullptr;
+  for (const auto& n : loaded.notes) {
+    if (n.id == 2) loaded_star = &n;
+    if (n.id == 4) loaded_type_mismatch = &n;
+    if (n.id == 5) loaded_width_mismatch = &n;
+  }
+  CHECK(loaded_star != nullptr);
+  if (loaded_star != nullptr) CHECK_EQ(loaded_star->parent_hold_id, 0);
+  CHECK(loaded_type_mismatch != nullptr);
+  if (loaded_type_mismatch != nullptr) CHECK_EQ(loaded_type_mismatch->parent_hold_id, kNoBoundHoldId);
+  CHECK(loaded_width_mismatch != nullptr);
+  if (loaded_width_mismatch != nullptr) {
+    CHECK_EQ(loaded_width_mismatch->parent_hold_id, kNoBoundHoldId);
+  }
+
+  ChartDocument doc;
+  CHECK(doc.set_notes(loaded.notes));
+  auto attached_a = hold_attached_notes_for(doc, *doc.find_note(0));
+  int visible_on_a = 0;
+  for (const auto& n : attached_a) {
+    if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) ++visible_on_a;
+  }
+  CHECK_EQ(visible_on_a, 1);
+  auto attached_b = hold_attached_notes_for(doc, *doc.find_note(1));
+  int visible_on_b = 0;
+  for (const auto& n : attached_b) {
+    if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) ++visible_on_b;
+  }
+  CHECK_EQ(visible_on_b, 0);
+
+  CHECK(hold_has_visible_star_at(doc, 0, 960, kNoBoundHoldId));
+  CHECK(!hold_has_visible_star_at(doc, 1, 960, kNoBoundHoldId));
+
+  NotationNote dup = *doc.find_note(2);
+  dup.id = 9;
+  auto notes = doc.notes();
+  notes.push_back(dup);
+  CHECK(visible_star_tick_conflicts(notes));
+  CHECK(!visible_star_tick_conflicts(doc.notes()));
+
+  // v5 roundtrip keeps the inferred bind.
+  const fs::path v5_path = temp_chart_path("star_bind_v5.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(loaded, v5_path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart v5;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(v5_path.string(), v5).error),
+           static_cast<int>(SerializeError::Ok));
+  bool found_bound = false;
+  for (const auto& n : v5.notes) {
+    if (n.note_type == NoteType::Sound && n.lane == 2 && n.width == 2) {
+      CHECK_EQ(n.parent_hold_id, 0);
+      found_bound = true;
+    }
+  }
+  CHECK(found_bound);
+
+  // SUS export hangs the bound star on hold A, not the overlapping hold B.
+  SusChartSaveOptions options;
+  options.ched_lane_padding = false;
+  std::string sus_text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(loaded, options, sus_text).error),
+           static_cast<int>(SerializeError::Ok));
+  SusChartLoadResult sus_loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus_text, sus_loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int32_t hold_a_id = -1;
+  int32_t hold_b_id = -1;
+  int32_t star_parent = -2;
+  for (const auto& n : sus_loaded.chart.notes) {
+    if (n.note_type == NoteType::Hold && n.start_tick == 0) hold_a_id = n.id;
+    if (n.note_type == NoteType::Hold && n.start_tick == 480) hold_b_id = n.id;
+    if (n.note_type == NoteType::Sound) star_parent = n.parent_hold_id;
+  }
+  CHECK(hold_a_id >= 0);
+  CHECK(hold_b_id >= 0);
+  CHECK_EQ(star_parent, hold_a_id);
+  CHECK(star_parent != hold_b_id);
+}
+
 int count_holds_with_tail(const NotationChart& chart) {
   int n = 0;
   for (const auto& note : chart.notes) {
@@ -4209,6 +4397,17 @@ void test_sus_hold_mid_star_roundtrip() {
   }
   CHECK_EQ(sounds, 1);
   CHECK_EQ(star_tick, 960);
+  const NotationNote* hold = nullptr;
+  const NotationNote* star = nullptr;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::Hold) hold = &n;
+    if (n.note_type == NoteType::Sound) star = &n;
+  }
+  CHECK(hold != nullptr);
+  CHECK(star != nullptr);
+  if (hold != nullptr && star != nullptr) {
+    CHECK_EQ(star->parent_hold_id, hold->id);
+  }
 }
 
 // Slide with different end lane → ScratchHold; no extra plain Hold.
@@ -5127,8 +5326,13 @@ void test_sus_comprehensive_roundtrip_all_cases() {
 
   // Sound mid on Hold
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 4320, 0, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 4320, 5280, 0, 1));
-  chart.notes.push_back(make_body(NoteType::Sound, nid(), 4800, 0, 0, 1));
+  {
+    const int32_t hold_id = nid();
+    chart.notes.push_back(make_body(NoteType::Hold, hold_id, 4320, 5280, 0, 1));
+    NotationNote star = make_body(NoteType::Sound, nid(), 4800, 0, 0, 1);
+    star.parent_hold_id = hold_id;
+    chart.notes.push_back(star);
+  }
 
   // HoldEighth must not become Sound
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 4320, 2, 1));
@@ -5153,8 +5357,13 @@ void test_sus_comprehensive_roundtrip_all_cases() {
 
   // ScratchSound mid (imports as Sound)
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680, 2, 1));
-  chart.notes.push_back(make_body(NoteType::Hold, nid(), 7680, 8640, 2, 1));
-  chart.notes.push_back(make_body(NoteType::ScratchSound, nid(), 8160, 0, 2, 1));
+  {
+    const int32_t hold_id = nid();
+    chart.notes.push_back(make_body(NoteType::Hold, hold_id, 7680, 8640, 2, 1));
+    NotationNote star = make_body(NoteType::ScratchSound, nid(), 8160, 0, 2, 1);
+    star.parent_hold_id = hold_id;
+    chart.notes.push_back(star);
+  }
 
   // Edge lanes + wide tap under ched padding
   chart.notes.push_back(make_body(NoteType::Normal, nid(), 8640, 0, 0, 4));
@@ -5880,6 +6089,12 @@ bool reference_is_combo_head_note(const NotationNote& note) noexcept {
   }
 }
 
+bool reference_mid_star_on_hold(const NotationNote& star, const NotationNote& hold) noexcept {
+  if (!is_hold_mid_star(star.note_type)) return false;
+  if (star.parent_hold_id >= 0) return star.parent_hold_id == hold.id;
+  return reference_lanes_overlap(hold, star);
+}
+
 void reference_collect_hold_body_judge_times(const NotationNote& hold,
                                              const std::vector<NotationNote>& notes,
                                              const MusicTiming& timing,
@@ -5904,7 +6119,7 @@ void reference_collect_hold_body_judge_times(const NotationNote& hold,
     if (ms <= start || ms >= end) {
       continue;
     }
-    if (!reference_lanes_overlap(hold, note)) {
+    if (!reference_mid_star_on_hold(note, hold)) {
       continue;
     }
     times.push_back(ms);
@@ -5934,7 +6149,7 @@ void reference_collect_preview_combo_hits(const std::vector<NotationNote>& notes
           continue;
         }
         const int64_t ms = notes[j].start_ms(timing);
-        if (ms > start && ms < end && reference_lanes_overlap(note, notes[j])) {
+        if (ms > start && ms < end && reference_mid_star_on_hold(notes[j], note)) {
           star_consumed[j] = 1;
         }
       }
@@ -6127,6 +6342,25 @@ void test_hold_combo_reference_fixed_cases() {
     CHECK_EQ(shared, 2);
     CHECK_EQ(static_cast<int>(combo.size()), 4);
     expect_hold_and_combo_match(notes, timing, "overlapping-holds");
+  }
+
+  // Bound star counts only for its parent, even when lanes overlap another hold.
+  {
+    auto hold_a = combo_note(0, 1920, 0, 3, NoteType::Hold);
+    hold_a.id = 1;
+    auto hold_b = combo_note(480, 2400, 2, 3, NoteType::CriticalHold);
+    hold_b.id = 2;
+    auto star = combo_note(960, 960, 2, 1, NoteType::Sound);
+    star.id = 3;
+    star.parent_hold_id = 1;
+    const std::vector<NotationNote> notes{hold_a, hold_b, star};
+    std::vector<int64_t> times_a;
+    std::vector<int64_t> times_b;
+    collect_hold_body_judge_times(hold_a, notes, timing, times_a);
+    collect_hold_body_judge_times(hold_b, notes, timing, times_b);
+    CHECK_EQ(static_cast<int>(times_a.size()), 1);
+    CHECK_EQ(static_cast<int>(times_b.size()), 0);
+    expect_hold_and_combo_match(notes, timing, "bound-star-parent-only");
   }
 
   // Stars exactly on hold start/end are exclusive; only the interior star counts.
@@ -6899,6 +7133,7 @@ int main() {
   test_set_timing_rejects_illegal_tpq_atomically();
   test_construct_normalize_fallback_illegal_tpq();
   test_tick_ms_saturates_nan_inf_and_extremes();
+  test_negative_offset_legal_tick_and_violation_query();
   test_int32_tick_range_measure_and_snap_no_hang();
   test_note_id_max_and_auto_exhaust_are_atomic();
   test_set_notes_auto_explicit_collision_is_atomic();
@@ -6966,6 +7201,7 @@ int main() {
   test_composite_undo_rolls_back_on_partial_failure();
   test_paired_hold_head_tolerates_subtick_drift();
   test_recompute_hold_eighths_respects_fractional_star();
+  test_star_hold_bind_legacy_uniqueness_and_attachment();
   test_timing_tick_ms_roundtrip_multi_bpm();
   test_timing_first_bpm_is_song_start_without_tick0();
   test_hold_span_stale_skips_rebuild_without_holds();

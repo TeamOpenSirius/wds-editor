@@ -10,6 +10,8 @@
 #include <wds/ui/note_skin_mapping.hpp>
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 
+#include <wds/interaction/theme.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -29,7 +31,8 @@ using wds::ui::sprites_for;
 void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::SkinCatalog& skin,
                        const EditViewport& viewport, const wds::chart_editor::NotationNote& note,
                        float alpha, float z, float arrow_z, int fb_w, int fb_h,
-                       wds::renderer::ScreenBounds screen, NoteVisualPass pass) {
+                       wds::renderer::ScreenBounds screen, NoteVisualPass pass, float tint_r,
+                       float tint_g, float tint_b) {
   // Split-lane gimmicks are authoring markers — never draw as flat/hold note art.
   if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
   if (note.note_type == NoteType::HoldEighth || alpha <= 0.0f) return;
@@ -61,8 +64,9 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
         {hold_x, top, hold_w, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
     wds::renderer::add_sliced_note(batch, sprites.connection, body, skin.hold_slice_border_l,
                                    skin.hold_slice_border_r, z, alpha, alpha, -1.0f,
-                                   sprites.connection_r, sprites.connection_g,
-                                   sprites.connection_b, viewport.hold_visual_world_width(note.width));
+                                   sprites.connection_r * tint_r, sprites.connection_g * tint_g,
+                                   sprites.connection_b * tint_b,
+                                   viewport.hold_visual_world_width(note.width));
     return;
   }
 
@@ -83,7 +87,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     const float cx = x + width * 0.5f;
     const auto q = wds::interaction::rect_to_quad({cx - tw * 0.5f, y0 - th * 0.5f, tw, th}, fb_w,
                                                   fb_h, screen);
-    batch.add_sprite(sprites.tick, q, z, alpha);
+    batch.add_sprite(sprites.tick, q, z, alpha, tint_r, tint_g, tint_b);
     return;
   }
 
@@ -119,7 +123,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
         std::swap(q.lb, q.rb);
         std::swap(q.lt, q.rt);
       }
-      batch.add_sprite(skin.scratch_arrow, q, arrow_z, alpha * inst.alpha);
+      batch.add_sprite(skin.scratch_arrow, q, arrow_z, alpha * inst.alpha, tint_r, tint_g, tint_b);
     }
   };
 
@@ -139,15 +143,15 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     if (draw_bottom) {
       if (!spr.bottom) return;
       wds::renderer::add_sliced_note(batch, spr.bottom, head, skin.note_slice_border_l,
-                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, 1.0f, 1.0f,
-                                     1.0f, tap_world);
+                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, tint_r,
+                                     tint_g, tint_b, tap_world);
       return;
     }
     if (draw_top) {
       if (!spr.top) return;
       wds::renderer::add_sliced_note(batch, spr.top, head, skin.note_slice_border_l,
-                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, 1.0f, 1.0f,
-                                     1.0f, tap_world);
+                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, tint_r,
+                                     tint_g, tint_b, tap_world);
       return;
     }
     if (draw_arrow && with_arrow_art) {
@@ -207,9 +211,82 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
                               const wds::renderer::SkinCatalog* skin,
               bool show_beat_grid,
               int32_t highlighted_split_note_id,
-              const std::vector<int32_t>& error_ticks) const {
+              const std::vector<int32_t>& error_ticks,
+              const std::unordered_set<int32_t>* violation_note_ids,
+              float violation_strength,
+              const wds::audio::WaveformOverview* waveform,
+              const wds::renderer::TextureInfo* spectrogram,
+              EditSpectrumMode spectrum_mode) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f, 0.86f);
+  const bool drew_spectrogram = spectrum_mode == EditSpectrumMode::Spectrogram &&
+                                spectrogram != nullptr && static_cast<bool>(*spectrogram) &&
+                                waveform != nullptr && waveform->duration_ms() > 0 && b.h > 0.5f &&
+                                b.w > 1.0f;
+  if (drew_spectrogram) {
+    const float dur = static_cast<float>(waveform->duration_ms());
+    const float view_lo = viewport.ms_at_y(b.bottom());
+    const float view_hi = viewport.ms_at_y(b.y);
+    const float a_lo = std::max(0.0f, view_lo);
+    const float a_hi = std::min(dur, view_hi);
+    if (a_hi > a_lo) {
+      const float y_top = std::clamp(viewport.y_at_ms(a_hi), b.y, b.bottom());
+      const float y_bot = std::clamp(viewport.y_at_ms(a_lo), b.y, b.bottom());
+      if (y_bot > y_top + 0.5f) {
+        wds::renderer::TextureInfo uv = *spectrogram;
+        uv.u0 = 0.0f;
+        uv.u1 = 1.0f;
+        uv.v0 = a_lo / dur;
+        uv.v1 = a_hi / dur;
+        painter.sprite_behind({b.x, y_top, b.w, y_bot - y_top}, uv, {1.0f, 1.0f, 1.0f, 1.0f},
+                              kEditWaveformZ);
+      }
+    }
+  } else if (spectrum_mode == EditSpectrumMode::Envelope && waveform != nullptr &&
+             !waveform->empty() && b.h > 0.5f && b.w > 1.0f) {
+    const int y0 = static_cast<int>(std::floor(b.y));
+    const int y1 = static_cast<int>(std::ceil(b.bottom()));
+    const int rows = std::max(0, y1 - y0);
+    painter.reserve_rects(static_cast<std::size_t>(rows) + 1);
+    const float cx = b.x + b.w * 0.5f;
+    const float max_w = b.w * 0.94f;
+    float run_y = 0.0f;
+    float run_h = 0.0f;
+    float run_w = -1.0f;
+    auto flush_run = [&]() {
+      if (run_w <= 0.5f || run_h <= 0.0f) return;
+      const float top = std::max(run_y, b.y);
+      const float bot = std::min(run_y + run_h, b.bottom());
+      const float h = bot - top;
+      if (h <= 0.0f) return;
+      painter.fill_rect({cx - run_w * 0.5f, top, run_w, h}, kEditWaveformColor, 0.0f,
+                        kEditWaveformZ);
+    };
+    for (int y = y0; y < y1; ++y) {
+      const float py = static_cast<float>(y);
+      const float py1 = py + 1.0f;
+      const float ms_a = viewport.ms_at_y(std::clamp(py, b.y, b.bottom()));
+      const float ms_b = viewport.ms_at_y(std::clamp(py1, b.y, b.bottom()));
+      const float peak = waveform->peak_in_range(static_cast<double>(ms_a),
+                                                 static_cast<double>(ms_b));
+      const float w = std::sqrt(std::clamp(peak, 0.0f, 1.0f)) * max_w;
+      if (w <= 0.5f) {
+        flush_run();
+        run_w = -1.0f;
+        continue;
+      }
+      if (run_w >= 0.0f && std::abs(w - run_w) < 1.0f) {
+        run_h += 1.0f;
+        run_w = std::max(run_w, w);
+      } else {
+        flush_run();
+        run_y = py;
+        run_h = 1.0f;
+        run_w = w;
+      }
+    }
+    flush_run();
+  }
   const auto& grid = viewport.grid();
   // Horizontal beat/subdiv grid (LOD + no per-frame tick vector alloc).
   if (show_beat_grid) {
@@ -306,6 +383,10 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
         apply_official_split_rgb_opacity(c);
         if (highlight) {
           c = c.lerp({1.0f, 1.0f, 1.0f, c.a}, 0.28f);
+        }
+        if (violation_note_ids != nullptr && violation_strength > 0.0f &&
+            violation_note_ids->count(note.id) != 0) {
+          c = c.lerp(wds::interaction::theme::kError, violation_strength);
         }
         if (skin != nullptr && skin->soft_split_line) {
           painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, z, a_bot, a_top);
@@ -536,7 +617,8 @@ void ChartEditRenderer::append_skinned_notes(
     wds::renderer::DrawBatch& batch, const wds::renderer::SkinCatalog& skin,
     const EditViewport& viewport, const std::vector<wds::chart_editor::NotationNote>& notes,
     const std::unordered_set<int32_t>& selected, int fb_w, int fb_h,
-    wds::renderer::ScreenBounds screen) const {
+    wds::renderer::ScreenBounds screen, const std::unordered_set<int32_t>* violation_note_ids,
+    float violation_strength) const {
   const auto layer_z = [&](float base, float start_tick) {
     return base - start_tick * depth_.tick_bias;
   };
@@ -571,9 +653,14 @@ void ChartEditRenderer::append_skinned_notes(
       if (!in_window(note)) continue;
       const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
       const float z = layer_z(layer.base_z, static_cast<float>(note.start_tick));
+      wds::interaction::Color tint{1.0f, 1.0f, 1.0f, 1.0f};
+      if (violation_note_ids != nullptr && violation_strength > 0.0f &&
+          violation_note_ids->count(note.id) != 0) {
+        tint = tint.lerp(wds::interaction::theme::kError, violation_strength);
+      }
       draw_skinned_note(batch, skin, viewport, note, alpha, z,
                         layer_z(depth_.flick_arrow, static_cast<float>(note.start_tick)), fb_w,
-                        fb_h, screen, layer.pass);
+                        fb_h, screen, layer.pass, tint.r, tint.g, tint.b);
     }
   }
 }
@@ -602,7 +689,7 @@ void ChartEditRenderer::append_skinned_ghosts(
       draw_skinned_note(batch, skin, viewport, n, g.alpha,
                         layer_z(layer.base_z, static_cast<float>(n.start_tick)),
                         layer_z(depth_.ghost_flick_arrow, static_cast<float>(n.start_tick)), fb_w,
-                        fb_h, screen, layer.pass);
+                        fb_h, screen, layer.pass, 1.0f, 1.0f, 1.0f);
     }
   };
   if (ghost) draw_ghost(*ghost);

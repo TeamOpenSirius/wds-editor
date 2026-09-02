@@ -1,6 +1,7 @@
 #include <wds/core/chart_serializer.hpp>
 
 #include <wds/core/file_io.hpp>
+#include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
 #include <wds/core/timing_map.hpp>
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <locale>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace wds::chart_editor {
@@ -90,7 +92,7 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
   normalize_timing_points(timing);
 
   std::ostringstream ss;
-  // WDSCHART v4 — TIMING points with has_bpm / has_meter flags (bit0 / bit1).
+  // WDSCHART v5 — N rows include parent_hold_id (star ↔ hold bind).
   // Chart delay lives in .wdsproject (one song, many charts) — not in the chart file.
   ss << "WDSCHART " << kFormatVersion << '\n';
   ss << "BPM " << timing.bpm << '\n';
@@ -111,7 +113,8 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
     if (note.note_type == NoteType::HoldEighth) continue;
     ss << "N " << note.id << ' ' << note.start_tick << ' ' << note.end_tick << ' '
        << static_cast<int32_t>(note.note_type) << ' ' << note.lane << ' ' << note.width << ' '
-       << static_cast<int32_t>(note.gimmick_type) << ' ' << note.scratch_length << '\n';
+       << static_cast<int32_t>(note.gimmick_type) << ' ' << note.scratch_length << ' '
+       << note.parent_hold_id << '\n';
   }
 
   ss << "CONCURRENT " << chart.concurrent_lines.size() << '\n';
@@ -226,6 +229,13 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
         return {SerializeError::ParseError, "malformed note record"};
       }
 
+      if (version >= 5) {
+        file >> note.parent_hold_id;
+        if (!file) {
+          return {SerializeError::ParseError, "malformed note record"};
+        }
+      }
+
       // v1 appended four unused ignore_* collider flags.
       if (version == 1) {
         int ignore_li = 0;
@@ -306,6 +316,27 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   }
   if (saw_concurrent && chart.concurrent_lines.size() != concurrent_count) {
     return {SerializeError::ParseError, "CONCURRENT count mismatch"};
+  }
+
+  if (version < 5) {
+    infer_legacy_star_hold_binds(chart.notes);
+  } else {
+    std::unordered_map<int32_t, const NotationNote*> by_id;
+    by_id.reserve(chart.notes.size());
+    for (const auto& n : chart.notes) {
+      if (n.id >= 0) by_id[n.id] = &n;
+    }
+    for (auto& n : chart.notes) {
+      if (n.parent_hold_id == kNoBoundHoldId) continue;
+      if (n.note_type != NoteType::Sound && n.note_type != NoteType::ScratchSound) {
+        n.parent_hold_id = kNoBoundHoldId;
+        continue;
+      }
+      const auto it = by_id.find(n.parent_hold_id);
+      if (it == by_id.end() || !is_bindable_hold_body(it->second->note_type)) {
+        return {SerializeError::ParseError, "invalid parent_hold_id"};
+      }
+    }
   }
 
   normalize_timing_points(chart.timing);
