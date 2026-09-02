@@ -175,7 +175,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_viewport() const;
   wds::chart_editor::NotationNote make_base_note(wds::interaction::Vec2 point) const;
   int effective_placement_width(wds::interaction::Vec2 point) const;
-  // Applies split-track lane/width when follow is on and point is in a steady split range.
+  // Applies split-track lane/width when follow is on: union of all split
+  // effects whose closed [start, end] covers the point's tick.
   void apply_placement_lane_width(wds::interaction::Vec2 point, int32_t& lane,
                                   int32_t& width) const;
   std::optional<wds::chart_editor::NotationNote> hit_test_note(wds::interaction::Vec2 point) const;

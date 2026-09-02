@@ -317,17 +317,24 @@ void ChartEditPanel::apply_placement_lane_width(wds::interaction::Vec2 point, in
   sync_viewport();
   if (split_width_follow_) {
     const int32_t tick = viewport_.tick_at(point.y);
+    std::vector<int32_t> mids;
+    std::vector<int32_t> one;
+    bool any = false;
     for (const auto& note : engine_.document().notes()) {
       if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
       const int32_t start = note.start_tick;
       const int32_t end = std::max(start, note.end_tick);
-      // Steady range only (exclude fade in/out).
+      // Closed interval [start, end] of every overlapping split effect.
       if (tick >= start && tick <= end) {
-        const int32_t probe = viewport_.lane_at(point.x, 1);
-        if (split_track_for_lane(wds::chart_editor::get_split_count(note.gimmick_type),
-                                 viewport_.grid().lane_count, probe, lane, width)) {
-          return;
-        }
+        any = true;
+        split_boundaries_12(wds::chart_editor::get_split_count(note.gimmick_type), one);
+        mids.insert(mids.end(), one.begin(), one.end());
+      }
+    }
+    if (any) {
+      const int32_t probe = viewport_.lane_at(point.x, 1);
+      if (split_track_between_lines(mids, viewport_.grid().lane_count, probe, lane, width)) {
+        return;
       }
     }
   }

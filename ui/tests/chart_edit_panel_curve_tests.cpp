@@ -1174,6 +1174,118 @@ void test_split_picker_search_filter() {
   CHECK(filter_split_picker_color_ids("00000").empty());
 }
 
+void expect_track(const std::vector<int32_t>& mids, int32_t probe, int32_t want_lane,
+                  int32_t want_width, const char* label) {
+  int32_t lane = -1;
+  int32_t width = -1;
+  CHECK(wds::ui::split_track_between_lines(mids, 12, probe, lane, width));
+  if (lane != want_lane || width != want_width) {
+    std::fprintf(stderr, "FAIL %s: probe %d got lane=%d width=%d want lane=%d width=%d\n",
+                 label, probe, lane, width, want_lane, want_width);
+    ++g_failures;
+  }
+}
+
+void test_split_track_between_overlapping_lines() {
+  // Split3 lines after lanes 3 and 7; Split2 after lane 5.
+  // Union: tracks [0,4) [4,6) [6,8) [8,12).
+  const std::vector<int32_t> union_mids{3, 7, 5};
+  expect_track(union_mids, 0, 0, 4, "leftmost");
+  expect_track(union_mids, 3, 0, 4, "left track right edge");
+  expect_track(union_mids, 4, 4, 2, "first inner");
+  expect_track(union_mids, 5, 4, 2, "first inner right");
+  expect_track(union_mids, 6, 6, 2, "second inner");
+  expect_track(union_mids, 7, 6, 2, "second inner right");
+  expect_track(union_mids, 8, 8, 4, "rightmost");
+  expect_track(union_mids, 11, 8, 4, "rightmost edge");
+
+  // Single Split3 still partitions into thirds.
+  int32_t lane = -1;
+  int32_t width = -1;
+  CHECK(wds::ui::split_track_for_lane(3, 12, 4, lane, width));
+  CHECK_EQ(lane, 4);
+  CHECK_EQ(width, 4);
+
+  // Duplicate mids from two identical Split3 effects do not shrink tracks.
+  expect_track({3, 7, 3, 7}, 4, 4, 4, "duplicate split3");
+
+  // No interior lines (Split1): whole playfield.
+  expect_track({}, 5, 0, 12, "no lines");
+}
+
+NotationNote make_split_effect(int32_t start_tick, int32_t end_tick,
+                               wds::chart_editor::GimmickType type) {
+  NotationNote note;
+  note.start_tick = start_tick;
+  note.end_tick = end_tick;
+  note.lane = 0;
+  note.width = 12;
+  note.note_type = NoteType::None;
+  note.gimmick_type = type;
+  return note;
+}
+
+void place_tap_at(Harness& h, int32_t tick, int32_t lane) {
+  const auto p = h.at_tick_lane(tick, lane);
+  h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+  h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+}
+
+const NotationNote* last_tap(const std::vector<NotationNote>& notes) {
+  const NotationNote* found = nullptr;
+  for (const auto& n : notes) {
+    if (n.note_type == NoteType::Normal) found = &n;
+  }
+  return found;
+}
+
+void test_split_width_follow_unions_overlapping_effects() {
+  using wds::chart_editor::GimmickType;
+  Harness h;
+  h.panel.set_split_width_follow(true);
+  h.panel.set_default_width(1);
+  h.engine.add_note(make_split_effect(0, 1920, GimmickType::Split3));
+  h.engine.add_note(make_split_effect(0, 1920, GimmickType::Split2));
+  place_tap_at(h, 240, 4);
+  const NotationNote* tap = last_tap(h.engine.document().notes());
+  CHECK(tap != nullptr);
+  if (tap != nullptr) {
+    CHECK_EQ(tap->lane, 4);
+    CHECK_EQ(tap->width, 2);
+  }
+}
+
+void test_split_width_follow_closed_interval_includes_endpoints() {
+  using wds::chart_editor::GimmickType;
+  // Split3 covers [0, 480], Split2 covers [480, 960]. Tick 480 is in both.
+  Harness overlap;
+  overlap.panel.set_split_width_follow(true);
+  overlap.panel.set_default_width(1);
+  overlap.engine.add_note(make_split_effect(0, 480, GimmickType::Split3));
+  overlap.engine.add_note(make_split_effect(480, 960, GimmickType::Split2));
+  place_tap_at(overlap, 480, 4);
+  const NotationNote* at_joint = last_tap(overlap.engine.document().notes());
+  CHECK(at_joint != nullptr);
+  if (at_joint != nullptr) {
+    CHECK_EQ(at_joint->lane, 4);
+    CHECK_EQ(at_joint->width, 2);
+  }
+
+  Harness before;
+  before.panel.set_split_width_follow(true);
+  before.panel.set_default_width(1);
+  before.engine.add_note(make_split_effect(0, 480, GimmickType::Split3));
+  before.engine.add_note(make_split_effect(480, 960, GimmickType::Split2));
+  place_tap_at(before, 240, 4);
+  const NotationNote* only_split3 = last_tap(before.engine.document().notes());
+  CHECK(only_split3 != nullptr);
+  if (only_split3 != nullptr) {
+    CHECK_EQ(only_split3->lane, 4);
+    CHECK_EQ(only_split3->width, 4);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1210,6 +1322,9 @@ int main() {
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   test_split_picker_search_filter();
+  test_split_track_between_overlapping_lines();
+  test_split_width_follow_unions_overlapping_effects();
+  test_split_width_follow_closed_interval_includes_endpoints();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;
