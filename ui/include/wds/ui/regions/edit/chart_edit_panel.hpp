@@ -107,6 +107,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Cleared when document content_generation differs from `content_generation`.
   void set_error_ticks(std::vector<int32_t> ticks, uint64_t content_generation);
   const std::vector<int32_t>& error_ticks() const noexcept;
+  // Red filter on notes / split bodies after a rejected delay edit (2s solid, 1s fade).
+  void flash_offset_violations(std::vector<int32_t> ids);
 
   bool wants_focus() const override { return true; }
   // Timing / split modals own the keyboard so Space/Delete/arrows do not hit global chords.
@@ -297,6 +299,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void layout_popup_rects() const;
   wds::interaction::Rect overlay_host_bounds() const;
   void sync_error_ticks() const;
+  int32_t first_legal_tick() const;
+  float offset_violation_strength() const noexcept;
 
   wds::chart_editor::ChartEditorEngine& engine_;
   mutable EditViewport viewport_;
@@ -305,6 +309,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable std::vector<int32_t> error_ticks_;
   mutable uint64_t error_ticks_generation_ = 0;
   mutable bool error_ticks_armed_ = false;
+  std::unordered_set<int32_t> offset_violation_ids_;
+  float offset_violation_elapsed_ = 0.0f;
   mutable wds::interaction::Rect left_gutter_{};
   mutable wds::interaction::Rect right_gutter_{};       // BPM / meter
   mutable wds::interaction::Rect measure_gutter_{};     // measure index (far right)

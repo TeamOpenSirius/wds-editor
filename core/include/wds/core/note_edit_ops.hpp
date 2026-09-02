@@ -15,7 +15,8 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
 // Split-lane color ids stored in scratch_length are left unchanged.
 void mirror_notes(std::vector<NotationNote>& notes, int32_t lane_count);
 void mirror_notes_about_center(std::vector<NotationNote>& notes);
-bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick);
+bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick,
+                      int32_t min_tick = 0);
 bool nudge_notes_lane(std::vector<NotationNote>& notes, int32_t delta_lane, int32_t lane_count);
 
 // Map a toolbar convert target to the note-family-correct type.

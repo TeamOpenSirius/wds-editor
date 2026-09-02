@@ -122,11 +122,16 @@ EditorToolbar::EditorToolbar(EditorSession& session, ChartEditPanel& edit)
     auto field = std::make_unique<wds::interaction::TextField>("0");
     field->set_text("0");
     field->set_validator([](const std::string& text) {
-      return wds::interaction::parse_non_negative_int(text).has_value();
+      const auto v = wds::interaction::parse_signed_int(text);
+      return v.has_value() && *v >= -60000 && *v <= 60000;
     });
     field->on_commit([this](const std::string& text) {
-      if (auto v = wds::interaction::parse_non_negative_int(text)) {
-        session_.set_offset_ms(std::min<int64_t>(*v, 60000));
+      if (auto v = wds::interaction::parse_signed_int(text)) {
+        const int64_t value = std::clamp<int64_t>(*v, -60000, 60000);
+        if (!session_.set_offset_ms(value)) {
+          static_cast<wds::interaction::TextField*>(delay_field_)->flash_error(2.0f);
+          edit_.flash_offset_violations(session_.last_offset_violation_ids());
+        }
       }
       sync_numeric_fields();
     });
@@ -531,8 +536,8 @@ void EditorToolbar::sync_numeric_fields() const {
   };
   auto* delay = static_cast<wds::interaction::TextField*>(delay_field_);
   if (delay->visual_state() != wds::interaction::WidgetState::Focused) {
-    delay->set_text(
-        std::to_string(static_cast<int>(std::min<int64_t>(session_.offset_ms(), 60000))));
+    delay->set_text(std::to_string(static_cast<int>(
+        std::clamp(session_.offset_ms(), int64_t{-60000}, int64_t{60000}))));
   }
   const auto grid = edit_.viewport().grid();
   set_combo(tick_combo_, std::to_string(grid.visible_hectoms));

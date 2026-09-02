@@ -447,6 +447,62 @@ void test_tick_ms_saturates_nan_inf_and_extremes() {
   CHECK_EQ(milliseconds_to_tick(1500, normal), 480);
 }
 
+void test_negative_offset_legal_tick_and_violation_query() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(timing);
+  CHECK_EQ(first_legal_note_tick(timing), 0);
+
+  ChartDocument doc(timing);
+  CHECK(doc.set_offset_ms(-2000));
+  CHECK_EQ(doc.timing().offset_ms, -2000);
+  CHECK_EQ(first_legal_note_tick(doc.timing()), 1920);
+
+  NotationNote tap_early = make_tap(0, 0);
+  tap_early.id = 1;
+  NotationNote tap_ok = make_tap(1920, 1);
+  tap_ok.id = 2;
+  NotationNote hold;
+  hold.id = 3;
+  hold.note_type = NoteType::Hold;
+  hold.start_tick = 1800;
+  hold.end_tick = 2400;
+  hold.lane = 2;
+  hold.width = 1;
+  NotationNote split;
+  split.id = 4;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.start_tick = 1920;
+  split.end_tick = 2880;
+  NotationNote split_early;
+  split_early.id = 5;
+  split_early.note_type = NoteType::None;
+  split_early.gimmick_type = GimmickType::Split3;
+  split_early.start_tick = 0;
+  split_early.end_tick = 480;
+  NotationNote hispeed;
+  hispeed.id = 6;
+  hispeed.note_type = NoteType::HiSpeed;
+  hispeed.start_tick = 0;
+
+  CHECK(note_intersects_negative_music_time(tap_early, doc.timing()));
+  CHECK(!note_intersects_negative_music_time(tap_ok, doc.timing()));
+  CHECK(note_intersects_negative_music_time(hold, doc.timing()));
+  CHECK(!note_intersects_negative_music_time(split, doc.timing()));
+  CHECK(note_intersects_negative_music_time(split_early, doc.timing()));
+  CHECK(!note_intersects_negative_music_time(hispeed, doc.timing()));
+
+  const auto ids = notes_in_negative_music_time(
+      {tap_early, tap_ok, hold, split, split_early, hispeed}, doc.timing());
+  CHECK_EQ(static_cast<int>(ids.size()), 3);
+  CHECK_EQ(ids[0], 1);
+  CHECK_EQ(ids[1], 3);
+  CHECK_EQ(ids[2], 5);
+}
+
 void test_int32_tick_range_measure_and_snap_no_hang() {
   MusicTiming timing;
   timing.bpm = 120.0;
@@ -6899,6 +6955,7 @@ int main() {
   test_set_timing_rejects_illegal_tpq_atomically();
   test_construct_normalize_fallback_illegal_tpq();
   test_tick_ms_saturates_nan_inf_and_extremes();
+  test_negative_offset_legal_tick_and_violation_query();
   test_int32_tick_range_measure_and_snap_no_hang();
   test_note_id_max_and_auto_exhaust_are_atomic();
   test_set_notes_auto_explicit_collision_is_atomic();

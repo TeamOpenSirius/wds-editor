@@ -1,6 +1,7 @@
 #include "wds/ui/regions/settings/preview_settings_panel.hpp"
 
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
+#include "wds/ui/timeline_wheel.hpp"
 
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/validators.hpp>
@@ -92,12 +93,12 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
   auto seek = std::make_unique<wds::interaction::Slider>();
   seek->set_range(0.0f, 1.0f);
   seek->on_change([this](float fraction) {
-    int64_t duration = preview_.transport().audio().duration_ms();
-    if (duration <= 0) {
-      duration = fallback_chart_duration_ms();
-    }
-    duration = std::max<int64_t>(duration, 1);
-    preview_.transport().request_seek_ms(static_cast<int64_t>(fraction * duration));
+    int64_t start = 0;
+    int64_t end = 1;
+    seek_window_ms(start, end);
+    const int64_t span = std::max<int64_t>(end - start, 1);
+    preview_.transport().request_seek_ms(
+        start + static_cast<int64_t>(fraction * static_cast<double>(span)));
   });
   seek_slider_ = seek.get();
   add_child(std::move(seek));
@@ -233,15 +234,25 @@ int64_t PreviewSettingsPanel::fallback_chart_duration_ms() const {
   if (cached_span_revision_ == rev) {
     return cached_chart_span_ms_;
   }
-  int64_t duration = 1;
+  int64_t duration = 0;
   const auto& timing = doc.timing();
   for (const auto& n : doc.notes()) {
     duration = std::max(duration, n.end_ms(timing) + 1);
     duration = std::max(duration, n.start_ms(timing) + 1);
   }
   cached_span_revision_ = rev;
-  cached_chart_span_ms_ = std::max<int64_t>(duration, 1);
+  cached_chart_span_ms_ = std::max<int64_t>(duration, 0);
   return cached_chart_span_ms_;
+}
+
+void PreviewSettingsPanel::seek_window_ms(int64_t& start_ms, int64_t& end_ms) const {
+  const int64_t doc_origin = timeline_origin_ms(preview_.engine().document().timing().offset_ms);
+  start_ms = std::min(doc_origin, preview_.transport().chart_start_ms());
+  int64_t duration = preview_.transport().audio().duration_ms();
+  if (duration <= 0) {
+    duration = fallback_chart_duration_ms();
+  }
+  end_ms = std::max({duration, int64_t{0}, start_ms + 1});
 }
 
 void PreviewSettingsPanel::layout(const wds::interaction::Rect& parent_bounds) {
@@ -332,14 +343,13 @@ void PreviewSettingsPanel::update(float delta_seconds) {
   if (slider == nullptr || slider->is_dragging()) {
     return;
   }
-  int64_t duration = preview_.transport().audio().duration_ms();
-  if (duration <= 0) {
-    duration = fallback_chart_duration_ms();
-  }
-  duration = std::max<int64_t>(duration, 1);
+  int64_t start = 0;
+  int64_t end = 1;
+  seek_window_ms(start, end);
+  const int64_t span = std::max<int64_t>(end - start, 1);
   const float frac = std::clamp(
-      static_cast<float>(preview_.transport().committed_ms()) / static_cast<float>(duration), 0.0f,
-      1.0f);
+      static_cast<float>(preview_.transport().committed_ms() - start) / static_cast<float>(span),
+      0.0f, 1.0f);
   slider->set_value(frac);
   sync_from_state();
 }

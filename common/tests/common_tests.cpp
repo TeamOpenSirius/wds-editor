@@ -44,7 +44,7 @@ void test_timeline_play_pause_seek() {
   CHECK(tl.position_ms() == 1516);
 
   tl.seek_ms(-10);
-  CHECK(tl.position_ms() == 0);
+  CHECK(tl.position_ms() == -10);
 }
 
 void test_timeline_advance_guards_and_apply() {
@@ -72,7 +72,7 @@ void test_timeline_advance_guards_and_apply() {
   snap.position = Microseconds{-100};
   snap.state = PlaybackState::Playing;
   tl.apply(snap);
-  CHECK(tl.position_ms() == 0);
+  CHECK(tl.position().count() == -100);
   CHECK(tl.playing());
 
   tl.toggle_playback();

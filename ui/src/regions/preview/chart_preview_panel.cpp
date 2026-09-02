@@ -232,7 +232,7 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
     std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
   }
 
-  transport_.request_seek_ms(0);
+  transport_.request_seek_ms(transport_.chart_start_ms());
   ready_ = true;
   return true;
 }
@@ -423,12 +423,15 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   }
   const auto effects = preview_.config().effects_directory;
   const bool was_playing = preserve_playback && transport_.playing();
-  const int64_t pos = preserve_playback ? transport_.committed_ms() : 0;
+  const int64_t pos =
+      preserve_playback ? transport_.committed_ms() : transport_.chart_start_ms();
+  const int64_t kept_offset = transport_.chart_offset_ms();
   transport_.shutdown();
   auto restore_transport = [&](const std::string& path) -> bool {
     if (!transport_.initialize(effects, path)) {
       return false;
     }
+    transport_.set_chart_offset_ms(kept_offset);
     preview_.attach_audio(&transport_.audio());
     transport_.request_seek_ms(pos);
     if (was_playing) {
@@ -448,7 +451,7 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   if (!preserve_playback) {
     // load_chart / publish_snapshot may still use the previous SeekableClock time
     // until the next Transport poll — snap the engine immediately.
-    engine_.seek(0);
+    engine_.seek(transport_.chart_start_ms());
   }
   return true;
 }
@@ -457,9 +460,10 @@ void ChartPreviewPanel::reset_playback() {
   if (!ready_) {
     return;
   }
+  const int64_t start = transport_.chart_start_ms();
   transport_.request_pause();
-  transport_.request_seek_ms(0);
-  engine_.seek(0);
+  transport_.request_seek_ms(start);
+  engine_.seek(start);
 }
 
 bool ChartPreviewPanel::load_chart(const std::string& chart_path,

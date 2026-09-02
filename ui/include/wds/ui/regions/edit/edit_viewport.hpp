@@ -35,9 +35,13 @@ class EditViewport {
     return wds::chart_editor::EditLeadIn::visible_ms_from_hectoms(grid_.visible_hectoms);
   }
 
-  // Earliest scroll: chart t=0 on the judgeline (blank = band below the line).
+  // Earliest scroll: chart start on the judgeline (blank = band below the line).
+  // Positive delay still scrolls into music-before-chart blank; negative delay
+  // can park tick 0 (music_ms = offset) on the judgeline.
   float min_scroll_ms() const noexcept {
-    return -static_cast<float>(visible_ms()) * kJudgelineMarginBottom;
+    const int64_t tick0_ms = wds::chart_editor::tick_to_milliseconds(0, timing_);
+    const float chart_start = static_cast<float>(std::min<int64_t>(0, tick0_ms));
+    return chart_start - static_cast<float>(visible_ms()) * kJudgelineMarginBottom;
   }
   void set_scroll_ms(float ms) { scroll_ms_ = std::max(min_scroll_ms(), ms); }
   void scroll_by_ms(float delta_ms) { set_scroll_ms(scroll_ms_ + delta_ms); }
@@ -60,7 +64,7 @@ class EditViewport {
   int32_t tick_at(float y) const {
     const float ms = ms_at_y(y);
     const int32_t raw = wds::chart_editor::milliseconds_to_tick(
-        static_cast<int64_t>(std::llround(std::max(0.0f, ms))), timing_);
+        static_cast<int64_t>(std::llround(ms)), timing_);
     return wds::chart_editor::snap_tick(static_cast<float>(std::max(0, raw)), grid_);
   }
 
@@ -71,7 +75,7 @@ class EditViewport {
   // Tick span that intersects the current time window (for grid / note culling).
   std::pair<int32_t, int32_t> visible_tick_range() const {
     const float vis = static_cast<float>(visible_ms());
-    const float ms_lo = std::max(0.0f, scroll_ms_);
+    const float ms_lo = scroll_ms_;
     const float ms_hi = std::max(ms_lo, scroll_ms_ + vis);
     const int32_t start = wds::chart_editor::milliseconds_to_tick(
         static_cast<int64_t>(std::llround(ms_lo)), timing_);
@@ -141,7 +145,7 @@ class EditViewport {
   }
 
   void sync_scroll_to_playhead_ms(double now_ms) {
-    set_scroll_ms(scroll_ms_for_playhead(static_cast<float>(std::max(0.0, now_ms))));
+    set_scroll_ms(scroll_ms_for_playhead(static_cast<float>(now_ms)));
   }
 
   void sync_scroll_to_playhead(int32_t now_tick) {

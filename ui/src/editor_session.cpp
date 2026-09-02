@@ -401,8 +401,7 @@ wds::chart_editor::SusChartSaveOptions EditorSession::make_sus_save_options() co
 }
 
 void EditorSession::apply_chart_delay() {
-  // Chart delay: how much later the chart starts than the music (tick0 → offset_ms).
-  // Edit area shows leading blank before notes; BGM still starts at timeline 0.
+  // Chart delay: tick 0 maps to music time offset_ms (may be negative).
   engine().document().set_offset_ms(offset_ms_);
   engine().rebuild_snapshot();
   preview_.transport().set_chart_offset_ms(offset_ms_);
@@ -1012,7 +1011,31 @@ bool EditorSession::import_music(const std::string& path) {
 }
 
 bool EditorSession::set_offset_ms(int64_t offset_ms) {
-  if (!delay_editable() || offset_ms < 0) return false;
+  last_offset_violation_ids_.clear();
+  if (!delay_editable()) return false;
+  if (offset_ms < -60000 || offset_ms > 60000) return false;
+  if (offset_ms == offset_ms_) return true;
+
+  auto collect = [&](const std::vector<wds::chart_editor::NotationNote>& notes,
+                     wds::chart_editor::MusicTiming timing) {
+    timing.offset_ms = offset_ms;
+    return wds::chart_editor::notes_in_negative_music_time(notes, timing);
+  };
+
+  bool blocked = false;
+  auto active_ids = collect(engine().document().notes(), engine().document().timing());
+  if (!active_ids.empty()) {
+    last_offset_violation_ids_ = std::move(active_ids);
+    blocked = true;
+  }
+  for (std::size_t i = 0; i < charts_.size(); ++i) {
+    if (i == active_chart_index_) continue;
+    if (!collect(charts_[i].chart.notes, charts_[i].chart.timing).empty()) {
+      blocked = true;
+    }
+  }
+  if (blocked) return false;
+
   offset_ms_ = offset_ms;
   if (!read_only_) {
     metadata_dirty_ = true;

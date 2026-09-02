@@ -215,6 +215,31 @@ int64_t NotationNote::end_ms(const MusicTiming& timing) const {
   return tick_to_milliseconds(end_tick, timing);
 }
 
+int32_t first_legal_note_tick(const MusicTiming& timing) {
+  return milliseconds_to_tick(0, timing);
+}
+
+bool note_intersects_negative_music_time(const NotationNote& note, const MusicTiming& timing) {
+  if (note.note_type == NoteType::HiSpeed) {
+    return false;
+  }
+  if (!is_split_lane_gimmick(note.gimmick_type) && note.note_type == NoteType::None) {
+    return false;
+  }
+  return note.start_ms(timing) < 0 || note.end_ms(timing) < 0;
+}
+
+std::vector<int32_t> notes_in_negative_music_time(const std::vector<NotationNote>& notes,
+                                                 const MusicTiming& timing) {
+  std::vector<int32_t> ids;
+  for (const auto& note : notes) {
+    if (note_intersects_negative_music_time(note, timing)) {
+      ids.push_back(note.id);
+    }
+  }
+  return ids;
+}
+
 bool is_hold_family(NoteType type) noexcept {
   switch (type) {
     case NoteType::HoldStart:
@@ -700,9 +725,6 @@ bool ChartDocument::set_timing(MusicTiming timing) {
 }
 
 bool ChartDocument::set_offset_ms(int64_t offset_ms) {
-  if (offset_ms < 0) {
-    return false;
-  }
   if (timing_.offset_ms == offset_ms) {
     return true;
   }

@@ -73,12 +73,9 @@ class PlaybackPreviewView {
   // Read-only armed MIXTIME POS count (0 when no audio).
   size_t pending_sfx_sync_count() const noexcept;
 
-  // Chart delay (MusicTiming::offset_ms): chart starts this many ms after music.
-  // Note hit times already include the delay; SFX schedule at the same timeline ms
-  // on the music stream (music t=0 == timeline 0).
-  void set_chart_offset_ms(int64_t offset_ms) noexcept {
-    chart_offset_ms_ = offset_ms < 0 ? 0 : offset_ms;
-  }
+  // Chart delay (MusicTiming::offset_ms): tick 0 maps to this music time.
+  // Negative offset is a silent preroll; SFX still schedule on the music clock.
+  void set_chart_offset_ms(int64_t offset_ms) noexcept { chart_offset_ms_ = offset_ms; }
   int64_t chart_offset_ms() const noexcept { return chart_offset_ms_; }
 
   // Edit visible_ms for lead-in SFX mapping (chart hit → transport time).

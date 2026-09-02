@@ -43,7 +43,9 @@ class ChartEditRenderer {
              const wds::renderer::SkinCatalog* skin = nullptr,
              bool show_beat_grid = true,
              int32_t highlighted_split_note_id = -1,
-             const std::vector<int32_t>& error_ticks = {}) const;
+             const std::vector<int32_t>& error_ticks = {},
+             const std::unordered_set<int32_t>* violation_note_ids = nullptr,
+             float violation_strength = 0.0f) const;
 
   // Drawn after skinned notes so the highlight sits on top of sprites.
   void paint_overlays(wds::interaction::UiPainter& painter, const EditViewport& viewport,
@@ -62,7 +64,9 @@ class ChartEditRenderer {
                             const EditViewport& viewport,
                             const std::vector<wds::chart_editor::NotationNote>& notes,
                             const std::unordered_set<int32_t>& selected, int fb_w, int fb_h,
-                            wds::renderer::ScreenBounds screen) const;
+                            wds::renderer::ScreenBounds screen,
+                            const std::unordered_set<int32_t>* violation_note_ids = nullptr,
+                            float violation_strength = 0.0f) const;
 
   void append_skinned_ghosts(wds::renderer::DrawBatch& batch,
                              const wds::renderer::SkinCatalog& skin,

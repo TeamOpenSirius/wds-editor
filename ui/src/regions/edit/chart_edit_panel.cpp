@@ -33,6 +33,15 @@ using wds::chart_editor::NoteType;
 using wds::interaction::PlaceIntent;
 using wds::interaction::SwipeDirection;
 
+bool clamps_to_nonnegative_music(const NotationNote& note) noexcept {
+  if (note.note_type == NoteType::HiSpeed) return false;
+  if (note.note_type == NoteType::None &&
+      !wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) {
+    return false;
+  }
+  return true;
+}
+
 // Width / hold-time edge hit targets (logical px; flush scales to FB).
 float width_edge_prefer_px() { return wds::interaction::theme::px(6.0f); }
 float width_edge_max_px() { return wds::interaction::theme::px(7.0f); }
@@ -622,6 +631,9 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
       if (split_label_hot_bounds(hit).contains(point)) return;  // existing label → edit, no add ghost
     }
     const int32_t tick = viewport_.tick_at(point.y);
+    if (wds::chart_editor::tick_to_milliseconds(tick, engine_.document().timing()) < 0) {
+      return;
+    }
     const auto placed = split_start_placement(viewport_, left_gutter_, tick, hits);
     gutter_ghosts_.push_back(
         {placed.bounds, kSplitLabelGhostColor, placed.anchor_y, true, true, placed.column});
@@ -756,6 +768,11 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
     ghost_.visible = false;
     return;
   }
+  // Idle: no placement ghost in music t<0. Active PlaceGesture returns earlier.
+  if (mode_ == Mode::Idle && viewport_.ms_at_y(point.y) < 0.0f) {
+    ghost_.visible = false;
+    return;
+  }
 
   ghost_.note = make_base_note(point);
   ghost_.note.note_type = NoteType::Normal;
@@ -764,6 +781,10 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
 
 bool ChartEditPanel::commit_notes(std::vector<NotationNote> notes, const std::string& label) {
   if (!engine_.is_editable() || notes.empty()) return false;
+  const auto& timing = engine_.document().timing();
+  for (const auto& note : notes) {
+    if (wds::chart_editor::note_intersects_negative_music_time(note, timing)) return false;
+  }
   auto cmd = std::make_unique<wds::chart_editor::AddNotesCommand>(std::move(notes), label);
   if (!engine_.execute_command(std::move(cmd))) return false;
   selected_.clear();
@@ -784,6 +805,9 @@ void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
   auto note = make_base_note(point);
   note.note_type = type;
   note.scratch_length = scratch_length;
+  if (wds::chart_editor::note_intersects_negative_music_time(note, engine_.document().timing())) {
+    return;
+  }
   const auto before_ids = [&] {
     std::unordered_set<int32_t> ids;
     for (const auto& n : engine_.document().notes()) ids.insert(n.id);
@@ -1430,6 +1454,13 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     flat.end_tick = flat.start_tick;
     flat.note_type = hold_scratch_ ? NoteType::Flick : NoteType::Normal;
     flat.scratch_length = 0;
+    if (wds::chart_editor::note_intersects_negative_music_time(flat, engine_.document().timing())) {
+      mode_ = Mode::Idle;
+      hold_stars_.clear();
+      clear_hold_chain_state();
+      update_ghost(pointer_);
+      return;
+    }
     const auto before_ids = [&] {
       std::unordered_set<int32_t> ids;
       for (const auto& n : engine_.document().notes()) ids.insert(n.id);
@@ -1788,12 +1819,14 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
     applied_d_tick = wds::chart_editor::selection_drag_tick_delta(
         anchor_it->second.start_tick, d_tick, viewport_.grid());
   }
+  const int32_t min_tick = first_legal_tick();
   for (const auto& [id, orig] : drag_originals_) {
     if (is_visible_mid_star(orig.note_type) || orig.note_type == NoteType::HoldEighth) {
       continue;
     }
-    if (orig.start_tick + applied_d_tick < 0) {
-      applied_d_tick = -orig.start_tick;
+    const int32_t floor = clamps_to_nonnegative_music(orig) ? min_tick : 0;
+    if (orig.start_tick + applied_d_tick < floor) {
+      applied_d_tick = floor - orig.start_tick;
     }
     if (orig.width > 0 && lane_count > 0) {
       const auto [occ_lane, occ_width] = wds::chart_editor::occupied_lane_span(orig);
@@ -1814,7 +1847,8 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
     // offset from that note (same applied_d_tick, no per-note snap).
     const int32_t duration =
         orig.end_tick > orig.start_tick ? (orig.end_tick - orig.start_tick) : 0;
-    const int32_t new_start = std::max(0, orig.start_tick + applied_d_tick);
+    const int32_t floor = clamps_to_nonnegative_music(orig) ? min_tick : 0;
+    const int32_t new_start = std::max(floor, orig.start_tick + applied_d_tick);
     n.start_tick = new_start;
     n.end_tick = duration > 0 ? n.start_tick + duration : n.start_tick;
     n.lane = wds::chart_editor::clamp_lane_for_width(orig.lane + d_lane, orig.width, lane_count);
@@ -1869,13 +1903,17 @@ void ChartEditPanel::sync_split_edge_to_pointer(wds::interaction::Vec2 point) {
   // Hold still on the press tick so a click on the off-line label does not jump.
   if (!split_edge_ever_moved_ && tick == drag_split_press_tick_) return;
   const int32_t min_dur = min_hold_duration_ticks();
+  const int32_t legal = first_legal_tick();
   auto note = engine_.document().find_note(drag_split_note_id_);
   if (!note) return;
   NotationNote updated = *note;
   if (drag_split_is_end_) {
-    updated.end_tick = std::max(updated.start_tick + min_dur, tick);
+    updated.end_tick = std::max({updated.start_tick + min_dur, tick, legal});
   } else {
-    updated.start_tick = std::min(tick, updated.end_tick - min_dur);
+    const int32_t hi = updated.end_tick - min_dur;
+    if (legal <= hi) {
+      updated.start_tick = std::clamp(tick, legal, hi);
+    }
   }
   if (auto orig_it = drag_originals_.find(drag_split_note_id_); orig_it != drag_originals_.end()) {
     if (updated.start_tick != orig_it->second.start_tick ||
@@ -2008,9 +2046,13 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
       continue;
     }
     if (adjust_end_) {
-      n.end_tick = std::max(n.start_tick + min_dur, tick);
+      n.end_tick = std::max({n.start_tick + min_dur, tick, first_legal_tick()});
     } else {
-      n.start_tick = std::min(tick, n.end_tick - min_dur);
+      const int32_t legal = first_legal_tick();
+      const int32_t hi = n.end_tick - min_dur;
+      if (legal <= hi) {
+        n.start_tick = std::clamp(tick, legal, hi);
+      }
       new_start = n.start_tick;
     }
     pending[id] = n;
@@ -2343,7 +2385,10 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
     if (auto n = engine_.document().find_note(id)) notes.push_back(*n);
   }
   auto before = notes;
-  if (delta_tick != 0 && !wds::chart_editor::nudge_notes_time(notes, delta_tick)) return false;
+  if (delta_tick != 0 &&
+      !wds::chart_editor::nudge_notes_time(notes, delta_tick, first_legal_tick())) {
+    return false;
+  }
   if (delta_lane != 0 &&
       !wds::chart_editor::nudge_notes_lane(notes, delta_lane, viewport_.grid().lane_count)) {
     return false;
@@ -2364,9 +2409,23 @@ bool ChartEditPanel::copy_selected() {
 bool ChartEditPanel::paste_at_pointer() {
   if (!engine_.is_editable() || clipboard_.empty()) return false;
   sync_viewport();
-  const int32_t anchor = viewport_.tick_at(pointer_.y);
+  const int32_t legal = first_legal_tick();
+  const int32_t anchor = std::max(legal, viewport_.tick_at(pointer_.y));
   auto pasted = wds::chart_editor::paste_notes_aligned(clipboard_, anchor, viewport_.grid());
-  for (auto& n : pasted) n.id = wds::chart_editor::kAutoNoteId;
+  int32_t shift = 0;
+  for (const auto& n : pasted) {
+    if (!clamps_to_nonnegative_music(n)) continue;
+    if (n.start_tick < legal) shift = std::max(shift, legal - n.start_tick);
+    if (n.end_tick > n.start_tick && n.end_tick < legal) {
+      shift = std::max(shift, legal - n.end_tick);
+    }
+  }
+  for (auto& n : pasted) {
+    n.id = wds::chart_editor::kAutoNoteId;
+    if (shift <= 0) continue;
+    n.start_tick += shift;
+    if (n.end_tick > 0) n.end_tick += shift;
+  }
   const auto before_ids = [&] {
     std::unordered_set<int32_t> ids;
     for (const auto& n : engine_.document().notes()) ids.insert(n.id);
@@ -2553,6 +2612,22 @@ void ChartEditPanel::set_error_ticks(std::vector<int32_t> ticks, uint64_t conten
   error_ticks_armed_ = true;
 }
 
+void ChartEditPanel::flash_offset_violations(std::vector<int32_t> ids) {
+  offset_violation_ids_.clear();
+  offset_violation_ids_.insert(ids.begin(), ids.end());
+  offset_violation_elapsed_ = 0.0f;
+}
+
+int32_t ChartEditPanel::first_legal_tick() const {
+  return wds::chart_editor::first_legal_note_tick(engine_.document().timing());
+}
+
+float ChartEditPanel::offset_violation_strength() const noexcept {
+  if (offset_violation_ids_.empty()) return 0.0f;
+  if (offset_violation_elapsed_ <= 2.0f) return 1.0f;
+  return std::max(0.0f, 1.0f - (offset_violation_elapsed_ - 2.0f));
+}
+
 const std::vector<int32_t>& ChartEditPanel::error_ticks() const noexcept {
   sync_error_ticks();
   return error_ticks_;
@@ -2575,7 +2650,8 @@ void ChartEditPanel::paint(wds::interaction::UiPainter& painter) const {
   paint_gutters(painter);
   renderer_.paint(painter, viewport_, timing, engine_.document().notes(),
                   engine_.preview_config(), selected_, std::nullopt, {}, std::nullopt, skin_,
-                  show_timing_grid, active_split_highlight_id(), error_ticks_);
+                  show_timing_grid, active_split_highlight_id(), error_ticks_,
+                  &offset_violation_ids_, offset_violation_strength());
   // Modals are painted last via paint_popups() from UiManager (above skins).
 }
 
@@ -2904,6 +2980,7 @@ void ChartEditPanel::paint_popup_chrome(wds::interaction::UiPainter& painter) co
 }
 
 void ChartEditPanel::open_split_picker(int32_t tick) {
+  if (wds::chart_editor::tick_to_milliseconds(tick, engine_.document().timing()) < 0) return;
   split_picker_open_ = true;
   split_picker_edit_id_ = -1;
   split_picker_tick_ = tick;
@@ -3316,7 +3393,9 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
   if (event.button == wds::interaction::PointerButton::Middle) return true;
   if (wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
     const int32_t tick = viewport_.tick_at(event.position.y);
-    open_split_picker(tick);
+    if (wds::chart_editor::tick_to_milliseconds(tick, engine_.document().timing()) >= 0) {
+      open_split_picker(tick);
+    }
     return true;
   }
   return true;
@@ -3448,7 +3527,8 @@ void ChartEditPanel::append_skin_batch(wds::renderer::DrawBatch& batch,
   sync_viewport();
   renderer_.append_skinned_backdrop(batch, skin, viewport_, fb_w, fb_h, screen, stage_opacity);
   renderer_.append_skinned_notes(batch, skin, viewport_, engine_.document().notes(), selected_,
-                                 fb_w, fb_h, screen);
+                                 fb_w, fb_h, screen, &offset_violation_ids_,
+                                 offset_violation_strength());
 
   std::optional<EditGhost> ghost;
   const float alpha = mode_ == Mode::PlaceHoldBody ? 0.5f : 0.45f;
@@ -3481,6 +3561,13 @@ void ChartEditPanel::append_skin_batch(wds::renderer::DrawBatch& batch,
 void ChartEditPanel::update(float delta_seconds) {
   wds::interaction::Widget::update(delta_seconds);
   sync_error_ticks();
+  if (!offset_violation_ids_.empty()) {
+    offset_violation_elapsed_ += delta_seconds;
+    if (offset_violation_strength() <= 0.0f) {
+      offset_violation_ids_.clear();
+      offset_violation_elapsed_ = 0.0f;
+    }
+  }
   if (timing_popup_open_) {
     timing_caret_blink_t_ += delta_seconds;
   }
@@ -3842,6 +3929,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
 
   if (!engine_.is_editable()) return;
   if (!wds::interaction::is_place_button(event.button)) return;
+  if (viewport_.ms_at_y(event.position.y) < 0.0f) return;
 
   // Empty area: start placement. Right-click on a selected purple terminal
   // end-cap (including outer-edge slop that hit_test misses) arms chain-extend.
@@ -4928,10 +5016,12 @@ void ChartEditPanel::handle_timeline_wheel(const wds::interaction::ScrollEvent& 
   }
 
   // Scroll = scrub preview timeline by fixed time so motion stays BPM-independent.
-  const int64_t next_ms = std::max<int64_t>(
-      0, engine_.timeline_ms() +
-             timeline_scrub_delta_ms(event.delta_y, viewport_.grid().visible_hectoms,
-                                     wds::interaction::scroll_wheel_speed()));
+  // Floor is the chart start (negative delay), not music t=0.
+  const int64_t next_ms = clamp_scrub_ms(
+      engine_.timeline_ms() +
+          timeline_scrub_delta_ms(event.delta_y, viewport_.grid().visible_hectoms,
+                                  wds::interaction::scroll_wheel_speed()),
+      engine_.document().timing().offset_ms);
   if (seek_ms_) {
     seek_ms_(next_ms);
   } else {

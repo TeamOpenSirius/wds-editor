@@ -300,6 +300,48 @@ void test_no_bgm_wall_clock_without_device() {
          "pause keeps committed position without music");
 }
 
+void test_negative_offset_preroll_without_music() {
+  Transport transport;
+  TestDouble fake;
+  fake.has_music = false;
+  AudioEngineTestAccess::bind(transport.audio(), fake);
+  transport.set_chart_offset_ms(-2000);
+  expect(transport.chart_start_ms() == -2000, "chart start follows negative offset");
+  transport.request_seek_ms(-2000);
+  transport.poll(0);
+  expect(transport.committed_ms() == -2000, "seek keeps negative preroll");
+  transport.request_play();
+  transport.poll(0);
+  expect(transport.committed_ms() == -2000, "play stays at preroll start");
+  const auto mid = transport.poll(1000000);
+  expect(mid.position_ms() == -1000, "wall clock advances through silent preroll");
+  const auto zero = transport.poll(1000000);
+  expect(zero.position_ms() == 0, "preroll crosses music zero");
+  const auto after = transport.poll(250000);
+  expect(after.position_ms() == 250, "continues after music zero");
+}
+
+void test_negative_offset_preroll_with_music() {
+  Transport transport;
+  TestDouble fake;
+  bind_fake_music(transport, fake);
+  transport.set_chart_offset_ms(-500);
+  const int plays0 = fake.play_music_calls;
+  transport.request_seek_ms(-500);
+  transport.poll(0);
+  expect(transport.committed_ms() == -500, "music seek keeps negative committed time");
+  transport.request_play();
+  transport.poll(0);
+  expect(transport.committed_ms() == -500, "play from preroll stays negative");
+  (void)transport.start_pending_music();
+  expect(fake.play_music_calls == plays0, "preroll does not play music");
+  transport.poll(600000);
+  expect(transport.committed_ms() >= 0, "wall clock crosses music zero");
+  expect(transport.music_start_pending(), "music start is armed after zero");
+  (void)transport.start_pending_music();
+  expect(fake.play_music_calls > plays0, "music plays only after crossing zero");
+}
+
 void ui_tick(Transport& transport, int64_t wall_delta_us) {
   transport.poll(wall_delta_us);
   (void)transport.start_pending_music();
@@ -1041,6 +1083,8 @@ int main() {
   test_uninitialized_bind_polls_without_bass();
   test_unbind_restores_ready_and_does_not_dangle();
   test_no_bgm_wall_clock_without_device();
+  test_negative_offset_preroll_without_music();
+  test_negative_offset_preroll_with_music();
 
   {
     Transport pending_t;

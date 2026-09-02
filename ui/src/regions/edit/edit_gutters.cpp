@@ -157,6 +157,7 @@ constexpr Color kMeterLabelColor{0.10f, 0.38f, 0.24f, 0.96f};
 constexpr Color kSubdivLineColor{0.28f, 0.30f, 0.34f, 0.75f};
 constexpr Color kBeatLineColor{0.50f, 0.52f, 0.56f, 0.88f};
 constexpr Color kMeasureLineColor{0.72f, 0.74f, 0.78f, 0.95f};
+constexpr Color kNegativeTimeGridColor{0.10f, 0.10f, 0.12f, 0.85f};
 
 }  // namespace
 
@@ -447,24 +448,31 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
 
   painter.reserve_rects(subdiv_ticks.size() + beat_ticks.size() + measure_ticks.size() + 8);
 
+  auto grid_color = [&](int32_t tick, const Color& normal) -> Color {
+    if (wds::chart_editor::tick_to_milliseconds(tick, timing) < 0) {
+      return kNegativeTimeGridColor;
+    }
+    return normal;
+  };
+
   float last_sub_y = 0.0f;
   bool have_sub = false;
   for (int32_t tick : subdiv_ticks) {
     if (is_in(beat_ticks, tick) || is_in(measure_ticks, tick)) continue;
-    draw_h(tick, 1.0f, kSubdivLineColor, last_sub_y, have_sub);
+    draw_h(tick, 1.0f, grid_color(tick, kSubdivLineColor), last_sub_y, have_sub);
   }
 
   float last_beat_y = 0.0f;
   bool have_beat = false;
   for (int32_t tick : beat_ticks) {
     if (is_in(measure_ticks, tick)) continue;
-    draw_h(tick, 1.5f, kBeatLineColor, last_beat_y, have_beat);
+    draw_h(tick, 1.5f, grid_color(tick, kBeatLineColor), last_beat_y, have_beat);
   }
 
   float last_measure_y = 0.0f;
   bool have_measure = false;
   for (int32_t tick : measure_ticks) {
-    draw_h(tick, 2.5f, kMeasureLineColor, last_measure_y, have_measure);
+    draw_h(tick, 2.5f, grid_color(tick, kMeasureLineColor), last_measure_y, have_measure);
   }
 }
 

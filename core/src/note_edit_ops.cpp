@@ -161,11 +161,22 @@ void mirror_notes_about_center(std::vector<NotationNote>& notes) {
   }
 }
 
-bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick) {
-  for (const auto& note : notes)
-    if (note.start_tick + delta_tick < 0 ||
-        (note.end_tick > 0 && note.end_tick + delta_tick < 0))
+bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick,
+                      int32_t min_tick) {
+  auto time_floor = [&](const NotationNote& note) {
+    if (note.note_type == NoteType::HiSpeed) return 0;
+    if (note.note_type == NoteType::None && !is_split_lane_gimmick(note.gimmick_type)) {
+      return 0;
+    }
+    return min_tick;
+  };
+  for (const auto& note : notes) {
+    const int32_t floor = time_floor(note);
+    if (note.start_tick + delta_tick < floor ||
+        (note.end_tick > 0 && note.end_tick + delta_tick < floor)) {
       return false;
+    }
+  }
   for (auto& note : notes) {
     note.start_tick += delta_tick;
     if (note.end_tick > 0) note.end_tick += delta_tick;

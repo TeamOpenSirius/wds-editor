@@ -61,6 +61,9 @@ class EditorSession {
   bool export_sus_project(const std::string& directory);
   bool import_music(const std::string& path);
   bool set_offset_ms(int64_t offset_ms);
+  const std::vector<int32_t>& last_offset_violation_ids() const noexcept {
+    return last_offset_violation_ids_;
+  }
   bool switch_chart(std::size_t index);
   bool add_chart();
   // Append an existing .wdschart into the current editable project.
@@ -116,6 +119,7 @@ class EditorSession {
   std::vector<ChartSlot> charts_;
   std::size_t active_chart_index_ = 0;
   int64_t offset_ms_ = 0;
+  std::vector<int32_t> last_offset_violation_ids_;
   bool metadata_dirty_ = false;
   bool read_only_ = false;
   bool allow_delay_when_read_only_ = false;

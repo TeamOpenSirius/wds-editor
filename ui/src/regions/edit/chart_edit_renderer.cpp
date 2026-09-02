@@ -10,6 +10,8 @@
 #include <wds/ui/note_skin_mapping.hpp>
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 
+#include <wds/interaction/theme.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -29,7 +31,8 @@ using wds::ui::sprites_for;
 void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::SkinCatalog& skin,
                        const EditViewport& viewport, const wds::chart_editor::NotationNote& note,
                        float alpha, float z, float arrow_z, int fb_w, int fb_h,
-                       wds::renderer::ScreenBounds screen, NoteVisualPass pass) {
+                       wds::renderer::ScreenBounds screen, NoteVisualPass pass, float tint_r,
+                       float tint_g, float tint_b) {
   // Split-lane gimmicks are authoring markers — never draw as flat/hold note art.
   if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
   if (note.note_type == NoteType::HoldEighth || alpha <= 0.0f) return;
@@ -61,8 +64,9 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
         {hold_x, top, hold_w, std::max(1.0f, bottom - top)}, fb_w, fb_h, screen);
     wds::renderer::add_sliced_note(batch, sprites.connection, body, skin.hold_slice_border_l,
                                    skin.hold_slice_border_r, z, alpha, alpha, -1.0f,
-                                   sprites.connection_r, sprites.connection_g,
-                                   sprites.connection_b, viewport.hold_visual_world_width(note.width));
+                                   sprites.connection_r * tint_r, sprites.connection_g * tint_g,
+                                   sprites.connection_b * tint_b,
+                                   viewport.hold_visual_world_width(note.width));
     return;
   }
 
@@ -83,7 +87,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     const float cx = x + width * 0.5f;
     const auto q = wds::interaction::rect_to_quad({cx - tw * 0.5f, y0 - th * 0.5f, tw, th}, fb_w,
                                                   fb_h, screen);
-    batch.add_sprite(sprites.tick, q, z, alpha);
+    batch.add_sprite(sprites.tick, q, z, alpha, tint_r, tint_g, tint_b);
     return;
   }
 
@@ -119,7 +123,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
         std::swap(q.lb, q.rb);
         std::swap(q.lt, q.rt);
       }
-      batch.add_sprite(skin.scratch_arrow, q, arrow_z, alpha * inst.alpha);
+      batch.add_sprite(skin.scratch_arrow, q, arrow_z, alpha * inst.alpha, tint_r, tint_g, tint_b);
     }
   };
 
@@ -139,15 +143,15 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     if (draw_bottom) {
       if (!spr.bottom) return;
       wds::renderer::add_sliced_note(batch, spr.bottom, head, skin.note_slice_border_l,
-                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, 1.0f, 1.0f,
-                                     1.0f, tap_world);
+                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, tint_r,
+                                     tint_g, tint_b, tap_world);
       return;
     }
     if (draw_top) {
       if (!spr.top) return;
       wds::renderer::add_sliced_note(batch, spr.top, head, skin.note_slice_border_l,
-                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, 1.0f, 1.0f,
-                                     1.0f, tap_world);
+                                     skin.note_slice_border_r, z, alpha, alpha, -1.0f, tint_r,
+                                     tint_g, tint_b, tap_world);
       return;
     }
     if (draw_arrow && with_arrow_art) {
@@ -207,7 +211,9 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
                               const wds::renderer::SkinCatalog* skin,
               bool show_beat_grid,
               int32_t highlighted_split_note_id,
-              const std::vector<int32_t>& error_ticks) const {
+              const std::vector<int32_t>& error_ticks,
+              const std::unordered_set<int32_t>* violation_note_ids,
+              float violation_strength) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f, 0.86f);
   const auto& grid = viewport.grid();
@@ -306,6 +312,10 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
         apply_official_split_rgb_opacity(c);
         if (highlight) {
           c = c.lerp({1.0f, 1.0f, 1.0f, c.a}, 0.28f);
+        }
+        if (violation_note_ids != nullptr && violation_strength > 0.0f &&
+            violation_note_ids->count(note.id) != 0) {
+          c = c.lerp(wds::interaction::theme::kError, violation_strength);
         }
         if (skin != nullptr && skin->soft_split_line) {
           painter.sprite_vfade(line, skin->soft_split_line, {c.r, c.g, c.b, 1.0f}, z, a_bot, a_top);
@@ -536,7 +546,8 @@ void ChartEditRenderer::append_skinned_notes(
     wds::renderer::DrawBatch& batch, const wds::renderer::SkinCatalog& skin,
     const EditViewport& viewport, const std::vector<wds::chart_editor::NotationNote>& notes,
     const std::unordered_set<int32_t>& selected, int fb_w, int fb_h,
-    wds::renderer::ScreenBounds screen) const {
+    wds::renderer::ScreenBounds screen, const std::unordered_set<int32_t>* violation_note_ids,
+    float violation_strength) const {
   const auto layer_z = [&](float base, float start_tick) {
     return base - start_tick * depth_.tick_bias;
   };
@@ -571,9 +582,14 @@ void ChartEditRenderer::append_skinned_notes(
       if (!in_window(note)) continue;
       const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
       const float z = layer_z(layer.base_z, static_cast<float>(note.start_tick));
+      wds::interaction::Color tint{1.0f, 1.0f, 1.0f, 1.0f};
+      if (violation_note_ids != nullptr && violation_strength > 0.0f &&
+          violation_note_ids->count(note.id) != 0) {
+        tint = tint.lerp(wds::interaction::theme::kError, violation_strength);
+      }
       draw_skinned_note(batch, skin, viewport, note, alpha, z,
                         layer_z(depth_.flick_arrow, static_cast<float>(note.start_tick)), fb_w,
-                        fb_h, screen, layer.pass);
+                        fb_h, screen, layer.pass, tint.r, tint.g, tint.b);
     }
   }
 }
@@ -602,7 +618,7 @@ void ChartEditRenderer::append_skinned_ghosts(
       draw_skinned_note(batch, skin, viewport, n, g.alpha,
                         layer_z(layer.base_z, static_cast<float>(n.start_tick)),
                         layer_z(depth_.ghost_flick_arrow, static_cast<float>(n.start_tick)), fb_w,
-                        fb_h, screen, layer.pass);
+                        fb_h, screen, layer.pass, 1.0f, 1.0f, 1.0f);
     }
   };
   if (ghost) draw_ghost(*ghost);

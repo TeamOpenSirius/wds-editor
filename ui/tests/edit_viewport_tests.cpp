@@ -105,6 +105,35 @@ int main() {
   assert(std::abs(viewport.scroll_ms() - viewport.min_scroll_ms()) < 0.01f);
   assert(viewport.tick_at(240) == 0);
 
+  // Negative chart delay: tick 0 sits at music_ms = -2000; clicks in t<0 stay on chart ticks.
+  {
+    wds::ui::EditViewport neg;
+    neg.set_bounds({0, 0, 120, 240});
+    wds::chart_editor::EditGridConfig g;
+    g.ticks_per_quarter = 480;
+    g.visible_hectoms = 10;
+    g.subdivisions_per_beat = 4;
+    g.lane_count = 12;
+    neg.set_grid(g);
+    wds::chart_editor::MusicTiming t;
+    t.bpm = 120.0;
+    t.ticks_per_quarter = 480;
+    t.offset_ms = -2000;
+    t.points = {{0, 120.0, 4, 4}};
+    neg.set_timing(t);
+    assert(wds::chart_editor::tick_to_milliseconds(0, t) == -2000);
+    assert(std::abs(neg.y_at(0) - neg.y_at_ms(-2000.0f)) < 0.01f);
+    neg.sync_scroll_to_playhead_ms(-2000.0);
+    assert(std::abs(neg.y_at(0) - neg.judgeline_y()) < 0.01f);
+    const float y_neg = neg.y_at_ms(-1000.0f);
+    const int32_t tick_neg = neg.tick_at(y_neg);
+    const int32_t expected = wds::chart_editor::milliseconds_to_tick(-1000, t);
+    assert(tick_neg == wds::chart_editor::snap_tick(static_cast<float>(expected), g));
+    const int32_t legal = wds::chart_editor::first_legal_note_tick(t);
+    assert(legal > 0);
+    assert(std::abs(neg.y_at(legal) - neg.y_at_ms(0.0f)) < 1.0f);
+  }
+
   // No time remapping / ease: 1:1 scroll, identity preview mapping.
   {
     using wds::chart_editor::EditLeadIn;
@@ -173,6 +202,15 @@ int main() {
   }
 
   // Shared wheel math: 20 hectoms / 1x / +1 notch → -100 ms; scales with range and speed.
+  assert(wds::ui::timeline_origin_ms(3019) == 0);
+  assert(wds::ui::timeline_origin_ms(0) == 0);
+  assert(wds::ui::timeline_origin_ms(-2000) == -2000);
+  assert(wds::ui::clamp_scrub_ms(-10, 0) == 0);
+  assert(wds::ui::clamp_scrub_ms(-10, 500) == 0);
+  assert(wds::ui::clamp_scrub_ms(-500, -2000) == -500);
+  assert(wds::ui::clamp_scrub_ms(-2500, -2000) == -2000);
+  assert(wds::ui::clamp_scrub_ms(100, -2000) == 100);
+
   assert(wds::ui::timeline_scrub_delta_ms(1.0f, 20, 1.0f) == -100);
   assert(wds::ui::timeline_scrub_delta_ms(-1.0f, 20, 1.0f) == 100);
   assert(wds::ui::timeline_scrub_delta_ms(1.0f, 40, 1.0f) == -200);

@@ -100,7 +100,8 @@ class ChartDocument {
   const MusicTiming& timing() const noexcept { return timing_; }
   // Returns false when OfficialPreviewOnly.
   bool set_timing(MusicTiming timing);
-  // Song-level chart delay. Allowed even in OfficialPreviewOnly (preview alignment).
+  // Song-level chart delay (signed). Allowed even in OfficialPreviewOnly
+  // (preview alignment). Negative offset maps tick 0 before music t=0.
   bool set_offset_ms(int64_t offset_ms);
 
   const std::vector<NotationNote>& notes() const noexcept { return notes_; }
@@ -178,6 +179,14 @@ class ChartDocument {
 int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing);
 // Rounded to nearest integer tick (notes are always integer-tick).
 int32_t milliseconds_to_tick(int64_t ms, const MusicTiming& timing);
+
+// First tick whose music time is >= 0 (tick 0 when offset_ms >= 0).
+int32_t first_legal_note_tick(const MusicTiming& timing);
+// HiSpeed ignored. Playable notes and split gimmicks use [start_ms, end_ms]
+// (split fade-in before start_ms is not a violation).
+bool note_intersects_negative_music_time(const NotationNote& note, const MusicTiming& timing);
+std::vector<int32_t> notes_in_negative_music_time(const std::vector<NotationNote>& notes,
+                                                 const MusicTiming& timing);
 
 bool is_hold_family(NoteType type) noexcept;
 bool is_hold_start(NoteType type) noexcept;
