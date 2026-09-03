@@ -156,6 +156,54 @@ void test_normalize_for_save_reassigns_zero_based() {
   CHECK_EQ(doc.next_note_id(), 3);
 }
 
+void test_normalize_remaps_and_rebinds_star_parents() {
+  ChartDocument doc;
+  NotationNote hold = make_tap(0, 6);
+  hold.id = 1147;
+  hold.width = 6;
+  hold.end_tick = 1920;
+  hold.note_type = NoteType::Hold;
+  NotationNote bound = make_tap(480, 6);
+  bound.id = 2000;
+  bound.width = 6;
+  bound.end_tick = 480;
+  bound.note_type = NoteType::Sound;
+  bound.parent_hold_id = 1147;
+  NotationNote dangling = make_tap(960, 6);
+  dangling.id = 2001;
+  dangling.width = 6;
+  dangling.end_tick = 960;
+  dangling.note_type = NoteType::Sound;
+  dangling.parent_hold_id = 99999;
+  NotationNote unbound = make_tap(1440, 6);
+  unbound.id = 2002;
+  unbound.width = 6;
+  unbound.end_tick = 1440;
+  unbound.note_type = NoteType::Sound;
+  unbound.parent_hold_id = kNoBoundHoldId;
+  CHECK(doc.set_notes({hold, bound, dangling, unbound}));
+
+  const auto normalized = doc.normalized_chart();
+  const NotationNote* n_hold = nullptr;
+  int rebound = 0;
+  for (const auto& n : normalized.notes) {
+    if (n.note_type == NoteType::Hold) n_hold = &n;
+    if (n.note_type == NoteType::Sound) {
+      CHECK_EQ(n.parent_hold_id, 0);
+      ++rebound;
+    }
+  }
+  CHECK(n_hold != nullptr);
+  if (n_hold != nullptr) CHECK_EQ(n_hold->id, 0);
+  CHECK_EQ(rebound, 3);
+
+  CHECK(doc.normalize_for_save());
+  CHECK_EQ(doc.find_note(0)->note_type, NoteType::Hold);
+  for (const auto& n : doc.notes()) {
+    if (n.note_type == NoteType::Sound) CHECK_EQ(n.parent_hold_id, 0);
+  }
+}
+
 void test_save_reload_normalizes_and_reloads() {
   ChartEditorEngine engine;
 
@@ -4188,6 +4236,62 @@ void test_star_hold_bind_legacy_uniqueness_and_attachment() {
   CHECK(star_parent != hold_b_id);
 }
 
+void test_load_v5_rebinds_dangling_and_unbound_star_parents() {
+  const fs::path path = temp_chart_path("v5_dangling_star_parent.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 5\nBPM 179\nTPQ 480\nTIMING 1\nT 0 179 4 4 3\nNOTES 4\n"
+           "N 681 126240 130320 100 6 6 0 0 -1\n"
+           "N 683 126720 126720 30 6 6 0 0 1147\n"
+           "N 684 126960 126960 30 6 6 0 0 -1\n"
+           "N 10 0 0 10 0 1 0 0 -1\n"
+           "CONCURRENT 0\nEND\n";
+  }
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int stars = 0;
+  for (const auto& n : loaded.notes) {
+    if (n.note_type != NoteType::Sound) continue;
+    ++stars;
+    CHECK_EQ(n.parent_hold_id, 681);
+  }
+  CHECK_EQ(stars, 2);
+
+  ChartDocument doc;
+  doc.load_from_chart(loaded);
+  const auto saved = doc.normalized_chart();
+  const NotationNote* hold = nullptr;
+  for (const auto& n : saved.notes) {
+    if (n.note_type == NoteType::Hold) hold = &n;
+  }
+  CHECK(hold != nullptr);
+  int saved_stars = 0;
+  for (const auto& n : saved.notes) {
+    if (n.note_type != NoteType::Sound) continue;
+    ++saved_stars;
+    if (hold != nullptr) CHECK_EQ(n.parent_hold_id, hold->id);
+  }
+  CHECK_EQ(saved_stars, 2);
+
+  const fs::path roundtrip = temp_chart_path("v5_rebound_roundtrip.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(saved, roundtrip.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart again;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(roundtrip.string(), again).error),
+           static_cast<int>(SerializeError::Ok));
+  const NotationNote* again_hold = nullptr;
+  for (const auto& n : again.notes) {
+    if (n.note_type == NoteType::Hold) again_hold = &n;
+  }
+  CHECK(again_hold != nullptr);
+  for (const auto& n : again.notes) {
+    if (n.note_type == NoteType::Sound && again_hold != nullptr) {
+      CHECK_EQ(n.parent_hold_id, again_hold->id);
+    }
+  }
+}
+
 int count_holds_with_tail(const NotationChart& chart) {
   int n = 0;
   for (const auto& note : chart.notes) {
@@ -7139,6 +7243,7 @@ int main() {
   test_resolve_convert_scratch_head_stays_official();
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
+  test_normalize_remaps_and_rebinds_star_parents();
   test_save_reload_normalizes_and_reloads();
   test_save_success_preserves_history_and_ids();
   test_replace_file_atomic_preserves_target_on_failure();
@@ -7219,6 +7324,7 @@ int main() {
   test_paired_hold_head_tolerates_subtick_drift();
   test_recompute_hold_eighths_respects_fractional_star();
   test_star_hold_bind_legacy_uniqueness_and_attachment();
+  test_load_v5_rebinds_dangling_and_unbound_star_parents();
   test_timing_tick_ms_roundtrip_multi_bpm();
   test_timing_first_bpm_is_song_start_without_tick0();
   test_hold_span_stale_skips_rebuild_without_holds();

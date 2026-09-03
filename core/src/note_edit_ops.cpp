@@ -602,8 +602,20 @@ bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes) {
 }
 
 void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes) {
+  std::unordered_map<int32_t, const NotationNote*> by_id;
+  by_id.reserve(notes.size());
+  for (const auto& note : notes) {
+    if (note.id >= 0) by_id[note.id] = &note;
+  }
   for (auto& star : notes) {
-    if (!is_visible_hold_mid_star(star.note_type) || star.parent_hold_id >= 0) continue;
+    if (!is_visible_hold_mid_star(star.note_type)) continue;
+    if (star.parent_hold_id >= 0) {
+      const auto it = by_id.find(star.parent_hold_id);
+      if (it == by_id.end() || !is_bindable_hold_body(it->second->note_type)) {
+        star.parent_hold_id = kNoBoundHoldId;
+      }
+    }
+    if (star.parent_hold_id >= 0) continue;
     for (const auto& hold : notes) {
       if (hold.id < 0 || !star_matches_hold_for_legacy_bind(star, hold)) continue;
       star.parent_hold_id = hold.id;

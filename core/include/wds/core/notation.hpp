@@ -138,11 +138,13 @@ class ChartDocument {
   // Allowed in read-only (derived view, not authoring).
   void rebuild_concurrent_lines();
 
-  // Sort notes by time, reassign ids 0..N-1, rebuild indexes. Used before save.
+  // Infer unbound star binds, sort notes, reassign ids 0..N-1 (and remap
+  // parent_hold_id), rebuild indexes. Used before save.
   // Returns false when read-only (does not mutate).
   bool normalize_for_save();
 
   // Normalized copy suitable for disk export without mutating this document.
+  // Star binds are inferred, then ids / parent_hold_id are rewritten densely.
   NotationChart normalized_chart() const;
 
   NotationChart to_notation_chart() const;

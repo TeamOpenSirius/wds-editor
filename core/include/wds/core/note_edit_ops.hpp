@@ -109,7 +109,9 @@ bool hold_has_visible_star_at(const ChartDocument& doc, int32_t hold_id, int32_t
 // True when two bound visible stars share a parent hold id and start_tick.
 bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes);
 
-// v1–v4 wdschart: bind unbound visible stars when type, open span, and exact lanes match.
+// Clear missing / non-hold parent_hold_id, then bind remaining unbound visible
+// stars when type, open span, and exact lanes match. Used on load and before
+// save-time id normalization.
 void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes);
 
 // Returns copies shifted so the earliest source note starts at snapped anchor_tick.
