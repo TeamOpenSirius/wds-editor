@@ -501,11 +501,11 @@ class VulkanRenderer {
 
   // Upload a standalone RGBA8 texture (full UV 0..1). Also used by atlas bake.
   // Submit is asynchronous: a successful queue submit publishes TextureInfo
-  // immediately (no per-texture host wait). Staging is filled in ≤4MiB host maps
-  // after temporarily unmapping the persistent vertex rings (some Windows ICDs
-  // refuse a 4th vkMapMemory with VK_ERROR_MEMORY_MAP_FAILED).
-  // The same graphics queue orders a later draw submit after this upload.
-  // draw_frame blocking-drains any still-pending upload fences before sampling.
+  // immediately (no per-texture host wait). Staging is filled in ≤16MiB host maps
+  // after unmapping the persistent vertex rings (some Windows ICDs refuse a
+  // further vkMapMemory with VK_ERROR_MEMORY_MAP_FAILED; 32MiB maps also fail).
+  // Consecutive uploads leave the rings unmapped so later submits overlap GPU
+  // copies; draw_frame remaps and then blocking-drains pending upload fences.
   // `nearest`: UI font atlases — NEAREST avoids LINEAR fringe that reads as bold text.
   TextureInfo create_texture_rgba(const unsigned char* pixels, int width, int height,
                                   bool nearest = false);

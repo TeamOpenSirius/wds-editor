@@ -80,10 +80,13 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
 
   const std::string p_hidden =
       queue_optional(cache, dir, {"img_game_common_start_line_500.png"});
-  const std::string p_split1 = queue_optional(cache, dir, {"Sirius Split Line _1.png"});
-  const std::string p_split2 = queue_optional(cache, dir, {"Sirius Split Line _2.png"});
-
-  split_lines.queue_all(cache, skins_directory);
+  // Startup skip (2026-09-04): Sirius Split Line _*.png are 1×256 placeholders.
+  // Preview/edit/picker draw procedural soft_split_line × official LineColor.
+  // SplitLineSkinBank::texture_for / suffixes_for have no callers. Keep the
+  // loaders below commented — do not delete — in case a suffix-sampled path returns.
+  // const std::string p_split1 = queue_optional(cache, dir, {"Sirius Split Line _1.png"});
+  // const std::string p_split2 = queue_optional(cache, dir, {"Sirius Split Line _2.png"});
+  // split_lines.queue_all(cache, skins_directory);
 
   const std::string p_auto = queue_optional(cache, dir, {"Sirius Judgment Auto.png"});
 
@@ -248,9 +251,10 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   tick_blue = cache.get(p_tick_b);
   tick_purple = cache.get(p_tick_p);
   hidden_line = cache.get(p_hidden);
-  split_line_1 = cache.get(p_split1);
-  split_line_2 = cache.get(p_split2);
-  split_lines.bind_after_bake(cache, skins_directory);
+  // See queue_all skip above. Fallbacks stay empty; soft_split_line is always baked.
+  // split_line_1 = cache.get(p_split1);
+  // split_line_2 = cache.get(p_split2);
+  // split_lines.bind_after_bake(cache, skins_directory);
   judge_auto = cache.get(p_auto);
   effect_linear_bg = {};
   effect_linear_star = {};

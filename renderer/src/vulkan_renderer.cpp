@@ -1365,6 +1365,10 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t bytes) {
   FrameVertexBuffer& slot = frame_vertices[frame];
   if (bytes <= slot.capacity_bytes && slot.buffer != VK_NULL_HANDLE) {
+    // Uploads may leave rings unmapped; restore this slot before draw memcpy.
+    if (slot.mapped == nullptr) {
+      return remap_frame_vertices() && slot.mapped != nullptr;
+    }
     return true;
   }
 
@@ -1660,16 +1664,9 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
   }
 
   unmap_frame_vertices();
-  struct RemapVertices {
-    Impl* impl = nullptr;
-    bool ok = true;
-    explicit RemapVertices(Impl* i) : impl(i) {}
-    ~RemapVertices() {
-      if (impl != nullptr) {
-        ok = impl->remap_frame_vertices();
-      }
-    }
-  } remap_guard(this);
+  // Leave rings unmapped. Consecutive create_texture_rgba calls then share the
+  // ICD map budget and can QueueSubmit without a remap/unmap pair each time.
+  // draw_frame / ensure_frame_vertex_capacity remap before writing vertices.
 
   std::vector<VkBufferImageCopy> copy_regions;
   copy_regions.reserve(staging_copy_chunk_count(image_bytes, chunk_bytes));
@@ -2894,6 +2891,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   const size_t total_verts =
       batch.vertex_count() + mid_verts + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
+  if (!impl_->remap_frame_vertices()) {
+    return false;
+  }
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
     // Fence still signaled (not reset yet). Drain the acquire semaphore only.
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
