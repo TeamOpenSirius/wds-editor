@@ -5,10 +5,14 @@
 
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace wds::chart_editor {
 
+// Convert one note to any target type. Extra fields are dropped; missing fields
+// get defaults (non-hold → hold body duration is one beat).
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter);
 // Mirror lanes horizontally. Also negates scratch_length (flick / ScratchHold /
 // JumpScratch direction·span) so arrows and end covers flip with the body.
@@ -21,14 +25,23 @@ bool nudge_notes_time(std::vector<NotationNote>& notes, int32_t delta_tick,
                       int32_t min_tick = 0);
 bool nudge_notes_lane(std::vector<NotationNote>& notes, int32_t delta_lane, int32_t lane_count);
 
-// Map a toolbar convert target to the note-family-correct type.
-// Hold heads (when converted alone): only legal head retints
-// (HoldStart↔CriticalHoldStart / ScratchHoldStart↔ScratchCriticalHoldStart); illegal
-// targets keep the current type. Hold bodies under Tap/Critical/HoldStart/Flick collapse
-// to that instantaneous type (UI deletes the paired head). ConvertHold /
-// ConvertScratchHold force the matching hold-body type.
+// Toolbar convert target is used as-is: every authored type can become every
+// other type. Extra fields / defaults are applied by convert_note_type.
 NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& note,
                                 NoteType target) noexcept;
+
+struct ConvertNotesResult {
+  std::unordered_map<int32_t, NotationNote> updates;
+  std::vector<NotationNote> removals;
+};
+
+// Selection convert: any type → any type. Hold → another hold remaps attached
+// visible stars (Sound ↔ ScratchSound) and the paired head family. Hold →
+// non-hold deletes unselected stars / eighths / the paired head; selected stars
+// convert to the target instead of being deleted.
+ConvertNotesResult convert_notes_in_selection(
+    const ChartDocument& doc, const std::unordered_set<int32_t>& selected, NoteType target,
+    std::optional<int32_t> scratch_length = std::nullopt);
 
 // Replaces HoldEighth notes bound to this hold (unbound open-span fallback).
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold);

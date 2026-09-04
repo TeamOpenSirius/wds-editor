@@ -2205,6 +2205,27 @@ void test_edit_grid_and_note_operations() {
   CHECK_EQ(static_cast<int>(back_to_tap.note_type), static_cast<int>(NoteType::Normal));
   CHECK_EQ(back_to_tap.scratch_length, 0);
 
+  // Flick direction is not a hold end-span: Flick → Hold drops it.
+  NotationNote flick_left = make_tap(240, 2);
+  flick_left.note_type = NoteType::Flick;
+  flick_left.scratch_length = -1;
+  const NotationNote flick_to_hold = convert_note_type(flick_left, NoteType::Hold, 480);
+  CHECK_EQ(static_cast<int>(flick_to_hold.note_type), static_cast<int>(NoteType::Hold));
+  CHECK_EQ(flick_to_hold.end_tick, 720);
+  CHECK_EQ(flick_to_hold.scratch_length, 0);
+
+  // Nontail bodies keep duration when staying a hold; collapse when leaving.
+  NotationNote nontail = make_tap(0, 3);
+  nontail.note_type = NoteType::NontailHold;
+  nontail.end_tick = 1920;
+  const NotationNote nontail_to_hold = convert_note_type(nontail, NoteType::Hold, 480);
+  CHECK_EQ(static_cast<int>(nontail_to_hold.note_type), static_cast<int>(NoteType::Hold));
+  CHECK_EQ(nontail_to_hold.end_tick, 1920);
+  const NotationNote nontail_to_tap = convert_note_type(nontail, NoteType::Normal, 480);
+  CHECK_EQ(nontail_to_tap.end_tick, nontail_to_tap.start_tick);
+  const NotationNote tap_to_nontail = convert_note_type(make_tap(100, 1), NoteType::NontailHold, 480);
+  CHECK_EQ(tap_to_nontail.end_tick, 580);
+
   // Lone tap must resolve ConvertHold → Hold (not HoldStart via legacy-head false positive).
   {
     ChartDocument resolve_doc;
@@ -5728,7 +5749,7 @@ void test_hold_span_stale_skips_rebuild_without_holds() {
   CHECK_EQ(doc.index().max_hold_span_ms(), 0);
 }
 
-void test_resolve_convert_scratch_head_stays_official() {
+void test_resolve_convert_target_is_identity() {
   ChartDocument doc;
   NotationNote body = make_tap(0, 2);
   body.id = 1;
@@ -5742,30 +5763,124 @@ void test_resolve_convert_scratch_head_stays_official() {
   head.note_type = NoteType::ScratchHoldStart;
   CHECK(doc.add_note(head) == 2);
 
-  // Head-only: legal retints stay in the ScratchHold head family.
-  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Critical) ==
-        NoteType::ScratchCriticalHoldStart);
-  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Normal) ==
-        NoteType::ScratchHoldStart);
-  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::HoldStart) ==
-        NoteType::ScratchHoldStart);
-  // Scratch head cannot become HoldStart while body stays ScratchHold.
-  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Hold) ==
-        NoteType::ScratchHoldStart);
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Critical) == NoteType::Critical);
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Normal) == NoteType::Normal);
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::HoldStart) == NoteType::HoldStart);
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Hold) == NoteType::Hold);
   CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::ScratchHold) ==
-        NoteType::ScratchHoldStart);
-  // Flick is not a legal head conversion → keep current type.
-  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Flick) ==
-        NoteType::ScratchHoldStart);
-  // Bodies still collapse to the instantaneous / forced body type.
+        NoteType::ScratchHold);
+  CHECK(resolve_convert_target(doc, *doc.find_note(2), NoteType::Flick) == NoteType::Flick);
   CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Hold) == NoteType::Hold);
   CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::ScratchHold) ==
         NoteType::ScratchHold);
   CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Normal) == NoteType::Normal);
   CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Critical) == NoteType::Critical);
-  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::HoldStart) ==
-        NoteType::ScratchHoldStart);
+  CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::HoldStart) == NoteType::HoldStart);
   CHECK(resolve_convert_target(doc, *doc.find_note(1), NoteType::Flick) == NoteType::Flick);
+}
+
+void test_convert_notes_in_selection_hold_stars() {
+  ChartDocument doc;
+  NotationNote body = make_tap(0, 2);
+  body.id = 1;
+  body.width = 2;
+  body.end_tick = 960;
+  body.note_type = NoteType::Hold;
+  CHECK(doc.add_note(body) == 1);
+  NotationNote head = make_tap(0, 2);
+  head.id = 2;
+  head.width = 2;
+  head.note_type = NoteType::CriticalHoldStart;
+  CHECK(doc.add_note(head) == 2);
+  NotationNote star_a = make_tap(240, 2);
+  star_a.id = 3;
+  star_a.width = 2;
+  star_a.note_type = NoteType::Sound;
+  star_a.parent_hold_id = 1;
+  CHECK(doc.add_note(star_a) == 3);
+  NotationNote star_b = make_tap(480, 2);
+  star_b.id = 4;
+  star_b.width = 2;
+  star_b.note_type = NoteType::Sound;
+  star_b.parent_hold_id = 1;
+  CHECK(doc.add_note(star_b) == 4);
+
+  {
+    const auto to_scratch =
+        convert_notes_in_selection(doc, {1}, NoteType::ScratchHold);
+    CHECK(to_scratch.removals.empty());
+    CHECK(to_scratch.updates.at(1).note_type == NoteType::ScratchHold);
+    CHECK_EQ(to_scratch.updates.at(1).end_tick, 960);
+    CHECK(to_scratch.updates.at(2).note_type == NoteType::ScratchCriticalHoldStart);
+    CHECK(to_scratch.updates.at(3).note_type == NoteType::ScratchSound);
+    CHECK_EQ(to_scratch.updates.at(3).parent_hold_id, 1);
+    CHECK(to_scratch.updates.at(4).note_type == NoteType::ScratchSound);
+  }
+
+  {
+    const auto collapse = convert_notes_in_selection(doc, {1}, NoteType::Normal);
+    CHECK(collapse.updates.at(1).note_type == NoteType::Normal);
+    CHECK_EQ(collapse.updates.at(1).end_tick, 0);
+    CHECK(collapse.updates.find(3) == collapse.updates.end());
+    CHECK(collapse.updates.find(4) == collapse.updates.end());
+    CHECK_EQ(static_cast<int>(collapse.removals.size()), 3);
+    std::unordered_set<int32_t> removed;
+    for (const auto& n : collapse.removals) removed.insert(n.id);
+    CHECK(removed.count(2));
+    CHECK(removed.count(3));
+    CHECK(removed.count(4));
+  }
+
+  {
+    const auto keep_star = convert_notes_in_selection(doc, {1, 3}, NoteType::Flick);
+    CHECK(keep_star.updates.at(1).note_type == NoteType::Flick);
+    CHECK(keep_star.updates.at(3).note_type == NoteType::Flick);
+    CHECK_EQ(keep_star.updates.at(3).parent_hold_id, kNoBoundHoldId);
+    std::unordered_set<int32_t> removed;
+    for (const auto& n : keep_star.removals) removed.insert(n.id);
+    CHECK(removed.count(2));
+    CHECK(removed.count(4));
+    CHECK(!removed.count(3));
+  }
+
+  {
+    const auto star_only = convert_notes_in_selection(doc, {3}, NoteType::Normal);
+    CHECK(star_only.removals.empty());
+    CHECK(star_only.updates.at(3).note_type == NoteType::Normal);
+    CHECK(star_only.updates.find(1) == star_only.updates.end());
+    CHECK(doc.find_note(4)->note_type == NoteType::Sound);
+  }
+
+  {
+    const auto head_to_flick = convert_notes_in_selection(doc, {2}, NoteType::Flick);
+    CHECK(head_to_flick.removals.empty());
+    CHECK(head_to_flick.updates.at(2).note_type == NoteType::Flick);
+    CHECK(head_to_flick.updates.find(1) == head_to_flick.updates.end());
+  }
+
+  ChartDocument scratch_doc;
+  NotationNote sbody = make_tap(0, 1);
+  sbody.id = 10;
+  sbody.width = 2;
+  sbody.end_tick = 720;
+  sbody.note_type = NoteType::ScratchHold;
+  CHECK(scratch_doc.add_note(sbody) == 10);
+  NotationNote shead = make_tap(0, 1);
+  shead.id = 11;
+  shead.width = 2;
+  shead.note_type = NoteType::ScratchHoldStart;
+  CHECK(scratch_doc.add_note(shead) == 11);
+  NotationNote sstar = make_tap(360, 1);
+  sstar.id = 12;
+  sstar.width = 2;
+  sstar.note_type = NoteType::ScratchSound;
+  sstar.parent_hold_id = 10;
+  CHECK(scratch_doc.add_note(sstar) == 12);
+  const auto to_hold = convert_notes_in_selection(scratch_doc, {10}, NoteType::Hold);
+  CHECK(to_hold.updates.at(10).note_type == NoteType::Hold);
+  CHECK(to_hold.updates.at(11).note_type == NoteType::HoldStart);
+  CHECK(to_hold.updates.at(12).note_type == NoteType::Sound);
+  CHECK_EQ(to_hold.updates.at(12).parent_hold_id, 10);
 }
 
 NotationNote note_with_id(int32_t id, int32_t start_tick, int32_t lane) {
@@ -7240,7 +7355,8 @@ int main() {
   test_scratch_hold_auto_head_is_scratch_hold_start();
   test_repair_legacy_scratch_hold_heads();
   test_hold_head_pairs_exact_span_and_family();
-  test_resolve_convert_scratch_head_stays_official();
+  test_resolve_convert_target_is_identity();
+  test_convert_notes_in_selection_hold_stars();
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
   test_normalize_remaps_and_rebinds_star_parents();

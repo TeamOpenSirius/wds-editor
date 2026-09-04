@@ -23,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace wds::ui {
@@ -2237,163 +2238,34 @@ void ChartEditPanel::finish_hold_adjust() {
 bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> scratch_length) {
   if (!engine_.is_editable() || selected_.empty()) return false;
   const auto& doc = engine_.document();
-
-  // Tap / Critical / HoldStart / Flick on a selected hold *body* collapses the hold
-  // (delete head, convert body). Head-only selection only retints the head legally.
-  const bool collapse_hold = target == NoteType::Normal || target == NoteType::Critical ||
-                             target == NoteType::HoldStart || target == NoteType::Flick;
-  // Hold / ScratchHold: when a body is selected, retarget the whole head↔body pair.
-  // Head-only selection only changes the head type (if legal for that body family).
-  const bool sync_hold_family =
-      target == NoteType::Hold || target == NoteType::ScratchHold;
-
-  std::unordered_set<int32_t> ids;
-  std::vector<NotationNote> remove_notes;
-  std::unordered_set<int32_t> remove_ids;
-
-  auto queue_remove = [&](const NotationNote& note) {
-    if (remove_ids.insert(note.id).second) remove_notes.push_back(note);
-  };
-
-  const bool any_body_selected = [&] {
-    for (const int32_t id : selected_) {
-      auto note = doc.find_note(id);
-      if (note && wds::chart_editor::is_hold_with_tail(note->note_type)) return true;
-    }
-    return false;
-  }();
-
-  if (collapse_hold) {
-    std::unordered_set<int32_t> collapse_bodies;
-    for (const int32_t id : selected_) {
-      auto note = doc.find_note(id);
-      if (!note) continue;
-      if (wds::chart_editor::is_hold_with_tail(note->note_type)) {
-        collapse_bodies.insert(note->id);
-        ids.insert(note->id);
-        continue;
-      }
-      if (auto body = wds::chart_editor::paired_hold_body_for(doc, *note)) {
-        // Selected a paired head.
-        if (selected_.count(body->id)) {
-          // Body also selected → collapse via body (head deleted below).
-          collapse_bodies.insert(body->id);
-          ids.insert(body->id);
-        } else {
-          // Head only → legal head retint; keep the hold body.
-          ids.insert(note->id);
-        }
-        continue;
-      }
-      // Tap / flick / orphan head: convert in place.
-      ids.insert(note->id);
-    }
-    for (const int32_t body_id : collapse_bodies) {
-      auto body = doc.find_note(body_id);
-      if (!body) continue;
-      for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *body)) {
-        queue_remove(dep);
-      }
-      if (auto head = wds::chart_editor::paired_hold_head_for(doc, *body)) {
-        queue_remove(*head);
-      }
-    }
-    for (const int32_t id : remove_ids) ids.erase(id);
-  } else if (sync_hold_family) {
-    ids = selected_;
-    if (any_body_selected) {
-      for (const int32_t id : selected_) {
-        auto note = doc.find_note(id);
-        if (!note) continue;
-        if (auto body = wds::chart_editor::paired_hold_body_for(doc, *note)) {
-          ids.insert(body->id);
-        }
-        if (auto head = wds::chart_editor::paired_hold_head_for(doc, *note)) {
-          ids.insert(head->id);
-        }
-      }
-    }
-  } else {
-    ids = selected_;
-  }
-
-  std::unordered_map<int32_t, NotationNote> after_by_id;
-  const int tpq = doc.timing().ticks_per_quarter;
-  for (const int32_t id : ids) {
-    auto note = doc.find_note(id);
-    if (!note) continue;
-    const NoteType resolved = wds::chart_editor::resolve_convert_target(doc, *note, target);
-    auto after = wds::chart_editor::convert_note_type(*note, resolved, tpq);
-    if (scratch_length.has_value()) {
-      const int32_t dir = *scratch_length;
-      if (after.note_type == NoteType::Flick) {
-        after.scratch_length = dir < 0 ? -1 : (dir > 0 ? 1 : 0);
-      } else if (wds::chart_editor::is_scratch_hold_body(after.note_type)) {
-        // Equal-width ScratchHold encodes direction as 0 / ±width.
-        after.scratch_length = dir < 0 ? -after.width : (dir > 0 ? after.width : 0);
-      }
-    }
-    after_by_id[id] = after;
-  }
-
-  // When Hold↔ScratchHold converts include a body, force paired heads to the matching
-  // start type (head-only path above keeps illegal family flips as no-ops).
-  if (sync_hold_family && any_body_selected) {
-    for (auto& [id, after] : after_by_id) {
-      if (!wds::chart_editor::is_hold_with_tail(after.note_type)) continue;
-      auto before = doc.find_note(id);
-      if (!before) continue;
-      if (auto head = wds::chart_editor::paired_hold_head_for(doc, *before)) {
-        auto it = after_by_id.find(head->id);
-        if (it == after_by_id.end()) continue;
-        it->second.note_type = wds::chart_editor::is_scratch_hold_body(after.note_type)
-                                   ? NoteType::ScratchHoldStart
-                                   : NoteType::HoldStart;
-      }
-    }
-  }
-
-  // Safety net: if a hold body still leaves the hold family, drop leftovers.
-  for (const auto& [id, after] : after_by_id) {
-    auto before = doc.find_note(id);
-    if (!before) continue;
-    if (!wds::chart_editor::is_hold_with_tail(before->note_type) ||
-        wds::chart_editor::is_hold_with_tail(after.note_type)) {
-      continue;
-    }
-    for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *before)) {
-      queue_remove(dep);
-    }
-    if (auto head = wds::chart_editor::paired_hold_head_for(doc, *before)) {
-      queue_remove(*head);
-    }
-  }
-  for (const int32_t id : remove_ids) after_by_id.erase(id);
+  const auto planned =
+      wds::chart_editor::convert_notes_in_selection(doc, selected_, target, scratch_length);
 
   std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
-  for (const auto& [id, after] : after_by_id) {
+  for (const auto& [id, after] : planned.updates) {
     auto before = doc.find_note(id);
     if (!before) continue;
     if (after.note_type != before->note_type || after.end_tick != before->end_tick ||
         after.scratch_length != before->scratch_length ||
-        after.gimmick_type != before->gimmick_type) {
+        after.gimmick_type != before->gimmick_type ||
+        after.parent_hold_id != before->parent_hold_id) {
       changes[id] = {*before, after};
     }
   }
-  if (changes.empty() && remove_notes.empty()) return false;
+  if (changes.empty() && planned.removals.empty()) return false;
 
   auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Convert notes");
   if (!changes.empty()) {
     composite->add(
         std::make_unique<wds::chart_editor::UpdateNotesCommand>(std::move(changes), "Convert notes"));
   }
-  if (!remove_notes.empty()) {
+  if (!planned.removals.empty()) {
     composite->add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(
-        std::move(remove_notes), "Convert cleanup"));
+        planned.removals, "Convert cleanup"));
   }
   if (!engine_.execute_command(std::move(composite))) return false;
 
-  for (const int32_t id : remove_ids) selected_.erase(id);
+  for (const auto& removed : planned.removals) selected_.erase(removed.id);
 
   // Converted hold bodies stay headless by default (unlike place-hold). Still refresh
   // eighths for any body that remains / becomes a hold — inside one undoable command.
@@ -2401,7 +2273,7 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
     const auto before = engine_.document().notes();
     auto after = before;
     bool touched = false;
-    for (const auto& [id, converted] : after_by_id) {
+    for (const auto& [id, converted] : planned.updates) {
       if (!wds::chart_editor::is_hold_with_tail(converted.note_type)) continue;
       std::optional<NotationNote> body;
       for (const auto& n : after) {

@@ -1330,6 +1330,79 @@ void test_mirror_and_copy_hold_includes_mid_stars() {
   }
 }
 
+void test_convert_selected_hold_stars_and_defaults() {
+  {
+    Harness h;
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 480;
+    tap.lane = 2;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    h.panel.set_selected({tap_id});
+    CHECK(h.panel.convert_selected(NoteType::Hold));
+    const auto hold = h.engine.document().find_note(tap_id);
+    CHECK(hold.has_value());
+    if (hold) {
+      CHECK(hold->note_type == NoteType::Hold);
+      CHECK_EQ(hold->end_tick, 960);
+    }
+  }
+
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    const int32_t head_id = h.engine.add_note(head);
+    const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+    h.panel.set_selected({hold_id});
+    CHECK(h.panel.convert_selected(NoteType::ScratchHold));
+    const auto body = h.engine.document().find_note(hold_id);
+    const auto star = h.engine.document().find_note(star_id);
+    const auto new_head = h.engine.document().find_note(head_id);
+    CHECK(body.has_value() && star.has_value() && new_head.has_value());
+    if (body && star && new_head) {
+      CHECK(body->note_type == NoteType::ScratchHold);
+      CHECK_EQ(body->end_tick, 960);
+      CHECK(star->note_type == NoteType::ScratchSound);
+      CHECK_EQ(star->parent_hold_id, hold_id);
+      CHECK(new_head->note_type == NoteType::ScratchHoldStart);
+    }
+  }
+
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    h.engine.add_note(head);
+    const int32_t keep_id = add_bound_star(h, hold_id, 240, 3, 1);
+    const int32_t drop_id = add_bound_star(h, hold_id, 480, 3, 1);
+    h.panel.set_selected({hold_id, keep_id});
+    CHECK(h.panel.convert_selected(NoteType::Flick, 1));
+    const auto body = h.engine.document().find_note(hold_id);
+    const auto kept = h.engine.document().find_note(keep_id);
+    CHECK(body.has_value() && kept.has_value());
+    if (body && kept) {
+      CHECK(body->note_type == NoteType::Flick);
+      CHECK_EQ(body->end_tick, body->start_tick);
+      CHECK_EQ(body->scratch_length, 1);
+      CHECK(kept->note_type == NoteType::Flick);
+      CHECK_EQ(kept->scratch_length, 1);
+    }
+    CHECK(!h.engine.document().find_note(drop_id).has_value());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 0);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  }
+}
+
 void test_split_width_follow_closed_interval_includes_endpoints() {
   using wds::chart_editor::GimmickType;
   // Split3 covers [0, 480], Split2 covers [480, 960]. Tick 480 is in both.
@@ -1399,6 +1472,7 @@ int main() {
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();
   test_mirror_and_copy_hold_includes_mid_stars();
+  test_convert_selected_hold_stars_and_defaults();
   test_split_width_follow_closed_interval_includes_endpoints();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

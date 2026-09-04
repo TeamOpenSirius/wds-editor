@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -106,16 +108,18 @@ std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationN
 }
 
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
-  const bool was_hold = is_hold_with_tail(note.note_type);
-  const bool target_hold = is_hold_with_tail(target);
+  const bool was_hold = is_bindable_hold_body(note.note_type) && note.end_tick > note.start_tick;
+  const bool target_hold = is_bindable_hold_body(target);
   const bool was_chain = is_hold_chain_body(note.note_type);
   const bool target_chain = is_hold_chain_body(target);
-  const bool target_scratch_hold = is_scratch_hold_body(target);
+  const bool target_scratch_chain = is_scratch_hold_body(target) && target_chain;
   const bool split = is_split_lane_gimmick(note.gimmick_type);
 
-  if (!was_hold && target_hold) {
-    note.end_tick = note.start_tick + std::max(1, ticks_per_quarter);
-  } else if (was_hold && !target_hold) {
+  if (target_hold) {
+    if (!was_hold) {
+      note.end_tick = note.start_tick + std::max(1, ticks_per_quarter);
+    }
+  } else {
     note.end_tick = note.start_tick;
   }
 
@@ -136,7 +140,7 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
         else if (note.scratch_length > 0) note.scratch_length = 1;
         else note.scratch_length = 0;
       }
-    } else if (target_scratch_hold) {
+    } else if (target_scratch_chain) {
       // Flick/Scratch encode ±1; ScratchHold equal-width direction uses ±width.
       // Hold↔ScratchHold keeps the existing JumpScratch span.
       if (!was_chain) {
@@ -145,10 +149,15 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
         else note.scratch_length = 0;
       }
     } else if (target_chain) {
-      // Regular hold-chain: keep scratch_length / gimmick.
+      // Regular hold-chain: keep span only when the source was already a chain.
+      if (!was_chain) note.scratch_length = 0;
     } else {
       note.scratch_length = 0;
     }
+  }
+
+  if (!is_hold_mid_star(target)) {
+    note.parent_hold_id = kNoBoundHoldId;
   }
   return note;
 }
@@ -441,73 +450,124 @@ int repair_legacy_hold_heads(ChartDocument& doc) {
 
 NoteType resolve_convert_target(const ChartDocument& doc, const NotationNote& note,
                                 NoteType target) noexcept {
-  const bool scratch_body = is_scratch_hold_body(note.note_type);
-  const bool hold_body = is_hold_with_tail(note.note_type);
-  // Legacy Normal/Critical/BlueTap heads only count when paired with a ScratchHold body.
-  // Lone taps share those types and must not be treated as hold heads (ConvertHold
-  // would otherwise incorrectly resolve them to HoldStart).
-  const bool legacy_paired_head =
-      is_legacy_scratch_hold_head(note) && paired_hold_body_for(doc, note).has_value();
-  const bool head = is_hold_head_note(note) || legacy_paired_head;
-  const bool scratch_head = [&] {
-    if (note.note_type == NoteType::ScratchHoldStart ||
-        note.note_type == NoteType::ScratchCriticalHoldStart) {
-      return true;
-    }
-    if (!legacy_paired_head) return false;
-    if (auto body = paired_hold_body_for(doc, note)) {
-      return is_scratch_hold_body(body->note_type);
-    }
-    return false;
-  }();
-
-  // Hold-head retints (head-only selection). Illegal targets keep the current type.
-  if (head && !hold_body) {
-    if (target == NoteType::Critical) {
-      return scratch_head ? NoteType::ScratchCriticalHoldStart : NoteType::CriticalHoldStart;
-    }
-    if (target == NoteType::Normal || target == NoteType::HoldStart) {
-      return scratch_head ? NoteType::ScratchHoldStart : NoteType::HoldStart;
-    }
-    if (target == NoteType::Hold) {
-      // Scratch-family heads cannot become HoldStart while the body stays ScratchHold.
-      return scratch_head ? note.note_type : NoteType::HoldStart;
-    }
-    if (target == NoteType::ScratchHold) {
-      return scratch_head ? NoteType::ScratchHoldStart : note.note_type;
-    }
-    // Flick / other: not a legal head conversion.
-    return note.note_type;
-  }
-
-  if (target == NoteType::Critical) {
-    // Hold bodies collapse to Critical taps (not CriticalHold*).
-    return NoteType::Critical;
-  }
-
-  if (target == NoteType::Normal) {
-    return NoteType::Normal;
-  }
-
-  if (target == NoteType::HoldStart) {
-    // Body collapses to a head at start (ScratchHold → ScratchHoldStart).
-    if (scratch_body) return NoteType::ScratchHoldStart;
-    return NoteType::HoldStart;
-  }
-
-  if (target == NoteType::Hold) {
-    return NoteType::Hold;
-  }
-
-  if (target == NoteType::ScratchHold) {
-    return NoteType::ScratchHold;
-  }
-
-  if (target == NoteType::Flick) {
-    return NoteType::Flick;
-  }
-
+  (void)doc;
+  (void)note;
   return target;
+}
+
+namespace {
+
+NoteType visible_star_type_for_hold(NoteType hold_body) noexcept {
+  return is_scratch_hold_body(hold_body) ? NoteType::ScratchSound : NoteType::Sound;
+}
+
+NoteType hold_head_type_for_body(NoteType current_head, NoteType body) noexcept {
+  const bool gold = current_head == NoteType::CriticalHoldStart ||
+                    current_head == NoteType::ScratchCriticalHoldStart;
+  if (is_scratch_hold_body(body)) {
+    return gold ? NoteType::ScratchCriticalHoldStart : NoteType::ScratchHoldStart;
+  }
+  return gold ? NoteType::CriticalHoldStart : NoteType::HoldStart;
+}
+
+void apply_convert_scratch_override(NotationNote& after,
+                                    std::optional<int32_t> scratch_length) noexcept {
+  if (!scratch_length.has_value()) return;
+  const int32_t dir = *scratch_length;
+  if (after.note_type == NoteType::Flick) {
+    after.scratch_length = dir < 0 ? -1 : (dir > 0 ? 1 : 0);
+  } else if (is_scratch_hold_body(after.note_type)) {
+    after.scratch_length = dir < 0 ? -after.width : (dir > 0 ? after.width : 0);
+  }
+}
+
+}  // namespace
+
+ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
+                                              const std::unordered_set<int32_t>& selected,
+                                              NoteType target,
+                                              std::optional<int32_t> scratch_length) {
+  ConvertNotesResult result;
+  if (selected.empty()) return result;
+  const int32_t tpq = doc.timing().ticks_per_quarter;
+  std::unordered_set<int32_t> handled;
+  std::unordered_set<int32_t> remove_ids;
+
+  auto queue_remove = [&](const NotationNote& note) {
+    if (remove_ids.insert(note.id).second) result.removals.push_back(note);
+  };
+
+  std::vector<int32_t> selected_bodies;
+  selected_bodies.reserve(selected.size());
+  for (const int32_t id : selected) {
+    auto note = doc.find_note(id);
+    if (note && is_bindable_hold_body(note->note_type)) selected_bodies.push_back(id);
+  }
+
+  for (const int32_t body_id : selected_bodies) {
+    auto body = doc.find_note(body_id);
+    if (!body) continue;
+    NotationNote after = convert_note_type(*body, target, tpq);
+    apply_convert_scratch_override(after, scratch_length);
+    result.updates[body_id] = after;
+    handled.insert(body_id);
+
+    if (is_bindable_hold_body(after.note_type)) {
+      const NoteType star_t = visible_star_type_for_hold(after.note_type);
+      for (const auto& dep : hold_attached_notes_for(doc, *body)) {
+        if (dep.note_type == NoteType::HoldEighth) {
+          if (is_nontail_hold_body(after.note_type)) {
+            queue_remove(dep);
+            handled.insert(dep.id);
+          }
+          continue;
+        }
+        if (!is_visible_hold_mid_star(dep.note_type)) continue;
+        NotationNote star_after = convert_note_type(dep, star_t, tpq);
+        star_after.parent_hold_id = body->id;
+        result.updates[dep.id] = star_after;
+        handled.insert(dep.id);
+      }
+      if (auto head = paired_hold_head_for(doc, *body)) {
+        const NoteType head_t = hold_head_type_for_body(head->note_type, after.note_type);
+        result.updates[head->id] = convert_note_type(*head, head_t, tpq);
+        handled.insert(head->id);
+      }
+    } else {
+      for (const auto& dep : hold_attached_notes_for(doc, *body)) {
+        if (dep.note_type == NoteType::HoldEighth) {
+          queue_remove(dep);
+          handled.insert(dep.id);
+          continue;
+        }
+        if (!is_visible_hold_mid_star(dep.note_type)) continue;
+        if (selected.count(dep.id)) {
+          NotationNote star_after = convert_note_type(dep, target, tpq);
+          apply_convert_scratch_override(star_after, scratch_length);
+          result.updates[dep.id] = star_after;
+        } else {
+          queue_remove(dep);
+        }
+        handled.insert(dep.id);
+      }
+      if (auto head = paired_hold_head_for(doc, *body)) {
+        queue_remove(*head);
+        handled.insert(head->id);
+      }
+    }
+  }
+
+  for (const int32_t id : selected) {
+    if (handled.count(id) || remove_ids.count(id)) continue;
+    auto note = doc.find_note(id);
+    if (!note) continue;
+    NotationNote after = convert_note_type(*note, target, tpq);
+    apply_convert_scratch_override(after, scratch_length);
+    result.updates[id] = after;
+  }
+
+  for (const int32_t id : remove_ids) result.updates.erase(id);
+  return result;
 }
 
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold) {
