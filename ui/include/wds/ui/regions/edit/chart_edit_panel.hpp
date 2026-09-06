@@ -68,10 +68,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
     selected_.clear();
     clear_hold_sel_focus();
   }
-  void set_selected(std::unordered_set<int32_t> ids) {
-    selected_ = std::move(ids);
-    sync_hold_sel_focus_to_selection();
-  }
+  void set_selected(std::unordered_set<int32_t> ids);
 
   int default_width() const noexcept { return default_width_; }
   void set_default_width(int width) noexcept;
@@ -430,8 +427,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t resize_side_ = 0;  // -1 left, +1 right
   // When true with ResizeWidth: edit ScratchHold end span (not body width).
   bool resize_scratch_end_ = false;
-  // True when the ScratchHold was already selected before this resize drag.
-  bool resize_was_selected_ = false;
   // Single chained ScratchHold segment MoveSelection: lock time, keep chain joints.
   bool move_scratch_segment_ = false;
   // Chained neighbor involved in an unselected ScratchHold width edit (-1 = none).

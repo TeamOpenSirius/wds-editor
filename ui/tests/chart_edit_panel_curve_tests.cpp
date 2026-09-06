@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -1269,6 +1270,112 @@ int32_t add_bound_star(Harness& h, int32_t hold_id, int32_t tick, int32_t lane, 
   return id;
 }
 
+Vec2 body_right_edge_on_note(const Harness& h, const NotationNote& note) {
+  const float x =
+      h.panel.viewport().x_at(note.lane) + h.panel.viewport().lane_width(note.width) - 1.0f;
+  // Prefer the note body center so hold time-edge hit tests do not steal the grab.
+  const float y = note.end_tick > note.start_tick
+                      ? (h.panel.viewport().y_at(note.start_tick) +
+                         h.panel.viewport().y_at(note.end_tick)) *
+                            0.5f
+                      : h.panel.viewport().y_at(note.start_tick);
+  return {x, y};
+}
+
+void test_selected_width_resize_affects_only_grabbed_note() {
+  Harness h;
+  NotationNote a;
+  a.note_type = NoteType::Normal;
+  a.start_tick = 480;
+  a.end_tick = 480;
+  a.lane = 2;
+  a.width = 2;
+  NotationNote b;
+  b.note_type = NoteType::Normal;
+  b.start_tick = 960;
+  b.end_tick = 960;
+  b.lane = 5;
+  b.width = 3;
+  const int32_t a_id = h.engine.add_note(a);
+  const int32_t b_id = h.engine.add_note(b);
+  CHECK(a_id >= 0);
+  CHECK(b_id >= 0);
+
+  h.panel.set_selected({a_id, b_id});
+  const auto* before_a = find_note_id(h.engine.document().notes(), a_id);
+  const auto* before_b = find_note_id(h.engine.document().notes(), b_id);
+  CHECK(before_a != nullptr);
+  CHECK(before_b != nullptr);
+  const int32_t b_width0 = before_b->width;
+  const int32_t b_lane0 = before_b->lane;
+
+  const auto grab = body_right_edge_on_note(h, *before_a);
+  const auto wider = h.at_tick_lane(480, before_a->end_lane() + 2);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{wider, {}});
+  h.panel.on_pointer_up(PointerUpEvent{wider, PointerButton::Left, {}});
+
+  const auto* after_a = find_note_id(h.engine.document().notes(), a_id);
+  const auto* after_b = find_note_id(h.engine.document().notes(), b_id);
+  CHECK(after_a != nullptr);
+  CHECK(after_b != nullptr);
+  CHECK(after_a->width > 2);
+  CHECK_EQ(after_b->width, b_width0);
+  CHECK_EQ(after_b->lane, b_lane0);
+  CHECK(h.panel.selected().count(a_id));
+  CHECK(h.panel.selected().count(b_id));
+}
+
+void test_paste_hold_does_not_select_eighths() {
+  Harness h;
+  h.enter_hold(false, 0, 960, 3);
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(960, 3), PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  const int eighths_before = count_type(h.engine.document().notes(), NoteType::HoldEighth);
+  CHECK(eighths_before > 0);
+
+  std::unordered_set<int32_t> copy_ids;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Hold || n.note_type == NoteType::HoldStart) {
+      copy_ids.insert(n.id);
+    }
+  }
+  h.panel.set_selected(copy_ids);
+  CHECK(h.panel.copy_selected());
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+  CHECK(h.panel.paste_at_pointer());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+  // Eighths are regenerated for the pasted hold, not copied from the clipboard.
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), eighths_before * 2);
+
+  int32_t pasted_hold_id = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type != NoteType::Hold) continue;
+    if (n.start_tick >= 1920) {
+      pasted_hold_id = n.id;
+      break;
+    }
+  }
+  CHECK(pasted_hold_id >= 0);
+  int bound_eighths = 0;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type != NoteType::HoldEighth) continue;
+    if (n.parent_hold_id != pasted_hold_id) continue;
+    CHECK_EQ(n.lane, 3);
+    CHECK_EQ(n.width, 1);
+    ++bound_eighths;
+  }
+  CHECK_EQ(bound_eighths, eighths_before);
+
+  for (const int32_t id : h.panel.selected()) {
+    const auto note = h.engine.document().find_note(id);
+    CHECK(note.has_value());
+    if (!note) continue;
+    CHECK(note->note_type != NoteType::HoldEighth);
+  }
+  CHECK(!h.panel.selected().empty());
+}
+
 void test_mirror_and_copy_hold_includes_mid_stars() {
   // Whole-hold selection is body + head only; stars must still flip / copy.
   {
@@ -1471,6 +1578,8 @@ int main() {
   test_split_picker_search_filter();
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();
+  test_selected_width_resize_affects_only_grabbed_note();
+  test_paste_hold_does_not_select_eighths();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
   test_split_width_follow_closed_interval_includes_endpoints();
