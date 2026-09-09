@@ -6,7 +6,10 @@ add_executable(wds_editor
   apps/wds_editor_qt.cpp
   src/qt/editor_main_window.cpp
   src/qt/realtime_vulkan_window.cpp
-  src/qt/qt_input_adapter.cpp)
+  src/qt/qt_input_adapter.cpp
+  src/qt/note_icons.cpp
+  src/qt/playback_dock.cpp
+  src/qt/settings_dialog.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 add_executable(wds_qt_shell_checkpoint ALIAS wds_editor)
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)

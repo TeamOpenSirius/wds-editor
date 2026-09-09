@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
   editor.enable_qt_chrome();
   editor.set_config_path(wds::ui::resolve_editor_config_path(argv[0]));
   editor.load_ui_config();
+  window.set_skins_dir(wds::ui::resolve_skins_dir(argv[0]));
   window.bind_ui_manager(&editor);
   editor.set_request_close([&window] { window.close(); });
   wds::renderer::PreviewVisualConfig visual;

@@ -661,6 +661,26 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   apply_curve_template_state(cfg, curve_template_state_);
 }
 
+void UiManager::snapshot_ui_config_for_qt(EditorUiConfig& cfg) { capture_live_ui_config(cfg); }
+
+void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
+  session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+  chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
+  wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
+  wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
+  wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
+  wds::interaction::set_width_slot_values(cfg.width_slots);
+  if (cfg.shortcuts_initialized) {
+    wds::interaction::set_editor_shortcuts(cfg.shortcuts);
+  }
+  apply_display_to_preview(*chart_preview_, cfg);
+  if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
+  bind_editor_shortcuts();
+  wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
+  save_ui_config();
+}
+
 void UiManager::save_ui_config() {
   ui_config_dirty_ = false;
   ui_config_dirty_us_ = 0;

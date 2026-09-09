@@ -179,6 +179,26 @@ void PreviewSettingsPanel::apply_playback_rate() {
   preview_.transport().set_playback_rate(playback_rate_);
 }
 
+void PreviewSettingsPanel::set_music_state_from_qt(float gain, bool muted) {
+  music_gain_ = std::clamp(gain, 0.0f, 1.0f);
+  music_muted_ = muted;
+  apply_music_gain();
+  sync_from_state();
+}
+
+void PreviewSettingsPanel::set_sfx_state_from_qt(float gain, bool muted) {
+  sfx_gain_ = std::clamp(gain, 0.0f, 1.0f);
+  sfx_muted_ = muted;
+  apply_sfx_gain();
+  sync_from_state();
+}
+
+void PreviewSettingsPanel::set_playback_rate_from_qt(float rate) {
+  playback_rate_ = rate_from_label(format_rate(rate));
+  apply_playback_rate();
+  sync_from_state();
+}
+
 void PreviewSettingsPanel::set_playback_rate(float rate) {
   playback_rate_ = rate_from_label(format_rate(rate));
   apply_playback_rate();

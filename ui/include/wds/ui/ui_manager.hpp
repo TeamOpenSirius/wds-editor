@@ -111,6 +111,12 @@ class UiManager {
   void set_preview_note_speed(double speed);
   void set_preview_lane_count(int lane_count);
   void set_curve_template_state_from_qt(CurveTemplateUiState state);
+  // Qt settings dialog: snapshot every persisted pref from live runtime, and
+  // apply an edited config back through the same path as the old settings modal.
+  void snapshot_ui_config_for_qt(EditorUiConfig& cfg);
+  void apply_ui_config_from_qt(const EditorUiConfig& cfg);
+  // Qt playback dock edited curve_template_state(): push selection to the edit panel.
+  void push_curve_fill_selection_from_qt() { push_curve_fill_selection(); }
   // Qt owns all ordinary chrome. Keep only the realtime preview/edit widgets in
   // the Vulkan batch and give them the complete central-widget area.
   void enable_qt_chrome(bool enabled = true);

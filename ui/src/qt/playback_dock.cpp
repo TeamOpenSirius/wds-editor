@@ -1,0 +1,376 @@
+#include "wds/ui/qt/playback_dock.hpp"
+
+#include "wds/ui/editor_session.hpp"
+#include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/regions/preview/chart_preview_panel.hpp"
+#include "wds/ui/regions/settings/preview_settings_panel.hpp"
+#include "wds/ui/ui_manager.hpp"
+
+#include <wds/audio/transport.hpp>
+
+#include <QCheckBox>
+#include <QComboBox>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QSignalBlocker>
+#include <QSlider>
+#include <QSpinBox>
+#include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
+
+#include <algorithm>
+#include <cmath>
+
+namespace wds::ui {
+namespace {
+
+constexpr int kSeekSteps = 1000;
+
+int volume_pct_from_combo(const QComboBox* combo) {
+  QString text = combo->currentText();
+  if (text.endsWith(QLatin1Char('%'))) text.chop(1);
+  bool ok = false;
+  const int pct = text.toInt(&ok);
+  return ok ? std::clamp(pct, 0, 100) : 100;
+}
+
+float rate_from_combo(const QComboBox* combo) {
+  QString text = combo->currentText();
+  if (text.endsWith(QLatin1Char('x'))) text.chop(1);
+  bool ok = false;
+  const float rate = text.toFloat(&ok);
+  return ok ? rate : 1.0f;
+}
+
+QComboBox* make_volume_combo(QWidget* parent) {
+  auto* combo = new QComboBox(parent);
+  combo->setEditable(true);
+  combo->addItems({"0%", "25%", "50%", "75%", "100%"});
+  combo->setCurrentText(QStringLiteral("100%"));
+  return combo;
+}
+
+}  // namespace
+
+PlaybackAudioPanel::PlaybackAudioPanel(UiManager* manager, QWidget* parent)
+    : QWidget(parent), manager_(manager) {
+  build_ui();
+  curve_controller_.set_on_changed([this](const CurveFillSelection&) {
+    manager_->push_curve_fill_selection_from_qt();
+    manager_->request_save_ui_config(true);
+  });
+  refresh_curve_controls();
+  sync_timer_ = new QTimer(this);
+  sync_timer_->setInterval(250);
+  connect(sync_timer_, &QTimer::timeout, this, &PlaybackAudioPanel::sync_from_runtime);
+  sync_timer_->start();
+  sync_from_runtime();
+}
+
+void PlaybackAudioPanel::build_ui() {
+  auto* root = new QVBoxLayout(this);
+
+  // Row 0: seek + transport buttons (old panel row 0 + play controls).
+  auto* seekRow = new QHBoxLayout;
+  seek_ = new QSlider(Qt::Horizontal, this);
+  seek_->setRange(0, kSeekSteps);
+  play_ = new QPushButton(tr("播放"), this);
+  stop_ = new QPushButton(tr("回到开头"), this);
+  seekRow->addWidget(seek_, 1);
+  seekRow->addWidget(play_);
+  seekRow->addWidget(stop_);
+  root->addLayout(seekRow);
+
+  // Row 1: 音乐 / 音效 / 播放速度 (old panel row 1).
+  auto* audioRow = new QHBoxLayout;
+  audioRow->addWidget(new QLabel(tr("音乐"), this));
+  music_volume_ = make_volume_combo(this);
+  music_mute_ = new QCheckBox(tr("静音"), this);
+  audioRow->addWidget(music_volume_);
+  audioRow->addWidget(music_mute_);
+  audioRow->addSpacing(12);
+  audioRow->addWidget(new QLabel(tr("音效"), this));
+  sfx_volume_ = make_volume_combo(this);
+  sfx_mute_ = new QCheckBox(tr("静音"), this);
+  audioRow->addWidget(sfx_volume_);
+  audioRow->addWidget(sfx_mute_);
+  audioRow->addSpacing(12);
+  audioRow->addWidget(new QLabel(tr("播放速度"), this));
+  rate_ = new QComboBox(this);
+  rate_->addItems({"0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x"});
+  rate_->setCurrentText(QStringLiteral("1x"));
+  audioRow->addWidget(rate_);
+  audioRow->addStretch(1);
+  root->addLayout(audioRow);
+
+  // Row 2: 谱面延迟 / 可见范围 / 拍内分格 (old toolbar numeric fields).
+  auto* gridRow = new QHBoxLayout;
+  gridRow->addWidget(new QLabel(tr("谱面延迟"), this));
+  delay_ms_ = new QSpinBox(this);
+  delay_ms_->setRange(-60000, 60000);
+  delay_ms_->setSuffix(QStringLiteral(" ms"));
+  delay_ms_->setKeyboardTracking(false);
+  gridRow->addWidget(delay_ms_);
+  gridRow->addSpacing(12);
+  gridRow->addWidget(new QLabel(tr("可见范围"), this));
+  visible_range_ = new QComboBox(this);
+  visible_range_->setEditable(true);
+  visible_range_->addItems({"10", "15", "20", "25", "30", "35", "40", "80"});
+  gridRow->addWidget(visible_range_);
+  gridRow->addSpacing(12);
+  gridRow->addWidget(new QLabel(tr("拍内分格"), this));
+  subdivisions_ = new QComboBox(this);
+  subdivisions_->setEditable(true);
+  subdivisions_->addItems({"2", "3", "4", "6", "8", "12", "16"});
+  gridRow->addWidget(subdivisions_);
+  gridRow->addStretch(1);
+  root->addLayout(gridRow);
+
+  // Row 3: 谱面选择 + 行为 checkbox（old toolbar chart dropdown + checkboxes）.
+  auto* chartRow = new QHBoxLayout;
+  chartRow->addWidget(new QLabel(tr("谱面"), this));
+  chart_select_ = new QComboBox(this);
+  chart_select_->setMinimumWidth(110);
+  chart_add_ = new QPushButton(QStringLiteral("+"), this);
+  chart_add_->setFixedWidth(28);
+  chartRow->addWidget(chart_select_);
+  chartRow->addWidget(chart_add_);
+  chartRow->addSpacing(12);
+  pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), this);
+  split_width_follow_ = new QCheckBox(tr("音符默认对齐分割线轨道"), this);
+  chartRow->addWidget(pause_at_current_);
+  chartRow->addWidget(split_width_follow_);
+  chartRow->addStretch(1);
+  root->addLayout(chartRow);
+
+  // Row 4: 曲线填充 (old toolbar curve dropdown + I/O/IO/OI).
+  auto* curveRow = new QHBoxLayout;
+  curveRow->addWidget(new QLabel(tr("曲线填充"), this));
+  curve_template_ = new QComboBox(this);
+  curve_template_->setMinimumWidth(140);
+  curveRow->addWidget(curve_template_);
+  for (int i = 0; i < 4; ++i) {
+    auto* button = new QToolButton(this);
+    button->setText(QString::fromUtf8(kCurveDirectionLabels[static_cast<std::size_t>(i)]));
+    button->setCheckable(true);
+    button->setAutoRaise(false);
+    curve_directions_[static_cast<std::size_t>(i)] = button;
+    curveRow->addWidget(button);
+    connect(button, &QToolButton::clicked, this, [this, i] {
+      curve_controller_.select_direction_index(manager_->curve_template_state(), i);
+      refresh_curve_controls();
+    });
+  }
+  curveRow->addStretch(1);
+  root->addLayout(curveRow);
+  root->addStretch(1);
+
+  connect(seek_, &QSlider::sliderMoved, this, [this](int value) {
+    auto* settings = manager_->settings_panel();
+    if (settings == nullptr) return;
+    int64_t start = 0;
+    int64_t end = 1;
+    settings->seek_window_ms(start, end);
+    const int64_t span = std::max<int64_t>(end - start, 1);
+    manager_->chart_preview().transport().request_seek_ms(
+        start + span * value / kSeekSteps);
+  });
+  connect(play_, &QPushButton::clicked, this, [this] {
+    auto& transport = manager_->chart_preview().transport();
+    transport.playing() ? transport.request_pause() : transport.request_play();
+  });
+  connect(stop_, &QPushButton::clicked, this,
+          [this] { manager_->chart_preview().reset_playback(); });
+
+  const auto apply_music = [this] {
+    if (syncing_) return;
+    if (auto* settings = manager_->settings_panel()) {
+      settings->set_music_state_from_qt(volume_pct_from_combo(music_volume_) / 100.0f,
+                                        music_mute_->isChecked());
+      manager_->request_save_ui_config(true);
+    }
+  };
+  const auto apply_sfx = [this] {
+    if (syncing_) return;
+    if (auto* settings = manager_->settings_panel()) {
+      settings->set_sfx_state_from_qt(volume_pct_from_combo(sfx_volume_) / 100.0f,
+                                      sfx_mute_->isChecked());
+      manager_->request_save_ui_config(true);
+    }
+  };
+  connect(music_volume_, &QComboBox::textActivated, this, [apply_music](const QString&) { apply_music(); });
+  connect(music_volume_->lineEdit(), &QLineEdit::editingFinished, this, apply_music);
+  connect(music_mute_, &QCheckBox::toggled, this, [apply_music](bool) { apply_music(); });
+  connect(sfx_volume_, &QComboBox::textActivated, this, [apply_sfx](const QString&) { apply_sfx(); });
+  connect(sfx_volume_->lineEdit(), &QLineEdit::editingFinished, this, apply_sfx);
+  connect(sfx_mute_, &QCheckBox::toggled, this, [apply_sfx](bool) { apply_sfx(); });
+  connect(rate_, &QComboBox::textActivated, this, [this](const QString&) {
+    if (syncing_) return;
+    if (auto* settings = manager_->settings_panel()) {
+      settings->set_playback_rate_from_qt(rate_from_combo(rate_));
+      manager_->request_save_ui_config(true);
+    }
+  });
+
+  connect(delay_ms_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
+    if (!syncing_) apply_delay();
+  });
+  connect(visible_range_, &QComboBox::textActivated, this, [this](const QString&) { apply_grid(); });
+  connect(visible_range_->lineEdit(), &QLineEdit::editingFinished, this,
+          [this] { apply_grid(); });
+  connect(subdivisions_, &QComboBox::textActivated, this, [this](const QString&) { apply_grid(); });
+  connect(subdivisions_->lineEdit(), &QLineEdit::editingFinished, this,
+          [this] { apply_grid(); });
+
+  connect(chart_select_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+    auto& session = manager_->session();
+    if (index >= 0 && static_cast<std::size_t>(index) < session.chart_count())
+      session.switch_chart(static_cast<std::size_t>(index));
+  });
+  connect(chart_add_, &QPushButton::clicked, this, [this] {
+    if (on_add_chart_) on_add_chart_();
+  });
+  connect(pause_at_current_, &QCheckBox::toggled, this, [this](bool checked) {
+    if (syncing_) return;
+    if (auto* edit = manager_->edit_panel()) {
+      edit->set_pause_at_current(checked);
+      manager_->request_save_ui_config(true);
+    }
+  });
+  connect(split_width_follow_, &QCheckBox::toggled, this, [this](bool checked) {
+    if (syncing_) return;
+    if (auto* edit = manager_->edit_panel()) {
+      edit->set_split_width_follow(checked);
+      manager_->request_save_ui_config(true);
+    }
+  });
+  connect(curve_template_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+    curve_controller_.select_dropdown_index(manager_->curve_template_state(), index);
+    refresh_curve_controls();
+  });
+}
+
+void PlaybackAudioPanel::apply_delay() {
+  auto& session = manager_->session();
+  const int64_t value = std::clamp<int64_t>(delay_ms_->value(), -60000, 60000);
+  if (value == session.offset_ms()) return;
+  if (!session.set_offset_ms(value)) {
+    manager_->set_status("谱面延迟修改被拒绝：会把音符移到时间轴之前", StatusLevel::Error);
+    if (auto* edit = manager_->edit_panel())
+      edit->flash_offset_violations(session.last_offset_violation_ids());
+  }
+}
+
+void PlaybackAudioPanel::apply_grid() {
+  auto* edit = manager_->edit_panel();
+  if (edit == nullptr) return;
+  auto grid = edit->viewport().grid();
+  bool ok = false;
+  const int hectoms = visible_range_->currentText().toInt(&ok);
+  if (ok) grid.visible_hectoms = std::clamp(hectoms, 1, 1000);
+  ok = false;
+  const int divisions = subdivisions_->currentText().toInt(&ok);
+  if (ok) grid.subdivisions_per_beat = std::clamp(divisions, 1, 64);
+  edit->set_grid(grid);
+  manager_->request_save_ui_config(true);
+}
+
+void PlaybackAudioPanel::refresh_curve_controls() {
+  curve_controller_.refresh_from(manager_->curve_template_state());
+  {
+    const QSignalBlocker blocker(curve_template_);
+    curve_template_->clear();
+    for (const auto& label : curve_controller_.dropdown_labels())
+      curve_template_->addItem(QString::fromStdString(label));
+    curve_template_->setCurrentIndex(curve_controller_.selected_dropdown_index());
+  }
+  const int selected = curve_controller_.selected_direction_index();
+  for (int i = 0; i < 4; ++i) {
+    auto* button = curve_directions_[static_cast<std::size_t>(i)];
+    const QSignalBlocker blocker(button);
+    button->setChecked(i == selected);
+  }
+}
+
+void PlaybackAudioPanel::sync_from_runtime() {
+  syncing_ = true;
+  auto& session = manager_->session();
+  auto& transport = manager_->chart_preview().transport();
+
+  play_->setText(transport.playing() ? tr("暂停") : tr("播放"));
+  if (!seek_->isSliderDown()) {
+    if (auto* settings = manager_->settings_panel()) {
+      int64_t start = 0;
+      int64_t end = 1;
+      settings->seek_window_ms(start, end);
+      const int64_t span = std::max<int64_t>(end - start, 1);
+      const int64_t pos = std::clamp<int64_t>(transport.committed_ms() - start, 0, span);
+      const QSignalBlocker blocker(seek_);
+      seek_->setValue(static_cast<int>(pos * kSeekSteps / span));
+    }
+  }
+
+  if (auto* settings = manager_->settings_panel()) {
+    if (!music_volume_->lineEdit()->hasFocus()) {
+      const QSignalBlocker blocker(music_volume_);
+      music_volume_->setCurrentText(
+          QString::number(static_cast<int>(std::lround(settings->music_gain() * 100.0f))) + "%");
+    }
+    if (!sfx_volume_->lineEdit()->hasFocus()) {
+      const QSignalBlocker blocker(sfx_volume_);
+      sfx_volume_->setCurrentText(
+          QString::number(static_cast<int>(std::lround(settings->sfx_gain() * 100.0f))) + "%");
+    }
+    {
+      const QSignalBlocker m(music_mute_);
+      music_mute_->setChecked(settings->music_muted());
+      const QSignalBlocker s(sfx_mute_);
+      sfx_mute_->setChecked(settings->sfx_muted());
+    }
+  }
+
+  if (!delay_ms_->hasFocus()) {
+    const QSignalBlocker blocker(delay_ms_);
+    delay_ms_->setValue(static_cast<int>(
+        std::clamp<int64_t>(session.offset_ms(), int64_t{-60000}, int64_t{60000})));
+  }
+  if (auto* edit = manager_->edit_panel()) {
+    const auto& grid = edit->viewport().grid();
+    if (!visible_range_->lineEdit()->hasFocus()) {
+      const QSignalBlocker blocker(visible_range_);
+      visible_range_->setCurrentText(QString::number(grid.visible_hectoms));
+    }
+    if (!subdivisions_->lineEdit()->hasFocus()) {
+      const QSignalBlocker blocker(subdivisions_);
+      subdivisions_->setCurrentText(QString::number(grid.subdivisions_per_beat));
+    }
+    {
+      const QSignalBlocker p(pause_at_current_);
+      pause_at_current_->setChecked(edit->pause_at_current());
+      const QSignalBlocker w(split_width_follow_);
+      split_width_follow_->setChecked(edit->split_width_follow());
+    }
+  }
+
+  const int count = std::max<int>(1, static_cast<int>(session.chart_count()));
+  if (chart_select_->count() != count) {
+    const QSignalBlocker blocker(chart_select_);
+    chart_select_->clear();
+    for (int i = 0; i < count; ++i) chart_select_->addItem(tr("谱面 %1").arg(i + 1));
+  }
+  if (chart_select_->currentIndex() != static_cast<int>(session.active_chart_index())) {
+    const QSignalBlocker blocker(chart_select_);
+    chart_select_->setCurrentIndex(static_cast<int>(session.active_chart_index()));
+  }
+  const bool editable = !session.read_only();
+  delay_ms_->setEnabled(session.delay_editable());
+  chart_select_->setEnabled(editable || session.chart_count() > 1);
+  chart_add_->setEnabled(editable);
+  syncing_ = false;
+}
+
+}  // namespace wds::ui
