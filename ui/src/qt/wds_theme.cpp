@@ -26,12 +26,9 @@ constexpr double kFontScale = 10.0;  // pt
 constexpr double kPadding = 4.0;
 
 struct Var {
-  enum Kind { Color, Size, Number, String, Alias, Calc, Min, Max } kind = String;
-  QString suffix;
-  QString str;                 // String / Alias key
-  double num = 0.0;            // Number / Size
-  QColor color;                // Color
-  QStringList calc;            // Calc/Min/Max: [a, op, b]
+  enum Kind { Color, Expr, String, Alias } kind = String;
+  QString str;    // String / Alias key / raw numeric-or-calc expression
+  QColor color;   // Color
 };
 
 QColor parse_color(const QString& raw) {
@@ -55,35 +52,10 @@ Var parse_value(QString value) {
   if (value.endsWith(';')) value.chop(1);
   value = value.trimmed();
 
-  if (value.startsWith("var(") && value.endsWith(")")) {
+  if (value.startsWith("var(") && value.endsWith(")") &&
+      value.indexOf('(', 4) < 0) {
     v.kind = Var::Alias;
     v.str = value.mid(4, value.size() - 5).trimmed();  // --name
-    return v;
-  }
-  auto func_args = [&](const QString& fn) -> QStringList {
-    QString inner = value.mid(fn.size() + 1, value.size() - fn.size() - 2);
-    // Split top-level by ',' and (for calc) by operators.
-    return inner.split(QRegularExpression(R"(\s*,\s*)"), Qt::SkipEmptyParts);
-  };
-  if (value.startsWith("calc(") && value.endsWith(")")) {
-    v.kind = Var::Calc;
-    QString inner = value.mid(5, value.size() - 6).trimmed();
-    static const QRegularExpression opRe(R"(^(.*\S)\s*([+\-*/])\s*(\S.*)$)");
-    auto m = opRe.match(inner);
-    if (m.hasMatch())
-      v.calc = {m.captured(1).trimmed(), m.captured(2), m.captured(3).trimmed()};
-    return v;
-  }
-  if (value.startsWith("min(") && value.endsWith(")")) {
-    v.kind = Var::Min;
-    const auto a = func_args("min");
-    if (a.size() == 2) v.calc = {a[0], ",", a[1]};
-    return v;
-  }
-  if (value.startsWith("max(") && value.endsWith(")")) {
-    v.kind = Var::Max;
-    const auto a = func_args("max");
-    if (a.size() == 2) v.calc = {a[0], ",", a[1]};
     return v;
   }
   if (value.startsWith('#') || value.startsWith("rgb(") || value.startsWith("rgba(")) {
@@ -91,13 +63,11 @@ Var parse_value(QString value) {
     v.color = parse_color(value);
     return v;
   }
-  // number [+ suffix]
-  static const QRegularExpression numRe(R"(^(-?[\d.]+)\s*([a-zA-Z%]*)$)");
-  auto m = numRe.match(value);
-  if (m.hasMatch()) {
-    v.num = m.captured(1).toDouble();
-    v.suffix = m.captured(2);
-    v.kind = v.suffix.isEmpty() ? Var::Number : Var::Size;
+  // Numeric literal, or any calc()/min()/max()/var() arithmetic expression.
+  static const QRegularExpression exprRe(R"(^-?[\d.].*|^(calc|min|max|var)\()");
+  if (exprRe.match(value).hasMatch()) {
+    v.kind = Var::Expr;
+    v.str = value;
     return v;
   }
   v.kind = Var::String;
@@ -110,7 +80,7 @@ Var parse_value(QString value) {
 
 // Resolve an alias chain to a concrete variable.
 Var resolve(const QHash<QString, Var>& vars, Var v, int depth = 0) {
-  while (v.kind == Var::Alias && depth < 20) {
+  while (v.kind == Var::Alias && depth < 40) {
     if (!vars.contains(v.str)) return v;
     v = vars.value(v.str);
     ++depth;
@@ -118,49 +88,154 @@ Var resolve(const QHash<QString, Var>& vars, Var v, int depth = 0) {
   return v;
 }
 
-double eval_num(const QHash<QString, Var>& vars, const QString& token, QString& suffix,
-                int depth);
+// --- Recursive-descent evaluator for the numeric expression grammar OBS uses:
+//   expr   := term (('+'|'-') term)*
+//   term   := factor (('*'|'/') factor)*
+//   factor := number[suffix] | '(' expr ')' | 'calc(' expr ')'
+//           | 'min(' expr ',' expr ')' | 'max(' expr ',' expr ')'
+//           | 'var(' name ')' | name
+// Values carry an optional unit suffix (px/pt/%); the suffix of a non-empty
+// operand propagates (OBS requires matching or single suffixes).
+struct Num {
+  double value = 0.0;
+  QString suffix;
+};
 
-double operand(const QHash<QString, Var>& vars, const QString& tok, QString& suffix, int depth) {
-  const QString t = tok.trimmed();
-  static const QRegularExpression numRe(R"(^(-?[\d.]+)\s*([a-zA-Z%]*)$)");
-  auto m = numRe.match(t);
-  if (m.hasMatch()) {
-    if (!m.captured(2).isEmpty()) suffix = m.captured(2);
-    return m.captured(1).toDouble();
-  }
-  QString key = t;
-  if (key.startsWith("var(") && key.endsWith(")")) key = key.mid(4, key.size() - 5).trimmed();
-  if (!vars.contains(key)) return 0.0;
-  return eval_num(vars, key, suffix, depth + 1);
-}
+class Eval {
+ public:
+  Eval(const QHash<QString, Var>& vars, int depth) : vars_(vars), depth_(depth) {}
 
-double eval_num(const QHash<QString, Var>& vars, const QString& key, QString& suffix, int depth) {
-  if (depth > 20) return 0.0;
-  Var v = resolve(vars, vars.value(key), depth);
-  if (v.kind == Var::Number || v.kind == Var::Size) {
-    if (!v.suffix.isEmpty()) suffix = v.suffix;
-    return v.num;
+  Num run(const QString& text) {
+    s_ = text;
+    i_ = 0;
+    return parse_expr();
   }
-  if (v.calc.size() == 3) {
-    const double a = operand(vars, v.calc[0], suffix, depth);
-    const double b = operand(vars, v.calc[2], suffix, depth);
-    const QString& op = v.calc[1];
-    if (v.kind == Var::Min) return std::min(a, b);
-    if (v.kind == Var::Max) return std::max(a, b);
-    if (op == "+") return a + b;
-    if (op == "-") return a - b;
-    if (op == "*") return a * b;
-    if (op == "/") return b != 0.0 ? a / b : 0.0;
-  }
-  return 0.0;
-}
 
-QString format_num(double val, const QString& suffix) {
-  const bool isInt = std::ceil(val) == val;
-  QString out = QString::number(val, 'f', isInt ? 0 : 2);
-  if (suffix == "px") out = QString::number(static_cast<int>(std::lround(val)));
-  return out + suffix;
+ private:
+  void skip() {
+    while (i_ < s_.size() && s_[i_].isSpace()) ++i_;
+  }
+  bool eat(QChar c) {
+    skip();
+    if (i_ < s_.size() && s_[i_] == c) { ++i_; return true; }
+    return false;
+  }
+  bool peek_word(const char* w) {
+    skip();
+    const QString word = QString::fromLatin1(w);
+    return s_.mid(i_, word.size()) == word;
+  }
+
+  Num combine(Num a, QChar op, Num b) {
+    Num r;
+    r.suffix = !a.suffix.isEmpty() ? a.suffix : b.suffix;
+    switch (op.toLatin1()) {
+      case '+': r.value = a.value + b.value; break;
+      case '-': r.value = a.value - b.value; break;
+      case '*': r.value = a.value * b.value; break;
+      case '/': r.value = b.value != 0.0 ? a.value / b.value : 0.0; break;
+    }
+    return r;
+  }
+
+  Num parse_expr() {
+    Num a = parse_term();
+    for (;;) {
+      skip();
+      if (i_ < s_.size() && (s_[i_] == '+' || s_[i_] == '-')) {
+        const QChar op = s_[i_++];
+        a = combine(a, op, parse_term());
+      } else {
+        break;
+      }
+    }
+    return a;
+  }
+  Num parse_term() {
+    Num a = parse_factor();
+    for (;;) {
+      skip();
+      if (i_ < s_.size() && (s_[i_] == '*' || s_[i_] == '/')) {
+        const QChar op = s_[i_++];
+        a = combine(a, op, parse_factor());
+      } else {
+        break;
+      }
+    }
+    return a;
+  }
+  Num parse_factor() {
+    skip();
+    if (eat('(')) {
+      Num r = parse_expr();
+      eat(')');
+      return r;
+    }
+    if (peek_word("calc(")) {
+      i_ += 5;
+      Num r = parse_expr();
+      eat(')');
+      return r;
+    }
+    if (peek_word("min(") || peek_word("max(")) {
+      const bool isMin = s_[i_] == 'm' && s_[i_ + 1] == 'i';
+      i_ += 4;
+      Num a = parse_expr();
+      eat(',');
+      Num b = parse_expr();
+      eat(')');
+      Num r;
+      r.suffix = !a.suffix.isEmpty() ? a.suffix : b.suffix;
+      r.value = isMin ? std::min(a.value, b.value) : std::max(a.value, b.value);
+      return r;
+    }
+    if (peek_word("var(")) {
+      i_ += 4;
+      int start = i_;
+      while (i_ < s_.size() && s_[i_] != ')') ++i_;
+      const QString name = s_.mid(start, i_ - start).trimmed();
+      eat(')');
+      return resolve_name(name);
+    }
+    // number [+ suffix]
+    skip();
+    int start = i_;
+    if (i_ < s_.size() && (s_[i_] == '+' || s_[i_] == '-')) ++i_;
+    while (i_ < s_.size() && (s_[i_].isDigit() || s_[i_] == '.')) ++i_;
+    if (i_ > start) {
+      Num r;
+      r.value = s_.mid(start, i_ - start).toDouble();
+      int sufStart = i_;
+      while (i_ < s_.size() && (s_[i_].isLetter() || s_[i_] == '%')) ++i_;
+      r.suffix = s_.mid(sufStart, i_ - sufStart);
+      return r;
+    }
+    // bare identifier → variable name
+    while (i_ < s_.size() && (s_[i_].isLetterOrNumber() || s_[i_] == '_' || s_[i_] == '-')) ++i_;
+    const QString name = s_.mid(start, i_ - start).trimmed();
+    return resolve_name(name);
+  }
+
+  Num resolve_name(QString name) {
+    if (!name.startsWith("--")) name = "--" + name;
+    if (depth_ > 40 || !vars_.contains(name)) return {};
+    Var v = resolve(vars_, vars_.value(name), depth_);
+    if (v.kind == Var::Expr) return Eval(vars_, depth_ + 1).run(v.str);
+    return {};
+  }
+
+  const QHash<QString, Var>& vars_;
+  int depth_;
+  QString s_;
+  int i_ = 0;
+};
+
+QString format_num(const Num& n) {
+  const bool isInt = std::ceil(n.value) == n.value;
+  if (n.suffix == "px") {
+    return QString::number(static_cast<int>(std::lround(n.value))) + "px";
+  }
+  return QString::number(n.value, 'f', isInt ? 0 : 2) + n.suffix;
 }
 
 QString resolved_string(const QHash<QString, Var>& vars, const QString& key) {
@@ -168,19 +243,8 @@ QString resolved_string(const QHash<QString, Var>& vars, const QString& key) {
   switch (v.kind) {
     case Var::Color:
       return v.color.name(v.color.alpha() < 255 ? QColor::HexArgb : QColor::HexRgb);
-    case Var::Size:
-    case Var::Number: {
-      QString suffix = v.suffix;
-      const double n = eval_num(vars, key, suffix, 0);
-      return format_num(n, suffix);
-    }
-    case Var::Calc:
-    case Var::Min:
-    case Var::Max: {
-      QString suffix;
-      const double n = eval_num(vars, key, suffix, 0);
-      return format_num(n, suffix);
-    }
+    case Var::Expr:
+      return format_num(Eval(vars, 0).run(v.str));
     default:
       return v.str;
   }
