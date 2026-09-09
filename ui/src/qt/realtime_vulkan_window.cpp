@@ -7,6 +7,20 @@
 #include <chrono>
 
 namespace wds::ui {
+
+void RealtimeVulkanWindow::inject_key_tap(wds::interaction::KeyCode key,
+                                          wds::interaction::Modifiers mods) {
+  wds::interaction::KeyDownEvent down;
+  down.key = key;
+  down.mods = mods;
+  input_queue_.push(down);
+  wds::interaction::KeyUpEvent up;
+  up.key = key;
+  up.mods = mods;
+  input_queue_.push(up);
+  schedule_frame();
+}
+
 RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* parent)
     : QWindow(parent), instance_(instance), last_frame_(std::chrono::steady_clock::now()) {
   setSurfaceType(QSurface::VulkanSurface);
@@ -63,7 +77,6 @@ wds::renderer::VulkanHostSurface RealtimeVulkanWindow::host_surface() const {
 
 bool RealtimeVulkanWindow::event(QEvent* event) {
   if (event->type() == QEvent::UpdateRequest) {
-    if (resizing_) return true;
     initialized_ = isExposed();
     if (initialized_) {
       const auto now = std::chrono::steady_clock::now();
@@ -71,7 +84,18 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       last_frame_ = now;
       pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
       const bool has_input = !input_queue_.events().empty();
-      if (idle_frame_interval_us_ > 0 && !has_input && pending_elapsed_us_ < idle_frame_interval_us_) {
+      // Resize: keep rendering, but cap swapchain churn to ~20 fps while docks /
+      // the main window are still being dragged.
+      if (resizing_ && !has_input && pending_elapsed_us_ < 50000) {
+        schedule_frame();
+        return true;
+      }
+      const bool bypass_idle_cap =
+          resizing_ || (idle_throttle_bypass_ && idle_throttle_bypass_());
+      // 2 ms slack: at exactly one vsync per interval the accumulator lands a
+      // hair under the cap and every other frame gets skipped (60→30 fps).
+      if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap &&
+          pending_elapsed_us_ + 2000 < idle_frame_interval_us_) {
         schedule_frame();
         return true;
       }

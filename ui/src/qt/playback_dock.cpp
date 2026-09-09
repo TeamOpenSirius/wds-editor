@@ -1,5 +1,7 @@
 #include "wds/ui/qt/playback_dock.hpp"
 
+#include "wds/ui/qt/flow_layout.hpp"
+
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
@@ -15,6 +17,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
@@ -73,11 +76,14 @@ PlaybackAudioPanel::PlaybackAudioPanel(UiManager* manager, QWidget* parent)
 
 void PlaybackAudioPanel::build_ui() {
   auto* root = new QVBoxLayout(this);
+  root->setContentsMargins(4, 4, 4, 4);
 
-  // Row 0: seek + transport buttons (old panel row 0 + play controls).
+  // Seek + transport stay pinned on top; every other control group lives in a
+  // flow layout inside a scroll area, so the dock stays usable at any aspect.
   auto* seekRow = new QHBoxLayout;
   seek_ = new QSlider(Qt::Horizontal, this);
   seek_->setRange(0, kSeekSteps);
+  seek_->setMinimumWidth(120);
   play_ = new QPushButton(tr("播放"), this);
   stop_ = new QPushButton(tr("回到开头"), this);
   seekRow->addWidget(seek_, 1);
@@ -85,89 +91,85 @@ void PlaybackAudioPanel::build_ui() {
   seekRow->addWidget(stop_);
   root->addLayout(seekRow);
 
-  // Row 1: 音乐 / 音效 / 播放速度 (old panel row 1).
-  auto* audioRow = new QHBoxLayout;
-  audioRow->addWidget(new QLabel(tr("音乐"), this));
-  music_volume_ = make_volume_combo(this);
-  music_mute_ = new QCheckBox(tr("静音"), this);
-  audioRow->addWidget(music_volume_);
-  audioRow->addWidget(music_mute_);
-  audioRow->addSpacing(12);
-  audioRow->addWidget(new QLabel(tr("音效"), this));
-  sfx_volume_ = make_volume_combo(this);
-  sfx_mute_ = new QCheckBox(tr("静音"), this);
-  audioRow->addWidget(sfx_volume_);
-  audioRow->addWidget(sfx_mute_);
-  audioRow->addSpacing(12);
-  audioRow->addWidget(new QLabel(tr("播放速度"), this));
-  rate_ = new QComboBox(this);
+  auto* scroll = new QScrollArea(this);
+  scroll->setWidgetResizable(true);
+  scroll->setFrameShape(QFrame::NoFrame);
+  auto* content = new QWidget(scroll);
+  auto* flow = new FlowLayout(content, 2, 12, 6);
+
+  const auto make_group = [content, flow](std::initializer_list<QWidget*> widgets) {
+    auto* group = new QWidget(content);
+    auto* row = new QHBoxLayout(group);
+    row->setContentsMargins(0, 0, 0, 0);
+    for (QWidget* widget : widgets) row->addWidget(widget);
+    flow->addWidget(group);
+  };
+
+  music_volume_ = make_volume_combo(content);
+  music_mute_ = new QCheckBox(tr("静音"), content);
+  make_group({new QLabel(tr("音乐"), content), music_volume_, music_mute_});
+
+  sfx_volume_ = make_volume_combo(content);
+  sfx_mute_ = new QCheckBox(tr("静音"), content);
+  make_group({new QLabel(tr("音效"), content), sfx_volume_, sfx_mute_});
+
+  rate_ = new QComboBox(content);
   rate_->addItems({"0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x"});
   rate_->setCurrentText(QStringLiteral("1x"));
-  audioRow->addWidget(rate_);
-  audioRow->addStretch(1);
-  root->addLayout(audioRow);
+  make_group({new QLabel(tr("播放速度"), content), rate_});
 
-  // Row 2: 谱面延迟 / 可见范围 / 拍内分格 (old toolbar numeric fields).
-  auto* gridRow = new QHBoxLayout;
-  gridRow->addWidget(new QLabel(tr("谱面延迟"), this));
-  delay_ms_ = new QSpinBox(this);
+  delay_ms_ = new QSpinBox(content);
   delay_ms_->setRange(-60000, 60000);
   delay_ms_->setSuffix(QStringLiteral(" ms"));
   delay_ms_->setKeyboardTracking(false);
-  gridRow->addWidget(delay_ms_);
-  gridRow->addSpacing(12);
-  gridRow->addWidget(new QLabel(tr("可见范围"), this));
-  visible_range_ = new QComboBox(this);
+  make_group({new QLabel(tr("谱面延迟"), content), delay_ms_});
+
+  visible_range_ = new QComboBox(content);
   visible_range_->setEditable(true);
   visible_range_->addItems({"10", "15", "20", "25", "30", "35", "40", "80"});
-  gridRow->addWidget(visible_range_);
-  gridRow->addSpacing(12);
-  gridRow->addWidget(new QLabel(tr("拍内分格"), this));
-  subdivisions_ = new QComboBox(this);
+  make_group({new QLabel(tr("可见范围"), content), visible_range_});
+
+  subdivisions_ = new QComboBox(content);
   subdivisions_->setEditable(true);
   subdivisions_->addItems({"2", "3", "4", "6", "8", "12", "16"});
-  gridRow->addWidget(subdivisions_);
-  gridRow->addStretch(1);
-  root->addLayout(gridRow);
+  make_group({new QLabel(tr("拍内分格"), content), subdivisions_});
 
-  // Row 3: 谱面选择 + 行为 checkbox（old toolbar chart dropdown + checkboxes）.
-  auto* chartRow = new QHBoxLayout;
-  chartRow->addWidget(new QLabel(tr("谱面"), this));
-  chart_select_ = new QComboBox(this);
+  chart_select_ = new QComboBox(content);
   chart_select_->setMinimumWidth(110);
-  chart_add_ = new QPushButton(QStringLiteral("+"), this);
+  chart_add_ = new QPushButton(QStringLiteral("+"), content);
   chart_add_->setFixedWidth(28);
-  chartRow->addWidget(chart_select_);
-  chartRow->addWidget(chart_add_);
-  chartRow->addSpacing(12);
-  pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), this);
-  split_width_follow_ = new QCheckBox(tr("音符默认对齐分割线轨道"), this);
-  chartRow->addWidget(pause_at_current_);
-  chartRow->addWidget(split_width_follow_);
-  chartRow->addStretch(1);
-  root->addLayout(chartRow);
+  make_group({new QLabel(tr("谱面"), content), chart_select_, chart_add_});
 
-  // Row 4: 曲线填充 (old toolbar curve dropdown + I/O/IO/OI).
-  auto* curveRow = new QHBoxLayout;
-  curveRow->addWidget(new QLabel(tr("曲线填充"), this));
-  curve_template_ = new QComboBox(this);
+  pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), content);
+  make_group({pause_at_current_});
+  split_width_follow_ = new QCheckBox(tr("音符默认对齐分割线轨道"), content);
+  make_group({split_width_follow_});
+
+  curve_template_ = new QComboBox(content);
   curve_template_->setMinimumWidth(140);
-  curveRow->addWidget(curve_template_);
-  for (int i = 0; i < 4; ++i) {
-    auto* button = new QToolButton(this);
-    button->setText(QString::fromUtf8(kCurveDirectionLabels[static_cast<std::size_t>(i)]));
-    button->setCheckable(true);
-    button->setAutoRaise(false);
-    curve_directions_[static_cast<std::size_t>(i)] = button;
-    curveRow->addWidget(button);
-    connect(button, &QToolButton::clicked, this, [this, i] {
-      curve_controller_.select_direction_index(manager_->curve_template_state(), i);
-      refresh_curve_controls();
-    });
+  {
+    std::initializer_list<QWidget*> head = {new QLabel(tr("曲线填充"), content), curve_template_};
+    auto* group = new QWidget(content);
+    auto* row = new QHBoxLayout(group);
+    row->setContentsMargins(0, 0, 0, 0);
+    for (QWidget* widget : head) row->addWidget(widget);
+    for (int i = 0; i < 4; ++i) {
+      auto* button = new QToolButton(group);
+      button->setText(QString::fromUtf8(kCurveDirectionLabels[static_cast<std::size_t>(i)]));
+      button->setCheckable(true);
+      button->setAutoRaise(false);
+      curve_directions_[static_cast<std::size_t>(i)] = button;
+      row->addWidget(button);
+      connect(button, &QToolButton::clicked, this, [this, i] {
+        curve_controller_.select_direction_index(manager_->curve_template_state(), i);
+        refresh_curve_controls();
+      });
+    }
+    flow->addWidget(group);
   }
-  curveRow->addStretch(1);
-  root->addLayout(curveRow);
-  root->addStretch(1);
+
+  scroll->setWidget(content);
+  root->addWidget(scroll, 1);
 
   connect(seek_, &QSlider::sliderMoved, this, [this](int value) {
     auto* settings = manager_->settings_panel();

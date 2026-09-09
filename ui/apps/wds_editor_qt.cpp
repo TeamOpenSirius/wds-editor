@@ -54,13 +54,30 @@ int main(int argc, char** argv) {
   auto editor_visual = visual;
   editor_visual.stage_opacity = 0.0f;
 
-  preview_window->set_frame_callback([&editor, preview_window, visual, ui_font](float delta, int logical_w,
+  // load_ui_config already pushed the persisted display prefs into the preview
+  // panel's config; fold them into the boot visual so initialization keeps them.
+  const auto overlay_loaded_display = [&editor](wds::renderer::PreviewVisualConfig v) {
+    const auto& loaded = editor.chart_preview().preview().config();
+    v.note_speed = loaded.note_speed;
+    v.note_start_offset = loaded.note_start_offset;
+    v.note_height_level = loaded.note_height_level;
+    v.split_line_opacity = loaded.split_line_opacity;
+    v.lane_count = loaded.lane_count;
+    return v;
+  };
+
+  editor_window->set_idle_throttle_bypass([&editor] {
+    return editor.chart_preview().ready() && editor.chart_preview().transport().playing();
+  });
+
+  preview_window->set_frame_callback([&editor, preview_window, visual, ui_font,
+                                      overlay_loaded_display](float delta, int logical_w,
                                                                      int logical_h, int fb_w,
                                                                      int fb_h, const std::vector<wds::interaction::InputEvent>& events) mutable {
     if (!editor.chart_preview().ready()) {
       auto host = preview_window->host_surface();
       if (host.external_instance == VK_NULL_HANDLE || host.external_surface == VK_NULL_HANDLE ||
-          !editor.chart_preview().initialize_empty(host, visual, ui_font)) {
+          !editor.chart_preview().initialize_empty(host, overlay_loaded_display(visual), ui_font)) {
         return;
       }
       editor.set_status("ui资源加载完毕", wds::ui::StatusLevel::Info);
@@ -71,13 +88,16 @@ int main(int argc, char** argv) {
     editor.chart_preview().flush_retired_font_textures();
   });
 
-  editor_window->set_frame_callback([&editor, editor_window, &editor_view, &editor_batch, editor_visual, ui_font](
+  editor_window->set_frame_callback([&editor, editor_window, &editor_view, &editor_batch, editor_visual, ui_font,
+                                     overlay_loaded_display](
                                          float delta, int logical_w, int logical_h, int fb_w,
                                          int fb_h, const std::vector<wds::interaction::InputEvent>& events) mutable {
     if (!editor_view.ready()) {
       auto host = editor_window->host_surface();
+      auto boot_visual = overlay_loaded_display(editor_visual);
+      boot_visual.stage_opacity = 0.0f;
       if (host.external_instance == VK_NULL_HANDLE || host.external_surface == VK_NULL_HANDLE ||
-          !editor_view.initialize_empty(host, editor_visual, ui_font, false)) {
+          !editor_view.initialize_empty(host, boot_visual, ui_font, false)) {
         return;
       }
     }

@@ -173,6 +173,9 @@ void SettingsDialog::build_pages() {
   invert_visible_range_scroll_ = new QCheckBox(tr("反转滚轮调节可见范围大小方向"), input);
   inputLayout->addWidget(invert_scroll_wheel_);
   inputLayout->addWidget(invert_visible_range_scroll_);
+  new_note_place_logic_ =
+      new QCheckBox(tr("启用新版音符放置逻辑（工具箱按钮切换左键放置类型）"), input);
+  inputLayout->addWidget(new_note_place_logic_);
   auto* speedRow = new QHBoxLayout;
   speedRow->addWidget(new QLabel(tr("时间轴滚轮速度"), input));
   scroll_wheel_speed_ = make_combo({"0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "1.75x",
@@ -191,7 +194,7 @@ void SettingsDialog::build_pages() {
   displayLayout->addWidget(show_judgment_text_);
   auto* form = new QFormLayout;
   note_speed_ = new QDoubleSpinBox(display);
-  note_speed_->setRange(1.0, 25.0);
+  note_speed_->setRange(1.0, 15.0);
   note_speed_->setDecimals(1);
   note_speed_->setSingleStep(0.5);
   form->addRow(tr("流速"), note_speed_);
@@ -275,6 +278,7 @@ void SettingsDialog::load_from_config() {
   mute_hold_body_sfx_->setChecked(cfg_.mute_hold_body_sfx);
   invert_scroll_wheel_->setChecked(cfg_.invert_scroll_wheel);
   invert_visible_range_scroll_->setChecked(cfg_.invert_visible_range_scroll);
+  new_note_place_logic_->setChecked(cfg_.new_note_place_logic);
   {
     const QString label = QString::number(static_cast<double>(cfg_.scroll_wheel_speed)) + "x";
     int best = scroll_wheel_speed_->findText(label);
@@ -324,6 +328,7 @@ bool SettingsDialog::capture_into_config() {
   cfg_.mute_hold_body_sfx = mute_hold_body_sfx_->isChecked();
   cfg_.invert_scroll_wheel = invert_scroll_wheel_->isChecked();
   cfg_.invert_visible_range_scroll = invert_visible_range_scroll_->isChecked();
+  cfg_.new_note_place_logic = new_note_place_logic_->isChecked();
   {
     QString label = scroll_wheel_speed_->currentText();
     label.chop(1);  // trailing "x"

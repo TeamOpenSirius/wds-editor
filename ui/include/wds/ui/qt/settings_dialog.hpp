@@ -43,6 +43,7 @@ class SettingsDialog final : public QDialog {
   QCheckBox* mute_hold_body_sfx_ = nullptr;
   QCheckBox* invert_scroll_wheel_ = nullptr;
   QCheckBox* invert_visible_range_scroll_ = nullptr;
+  QCheckBox* new_note_place_logic_ = nullptr;
   QComboBox* scroll_wheel_speed_ = nullptr;
   QCheckBox* show_judgment_text_ = nullptr;
   QDoubleSpinBox* note_speed_ = nullptr;

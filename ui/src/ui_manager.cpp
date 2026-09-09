@@ -445,6 +445,35 @@ void UiManager::check_chart_errors() {
   if (on_check_chart_) on_check_chart_();
 }
 
+std::vector<int32_t> UiManager::collect_chart_error_ticks() {
+  auto& engine = session_->engine();
+  const auto result = wds::chart_editor::find_note_overlaps(engine.document().notes());
+  const uint64_t generation = engine.document().content_generation();
+  if (edit_panel_ != nullptr) {
+    edit_panel_->set_error_ticks(result.error_ticks, generation);
+  }
+  if (on_check_chart_) on_check_chart_();
+  return result.error_ticks;
+}
+
+void UiManager::jump_to_error_tick(int32_t tick) {
+  auto& engine = session_->engine();
+  const int64_t ms = wds::chart_editor::tick_to_milliseconds(tick, engine.document().timing());
+  chart_preview_->transport().request_pause();
+  chart_preview_->transport().request_seek_ms(ms);
+  wds::common::TimelineSnapshot snap;
+  snap.position = wds::common::ms_to_us(ms);
+  snap.state = wds::common::PlaybackState::Paused;
+  engine.apply_timeline(snap);
+}
+
+void UiManager::set_new_note_place_logic(bool enabled) {
+  new_note_place_logic_ = enabled;
+  if (!enabled && edit_panel_ != nullptr) {
+    edit_panel_->set_place_intent_override(wds::interaction::PlaceIntent::None);
+  }
+}
+
 CurveFillSelection UiManager::curve_fill_selection() const {
   return make_curve_fill_selection(curve_template_state_);
 }
@@ -631,6 +660,8 @@ void UiManager::load_ui_config() {
     bind_editor_shortcuts();
   }
   apply_display_to_preview(*chart_preview_, cfg);
+  chart_preview_->set_lane_count(std::clamp(cfg.lane_count, 1, 32));
+  new_note_place_logic_ = cfg.new_note_place_logic;
   if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
   capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
@@ -657,6 +688,8 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
   capture_display_from_preview(*chart_preview_, cfg);
+  cfg.lane_count = chart_preview_->preview().config().lane_count;
+  cfg.new_note_place_logic = new_note_place_logic_;
   if (const auto* edit = edit_panel()) cfg.spectrum_display = edit->spectrum_mode();
   apply_curve_template_state(cfg, curve_template_state_);
 }
@@ -675,6 +708,7 @@ void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
     wds::interaction::set_editor_shortcuts(cfg.shortcuts);
   }
   apply_display_to_preview(*chart_preview_, cfg);
+  set_new_note_place_logic(cfg.new_note_place_logic);
   if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
   bind_editor_shortcuts();
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);

@@ -141,6 +141,29 @@ bool apply_note_map(wds::chart_editor::ChartDocument& doc,
 ChartEditPanel::ChartEditPanel(wds::chart_editor::ChartEditorEngine& engine) : engine_(engine) {
 }
 
+PlaceIntent ChartEditPanel::effective_place_intent(PlaceIntent intent) const noexcept {
+  if (place_intent_override_ == PlaceIntent::None) return intent;
+  if (intent == PlaceIntent::Tap) {
+    switch (place_intent_override_) {
+      case PlaceIntent::ExTap:
+      case PlaceIntent::HoldStart:
+      case PlaceIntent::Flick:
+      case PlaceIntent::FlickLeft:
+      case PlaceIntent::FlickRight:
+        return place_intent_override_;
+      default:
+        // Hold-body locks keep the plain click as Tap; the drag defines the hold.
+        return intent;
+    }
+  }
+  // Scratch-hold lock: a left swipe-up draws the scratch hold body.
+  if (intent == PlaceIntent::HoldBody &&
+      place_intent_override_ == PlaceIntent::ScratchHoldBody) {
+    return PlaceIntent::ScratchHoldBody;
+  }
+  return intent;
+}
+
 void ChartEditPanel::set_selected(std::unordered_set<int32_t> ids) {
   selected_.clear();
   for (const int32_t id : ids) {
@@ -809,8 +832,8 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
   if (mode_ == Mode::PlaceGesture) {
     hide_gutter_ghost();
     const auto swipe = update_place_swipe(point);
-    const PlaceIntent intent = wds::interaction::resolve_place_intent(
-        active_button_, swipe, swipe == SwipeDirection::None);
+    const PlaceIntent intent = effective_place_intent(wds::interaction::resolve_place_intent(
+        active_button_, swipe, swipe == SwipeDirection::None));
     // Type/length may change; position stays on the snapped place anchor.
     // Feed note-center so lane/tick re-snap matches place_anchor_.
     apply_intent(intent, place_note_center());
@@ -843,6 +866,27 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
 
   ghost_.note = make_base_note(point);
   ghost_.note.note_type = NoteType::Normal;
+  switch (effective_place_intent(PlaceIntent::Tap)) {
+    case PlaceIntent::ExTap:
+      ghost_.note.note_type = NoteType::Critical;
+      break;
+    case PlaceIntent::HoldStart:
+      ghost_.note.note_type = NoteType::HoldStart;
+      break;
+    case PlaceIntent::Flick:
+      ghost_.note.note_type = NoteType::Flick;
+      break;
+    case PlaceIntent::FlickLeft:
+      ghost_.note.note_type = NoteType::Flick;
+      ghost_.note.scratch_length = -1;
+      break;
+    case PlaceIntent::FlickRight:
+      ghost_.note.note_type = NoteType::Flick;
+      ghost_.note.scratch_length = 1;
+      break;
+    default:
+      break;
+  }
   ghost_.visible = true;
 }
 
@@ -1726,8 +1770,8 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
   // Axis-locked place swipe (not angle classify). was_click only when there was
   // no axial swipe, so short left/right flicks are not collapsed into bidirectional.
   const auto swipe = update_place_swipe(event.position);
-  const PlaceIntent intent = wds::interaction::resolve_place_intent(
-      active_button_, swipe, swipe == SwipeDirection::None);
+  const PlaceIntent intent = effective_place_intent(wds::interaction::resolve_place_intent(
+      active_button_, swipe, swipe == SwipeDirection::None));
   if (pending_chain_extend_id_ >= 0 && intent == PlaceIntent::Tap) {
     clear_pending_chain_extend();
     mode_ = Mode::Idle;

@@ -25,9 +25,18 @@ class RealtimeVulkanWindow final : public QWindow {
   // Limit idle rendering for secondary viewports; pending input still renders
   // immediately so editing remains responsive.
   void set_idle_frame_rate(int fps) noexcept { idle_frame_interval_us_ = fps > 0 ? 1000000 / fps : 0; }
+  // While this returns true the idle frame cap is bypassed (e.g. transport playing),
+  // so scrolling stays at full display rate instead of the every-other-vsync cadence.
+  void set_idle_throttle_bypass(std::function<bool()> playing) {
+    idle_throttle_bypass_ = std::move(playing);
+  }
   // Host-level resize suspension covers the short interval where QMainWindow
   // is relayouting docks and the native child window has not settled yet.
+  // Rendering continues at a reduced rate rather than freezing outright.
   void set_resize_suspended(bool suspended) noexcept;
+  // Queue a synthetic key tap into the realtime input path (global shortcuts
+  // forwarded from Qt widgets, e.g. Space anywhere in the app).
+  void inject_key_tap(wds::interaction::KeyCode key, wds::interaction::Modifiers mods);
   wds::renderer::VulkanHostSurface host_surface() const;
   wds::interaction::Vec2 pointer_logical() const noexcept;
 
@@ -42,6 +51,7 @@ class RealtimeVulkanWindow final : public QWindow {
   wds::interaction::InputQueue input_queue_;
   std::unique_ptr<QtInputAdapter> input_adapter_;
   FrameCallback frame_callback_;
+  std::function<bool()> idle_throttle_bypass_;
   std::chrono::steady_clock::time_point last_frame_{};
   int64_t idle_frame_interval_us_ = 0;
   int64_t pending_elapsed_us_ = 0;

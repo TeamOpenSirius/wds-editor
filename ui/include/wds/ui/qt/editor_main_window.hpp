@@ -6,8 +6,10 @@
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
 #include <functional>
 #include <string>
+#include <array>
 class QWindow;
 class QDockWidget;
+class QToolButton;
 
 namespace wds::ui {
 class UiManager;
@@ -19,6 +21,8 @@ class EditorMainWindow final : public QMainWindow {
   void set_skins_dir(std::string dir) { skins_dir_ = std::move(dir); }
   void bind_ui_manager(UiManager* manager);
   void set_viewport_windows(QWindow* preview, QWindow* editor);
+  // App-wide Space → transport toggle (except while typing / edit viewport focus).
+  bool eventFilter(QObject* watched, QEvent* event) override;
  protected:
   void closeEvent(QCloseEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
@@ -29,11 +33,13 @@ class EditorMainWindow final : public QMainWindow {
   void import_music();
   void export_chart();
   void add_chart();
+  void check_chart();
   void show_settings();
   void show_curve_templates();
  private:
   void create_playback_and_toolbox_docks();
   void reset_default_layout();
+  void sync_toolbox_place_checks();
   UiManager* ui_manager_ = nullptr;
   std::string skins_dir_;
   ::QAction* open_action_ = nullptr;
@@ -52,6 +58,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QDockWidget* playback_dock_ = nullptr;
   ::QDockWidget* toolbox_dock_ = nullptr;
   PlaybackAudioPanel* playback_panel_ = nullptr;
+  std::array<::QToolButton*, 8> convert_buttons_{};
   ::QWindow* preview_window_ = nullptr;
   ::QWindow* editor_window_ = nullptr;
   QTimer resize_settle_timer_;

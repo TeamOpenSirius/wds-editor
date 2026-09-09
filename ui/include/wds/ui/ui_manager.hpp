@@ -67,6 +67,14 @@ class UiManager {
 
   // Toolbar Check: snapshot notes, validate overlaps, never mutate document/history.
   void check_chart_errors();
+  // Qt check dialog: collect overlap ticks (also refreshes edit-panel markers)
+  // and step through them one by one.
+  std::vector<int32_t> collect_chart_error_ticks();
+  void jump_to_error_tick(int32_t tick);
+
+  // New-style toolbox flow: convert buttons also lock the left-click place type.
+  bool new_note_place_logic() const noexcept { return new_note_place_logic_; }
+  void set_new_note_place_logic(bool enabled);
   void set_on_check_chart(std::function<void()> handler) { on_check_chart_ = std::move(handler); }
 
   // Selected curve-fill template + resolved easing for ChartEditPanel (Task 5).
@@ -208,6 +216,7 @@ class UiManager {
   std::function<void()> pending_after_save_;
   std::function<void(std::string, StatusLevel)> external_status_handler_;
   bool qt_chrome_enabled_ = false;
+  bool new_note_place_logic_ = false;
   std::function<void()> request_close_;
   std::function<void()> fullscreen_toggler_;
   std::function<void()> on_check_chart_;
