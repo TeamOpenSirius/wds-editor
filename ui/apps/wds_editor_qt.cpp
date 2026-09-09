@@ -1,5 +1,6 @@
 #include "wds/ui/qt/editor_main_window.hpp"
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
+#include "wds/ui/qt/wds_theme.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/resource_paths.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
@@ -18,12 +19,17 @@
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
   QApplication app(argc, argv);
-  QApplication::setStyle(QStyleFactory::create("Fusion"));
+  wds::ui::apply_wds_theme(app);
   const auto bundled_font = wds::ui::resolve_ui_font_path(argv[0]);
   const int font_id = QFontDatabase::addApplicationFont(QString::fromStdString(bundled_font));
   if (font_id >= 0) {
     const auto families = QFontDatabase::applicationFontFamilies(font_id);
-    if (!families.isEmpty()) QApplication::setFont(QFont(families.front()));
+    if (!families.isEmpty()) {
+      QFont font(families.front());
+      font.setPointSize(10);
+      font.setHintingPreference(QFont::PreferFullHinting);
+      QApplication::setFont(font);
+    }
   }
 
   QVulkanInstance vk_instance;

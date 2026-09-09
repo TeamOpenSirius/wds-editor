@@ -18,11 +18,9 @@ namespace wds::ui {
 
 class UiManager;
 
-// Dock content mirroring the old below-preview settings row plus the old
-// toolbar's playback-adjacent controls: seek + play controls, music/SFX
-// volume + mute, playback rate, chart delay, visible range, beat
-// subdivisions, chart selection, the two edit checkboxes, and curve fill
-// (template dropdown + I/O/IO/OI direction).
+// 播放 dock: seek + transport, playback rate, chart delay, visible range,
+// beat subdivisions, chart selection, and the two edit behavior checkboxes.
+// Controls live in a flow layout so the dock works at any size / orientation.
 class PlaybackAudioPanel final : public QWidget {
  public:
   explicit PlaybackAudioPanel(UiManager* manager, QWidget* parent = nullptr);
@@ -30,27 +28,21 @@ class PlaybackAudioPanel final : public QWidget {
   void set_add_chart_handler(std::function<void()> handler) {
     on_add_chart_ = std::move(handler);
   }
-  // Re-read curve templates after the curve-templates dialog confirms.
-  void refresh_curve_controls();
 
  private:
   void build_ui();
   void sync_from_runtime();
   void apply_delay();
   void apply_grid();
+  void seek_to_slider(int value);
 
   UiManager* manager_ = nullptr;
   QTimer* sync_timer_ = nullptr;
   std::function<void()> on_add_chart_;
-  CurveToolbarController curve_controller_;
 
   QSlider* seek_ = nullptr;
   QPushButton* play_ = nullptr;
   QPushButton* stop_ = nullptr;
-  QComboBox* music_volume_ = nullptr;
-  QCheckBox* music_mute_ = nullptr;
-  QComboBox* sfx_volume_ = nullptr;
-  QCheckBox* sfx_mute_ = nullptr;
   QComboBox* rate_ = nullptr;
   QSpinBox* delay_ms_ = nullptr;
   QComboBox* visible_range_ = nullptr;
@@ -59,9 +51,38 @@ class PlaybackAudioPanel final : public QWidget {
   QPushButton* chart_add_ = nullptr;
   QCheckBox* pause_at_current_ = nullptr;
   QCheckBox* split_width_follow_ = nullptr;
+  bool syncing_ = false;
+};
+
+// 音频 dock: music / SFX volume and mute.
+class AudioMixPanel final : public QWidget {
+ public:
+  explicit AudioMixPanel(UiManager* manager, QWidget* parent = nullptr);
+
+ private:
+  void sync_from_runtime();
+
+  UiManager* manager_ = nullptr;
+  QTimer* sync_timer_ = nullptr;
+  QComboBox* music_volume_ = nullptr;
+  QCheckBox* music_mute_ = nullptr;
+  QComboBox* sfx_volume_ = nullptr;
+  QCheckBox* sfx_mute_ = nullptr;
+  bool syncing_ = false;
+};
+
+// 曲线填充 group (template dropdown + I/O/IO/OI), embedded in the 编辑工具箱.
+class CurveFillWidget final : public QWidget {
+ public:
+  explicit CurveFillWidget(UiManager* manager, QWidget* parent = nullptr);
+  // Re-read curve templates after the curve-templates dialog confirms.
+  void refresh_curve_controls();
+
+ private:
+  UiManager* manager_ = nullptr;
+  CurveToolbarController curve_controller_;
   QComboBox* curve_template_ = nullptr;
   std::array<QToolButton*, 4> curve_directions_{};
-  bool syncing_ = false;
 };
 
 }  // namespace wds::ui

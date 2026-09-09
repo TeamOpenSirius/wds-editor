@@ -14,6 +14,8 @@ class QToolButton;
 namespace wds::ui {
 class UiManager;
 class PlaybackAudioPanel;
+class AudioMixPanel;
+class CurveFillWidget;
 class EditorMainWindow final : public QMainWindow {
  public:
   explicit EditorMainWindow(QWidget* parent = nullptr);
@@ -56,8 +58,10 @@ class EditorMainWindow final : public QMainWindow {
   ::QDockWidget* editor_dock_ = nullptr;
   ::QDockWidget* settings_dock_ = nullptr;
   ::QDockWidget* playback_dock_ = nullptr;
+  ::QDockWidget* audio_dock_ = nullptr;
   ::QDockWidget* toolbox_dock_ = nullptr;
   PlaybackAudioPanel* playback_panel_ = nullptr;
+  CurveFillWidget* curve_fill_widget_ = nullptr;
   std::array<::QToolButton*, 8> convert_buttons_{};
   ::QWindow* preview_window_ = nullptr;
   ::QWindow* editor_window_ = nullptr;
