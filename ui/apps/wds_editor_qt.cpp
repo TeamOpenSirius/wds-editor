@@ -1,6 +1,7 @@
 #include "wds/ui/qt/editor_main_window.hpp"
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
+#include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/resource_paths.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
@@ -19,7 +20,8 @@
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
   QApplication app(argc, argv);
-  wds::ui::apply_wds_theme(app);
+  wds::ui::apply_wds_theme(app, QString::fromStdString(wds::ui::resolve_theme_dir(argv[0])));
+  wds::ui::load_fluent_font(QString::fromStdString(wds::ui::resolve_fluent_font_path(argv[0])));
   const auto bundled_font = wds::ui::resolve_ui_font_path(argv[0]);
   const int font_id = QFontDatabase::addApplicationFont(QString::fromStdString(bundled_font));
   if (font_id >= 0) {

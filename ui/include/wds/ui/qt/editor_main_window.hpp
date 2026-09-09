@@ -53,6 +53,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* music_action_ = nullptr;
   ::QAction* check_action_ = nullptr;
   ::QAction* settings_action_ = nullptr;
+  ::QAction* about_action_ = nullptr;
   ::QAction* curve_templates_action_ = nullptr;
   ::QDockWidget* preview_dock_ = nullptr;
   ::QDockWidget* editor_dock_ = nullptr;

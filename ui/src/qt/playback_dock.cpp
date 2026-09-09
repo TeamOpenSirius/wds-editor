@@ -32,28 +32,12 @@ namespace {
 
 constexpr int kSeekSteps = 1000;
 
-int volume_pct_from_combo(const QComboBox* combo) {
-  QString text = combo->currentText();
-  if (text.endsWith(QLatin1Char('%'))) text.chop(1);
-  bool ok = false;
-  const int pct = text.toInt(&ok);
-  return ok ? std::clamp(pct, 0, 100) : 100;
-}
-
 float rate_from_combo(const QComboBox* combo) {
   QString text = combo->currentText();
   if (text.endsWith(QLatin1Char('x'))) text.chop(1);
   bool ok = false;
   const float rate = text.toFloat(&ok);
   return ok ? rate : 1.0f;
-}
-
-QComboBox* make_volume_combo(QWidget* parent) {
-  auto* combo = new QComboBox(parent);
-  combo->setEditable(true);
-  combo->addItems({"0%", "25%", "50%", "75%", "100%"});
-  combo->setCurrentText(QStringLiteral("100%"));
-  return combo;
 }
 
 // Scroll + flow scaffold shared by the dock panels: controls wrap into
@@ -298,35 +282,41 @@ AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
   auto* flow = make_flow_panel(this, root);
   auto* content = flow->parentWidget();
 
-  music_volume_ = make_volume_combo(content);
+  auto make_volume_slider = [content](QSlider*& slider, QLabel*& value) {
+    slider = new QSlider(Qt::Horizontal, content);
+    slider->setRange(0, 100);
+    slider->setValue(100);
+    slider->setMinimumWidth(120);
+    value = new QLabel(QStringLiteral("100%"), content);
+    value->setMinimumWidth(38);
+    value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  };
+  make_volume_slider(music_volume_, music_value_);
   music_mute_ = new QCheckBox(tr("静音"), content);
-  make_group(flow, {new QLabel(tr("音乐"), content), music_volume_, music_mute_});
-
-  sfx_volume_ = make_volume_combo(content);
+  make_group(flow, {new QLabel(tr("音乐"), content), music_volume_, music_value_, music_mute_});
+  make_volume_slider(sfx_volume_, sfx_value_);
   sfx_mute_ = new QCheckBox(tr("静音"), content);
-  make_group(flow, {new QLabel(tr("音效"), content), sfx_volume_, sfx_mute_});
+  make_group(flow, {new QLabel(tr("音效"), content), sfx_volume_, sfx_value_, sfx_mute_});
 
   const auto apply_music = [this] {
     if (syncing_) return;
+    music_value_->setText(QString::number(music_volume_->value()) + "%");
     if (auto* settings = manager_->settings_panel()) {
-      settings->set_music_state_from_qt(volume_pct_from_combo(music_volume_) / 100.0f,
-                                        music_mute_->isChecked());
-      manager_->request_save_ui_config(true);
+      settings->set_music_state_from_qt(music_volume_->value() / 100.0f, music_mute_->isChecked());
+      manager_->request_save_ui_config(false);
     }
   };
   const auto apply_sfx = [this] {
     if (syncing_) return;
+    sfx_value_->setText(QString::number(sfx_volume_->value()) + "%");
     if (auto* settings = manager_->settings_panel()) {
-      settings->set_sfx_state_from_qt(volume_pct_from_combo(sfx_volume_) / 100.0f,
-                                      sfx_mute_->isChecked());
-      manager_->request_save_ui_config(true);
+      settings->set_sfx_state_from_qt(sfx_volume_->value() / 100.0f, sfx_mute_->isChecked());
+      manager_->request_save_ui_config(false);
     }
   };
-  connect(music_volume_, &QComboBox::textActivated, this, [apply_music](const QString&) { apply_music(); });
-  connect(music_volume_->lineEdit(), &QLineEdit::editingFinished, this, apply_music);
+  connect(music_volume_, &QSlider::valueChanged, this, [apply_music](int) { apply_music(); });
   connect(music_mute_, &QCheckBox::toggled, this, [apply_music](bool) { apply_music(); });
-  connect(sfx_volume_, &QComboBox::textActivated, this, [apply_sfx](const QString&) { apply_sfx(); });
-  connect(sfx_volume_->lineEdit(), &QLineEdit::editingFinished, this, apply_sfx);
+  connect(sfx_volume_, &QSlider::valueChanged, this, [apply_sfx](int) { apply_sfx(); });
   connect(sfx_mute_, &QCheckBox::toggled, this, [apply_sfx](bool) { apply_sfx(); });
 
   sync_timer_ = new QTimer(this);
@@ -339,15 +329,17 @@ AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
 void AudioMixPanel::sync_from_runtime() {
   syncing_ = true;
   if (auto* settings = manager_->settings_panel()) {
-    if (!music_volume_->lineEdit()->hasFocus()) {
+    if (!music_volume_->isSliderDown()) {
       const QSignalBlocker blocker(music_volume_);
-      music_volume_->setCurrentText(
-          QString::number(static_cast<int>(std::lround(settings->music_gain() * 100.0f))) + "%");
+      const int pct = static_cast<int>(std::lround(settings->music_gain() * 100.0f));
+      music_volume_->setValue(pct);
+      music_value_->setText(QString::number(pct) + "%");
     }
-    if (!sfx_volume_->lineEdit()->hasFocus()) {
+    if (!sfx_volume_->isSliderDown()) {
       const QSignalBlocker blocker(sfx_volume_);
-      sfx_volume_->setCurrentText(
-          QString::number(static_cast<int>(std::lround(settings->sfx_gain() * 100.0f))) + "%");
+      const int pct = static_cast<int>(std::lround(settings->sfx_gain() * 100.0f));
+      sfx_volume_->setValue(pct);
+      sfx_value_->setText(QString::number(pct) + "%");
     }
     const QSignalBlocker m(music_mute_);
     music_mute_->setChecked(settings->music_muted());

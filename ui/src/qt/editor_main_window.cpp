@@ -3,6 +3,9 @@
 #include "wds/ui/qt/note_icons.hpp"
 #include "wds/ui/qt/playback_dock.hpp"
 #include "wds/ui/qt/settings_dialog.hpp"
+#include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/qt/about_dialog.hpp"
+#include "wds/ui/qt/busy_dialog.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
@@ -71,6 +74,8 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   auto* viewMenu = menuBar()->actions().at(2)->menu();
   auto* toolbar = addToolBar(tr("功能区"));
   toolbar->setObjectName(QStringLiteral("editorToolBar"));
+  toolbar->setIconSize(QSize(20, 20));
+  toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   // Same eight commands as the old toolbar; undo/redo live in the 编辑 menu.
   auto addCommand = [this, fileMenu, toolbar](const QString& text, const QKeySequence& shortcut,
                                               const QString& tooltip) {
@@ -88,17 +93,31 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   music_action_ = addCommand(tr("导入音乐"), QKeySequence(), tr("导入 ogg / wav / mp3 音乐"));
   curve_templates_action_ = addCommand(tr("曲线模板"), QKeySequence(), tr("编辑曲线模板"));
   check_action_ = addCommand(tr("检查谱面"), QKeySequence(), tr("检查谱面错误"));
-  open_action_->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
-  save_action_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
+  open_action_->setIcon(fluent_icon(fluent::OpenFolder));
+  save_action_->setIcon(fluent_icon(fluent::Save));
+  import_action_->setIcon(fluent_icon(fluent::Import));
+  export_action_->setIcon(fluent_icon(fluent::Export));
+  music_action_->setIcon(fluent_icon(fluent::Music));
+  curve_templates_action_->setIcon(fluent_icon(fluent::Curve));
+  check_action_->setIcon(fluent_icon(fluent::Checklist));
   // 设置 lives in the top menu bar, not the toolbar.
   settings_action_ = new QAction(tr("设置"), this);
   settings_action_->setToolTip(tr("编辑器设置"));
+  settings_action_->setIcon(fluent_icon(fluent::Settings));
   menuBar()->addAction(settings_action_);
+  about_action_ = new QAction(tr("关于"), this);
+  about_action_->setIcon(fluent_icon(fluent::Info));
+  menuBar()->addAction(about_action_);
+  connect(about_action_, &QAction::triggered, this, [this] {
+    AboutDialog(this).exec();
+  });
 
   undo_action_ = new QAction(tr("撤销"), this);
   undo_action_->setShortcut(QKeySequence::Undo);
+  undo_action_->setIcon(fluent_icon(fluent::Undo));
   redo_action_ = new QAction(tr("重做"), this);
   redo_action_->setShortcut(QKeySequence::Redo);
+  redo_action_->setIcon(fluent_icon(fluent::Redo));
   editMenu->addAction(undo_action_);
   editMenu->addAction(redo_action_);
   statusBar()->showMessage(tr("就绪"));
@@ -534,8 +553,12 @@ void EditorMainWindow::open_project() {
   const auto path = QFileDialog::getOpenFileName(this, tr("打开 WDS 工程"), {},
                                                   tr("WDS 工程 (*.wdsproject)"));
   if (path.isEmpty()) return;
-  if (!ui_manager_->session().open_wdsproject(path.toStdString()))
-    QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
+  bool ok = false;
+  {
+    BusyScope busy(this, tr("正在打开工程…"));
+    ok = ui_manager_->session().open_wdsproject(path.toStdString());
+  }
+  if (!ok) QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
 }
 
 void EditorMainWindow::save_project() {
@@ -547,7 +570,11 @@ void EditorMainWindow::save_project() {
                                                           QStringLiteral("untitled.wdsproject"),
                                                           tr("WDS 工程 (*.wdsproject)"));
   if (path.isEmpty()) return;
-  const bool ok = session.project_path().empty() ? session.save_as(path.toStdString()) : session.save();
+  bool ok = false;
+  {
+    BusyScope busy(this, tr("正在保存工程…"));
+    ok = session.project_path().empty() ? session.save_as(path.toStdString()) : session.save();
+  }
   if (!ok) QMessageBox::warning(this, tr("保存失败"), tr("无法保存工程。"));
 }
 
@@ -555,16 +582,25 @@ void EditorMainWindow::import_chart() {
   if (!confirm_pending_changes()) return;
   const auto path = QFileDialog::getOpenFileName(this, tr("导入官方谱面"), {},
                                                   tr("谱面文件 (*.csv *.sus)"));
-  if (!path.isEmpty() && !ui_manager_->session().import_official(path.toStdString()))
-    QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选谱面。"));
+  if (path.isEmpty()) return;
+  bool ok = false;
+  {
+    BusyScope busy(this, tr("正在导入谱面…"));
+    ok = ui_manager_->session().import_official(path.toStdString());
+  }
+  if (!ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选谱面。"));
 }
 
 void EditorMainWindow::import_music() {
   const auto path = QFileDialog::getOpenFileName(this, tr("导入音乐"), {},
                                                   tr("音频文件 (*.ogg *.wav *.mp3)"));
   if (path.isEmpty()) return;
-  if (!ui_manager_->session().import_music(path.toStdString()))
-    QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选音乐。"));
+  bool ok = false;
+  {
+    BusyScope busy(this, tr("正在导入音乐…"));
+    ok = ui_manager_->session().import_music(path.toStdString());
+  }
+  if (!ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选音乐。"));
 }
 
 void EditorMainWindow::add_chart() {

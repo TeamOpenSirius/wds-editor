@@ -11,7 +11,10 @@ add_executable(wds_editor
   src/qt/playback_dock.cpp
   src/qt/settings_dialog.cpp
   src/qt/flow_layout.cpp
-  src/qt/wds_theme.cpp)
+  src/qt/wds_theme.cpp
+  src/qt/fluent_icons.cpp
+  src/qt/about_dialog.cpp
+  src/qt/busy_dialog.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 add_executable(wds_qt_shell_checkpoint ALIAS wds_editor)
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
@@ -33,6 +36,12 @@ install(DIRECTORY "${CMAKE_SOURCE_DIR}/effects" DESTINATION .)
 install(DIRECTORY "${CMAKE_BINARY_DIR}/renderer/shaders/" DESTINATION shaders)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf" DESTINATION fonts)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/SegoeFluentIcons.ttf")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/SegoeFluentIcons.ttf" DESTINATION fonts)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/theme/Yami.obt")
+  install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/theme/" DESTINATION theme)
 endif()
   if(COMMAND qt_generate_deploy_app_script)
     qt_generate_deploy_app_script(

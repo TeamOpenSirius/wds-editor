@@ -1,6 +1,7 @@
 #include "wds/ui/qt/settings_dialog.hpp"
 
 #include "wds/ui/ui_manager.hpp"
+#include "wds/ui/qt/fluent_icons.hpp"
 
 #include <wds/interaction/platform.hpp>
 #include <wds/interaction/shortcuts.hpp>
@@ -15,6 +16,9 @@
 #include <QKeySequenceEdit>
 #include <QLabel>
 #include <QListWidget>
+#include <QListWidgetItem>
+#include <array>
+#include <utility>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -128,9 +132,21 @@ SettingsDialog::SettingsDialog(UiManager* manager, QWidget* parent)
   auto* root = new QVBoxLayout(this);
   auto* body = new QHBoxLayout;
   sidebar_ = new QListWidget(this);
-  sidebar_->addItems({tr("文件"), tr("音频"), tr("输入"), tr("显示"), tr("宽度"),
-                      tr("快捷键"), tr("隐私")});
-  sidebar_->setFixedWidth(120);
+  const std::array<std::pair<QString, char32_t>, 7> tabs = {{
+      {tr("文件"), fluent::Files},
+      {tr("音频"), fluent::Audio},
+      {tr("输入"), fluent::Keyboard},
+      {tr("显示"), fluent::Display},
+      {tr("宽度"), fluent::Ruler},
+      {tr("快捷键"), fluent::Keyboard},
+      {tr("隐私"), fluent::Shield},
+  }};
+  for (const auto& [label, glyph] : tabs) {
+    auto* item = new QListWidgetItem(fluent_icon(glyph), label, sidebar_);
+    item->setSizeHint(QSize(0, 34));
+  }
+  sidebar_->setIconSize(QSize(18, 18));
+  sidebar_->setFixedWidth(132);
   pages_ = new QStackedWidget(this);
   body->addWidget(sidebar_);
   body->addWidget(pages_, 1);

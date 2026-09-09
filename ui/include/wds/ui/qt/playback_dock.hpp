@@ -8,6 +8,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QLabel;
 class QPushButton;
 class QSlider;
 class QSpinBox;
@@ -64,9 +65,11 @@ class AudioMixPanel final : public QWidget {
 
   UiManager* manager_ = nullptr;
   QTimer* sync_timer_ = nullptr;
-  QComboBox* music_volume_ = nullptr;
+  QSlider* music_volume_ = nullptr;
+  QLabel* music_value_ = nullptr;
   QCheckBox* music_mute_ = nullptr;
-  QComboBox* sfx_volume_ = nullptr;
+  QSlider* sfx_volume_ = nullptr;
+  QLabel* sfx_value_ = nullptr;
   QCheckBox* sfx_mute_ = nullptr;
   bool syncing_ = false;
 };
