@@ -1,5 +1,9 @@
 #include "wds/audio/waveform_overview.hpp"
 
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include <wds/common/log.hpp>
 
 #include "bass.h"

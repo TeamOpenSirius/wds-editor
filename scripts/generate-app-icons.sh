@@ -3,7 +3,7 @@
 # Outputs (committed under ui/assets/app_icon/):
 #   wds.ico   — Windows exe / MSI shortcut
 #   wds.icns  — macOS .app CFBundleIconFile (opaque full-bleed; OS applies squircle)
-#   wds.png   — Linux .desktop + GLFW window icon (256×256)
+#   wds.png   — Linux .desktop + application icon (256×256)
 #
 # Requires: python3 + Pillow, and on macOS: iconutil.
 # Prefer: /opt/anaconda3/bin/python3 when present.

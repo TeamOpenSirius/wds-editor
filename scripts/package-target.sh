@@ -5,7 +5,7 @@
 #   macos-arm  — Apple Silicon Mac with Homebrew deps
 #
 # External deps policy (ship everything we can):
-#   win   — static MinGW runtimes + vcpkg static GLFW/png; ship bass.dll + vulkan-1.dll
+#   win   — static MinGW runtimes + vcpkg static png; ship bass.dll + vulkan-1.dll
 #   macOS — bundle Homebrew dylibs + MoltenVK into the .app
 set -euo pipefail
 
@@ -267,7 +267,7 @@ EOF
 WDS Editor package (macos-arm) — self-contained .app
 
 Inside WDS Editor.app:
-  Contents/MacOS/       wds_editor + lib/ (glfw, png, vulkan, MoltenVK, bass)
+  Contents/MacOS/       wds_editor + lib/ (png, vulkan, MoltenVK, bass)
   Contents/Resources/   skins effects fonts icons shaders wds.icns wds.png
                         + vulkan/icd.d/MoltenVK_icd.json
 
@@ -1013,7 +1013,7 @@ EOF
 
   # Mach-O as CFBundleExecutable — bash wrappers break under Gatekeeper quarantine
   # (SIGKILL / empty launch) and are unnecessary once prepare_macos_vulkan_environment
-  # forces the bundled ICD before glfwInit.
+  # forces the bundled ICD before the Qt Vulkan instance is created.
   cat >"${app}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

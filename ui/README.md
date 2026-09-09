@@ -5,7 +5,7 @@
 
 ## 职责
 
-- GLFW 窗口 + Vulkan 表面注入（`VulkanHostSurface`）
+- Qt QWindow/QVulkanInstance 窗口 + Vulkan 表面注入（`VulkanHostSurface`）
 - 工具栏 / 预览 / 预览设置 / 编辑区布局
 - `.wdsproject` 打开保存、官方 CSV 只读导入、撤销重做
 - 资源路径解析（`skins/`、`effects/`、shaders、fonts、icons）
@@ -17,10 +17,10 @@ ui/
 ├── CMakeLists.txt
 ├── apps/                   # wds_editor / Uninstall 等入口
 ├── include/wds/ui/
-│   ├── ui_manager.hpp / window.hpp
+│   ├── ui_manager.hpp / qt/
 │   ├── editor_session.hpp / editor_ui_config.hpp
 │   ├── resource_paths.hpp / startup_deps.hpp
-│   ├── native_file_dialog.hpp / macos_*.hpp
+│   ├── native_file_dialog.hpp
 │   ├── layout/editor_layout.hpp
 │   └── regions/
 │       ├── preview/        # ChartPreviewPanel, PlaybackPreview
@@ -141,4 +141,4 @@ ctest --test-dir build-macos-arm -R 'wds_ui_logic_tests|wds_note_draw_order_test
 
 ## 依赖
 
-`wds::interaction`（+ glfw）、`wds::audio_player`、`wds::core`、`wds::chart_render`、`wds::renderer`。
+`wds::interaction`、`wds::audio_player`、`wds::core`、`wds::chart_render`、`wds::renderer`。

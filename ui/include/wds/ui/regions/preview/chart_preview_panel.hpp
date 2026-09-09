@@ -12,8 +12,6 @@
 #include <string>
 #include <vector>
 
-struct GLFWwindow;
-
 namespace wds::ui {
 
 // Chart preview panel: Transport + ChartEditorEngine sync loop around PlaybackPreviewView.
@@ -25,12 +23,9 @@ class ChartPreviewPanel {
   ChartPreviewPanel(const ChartPreviewPanel&) = delete;
   ChartPreviewPanel& operator=(const ChartPreviewPanel&) = delete;
 
-  bool initialize(GLFWwindow* window, const wds::renderer::PreviewVisualConfig& visual,
-                  const std::string& chart_path = {}, const std::string& music_config_path = {},
-                  const std::string& ui_font_path = {});
-  // Initialize with empty editable chart (default new project).
-  bool initialize_empty(GLFWwindow* window, const wds::renderer::PreviewVisualConfig& visual,
-                        const std::string& ui_font_path = {});
+  bool initialize_empty(const wds::renderer::VulkanHostSurface& host,
+                        const wds::renderer::PreviewVisualConfig& visual,
+                        const std::string& ui_font_path = {}, bool initialize_audio = true);
   void shutdown();
 
   bool ready() const noexcept { return ready_; }
@@ -69,6 +64,7 @@ class ChartPreviewPanel {
 
   // Apply note_speed to both visual and core preview configs and rebuild.
   void set_note_speed(double speed);
+  void set_lane_count(int lane_count);
   // Apply official display settings (speed / 挡板 / note 厚度 / 分割线特效透明度).
   void apply_display_settings(double note_speed, int note_start_offset, int note_height_level,
                               int split_line_opacity_percent);
@@ -84,8 +80,9 @@ class ChartPreviewPanel {
   int64_t display_frame_lead_us() const noexcept;
 
  private:
-  bool finish_initialize(GLFWwindow* window, const wds::renderer::PreviewVisualConfig& visual,
-                         const std::string& ui_font_path);
+  bool finish_initialize(const wds::renderer::VulkanHostSurface& host,
+                          const wds::renderer::PreviewVisualConfig& visual,
+                         const std::string& ui_font_path, bool initialize_audio = true);
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
   void rebuild_waveform(const std::string& music_path);
@@ -106,7 +103,7 @@ class ChartPreviewPanel {
   // Atlases replaced mid-frame; destroyed in flush_retired_font_textures().
   std::vector<wds::renderer::TextureInfo> retired_font_textures_;
   std::string ui_font_path_;
-  GLFWwindow* window_ = nullptr;
+  int display_refresh_hz_ = 60;
   float font_bake_tier_ = 0.0f;
   float font_bake_tip_bucket_ = 0.0f;
   int panel_fb_w_ = 0;

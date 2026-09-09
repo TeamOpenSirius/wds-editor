@@ -16,6 +16,10 @@
 #include <string>
 #include <vector>
 
+namespace wds::renderer {
+class SkinCatalog;
+}
+
 namespace wds::ui {
 
 class ChartPreviewPanel;
@@ -30,6 +34,7 @@ class CurveTemplatesDialog;
 class ExportChoiceDialog;
 class ChartAddDialog;
 class UnsavedChangesDialog;
+namespace detail { }
 struct EditorUiConfig;
 
 // Shell orchestrator: owns the four regions and applies EditorLayouter results.
@@ -99,6 +104,25 @@ class UiManager {
   bool confirm_close();
 
   bool save_current_project();
+  void open_project_with_prompt();
+  void set_external_status_handler(std::function<void(std::string, StatusLevel)> handler) {
+    external_status_handler_ = std::move(handler);
+  }
+  void set_preview_note_speed(double speed);
+  void set_preview_lane_count(int lane_count);
+  void set_curve_template_state_from_qt(CurveTemplateUiState state);
+  // Qt owns all ordinary chrome. Keep only the realtime preview/edit widgets in
+  // the Vulkan batch and give them the complete central-widget area.
+  void enable_qt_chrome(bool enabled = true);
+  void build_editor_batch(wds::renderer::DrawBatch& out, wds::renderer::TextureId solid_texture,
+                          int fb_w, int fb_h, const wds::renderer::ScreenBounds& screen,
+                          const wds::renderer::SkinCatalog& skin);
+
+  // Layout the edit panel against an independent editor viewport surface.
+  void resize_editor_viewport(int logical_width, int logical_height, int framebuffer_width,
+                              int framebuffer_height);
+  void resize_preview_viewport(int logical_width, int logical_height, int framebuffer_width,
+                               int framebuffer_height);
 
   void resize(int logical_width, int logical_height, int framebuffer_width, int framebuffer_height);
   const EditorLayoutRects& layout() const noexcept { return layout_; }
@@ -176,6 +200,8 @@ class UiManager {
   std::string config_path_;
   CurveTemplateUiState curve_template_state_{};
   std::function<void()> pending_after_save_;
+  std::function<void(std::string, StatusLevel)> external_status_handler_;
+  bool qt_chrome_enabled_ = false;
   std::function<void()> request_close_;
   std::function<void()> fullscreen_toggler_;
   std::function<void()> on_check_chart_;

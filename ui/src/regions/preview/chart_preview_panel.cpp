@@ -8,8 +8,6 @@
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
 
-#include <GLFW/glfw3.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -43,52 +41,6 @@ float toolbar_tip_logical_px(float left_w_logical) {
 
 // Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
 bool ui_font_mild_sharpen(float tier) { return tier <= 1.5f + 0.001f; }
-
-// Prefer the monitor that currently owns the window (fullscreen or windowed).
-GLFWmonitor* monitor_for_window(GLFWwindow* window) {
-  if (window == nullptr) {
-    return glfwGetPrimaryMonitor();
-  }
-  if (GLFWmonitor* exclusive = glfwGetWindowMonitor(window)) {
-    return exclusive;
-  }
-  int wx = 0;
-  int wy = 0;
-  int ww = 0;
-  int wh = 0;
-  glfwGetWindowPos(window, &wx, &wy);
-  glfwGetWindowSize(window, &ww, &wh);
-  const int cx = wx + ww / 2;
-  const int cy = wy + wh / 2;
-
-  int count = 0;
-  GLFWmonitor** monitors = glfwGetMonitors(&count);
-  for (int i = 0; i < count; ++i) {
-    int mx = 0;
-    int my = 0;
-    glfwGetMonitorPos(monitors[i], &mx, &my);
-    const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
-    if (mode == nullptr) {
-      continue;
-    }
-    if (cx >= mx && cx < mx + mode->width && cy >= my && cy < my + mode->height) {
-      return monitors[i];
-    }
-  }
-  return glfwGetPrimaryMonitor();
-}
-
-int display_refresh_hz(GLFWwindow* window) {
-  GLFWmonitor* monitor = monitor_for_window(window);
-  if (monitor == nullptr) {
-    return kFallbackDisplayHz;
-  }
-  const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-  if (mode == nullptr || mode->refreshRate <= 0) {
-    return kFallbackDisplayHz;
-  }
-  return mode->refreshRate;
-}
 
 }  // namespace
 
@@ -178,20 +130,19 @@ bool ChartPreviewPanel::ensure_ui_font_scale() {
   return true;
 }
 
-bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
+bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface& host,
                                           const wds::renderer::PreviewVisualConfig& visual,
-                                          const std::string& ui_font_path) {
+                                          const std::string& ui_font_path, bool initialize_audio) {
   last_init_error_.clear();
-  window_ = window;
-  if (!transport_.initialize(visual.effects_directory, visual.bgm_path)) {
+  display_refresh_hz_ = host.display_refresh_hz ? std::max(1, host.display_refresh_hz()) : 60;
+  if (initialize_audio && !transport_.initialize(visual.effects_directory, visual.bgm_path)) {
     last_init_error_ =
         "音频初始化失败（BASS / effects：" + visual.effects_directory + "）";
     std::fprintf(stderr, "ChartPreviewPanel: audio init failed\n");
-    window_ = nullptr;
     return false;
   }
 
-  if (!preview_.initialize(window, visual)) {
+  if (!preview_.initialize(host, visual)) {
     // Distinguish the common CI libpng header/dylib skew (skins) from Vulkan.
     last_init_error_ =
         "预览初始化失败（Vulkan 或 skins PNG）。skins=" + visual.skins_directory +
@@ -199,10 +150,9 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
         "failed，说明程序链到了错误的 libpng，请重装完整程序包";
     std::fprintf(stderr, "ChartPreviewPanel: preview init failed\n");
     transport_.shutdown();
-    window_ = nullptr;
     return false;
   }
-  preview_.attach_audio(&transport_.audio());
+  if (initialize_audio) preview_.attach_audio(&transport_.audio());
 
   {
     wds::chart_editor::PreviewConfig core_cfg;
@@ -240,33 +190,14 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
   return true;
 }
 
-bool ChartPreviewPanel::initialize(GLFWwindow* window,
-                                   const wds::renderer::PreviewVisualConfig& visual,
-                                   const std::string& chart_path,
-                                   const std::string& music_config_path,
-                                   const std::string& ui_font_path) {
-  if (ready_) {
-    return true;
-  }
-  if (!finish_initialize(window, visual, ui_font_path)) {
-    return false;
-  }
-  if (!chart_path.empty()) {
-    if (!load_chart(chart_path, music_config_path)) {
-      std::fprintf(stderr, "ChartPreviewPanel: falling back to empty chart\n");
-      seed_empty_chart();
-    }
-  } else {
-    seed_empty_chart();
-  }
-  WDS_LOG("ChartPreviewPanel ready notes=%zu\n", engine_.document().notes().size());
-  return true;
-}
 
-bool ChartPreviewPanel::initialize_empty(GLFWwindow* window,
+bool ChartPreviewPanel::initialize_empty(const wds::renderer::VulkanHostSurface& host,
                                          const wds::renderer::PreviewVisualConfig& visual,
-                                         const std::string& ui_font_path) {
-  return initialize(window, visual, {}, {}, ui_font_path);
+                                         const std::string& ui_font_path, bool initialize_audio) {
+  if (ready_) return true;
+  if (!finish_initialize(host, visual, ui_font_path, initialize_audio)) return false;
+  seed_empty_chart();
+  return true;
 }
 
 void ChartPreviewPanel::shutdown() {
@@ -293,7 +224,6 @@ void ChartPreviewPanel::shutdown() {
   preview_.shutdown();
   transport_.shutdown();
   waveform_.clear();
-  window_ = nullptr;
   ready_ = false;
   font_bake_tier_ = 0.0f;
   font_bake_tip_bucket_ = 0.0f;
@@ -301,7 +231,7 @@ void ChartPreviewPanel::shutdown() {
 }
 
 int64_t ChartPreviewPanel::display_frame_lead_us() const noexcept {
-  const int hz = display_refresh_hz(window_);
+  const int hz = display_refresh_hz_;
   // Fixed one-frame wall duration — not scaled by playback_rate.
   return 1'000'000 / std::max(hz, 1);
 }
@@ -391,6 +321,16 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   const int64_t lead_us = playing ? display_frame_lead_us() : 0;
   preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome,
                   lead_us);
+}
+
+void ChartPreviewPanel::set_lane_count(int lane_count) {
+  lane_count = std::clamp(lane_count, 1, 32);
+  auto visual = preview_.config();
+  visual.lane_count = lane_count;
+  preview_.set_config(visual);
+  auto core_cfg = engine_.preview_config();
+  core_cfg.lane_count = lane_count;
+  engine_.set_preview_config(core_cfg);
 }
 
 void ChartPreviewPanel::set_note_speed(double speed) {

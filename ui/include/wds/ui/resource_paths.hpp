@@ -10,7 +10,7 @@ bool looks_like_effects_dir(const std::string& dir);
 std::string resolve_skins_dir(const char* argv0);
 std::string resolve_effects_dir(const char* argv0);
 std::string resolve_icons_dir(const char* argv0);
-// App icon PNG (wds.png) for GLFW / Linux desktop. Empty if missing.
+// App icon PNG (wds.png) for the desktop shell. Empty if missing.
 std::string resolve_app_icon_png(const char* argv0);
 std::string resolve_fonts_dir(const char* argv0);
 // Bundled full Noto Sans SC Regular. Empty if missing.

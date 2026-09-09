@@ -416,19 +416,29 @@ inline constexpr int frames_in_flight_for_swapchain(uint32_t image_count,
   return spare < max_frames_in_flight ? spare : max_frames_in_flight;
 }
 
-// Window-system binding supplied by the ui layer (GLFW today). Renderer never
-// touches GLFWwindow — only the Vulkan surface and framebuffer size queries.
+// Window-system binding supplied by the ui layer. Renderer never touches a
+// native window object — only the Vulkan instance/surface and size callbacks.
 struct VulkanHostSurface {
-  // Platform WSI instance extensions (e.g. glfwGetRequiredInstanceExtensions).
+  // Optional Qt (or other host) owned handles. When supplied, the renderer
+  // adopts them without creating or destroying the instance/surface.
+  VkInstance external_instance = VK_NULL_HANDLE;
+  VkSurfaceKHR external_surface = VK_NULL_HANDLE;
+  bool renderer_owns_instance = true;
+  bool renderer_owns_surface = true;
+  // Host-provided WSI instance when the UI owns the Vulkan instance.
   // Renderer appends VK_KHR_portability_enumeration on its own for MoltenVK.
   std::vector<const char*> instance_extensions;
 
   // Create a VkSurfaceKHR for the given instance. Renderer owns and destroys it.
   // Return VK_NULL_HANDLE on failure.
   std::function<VkSurfaceKHR(VkInstance)> create_surface;
+  // Reacquire a host-owned surface after platform surface loss.
+  std::function<VkSurfaceKHR()> acquire_surface;
 
   // Current framebuffer size in pixels (swapchain extent source).
   std::function<void(int* width, int* height)> framebuffer_size;
+  // Optional display refresh rate used for one-frame visual lead.
+  std::function<int()> display_refresh_hz;
 
 #if defined(_WIN32)
   // Optional: HMONITOR for VK_EXT_full_screen_exclusive Win32 info. Used when

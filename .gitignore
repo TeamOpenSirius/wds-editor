@@ -54,3 +54,20 @@ compile_commands.json
 
 # Optional sample BGM for local testing
 /suzume_no_tojimari.ogg
+# Local Qt migration verification outputs
+build-*.log
+all-tests*.log
+*-build.log
+*-config.log
+*-tests.log
+install.log
+package-test/
+package-qt-final/
+verify*.log
+env-test.log
+host-build.log
+integration*.log
+qt*.log
+final-qt.log
+audio-test.log
+deploy-final.log

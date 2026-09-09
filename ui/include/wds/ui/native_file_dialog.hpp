@@ -25,10 +25,8 @@ bool confirm(const std::string& title, const std::string& message);
 // Blocking error alert (single OK). Use for fatal startup dependency failures.
 void alert_error(const std::string& title, const std::string& message);
 
-// Owner for modal dialogs and post-dialog focus restore.
-// Windows: HWND (also used as IFileDialog / MessageBox owner).
-// macOS / Linux: GLFWwindow* so the key window can be restored after AppKit / zenity.
-// Pass nullptr to clear.
+// Kept as a source-compatible hook for the pre-Qt callers. Qt resolves the
+// active QWidget as the modal owner, so the platform handle is intentionally ignored.
 void set_owner_window(void* platform_handle);
 
 // Three-way prompt for unsaved changes: 保存 / 不保存 / 取消.

@@ -1,7 +1,7 @@
 #pragma once
 
 // Process-wide crash / fatal-error interception.
-// Call install_crash_handlers() once at the very start of main() (before GLFW).
+// Call install_crash_handlers() once at the very start of main().
 
 namespace wds::common {
 

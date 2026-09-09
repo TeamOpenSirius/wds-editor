@@ -403,7 +403,8 @@ PreviewSettingsPanel* UiManager::settings_panel() noexcept {
 StatusBar* UiManager::status_bar() noexcept { return status_bar_; }
 
 void UiManager::set_status(std::string text, StatusLevel level) {
-  if (status_bar_ != nullptr) status_bar_->set_message(std::move(text), level);
+  if (status_bar_ != nullptr) status_bar_->set_message(text, level);
+  if (external_status_handler_) external_status_handler_(std::move(text), level);
 }
 
 WidthSlotsDialog* UiManager::width_slots_dialog() noexcept { return width_slots_dialog_; }
@@ -460,6 +461,93 @@ ChartAddDialog* UiManager::chart_add_dialog() noexcept { return chart_add_dialog
 
 UnsavedChangesDialog* UiManager::unsaved_changes_dialog() noexcept {
   return unsaved_changes_dialog_;
+}
+
+void UiManager::open_project_with_prompt() {
+  with_save_if_dirty([this] {
+    if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
+      (void)session_->open_wdsproject(*path);
+    } else {
+      set_status("打开已取消", StatusLevel::Info);
+    }
+  });
+}
+
+void UiManager::set_preview_note_speed(double speed) {
+  chart_preview_->set_note_speed(speed);
+  request_save_ui_config(false);
+}
+
+void UiManager::set_preview_lane_count(int lane_count) {
+  chart_preview_->set_lane_count(lane_count);
+  request_save_ui_config(false);
+}
+
+void UiManager::set_curve_template_state_from_qt(CurveTemplateUiState state) {
+  normalize_curve_config(state.templates, state.selected_id);
+  curve_template_state_ = std::move(state);
+  push_curve_fill_selection();
+  request_save_ui_config(true);
+}
+
+void UiManager::enable_qt_chrome(bool enabled) {
+  qt_chrome_enabled_ = enabled;
+  if (auto* widget = toolbar_panel()) widget->set_visible(!enabled);
+  if (auto* widget = settings_panel()) widget->set_visible(!enabled);
+  if (status_bar_ != nullptr) status_bar_->set_visible(!enabled);
+  if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_visible(!enabled);
+  if (curve_templates_dialog_ != nullptr) curve_templates_dialog_->set_visible(!enabled);
+  if (export_choice_dialog_ != nullptr) export_choice_dialog_->set_visible(!enabled);
+  if (chart_add_dialog_ != nullptr) chart_add_dialog_->set_visible(!enabled);
+  if (unsaved_changes_dialog_ != nullptr) unsaved_changes_dialog_->set_visible(!enabled);
+}
+
+void UiManager::build_editor_batch(wds::renderer::DrawBatch& out,
+                                   wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
+                                   const wds::renderer::ScreenBounds& screen,
+                                   const wds::renderer::SkinCatalog& skin) {
+  out.clear();
+  auto* edit = edit_panel();
+  if (edit == nullptr) return;
+  edit->resync_pointer_overlays();
+  wds::interaction::UiPainter painter;
+  edit->paint(painter);
+  wds::interaction::UiPainter overlay;
+  edit->paint_overlays(overlay);
+  painter.flush_to(out, solid_texture, fb_w, fb_h, screen);
+  edit->append_skin_batch(out, skin, fb_w, fb_h, screen, 1.0f);
+  overlay.flush_to(out, solid_texture, fb_w, fb_h, screen);
+}
+
+void UiManager::resize_editor_viewport(int logical_width, int logical_height,
+                                       int framebuffer_width, int framebuffer_height) {
+  if (width_ == std::max(1, logical_width) && height_ == std::max(1, logical_height) &&
+      fb_width_ == std::max(1, framebuffer_width) && fb_height_ == std::max(1, framebuffer_height)) {
+    return;
+  }
+  width_ = std::max(1, logical_width);
+  height_ = std::max(1, logical_height);
+  fb_width_ = std::max(1, framebuffer_width);
+  fb_height_ = std::max(1, framebuffer_height);
+  layout_ = {};
+  layout_.edit = {0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_)};
+  root_.set_bounds({0, 0, static_cast<float>(width_), static_cast<float>(height_)});
+  apply_region_bounds();
+}
+
+void UiManager::resize_preview_viewport(int logical_width, int logical_height,
+                                        int framebuffer_width, int framebuffer_height) {
+  (void)logical_width;
+  (void)logical_height;
+  const int fb_w = std::max(1, framebuffer_width);
+  const int fb_h = std::max(1, framebuffer_height);
+  chart_preview_->resize_framebuffer(fb_w, fb_h);
+  const float aspect = EditorLayouter::kPreviewAspect;
+  const int stage_w = std::max(1, std::min(fb_w, static_cast<int>(std::lround(fb_h * aspect))));
+  const int stage_h = std::max(1, static_cast<int>(std::lround(stage_w / aspect)));
+  chart_preview_->set_panel_bounds(0, 0, fb_w, fb_h);
+  chart_preview_->set_content_bounds((fb_w - stage_w) / 2, (fb_h - stage_h) / 2, stage_w,
+                                     stage_h);
 }
 
 bool UiManager::save_current_project() {
@@ -619,7 +707,23 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
   fb_width_ = fb_w;
   fb_height_ = fb_h;
 
-  const EditorLayoutResult computed = layouter_.compute(width_, height_);
+  EditorLayoutResult computed = layouter_.compute(width_, height_);
+  if (qt_chrome_enabled_) {
+    const float full_w = static_cast<float>(width_);
+    const float full_h = static_cast<float>(height_);
+    const float left_w = std::max(1.0f, full_w * 0.45f);
+    const float edit_w = std::max(1.0f, full_w - left_w);
+    const float stage_w = std::min(left_w, full_h * EditorLayouter::kPreviewAspect);
+    const float stage_h = stage_w / EditorLayouter::kPreviewAspect;
+    computed.regions = {};
+    computed.regions.preview = {0.0f, 0.0f, left_w, full_h};
+    computed.regions.edit = {left_w, 0.0f, edit_w, full_h};
+    computed.preview_content = {
+        static_cast<int>((left_w - stage_w) * 0.5f),
+        static_cast<int>((full_h - stage_h) * 0.5f),
+        std::max(1, static_cast<int>(stage_w)),
+        std::max(1, static_cast<int>(stage_h))};
+  }
   layout_ = computed.regions;
   root_.set_bounds({0, 0, static_cast<float>(width_), static_cast<float>(height_)});
   apply_region_bounds();
@@ -683,7 +787,7 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   };
 
   // Native file panels must not open inside a button click handler — defer from the
-  // unsaved-changes dialog to the next frame (after glfwPollEvents has fully settled).
+  // unsaved-changes dialog to the next frame (after Qt event dispatch has settled).
   auto t0 = clock::now();
   flush_pending_after_save_prompt();
   last_update_flush_us_ = phase_us(t0);
@@ -720,7 +824,13 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   flush_pending_ui_config();
 }
 
-void UiManager::paint(wds::interaction::UiPainter& painter) const { root_.paint(painter); }
+void UiManager::paint(wds::interaction::UiPainter& painter) const {
+  if (qt_chrome_enabled_) {
+    if (const auto* edit = edit_panel()) edit->paint(painter);
+    return;
+  }
+  root_.paint(painter);
+}
 
 void UiManager::prepare_painter(wds::interaction::UiPainter& painter) const {
   if (chart_preview_ != nullptr) {

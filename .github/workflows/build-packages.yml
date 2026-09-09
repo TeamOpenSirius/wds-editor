@@ -53,7 +53,7 @@ jobs:
             ${{ env.VCPKG_ROOT }}/installed
             ${{ env.VCPKG_ROOT }}/packages
             ${{ env.VCPKG_ROOT }}/downloads
-          key: vcpkg-x64-mingw-static-v3-${{ runner.os }}-libpng-zlib-glfw3-vulkan-loader
+          key: vcpkg-x64-mingw-static-v3-${{ runner.os }}-libpng-zlib-vulkan-loader
 
       - name: Bootstrap vcpkg
         run: |
@@ -68,7 +68,6 @@ jobs:
           "${VCPKG_ROOT}/vcpkg" --vcpkg-root="${VCPKG_ROOT}" install \
             libpng:x64-mingw-static \
             zlib:x64-mingw-static \
-            glfw3:x64-mingw-static \
             vulkan-loader:x64-mingw-static
 
       - name: Build and package
@@ -96,7 +95,7 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
-          brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
+          brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
 
       - name: Setup Python packaging tools
         run: |

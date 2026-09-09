@@ -59,7 +59,7 @@ cp scripts/env.example scripts/env.local
 1. 工具链：`mingw-w64`、`cmake`、`ninja` 或 Make、`zip`、`curl`
 2. MSI 打包（可选但推荐）：`msitools`（`wixl` / `wixl-heat` / `msiinfo`）
 3. [vcpkg](https://github.com/microsoft/vcpkg)，triplet `x64-mingw-static`，安装例如：
-   `libpng` `zlib` `glfw3` `vulkan-loader`
+   `libpng` `zlib` `vulkan-loader`
 4. 在 `scripts/env.local` 中设置：
    ```bash
    WDS_VCPKG_ROOT="$HOME/path/to/vcpkg"
@@ -82,7 +82,7 @@ cp scripts/env.example scripts/env.local
 
 ```bash
 xcode-select --install   # 若尚未安装
-brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
+brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
 ```
 
 **编译与打包**
@@ -100,7 +100,7 @@ brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
 当前脚本与文档以 **Linux 交叉 MinGW** 为主路径。若在 Windows 上原生构建，需自行准备：
 
 - Visual Studio 或 MinGW-w64、CMake
-- vcpkg（如 `x64-windows` 或 `x64-mingw-static`）提供 GLFW / libpng / Vulkan
+- vcpkg（如 `x64-windows` 或 `x64-mingw-static`）提供 libpng / Vulkan
 - 将 `CMAKE_PREFIX_PATH`、`Vulkan_LIBRARY` 指向本机前缀
 
 欢迎把可复现步骤以 PR 形式补回文档。
@@ -157,7 +157,7 @@ wds-editor/
 ### 依赖方向（下层不得反向依赖 `ui`）
 
 ```text
-ui → interaction (+ interaction_glfw) → draw → common
+ui → interaction → draw → common
 ui → chart-render → renderer → draw → common
 ui → audio-player → common
 ui → core → common
