@@ -1364,6 +1364,40 @@ void test_jumpscratch_joint_halves_select_tail_and_next_head() {
   CHECK(!h.panel.selected().count(head_id));
 }
 
+void test_alt_selects_one_scratch_hold_segment() {
+  Harness h;
+  const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+  const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  NotationNote prev_head;
+  prev_head.note_type = NoteType::ScratchHoldStart;
+  prev_head.start_tick = 0;
+  prev_head.end_tick = 0;
+  prev_head.lane = 2;
+  prev_head.width = 2;
+  const int32_t prev_head_id = h.engine.add_note(prev_head);
+  NotationNote next_head = prev_head;
+  next_head.start_tick = 480;
+  next_head.end_tick = 480;
+  const int32_t next_head_id = h.engine.add_note(next_head);
+
+  const auto middle = h.at_tick_lane(240, 2);
+  h.panel.on_pointer_down(PointerDownEvent{middle, PointerButton::Left, option_mods()});
+  h.panel.on_pointer_up(PointerUpEvent{middle, PointerButton::Left, option_mods()});
+  CHECK(h.panel.selected().count(prev_id));
+  CHECK(h.panel.selected().count(prev_head_id));
+  CHECK(!h.panel.selected().count(next_id));
+  CHECK(!h.panel.selected().count(next_head_id));
+
+  const auto next_middle = h.at_tick_lane(720, 2);
+  h.panel.on_pointer_down(
+      PointerDownEvent{next_middle, PointerButton::Left, option_mods()});
+  h.panel.on_pointer_up(PointerUpEvent{next_middle, PointerButton::Left, option_mods()});
+  CHECK(!h.panel.selected().count(prev_id));
+  CHECK(!h.panel.selected().count(prev_head_id));
+  CHECK(h.panel.selected().count(next_id));
+  CHECK(h.panel.selected().count(next_head_id));
+}
+
 void test_first_click_on_narrow_note_edge_selects_without_resizing() {
   Harness h;
   NotationNote note;
@@ -1640,6 +1674,7 @@ int main() {
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_jumpscratch_joint_halves_select_tail_and_next_head();
+  test_alt_selects_one_scratch_hold_segment();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   test_split_picker_search_filter();
   test_split_track_between_overlapping_lines();

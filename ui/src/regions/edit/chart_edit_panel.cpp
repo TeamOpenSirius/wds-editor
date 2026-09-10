@@ -3695,7 +3695,19 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         }
       }
       const NotationNote* hit_note = scratch_edge_owner ? &*scratch_edge_owner : &*hit;
-      const bool anchor_already_selected = selected_.count(hit_note->id) != 0;
+      bool alt_chain_part = false;
+      if (event.mods.alt) {
+        if (auto body = resolve_hold_body(*hit_note);
+            body && wds::chart_editor::is_hold_chain_body(body->note_type)) {
+          // Alt opts out of the normal chain-layer selection and isolates the
+          // clicked ScratchHold segment (plus its paired head).
+          select_hold_segment(*body);
+          hold_sel_layer_ = HoldSelLayer::Whole;
+          alt_chain_part = true;
+        }
+      }
+      bool anchor_already_selected = selected_.count(hit_note->id) != 0;
+      if (alt_chain_part) anchor_already_selected = true;
       const auto pair_partner = hold_width_pair_partner(engine_.document(), *hit_note);
       const bool pair_already_selected =
           pair_partner.has_value() && selected_.count(pair_partner->id) != 0;
@@ -3725,7 +3737,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
              near_end_time(*hit_note, event.position.y))));
 
       // Width / time edge drags must not change the current selection set.
-      if (!hitting_width_edge && !hitting_time_edge) {
+      if (!alt_chain_part && !hitting_width_edge && !hitting_time_edge) {
         const bool direct_hold_part =
             wds::chart_editor::is_hold_head_note(*hit_note) ||
             (wds::chart_editor::is_hold_with_tail(hit_note->note_type) &&
