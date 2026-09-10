@@ -445,7 +445,11 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   const auto state = prefs.value("window/state-v4").toByteArray();
   if (!state.isEmpty() && restoreState(state)) {
-    QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
+    QTimer::singleShot(0, this, [this] {
+      for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+        update_control_dock_height(dock);
+      }
+    });
   } else {
     reset_default_layout();
   }
