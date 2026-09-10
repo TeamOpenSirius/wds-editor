@@ -101,6 +101,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_place_intent_override(wds::interaction::PlaceIntent intent) noexcept {
     place_intent_override_ = intent;
   }
+  void set_new_note_place_logic(bool enabled) noexcept { new_note_place_logic_ = enabled; }
   wds::interaction::PlaceIntent place_intent_override() const noexcept {
     return place_intent_override_;
   }
@@ -389,6 +390,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t split_picker_memory_color_id_ = 1;
 
   bool timing_popup_open_ = false;
+  bool new_note_place_logic_ = false;
   TimingPopupMode timing_popup_mode_ = TimingPopupMode::Bpm;
   int32_t timing_edit_tick_ = 0;
   std::string timing_bpm_text_;

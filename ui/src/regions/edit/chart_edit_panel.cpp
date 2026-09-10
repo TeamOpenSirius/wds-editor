@@ -3647,6 +3647,15 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   if (handle_right_gutter_pointer_down(event)) return;
   if (!playfield_.contains(event.position)) return;
 
+  // In the new toolbar-driven interaction mode right click is a destructive
+  // command, never another placement gesture. This makes rapid left-place /
+  // right-delete editing deterministic and avoids accidental overlaps.
+  if (new_note_place_logic_ && wds::interaction::is_right_button(event.button)) {
+    if (hit_test_note(event.position)) delete_note_at(event.position);
+    mode_ = Mode::Idle;
+    return;
+  }
+
   // Middle interrupts in-progress placement before delete-on-note handling.
   if ((mode_ == Mode::PlaceHoldBody || mode_ == Mode::PlaceGesture) &&
       wds::interaction::is_cancel_placement(event)) {

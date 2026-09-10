@@ -250,6 +250,10 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
   // cheap for a single desktop stream (DEV_PERIOD stays 10).
   BASS_SetConfig(BASS_CONFIG_UPDATEPERIOD, 5);
   BASS_SetConfig(BASS_CONFIG_DEV_NONSTOP, TRUE);  // do not stop device when idle
+  // Keep the device queue short for rhythm-game preview. The default BASS
+  // device buffer is intentionally conservative for general media playback,
+  // but makes MP3 playback audibly trail the edit timeline on first play.
+  BASS_SetConfig(BASS_CONFIG_DEV_BUFFER, 20);
   BASS_SetConfig(BASS_CONFIG_DEV_PERIOD, 10);
   if (!BASS_Init(-1, 44100, 0, nullptr, nullptr)) {
     WDS_LOG("AudioEngine: BASS_Init failed code=%d\n", BASS_ErrorGetCode());

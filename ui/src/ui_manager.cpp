@@ -75,6 +75,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit_panel_ = edit.get();
+  edit_panel_->set_new_note_place_logic(new_note_place_logic_);
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
   edit->set_visible_range_changed_handler([this] {
     if (auto* toolbar_panel = this->toolbar_panel()) {
@@ -479,6 +480,7 @@ void UiManager::jump_to_error_tick(int32_t tick) {
 
 void UiManager::set_new_note_place_logic(bool enabled) {
   new_note_place_logic_ = enabled;
+  if (edit_panel_ != nullptr) edit_panel_->set_new_note_place_logic(enabled);
   if (!enabled && edit_panel_ != nullptr) {
     edit_panel_->set_place_intent_override(wds::interaction::PlaceIntent::None);
   }
