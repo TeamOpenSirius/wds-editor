@@ -23,6 +23,7 @@ BusyScope::BusyScope(QWidget* parent, const QString& message) {
   bar->setRange(0, 0);  // indeterminate
   bar->setTextVisible(false);
   layout->addWidget(bar);
+  dialog_->setFixedSize(360, 120);
 
   dialog_->show();
   dialog_->raise();

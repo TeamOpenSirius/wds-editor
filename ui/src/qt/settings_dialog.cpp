@@ -131,7 +131,7 @@ QComboBox* make_combo(const QStringList& items, QWidget* parent) {
 SettingsDialog::SettingsDialog(UiManager* manager, QString theme_dir, QWidget* parent)
     : QDialog(parent), manager_(manager), theme_dir_(std::move(theme_dir)) {
   setWindowTitle(tr("设置"));
-  resize(760, 560);
+  setFixedSize(760, 560);
   manager_->snapshot_ui_config_for_qt(cfg_);
 
   auto* root = new QVBoxLayout(this);

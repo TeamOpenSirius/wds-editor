@@ -53,7 +53,7 @@ respective rights holders and are used here for authoring/preview only.)";
 
 AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
   setWindowTitle(tr("关于 WDS Editor"));
-  resize(560, 460);
+  setFixedSize(560, 460);
 
   auto* root = new QVBoxLayout(this);
 

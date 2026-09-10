@@ -479,7 +479,7 @@ bool EditorMainWindow::show_startup_splash() {
   splash.setWindowTitle(tr("WDS Editor"));
   splash.setModal(true);
   splash.resize(720, 480);
-  splash.setMinimumSize(520, 360);
+  splash.setMinimumSize(720, 480);
   splash.setWindowFlag(Qt::WindowCloseButtonHint, true);
   auto* root = new QVBoxLayout(&splash);
   root->setContentsMargins(24, 20, 24, 18);
@@ -691,6 +691,7 @@ void EditorMainWindow::check_chart() {
     if (index + 1 < static_cast<int>(ticks.size())) { ++index; show_current(); }
   });
   connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+  dialog.setFixedSize(420, 180);
   show_current();
   dialog.exec();
 }
@@ -947,6 +948,7 @@ void EditorMainWindow::export_chart() {
   layout->addWidget(project);
   layout->addWidget(chart);
   layout->addWidget(cancel);
+  dialog.setFixedSize(360, 180);
   enum class Choice { None, Project, Chart };
   Choice choice = Choice::None;
   connect(project, &QPushButton::clicked, &dialog, [&] { choice = Choice::Project; dialog.accept(); });
@@ -981,7 +983,7 @@ void EditorMainWindow::show_settings() {
 }
 
 void EditorMainWindow::show_curve_templates() {
-  QDialog dialog(this); dialog.setWindowTitle(tr("曲线模板")); dialog.resize(560, 360);
+  QDialog dialog(this); dialog.setWindowTitle(tr("曲线模板")); dialog.setFixedSize(560, 360);
   auto* root = new QVBoxLayout(&dialog);
   auto* list = new QListWidget(&dialog);
   auto state = ui_manager_->curve_template_state();

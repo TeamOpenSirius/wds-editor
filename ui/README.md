@@ -31,7 +31,7 @@ ui/
 ├── src/
 ├── assets/                 # 字体、应用图标、OBS/Yami 主题资源
 ├── wds_resources.qrc       # 必须内嵌的 Qt 资源（当前为应用图标）
-└── tests/                  # UI 逻辑与 Qt shell 回归测试
+└── tests/                  # UI 逻辑回归测试
 ```
 
 | CMake 目标 | 角色 |
@@ -39,7 +39,7 @@ ui/
 | `wds_ui` | 静态库：regions / session / dialogs |
 | `wds_editor` | 可执行文件 |
 | `wds_ui_logic_tests` | 视口 / 会话逻辑 |
-| `wds_qt_shell_tests` | Qt 主题、Dock 尺寸和 resize suspension |
+| `wds_chart_edit_panel_curve_tests` | 编辑交互、Hold/ScratchHold 与曲线逻辑 |
 
 ## Qt Dock 布局
 

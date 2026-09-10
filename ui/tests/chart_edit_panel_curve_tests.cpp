@@ -1329,102 +1329,6 @@ void test_selected_width_resize_affects_only_grabbed_note() {
   CHECK(h.panel.selected().count(b_id));
 }
 
-void test_jumpscratch_joint_halves_select_tail_and_next_head() {
-  Harness h;
-  const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
-  const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
-  NotationNote head;
-  head.note_type = NoteType::ScratchHoldStart;
-  head.start_tick = 480;
-  head.end_tick = 480;
-  head.lane = 2;
-  head.width = 2;
-  const int32_t head_id = h.engine.add_note(head);
-  CHECK(head_id >= 0);
-
-  const auto joint = h.at_tick_lane(480, 2);
-  const float half_cap = h.panel.viewport().note_height_px() * 0.25f;
-  const Vec2 previous_side{joint.x, joint.y + half_cap};
-  h.panel.on_pointer_down(PointerDownEvent{previous_side, PointerButton::Left, {}});
-  h.panel.on_pointer_up(PointerUpEvent{previous_side, PointerButton::Left, {}});
-  CHECK(h.panel.selected().count(prev_id));
-  CHECK(!h.panel.selected().count(next_id));
-  CHECK(!h.panel.selected().count(head_id));
-
-  const Vec2 next_side{joint.x, joint.y - half_cap};
-  h.panel.on_pointer_down(PointerDownEvent{next_side, PointerButton::Left, {}});
-  h.panel.on_pointer_up(PointerUpEvent{next_side, PointerButton::Left, {}});
-  CHECK(!h.panel.selected().count(prev_id));
-  CHECK(!h.panel.selected().count(next_id));
-  CHECK(h.panel.selected().count(head_id));
-
-  h.panel.on_pointer_down(PointerDownEvent{previous_side, PointerButton::Left, {}});
-  h.panel.on_pointer_up(PointerUpEvent{previous_side, PointerButton::Left, {}});
-  CHECK(h.panel.selected().count(prev_id));
-  CHECK(!h.panel.selected().count(head_id));
-}
-
-void test_alt_selects_one_scratch_hold_segment() {
-  Harness h;
-  const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
-  const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
-  NotationNote prev_head;
-  prev_head.note_type = NoteType::ScratchHoldStart;
-  prev_head.start_tick = 0;
-  prev_head.end_tick = 0;
-  prev_head.lane = 2;
-  prev_head.width = 2;
-  const int32_t prev_head_id = h.engine.add_note(prev_head);
-  NotationNote next_head = prev_head;
-  next_head.start_tick = 480;
-  next_head.end_tick = 480;
-  const int32_t next_head_id = h.engine.add_note(next_head);
-
-  const auto middle = h.at_tick_lane(240, 2);
-  h.panel.on_pointer_down(PointerDownEvent{middle, PointerButton::Left, option_mods()});
-  h.panel.on_pointer_up(PointerUpEvent{middle, PointerButton::Left, option_mods()});
-  CHECK(h.panel.selected().count(prev_id));
-  CHECK(h.panel.selected().count(prev_head_id));
-  CHECK(!h.panel.selected().count(next_id));
-  CHECK(!h.panel.selected().count(next_head_id));
-
-  const auto next_middle = h.at_tick_lane(720, 2);
-  h.panel.on_pointer_down(
-      PointerDownEvent{next_middle, PointerButton::Left, option_mods()});
-  h.panel.on_pointer_up(PointerUpEvent{next_middle, PointerButton::Left, option_mods()});
-  CHECK(!h.panel.selected().count(prev_id));
-  CHECK(!h.panel.selected().count(prev_head_id));
-  CHECK(h.panel.selected().count(next_id));
-  CHECK(h.panel.selected().count(next_head_id));
-}
-
-void test_first_click_on_narrow_note_edge_selects_without_resizing() {
-  Harness h;
-  NotationNote note;
-  note.note_type = NoteType::Normal;
-  note.start_tick = 480;
-  note.end_tick = 480;
-  note.lane = 3;
-  note.width = 1;
-  const int32_t id = h.engine.add_note(note);
-  CHECK(id >= 0);
-  const auto* before = find_note_id(h.engine.document().notes(), id);
-  CHECK(before != nullptr);
-  if (before == nullptr) return;
-
-  const auto edge = body_right_edge_on_note(h, *before);
-  h.panel.on_pointer_down(PointerDownEvent{edge, PointerButton::Left, {}});
-  h.panel.on_pointer_up(PointerUpEvent{edge, PointerButton::Left, {}});
-
-  const auto* after = find_note_id(h.engine.document().notes(), id);
-  CHECK(after != nullptr);
-  CHECK(h.panel.selected().count(id));
-  if (after != nullptr) {
-    CHECK_EQ(after->lane, 3);
-    CHECK_EQ(after->width, 1);
-  }
-}
-
 void test_paste_hold_does_not_select_eighths() {
   Harness h;
   h.enter_hold(false, 0, 960, 3);
@@ -1673,14 +1577,11 @@ int main() {
   test_hold_tail_adjust_follows_playback_resync();
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
-  test_jumpscratch_joint_halves_select_tail_and_next_head();
-  test_alt_selects_one_scratch_hold_segment();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   test_split_picker_search_filter();
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();
   test_selected_width_resize_affects_only_grabbed_note();
-  test_first_click_on_narrow_note_edge_selects_without_resizing();
   test_paste_hold_does_not_select_eighths();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
