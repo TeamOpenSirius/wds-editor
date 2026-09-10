@@ -59,6 +59,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_global_pointer(wds::interaction::Vec2 point);
   const EditViewport& viewport() const noexcept { return viewport_; }
   EditViewport& viewport() noexcept { return viewport_; }
+  wds::interaction::CursorKind hover_cursor() const noexcept { return hover_cursor_; }
+  wds::chart_editor::ChartEditorEngine& engine() const noexcept { return engine_; }
 
   const EditDrawDepthConfig& draw_depth() const noexcept { return renderer_.draw_depth(); }
   EditDrawDepthConfig& draw_depth() noexcept { return renderer_.draw_depth(); }
@@ -86,6 +88,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_waveform(const wds::audio::WaveformOverview* waveform) noexcept {
     waveform_ = waveform;
   }
+  const wds::audio::WaveformOverview* waveform() const noexcept { return waveform_; }
   void set_spectrogram(wds::renderer::TextureInfo spectrogram) noexcept {
     spectrogram_ = spectrogram;
   }

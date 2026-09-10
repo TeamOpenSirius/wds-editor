@@ -2,6 +2,7 @@
 #include "wds/ui/qt/qt_input_adapter.hpp"
 
 #include <QEvent>
+#include <QGuiApplication>
 #include <QResizeEvent>
 #include <algorithm>
 #include <chrono>
@@ -29,6 +30,12 @@ RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* p
   resize_settle_timer_.setSingleShot(true);
   resize_settle_timer_.setInterval(120);
   QObject::connect(&resize_settle_timer_, &QTimer::timeout, this, [this] {
+    // A splitter/floating dock drag can pause between moves while the button
+    // is still held. Do not recreate its swapchain midway through that gesture.
+    if (QGuiApplication::mouseButtons().testFlag(Qt::LeftButton)) {
+      resize_settle_timer_.start();
+      return;
+    }
     resizing_ = false;
     last_frame_ = std::chrono::steady_clock::now();
     pending_elapsed_us_ = 0;
@@ -39,9 +46,8 @@ RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* p
 RealtimeVulkanWindow::~RealtimeVulkanWindow() = default;
 
 void RealtimeVulkanWindow::set_resize_suspended(bool suspended) noexcept {
-  resizing_ = suspended;
+  host_resize_suspended_ = suspended;
   if (suspended) {
-    resize_settle_timer_.stop();
     pending_elapsed_us_ = 0;
     return;
   }
@@ -77,6 +83,12 @@ wds::renderer::VulkanHostSurface RealtimeVulkanWindow::host_surface() const {
 
 bool RealtimeVulkanWindow::event(QEvent* event) {
   if (event->type() == QEvent::UpdateRequest) {
+    // A request already queued before the resize must not reach the renderer,
+    // even if input is pending. Resume with one frame at the final dimensions.
+    if (resizing_ || host_resize_suspended_) {
+      pending_elapsed_us_ = 0;
+      return true;
+    }
     initialized_ = isExposed();
     if (initialized_) {
       const auto now = std::chrono::steady_clock::now();
@@ -84,14 +96,8 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       last_frame_ = now;
       pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
       const bool has_input = !input_queue_.events().empty();
-      // Resize: keep rendering, but cap swapchain churn to ~20 fps while docks /
-      // the main window are still being dragged.
-      if (resizing_ && !has_input && pending_elapsed_us_ < 50000) {
-        schedule_frame();
-        return true;
-      }
       const bool bypass_idle_cap =
-          resizing_ || (idle_throttle_bypass_ && idle_throttle_bypass_());
+          idle_throttle_bypass_ && idle_throttle_bypass_();
       // 2 ms slack: at exactly one vsync per interval the accumulator lands a
       // hair under the cap and every other frame gets skipped (60→30 fps).
       if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap &&
@@ -117,7 +123,6 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
 
 void RealtimeVulkanWindow::exposeEvent(QExposeEvent*) {
   if (isExposed()) {
-    resizing_ = false;
     last_frame_ = std::chrono::steady_clock::now();
     schedule_frame();
   }
@@ -129,6 +134,6 @@ void RealtimeVulkanWindow::resizeEvent(QResizeEvent*) {
 }
 
 void RealtimeVulkanWindow::schedule_frame() {
-  if (!resizing_ && isExposed()) requestUpdate();
+  if (!resizing_ && !host_resize_suspended_ && isExposed()) requestUpdate();
 }
 }

@@ -131,6 +131,7 @@ class UiManager {
   void build_editor_batch(wds::renderer::DrawBatch& out, wds::renderer::TextureId solid_texture,
                           int fb_w, int fb_h, const wds::renderer::ScreenBounds& screen,
                           const wds::renderer::SkinCatalog& skin);
+  bool editor_batch_needs_rebuild() const noexcept { return editor_batch_dirty_; }
 
   // Layout the edit panel against an independent editor viewport surface.
   void resize_editor_viewport(int logical_width, int logical_height, int framebuffer_width,
@@ -142,6 +143,9 @@ class UiManager {
   const EditorLayoutRects& layout() const noexcept { return layout_; }
 
   void update(float delta_seconds, const std::vector<wds::interaction::InputEvent>& events);
+  bool dispatch_shortcut(const wds::interaction::KeyDownEvent& event) {
+    return shortcuts_.dispatch(event);
+  }
   // Last update() phase costs (µs). Used by frame-diag; always updated.
   int64_t last_update_flush_us() const noexcept { return last_update_flush_us_; }
   int64_t last_update_bounds_us() const noexcept { return last_update_bounds_us_; }
@@ -192,6 +196,7 @@ class UiManager {
   bool has_blocking_modal_dialog() const noexcept;
 
   std::unique_ptr<ChartPreviewPanel> chart_preview_;
+  bool editor_batch_dirty_ = true;
   std::unique_ptr<EditorSession> session_;
   wds::interaction::WidgetRoot root_;
   wds::interaction::ShortcutManager shortcuts_;

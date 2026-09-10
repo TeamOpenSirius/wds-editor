@@ -2,10 +2,13 @@
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets)
 option(WDS_USE_QT_EDITOR "Build the Qt editor entry point" ON)
 if(WDS_USE_QT_EDITOR)
-add_executable(wds_editor
+set(CMAKE_AUTORCC ON)
+add_executable(wds_editor WIN32
   apps/wds_editor_qt.cpp
+  wds_resources.qrc
   src/qt/editor_main_window.cpp
   src/qt/realtime_vulkan_window.cpp
+  src/qt/chart_edit_widget.cpp
   src/qt/qt_input_adapter.cpp
   src/qt/note_icons.cpp
   src/qt/playback_dock.cpp
@@ -17,11 +20,32 @@ add_executable(wds_editor
   src/qt/busy_dialog.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 add_executable(wds_qt_shell_checkpoint ALIAS wds_editor)
+if(NOT CMAKE_CROSSCOMPILING)
+  get_target_property(_wds_shell_sources wds_editor SOURCES)
+  list(REMOVE_ITEM _wds_shell_sources apps/wds_editor_qt.cpp)
+  add_executable(wds_qt_shell_tests tests/qt_shell_tests.cpp ${_wds_shell_sources})
+  target_include_directories(wds_qt_shell_tests PRIVATE include)
+  target_link_libraries(wds_qt_shell_tests PRIVATE Qt6::Widgets wds::ui)
+  target_compile_features(wds_qt_shell_tests PRIVATE cxx_std_17)
+  target_compile_definitions(wds_qt_shell_tests PRIVATE QT_NO_KEYWORDS WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}" WDS_APP_VERSION="${PROJECT_VERSION}")
+  if(MSVC)
+    target_compile_options(wds_qt_shell_tests PRIVATE /utf-8)
+  endif()
+  add_test(NAME wds_qt_shell_tests COMMAND wds_qt_shell_tests)
+endif()
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
 target_link_libraries(wds_editor PRIVATE Qt6::Widgets wds::ui)
 target_compile_features(wds_editor PRIVATE cxx_std_17)
 target_compile_definitions(wds_editor PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
-target_compile_definitions(wds_editor PRIVATE QT_NO_KEYWORDS)
+target_compile_definitions(wds_editor PRIVATE QT_NO_KEYWORDS WDS_APP_VERSION="${PROJECT_VERSION}")
+if(WIN32)
+  enable_language(RC)
+  configure_file(wds_version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/wds_version.rc" @ONLY)
+  target_sources(wds_editor PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/wds_version.rc")
+  add_custom_command(TARGET wds_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WDS_BASS_LIBRARY}" "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>")
+endif()
 if(MSVC)
   target_compile_options(wds_editor PRIVATE /utf-8)
 endif()
@@ -184,6 +208,9 @@ if(NOT CMAKE_CROSSCOMPILING)
       "${_wds_qt_root}/bin\\;${WDS_BASS_LIBRARY_DIR}\\;$ENV{PATH}")
     set_tests_properties(wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
       wds_chart_validation_ui_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
+    if(TARGET wds_qt_shell_tests)
+      set_tests_properties(wds_qt_shell_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
+    endif()
   endif()
 else()
   message(STATUS "Skipping ctest registration for ui tests (cross build)")

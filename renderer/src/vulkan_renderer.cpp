@@ -1117,11 +1117,13 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
                                                          presents.data()))) {
     return false;
   }
-  // FIFO caps the main loop to the display refresh everywhere. MAILBOX lets the
-  // CPU race ahead of scan-out; combined with a per-tick display lead that made
-  // preview time run hot then get pulled back by Transport (speed wobble).
+  // Prefer MAILBOX when available. FIFO makes vkQueuePresentKHR block each
+  // viewport independently, so two visible surfaces serialize and produce
+  // missed frames even when the GPU has spare time. Transport uses measured
+  // elapsed time, therefore MAILBOX does not change playback speed.
   VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
-  (void)presents;
+  if (std::find(presents.begin(), presents.end(), VK_PRESENT_MODE_MAILBOX_KHR) != presents.end())
+    present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
 
   // FIF+2 when the surface allows it (scan-out + queued + in-flight). Clamped
   // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.

@@ -462,6 +462,9 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
   int32_t best_type = 0;
 
   auto consider = [&](float dist, int priority, const NotationNote& note) {
+    // Keep the selected segment as the owner of an overlapping ScratchHold
+    // joint, so the previous tail and next head can be adjusted independently.
+    if (selected_.count(note.id) != 0) priority += 8;
     const int64_t start = static_cast<int64_t>(note.start_tick);
     const int32_t type = static_cast<int32_t>(note.note_type);
     bool better = dist < best_dist - 0.5f;
@@ -625,6 +628,12 @@ void ChartEditPanel::update_hover_cursor(wds::interaction::Vec2 point) {
   }
   const auto hit = hit_test_note(point);
   if (!hit) {
+    set_hover_cursor(CursorKind::Default);
+    return;
+  }
+  // First click selects. Only expose resize handles for the selected note;
+  // otherwise narrow notes can become all handle and no selectable center.
+  if (selected_.count(hit->id) == 0) {
     set_hover_cursor(CursorKind::Default);
     return;
   }
@@ -3650,6 +3659,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
       std::optional<NotationNote> scratch_edge_owner;
       float scratch_edge_dist = 1e9f;
       for (const auto& note : engine_.document().notes()) {
+        if (selected_.count(note.id) == 0) continue;
         if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
         if (!near_scratch_end_cap(note, event.position.y)) continue;
         if (!near_scratch_end_left(note, event.position.x) &&
@@ -3669,24 +3679,24 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
           pair_partner.has_value() && selected_.count(pair_partner->id) != 0;
 
       const bool hitting_scratch_end =
-          scratch_edge_owner.has_value() ||
+          anchor_already_selected && (scratch_edge_owner.has_value() ||
           (wds::chart_editor::is_hold_chain_body(hit_note->note_type) &&
            near_scratch_end_cap(*hit_note, event.position.y) &&
            (near_scratch_end_left(*hit_note, event.position.x) ||
-            near_scratch_end_right(*hit_note, event.position.x)));
+            near_scratch_end_right(*hit_note, event.position.x))));
       // JumpScratch end-cap: vertical adjust or side-edge width only — never free-drag.
       const bool in_jump_scratch_cap =
-          !hitting_scratch_end &&
+          anchor_already_selected && !hitting_scratch_end &&
           wds::chart_editor::is_hold_chain_body(hit_note->note_type) &&
           near_scratch_end_cap(*hit_note, event.position.y);
       const bool mid_star_hit =
           is_visible_mid_star(hit_note->note_type) || hit_note->note_type == NoteType::HoldEighth;
       const bool hitting_width_edge =
-          !mid_star_hit &&
+          anchor_already_selected && !mid_star_hit &&
           (hitting_scratch_end || near_left_edge(*hit_note, event.position.x) ||
            near_right_edge(*hit_note, event.position.x));
       const bool hitting_time_edge =
-          !mid_star_hit && !hitting_scratch_end &&
+          anchor_already_selected && !mid_star_hit && !hitting_scratch_end &&
           (in_jump_scratch_cap ||
            (wds::chart_editor::is_hold_with_tail(hit_note->note_type) &&
             (near_start_time(*hit_note, event.position.y) ||
@@ -3694,7 +3704,16 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
 
       // Width / time edge drags must not change the current selection set.
       if (!hitting_width_edge && !hitting_time_edge) {
-        if (!apply_hold_layered_click(*hit_note)) {
+        const bool direct_hold_part =
+            wds::chart_editor::is_hold_head_note(*hit_note) ||
+            (wds::chart_editor::is_hold_with_tail(hit_note->note_type) &&
+             (near_start_time(*hit_note, event.position.y) ||
+              near_end_time(*hit_note, event.position.y)));
+        if (direct_hold_part) {
+          clear_hold_sel_focus();
+          selected_.clear();
+          selected_.insert(hit_note->id);
+        } else if (!apply_hold_layered_click(*hit_note)) {
           clear_hold_sel_focus();
           if (!selected_.count(hit_note->id)) {
             selected_.clear();
@@ -3791,8 +3810,9 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
             }
           }
         }
-      } else if (near_left_edge(*hit_note, event.position.x) ||
-                 near_right_edge(*hit_note, event.position.x)) {
+      } else if (anchor_already_selected &&
+                 (near_left_edge(*hit_note, event.position.x) ||
+                  near_right_edge(*hit_note, event.position.x))) {
         // Width edits always target the grabbed note only — never the selection set.
         // Move / copy / mirror remain the multi-select batch operations.
         mode_ = Mode::ResizeWidth;

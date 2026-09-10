@@ -12,12 +12,13 @@
 #include <QTextStream>
 
 #include <cmath>
+#include <algorithm>
 
 // Compact, self-contained baker for OBS-style .obt themes. Handles the subset
 // the bundled Yami theme uses: @OBSThemeVars declarations (color / size /
 // number / string / var() alias / calc()/min()/max()), var() substitution in
 // the QSS body, palette_* -> QPalette, and url(theme:...) rewriting. This is
-// deliberately not the full OBS engine (no variants/watchers/user density).
+// deliberately not the full OBS engine (no watchers/user density).
 namespace wds::ui {
 namespace {
 
@@ -250,45 +251,109 @@ QString resolved_string(const QHash<QString, Var>& vars, const QString& key) {
   }
 }
 
-}  // namespace
+QString read_file(const QString& path) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+  return QTextStream(&file).readAll();
+}
 
-void apply_wds_theme(QApplication& app, const QString& theme_dir) {
-  QApplication::setStyle(QStyleFactory::create("Fusion"));
+// Reads a value from an @OBSThemeMeta block (name/id/extends/dark).
+QString meta_field(const QString& content, const QString& field) {
+  const int metaStart = content.indexOf(QStringLiteral("@OBSThemeMeta"));
+  if (metaStart < 0) return {};
+  const int metaEnd = content.indexOf('}', metaStart);
+  const QString block = content.mid(metaStart, metaEnd - metaStart);
+  const QRegularExpression re(field + R"(\s*:\s*'([^']*)')");
+  return re.match(block).captured(1);
+}
 
-  QFile file(QDir(theme_dir).filePath(QStringLiteral("Yami.obt")));
-  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
-  const QString content = QTextStream(&file).readAll();
-
-  // 1. Collect @OBSThemeVars declarations.
-  QHash<QString, Var> vars;
-  {
-    const int varsStart = content.indexOf(QStringLiteral("@OBSThemeVars"));
-    const int open = content.indexOf('{', varsStart);
-    int depth = 0, end = open;
-    for (int i = open; i < content.size(); ++i) {
-      if (content[i] == '{') ++depth;
-      else if (content[i] == '}' && --depth == 0) { end = i; break; }
-    }
-    const QString block = content.mid(open + 1, end - open - 1);
-    static const QRegularExpression declRe(R"(--([A-Za-z0-9_]+)\s*:\s*([^;]+);)");
-    auto it = declRe.globalMatch(block);
-    while (it.hasNext()) {
-      auto m = it.next();
-      vars.insert("--" + m.captured(1), parse_value(m.captured(2)));
-    }
+// Merges @OBSThemeVars declarations from `content` into `vars`.
+void collect_vars(const QString& content, QHash<QString, Var>& vars) {
+  const int varsStart = content.indexOf(QStringLiteral("@OBSThemeVars"));
+  if (varsStart < 0) return;
+  const int open = content.indexOf('{', varsStart);
+  int depth = 0, end = open;
+  for (int i = open; i < content.size(); ++i) {
+    if (content[i] == '{') ++depth;
+    else if (content[i] == '}' && --depth == 0) { end = i; break; }
   }
-  // Runtime-injected values.
-  vars["--obsFontScale"] = parse_value(QString::number(kFontScale));
-  vars["--obsPadding"] = parse_value(QString::number(kPadding));
+  const QString block = content.mid(open + 1, end - open - 1);
+  static const QRegularExpression declRe(R"(--([A-Za-z0-9_]+)\s*:\s*([^;]+);)");
+  auto it = declRe.globalMatch(block);
+  while (it.hasNext()) {
+    auto m = it.next();
+    vars.insert("--" + m.captured(1), parse_value(m.captured(2)));
+  }
+}
 
-  // 2. QSS body = everything after the last OBS metadata section.
+// QSS body = everything after the last OBS metadata section.
+QString qss_body(const QString& content) {
   int bodyStart = 0;
   for (const QString& section :
        {QStringLiteral("OBSThemeMeta"), QStringLiteral("OBSThemeVars"), QStringLiteral("OBSTheme")}) {
     const int idx = content.indexOf(section);
     if (idx > bodyStart) bodyStart = content.indexOf('}', idx) + 1;
   }
-  QString qss = content.mid(bodyStart);
+  return content.mid(bodyStart);
+}
+
+// Resolves a theme id to its file, walking .obt (base) + .ovt (variants).
+QString file_for_theme(const QString& theme_dir, const QString& theme_id) {
+  QDir dir(theme_dir);
+  for (const QString& name : dir.entryList({"*.obt", "*.ovt"}, QDir::Files)) {
+    if (meta_field(read_file(dir.filePath(name)), "id") == theme_id)
+      return dir.filePath(name);
+  }
+  return {};
+}
+
+}  // namespace
+
+QVector<ThemeInfo> available_themes(const QString& theme_dir) {
+  QVector<ThemeInfo> out;
+  QDir dir(theme_dir);
+  // Variant themes first (they populate the picker); skip System passthrough.
+  for (const QString& name : dir.entryList({"*.obt", "*.ovt"}, QDir::Files, QDir::Name)) {
+    const QString content = read_file(dir.filePath(name));
+    const QString id = meta_field(content, "id");
+    if (id.isEmpty() || id == QStringLiteral("com.obsproject.System")) continue;
+    // Only Yami-family (base + variants) — that's what we ship icons/vars for.
+    const bool isBase = id == QStringLiteral("com.obsproject.Yami");
+    if (!isBase && meta_field(content, "extends") != QStringLiteral("com.obsproject.Yami"))
+      continue;
+    ThemeInfo info;
+    info.id = id;
+    info.name = meta_field(content, "name");
+    info.dark = meta_field(content, "dark") != QStringLiteral("false");
+    out.push_back(info);
+  }
+  return out;
+}
+
+void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString& theme_id) {
+  QApplication::setStyle(QStyleFactory::create("Fusion"));
+
+  const QString base_content = read_file(QDir(theme_dir).filePath(QStringLiteral("Yami.obt")));
+  if (base_content.isEmpty()) return;
+
+  // Optional variant layered on the base (overrides vars, appends QSS).
+  QString variant_content;
+  if (!theme_id.isEmpty() && theme_id != QStringLiteral("com.obsproject.Yami")) {
+    const QString path = file_for_theme(theme_dir, theme_id);
+    if (!path.isEmpty()) variant_content = read_file(path);
+  }
+
+  // 1. Collect vars: base first, then variant overrides.
+  QHash<QString, Var> vars;
+  collect_vars(base_content, vars);
+  if (!variant_content.isEmpty()) collect_vars(variant_content, vars);
+  // Runtime-injected values.
+  vars["--obsFontScale"] = parse_value(QString::number(kFontScale));
+  vars["--obsPadding"] = parse_value(QString::number(kPadding));
+
+  // 2. QSS body: base then variant appended.
+  QString qss = qss_body(base_content);
+  if (!variant_content.isEmpty()) qss += "\n" + qss_body(variant_content);
 
   // 3. Substitute var(--x) with concrete values (longest names first so
   // --primary_light isn't clipped by --primary).
@@ -303,6 +368,11 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir) {
   const QString base = QDir(theme_dir).absolutePath();
   qss.replace(QRegularExpression(R"(url\(\s*theme:)"),
               QStringLiteral("url(%1/").arg(base));
+  qss.replace(QStringLiteral(":res/images/"), base + QStringLiteral("/Common/"));
+
+  // 5. Force the bundled Noto Sans SC as the primary family so CJK renders and
+  // the theme's 'Open Sans' fallback (unbundled, Latin-only) doesn't win.
+  qss.replace(QStringLiteral("'Open Sans'"), QStringLiteral("'Noto Sans SC'"));
 
   // 5. Palette from palette_* vars (names are lowercase-first, e.g.
   // palette_windowText -> QPalette::WindowText).

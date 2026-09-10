@@ -32,6 +32,9 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <QCoreApplication>
+#include <QMetaObject>
+#include <QThread>
 
 namespace wds::ui {
 namespace {
@@ -57,6 +60,13 @@ void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& 
 UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   session_ = std::make_unique<EditorSession>(*chart_preview_);
   session_->set_status_handler([this](std::string text, StatusLevel level) {
+    auto* app = QCoreApplication::instance();
+    if (app != nullptr && QThread::currentThread() != app->thread()) {
+      QMetaObject::invokeMethod(app, [this, text = std::move(text), level]() mutable {
+        set_status(std::move(text), level);
+      }, Qt::QueuedConnection);
+      return;
+    }
     set_status(std::move(text), level);
   });
 
@@ -546,6 +556,7 @@ void UiManager::build_editor_batch(wds::renderer::DrawBatch& out,
   painter.flush_to(out, solid_texture, fb_w, fb_h, screen);
   edit->append_skin_batch(out, skin, fb_w, fb_h, screen, 1.0f);
   overlay.flush_to(out, solid_texture, fb_w, fb_h, screen);
+  editor_batch_dirty_ = false;
 }
 
 void UiManager::resize_editor_viewport(int logical_width, int logical_height,
@@ -562,6 +573,7 @@ void UiManager::resize_editor_viewport(int logical_width, int logical_height,
   layout_.edit = {0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_)};
   root_.set_bounds({0, 0, static_cast<float>(width_), static_cast<float>(height_)});
   apply_region_bounds();
+  editor_batch_dirty_ = true;
 }
 
 void UiManager::resize_preview_viewport(int logical_width, int logical_height,
@@ -835,6 +847,9 @@ void UiManager::apply_region_bounds() {
 }
 
 void UiManager::update(float delta_seconds, const std::vector<wds::interaction::InputEvent>& events) {
+  if (!events.empty()) editor_batch_dirty_ = true;
+  if (session_ != nullptr && session_->engine().playback_state() == wds::common::PlaybackState::Playing)
+    editor_batch_dirty_ = true;
   using clock = std::chrono::steady_clock;
   const auto phase_us = [](clock::time_point t0) {
     return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();

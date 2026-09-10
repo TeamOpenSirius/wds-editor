@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 #include <QAction>
+#include <QString>
 #include <QTimer>
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
 #include <functional>
@@ -21,13 +22,22 @@ class EditorMainWindow final : public QMainWindow {
   explicit EditorMainWindow(QWidget* parent = nullptr);
   // Skin PNG directory for the convert-button note icons; call before bind_ui_manager.
   void set_skins_dir(std::string dir) { skins_dir_ = std::move(dir); }
+  // OBS theme directory, for the settings appearance picker.
+  void set_theme_dir(QString dir) { theme_dir_ = std::move(dir); }
   void bind_ui_manager(UiManager* manager);
+  // Shows the startup chooser. Returns true when the editor should continue,
+  // false when the user closed the splash and the application should exit.
+  bool show_startup_splash();
   void set_viewport_windows(QWindow* preview, QWindow* editor);
+  void set_editor_widget(QWidget* editor);
   // App-wide Space → transport toggle (except while typing / edit viewport focus).
   bool eventFilter(QObject* watched, QEvent* event) override;
  protected:
   void closeEvent(QCloseEvent* event) override;
+  void hideEvent(QHideEvent* event) override;
+  void showEvent(QShowEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
+  bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
   bool confirm_pending_changes();
   void open_project();
   void save_project();
@@ -38,12 +48,14 @@ class EditorMainWindow final : public QMainWindow {
   void check_chart();
   void show_settings();
   void show_curve_templates();
+  void remember_recent_project(const QString& path);
  private:
   void create_playback_and_toolbox_docks();
   void reset_default_layout();
   void sync_toolbox_place_checks();
   UiManager* ui_manager_ = nullptr;
   std::string skins_dir_;
+  QString theme_dir_;
   ::QAction* open_action_ = nullptr;
   ::QAction* save_action_ = nullptr;
   ::QAction* undo_action_ = nullptr;
@@ -66,6 +78,14 @@ class EditorMainWindow final : public QMainWindow {
   std::array<::QToolButton*, 8> convert_buttons_{};
   ::QWindow* preview_window_ = nullptr;
   ::QWindow* editor_window_ = nullptr;
+  ::QWidget* editor_widget_ = nullptr;
   QTimer resize_settle_timer_;
+  // Pin the bottom control-dock row height across window resizes so the
+  // preview/editor row absorbs the slack; manual splitter drags update it.
+  void pin_bottom_row();
+  void restore_bottom_row();
+  std::array<int, 3> bottom_row_heights_{};
+  std::array<int, 3> bottom_row_widths_{};
+  bool native_resizing_ = false;
 };
 }

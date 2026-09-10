@@ -2,6 +2,10 @@
 
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/qt/wds_theme.hpp"
+
+#include <QApplication>
+#include <QSettings>
 
 #include <wds/interaction/platform.hpp>
 #include <wds/interaction/shortcuts.hpp>
@@ -23,6 +27,7 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -123,8 +128,8 @@ QComboBox* make_combo(const QStringList& items, QWidget* parent) {
 
 }  // namespace
 
-SettingsDialog::SettingsDialog(UiManager* manager, QWidget* parent)
-    : QDialog(parent), manager_(manager) {
+SettingsDialog::SettingsDialog(UiManager* manager, QString theme_dir, QWidget* parent)
+    : QDialog(parent), manager_(manager), theme_dir_(std::move(theme_dir)) {
   setWindowTitle(tr("设置"));
   resize(760, 560);
   manager_->snapshot_ui_config_for_qt(cfg_);
@@ -132,7 +137,8 @@ SettingsDialog::SettingsDialog(UiManager* manager, QWidget* parent)
   auto* root = new QVBoxLayout(this);
   auto* body = new QHBoxLayout;
   sidebar_ = new QListWidget(this);
-  const std::array<std::pair<QString, char32_t>, 7> tabs = {{
+  const std::array<std::pair<QString, char32_t>, 8> tabs = {{
+      {tr("外观"), fluent::Display},
       {tr("文件"), fluent::Files},
       {tr("音频"), fluent::Audio},
       {tr("输入"), fluent::Keyboard},
@@ -154,7 +160,9 @@ SettingsDialog::SettingsDialog(UiManager* manager, QWidget* parent)
 
   auto* buttons = new QDialogButtonBox(this);
   auto* confirm = buttons->addButton(tr("确认"), QDialogButtonBox::AcceptRole);
-  buttons->addButton(tr("取消"), QDialogButtonBox::RejectRole);
+  confirm->setIcon(fluent_icon(fluent::Accept));
+  auto* cancel = buttons->addButton(tr("取消"), QDialogButtonBox::RejectRole);
+  cancel->setIcon(fluent_icon(fluent::Clear));
   root->addWidget(buttons);
   connect(confirm, &QPushButton::clicked, this, &SettingsDialog::try_confirm);
   connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -166,6 +174,20 @@ SettingsDialog::SettingsDialog(UiManager* manager, QWidget* parent)
 }
 
 void SettingsDialog::build_pages() {
+  // 外观 (persist on confirm, apply at next startup)
+  auto* appearance = new QWidget(pages_);
+  auto* appearanceForm = new QFormLayout(appearance);
+  theme_combo_ = new QComboBox(appearance);
+  const QString current =
+      QSettings("WDS", "WDS Editor").value("appearance/theme").toString();
+  for (const auto& info : available_themes(theme_dir_)) {
+    theme_combo_->addItem(info.name, info.id);
+    if (info.id == current) theme_combo_->setCurrentIndex(theme_combo_->count() - 1);
+  }
+  appearanceForm->addRow(tr("主题"), theme_combo_);
+  appearanceForm->addRow(new QLabel(tr("保存后重启编辑器生效。"), appearance));
+  pages_->addWidget(appearance);
+
   // 文件
   auto* file = new QWidget(pages_);
   auto* fileLayout = new QVBoxLayout(file);
@@ -268,8 +290,16 @@ void SettingsDialog::build_pages() {
 #endif
     shortcut_edits_[i] = edit;
     shortcutsLayout->addWidget(edit, row, 1);
-    auto* clear = new QPushButton(QStringLiteral("×"), shortcuts);
-    clear->setFixedWidth(28);
+    auto* clear = new QPushButton(shortcuts);
+    auto clear_icon = fluent_icon(fluent::Clear);
+    if (clear_icon.isNull()) clear_icon = style()->standardIcon(QStyle::SP_DialogCloseButton);
+    clear->setIcon(clear_icon);
+    clear->setIconSize(QSize(18, 18));
+    clear->setFixedSize(32, 32);
+    const QString clear_label = tr("清除快捷键：%1").arg(QString::fromUtf8(
+        wds::interaction::editor_shortcut_label(id, cfg_.pause_at_current)));
+    clear->setToolTip(clear_label);
+    clear->setAccessibleName(clear_label);
     connect(clear, &QPushButton::clicked, edit, &QKeySequenceEdit::clear);
     connect(edit, &QKeySequenceEdit::keySequenceChanged, this,
             [this] { refresh_shortcut_conflicts(); });
@@ -376,12 +406,20 @@ bool SettingsDialog::capture_into_config() {
 void SettingsDialog::try_confirm() {
   const int conflict = refresh_shortcut_conflicts();
   if (conflict >= 0) {
-    sidebar_->setCurrentRow(5);
+    sidebar_->setCurrentRow(6);  // 快捷键 tab (外观 inserted at 0)
     shortcut_edits_[static_cast<std::size_t>(conflict)]->setFocus();
     return;
   }
   if (!capture_into_config()) return;
   manager_->apply_ui_config_from_qt(cfg_);
+  // Apply at startup so existing rasterized icons use the new palette too.
+  if (theme_combo_ != nullptr && theme_combo_->currentIndex() >= 0) {
+    const QString id = theme_combo_->currentData().toString();
+    QSettings prefs("WDS", "WDS Editor");
+    if (prefs.value("appearance/theme").toString() != id) {
+      prefs.setValue("appearance/theme", id);
+    }
+  }
   accept();
 }
 

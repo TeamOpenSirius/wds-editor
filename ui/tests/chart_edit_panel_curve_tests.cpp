@@ -1042,9 +1042,9 @@ void test_selected_regular_terminal_tail_shows_resize_cursor() {
 
   h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
   h.panel.on_pointer_move(PointerMoveEvent{tail_edge, {}});
-  CHECK(cursor == CursorKind::ResizeHorizontal);
+  CHECK(cursor == CursorKind::Default);
   h.panel.on_pointer_move(PointerMoveEvent{tail_mid, {}});
-  CHECK(cursor == CursorKind::ResizeVertical);
+  CHECK(cursor == CursorKind::Default);
 
   h.panel.set_selected({id});
   h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
@@ -1079,6 +1079,7 @@ void test_selected_scratch_terminal_tail_keeps_resize_cursor() {
 void test_hold_tail_adjust_follows_playback_resync() {
   Harness h;
   const int32_t id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+  h.panel.set_selected({id});
   const auto grab = h.at_tick_lane(960, 4);
   h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
   const auto* before = find_note_id(h.engine.document().notes(), id);
@@ -1100,6 +1101,7 @@ void test_hold_tail_adjust_follows_playback_resync() {
 void test_jumpscratch_end_adjust_follows_wheel_resync() {
   Harness h;
   const int32_t id = add_hold_body(h, NoteType::ScratchHold, 0, 960, 3, 3);
+  h.panel.set_selected({id});
   const auto grab = h.at_tick_lane(960, 4);
   h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
   const auto* before = find_note_id(h.engine.document().notes(), id);
@@ -1120,6 +1122,7 @@ void test_jumpscratch_joint_adjust_follows_playback_resync() {
   Harness h;
   const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
   const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  h.panel.set_selected({prev_id});
   const auto grab = h.at_tick_lane(480, 2);
   h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
 
@@ -1324,6 +1327,33 @@ void test_selected_width_resize_affects_only_grabbed_note() {
   CHECK_EQ(after_b->lane, b_lane0);
   CHECK(h.panel.selected().count(a_id));
   CHECK(h.panel.selected().count(b_id));
+}
+
+void test_first_click_on_narrow_note_edge_selects_without_resizing() {
+  Harness h;
+  NotationNote note;
+  note.note_type = NoteType::Normal;
+  note.start_tick = 480;
+  note.end_tick = 480;
+  note.lane = 3;
+  note.width = 1;
+  const int32_t id = h.engine.add_note(note);
+  CHECK(id >= 0);
+  const auto* before = find_note_id(h.engine.document().notes(), id);
+  CHECK(before != nullptr);
+  if (before == nullptr) return;
+
+  const auto edge = body_right_edge_on_note(h, *before);
+  h.panel.on_pointer_down(PointerDownEvent{edge, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{edge, PointerButton::Left, {}});
+
+  const auto* after = find_note_id(h.engine.document().notes(), id);
+  CHECK(after != nullptr);
+  CHECK(h.panel.selected().count(id));
+  if (after != nullptr) {
+    CHECK_EQ(after->lane, 3);
+    CHECK_EQ(after->width, 1);
+  }
 }
 
 void test_paste_hold_does_not_select_eighths() {
@@ -1579,6 +1609,7 @@ int main() {
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();
   test_selected_width_resize_affects_only_grabbed_note();
+  test_first_click_on_narrow_note_edge_selects_without_resizing();
   test_paste_hold_does_not_select_eighths();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();

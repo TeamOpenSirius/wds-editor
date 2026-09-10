@@ -23,6 +23,8 @@ constexpr char32_t Play = 0xE768;
 constexpr char32_t Pause = 0xE769;
 constexpr char32_t Previous = 0xE892;   // "回到开头"
 constexpr char32_t Add = 0xE710;
+constexpr char32_t Clear = 0xE711;
+constexpr char32_t Accept = 0xE73E;
 constexpr char32_t Info = 0xE946;       // about
 constexpr char32_t Volume = 0xE767;
 constexpr char32_t Speed = 0xEC4A;      // "Speed"/timer-ish
@@ -43,5 +45,7 @@ QString load_fluent_font(const QString& font_path);
 // Renders a Fluent glyph to a themed QIcon. `color` defaults to the current
 // palette text color when invalid.
 QIcon fluent_icon(char32_t glyph, const QColor& color = QColor(), int px = 20);
+// The bundled edit_curve.svg shape, drawn with the active text color.
+QIcon curve_template_icon(int px = 20);
 
 }  // namespace wds::ui

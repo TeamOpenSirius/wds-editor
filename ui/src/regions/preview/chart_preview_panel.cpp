@@ -9,6 +9,7 @@
 #include <wds/interaction/theme.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -196,7 +197,9 @@ bool ChartPreviewPanel::initialize_empty(const wds::renderer::VulkanHostSurface&
                                          const std::string& ui_font_path, bool initialize_audio) {
   if (ready_) return true;
   if (!finish_initialize(host, visual, ui_font_path, initialize_audio)) return false;
-  seed_empty_chart();
+  // Keep the engine's current document intact. Startup project loading can
+  // happen before the Vulkan surface is ready; seeding here would overwrite
+  // that document with a blank chart when the first frame is initialized.
   return true;
 }
 
@@ -220,6 +223,19 @@ void ChartPreviewPanel::shutdown() {
     preview_.vulkan().destroy_texture(solid_texture_.id);
     solid_texture_ = {};
   }
+  // Dedicated decode streams may still be using BASS. Join them before the
+  // transport shuts the audio engine down; this wait only occurs on exit.
+  ++waveform_generation_;
+  for (auto& pending : pending_waveforms_) {
+    if (pending.result.valid()) {
+      try {
+        (void)pending.result.get();
+      } catch (...) {
+        WDS_LOG("ChartPreviewPanel: waveform worker failed during shutdown\n");
+      }
+    }
+  }
+  pending_waveforms_.clear();
   destroy_spectrogram_texture();
   preview_.shutdown();
   transport_.shutdown();
@@ -290,6 +306,7 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   if (!ready_) {
     return;
   }
+  collect_ready_waveforms();
   // Clamp post-hitch spikes so Transport does not hard-snap (100 ms) on one frame.
   constexpr int64_t kMaxWallDeltaUs = 80000;  // 80 ms
   const int64_t clamped =
@@ -408,16 +425,46 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
 
 void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
   destroy_spectrogram_texture();
+  waveform_.clear();
+  const std::uint64_t generation = ++waveform_generation_;
   if (music_path.empty() || !transport_.audio().has_music()) {
-    waveform_.clear();
     return;
   }
-  if (!waveform_.load(music_path)) {
-    WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
-    waveform_.clear();
-    return;
+  // Decoding the full song and calculating two FFTs per hop is the expensive
+  // part of project opening. Keep it off the Qt/render thread; tick() installs
+  // only the newest completed result and performs the Vulkan upload there.
+  pending_waveforms_.push_back(PendingWaveform{
+      generation,
+      std::async(std::launch::async, [music_path] {
+        wds::audio::WaveformOverview decoded;
+        if (!decoded.load(music_path)) {
+          WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
+          decoded.clear();
+        }
+        return decoded;
+      })});
+}
+
+void ChartPreviewPanel::collect_ready_waveforms() {
+  using namespace std::chrono_literals;
+  for (auto it = pending_waveforms_.begin(); it != pending_waveforms_.end();) {
+    if (!it->result.valid() || it->result.wait_for(0ms) != std::future_status::ready) {
+      ++it;
+      continue;
+    }
+    wds::audio::WaveformOverview decoded;
+    try {
+      decoded = it->result.get();
+    } catch (...) {
+      WDS_LOG("ChartPreviewPanel: waveform worker failed\n");
+      decoded.clear();
+    }
+    const bool current = it->generation == waveform_generation_;
+    it = pending_waveforms_.erase(it);
+    if (!current) continue;
+    waveform_ = std::move(decoded);
+    bake_spectrogram_texture();
   }
-  bake_spectrogram_texture();
 }
 
 void ChartPreviewPanel::destroy_spectrogram_texture() {

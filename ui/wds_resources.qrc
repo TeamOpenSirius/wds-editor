@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/wds">
+    <file alias="app_icon.png">assets/app_icon/wds.png</file>
+  </qresource>
+</RCC>

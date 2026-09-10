@@ -11,11 +11,12 @@
 namespace wds::ui {
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = WDS_APP_VERSION;
 
-const char* kLicenseText = R"(WDS Editor — a chart editor for World Dai Star: Gakuen Idolmaster style rhythm charts.
+const char* kLicenseText = R"(WDS Editor — a chart editor for World Dai Star rhythm charts.
 
-Copyright (C) 2025 WDS Editor contributors.
+Copyright (C) 2026 softmanmaker.
+Copyright (C) 2026 The OpenSirius team.
 
 This program bundles third-party components under their own licenses:
 

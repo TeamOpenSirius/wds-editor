@@ -502,11 +502,13 @@ bool EditorSession::open_wdsproject(const std::string& path) {
   // Missing/unloadable music is non-fatal — charts still open.
   std::string loaded_music = new_music;
   std::string music_note;
-  if (!preview_.load_music(loaded_music, false)) {
-    if (!loaded_music.empty()) {
-      music_note = "（音乐未加载，可重新导入）";
+  if (preview_.ready()) {
+    if (!preview_.load_music(loaded_music, false)) {
+      if (!loaded_music.empty()) {
+        music_note = "（音乐未加载，可重新导入）";
+      }
+      (void)preview_.load_music({}, false);
     }
-    (void)preview_.load_music({}, false);
   }
 
   project_path_ = path;

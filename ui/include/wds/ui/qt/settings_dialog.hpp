@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QString>
 #include <array>
 
 #include "wds/ui/editor_ui_config.hpp"
@@ -23,7 +24,7 @@ class UiManager;
 // 文件 / 音频 / 输入 / 显示 / 宽度 / 快捷键 / 隐私 pages plus 确认 / 取消.
 class SettingsDialog final : public QDialog {
  public:
-  explicit SettingsDialog(UiManager* manager, QWidget* parent = nullptr);
+  explicit SettingsDialog(UiManager* manager, QString theme_dir, QWidget* parent = nullptr);
 
  private:
   void build_pages();
@@ -34,10 +35,12 @@ class SettingsDialog final : public QDialog {
   void try_confirm();
 
   UiManager* manager_ = nullptr;
+  QString theme_dir_;
   EditorUiConfig cfg_{};
 
   QListWidget* sidebar_ = nullptr;
   QStackedWidget* pages_ = nullptr;
+  QComboBox* theme_combo_ = nullptr;
 
   QCheckBox* sus_auto_convert_ = nullptr;
   QCheckBox* mute_hold_body_sfx_ = nullptr;

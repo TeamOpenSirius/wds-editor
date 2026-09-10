@@ -1,6 +1,7 @@
 #include "wds/ui/qt/playback_dock.hpp"
 
 #include "wds/ui/qt/flow_layout.hpp"
+#include "wds/ui/qt/fluent_icons.hpp"
 
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
@@ -13,6 +14,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -20,6 +22,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStyle>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -96,6 +99,21 @@ void PlaybackAudioPanel::build_ui() {
   seek_->setMinimumWidth(120);
   play_ = new QPushButton(tr("播放"), this);
   stop_ = new QPushButton(tr("回到开头"), this);
+  play_icon_ = fluent_icon(fluent::Play);
+  pause_icon_ = fluent_icon(fluent::Pause);
+  if (play_icon_.isNull()) play_icon_ = style()->standardIcon(QStyle::SP_MediaPlay);
+  if (pause_icon_.isNull()) pause_icon_ = style()->standardIcon(QStyle::SP_MediaPause);
+  auto previous = fluent_icon(fluent::Previous);
+  if (previous.isNull()) previous = style()->standardIcon(QStyle::SP_MediaSkipBackward);
+  play_->setIcon(play_icon_);
+  stop_->setIcon(previous);
+  for (auto* button : {play_, stop_}) {
+    button->setToolTip(button->text());
+    button->setAccessibleName(button->text());
+    button->setText({});
+    button->setIconSize(QSize(20, 20));
+    button->setFixedSize(36, 32);
+  }
   seekRow->addWidget(seek_, 1);
   seekRow->addWidget(play_);
   seekRow->addWidget(stop_);
@@ -127,8 +145,14 @@ void PlaybackAudioPanel::build_ui() {
 
   chart_select_ = new QComboBox(content);
   chart_select_->setMinimumWidth(110);
-  chart_add_ = new QPushButton(QStringLiteral("+"), content);
-  chart_add_->setFixedWidth(28);
+  chart_add_ = new QPushButton(content);
+  auto add_icon = fluent_icon(fluent::Add);
+  if (add_icon.isNull()) add_icon = style()->standardIcon(QStyle::SP_FileDialogNewFolder);
+  chart_add_->setIcon(add_icon);
+  chart_add_->setIconSize(QSize(20, 20));
+  chart_add_->setFixedSize(32, 32);
+  chart_add_->setToolTip(tr("增加谱面"));
+  chart_add_->setAccessibleName(tr("增加谱面"));
   make_group(flow, {new QLabel(tr("谱面"), content), chart_select_, chart_add_});
 
   pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), content);
@@ -220,7 +244,12 @@ void PlaybackAudioPanel::sync_from_runtime() {
   auto& session = manager_->session();
   auto& transport = manager_->chart_preview().transport();
 
-  play_->setText(transport.playing() ? tr("暂停") : tr("播放"));
+  const QString action = transport.playing() ? tr("暂停") : tr("播放");
+  if (play_->toolTip() != action) {
+    play_->setIcon(transport.playing() ? pause_icon_ : play_icon_);
+    play_->setToolTip(action);
+    play_->setAccessibleName(action);
+  }
   if (!seek_->isSliderDown()) {
     if (auto* settings = manager_->settings_panel()) {
       int64_t start = 0;
@@ -293,10 +322,24 @@ AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
   };
   make_volume_slider(music_volume_, music_value_);
   music_mute_ = new QCheckBox(tr("静音"), content);
-  make_group(flow, {new QLabel(tr("音乐"), content), music_volume_, music_value_, music_mute_});
   make_volume_slider(sfx_volume_, sfx_value_);
   sfx_mute_ = new QCheckBox(tr("静音"), content);
-  make_group(flow, {new QLabel(tr("音效"), content), sfx_volume_, sfx_value_, sfx_mute_});
+  const auto add_channel = [flow, content](const QString& title, QSlider* slider,
+                                          QLabel* value, QCheckBox* mute) {
+    auto* group = new QWidget(content);
+    auto* grid = new QGridLayout(group);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setHorizontalSpacing(6);
+    grid->setVerticalSpacing(4);
+    grid->addWidget(new QLabel(title, group), 0, 0);
+    grid->addWidget(slider, 0, 1);
+    grid->addWidget(value, 0, 2);
+    grid->addWidget(mute, 1, 1, 1, 2);
+    grid->setColumnStretch(1, 1);
+    flow->addWidget(group);
+  };
+  add_channel(tr("音乐"), music_volume_, music_value_, music_mute_);
+  add_channel(tr("音效"), sfx_volume_, sfx_value_, sfx_mute_);
 
   const auto apply_music = [this] {
     if (syncing_) return;

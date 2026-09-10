@@ -12,6 +12,8 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/core/chart_editor_engine.hpp"
 #include <QCloseEvent>
+#include <QHideEvent>
+#include <QShowEvent>
 #include <QResizeEvent>
 #include <QMenuBar>
 #include <QSettings>
@@ -42,13 +44,20 @@
 #include <QScrollArea>
 #include <QKeyEvent>
 #include <QAbstractSpinBox>
+#include <QAbstractItemView>
 #include <QKeySequenceEdit>
 #include <QApplication>
+#include <QProgressBar>
+#include <QMetaObject>
 #include <wds/interaction/editor_input.hpp>
 #include "wds/ui/curve_template.hpp"
 #include <algorithm>
 #include <array>
 #include <optional>
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace wds::ui {
 EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -61,6 +70,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   resize_settle_timer_.setSingleShot(true);
   resize_settle_timer_.setInterval(140);
   connect(&resize_settle_timer_, &QTimer::timeout, this, [this] {
+    if (native_resizing_) return;
     if (auto* window = static_cast<RealtimeVulkanWindow*>(preview_window_))
       window->set_resize_suspended(false);
     if (auto* window = static_cast<RealtimeVulkanWindow*>(editor_window_))
@@ -98,7 +108,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   import_action_->setIcon(fluent_icon(fluent::Import));
   export_action_->setIcon(fluent_icon(fluent::Export));
   music_action_->setIcon(fluent_icon(fluent::Music));
-  curve_templates_action_->setIcon(fluent_icon(fluent::Curve));
+  curve_templates_action_->setIcon(curve_template_icon());
   check_action_->setIcon(fluent_icon(fluent::Checklist));
   // 设置 lives in the top menu bar, not the toolbar.
   settings_action_ = new QAction(tr("设置"), this);
@@ -162,7 +172,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   });
   auto* reset = viewMenu->addAction(tr("重置布局"));
   connect(reset, &QAction::triggered, this, [this] {
-    QSettings prefs("WDS", "WDS Editor");
+    QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
     prefs.remove("window/geometry");
     prefs.remove("window/state-v4");
     reset_default_layout();
@@ -183,7 +193,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(lanes, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
     if (ui_manager_) ui_manager_->set_preview_lane_count(value);
   });
-  QSettings prefs("WDS", "WDS Editor");
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   const auto geometry = prefs.value("window/geometry").toByteArray();
   if (geometry.isEmpty()) {
     setWindowState(windowState() | Qt::WindowMaximized);
@@ -213,7 +223,6 @@ void EditorMainWindow::reset_default_layout() {
   for (auto* dock : docks) {
     if (dock != nullptr) dock->show();
   }
-  showMaximized();
   const int side = settings_dock_ != nullptr ? settings_dock_->minimumWidth() : 0;
   const int half = std::max(200, (width() - side) / 2);
   if (settings_dock_ != nullptr)
@@ -225,6 +234,14 @@ void EditorMainWindow::reset_default_layout() {
                 {w * 2 / 5, w / 5, w * 2 / 5}, Qt::Horizontal);
     resizeDocks({playback_dock_, audio_dock_, toolbox_dock_}, {200, 200, 200}, Qt::Vertical);
   }
+  QTimer::singleShot(0, this, [this] {
+    bottom_row_heights_.fill(200);
+    bottom_row_widths_.fill(0);
+    restore_bottom_row();
+    // Capture Qt's achievable size after applying the preferred height. If we
+    // pin first, a dock-only QMainWindow records an oversized bottom row.
+    QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
+  });
 }
 
 void EditorMainWindow::create_playback_and_toolbox_docks() {
@@ -396,7 +413,10 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   if (auto* split = findChild<QSpinBox*>(QStringLiteral("splitLineOpacity")))
     split->setValue(static_cast<int>(std::lround(visual.split_line_opacity * 100.0f)));
   ui_manager_->set_external_status_handler([this](std::string text, StatusLevel) {
-    statusBar()->showMessage(QString::fromUtf8(text.c_str()));
+    const QString message = QString::fromUtf8(text.c_str());
+    QMetaObject::invokeMethod(this, [this, message] {
+      if (statusBar() != nullptr) statusBar()->showMessage(message);
+    }, Qt::QueuedConnection);
   });
   connect(open_action_, &QAction::triggered, this, &EditorMainWindow::open_project);
   connect(save_action_, &QAction::triggered, this, &EditorMainWindow::save_project);
@@ -413,22 +433,183 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
           &EditorMainWindow::show_curve_templates);
 
   create_playback_and_toolbox_docks();
-  QSettings prefs("WDS", "WDS Editor");
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   const auto state = prefs.value("window/state-v4").toByteArray();
-  if (!state.isEmpty()) {
-    restoreState(state);
+  if (!state.isEmpty() && restoreState(state)) {
+    QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
   } else {
     reset_default_layout();
   }
   // Space toggles playback anywhere in the app (except while typing).
   qApp->installEventFilter(this);
+  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_})
+    dock->widget()->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+}
+
+bool EditorMainWindow::show_startup_splash() {
+  if (ui_manager_ == nullptr || !ui_manager_->session().project_path().empty()) return true;
+  // Keep the chooser independent from the (still hidden) main window. This
+  // avoids modality/activation quirks where accepting a child dialog leaves
+  // the hidden parent as the active top-level window.
+  QDialog splash(nullptr);
+  splash.setWindowTitle(tr("WDS Editor"));
+  splash.setModal(true);
+  splash.resize(720, 480);
+  splash.setMinimumSize(520, 360);
+  splash.setWindowFlag(Qt::WindowCloseButtonHint, true);
+  auto* root = new QVBoxLayout(&splash);
+  root->setContentsMargins(24, 20, 24, 18);
+  root->setSpacing(10);
+  auto* title = new QLabel(tr("<h1>WDS Editor</h1><p>开始编辑你的音游谱面</p>"), &splash);
+  title->setTextFormat(Qt::RichText);
+  root->addWidget(title);
+  root->addWidget(new QLabel(tr("打开最近工程，或创建一个空白工程。"), &splash));
+  auto* recent_label = new QLabel(tr("最近编辑"), &splash);
+  recent_label->setStyleSheet(QStringLiteral("font-weight:bold;"));
+  root->addWidget(recent_label);
+  auto* recent = new QListWidget(&splash);
+  recent->setMinimumHeight(96);
+  recent->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  recent->setUniformItemSizes(true);
+  recent->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+  const auto recent_paths = QSettings(QSettings::defaultFormat(), QSettings::UserScope,
+                                      "WDS", "WDS Editor")
+                                .value(QStringLiteral("recent/projects"))
+                                .toStringList();
+  int shown_recent = 0;
+  for (const auto& path : recent_paths) {
+    if (shown_recent >= 8) break;
+    if (QFileInfo::exists(path)) {
+      auto* item = new QListWidgetItem(QFileInfo(path).fileName(), recent);
+      item->setToolTip(path);
+      item->setData(Qt::UserRole, path);
+      ++shown_recent;
+    }
+  }
+  if (recent->count() == 0) {
+    auto* item = new QListWidgetItem(tr("暂无最近工程"), recent);
+    item->setFlags(Qt::NoItemFlags);
+  }
+  root->addWidget(recent, 1);
+  auto* loading = new QLabel(&splash);
+  loading->setText(tr("准备就绪"));
+  loading->setVisible(false);
+  root->addWidget(loading);
+  auto* progress = new QProgressBar(&splash);
+  progress->setRange(0, 0);
+  progress->setTextVisible(false);
+  progress->setVisible(false);
+  root->addWidget(progress);
+  auto* actions = new QHBoxLayout;
+  actions->setSpacing(8);
+  auto* open = new QPushButton(tr("打开工程"), &splash);
+  open->setIcon(fluent_icon(fluent::OpenFolder));
+  auto* create = new QPushButton(tr("新建工程"), &splash);
+  create->setIcon(fluent_icon(fluent::Add));
+  auto* later = new QPushButton(tr("直接打开主窗口"), &splash);
+  later->setIcon(fluent_icon(fluent::Clear));
+  auto* settings = new QPushButton(tr("设置"), &splash);
+  settings->setIcon(fluent_icon(fluent::Settings));
+  auto* about = new QPushButton(tr("关于"), &splash);
+  about->setIcon(fluent_icon(fluent::Info));
+  auto* version = new QLabel(tr("版本 %1").arg(QStringLiteral(WDS_APP_VERSION)), &splash);
+  version->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  actions->addWidget(open);
+  actions->addWidget(create);
+  actions->addStretch(1);
+  actions->addWidget(settings);
+  actions->addWidget(about);
+  actions->addWidget(later);
+  root->addLayout(actions);
+  root->addWidget(version);
+
+  std::function<void(const QString&)> start_load;
+  start_load = [this, &splash, recent, open, create, later, settings, about, loading,
+                progress](const QString& path) {
+    if (path.isEmpty()) return;
+    // Session/transport/Vulkan objects belong to the GUI thread. Yield once so
+    // the progress state paints, then perform the small project/chart commit
+    // there; full-song waveform/FFT work is dispatched asynchronously by the
+    // preview panel.
+    splash.setEnabled(false);
+    for (auto* button : {open, create, later, settings, about}) button->setEnabled(false);
+    recent->setEnabled(false);
+    loading->setText(tr("正在加载工程…"));
+    loading->setVisible(true);
+    progress->setVisible(true);
+    QTimer::singleShot(0, &splash,
+                     [this, &splash, path, recent, open, create, later, settings,
+                      about, loading, progress] {
+                       const bool result =
+                           ui_manager_->session().open_wdsproject(path.toStdString());
+                       for (auto* button : {open, create, later, settings, about})
+                         button->setEnabled(true);
+                       recent->setEnabled(true);
+                       splash.setEnabled(true);
+                       loading->setVisible(false);
+                       progress->setVisible(false);
+                       if (result) {
+                         remember_recent_project(path);
+                         splash.accept();
+                       } else {
+                         QMessageBox::warning(&splash, tr("打开失败"),
+                                              tr("无法加载所选工程。"));
+                       }
+                     });
+  };
+  connect(recent, &QListWidget::itemDoubleClicked, &splash,
+          [start_load](QListWidgetItem* item) {
+            start_load(item->data(Qt::UserRole).toString());
+          });
+  connect(open, &QPushButton::clicked, &splash, [this, &splash, start_load] {
+    const auto path = QFileDialog::getOpenFileName(&splash, tr("打开 WDS 工程"), {},
+                                                   tr("WDS 工程 (*.wdsproject)"));
+    start_load(path);
+  });
+  connect(create, &QPushButton::clicked, &splash, [this, &splash] {
+    ui_manager_->session().new_project();
+    splash.accept();
+  });
+  connect(later, &QPushButton::clicked, &splash, &QDialog::accept);
+  connect(settings, &QPushButton::clicked, &splash, [this, &splash] {
+    SettingsDialog dialog(ui_manager_, theme_dir_, &splash);
+    dialog.exec();
+    sync_toolbox_place_checks();
+  });
+  connect(about, &QPushButton::clicked, &splash, [this, &splash] {
+    AboutDialog(&splash).exec();
+  });
+  const int result = splash.exec();
+  // Closing the startup page means the user chose to exit, since the main
+  // window has not been shown yet. The caller owns showing the editor.
+  return result == QDialog::Accepted;
+}
+
+void EditorMainWindow::remember_recent_project(const QString& path) {
+  if (path.isEmpty()) return;
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  auto paths = prefs.value(QStringLiteral("recent/projects")).toStringList();
+  paths.removeAll(path);
+  paths.prepend(path);
+  while (paths.size() > 8) paths.removeLast();
+  prefs.setValue(QStringLiteral("recent/projects"), paths);
 }
 
 bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
-  if (event->type() == QEvent::KeyPress && ui_manager_ != nullptr && editor_window_ != nullptr) {
-    // Act on the QWindow-level delivery only (each key event reaches exactly one
-    // window), and let the edit viewport's own realtime input path keep Space.
-    if (watched->isWindowType() && watched != static_cast<QObject*>(editor_window_)) {
+  // QMainWindow dock separators are private layout items rather than public
+  // QSplitterHandles. Adopt sizes after a mouse gesture anywhere in this
+  // window; ordinary clicks simply re-pin the unchanged layout, while a dock
+  // separator release records the user's new bottom-row height.
+  if (event->type() == QEvent::MouseButtonRelease && !native_resizing_) {
+    auto* widget = qobject_cast<QWidget*>(watched);
+    if (watched == this || (widget != nullptr && isAncestorOf(widget))) {
+      QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
+    }
+  }
+  if (event->type() == QEvent::KeyPress && ui_manager_ != nullptr) {
+    // Space is an application command. Handle it before any child widget,
+    // including the Qt edit canvas, can consume it.
+    {
       auto* key_event = static_cast<QKeyEvent*>(event);
       if (key_event->key() == Qt::Key_Space && !key_event->isAutoRepeat() &&
           QApplication::activeModalWidget() == nullptr) {
@@ -439,8 +620,11 @@ bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
         if (!typing) {
           wds::interaction::Modifiers mods;
           mods.shift = key_event->modifiers().testFlag(Qt::ShiftModifier);
-          static_cast<RealtimeVulkanWindow*>(editor_window_)
-              ->inject_key_tap(wds::interaction::KeyCode::Space, mods);
+          wds::interaction::KeyDownEvent command;
+          command.key = wds::interaction::KeyCode::Space;
+          command.mods = mods;
+          command.repeat = false;
+          ui_manager_->dispatch_shortcut(command);
           return true;
         }
       }
@@ -501,9 +685,13 @@ void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
                              QDockWidget::DockWidgetClosable);
   auto* preview_container = QWidget::createWindowContainer(preview, preview_dock_);
   preview_container->setMinimumSize(260, 300);
+  // Viewport docks absorb window-resize slack; the bottom control docks keep
+  // their manually-set size (Preferred, set below).
+  preview_container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   preview_dock_->setWidget(preview_container);
   addDockWidget(Qt::LeftDockWidgetArea, preview_dock_);
 
+  if (editor == nullptr) return;
   editor_dock_ = new QDockWidget(tr("谱面编辑器"), this);
   editor_dock_->setObjectName(QStringLiteral("editorViewportDock"));
   editor_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
@@ -512,6 +700,7 @@ void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
                             QDockWidget::DockWidgetClosable);
   auto* editor_container = QWidget::createWindowContainer(editor, editor_dock_);
   editor_container->setMinimumSize(360, 300);
+  editor_container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   editor_dock_->setWidget(editor_container);
   splitDockWidget(preview_dock_, editor_dock_, Qt::Horizontal);
   if (settings_dock_ != nullptr) {
@@ -524,13 +713,123 @@ void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
   viewMenu->addAction(editor_dock_->toggleViewAction());
 }
 
+void EditorMainWindow::set_editor_widget(QWidget* editor) {
+  editor_widget_ = editor;
+  editor_dock_ = new QDockWidget(tr("谱面编辑器"), this);
+  // Preserve the stable object name: QMainWindow's saved state keys docks by
+  // objectName, independent of whether their viewport is Vulkan or QWidget.
+  editor_dock_->setObjectName(QStringLiteral("editorViewportDock"));
+  editor_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+  editor_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable |
+                            QDockWidget::DockWidgetClosable);
+  editor_dock_->setWidget(editor);
+  addDockWidget(Qt::LeftDockWidgetArea, editor_dock_);
+  if (preview_dock_) splitDockWidget(preview_dock_, editor_dock_, Qt::Horizontal);
+  if (settings_dock_) splitDockWidget(editor_dock_, settings_dock_, Qt::Horizontal);
+  auto* viewMenu = menuBar()->actions().at(2)->menu();
+  viewMenu->addAction(editor_dock_->toggleViewAction());
+  // bind_ui_manager runs before the application supplies its viewport widgets,
+  // so restore the dock state only now, after every named dock exists.
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  const auto state = prefs.value("window/state-v4").toByteArray();
+  if (!state.isEmpty()) restoreState(state);
+  else reset_default_layout();
+}
+
 void EditorMainWindow::resizeEvent(QResizeEvent* event) {
-  QMainWindow::resizeEvent(event);
+  const int settings_width = (settings_dock_ && !settings_dock_->isFloating())
+                                 ? settings_dock_->width() : 0;
   if (auto* window = static_cast<RealtimeVulkanWindow*>(preview_window_))
     window->set_resize_suspended(true);
   if (auto* window = static_cast<RealtimeVulkanWindow*>(editor_window_))
     window->set_resize_suspended(true);
+  QMainWindow::resizeEvent(event);
+  // Main-window width changes resize only the two primary viewports. Keep the
+  // inspector's user-selected width untouched and preserve a 1:1 preview/edit
+  // split for the remaining space.
+  if (preview_dock_ && editor_dock_ && settings_width > 0 &&
+      !preview_dock_->isFloating() && !editor_dock_->isFloating()) {
+    const int available = std::max(400, width() - settings_width);
+    resizeDocks({preview_dock_, editor_dock_}, {available / 2, available - available / 2},
+                Qt::Horizontal);
+  }
+  restore_bottom_row();
+  // Native child/layout events may finish after the main Resize delivery.
+  QTimer::singleShot(0, this, &EditorMainWindow::restore_bottom_row);
   resize_settle_timer_.start();
+}
+
+void EditorMainWindow::restore_bottom_row() {
+  // Keep the bottom control row at its pinned height; the viewport row grows.
+  {
+    QList<QDockWidget*> row;
+    QList<int> sizes;
+    int viewport_delta = 0;
+    std::size_t i = 0;
+    for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+      const int height = bottom_row_heights_[i++];
+      if (height > 0 && dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
+          dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
+        row.append(dock);
+        sizes.append(height);
+        if (row.size() == 1) viewport_delta = dock->height() - height;
+      }
+    }
+    // In a dock-only QMainWindow, sizing only the bottom area leaves Qt free to
+    // assign all surplus height back to it. Explicitly size the viewport area
+    // as well so it receives that surplus.
+    for (auto* dock : {preview_dock_, editor_dock_}) {
+      if (dock && !dock->isFloating() && !dock->isHidden() &&
+          (dockWidgetArea(dock) == Qt::TopDockWidgetArea ||
+           dockWidgetArea(dock) == Qt::LeftDockWidgetArea)) {
+        row.append(dock);
+        sizes.append(std::max(dock->minimumSizeHint().height(), dock->height() + viewport_delta));
+      }
+    }
+    if (!row.isEmpty()) {
+      resizeDocks(row, sizes, Qt::Vertical);
+      layout()->activate();
+    }
+    QList<QDockWidget*> width_row;
+    QList<int> width_sizes;
+    std::size_t wi = 0;
+    for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+      const int width = bottom_row_widths_[wi++];
+      if (width > 0 && dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
+          dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
+        width_row.append(dock);
+        width_sizes.append(width);
+      }
+    }
+    if (!width_row.isEmpty()) resizeDocks(width_row, width_sizes, Qt::Horizontal);
+  }
+}
+
+void EditorMainWindow::pin_bottom_row() {
+  std::size_t i = 0;
+  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+    if (dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
+        dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
+      bottom_row_heights_[i] = dock->height();
+      bottom_row_widths_[i] = dock->width();
+    }
+    ++i;
+  }
+}
+
+bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#ifdef Q_OS_WIN
+  const auto* msg = static_cast<MSG*>(message);
+  if (msg->message == WM_ENTERSIZEMOVE) {
+    native_resizing_ = true;
+    for (auto* window : {preview_window_, editor_window_})
+      if (window) static_cast<RealtimeVulkanWindow*>(window)->set_resize_suspended(true);
+  } else if (msg->message == WM_EXITSIZEMOVE) {
+    native_resizing_ = false;
+    resize_settle_timer_.start();
+  }
+#endif
+  return QMainWindow::nativeEvent(eventType, message, result);
 }
 
 bool EditorMainWindow::confirm_pending_changes() {
@@ -559,6 +858,7 @@ void EditorMainWindow::open_project() {
     ok = ui_manager_->session().open_wdsproject(path.toStdString());
   }
   if (!ok) QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
+  else remember_recent_project(path);
 }
 
 void EditorMainWindow::save_project() {
@@ -576,6 +876,7 @@ void EditorMainWindow::save_project() {
     ok = session.project_path().empty() ? session.save_as(path.toStdString()) : session.save();
   }
   if (!ok) QMessageBox::warning(this, tr("保存失败"), tr("无法保存工程。"));
+  else remember_recent_project(path);
 }
 
 void EditorMainWindow::import_chart() {
@@ -663,7 +964,7 @@ void EditorMainWindow::export_chart() {
 }
 
 void EditorMainWindow::show_settings() {
-  SettingsDialog dialog(ui_manager_, this);
+  SettingsDialog dialog(ui_manager_, theme_dir_, this);
   dialog.exec();
   // Disabling the new place logic clears the lock; reflect it on the buttons.
   sync_toolbox_place_checks();
@@ -693,9 +994,27 @@ void EditorMainWindow::show_curve_templates() {
 
 void EditorMainWindow::closeEvent(QCloseEvent* event) {
   if (!confirm_pending_changes()) { event->ignore(); return; }
-  QSettings prefs("WDS", "WDS Editor");
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   prefs.setValue("window/geometry", saveGeometry());
   prefs.setValue("window/state-v4", saveState());
   event->accept();
+}
+
+void EditorMainWindow::hideEvent(QHideEvent* event) {
+  QMainWindow::hideEvent(event);
+  // Floating docks are independent top-level windows. Keep them visible when
+  // the main shell is temporarily hidden (for example while switching apps).
+  for (auto* dock : {preview_dock_, editor_dock_, settings_dock_, playback_dock_, audio_dock_,
+                     toolbox_dock_}) {
+    if (dock != nullptr && dock->isFloating()) dock->show();
+  }
+}
+
+void EditorMainWindow::showEvent(QShowEvent* event) {
+  QMainWindow::showEvent(event);
+  for (auto* dock : {preview_dock_, editor_dock_, settings_dock_, playback_dock_, audio_dock_,
+                     toolbox_dock_}) {
+    if (dock != nullptr && dock->isFloating() && !dock->isHidden()) dock->raise();
+  }
 }
 }

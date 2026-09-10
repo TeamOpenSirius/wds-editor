@@ -32,7 +32,7 @@ class RealtimeVulkanWindow final : public QWindow {
   }
   // Host-level resize suspension covers the short interval where QMainWindow
   // is relayouting docks and the native child window has not settled yet.
-  // Rendering continues at a reduced rate rather than freezing outright.
+  // Pending frames are dropped until both host and child resizing have settled.
   void set_resize_suspended(bool suspended) noexcept;
   // Queue a synthetic key tap into the realtime input path (global shortcuts
   // forwarded from Qt widgets, e.g. Space anywhere in the app).
@@ -57,5 +57,6 @@ class RealtimeVulkanWindow final : public QWindow {
   int64_t pending_elapsed_us_ = 0;
   QTimer resize_settle_timer_;
   bool resizing_ = false;
+  bool host_resize_suspended_ = false;
 };
 }

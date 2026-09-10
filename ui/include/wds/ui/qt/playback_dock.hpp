@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QIcon>
 #include <array>
 #include <functional>
 
@@ -44,6 +45,8 @@ class PlaybackAudioPanel final : public QWidget {
   QSlider* seek_ = nullptr;
   QPushButton* play_ = nullptr;
   QPushButton* stop_ = nullptr;
+  QIcon play_icon_;
+  QIcon pause_icon_;
   QComboBox* rate_ = nullptr;
   QSpinBox* delay_ms_ = nullptr;
   QComboBox* visible_range_ = nullptr;

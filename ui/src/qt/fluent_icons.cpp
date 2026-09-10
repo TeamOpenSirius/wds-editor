@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QFontDatabase>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
 #include <QPixmap>
 
@@ -18,6 +19,25 @@ QString load_fluent_font(const QString& font_path) {
   if (families.isEmpty()) return {};
   g_family = families.front();
   return g_family;
+}
+
+QIcon curve_template_icon(int px) {
+  const qreal dpr = qApp->devicePixelRatio();
+  QPixmap pm(QSize(px, px) * dpr);
+  pm.setDevicePixelRatio(dpr);
+  pm.fill(Qt::transparent);
+  QPainter painter(&pm);
+  painter.setRenderHint(QPainter::Antialiasing);
+  painter.scale(px / 48.0, px / 48.0);
+  painter.setPen(QPen(qApp->palette().color(QPalette::WindowText), 4,
+                      Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  painter.drawRect(QRectF(4, 4, 40, 40));
+  QPainterPath curve(QPointF(38, 10));
+  curve.cubicTo(32, 10, 27, 14, 24, 24);
+  curve.cubicTo(21, 34, 16, 38, 10, 38);
+  painter.drawPath(curve);
+  painter.end();
+  return QIcon(pm);
 }
 
 QIcon fluent_icon(char32_t glyph, const QColor& color, int px) {

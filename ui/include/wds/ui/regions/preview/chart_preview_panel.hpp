@@ -9,6 +9,8 @@
 
 #include <wds/core/chart_editor_engine.hpp>
 
+#include <cstdint>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -86,6 +88,7 @@ class ChartPreviewPanel {
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
   void rebuild_waveform(const std::string& music_path);
+  void collect_ready_waveforms();
   void destroy_spectrogram_texture();
   void bake_spectrogram_texture();
   bool bake_ui_font(float body_px, float tip_px, bool mild_sharpen);
@@ -96,6 +99,12 @@ class ChartPreviewPanel {
   PlaybackPreviewView preview_;
   wds::audio::Transport transport_;
   wds::audio::WaveformOverview waveform_;
+  struct PendingWaveform {
+    std::uint64_t generation = 0;
+    std::future<wds::audio::WaveformOverview> result;
+  };
+  std::vector<PendingWaveform> pending_waveforms_;
+  std::uint64_t waveform_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;
   wds::renderer::TextureInfo solid_texture_{};
