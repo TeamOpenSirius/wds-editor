@@ -192,6 +192,20 @@ configure_macos_arm() {
     prefix="$(brew --prefix)"
   fi
 
+  # Homebrew Qt is keg-only, so the general brew prefix is not sufficient for
+  # find_package(Qt6). Prefer the versioned formula when present, then `qt`.
+  local brew_qt=""
+  if command -v brew >/dev/null 2>&1; then
+    brew_qt="$(brew --prefix qt@6 2>/dev/null || brew --prefix qt 2>/dev/null || true)"
+  fi
+  if [[ -n "${brew_qt}" && -f "${brew_qt}/lib/cmake/Qt6/Qt6Config.cmake" ]]; then
+    if [[ -n "${prefix}" ]]; then
+      prefix="${brew_qt};${prefix}"
+    else
+      prefix="${brew_qt}"
+    fi
+  fi
+
   # Pin Homebrew libpng headers+dylib together. CI / XQuartz trees often expose
   # libpng 1.4 headers under /opt/X11 while packaging copies brew's 1.6 dylib —
   # png_create_read_struct then fails and every skin PNG load returns false.

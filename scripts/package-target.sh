@@ -1043,6 +1043,21 @@ EOF
 
   chmod +x "${payload}/${demo_name}"
 
+  # Qt frameworks use @rpath install names and are therefore intentionally not
+  # handled by copy_macho_deps (which follows absolute Homebrew dylibs). Let
+  # Qt's deployment tool copy frameworks and platform plugins, then apply the
+  # final ad-hoc signature below.
+  local macdeployqt=""
+  if command -v macdeployqt >/dev/null 2>&1; then
+    macdeployqt="$(command -v macdeployqt)"
+  elif command -v brew >/dev/null 2>&1; then
+    local qt_prefix
+    qt_prefix="$(brew --prefix qt@6 2>/dev/null || brew --prefix qt 2>/dev/null || true)"
+    [[ -x "${qt_prefix}/bin/macdeployqt" ]] && macdeployqt="${qt_prefix}/bin/macdeployqt"
+  fi
+  [[ -n "${macdeployqt}" ]] || die "macdeployqt missing; install Homebrew qt"
+  "${macdeployqt}" "${app}" -always-overwrite
+
   # install_name_tool invalidates existing ad-hoc signatures on copied Homebrew
   # dylibs; modern macOS then SIGKILLs at load with "Code Signature Invalid".
   codesign_macos_app "$app"
