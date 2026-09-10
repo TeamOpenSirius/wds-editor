@@ -50,10 +50,13 @@
 #include <QProgressBar>
 #include <QMetaObject>
 #include <QSizePolicy>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <wds/interaction/editor_input.hpp>
 #include "wds/ui/curve_template.hpp"
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <optional>
 
 #ifdef Q_OS_WIN
@@ -540,35 +543,38 @@ bool EditorMainWindow::show_startup_splash() {
   start_load = [this, &splash, recent, open, create, later, settings, about, loading,
                 progress](const QString& path) {
     if (path.isEmpty()) return;
-    // Session/transport/Vulkan objects belong to the GUI thread. Yield once so
-    // the progress state paints, then perform the small project/chart commit
-    // there; full-song waveform/FFT work is dispatched asynchronously by the
-    // preview panel.
     splash.setEnabled(false);
     for (auto* button : {open, create, later, settings, about}) button->setEnabled(false);
     recent->setEnabled(false);
     loading->setText(tr("正在加载工程…"));
     loading->setVisible(true);
     progress->setVisible(true);
-    QTimer::singleShot(0, &splash,
-                     [this, &splash, path, recent, open, create, later, settings,
-                      about, loading, progress] {
-                       const bool result =
-                           ui_manager_->session().open_wdsproject(path.toStdString());
-                       for (auto* button : {open, create, later, settings, about})
-                         button->setEnabled(true);
-                       recent->setEnabled(true);
-                       splash.setEnabled(true);
-                       loading->setVisible(false);
-                       progress->setVisible(false);
-                       if (result) {
-                         remember_recent_project(path);
-                         splash.accept();
-                       } else {
-                         QMessageBox::warning(&splash, tr("打开失败"),
-                                              tr("无法加载所选工程。"));
-                       }
-                     });
+    auto* watcher = new QFutureWatcher<PreparedWdsProject>(&splash);
+    connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, &splash,
+            [this, &splash, path, recent, open, create, later, settings, about,
+             loading, progress, watcher] {
+              auto future = watcher->future();
+              const bool result = ui_manager_->session().apply_prepared_wdsproject(
+                  future.takeResult());
+              watcher->deleteLater();
+              for (auto* button : {open, create, later, settings, about})
+                button->setEnabled(true);
+              recent->setEnabled(true);
+              splash.setEnabled(true);
+              loading->setVisible(false);
+              progress->setVisible(false);
+              if (result) {
+                remember_recent_project(path);
+                splash.accept();
+              } else {
+                QMessageBox::warning(&splash, tr("打开失败"),
+                                     tr("无法加载所选工程。"));
+              }
+            });
+    const std::string native_path = path.toStdString();
+    watcher->setFuture(QtConcurrent::run([native_path] {
+      return EditorSession::prepare_wdsproject(native_path);
+    }));
   };
   connect(recent, &QListWidget::itemDoubleClicked, &splash,
           [start_load](QListWidgetItem* item) {
@@ -609,16 +615,6 @@ void EditorMainWindow::remember_recent_project(const QString& path) {
 }
 
 bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
-  // QMainWindow dock separators are private layout items rather than public
-  // QSplitterHandles. Adopt sizes after a mouse gesture anywhere in this
-  // window; ordinary clicks simply re-pin the unchanged layout, while a dock
-  // separator release records the user's new bottom-row height.
-  if (event->type() == QEvent::MouseButtonRelease && !native_resizing_) {
-    auto* widget = qobject_cast<QWidget*>(watched);
-    if (watched == this || (widget != nullptr && isAncestorOf(widget))) {
-      QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
-    }
-  }
   if (event->type() == QEvent::KeyPress && ui_manager_ != nullptr) {
     // Space is an application command. Handle it before any child widget,
     // including the Qt edit canvas, can consume it.
@@ -804,13 +800,25 @@ void EditorMainWindow::open_project() {
   const auto path = QFileDialog::getOpenFileName(this, tr("打开 WDS 工程"), {},
                                                   tr("WDS 工程 (*.wdsproject)"));
   if (path.isEmpty()) return;
-  bool ok = false;
-  {
-    BusyScope busy(this, tr("正在打开工程…"));
-    ok = ui_manager_->session().open_wdsproject(path.toStdString());
-  }
-  if (!ok) QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
-  else remember_recent_project(path);
+  auto busy = std::make_shared<BusyScope>(this, tr("正在打开工程…"));
+  auto* watcher = new QFutureWatcher<PreparedWdsProject>(this);
+  connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, this,
+          [this, path, busy = std::move(busy), watcher]() mutable {
+            auto future = watcher->future();
+            const bool ok = ui_manager_->session().apply_prepared_wdsproject(
+                future.takeResult());
+            watcher->deleteLater();
+            busy.reset();
+            if (!ok) {
+              QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
+            } else {
+              remember_recent_project(path);
+            }
+          });
+  const std::string native_path = path.toStdString();
+  watcher->setFuture(QtConcurrent::run([native_path] {
+    return EditorSession::prepare_wdsproject(native_path);
+  }));
 }
 
 void EditorMainWindow::save_project() {
