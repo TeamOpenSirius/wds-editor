@@ -39,7 +39,10 @@ fi
 : "${WDS_MINGW_OBJDUMP:=${WDS_MINGW_TRIPLE}-objdump}"
 : "${WDS_VCPKG_TRIPLET:=x64-mingw-static}"
 : "${WDS_WIXL_VERSION:=0.103}"
-: "${WDS_PRODUCT_VERSION:=1.0.0}"
+# Product version defaults to the same project() declaration used by the app.
+if [[ -z "${WDS_PRODUCT_VERSION:-}" ]]; then
+  WDS_PRODUCT_VERSION="$(sed -nE 's/^project\(wds VERSION ([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' "${_wds_env_root}/CMakeLists.txt")"
+fi
 : "${WDS_MSITOOLS_PREFIX:=${HOME}/.local/opt/msitools}"
 
 # Derive CMAKE prefix / Vulkan import lib from vcpkg root when unset.

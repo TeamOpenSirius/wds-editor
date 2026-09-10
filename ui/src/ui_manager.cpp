@@ -32,6 +32,9 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <QCoreApplication>
+#include <QMetaObject>
+#include <QThread>
 
 namespace wds::ui {
 namespace {
@@ -57,6 +60,13 @@ void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& 
 UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   session_ = std::make_unique<EditorSession>(*chart_preview_);
   session_->set_status_handler([this](std::string text, StatusLevel level) {
+    auto* app = QCoreApplication::instance();
+    if (app != nullptr && QThread::currentThread() != app->thread()) {
+      QMetaObject::invokeMethod(app, [this, text = std::move(text), level]() mutable {
+        set_status(std::move(text), level);
+      }, Qt::QueuedConnection);
+      return;
+    }
     set_status(std::move(text), level);
   });
 
@@ -403,7 +413,8 @@ PreviewSettingsPanel* UiManager::settings_panel() noexcept {
 StatusBar* UiManager::status_bar() noexcept { return status_bar_; }
 
 void UiManager::set_status(std::string text, StatusLevel level) {
-  if (status_bar_ != nullptr) status_bar_->set_message(std::move(text), level);
+  if (status_bar_ != nullptr) status_bar_->set_message(text, level);
+  if (external_status_handler_) external_status_handler_(std::move(text), level);
 }
 
 WidthSlotsDialog* UiManager::width_slots_dialog() noexcept { return width_slots_dialog_; }
@@ -444,6 +455,35 @@ void UiManager::check_chart_errors() {
   if (on_check_chart_) on_check_chart_();
 }
 
+std::vector<int32_t> UiManager::collect_chart_error_ticks() {
+  auto& engine = session_->engine();
+  const auto result = wds::chart_editor::find_note_overlaps(engine.document().notes());
+  const uint64_t generation = engine.document().content_generation();
+  if (edit_panel_ != nullptr) {
+    edit_panel_->set_error_ticks(result.error_ticks, generation);
+  }
+  if (on_check_chart_) on_check_chart_();
+  return result.error_ticks;
+}
+
+void UiManager::jump_to_error_tick(int32_t tick) {
+  auto& engine = session_->engine();
+  const int64_t ms = wds::chart_editor::tick_to_milliseconds(tick, engine.document().timing());
+  chart_preview_->transport().request_pause();
+  chart_preview_->transport().request_seek_ms(ms);
+  wds::common::TimelineSnapshot snap;
+  snap.position = wds::common::ms_to_us(ms);
+  snap.state = wds::common::PlaybackState::Paused;
+  engine.apply_timeline(snap);
+}
+
+void UiManager::set_new_note_place_logic(bool enabled) {
+  new_note_place_logic_ = enabled;
+  if (!enabled && edit_panel_ != nullptr) {
+    edit_panel_->set_place_intent_override(wds::interaction::PlaceIntent::None);
+  }
+}
+
 CurveFillSelection UiManager::curve_fill_selection() const {
   return make_curve_fill_selection(curve_template_state_);
 }
@@ -460,6 +500,95 @@ ChartAddDialog* UiManager::chart_add_dialog() noexcept { return chart_add_dialog
 
 UnsavedChangesDialog* UiManager::unsaved_changes_dialog() noexcept {
   return unsaved_changes_dialog_;
+}
+
+void UiManager::open_project_with_prompt() {
+  with_save_if_dirty([this] {
+    if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
+      (void)session_->open_wdsproject(*path);
+    } else {
+      set_status("打开已取消", StatusLevel::Info);
+    }
+  });
+}
+
+void UiManager::set_preview_note_speed(double speed) {
+  chart_preview_->set_note_speed(speed);
+  request_save_ui_config(false);
+}
+
+void UiManager::set_preview_lane_count(int lane_count) {
+  chart_preview_->set_lane_count(lane_count);
+  request_save_ui_config(false);
+}
+
+void UiManager::set_curve_template_state_from_qt(CurveTemplateUiState state) {
+  normalize_curve_config(state.templates, state.selected_id);
+  curve_template_state_ = std::move(state);
+  push_curve_fill_selection();
+  request_save_ui_config(true);
+}
+
+void UiManager::enable_qt_chrome(bool enabled) {
+  qt_chrome_enabled_ = enabled;
+  if (auto* widget = toolbar_panel()) widget->set_visible(!enabled);
+  if (auto* widget = settings_panel()) widget->set_visible(!enabled);
+  if (status_bar_ != nullptr) status_bar_->set_visible(!enabled);
+  if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_visible(!enabled);
+  if (curve_templates_dialog_ != nullptr) curve_templates_dialog_->set_visible(!enabled);
+  if (export_choice_dialog_ != nullptr) export_choice_dialog_->set_visible(!enabled);
+  if (chart_add_dialog_ != nullptr) chart_add_dialog_->set_visible(!enabled);
+  if (unsaved_changes_dialog_ != nullptr) unsaved_changes_dialog_->set_visible(!enabled);
+}
+
+void UiManager::build_editor_batch(wds::renderer::DrawBatch& out,
+                                   wds::renderer::TextureId solid_texture, int fb_w, int fb_h,
+                                   const wds::renderer::ScreenBounds& screen,
+                                   const wds::renderer::SkinCatalog& skin) {
+  out.clear();
+  auto* edit = edit_panel();
+  if (edit == nullptr) return;
+  edit->resync_pointer_overlays();
+  wds::interaction::UiPainter painter;
+  edit->paint(painter);
+  wds::interaction::UiPainter overlay;
+  edit->paint_overlays(overlay);
+  painter.flush_to(out, solid_texture, fb_w, fb_h, screen);
+  edit->append_skin_batch(out, skin, fb_w, fb_h, screen, 1.0f);
+  overlay.flush_to(out, solid_texture, fb_w, fb_h, screen);
+  editor_batch_dirty_ = false;
+}
+
+void UiManager::resize_editor_viewport(int logical_width, int logical_height,
+                                       int framebuffer_width, int framebuffer_height) {
+  if (width_ == std::max(1, logical_width) && height_ == std::max(1, logical_height) &&
+      fb_width_ == std::max(1, framebuffer_width) && fb_height_ == std::max(1, framebuffer_height)) {
+    return;
+  }
+  width_ = std::max(1, logical_width);
+  height_ = std::max(1, logical_height);
+  fb_width_ = std::max(1, framebuffer_width);
+  fb_height_ = std::max(1, framebuffer_height);
+  layout_ = {};
+  layout_.edit = {0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_)};
+  root_.set_bounds({0, 0, static_cast<float>(width_), static_cast<float>(height_)});
+  apply_region_bounds();
+  editor_batch_dirty_ = true;
+}
+
+void UiManager::resize_preview_viewport(int logical_width, int logical_height,
+                                        int framebuffer_width, int framebuffer_height) {
+  (void)logical_width;
+  (void)logical_height;
+  const int fb_w = std::max(1, framebuffer_width);
+  const int fb_h = std::max(1, framebuffer_height);
+  chart_preview_->resize_framebuffer(fb_w, fb_h);
+  const float aspect = EditorLayouter::kPreviewAspect;
+  const int stage_w = std::max(1, std::min(fb_w, static_cast<int>(std::lround(fb_h * aspect))));
+  const int stage_h = std::max(1, static_cast<int>(std::lround(stage_w / aspect)));
+  chart_preview_->set_panel_bounds(0, 0, fb_w, fb_h);
+  chart_preview_->set_content_bounds((fb_w - stage_w) / 2, (fb_h - stage_h) / 2, stage_w,
+                                     stage_h);
 }
 
 bool UiManager::save_current_project() {
@@ -543,6 +672,8 @@ void UiManager::load_ui_config() {
     bind_editor_shortcuts();
   }
   apply_display_to_preview(*chart_preview_, cfg);
+  chart_preview_->set_lane_count(std::clamp(cfg.lane_count, 1, 32));
+  new_note_place_logic_ = cfg.new_note_place_logic;
   if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
   capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
@@ -569,8 +700,31 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.shortcuts = wds::interaction::editor_shortcuts_snapshot();
   cfg.shortcuts_initialized = true;
   capture_display_from_preview(*chart_preview_, cfg);
+  cfg.lane_count = chart_preview_->preview().config().lane_count;
+  cfg.new_note_place_logic = new_note_place_logic_;
   if (const auto* edit = edit_panel()) cfg.spectrum_display = edit->spectrum_mode();
   apply_curve_template_state(cfg, curve_template_state_);
+}
+
+void UiManager::snapshot_ui_config_for_qt(EditorUiConfig& cfg) { capture_live_ui_config(cfg); }
+
+void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
+  session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
+  chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
+  wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
+  wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
+  wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
+  wds::interaction::set_width_slot_values(cfg.width_slots);
+  if (cfg.shortcuts_initialized) {
+    wds::interaction::set_editor_shortcuts(cfg.shortcuts);
+  }
+  apply_display_to_preview(*chart_preview_, cfg);
+  set_new_note_place_logic(cfg.new_note_place_logic);
+  if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
+  bind_editor_shortcuts();
+  wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
+  save_ui_config();
 }
 
 void UiManager::save_ui_config() {
@@ -619,7 +773,23 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
   fb_width_ = fb_w;
   fb_height_ = fb_h;
 
-  const EditorLayoutResult computed = layouter_.compute(width_, height_);
+  EditorLayoutResult computed = layouter_.compute(width_, height_);
+  if (qt_chrome_enabled_) {
+    const float full_w = static_cast<float>(width_);
+    const float full_h = static_cast<float>(height_);
+    const float left_w = std::max(1.0f, full_w * 0.45f);
+    const float edit_w = std::max(1.0f, full_w - left_w);
+    const float stage_w = std::min(left_w, full_h * EditorLayouter::kPreviewAspect);
+    const float stage_h = stage_w / EditorLayouter::kPreviewAspect;
+    computed.regions = {};
+    computed.regions.preview = {0.0f, 0.0f, left_w, full_h};
+    computed.regions.edit = {left_w, 0.0f, edit_w, full_h};
+    computed.preview_content = {
+        static_cast<int>((left_w - stage_w) * 0.5f),
+        static_cast<int>((full_h - stage_h) * 0.5f),
+        std::max(1, static_cast<int>(stage_w)),
+        std::max(1, static_cast<int>(stage_h))};
+  }
   layout_ = computed.regions;
   root_.set_bounds({0, 0, static_cast<float>(width_), static_cast<float>(height_)});
   apply_region_bounds();
@@ -677,13 +847,16 @@ void UiManager::apply_region_bounds() {
 }
 
 void UiManager::update(float delta_seconds, const std::vector<wds::interaction::InputEvent>& events) {
+  if (!events.empty()) editor_batch_dirty_ = true;
+  if (session_ != nullptr && session_->engine().playback_state() == wds::common::PlaybackState::Playing)
+    editor_batch_dirty_ = true;
   using clock = std::chrono::steady_clock;
   const auto phase_us = [](clock::time_point t0) {
     return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
   };
 
   // Native file panels must not open inside a button click handler — defer from the
-  // unsaved-changes dialog to the next frame (after glfwPollEvents has fully settled).
+  // unsaved-changes dialog to the next frame (after Qt event dispatch has settled).
   auto t0 = clock::now();
   flush_pending_after_save_prompt();
   last_update_flush_us_ = phase_us(t0);
@@ -720,7 +893,13 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   flush_pending_ui_config();
 }
 
-void UiManager::paint(wds::interaction::UiPainter& painter) const { root_.paint(painter); }
+void UiManager::paint(wds::interaction::UiPainter& painter) const {
+  if (qt_chrome_enabled_) {
+    if (const auto* edit = edit_panel()) edit->paint(painter);
+    return;
+  }
+  root_.paint(painter);
+}
 
 void UiManager::prepare_painter(wds::interaction::UiPainter& painter) const {
   if (chart_preview_ != nullptr) {

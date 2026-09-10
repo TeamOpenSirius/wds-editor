@@ -4,7 +4,6 @@
 #include "wds/ui/regions/edit/edit_viewport.hpp"
 
 #include <wds/core/official_playfield.hpp>
-#include "wds/ui/window.hpp"
 #include "wds/ui/regions/preview/preview_hit_widget.hpp"
 #define WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
 #include "wds/ui/regions/preview/playback_preview.hpp"
@@ -170,8 +169,6 @@ int main() {
                      16.0f / 9.0f) < 0.03f);
   }
 
-  assert(wds::ui::kDefaultWindowWidth == 1280);
-  assert(wds::ui::kDefaultWindowHeight == 800);
   {
     namespace th = wds::interaction::theme;
     wds::ui::EditorLayouter layouter;

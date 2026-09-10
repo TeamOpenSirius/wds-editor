@@ -298,7 +298,10 @@ void ortho_rh(float l, float r, float b, float t, float n, float f, float* out16
 
 struct VulkanRenderer::Impl {
   std::function<VkSurfaceKHR(VkInstance)> create_surface;
+  std::function<VkSurfaceKHR()> acquire_surface;
   std::function<void(int* width, int* height)> framebuffer_size;
+  bool owns_instance = true;
+  bool owns_surface = true;
   WsiRecoverAction last_wsi_action = WsiRecoverAction::None;
   struct PendingUpload {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -1114,11 +1117,13 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
                                                          presents.data()))) {
     return false;
   }
-  // FIFO caps the main loop to the display refresh everywhere. MAILBOX lets the
-  // CPU race ahead of scan-out; combined with a per-tick display lead that made
-  // preview time run hot then get pulled back by Transport (speed wobble).
+  // Prefer MAILBOX when available. FIFO makes vkQueuePresentKHR block each
+  // viewport independently, so two visible surfaces serialize and produce
+  // missed frames even when the GPU has spare time. Transport uses measured
+  // elapsed time, therefore MAILBOX does not change playback speed.
   VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
-  (void)presents;
+  if (std::find(presents.begin(), presents.end(), VK_PRESENT_MODE_MAILBOX_KHR) != presents.end())
+    present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
 
   // FIF+2 when the surface allows it (scan-out + queued + in-flight). Clamped
   // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.
@@ -1365,6 +1370,10 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t bytes) {
   FrameVertexBuffer& slot = frame_vertices[frame];
   if (bytes <= slot.capacity_bytes && slot.buffer != VK_NULL_HANDLE) {
+    // Uploads may leave rings unmapped; restore this slot before draw memcpy.
+    if (slot.mapped == nullptr) {
+      return remap_frame_vertices() && slot.mapped != nullptr;
+    }
     return true;
   }
 
@@ -1660,16 +1669,9 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
   }
 
   unmap_frame_vertices();
-  struct RemapVertices {
-    Impl* impl = nullptr;
-    bool ok = true;
-    explicit RemapVertices(Impl* i) : impl(i) {}
-    ~RemapVertices() {
-      if (impl != nullptr) {
-        ok = impl->remap_frame_vertices();
-      }
-    }
-  } remap_guard(this);
+  // Leave rings unmapped. Consecutive create_texture_rgba calls then share the
+  // ICD map budget and can QueueSubmit without a remap/unmap pair each time.
+  // draw_frame / ensure_frame_vertex_capacity remap before writing vertices.
 
   std::vector<VkBufferImageCopy> copy_regions;
   copy_regions.reserve(staging_copy_chunk_count(image_bytes, chunk_bytes));
@@ -2087,7 +2089,7 @@ void VulkanRenderer::Impl::destroy_render_pass_and_pipelines() {
 
 bool VulkanRenderer::create(const VulkanHostSurface& host) {
   destroy();
-  if (!host.create_surface || !host.framebuffer_size) {
+  if ((!host.create_surface && host.external_surface == VK_NULL_HANDLE) || !host.framebuffer_size) {
     std::fprintf(stderr, "VulkanHostSurface missing create_surface / framebuffer_size\n");
     return false;
   }
@@ -2102,7 +2104,10 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     }
   } guard{this, &committed};
   impl_->create_surface = host.create_surface;
+  impl_->acquire_surface = host.acquire_surface;
   impl_->framebuffer_size = host.framebuffer_size;
+  impl_->owns_instance = host.external_instance == VK_NULL_HANDLE && host.renderer_owns_instance;
+  impl_->owns_surface = host.external_surface == VK_NULL_HANDLE && host.renderer_owns_surface;
 #if defined(_WIN32)
   impl_->win32_monitor = host.win32_monitor;
 #endif
@@ -2111,6 +2116,9 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   impl_->shader_dir = resolve_shader_dir();
   WDS_LOG("VulkanRenderer::create shader_dir=%s\n", impl_->shader_dir.c_str());
 
+  if (host.external_instance != VK_NULL_HANDLE) {
+    impl_->instance = host.external_instance;
+  }
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
   app.pApplicationName = "WDS Preview";
   app.apiVersion = VK_API_VERSION_1_1;
@@ -2120,7 +2128,7 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   // VK_ERROR_INCOMPATIBLE_DRIVER / "Found no drivers!" on macOS.
   extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #if defined(_WIN32)
-  {
+  if (impl_->instance == VK_NULL_HANDLE) {
     // Optional: required by VK_EXT_full_screen_exclusive on some ICDs.
     uint32_t inst_ext_count = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &inst_ext_count, nullptr);
@@ -2141,17 +2149,19 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
 #endif
   WDS_LOG("instance extensions=%zu (incl. portability_enumeration)\n", extensions.size());
 
-  VkInstanceCreateInfo inst_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-  inst_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-  inst_info.pApplicationInfo = &app;
-  inst_info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
-  inst_info.ppEnabledExtensionNames = extensions.data();
-  {
+  if (host.external_instance == VK_NULL_HANDLE) {
+    VkInstanceCreateInfo inst_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    inst_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    inst_info.pApplicationInfo = &app;
+    inst_info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    inst_info.ppEnabledExtensionNames = extensions.data();
     const VkResult ir = vkCreateInstance(&inst_info, nullptr, &impl_->instance);
     if (ir != VK_SUCCESS) {
       WDS_LOG("vkCreateInstance failed result=%d\n", static_cast<int>(ir));
       return false;
     }
+  } else {
+    WDS_LOG("using host-owned Vulkan instance\n");
   }
 #if defined(_WIN32)
   if (impl_->surface_caps2_extension) {
@@ -2164,7 +2174,9 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   }
 #endif
 
-  impl_->surface = host.create_surface(impl_->instance);
+  impl_->surface = host.external_surface != VK_NULL_HANDLE
+                       ? host.external_surface
+                       : host.create_surface(impl_->instance);
   if (impl_->surface == VK_NULL_HANDLE) {
     WDS_LOG("host.create_surface failed\n");
     return false;
@@ -2436,11 +2448,11 @@ void VulkanRenderer::destroy() {
   }
 
   // Half-init path (instance/surface without device) must still free WSI objects.
-  if (impl_->surface && impl_->instance) {
+  if (impl_->surface && impl_->instance && impl_->owns_surface) {
     vkDestroySurfaceKHR(impl_->instance, impl_->surface, nullptr);
     impl_->surface = VK_NULL_HANDLE;
   }
-  if (impl_->instance) {
+  if (impl_->instance && impl_->owns_instance) {
     vkDestroyInstance(impl_->instance, nullptr);
     impl_->instance = VK_NULL_HANDLE;
   }
@@ -2651,13 +2663,23 @@ bool VulkanRenderer::recover_surface_and_swapchain() {
   if (!check_device_result(vkDeviceWaitIdle(impl_->device))) {
     return false;
   }
+  // A host-owned surface must be recreated by the host (for example Qt after
+  // a platform surface event); never destroy or reacquire it here.
   impl_->cleanup_swapchain();
-  if (impl_->surface != VK_NULL_HANDLE) {
+  if (impl_->owns_surface && impl_->surface != VK_NULL_HANDLE) {
     vkDestroySurfaceKHR(impl_->instance, impl_->surface, nullptr);
     impl_->surface = VK_NULL_HANDLE;
   }
 
-  impl_->surface = impl_->create_surface(impl_->instance);
+  if (!impl_->owns_surface) {
+    if (!impl_->acquire_surface) {
+      emit_health(RendererHealthEvent::SurfaceLost);
+      return false;
+    }
+    impl_->surface = impl_->acquire_surface();
+  } else {
+    impl_->surface = impl_->create_surface(impl_->instance);
+  }
   if (impl_->surface == VK_NULL_HANDLE) {
     WDS_LOG("recover_surface: create_surface callback failed\n");
     emit_health(RendererHealthEvent::SurfaceLost);
@@ -2894,6 +2916,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   const size_t total_verts =
       batch.vertex_count() + mid_verts + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
+  if (!impl_->remap_frame_vertices()) {
+    return false;
+  }
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
     // Fence still signaled (not reset yet). Drain the acquire semaphore only.
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;

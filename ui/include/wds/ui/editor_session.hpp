@@ -21,6 +21,21 @@ struct SerializeResult;
 namespace wds::ui {
 class ChartPreviewPanel;
 
+// File-I/O-only result that can be prepared on a worker thread. Applying it to
+// EditorSession remains a GUI-thread operation because it touches the live
+// editor engine, transport, and preview.
+struct PreparedWdsProject {
+  std::string project_path;
+  std::string music_path;
+  std::vector<std::string> chart_paths;
+  std::vector<wds::chart_editor::NotationChart> charts;
+  std::string error;
+  std::size_t active_chart_index = 0;
+  int64_t offset_ms = 0;
+
+  bool valid() const noexcept { return error.empty() && !charts.empty(); }
+};
+
 enum class ExportFormat {
   OfficialCsv,
   Sus,
@@ -46,6 +61,8 @@ class EditorSession {
   }
 
   bool new_project();
+  static PreparedWdsProject prepare_wdsproject(const std::string& path);
+  bool apply_prepared_wdsproject(PreparedWdsProject prepared);
   bool open_wdsproject(const std::string& path);
   bool save();
   bool save_as(const std::string& path);

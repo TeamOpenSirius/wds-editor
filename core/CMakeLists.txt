@@ -39,7 +39,7 @@ target_link_libraries(wds_core PUBLIC wds::common)
 target_compile_features(wds_core PUBLIC cxx_std_17)
 
 if(MSVC)
-    target_compile_options(wds_core PRIVATE /W4)
+  target_compile_options(wds_core PRIVATE /W4 /utf-8)
 else()
     target_compile_options(wds_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -1,8 +1,69 @@
-# UI shell: outer layouter + four regions (preview / settings / toolbar / edit).
+# UI library and Qt editor shell (realtime preview/edit remain Vulkan-rendered).
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+option(WDS_USE_QT_EDITOR "Build the Qt editor entry point" ON)
+if(WDS_USE_QT_EDITOR)
+set(CMAKE_AUTORCC ON)
+add_executable(wds_editor WIN32
+  apps/wds_editor_qt.cpp
+  wds_resources.qrc
+  src/qt/editor_main_window.cpp
+  src/qt/realtime_vulkan_window.cpp
+  src/qt/chart_edit_widget.cpp
+  src/qt/qt_input_adapter.cpp
+  src/qt/note_icons.cpp
+  src/qt/playback_dock.cpp
+  src/qt/settings_dialog.cpp
+  src/qt/flow_layout.cpp
+  src/qt/wds_theme.cpp
+  src/qt/fluent_icons.cpp
+  src/qt/about_dialog.cpp
+  src/qt/busy_dialog.cpp)
+add_executable(wds_editor_qt ALIAS wds_editor)
+target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
+target_link_libraries(wds_editor PRIVATE Qt6::Widgets Qt6::Concurrent wds::ui)
+target_compile_features(wds_editor PRIVATE cxx_std_17)
+target_compile_definitions(wds_editor PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+target_compile_definitions(wds_editor PRIVATE QT_NO_KEYWORDS WDS_APP_VERSION="${PROJECT_VERSION}")
+if(WIN32)
+  enable_language(RC)
+  configure_file(wds_version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/wds_version.rc" @ONLY)
+  target_sources(wds_editor PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/wds_version.rc")
+  add_custom_command(TARGET wds_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WDS_BASS_LIBRARY}" "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>")
+endif()
+if(MSVC)
+  target_compile_options(wds_editor PRIVATE /utf-8)
+endif()
+install(TARGETS wds_editor RUNTIME DESTINATION bin)
+if(WIN32)
+  install(FILES "${WDS_BASS_LIBRARY}" "${WDS_BASSMIX_LIBRARY}" DESTINATION bin)
+else()
+  install(FILES "${WDS_BASS_LIBRARY}" "${WDS_BASSMIX_LIBRARY}" DESTINATION lib)
+endif()
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/skins" DESTINATION .)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/effects" DESTINATION .)
+install(DIRECTORY "${CMAKE_BINARY_DIR}/renderer/shaders/" DESTINATION shaders)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf" DESTINATION fonts)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/SegoeFluentIcons.ttf")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/SegoeFluentIcons.ttf" DESTINATION fonts)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/theme/Yami.obt")
+  install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/theme/" DESTINATION theme)
+endif()
+  if(COMMAND qt_generate_deploy_app_script)
+    qt_generate_deploy_app_script(
+      TARGET wds_editor
+      OUTPUT_SCRIPT wds_qt_deploy_script
+      NO_UNSUPPORTED_PLATFORM_ERROR)
+    install(SCRIPT ${wds_qt_deploy_script})
+  endif()
+endif()
 
 add_library(wds_ui STATIC
   src/ui_manager.cpp
-  src/window.cpp
   src/resource_paths.cpp
   src/startup_deps.cpp
   src/editor_session.cpp
@@ -26,12 +87,6 @@ add_library(wds_ui STATIC
   src/regions/status/status_bar.cpp
   src/regions/toolbar/editor_toolbar.cpp
 )
-if(APPLE)
-  target_sources(wds_ui PRIVATE src/macos_menu.mm src/macos_file_dialog.mm)
-  # Per-source only: do not use target_compile_options (would apply to macos_menu.mm
-  # and every other wds_ui TU) and do not replace other files' COMPILE_OPTIONS.
-  set_property(SOURCE src/macos_file_dialog.mm APPEND PROPERTY COMPILE_OPTIONS "-fobjc-arc")
-endif()
 add_library(wds::ui ALIAS wds_ui)
 
 target_include_directories(wds_ui
@@ -46,10 +101,10 @@ target_link_libraries(wds_ui
     wds::chart_render
     wds::audio_player
     wds::core
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
 )
-if(TARGET wds_interaction_glfw)
-  target_link_libraries(wds_ui PUBLIC wds::interaction_glfw)
-endif()
 
 # Portable layouts still need the BASS dylib next to the binary (probed via wds::audio).
 if(TARGET wds_bass)
@@ -58,19 +113,11 @@ endif()
 if(TARGET wds_bassmix)
   target_link_libraries(wds_ui PRIVATE wds_bassmix)
 endif()
-if(APPLE)
-  target_link_libraries(wds_ui PRIVATE "-framework AppKit" "-framework UniformTypeIdentifiers")
-elseif(WIN32)
-  # IFileOpenDialog / IFileSaveDialog (native_file_dialog.cpp)
-  target_link_libraries(wds_ui PUBLIC ole32 uuid)
-elseif(UNIX)
-  if(CMAKE_DL_LIBS)
-    target_link_libraries(wds_ui PRIVATE ${CMAKE_DL_LIBS})
-  endif()
-endif()
-
 target_compile_features(wds_ui PUBLIC cxx_std_17)
 target_compile_definitions(wds_ui PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+if(WDS_USE_QT_EDITOR)
+  target_compile_definitions(wds_ui PRIVATE WDS_USE_QT_EDITOR=1)
+endif()
 
 add_executable(wds_ui_logic_tests
   tests/edit_viewport_tests.cpp
@@ -141,170 +188,22 @@ if(NOT CMAKE_CROSSCOMPILING)
   add_test(NAME wds_editor_toolbar_tests COMMAND wds_editor_toolbar_tests)
   add_test(NAME wds_chart_edit_panel_curve_tests COMMAND wds_chart_edit_panel_curve_tests)
   add_test(NAME wds_chart_validation_ui_tests COMMAND wds_chart_validation_ui_tests)
+  if(WIN32)
+    get_filename_component(_wds_qt_root "${Qt6_DIR}/../../.." ABSOLUTE)
+    set(_wds_test_path
+      "${_wds_qt_root}/bin\\;${WDS_BASS_LIBRARY_DIR}\\;$ENV{PATH}")
+    set_tests_properties(wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
+      wds_chart_validation_ui_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
+  endif()
 else()
   message(STATUS "Skipping ctest registration for ui tests (cross build)")
 endif()
 
 if(MSVC)
-  target_compile_options(wds_ui PRIVATE /W4)
+  target_compile_options(wds_ui PRIVATE /W4 /utf-8)
 else()
   target_compile_options(wds_ui PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# --- wds_editor executable ---------------------------------------------------
-
-set(WDS_UI_GLFW_TARGET "")
-find_package(glfw3 CONFIG QUIET)
-if(TARGET glfw)
-  set(WDS_UI_GLFW_TARGET glfw)
-elseif(TARGET glfw3)
-  set(WDS_UI_GLFW_TARGET glfw3)
-else()
-  find_library(WDS_UI_GLFW_LIB NAMES glfw3 glfw)
-endif()
-
-if(WDS_UI_GLFW_TARGET)
-  target_link_libraries(wds_ui PRIVATE ${WDS_UI_GLFW_TARGET})
-elseif(WDS_UI_GLFW_LIB)
-  find_path(WDS_UI_GLFW_INCLUDE_DIR GLFW/glfw3.h)
-  if(WDS_UI_GLFW_INCLUDE_DIR)
-    target_include_directories(wds_ui PRIVATE ${WDS_UI_GLFW_INCLUDE_DIR})
-  endif()
-  target_link_libraries(wds_ui PRIVATE ${WDS_UI_GLFW_LIB})
-endif()
-
-if(NOT WDS_UI_GLFW_TARGET AND NOT WDS_UI_GLFW_LIB)
-  message(STATUS "wds_editor skipped: libglfw not found")
-  return()
-endif()
-
-add_executable(wds_editor apps/wds_editor.cpp)
-set(_wds_app_icon_dir "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon")
-set(_wds_app_icon_ico "${_wds_app_icon_dir}/wds.ico")
-set(_wds_app_icon_png "${_wds_app_icon_dir}/wds.png")
-set(_wds_app_icon_icns "${_wds_app_icon_dir}/wds.icns")
-
-if(WIN32)
-  # Embed DPI-awareness manifest + application icon (MinGW windres / MSVC rc).
-  enable_language(RC)
-  set(_wds_editor_manifest "${CMAKE_CURRENT_SOURCE_DIR}/apps/wds_editor.manifest")
-  set(_wds_editor_rc "${CMAKE_CURRENT_BINARY_DIR}/wds_editor.rc")
-  # Escape backslashes for windres on Windows hosts; forward slashes work for MinGW.
-  file(TO_CMAKE_PATH "${_wds_editor_manifest}" _wds_manifest_rc_path)
-  file(TO_CMAKE_PATH "${_wds_app_icon_ico}" _wds_ico_rc_path)
-  file(WRITE "${_wds_editor_rc}"
-    "1 24 \"${_wds_manifest_rc_path}\"\n"
-    "IDI_ICON1 ICON \"${_wds_ico_rc_path}\"\n")
-  target_sources(wds_editor PRIVATE "${_wds_editor_rc}")
-endif()
-target_include_directories(wds_editor PRIVATE ${CMAKE_SOURCE_DIR}/renderer/third_party)
-# wds::ui PUBLIC-links wds::renderer / wds::core (→ wds::common); extra
-# direct links duplicate those .a files on Apple ld.
-target_link_libraries(wds_editor PRIVATE wds::ui)
-if(WDS_UI_GLFW_TARGET)
-  target_link_libraries(wds_editor PRIVATE ${WDS_UI_GLFW_TARGET})
-else()
-  target_link_libraries(wds_editor PRIVATE ${WDS_UI_GLFW_LIB})
-endif()
-
-if(WIN32)
-  target_link_libraries(wds_editor PRIVATE gdi32 user32 shell32 imm32)
-  # Hide the console MinGW attaches to console-subsystem binaries.
-  set_target_properties(wds_editor PROPERTIES WIN32_EXECUTABLE TRUE)
-
-  # MSI helper: Uninstall.exe (UpgradeCode must match scripts/win-msi-product.wxs).
-  add_executable(wds_uninstall WIN32 apps/wds_uninstall.cpp)
-  target_link_libraries(wds_uninstall PRIVATE msi shell32 user32 ole32)
-  set_target_properties(wds_uninstall PROPERTIES
-    OUTPUT_NAME "Uninstall"
-    WIN32_EXECUTABLE TRUE)
-  if(NOT MSVC)
-    # Keep MinGW runtime static; msi.dll remains a system import.
-    # -municode selects wWinMain (Unicode) instead of ANSI WinMain.
-    target_link_options(wds_uninstall PRIVATE -static-libgcc -static-libstdc++ -municode)
-  endif()
-else()
-  find_package(Threads QUIET)
-  if(Threads_FOUND)
-    target_link_libraries(wds_editor PRIVATE Threads::Threads)
-  endif()
-  if(CMAKE_DL_LIBS)
-    target_link_libraries(wds_editor PRIVATE ${CMAKE_DL_LIBS})
-  endif()
-endif()
-
-target_compile_definitions(wds_editor PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
-
-if(APPLE)
-  set(_wds_editor_build_rpath "@loader_path;${WDS_BASS_LIBRARY_DIR}")
-  set(_wds_editor_install_rpath "@loader_path;@loader_path/../lib")
-elseif(WIN32)
-  set(_wds_editor_build_rpath "")
-  set(_wds_editor_install_rpath "")
-else()
-  set(_wds_editor_build_rpath "${WDS_BASS_LIBRARY_DIR}")
-  set(_wds_editor_install_rpath "$ORIGIN;$ORIGIN/../lib")
-endif()
-
-set_target_properties(wds_editor PROPERTIES
-  BUILD_RPATH "${_wds_editor_build_rpath}"
-  INSTALL_RPATH "${_wds_editor_install_rpath}"
-  BUILD_WITH_INSTALL_RPATH FALSE
-)
-
-if(APPLE)
-  add_custom_command(TARGET wds_editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${WDS_BASS_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/libbass.dylib"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/libbassmix.dylib"
-    COMMENT "Copy libbass.dylib and libbassmix.dylib next to wds_editor"
-  )
-elseif(WIN32)
-  add_custom_command(TARGET wds_editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${WDS_BASS_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/bass.dll"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/bassmix.dll"
-    COMMENT "Copy bass.dll and bassmix.dll next to wds_editor"
-  )
-else()
-  add_custom_command(TARGET wds_editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${WDS_BASS_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>/libbass.so"
-    COMMENT "Copy libbass.so next to wds_editor"
-  )
-  target_link_options(wds_editor PRIVATE "-Wl,-rpath,$ORIGIN")
-endif()
-
-# Ship the bundled CJK UI font next to the binary for portable runs.
-set(_wds_ui_font "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf")
-if(EXISTS "${_wds_ui_font}")
-  add_custom_command(TARGET wds_editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:wds_editor>/fonts"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${_wds_ui_font}" "$<TARGET_FILE_DIR:wds_editor>/fonts/NotoSansSC-Regular.ttf"
-    COMMENT "Copy bundled UI font next to wds_editor"
-  )
-endif()
-
-# Ship toolbar SVG icons next to the binary.
-set(_wds_icons_dir "${CMAKE_SOURCE_DIR}/icons")
-if(EXISTS "${_wds_icons_dir}/open.svg")
-  add_custom_command(TARGET wds_editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:wds_editor>/icons"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:wds_editor>/icons"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${_wds_icons_dir}" "$<TARGET_FILE_DIR:wds_editor>/icons"
-    COMMENT "Copy toolbar SVG icons next to wds_editor"
-  )
-endif()
-
-# Ship app icon PNG next to the binary (GLFW / Linux .desktop; macOS uses .icns in packaging).
-if(EXISTS "${_wds_app_icon_png}")
-  add_custom_command(TARGET wds_editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${_wds_app_icon_png}" "$<TARGET_FILE_DIR:wds_editor>/wds.png"
-    COMMENT "Copy app icon PNG next to wds_editor"
-  )
-endif()
+# The Qt target above is the sole product editor; the realtime renderer is hosted by
+# QVulkanInstance.

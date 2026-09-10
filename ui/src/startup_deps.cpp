@@ -130,7 +130,7 @@ void check_vulkan_runtime_files(StartupDependencyReport& report, const fs::path&
     return;  // bundled loader present
   }
   if (::GetModuleHandleW(L"vulkan-1.dll") == nullptr) {
-    // Not loaded yet (before glfwInit). Probe LoadLibrary without keeping it.
+    // Not loaded yet. Probe LoadLibrary without keeping it.
     HMODULE mod = ::LoadLibraryW(L"vulkan-1.dll");
     if (mod == nullptr) {
       report.missing.push_back(
@@ -221,7 +221,7 @@ StartupDependencyReport check_startup_dependencies(const char* argv0) {
 
 void add_vulkan_unavailable(StartupDependencyReport& report) {
   report.missing.push_back(
-      "Vulkan 不可用（glfwVulkanSupported=false：请检查 GPU 驱动 / MoltenVK / ICD）");
+      "Vulkan 不可用（QVulkanInstance 创建失败：请检查 GPU 驱动 / MoltenVK / ICD）");
 }
 
 int fail_startup_dependencies(const StartupDependencyReport& report) {

@@ -23,7 +23,6 @@ bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
 }
 
 }  // namespace wds::ui
-
 #ifndef WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
 
 #include "wds/ui/regions/preview/hit_sfx_mapping.hpp"
@@ -45,12 +44,10 @@ bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
 #include <unordered_set>
 #include <vector>
 
-struct GLFWwindow;
-
 namespace wds::ui {
 
-// Chart playback preview surface. Builds a VulkanHostSurface from the GLFW window
-// (WSI stays in ui) and owns VulkanRenderer. Consumes PreviewSnapshot each frame.
+// Chart playback preview surface. The UI host supplies the Vulkan instance/surface
+// through VulkanHostSurface; this class owns the renderer and consumes snapshots.
 class PlaybackPreviewView {
  public:
   PlaybackPreviewView() = default;
@@ -59,7 +56,7 @@ class PlaybackPreviewView {
   PlaybackPreviewView(const PlaybackPreviewView&) = delete;
   PlaybackPreviewView& operator=(const PlaybackPreviewView&) = delete;
 
-  bool initialize(GLFWwindow* window, const wds::renderer::PreviewVisualConfig& config = {});
+  bool initialize(const wds::renderer::VulkanHostSurface& host, const wds::renderer::PreviewVisualConfig& config = {});
   void shutdown();
 
   bool ready() const noexcept { return ready_; }
@@ -108,6 +105,11 @@ class PlaybackPreviewView {
               const wds::renderer::DrawBatch* modal_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_chrome = nullptr,
               int64_t visual_lead_us = 0);
+
+  // Render an editor-only batch into this surface. This intentionally skips
+  // preview stage, notes and timing effects so the editor viewport cannot
+  // duplicate the adjacent realtime preview.
+  void render_editor_only(const wds::renderer::DrawBatch& editor_batch);
 
   wds::renderer::StageGeometry& geometry() noexcept { return geometry_; }
   const wds::renderer::StageGeometry& geometry() const noexcept { return geometry_; }

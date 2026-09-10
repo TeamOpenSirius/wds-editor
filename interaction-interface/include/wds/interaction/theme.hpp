@@ -23,12 +23,12 @@ inline constexpr Color kPressedOverlay{1.0f, 1.0f, 1.0f, 0.14f};
 
 inline constexpr float kPressedScale = 0.97f;
 
-// --- Logical-pixel metrics (1× design / GLFW window coordinates) --------------
+// --- Logical-pixel metrics (1× design / Qt window coordinates) ----------------
 // Layout, hit-testing, and UiPainter commands use these values directly.
 // Framebuffer scaling happens only at flush / Vulkan boundaries via
 // ui_content_scale() (= fb_px / window_px) / to_fb().
 // On Windows/X11 this ratio is 1; on macOS Retina it is typically 2.
-// Do not feed OS DPI % (glfwGetWindowContentScale) into apply_content_scale.
+// Do not feed OS DPI % into apply_content_scale.
 
 inline constexpr float kCornerRadiusSm = 2.0f;
 inline constexpr float kCornerRadiusMd = 4.0f;

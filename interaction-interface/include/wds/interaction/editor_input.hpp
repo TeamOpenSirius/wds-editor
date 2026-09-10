@@ -95,7 +95,7 @@ bool is_delete_selection_key(KeyCode key) noexcept;
 std::array<int, 6>& width_slot_values() noexcept;
 const std::array<int, 6>& width_slot_values_const() noexcept;
 bool set_width_slot_values(const std::array<int, 6>& values) noexcept;  // each in [1,12]
-// When true, GlfwInputAdapter negates scroll deltas before enqueue.
+// When true, the active UI host negates scroll deltas before enqueue.
 bool invert_scroll_wheel() noexcept;
 void set_invert_scroll_wheel(bool enabled) noexcept;
 // When true, invert Option+wheel visible-range direction (independent of invert_scroll_wheel).

@@ -15,20 +15,6 @@
 #include <wds/ui/note_skin_mapping.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
-#include <windows.h>
-#endif
-
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -200,46 +186,10 @@ PreviewLookup build_preview_lookup(const PreviewSnapshot& snapshot) {
 
 PlaybackPreviewView::~PlaybackPreviewView() { shutdown(); }
 
-bool PlaybackPreviewView::initialize(GLFWwindow* window, const PreviewVisualConfig& config) {
+bool PlaybackPreviewView::initialize(const wds::renderer::VulkanHostSurface& host, const PreviewVisualConfig& config) {
   shutdown();
   config_ = config;
   geometry_.configure(config_);
-  WDS_LOG("PlaybackPreviewView::initialize skins=%s lanes=%d speed=%.2f\n",
-          config_.skins_directory.c_str(), config_.lane_count, config_.note_speed);
-
-  if (window == nullptr || !glfwVulkanSupported()) {
-    WDS_LOG("GLFW Vulkan not supported\n");
-    return false;
-  }
-
-  wds::renderer::VulkanHostSurface host;
-  uint32_t ext_count = 0;
-  const char** exts = glfwGetRequiredInstanceExtensions(&ext_count);
-  if (exts == nullptr || ext_count == 0) {
-    WDS_LOG("glfwGetRequiredInstanceExtensions failed\n");
-    return false;
-  }
-  host.instance_extensions.assign(exts, exts + ext_count);
-  host.create_surface = [window](VkInstance instance) -> VkSurfaceKHR {
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-    if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
-      return VK_NULL_HANDLE;
-    }
-    return surface;
-  };
-  host.framebuffer_size = [window](int* width, int* height) {
-    glfwGetFramebufferSize(window, width, height);
-  };
-#if defined(_WIN32)
-  host.win32_monitor = [window]() -> HMONITOR {
-    HWND hwnd = glfwGetWin32Window(window);
-    if (hwnd == nullptr) {
-      return nullptr;
-    }
-    return ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-  };
-#endif
-
   vulkan_.set_preferred_msaa(config_.msaa_samples);
   const bool vk_ok = vulkan_.create(host);
   if (!vk_ok) {
@@ -312,8 +262,24 @@ void PlaybackPreviewView::resize(int framebuffer_width, int framebuffer_height) 
   if (!ready_) {
     return;
   }
+  if (framebuffer_width == vulkan_.framebuffer_width() &&
+      framebuffer_height == vulkan_.framebuffer_height()) {
+    return;
+  }
   vulkan_.resize(framebuffer_width, framebuffer_height);
   geometry_.resize(vulkan_.framebuffer_width(), vulkan_.framebuffer_height());
+}
+
+void PlaybackPreviewView::render_editor_only(const wds::renderer::DrawBatch& editor_batch) {
+  if (!ready_) return;
+  batch_.clear();
+  for (const auto& bucket : editor_batch.buckets) {
+    if (bucket.vertices.empty()) continue;
+    auto& dst = batch_.bucket_for(bucket.texture);
+    dst.vertices.insert(dst.vertices.end(), bucket.vertices.begin(), bucket.vertices.end());
+  }
+  vulkan_.draw_frame(batch_, geometry_.screen(), 0.05f, 0.05f, 0.08f,
+                     nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 void PlaybackPreviewView::sync_hit_sfx(const wds::chart_editor::PreviewSnapshot& snapshot) {

@@ -43,11 +43,11 @@ enum class KeyCode : int32_t {
   Right = 262,
   Up = 265,
   Down = 264,
-  F1 = 290,   // matches GLFW_KEY_F1
+  F1 = 290,
   F2 = 291,
   F3 = 292,
   F4 = 293,
-  F11 = 300,  // matches GLFW_KEY_F11
+  F11 = 300,
   A = 65,
   Z = 90,
 };
@@ -123,6 +123,8 @@ using InputEvent = std::variant<PointerDownEvent, PointerUpEvent, PointerMoveEve
 
 class InputQueue {
  public:
+  InputQueue() { events_.reserve(64); }
+
   void push(InputEvent event) { events_.push_back(std::move(event)); }
   void clear() noexcept { events_.clear(); }
   bool empty() const noexcept { return events_.empty(); }

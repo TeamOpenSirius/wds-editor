@@ -464,56 +464,84 @@ bool EditorSession::new_project() {
 }
 
 bool EditorSession::open_wdsproject(const std::string& path) {
+  return apply_prepared_wdsproject(prepare_wdsproject(path));
+}
+
+PreparedWdsProject EditorSession::prepare_wdsproject(const std::string& path) {
+  PreparedWdsProject prepared;
+  prepared.project_path = path;
   wds::chart_editor::WdsProject project;
   if (!ok(wds::chart_editor::ProjectSerializer::load_from_file(path, project))) {
-    status("打开失败：无法读取工程文件", StatusLevel::Error);
-    return false;
+    prepared.error = "无法读取工程文件";
+    return prepared;
   }
 
-  // Resolve and load every chart into a temporary buffer first — never mutate the
-  // live session until the whole project is known to be loadable.
-  const std::string new_music =
+  prepared.music_path =
       wds::chart_editor::ProjectSerializer::resolve_path(path, project.music_path);
-  std::vector<ChartSlot> loaded;
-  loaded.reserve(project.chart_paths.size());
+  prepared.chart_paths.reserve(project.chart_paths.size());
+  prepared.charts.reserve(project.chart_paths.size());
   for (const auto& chart_rel : project.chart_paths) {
     const std::string chart_path =
         wds::chart_editor::ProjectSerializer::resolve_path(path, chart_rel);
     wds::chart_editor::NotationChart chart;
     if (!ok(wds::chart_editor::ChartSerializer::load_from_file(chart_path, chart))) {
-      status("打开失败：无法加载谱面 " + chart_path, StatusLevel::Error);
-      return false;
+      prepared.error = "无法加载谱面 " + chart_path;
+      prepared.chart_paths.clear();
+      prepared.charts.clear();
+      return prepared;
     }
     chart.timing.offset_ms = 0;
-    ChartSlot slot;
-    slot.path = chart_path;
-    slot.chart = std::move(chart);
-    slot.dirty = false;
-    loaded.push_back(std::move(slot));
+    prepared.chart_paths.push_back(chart_path);
+    prepared.charts.push_back(std::move(chart));
   }
-  if (loaded.empty()) {
-    status("打开失败：工程未包含任何谱面", StatusLevel::Error);
+  if (prepared.charts.empty()) {
+    prepared.error = "工程未包含任何谱面";
+    return prepared;
+  }
+
+  prepared.active_chart_index = static_cast<std::size_t>(std::clamp(
+      project.active_chart_index, 0, static_cast<int32_t>(prepared.charts.size() - 1)));
+  prepared.offset_ms = project.offset_ms;
+  return prepared;
+}
+
+bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
+  if (!prepared.valid() || prepared.chart_paths.size() != prepared.charts.size()) {
+    status("打开失败：" + (prepared.error.empty() ? std::string("工程数据无效")
+                                                   : prepared.error),
+           StatusLevel::Error);
     return false;
   }
 
-  const std::size_t new_active = static_cast<std::size_t>(
-      std::clamp(project.active_chart_index, 0, static_cast<int32_t>(loaded.size() - 1)));
-
-  // Missing/unloadable music is non-fatal — charts still open.
-  std::string loaded_music = new_music;
-  std::string music_note;
-  if (!preview_.load_music(loaded_music, false)) {
-    if (!loaded_music.empty()) {
-      music_note = "（音乐未加载，可重新导入）";
-    }
-    (void)preview_.load_music({}, false);
+  // Build session slots only on the owner thread. Preparation above is pure
+  // file I/O/parsing and never exposes a half-loaded project to rendering.
+  std::vector<ChartSlot> loaded;
+  loaded.reserve(prepared.charts.size());
+  for (std::size_t i = 0; i < prepared.charts.size(); ++i) {
+    ChartSlot slot;
+    slot.path = std::move(prepared.chart_paths[i]);
+    slot.chart = std::move(prepared.charts[i]);
+    slot.dirty = false;
+    loaded.push_back(std::move(slot));
   }
 
-  project_path_ = path;
+  // Missing/unloadable music is non-fatal — charts still open.
+  std::string loaded_music = std::move(prepared.music_path);
+  std::string music_note;
+  if (preview_.ready()) {
+    if (!preview_.load_music(loaded_music, false)) {
+      if (!loaded_music.empty()) {
+        music_note = "（音乐未加载，可重新导入）";
+      }
+      (void)preview_.load_music({}, false);
+    }
+  }
+
+  project_path_ = std::move(prepared.project_path);
   music_path_ = loaded_music;
   charts_ = std::move(loaded);
-  active_chart_index_ = new_active;
-  offset_ms_ = project.offset_ms;
+  active_chart_index_ = prepared.active_chart_index;
+  offset_ms_ = prepared.offset_ms;
   metadata_dirty_ = false;
   read_only_ = false;
   allow_delay_when_read_only_ = false;
@@ -524,7 +552,7 @@ bool EditorSession::open_wdsproject(const std::string& path) {
     return false;
   }
   preview_.reset_playback();
-  status("已打开工程：" + path + music_note, StatusLevel::Info);
+  status("已打开工程：" + project_path_ + music_note, StatusLevel::Info);
   return true;
 }
 

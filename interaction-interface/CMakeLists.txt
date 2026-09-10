@@ -1,5 +1,5 @@
 # Interaction layer: input events, widgets, shortcuts. Depends on wds::common + wds::draw.
-# GLFW adapter is a separate optional target (wds_interaction_glfw).
+# Platform input adapters live in the UI host; this library remains framework independent.
 
 add_library(wds_interaction STATIC
   src/bitmap_font.cpp
@@ -42,42 +42,12 @@ target_link_libraries(wds_interaction
 target_compile_features(wds_interaction PUBLIC cxx_std_17)
 
 if(MSVC)
-  target_compile_options(wds_interaction PRIVATE /W4)
+  target_compile_options(wds_interaction PRIVATE /W4 /utf-8)
 else()
   target_compile_options(wds_interaction PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# --- GLFW adapter (optional; ui / editor links this) --------------------------------
-set(WDS_INTERACTION_GLFW_TARGET "")
-find_package(glfw3 CONFIG QUIET)
-if(TARGET glfw)
-  set(WDS_INTERACTION_GLFW_TARGET glfw)
-elseif(TARGET glfw3)
-  set(WDS_INTERACTION_GLFW_TARGET glfw3)
-else()
-  find_library(WDS_INTERACTION_GLFW_LIB NAMES glfw3 glfw)
-endif()
-
-if(WDS_INTERACTION_GLFW_TARGET OR WDS_INTERACTION_GLFW_LIB)
-  add_library(wds_interaction_glfw STATIC src/glfw_input_adapter.cpp)
-  add_library(wds::interaction_glfw ALIAS wds_interaction_glfw)
-  target_include_directories(wds_interaction_glfw
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-  target_link_libraries(wds_interaction_glfw PUBLIC wds::interaction)
-  if(WDS_INTERACTION_GLFW_TARGET)
-    target_link_libraries(wds_interaction_glfw PRIVATE ${WDS_INTERACTION_GLFW_TARGET})
-  else()
-    find_path(WDS_INTERACTION_GLFW_INCLUDE_DIR GLFW/glfw3.h)
-    if(WDS_INTERACTION_GLFW_INCLUDE_DIR)
-      target_include_directories(wds_interaction_glfw PRIVATE ${WDS_INTERACTION_GLFW_INCLUDE_DIR})
-    endif()
-    target_link_libraries(wds_interaction_glfw PRIVATE ${WDS_INTERACTION_GLFW_LIB})
-  endif()
-  target_compile_features(wds_interaction_glfw PUBLIC cxx_std_17)
-else()
-  message(WARNING "GLFW not found; wds_interaction_glfw skipped (ui build may fail)")
-endif()
+# Qt owns platform input adaptation; interaction remains framework independent.
 
 option(WDS_INTERACTION_BUILD_TESTS "Build interaction unit tests" ON)
 if(WDS_INTERACTION_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)

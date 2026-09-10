@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -1041,9 +1042,9 @@ void test_selected_regular_terminal_tail_shows_resize_cursor() {
 
   h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
   h.panel.on_pointer_move(PointerMoveEvent{tail_edge, {}});
-  CHECK(cursor == CursorKind::ResizeHorizontal);
+  CHECK(cursor == CursorKind::Default);
   h.panel.on_pointer_move(PointerMoveEvent{tail_mid, {}});
-  CHECK(cursor == CursorKind::ResizeVertical);
+  CHECK(cursor == CursorKind::Default);
 
   h.panel.set_selected({id});
   h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
@@ -1078,6 +1079,7 @@ void test_selected_scratch_terminal_tail_keeps_resize_cursor() {
 void test_hold_tail_adjust_follows_playback_resync() {
   Harness h;
   const int32_t id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+  h.panel.set_selected({id});
   const auto grab = h.at_tick_lane(960, 4);
   h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
   const auto* before = find_note_id(h.engine.document().notes(), id);
@@ -1099,6 +1101,7 @@ void test_hold_tail_adjust_follows_playback_resync() {
 void test_jumpscratch_end_adjust_follows_wheel_resync() {
   Harness h;
   const int32_t id = add_hold_body(h, NoteType::ScratchHold, 0, 960, 3, 3);
+  h.panel.set_selected({id});
   const auto grab = h.at_tick_lane(960, 4);
   h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
   const auto* before = find_note_id(h.engine.document().notes(), id);
@@ -1119,6 +1122,7 @@ void test_jumpscratch_joint_adjust_follows_playback_resync() {
   Harness h;
   const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
   const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  h.panel.set_selected({prev_id});
   const auto grab = h.at_tick_lane(480, 2);
   h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
 
@@ -1174,6 +1178,371 @@ void test_split_picker_search_filter() {
   CHECK(filter_split_picker_color_ids("00000").empty());
 }
 
+void expect_track(const std::vector<int32_t>& mids, int32_t probe, int32_t want_lane,
+                  int32_t want_width, const char* label) {
+  int32_t lane = -1;
+  int32_t width = -1;
+  CHECK(wds::ui::split_track_between_lines(mids, 12, probe, lane, width));
+  if (lane != want_lane || width != want_width) {
+    std::fprintf(stderr, "FAIL %s: probe %d got lane=%d width=%d want lane=%d width=%d\n",
+                 label, probe, lane, width, want_lane, want_width);
+    ++g_failures;
+  }
+}
+
+void test_split_track_between_overlapping_lines() {
+  // Split3 lines after lanes 3 and 7; Split2 after lane 5.
+  // Union: tracks [0,4) [4,6) [6,8) [8,12).
+  const std::vector<int32_t> union_mids{3, 7, 5};
+  expect_track(union_mids, 0, 0, 4, "leftmost");
+  expect_track(union_mids, 3, 0, 4, "left track right edge");
+  expect_track(union_mids, 4, 4, 2, "first inner");
+  expect_track(union_mids, 5, 4, 2, "first inner right");
+  expect_track(union_mids, 6, 6, 2, "second inner");
+  expect_track(union_mids, 7, 6, 2, "second inner right");
+  expect_track(union_mids, 8, 8, 4, "rightmost");
+  expect_track(union_mids, 11, 8, 4, "rightmost edge");
+
+  // Single Split3 still partitions into thirds.
+  int32_t lane = -1;
+  int32_t width = -1;
+  CHECK(wds::ui::split_track_for_lane(3, 12, 4, lane, width));
+  CHECK_EQ(lane, 4);
+  CHECK_EQ(width, 4);
+
+  // Duplicate mids from two identical Split3 effects do not shrink tracks.
+  expect_track({3, 7, 3, 7}, 4, 4, 4, "duplicate split3");
+
+  // No interior lines (Split1): whole playfield.
+  expect_track({}, 5, 0, 12, "no lines");
+}
+
+NotationNote make_split_effect(int32_t start_tick, int32_t end_tick,
+                               wds::chart_editor::GimmickType type) {
+  NotationNote note;
+  note.start_tick = start_tick;
+  note.end_tick = end_tick;
+  note.lane = 0;
+  note.width = 12;
+  note.note_type = NoteType::None;
+  note.gimmick_type = type;
+  return note;
+}
+
+void place_tap_at(Harness& h, int32_t tick, int32_t lane) {
+  const auto p = h.at_tick_lane(tick, lane);
+  h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+  h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+}
+
+const NotationNote* last_tap(const std::vector<NotationNote>& notes) {
+  const NotationNote* found = nullptr;
+  for (const auto& n : notes) {
+    if (n.note_type == NoteType::Normal) found = &n;
+  }
+  return found;
+}
+
+void test_split_width_follow_unions_overlapping_effects() {
+  using wds::chart_editor::GimmickType;
+  Harness h;
+  h.panel.set_split_width_follow(true);
+  h.panel.set_default_width(1);
+  h.engine.add_note(make_split_effect(0, 1920, GimmickType::Split3));
+  h.engine.add_note(make_split_effect(0, 1920, GimmickType::Split2));
+  place_tap_at(h, 240, 4);
+  const NotationNote* tap = last_tap(h.engine.document().notes());
+  CHECK(tap != nullptr);
+  if (tap != nullptr) {
+    CHECK_EQ(tap->lane, 4);
+    CHECK_EQ(tap->width, 2);
+  }
+}
+
+int32_t add_bound_star(Harness& h, int32_t hold_id, int32_t tick, int32_t lane, int32_t width) {
+  NotationNote star;
+  star.note_type = NoteType::Sound;
+  star.start_tick = tick;
+  star.end_tick = tick;
+  star.lane = lane;
+  star.width = width;
+  star.parent_hold_id = hold_id;
+  const int32_t id = h.engine.add_note(star);
+  CHECK(id >= 0);
+  return id;
+}
+
+Vec2 body_right_edge_on_note(const Harness& h, const NotationNote& note) {
+  const float x =
+      h.panel.viewport().x_at(note.lane) + h.panel.viewport().lane_width(note.width) - 1.0f;
+  // Prefer the note body center so hold time-edge hit tests do not steal the grab.
+  const float y = note.end_tick > note.start_tick
+                      ? (h.panel.viewport().y_at(note.start_tick) +
+                         h.panel.viewport().y_at(note.end_tick)) *
+                            0.5f
+                      : h.panel.viewport().y_at(note.start_tick);
+  return {x, y};
+}
+
+void test_selected_width_resize_affects_only_grabbed_note() {
+  Harness h;
+  NotationNote a;
+  a.note_type = NoteType::Normal;
+  a.start_tick = 480;
+  a.end_tick = 480;
+  a.lane = 2;
+  a.width = 2;
+  NotationNote b;
+  b.note_type = NoteType::Normal;
+  b.start_tick = 960;
+  b.end_tick = 960;
+  b.lane = 5;
+  b.width = 3;
+  const int32_t a_id = h.engine.add_note(a);
+  const int32_t b_id = h.engine.add_note(b);
+  CHECK(a_id >= 0);
+  CHECK(b_id >= 0);
+
+  h.panel.set_selected({a_id, b_id});
+  const auto* before_a = find_note_id(h.engine.document().notes(), a_id);
+  const auto* before_b = find_note_id(h.engine.document().notes(), b_id);
+  CHECK(before_a != nullptr);
+  CHECK(before_b != nullptr);
+  const int32_t b_width0 = before_b->width;
+  const int32_t b_lane0 = before_b->lane;
+
+  const auto grab = body_right_edge_on_note(h, *before_a);
+  const auto wider = h.at_tick_lane(480, before_a->end_lane() + 2);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{wider, {}});
+  h.panel.on_pointer_up(PointerUpEvent{wider, PointerButton::Left, {}});
+
+  const auto* after_a = find_note_id(h.engine.document().notes(), a_id);
+  const auto* after_b = find_note_id(h.engine.document().notes(), b_id);
+  CHECK(after_a != nullptr);
+  CHECK(after_b != nullptr);
+  CHECK(after_a->width > 2);
+  CHECK_EQ(after_b->width, b_width0);
+  CHECK_EQ(after_b->lane, b_lane0);
+  CHECK(h.panel.selected().count(a_id));
+  CHECK(h.panel.selected().count(b_id));
+}
+
+void test_paste_hold_does_not_select_eighths() {
+  Harness h;
+  h.enter_hold(false, 0, 960, 3);
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(960, 3), PointerButton::Left, {}});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  const int eighths_before = count_type(h.engine.document().notes(), NoteType::HoldEighth);
+  CHECK(eighths_before > 0);
+
+  std::unordered_set<int32_t> copy_ids;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Hold || n.note_type == NoteType::HoldStart) {
+      copy_ids.insert(n.id);
+    }
+  }
+  h.panel.set_selected(copy_ids);
+  CHECK(h.panel.copy_selected());
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+  CHECK(h.panel.paste_at_pointer());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+  // Eighths are regenerated for the pasted hold, not copied from the clipboard.
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), eighths_before * 2);
+
+  int32_t pasted_hold_id = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type != NoteType::Hold) continue;
+    if (n.start_tick >= 1920) {
+      pasted_hold_id = n.id;
+      break;
+    }
+  }
+  CHECK(pasted_hold_id >= 0);
+  int bound_eighths = 0;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type != NoteType::HoldEighth) continue;
+    if (n.parent_hold_id != pasted_hold_id) continue;
+    CHECK_EQ(n.lane, 3);
+    CHECK_EQ(n.width, 1);
+    ++bound_eighths;
+  }
+  CHECK_EQ(bound_eighths, eighths_before);
+
+  for (const int32_t id : h.panel.selected()) {
+    const auto note = h.engine.document().find_note(id);
+    CHECK(note.has_value());
+    if (!note) continue;
+    CHECK(note->note_type != NoteType::HoldEighth);
+  }
+  CHECK(!h.panel.selected().empty());
+}
+
+void test_mirror_and_copy_hold_includes_mid_stars() {
+  // Whole-hold selection is body + head only; stars must still flip / copy.
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    const int32_t head_id = h.engine.add_note(head);
+    CHECK(head_id >= 0);
+    const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+
+    h.panel.set_selected({hold_id, head_id});
+    CHECK(h.panel.mirror_selected(false));
+    CHECK(!h.panel.selected().count(star_id));
+
+    const auto hold = h.engine.document().find_note(hold_id);
+    const auto star = h.engine.document().find_note(star_id);
+    CHECK(hold.has_value() && star.has_value());
+    if (hold && star) {
+      CHECK_EQ(hold->lane, 8);
+      CHECK_EQ(star->lane, 8);
+      CHECK_EQ(star->parent_hold_id, hold_id);
+    }
+  }
+
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    const int32_t head_id = h.engine.add_note(head);
+    CHECK(head_id >= 0);
+    add_bound_star(h, hold_id, 480, 3, 1);
+
+    h.panel.set_selected({hold_id, head_id});
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+    CHECK(h.panel.paste_at_pointer());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 2);
+
+    int bound_stars = 0;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type != NoteType::Sound) continue;
+      const auto parent = h.engine.document().find_note(n.parent_hold_id);
+      CHECK(parent.has_value());
+      if (!parent) continue;
+      CHECK_EQ(static_cast<int>(parent->note_type), static_cast<int>(NoteType::Hold));
+      CHECK_EQ(n.lane, parent->lane);
+      ++bound_stars;
+    }
+    CHECK_EQ(bound_stars, 2);
+  }
+}
+
+void test_convert_selected_hold_stars_and_defaults() {
+  {
+    Harness h;
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 480;
+    tap.lane = 2;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    h.panel.set_selected({tap_id});
+    CHECK(h.panel.convert_selected(NoteType::Hold));
+    const auto hold = h.engine.document().find_note(tap_id);
+    CHECK(hold.has_value());
+    if (hold) {
+      CHECK(hold->note_type == NoteType::Hold);
+      CHECK_EQ(hold->end_tick, 960);
+    }
+  }
+
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    const int32_t head_id = h.engine.add_note(head);
+    const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+    h.panel.set_selected({hold_id});
+    CHECK(h.panel.convert_selected(NoteType::ScratchHold));
+    const auto body = h.engine.document().find_note(hold_id);
+    const auto star = h.engine.document().find_note(star_id);
+    const auto new_head = h.engine.document().find_note(head_id);
+    CHECK(body.has_value() && star.has_value() && new_head.has_value());
+    if (body && star && new_head) {
+      CHECK(body->note_type == NoteType::ScratchHold);
+      CHECK_EQ(body->end_tick, 960);
+      CHECK(star->note_type == NoteType::ScratchSound);
+      CHECK_EQ(star->parent_hold_id, hold_id);
+      CHECK(new_head->note_type == NoteType::ScratchHoldStart);
+    }
+  }
+
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+    NotationNote head;
+    head.note_type = NoteType::HoldStart;
+    head.start_tick = 0;
+    head.lane = 3;
+    head.width = 1;
+    h.engine.add_note(head);
+    const int32_t keep_id = add_bound_star(h, hold_id, 240, 3, 1);
+    const int32_t drop_id = add_bound_star(h, hold_id, 480, 3, 1);
+    h.panel.set_selected({hold_id, keep_id});
+    CHECK(h.panel.convert_selected(NoteType::Flick, 1));
+    const auto body = h.engine.document().find_note(hold_id);
+    const auto kept = h.engine.document().find_note(keep_id);
+    CHECK(body.has_value() && kept.has_value());
+    if (body && kept) {
+      CHECK(body->note_type == NoteType::Flick);
+      CHECK_EQ(body->end_tick, body->start_tick);
+      CHECK_EQ(body->scratch_length, 1);
+      CHECK(kept->note_type == NoteType::Flick);
+      CHECK_EQ(kept->scratch_length, 1);
+    }
+    CHECK(!h.engine.document().find_note(drop_id).has_value());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 0);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  }
+}
+
+void test_split_width_follow_closed_interval_includes_endpoints() {
+  using wds::chart_editor::GimmickType;
+  // Split3 covers [0, 480], Split2 covers [480, 960]. Tick 480 is in both.
+  Harness overlap;
+  overlap.panel.set_split_width_follow(true);
+  overlap.panel.set_default_width(1);
+  overlap.engine.add_note(make_split_effect(0, 480, GimmickType::Split3));
+  overlap.engine.add_note(make_split_effect(480, 960, GimmickType::Split2));
+  place_tap_at(overlap, 480, 4);
+  const NotationNote* at_joint = last_tap(overlap.engine.document().notes());
+  CHECK(at_joint != nullptr);
+  if (at_joint != nullptr) {
+    CHECK_EQ(at_joint->lane, 4);
+    CHECK_EQ(at_joint->width, 2);
+  }
+
+  Harness before;
+  before.panel.set_split_width_follow(true);
+  before.panel.set_default_width(1);
+  before.engine.add_note(make_split_effect(0, 480, GimmickType::Split3));
+  before.engine.add_note(make_split_effect(480, 960, GimmickType::Split2));
+  place_tap_at(before, 240, 4);
+  const NotationNote* only_split3 = last_tap(before.engine.document().notes());
+  CHECK(only_split3 != nullptr);
+  if (only_split3 != nullptr) {
+    CHECK_EQ(only_split3->lane, 4);
+    CHECK_EQ(only_split3->width, 4);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1210,6 +1579,13 @@ int main() {
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   test_split_picker_search_filter();
+  test_split_track_between_overlapping_lines();
+  test_split_width_follow_unions_overlapping_effects();
+  test_selected_width_resize_affects_only_grabbed_note();
+  test_paste_hold_does_not_select_eighths();
+  test_mirror_and_copy_hold_includes_mid_stars();
+  test_convert_selected_hold_stars_and_defaults();
+  test_split_width_follow_closed_interval_includes_endpoints();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;
