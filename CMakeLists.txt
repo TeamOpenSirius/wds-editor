@@ -15,7 +15,7 @@ if(NOT CMAKE_TOOLCHAIN_FILE AND DEFINED WDS_TARGET AND NOT WDS_TARGET STREQUAL "
   endif()
 endif()
 
-project(wds LANGUAGES CXX)
+project(wds VERSION 0.2.0 LANGUAGES CXX)
 
 include("${CMAKE_SOURCE_DIR}/cmake/WdsPlatform.cmake")
 

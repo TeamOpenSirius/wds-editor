@@ -33,7 +33,8 @@ class ChartSerializer {
 
   // Native .wdschart format (always writes latest).
   // v3 adds TIMING points (BPM + meter). v4 adds has_bpm/has_meter flags on T rows.
-  // v5 adds parent_hold_id on N rows. v1–v4 load infers binds (type + open span + exact lanes).
+  // v5 adds parent_hold_id on N rows. Load treats -1 / missing / non-hold parents as
+  // unbound and infers binds (type + open span + exact lanes) on every version.
   // v1/v2 load creates a default tick-0 point.
   // HoldEighth is never written; legacy HoldEighth rows are skipped on load.
   static SerializeResult save_to_file(const NotationChart& chart, const std::string& path);

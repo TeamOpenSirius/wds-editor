@@ -1,12 +1,13 @@
 # ui — `wds_ui` + `wds_editor`
 
-编辑器壳层：窗口、四区排版、`UiManager`、工程会话与原生文件对话框。  
+编辑器壳层：Qt 窗口与 Dock 工作区、`UiManager`、工程会话与原生文件对话框。
 组装 `core` / `audio` / `interaction` / `chart-render` / `renderer`，**不要**把谱面算法或 Vulkan 设备细节复制进 panel。
 
 ## 职责
 
-- GLFW 窗口 + Vulkan 表面注入（`VulkanHostSurface`）
-- 工具栏 / 预览 / 预览设置 / 编辑区布局
+- Qt Widgets 菜单、工具栏、属性/播放/音频/编辑工具箱 Dock
+- `QWindow`/`QVulkanInstance` 实时预览 + Vulkan 表面注入（`VulkanHostSurface`）
+- `QPainter` 谱面编辑画布（编辑交互仍由 `ChartEditPanel` 提供）
 - `.wdsproject` 打开保存、官方 CSV 只读导入、撤销重做
 - 资源路径解析（`skins/`、`effects/`、shaders、fonts、icons）
 
@@ -17,10 +18,10 @@ ui/
 ├── CMakeLists.txt
 ├── apps/                   # wds_editor / Uninstall 等入口
 ├── include/wds/ui/
-│   ├── ui_manager.hpp / window.hpp
+│   ├── ui_manager.hpp / qt/
 │   ├── editor_session.hpp / editor_ui_config.hpp
 │   ├── resource_paths.hpp / startup_deps.hpp
-│   ├── native_file_dialog.hpp / macos_*.hpp
+│   ├── native_file_dialog.hpp
 │   ├── layout/editor_layout.hpp
 │   └── regions/
 │       ├── preview/        # ChartPreviewPanel, PlaybackPreview
@@ -28,8 +29,9 @@ ui/
 │       ├── toolbar/        # EditorToolbar
 │       └── edit/           # ChartEditPanel, viewport, gutters
 ├── src/
-├── assets/                 # 字体、应用图标
-└── tests/                  # wds_ui_logic_tests（无 GPU）
+├── assets/                 # 字体、应用图标、OBS/Yami 主题资源
+├── wds_resources.qrc       # 必须内嵌的 Qt 资源（当前为应用图标）
+└── tests/                  # UI 逻辑回归测试
 ```
 
 | CMake 目标 | 角色 |
@@ -37,28 +39,36 @@ ui/
 | `wds_ui` | 静态库：regions / session / dialogs |
 | `wds_editor` | 可执行文件 |
 | `wds_ui_logic_tests` | 视口 / 会话逻辑 |
+| `wds_chart_edit_panel_curve_tests` | 编辑交互、Hold/ScratchHold 与曲线逻辑 |
 
-## 布局
+## Qt Dock 布局
 
 ```text
-┌──────────────────────┬──────────────────────┐
-│     Preview          │                      │
-│                      │                      │
-├──────────────────────┤        Edit          │
-│     Settings         │                      │
-├──────────┬───────────┤                      │
-│ Toolbar  │ Convert   │                      │
-└──────────┴───────────┴──────────────────────┘
+┌─────────────────┬─────────────────┬──────────┐
+│ Vulkan Preview  │ QPainter Edit   │   属性   │
+│                 │                 │          │
+├─────────────────┴─────────────────┴──────────┤
+│         播放       │  音频  │   编辑工具箱   │
+└────────────────────┴────────┴────────────────┘
 ```
 
-- `EditorLayouter`：计算四区矩形与舞台 content bounds  
-- `ChartPreviewPanel` / `PlaybackPreviewView`：Vulkan 预览  
-- `PreviewSettingsPanel`：速度、进度、音量  
-- `EditorToolbar`：打开/保存/导入导出/音乐/撤销/网格/转换  
-- `ChartEditPanel`：铺平 tick×lane 编辑  
-- `EditorSession`：工程生命周期  
+- 顶行 Preview/Edit 是唯一的纵向弹性区域，自动吸收主窗口高度变化。
+- 播放、音频、编辑工具箱停靠在底部时默认约 200px 高；窗口整体 resize 不会自动改写该高度，但用户仍可拖动分隔线手动调整。横向宽度由 Qt 按当前比例自适应，移到侧边或浮动后恢复自由尺寸。
+- 所有 Dock 可移动、浮动、关闭；“视图 → 重置布局”恢复默认比例。
+- Preview 内容保持舞台宽高比，Dock 本身可自由缩放；编辑画布自适应可用区域。
+- `ChartEditPanel` 保留 tick×lane 编辑算法，`ChartEditWidget` 负责 Qt 绘制和事件桥接。
 
-窗口固定 16:9。
+### 谱面画布命中与层级
+
+- Hold ribbon 先统一绘制，Tap、Hold cap、星标等可选 note sprite 始终在其上层。
+- 第一次点击用于选中；只有已选 note 才显示并响应宽度/时间 resize handle，避免窄 note 的热区吞掉选择。
+- ScratchHold 共享关节按时间方向拆分命中：线下半选择前段尾，线上半选择后段 tap 头，两者可独立调整。
+- 按住 Alt 点击拼接的 ScratchHold，可直接选择当前段（及其配对头），不进入整条链编辑。
+- 宽度/时间 resize handle 最多占 note 每侧 20%，窄 note 与极短 hold 始终保留中央选择/移动区。
+
+### 工程加载
+
+`.wdsproject` 和其引用谱面的文件读取、反序列化在 Qt worker 线程完成；只有把完整结果提交到 `EditorSession`、切换 Transport/Vulkan 状态的短步骤留在 GUI 线程。整曲波形解码与双声道 FFT 也在独立后台任务中执行，主线程只接收最新一代结果并上传频谱纹理，因此启动页和主窗口在加载期间都能继续刷新。
 
 ### 预览 / 编辑滚轮
 
@@ -108,9 +118,15 @@ ui.session();
 - 官方 CSV 只读导入
 - dirty 提示与未保存对话框
 
-### `resource_paths`
+### `resource_paths` 与 Qt Resources
 
-发行包与 Debug 树通过 `WDS_REPO_ROOT` / 可执行文件旁资源定位 `skins/`、`effects/` 等。交叉编译的 Win Debug 需经 `package-target.sh --stage-win-debug` 拷贝资源。
+应用图标属于不可替换的 Qt chrome，编入 `wds_resources.qrc`。其余资源有意保留为发行包内的目录：
+
+- `skins/`、`effects/` 由 Vulkan/BASS 原生路径 API 使用，不能直接换成 `:/` URL；
+- `theme/` 与字体保留外置，便于主题枚举、用户替换及许可证随包分发；
+- CMake/打包脚本负责把这些目录放到可执行文件旁（macOS 为 App Resources），业务代码统一通过 `resource_paths` 解析。
+
+这样安装目录仍是自包含的，但不会把可定制资源和原生加载资源硬塞进可执行文件。交叉编译的 Win Debug 需经 `package-target.sh --stage-win-debug` 拷贝资源。
 
 ## 快捷键（节选）
 
@@ -141,4 +157,4 @@ ctest --test-dir build-macos-arm -R 'wds_ui_logic_tests|wds_note_draw_order_test
 
 ## 依赖
 
-`wds::interaction`（+ glfw）、`wds::audio_player`、`wds::core`、`wds::chart_render`、`wds::renderer`。
+`wds::interaction`、`wds::audio_player`、`wds::core`、`wds::chart_render`、`wds::renderer`。

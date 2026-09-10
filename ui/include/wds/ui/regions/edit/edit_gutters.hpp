@@ -27,6 +27,14 @@ void split_boundaries_12(int32_t split_count, std::vector<int32_t>& out);
 bool split_track_for_lane(int32_t split_count, int32_t lane_count, int32_t probe_lane,
                           int32_t& out_lane, int32_t& out_width) noexcept;
 
+// Same as split_track_for_lane, but `mids` is the union of split_boundaries_12
+// from every overlapping split effect. Nearest line to the left of probe_lane
+// and nearest line to the right (playfield edges 0 / lane_count bound the
+// closed interval) determine the note's lane and width.
+bool split_track_between_lines(const std::vector<int32_t>& mids, int32_t lane_count,
+                               int32_t probe_lane, int32_t& out_lane,
+                               int32_t& out_width) noexcept;
+
 wds::interaction::Color split_color_for_id(int32_t color_id) noexcept;
 
 // Official LineColor for a left-to-right world slot. Z=180 IDs are mirrored.

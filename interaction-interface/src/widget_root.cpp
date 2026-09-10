@@ -258,7 +258,7 @@ void WidgetRoot::dispatch_event(const InputEvent& event, ShortcutManager* shortc
     wds::common::journal_begin_event(wds::common::CrashInputKind::DoubleClick, e.position.x,
                                      e.position.y, 0, 0, 0, pack_mods(e.mods),
                                      static_cast<std::uint8_t>(e.button), 0);
-    // Do not clear press_target_: GlfwInputAdapter emits DoubleClick then Click
+    // Do not clear press_target_: the Qt host emits DoubleClick then Click
     // on the same release. Clearing here would drop the Click (buttons only
     // handle on_click), so rapid re-clicks appeared dead.
     target = press_target_;

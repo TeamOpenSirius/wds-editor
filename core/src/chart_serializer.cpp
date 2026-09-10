@@ -13,7 +13,6 @@
 #include <cstdint>
 #include <locale>
 #include <sstream>
-#include <unordered_map>
 #include <unordered_set>
 
 namespace wds::chart_editor {
@@ -318,26 +317,13 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     return {SerializeError::ParseError, "CONCURRENT count mismatch"};
   }
 
-  if (version < 5) {
-    infer_legacy_star_hold_binds(chart.notes);
-  } else {
-    std::unordered_map<int32_t, const NotationNote*> by_id;
-    by_id.reserve(chart.notes.size());
-    for (const auto& n : chart.notes) {
-      if (n.id >= 0) by_id[n.id] = &n;
-    }
+  if (version >= 5) {
     for (auto& n : chart.notes) {
-      if (n.parent_hold_id == kNoBoundHoldId) continue;
-      if (n.note_type != NoteType::Sound && n.note_type != NoteType::ScratchSound) {
-        n.parent_hold_id = kNoBoundHoldId;
-        continue;
-      }
-      const auto it = by_id.find(n.parent_hold_id);
-      if (it == by_id.end() || !is_bindable_hold_body(it->second->note_type)) {
-        return {SerializeError::ParseError, "invalid parent_hold_id"};
-      }
+      if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) continue;
+      n.parent_hold_id = kNoBoundHoldId;
     }
   }
+  infer_legacy_star_hold_binds(chart.notes);
 
   normalize_timing_points(chart.timing);
   out_chart = std::move(chart);

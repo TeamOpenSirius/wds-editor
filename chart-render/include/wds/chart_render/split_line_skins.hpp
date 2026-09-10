@@ -37,9 +37,11 @@ struct SplitLineVariant {
 class SplitLineSkinBank {
  public:
   // Queue all Sirius Split Line PNGs into cache (call before bake_atlas).
+  // SkinCatalog::load no longer calls this — draw uses procedural soft_split_line.
   void queue_all(TextureCache& cache, const std::string& skins_directory);
 
   // Bind TextureInfo after bake_atlas; build color→suffix resolution tables.
+  // Paired with queue_all; also unused on the current startup path.
   void bind_after_bake(TextureCache& cache, const std::string& skins_directory);
 
   // line_slot matches Sonolus splitLineMemory index: 0=left, 1..N-1=mids, N=right end.

@@ -22,7 +22,7 @@ Fedora:
 
   sudo dnf install mingw64-gcc mingw64-gcc-c++ mingw64-winpthreads-static
 
-Renderer / demo deps (libpng, Vulkan, GLFW) via vcpkg or a custom prefix.
+Renderer / editor deps (libpng, Vulkan) via vcpkg or a custom prefix.
 Copy scripts/env.example → scripts/env.local and set WDS_VCPKG_ROOT, then:
 
   ./scripts/build-target.sh win-x86_64
@@ -32,7 +32,7 @@ Copy scripts/env.example → scripts/env.local and set WDS_VCPKG_ROOT, then:
     -DWDS_BUILD_RENDERER=OFF -DWDS_BUILD_INTERACTION=OFF -DWDS_BUILD_UI=OFF
   # core without audio: add -DWDS_BUILD_AUDIO=OFF
 
-vcpkg triplet: x64-mingw-static (install libpng zlib glfw3 vulkan-loader).
+vcpkg triplet: x64-mingw-static (install libpng zlib vulkan-loader).
 ]=])
 endif()
 

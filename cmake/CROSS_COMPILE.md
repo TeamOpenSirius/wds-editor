@@ -56,7 +56,7 @@ Windows MSI uses [msitools](https://wiki.gnome.org/msitools) `wixl` on the Linux
 - `WDS_CORE_BUILD_TESTS=OFF`
 - `WDS_CORE_BUILD_EXAMPLE=ON`
 
-`wds_editor` needs **target** GLFW in the prefix (e.g. vcpkg `glfw3:x64-mingw-static`). Missing GLFW skips the editor with a status message.
+`wds_editor` needs target Qt and Vulkan runtime support in the prefix. The Qt editor host no longer depends on GLFW.
 
 ## Tests: native CTest vs cross-compile
 
@@ -84,7 +84,7 @@ Linux host, common+core unit tests only (not a product configure, not a Windows 
 ./scripts/run-host-core-tests.sh
 ```
 
-Opt-in benches (`WDS_CORE_BUILD_BENCHMARKS`, `WDS_RENDERER_BUILD_BENCHMARKS`) are **not** CTest and are not run on the Linux packaging host. Renderer path bench expects a host Vulkan/GLFW window (validated on macOS / MoltenVK). This document does not claim Windows-native test or bench results.
+Opt-in benches (`WDS_CORE_BUILD_BENCHMARKS`, `WDS_RENDERER_BUILD_BENCHMARKS`) are **not** CTest and are not run on the Linux packaging host. Renderer performance is measured through the Qt editor host diagnostics. This document does not claim Windows-native test results.
 
 ## Installing toolchains (Linux host → Windows)
 
@@ -99,7 +99,7 @@ vcpkg (static triplet):
 ```bash
 export VCPKG_DEFAULT_TRIPLET=x64-mingw-static
 export VCPKG_DEFAULT_HOST_TRIPLET=x64-mingw-static
-./vcpkg install libpng zlib glfw3 vulkan-loader
+./vcpkg install libpng zlib vulkan-loader
 ```
 
 Then in `scripts/env.local`:
@@ -122,7 +122,7 @@ WDS_VCPKG_ROOT="/path/to/vcpkg"
 ## Native macOS (arm64)
 
 ```bash
-brew install cmake libpng glfw glslang molten-vk vulkan-headers vulkan-loader
+brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
 ./scripts/build-target.sh macos-arm
 ```
 

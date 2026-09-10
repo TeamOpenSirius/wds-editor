@@ -59,7 +59,7 @@ else()
 endif()
 
 # MinGW: statically link libgcc / libstdc++ / winpthread so Release packages need fewer
-# redistributable DLLs (GLFW/png already come from vcpkg x64-mingw-static).
+# redistributable DLLs (png already comes from vcpkg x64-mingw-static).
 if(MINGW)
   add_link_options(-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic)
 endif()

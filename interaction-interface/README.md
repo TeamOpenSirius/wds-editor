@@ -9,7 +9,7 @@
 - 绝对布局控件树（命中测试、焦点、捕获）
 - 快捷键：namespace → chord → action
 - UI 文本：`FontAtlas` + `UiPainter`
-- GLFW 适配（可选目标 `wds_interaction_glfw`）
+- Qt 输入适配由 `ui` 宿主提供，interaction 保持框架无关
 
 ## 结构
 
@@ -20,7 +20,6 @@ interaction-interface/
 │   ├── events.hpp / types.hpp / platform.hpp / gesture.hpp
 │   ├── widget.hpp / widget_root.hpp
 │   ├── shortcuts.hpp / theme.hpp / ui_painter.hpp / font_atlas.hpp
-│   ├── glfw_input_adapter.hpp
 │   └── widgets/
 │       ├── button.hpp / icon_button.hpp / checkbox.hpp
 │       ├── text_field.hpp / slider.hpp / stepper.hpp
@@ -33,16 +32,13 @@ interaction-interface/
 | CMake 目标 | 角色 |
 |------------|------|
 | `wds_interaction` | 控件与绘制；PUBLIC 链 `wds::draw` |
-| `wds_interaction_glfw` | `GlfwInputAdapter`（ui 链接） |
 
 ## 主要接口
 
 ### 事件与适配
 
 ```cpp
-#include <wds/interaction/glfw_input_adapter.hpp>
-
-wds::interaction::GlfwInputAdapter adapter(window);
+// QtInputAdapter 在 ui 宿主中把 QWindow 事件转换为这些事件。
 // 每帧取出 events → WidgetRoot::process_frame
 ```
 

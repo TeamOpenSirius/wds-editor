@@ -8,6 +8,7 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/types.hpp>
 
+#include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/gesture.hpp>
 #include <wds/interaction/widget.hpp>
 #include <wds/renderer/draw_batch.hpp>
@@ -58,6 +59,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_global_pointer(wds::interaction::Vec2 point);
   const EditViewport& viewport() const noexcept { return viewport_; }
   EditViewport& viewport() noexcept { return viewport_; }
+  wds::interaction::CursorKind hover_cursor() const noexcept { return hover_cursor_; }
+  wds::chart_editor::ChartEditorEngine& engine() const noexcept { return engine_; }
 
   const EditDrawDepthConfig& draw_depth() const noexcept { return renderer_.draw_depth(); }
   EditDrawDepthConfig& draw_depth() noexcept { return renderer_.draw_depth(); }
@@ -68,10 +71,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
     selected_.clear();
     clear_hold_sel_focus();
   }
-  void set_selected(std::unordered_set<int32_t> ids) {
-    selected_ = std::move(ids);
-    sync_hold_sel_focus_to_selection();
-  }
+  void set_selected(std::unordered_set<int32_t> ids);
 
   int default_width() const noexcept { return default_width_; }
   void set_default_width(int width) noexcept;
@@ -88,11 +88,22 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_waveform(const wds::audio::WaveformOverview* waveform) noexcept {
     waveform_ = waveform;
   }
+  const wds::audio::WaveformOverview* waveform() const noexcept { return waveform_; }
   void set_spectrogram(wds::renderer::TextureInfo spectrogram) noexcept {
     spectrogram_ = spectrogram;
   }
   void set_spectrum_mode(EditSpectrumMode mode) noexcept { spectrum_mode_ = mode; }
   EditSpectrumMode spectrum_mode() const noexcept { return spectrum_mode_; }
+
+  // New-style toolbox flow: while set, a plain left click places this intent
+  // instead of Tap. Swipe gestures keep their old meaning; HoldBody /
+  // ScratchHoldBody overrides only redirect the left swipe-up hold type.
+  void set_place_intent_override(wds::interaction::PlaceIntent intent) noexcept {
+    place_intent_override_ = intent;
+  }
+  wds::interaction::PlaceIntent place_intent_override() const noexcept {
+    return place_intent_override_;
+  }
 
   // scratch_length: for Flick / ScratchHold direction (-1 left, 0 both, +1 right).
   // Pass nullopt to leave scratch_length to convert_note_type defaults.
@@ -175,7 +186,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void sync_viewport() const;
   wds::chart_editor::NotationNote make_base_note(wds::interaction::Vec2 point) const;
   int effective_placement_width(wds::interaction::Vec2 point) const;
-  // Applies split-track lane/width when follow is on and point is in a steady split range.
+  // Applies split-track lane/width when follow is on: union of all split
+  // effects whose closed [start, end] covers the point's tick.
   void apply_placement_lane_width(wds::interaction::Vec2 point, int32_t& lane,
                                   int32_t& width) const;
   std::optional<wds::chart_editor::NotationNote> hit_test_note(wds::interaction::Vec2 point) const;
@@ -429,8 +441,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t resize_side_ = 0;  // -1 left, +1 right
   // When true with ResizeWidth: edit ScratchHold end span (not body width).
   bool resize_scratch_end_ = false;
-  // True when the ScratchHold was already selected before this resize drag.
-  bool resize_was_selected_ = false;
   // Single chained ScratchHold segment MoveSelection: lock time, keep chain joints.
   bool move_scratch_segment_ = false;
   // Chained neighbor involved in an unselected ScratchHold width edit (-1 = none).
@@ -468,6 +478,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Locked when PlaceGesture starts: Shift was already down at mouse press.
   // The same Shift still places stars; releasing it mid-draw does not retint.
   bool place_gold_head_ = false;
+  // New-style toolbox lock; PlaceIntent::None keeps the classic Tap default.
+  wds::interaction::PlaceIntent place_intent_override_ = wds::interaction::PlaceIntent::None;
+  wds::interaction::PlaceIntent effective_place_intent(
+      wds::interaction::PlaceIntent intent) const noexcept;
 
   void clear_hold_chain_state();
   void select_hold_chain();

@@ -199,27 +199,34 @@ void split_boundaries_12(int32_t split_count, std::vector<int32_t>& out) {
   }
 }
 
-bool split_track_for_lane(int32_t split_count, int32_t lane_count, int32_t probe_lane,
-                          int32_t& out_lane, int32_t& out_width) noexcept {
+bool split_track_between_lines(const std::vector<int32_t>& mids, int32_t lane_count,
+                               int32_t probe_lane, int32_t& out_lane,
+                               int32_t& out_width) noexcept {
   const int32_t n = std::max(1, lane_count);
   const int32_t lane = std::clamp(probe_lane, 0, n - 1);
+  // Lines are drawn at edge = mid + 1. Playfield edges 0 and n always bound
+  // the closed interval; search stops at the nearest interior line on each side.
+  int32_t left = 0;
+  int32_t right = n;
+  for (const int32_t mid : mids) {
+    const int32_t edge = mid + 1;
+    if (edge <= 0 || edge >= n) continue;
+    if (edge <= lane) {
+      if (edge > left) left = edge;
+    } else if (edge < right) {
+      right = edge;
+    }
+  }
+  out_lane = left;
+  out_width = right - left;
+  return out_width > 0;
+}
+
+bool split_track_for_lane(int32_t split_count, int32_t lane_count, int32_t probe_lane,
+                          int32_t& out_lane, int32_t& out_width) noexcept {
   std::vector<int32_t> mids;
   split_boundaries_12(split_count, mids);
-  // Boundaries store the last lane index of each track before the final one;
-  // vertical lines are drawn at mid + 1 (see draw_split_boundaries).
-  int32_t start = 0;
-  for (const int32_t mid : mids) {
-    const int32_t next = mid + 1;
-    if (lane < next) {
-      out_lane = start;
-      out_width = next - start;
-      return out_width > 0;
-    }
-    start = next;
-  }
-  out_lane = start;
-  out_width = n - start;
-  return out_width > 0;
+  return split_track_between_lines(mids, lane_count, probe_lane, out_lane, out_width);
 }
 
 Color split_color_for_id(int32_t color_id) noexcept {

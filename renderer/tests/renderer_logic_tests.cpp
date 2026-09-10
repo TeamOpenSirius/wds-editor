@@ -105,6 +105,7 @@ using wds::renderer::upload_submit_failure_recycles_slot;
 using wds::renderer::wait_pending_uploads_holds_staging_on_failure;
 using wds::renderer::wait_pending_uploads_reaps_after_ok_wait;
 using wds::renderer::kHostVisibleMapChunkBytes;
+using wds::renderer::texture_upload_defers_vertex_remap;
 using wds::renderer::staging_copy_chunk_bytes;
 using wds::renderer::staging_copy_chunk_count;
 using wds::renderer::texture_upload_unmaps_persistent_vertex_maps;
@@ -418,11 +419,16 @@ void test_atlas_rebake_and_font_replace_hold_async_upload() {
 }
 
 void test_staging_copy_chunks_cap_host_maps() {
+  constexpr VkDeviceSize kKnownBadWinMapBytes = 32ull * 1024ull * 1024ull;
+  CHECK(kHostVisibleMapChunkBytes < kKnownBadWinMapBytes);
   CHECK(staging_copy_chunk_bytes(16384) == kHostVisibleMapChunkBytes);
-  CHECK(staging_copy_chunk_count(4096ull * 2048ull * 4ull, kHostVisibleMapChunkBytes) == 8);
+  const VkDeviceSize half_atlas = 4096ull * 2048ull * 4ull;
+  CHECK(staging_copy_chunk_count(half_atlas, kHostVisibleMapChunkBytes) ==
+        (half_atlas + kHostVisibleMapChunkBytes - 1) / kHostVisibleMapChunkBytes);
   CHECK(staging_copy_chunk_count(64ull * 64ull * 4ull, staging_copy_chunk_bytes(64ull * 4ull)) == 1);
   CHECK(staging_copy_chunk_bytes(kHostVisibleMapChunkBytes + 16) == kHostVisibleMapChunkBytes + 16);
   CHECK(texture_upload_unmaps_persistent_vertex_maps());
+  CHECK(texture_upload_defers_vertex_remap());
 }
 
 void test_draw_frame_drains_pending_uploads_before_sample() {

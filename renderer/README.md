@@ -30,14 +30,15 @@ renderer/
 
 ```cpp
 struct VulkanHostSurface {
-  std::vector<const char*> instance_extensions;           // 如 GLFW WSI
-  std::function<VkSurfaceKHR(VkInstance)> create_surface;
+  VkInstance external_instance;
+  VkSurfaceKHR external_surface;
+  std::function<VkSurfaceKHR()> acquire_surface;
   std::function<void(int*, int*)> framebuffer_size;
   // Win32: optional win32_monitor for fullscreen exclusive
 };
 ```
 
-Renderer **不**持有 `GLFWwindow`，只通过上述回调拿 surface 与尺寸。
+Renderer **不**持有原生窗口对象，只通过上述 host binding 拿 surface 与尺寸。
 
 ### `VulkanRenderer`
 
@@ -65,7 +66,7 @@ Descriptor 池按块增长：**256 → 512 → 之后每块 1024**。池满或�
 
 - `wds::common`
 - 目标平台：Vulkan loader、libpng；着色器工具链（glslangValidator）用于构建期
-- **不**链接 GLFW（WSI 在 ui）
+- **不**链接窗口库（WSI 在 Qt ui host）
 
 ## 构建与测试
 
@@ -85,9 +86,9 @@ ctest --test-dir build-macos-arm -R wds_renderer_tests --output-on-failure
 
 ## 路径基准（默认关）
 
-`WDS_RENDERER_BUILD_BENCHMARKS=ON` 且找到 GLFW 时编 `wds_renderer_path_bench`。隐藏窗口、无手动点击；面向宿主 Vulkan（macOS 上会优先探测 Homebrew MoltenVK ICD）。**不**进 CTest，也不是 CI 门禁。
+编辑器性能通过 Qt host 的帧诊断和 renderer path diagnostics 验证；不再维护独立窗口 benchmark。**不**进 CTest，也不是 CI 门禁。
 
-无 GLFW / 无 Vulkan / `create` 失败时打印 `UNMEASURED` 并以 0 退出。测得到时打印 font 2048²、skin 4096² 上传（含 async submit / fence wait / reap / descriptor）、swapchain resize、MSAA，以及 descriptor 300 创建 + 100 回收。主线程 upload 或 wait 的 P95 **信息门**为 8ms（超出只打印 `EXCEEDS`，不当作产品 CTest）。首帧以及 atlas/图标 rebake 后的下一帧可能出现 `upload_fence_wait`（`draw_frame` 在采样前 drain pending）；稳态 pending 为空时该 wait 为 no-op。
+Vulkan 创建失败由 Qt host 报告并交给统一启动依赖检查。上传、swapchain resize、MSAA 和 descriptor 回收可通过现有 path diagnostics 观察。
 
 ```bash
 ./scripts/build-target.sh macos-arm --no-package -- -DWDS_RENDERER_BUILD_BENCHMARKS=ON

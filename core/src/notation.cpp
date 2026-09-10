@@ -1,5 +1,6 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/gimmick.hpp>
+#include <wds/core/note_edit_ops.hpp>
 #include <wds/core/timing_map.hpp>
 
 #include <algorithm>
@@ -904,6 +905,7 @@ NotationChart ChartDocument::to_notation_chart() const {
 
 NotationChart ChartDocument::normalized_chart() const {
   NotationChart chart = to_notation_chart();
+  infer_legacy_star_hold_binds(chart.notes);
   normalize_notes_inplace(chart.notes);
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
   return chart;
@@ -917,6 +919,7 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
   edit_mode_ = mode;
 
   if (!chart_note_ids_keepable(notes_)) {
+    infer_legacy_star_hold_binds(notes_);
     normalize_notes_inplace(notes_);
     next_id_ = notes_.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())
                    ? std::numeric_limits<int32_t>::max()
@@ -930,6 +933,7 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
         next_id_ = std::max(next_id_, note.id + 1);
       }
     }
+    infer_legacy_star_hold_binds(notes_);
   }
 
   sort_notes_for_display();
@@ -944,6 +948,7 @@ bool ChartDocument::normalize_for_save() {
   if (is_read_only()) {
     return false;
   }
+  infer_legacy_star_hold_binds(notes_);
   normalize_notes_inplace(notes_);
   next_id_ = static_cast<int32_t>(notes_.size());
   rebuild_id_index();
@@ -953,9 +958,19 @@ bool ChartDocument::normalize_for_save() {
 
 void ChartDocument::normalize_notes_inplace(std::vector<NotationNote>& notes) {
   std::sort(notes.begin(), notes.end(), compare_notes_for_save);
+  std::unordered_map<int32_t, int32_t> old_to_new;
+  old_to_new.reserve(notes.size());
   int32_t next = 0;
   for (auto& note : notes) {
+    if (note.id >= 0) {
+      old_to_new[note.id] = next;
+    }
     note.id = next++;
+  }
+  for (auto& note : notes) {
+    if (note.parent_hold_id == kNoBoundHoldId) continue;
+    const auto it = old_to_new.find(note.parent_hold_id);
+    note.parent_hold_id = it != old_to_new.end() ? it->second : kNoBoundHoldId;
   }
 }
 

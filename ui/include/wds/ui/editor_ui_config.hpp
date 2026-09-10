@@ -78,6 +78,10 @@ struct EditorUiConfig {
   bool mute_hold_body_sfx = false;
   // When true, show TimingEffect Auto judgment text during preview auto-hit.
   bool show_judgment_text = false;
+  // Preview stage lane count (1..32).
+  int lane_count = 12;
+  // New-style toolbox flow: convert buttons also lock the left-click place type.
+  bool new_note_place_logic = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
   // When true, negate timeline-scrub wheel deltas (not Option+wheel visible range).

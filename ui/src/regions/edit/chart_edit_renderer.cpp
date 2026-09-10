@@ -514,6 +514,8 @@ void ChartEditRenderer::paint_overlays(
 
   for (const auto& note : notes) {
     if (!selected.count(note.id)) continue;
+    // HoldEighth is derived and never selectable — skip any leaked selection ids.
+    if (note.note_type == NoteType::HoldEighth) continue;
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
 
     // Mid-stars: selection box matches the tight square hit / draw size.

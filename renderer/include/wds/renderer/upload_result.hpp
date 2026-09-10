@@ -190,8 +190,9 @@ inline constexpr bool wait_pending_uploads_holds_staging_on_failure(VkResult wai
 }
 
 // Windows ICDs (and some mapped-memory budgets) fail vkMapMemory on a 32MiB
-// HOST_VISIBLE allocation. Cap each staging map/alloc; large images use several.
-inline constexpr VkDeviceSize kHostVisibleMapChunkBytes = 4ull * 1024ull * 1024ull;
+// HOST_VISIBLE allocation. 16MiB stays under that ceiling and cuts atlas/font
+// staging allocs vs the original 4MiB cap (4096×4096 RGBA: 4 maps, not 16).
+inline constexpr VkDeviceSize kHostVisibleMapChunkBytes = 16ull * 1024ull * 1024ull;
 
 inline constexpr VkDeviceSize staging_copy_chunk_bytes(VkDeviceSize row_bytes) noexcept {
   if (row_bytes == 0) {
@@ -214,6 +215,14 @@ inline constexpr uint32_t staging_copy_chunk_count(VkDeviceSize image_bytes,
 // Device create persistently maps per-frame vertex rings. Some Windows ICDs refuse
 // a further vkMapMemory (MEMORY_MAP_FAILED) until those maps are released.
 inline constexpr bool texture_upload_unmaps_persistent_vertex_maps() noexcept {
+  return true;
+}
+
+// Remap is deferred until draw_frame so a burst of create_texture_rgba can keep
+// the rings unmapped and pile QueueSubmit work on the graphics queue. A second
+// transfer queue is not used: many Win ICDs share one family, and ownership
+// barriers would serialize the same copies we already submit asynchronously.
+inline constexpr bool texture_upload_defers_vertex_remap() noexcept {
   return true;
 }
 

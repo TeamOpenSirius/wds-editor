@@ -6,7 +6,7 @@
 
 namespace wds::interaction {
 
-// Platform mouse cursor shapes (GlfwInputAdapter maps these to GLFW standard cursors).
+// Platform-independent mouse cursor shapes mapped by the active UI host.
 enum class CursorKind : uint8_t {
   Default,
   ResizeHorizontal,  // note width edges

@@ -8,9 +8,8 @@
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
 
-#include <GLFW/glfw3.h>
-
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -43,52 +42,6 @@ float toolbar_tip_logical_px(float left_w_logical) {
 
 // Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
 bool ui_font_mild_sharpen(float tier) { return tier <= 1.5f + 0.001f; }
-
-// Prefer the monitor that currently owns the window (fullscreen or windowed).
-GLFWmonitor* monitor_for_window(GLFWwindow* window) {
-  if (window == nullptr) {
-    return glfwGetPrimaryMonitor();
-  }
-  if (GLFWmonitor* exclusive = glfwGetWindowMonitor(window)) {
-    return exclusive;
-  }
-  int wx = 0;
-  int wy = 0;
-  int ww = 0;
-  int wh = 0;
-  glfwGetWindowPos(window, &wx, &wy);
-  glfwGetWindowSize(window, &ww, &wh);
-  const int cx = wx + ww / 2;
-  const int cy = wy + wh / 2;
-
-  int count = 0;
-  GLFWmonitor** monitors = glfwGetMonitors(&count);
-  for (int i = 0; i < count; ++i) {
-    int mx = 0;
-    int my = 0;
-    glfwGetMonitorPos(monitors[i], &mx, &my);
-    const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
-    if (mode == nullptr) {
-      continue;
-    }
-    if (cx >= mx && cx < mx + mode->width && cy >= my && cy < my + mode->height) {
-      return monitors[i];
-    }
-  }
-  return glfwGetPrimaryMonitor();
-}
-
-int display_refresh_hz(GLFWwindow* window) {
-  GLFWmonitor* monitor = monitor_for_window(window);
-  if (monitor == nullptr) {
-    return kFallbackDisplayHz;
-  }
-  const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-  if (mode == nullptr || mode->refreshRate <= 0) {
-    return kFallbackDisplayHz;
-  }
-  return mode->refreshRate;
-}
 
 }  // namespace
 
@@ -178,20 +131,19 @@ bool ChartPreviewPanel::ensure_ui_font_scale() {
   return true;
 }
 
-bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
+bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface& host,
                                           const wds::renderer::PreviewVisualConfig& visual,
-                                          const std::string& ui_font_path) {
+                                          const std::string& ui_font_path, bool initialize_audio) {
   last_init_error_.clear();
-  window_ = window;
-  if (!transport_.initialize(visual.effects_directory, visual.bgm_path)) {
+  display_refresh_hz_ = host.display_refresh_hz ? std::max(1, host.display_refresh_hz()) : 60;
+  if (initialize_audio && !transport_.initialize(visual.effects_directory, visual.bgm_path)) {
     last_init_error_ =
         "音频初始化失败（BASS / effects：" + visual.effects_directory + "）";
     std::fprintf(stderr, "ChartPreviewPanel: audio init failed\n");
-    window_ = nullptr;
     return false;
   }
 
-  if (!preview_.initialize(window, visual)) {
+  if (!preview_.initialize(host, visual)) {
     // Distinguish the common CI libpng header/dylib skew (skins) from Vulkan.
     last_init_error_ =
         "预览初始化失败（Vulkan 或 skins PNG）。skins=" + visual.skins_directory +
@@ -199,10 +151,9 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
         "failed，说明程序链到了错误的 libpng，请重装完整程序包";
     std::fprintf(stderr, "ChartPreviewPanel: preview init failed\n");
     transport_.shutdown();
-    window_ = nullptr;
     return false;
   }
-  preview_.attach_audio(&transport_.audio());
+  if (initialize_audio) preview_.attach_audio(&transport_.audio());
 
   {
     wds::chart_editor::PreviewConfig core_cfg;
@@ -240,33 +191,16 @@ bool ChartPreviewPanel::finish_initialize(GLFWwindow* window,
   return true;
 }
 
-bool ChartPreviewPanel::initialize(GLFWwindow* window,
-                                   const wds::renderer::PreviewVisualConfig& visual,
-                                   const std::string& chart_path,
-                                   const std::string& music_config_path,
-                                   const std::string& ui_font_path) {
-  if (ready_) {
-    return true;
-  }
-  if (!finish_initialize(window, visual, ui_font_path)) {
-    return false;
-  }
-  if (!chart_path.empty()) {
-    if (!load_chart(chart_path, music_config_path)) {
-      std::fprintf(stderr, "ChartPreviewPanel: falling back to empty chart\n");
-      seed_empty_chart();
-    }
-  } else {
-    seed_empty_chart();
-  }
-  WDS_LOG("ChartPreviewPanel ready notes=%zu\n", engine_.document().notes().size());
-  return true;
-}
 
-bool ChartPreviewPanel::initialize_empty(GLFWwindow* window,
+bool ChartPreviewPanel::initialize_empty(const wds::renderer::VulkanHostSurface& host,
                                          const wds::renderer::PreviewVisualConfig& visual,
-                                         const std::string& ui_font_path) {
-  return initialize(window, visual, {}, {}, ui_font_path);
+                                         const std::string& ui_font_path, bool initialize_audio) {
+  if (ready_) return true;
+  if (!finish_initialize(host, visual, ui_font_path, initialize_audio)) return false;
+  // Keep the engine's current document intact. Startup project loading can
+  // happen before the Vulkan surface is ready; seeding here would overwrite
+  // that document with a blank chart when the first frame is initialized.
+  return true;
 }
 
 void ChartPreviewPanel::shutdown() {
@@ -289,11 +223,23 @@ void ChartPreviewPanel::shutdown() {
     preview_.vulkan().destroy_texture(solid_texture_.id);
     solid_texture_ = {};
   }
+  // Dedicated decode streams may still be using BASS. Join them before the
+  // transport shuts the audio engine down; this wait only occurs on exit.
+  ++waveform_generation_;
+  for (auto& pending : pending_waveforms_) {
+    if (pending.result.valid()) {
+      try {
+        (void)pending.result.get();
+      } catch (...) {
+        WDS_LOG("ChartPreviewPanel: waveform worker failed during shutdown\n");
+      }
+    }
+  }
+  pending_waveforms_.clear();
   destroy_spectrogram_texture();
   preview_.shutdown();
   transport_.shutdown();
   waveform_.clear();
-  window_ = nullptr;
   ready_ = false;
   font_bake_tier_ = 0.0f;
   font_bake_tip_bucket_ = 0.0f;
@@ -301,7 +247,7 @@ void ChartPreviewPanel::shutdown() {
 }
 
 int64_t ChartPreviewPanel::display_frame_lead_us() const noexcept {
-  const int hz = display_refresh_hz(window_);
+  const int hz = display_refresh_hz_;
   // Fixed one-frame wall duration — not scaled by playback_rate.
   return 1'000'000 / std::max(hz, 1);
 }
@@ -360,6 +306,7 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   if (!ready_) {
     return;
   }
+  collect_ready_waveforms();
   // Clamp post-hitch spikes so Transport does not hard-snap (100 ms) on one frame.
   constexpr int64_t kMaxWallDeltaUs = 80000;  // 80 ms
   const int64_t clamped =
@@ -391,6 +338,16 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   const int64_t lead_us = playing ? display_frame_lead_us() : 0;
   preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome,
                   lead_us);
+}
+
+void ChartPreviewPanel::set_lane_count(int lane_count) {
+  lane_count = std::clamp(lane_count, 1, 32);
+  auto visual = preview_.config();
+  visual.lane_count = lane_count;
+  preview_.set_config(visual);
+  auto core_cfg = engine_.preview_config();
+  core_cfg.lane_count = lane_count;
+  engine_.set_preview_config(core_cfg);
 }
 
 void ChartPreviewPanel::set_note_speed(double speed) {
@@ -468,16 +425,46 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
 
 void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
   destroy_spectrogram_texture();
+  waveform_.clear();
+  const std::uint64_t generation = ++waveform_generation_;
   if (music_path.empty() || !transport_.audio().has_music()) {
-    waveform_.clear();
     return;
   }
-  if (!waveform_.load(music_path)) {
-    WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
-    waveform_.clear();
-    return;
+  // Decoding the full song and calculating two FFTs per hop is the expensive
+  // part of project opening. Keep it off the Qt/render thread; tick() installs
+  // only the newest completed result and performs the Vulkan upload there.
+  pending_waveforms_.push_back(PendingWaveform{
+      generation,
+      std::async(std::launch::async, [music_path] {
+        wds::audio::WaveformOverview decoded;
+        if (!decoded.load(music_path)) {
+          WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
+          decoded.clear();
+        }
+        return decoded;
+      })});
+}
+
+void ChartPreviewPanel::collect_ready_waveforms() {
+  using namespace std::chrono_literals;
+  for (auto it = pending_waveforms_.begin(); it != pending_waveforms_.end();) {
+    if (!it->result.valid() || it->result.wait_for(0ms) != std::future_status::ready) {
+      ++it;
+      continue;
+    }
+    wds::audio::WaveformOverview decoded;
+    try {
+      decoded = it->result.get();
+    } catch (...) {
+      WDS_LOG("ChartPreviewPanel: waveform worker failed\n");
+      decoded.clear();
+    }
+    const bool current = it->generation == waveform_generation_;
+    it = pending_waveforms_.erase(it);
+    if (!current) continue;
+    waveform_ = std::move(decoded);
+    bake_spectrogram_texture();
   }
-  bake_spectrogram_texture();
 }
 
 void ChartPreviewPanel::destroy_spectrogram_texture() {
