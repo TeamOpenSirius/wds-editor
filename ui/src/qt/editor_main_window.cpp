@@ -236,8 +236,15 @@ void EditorMainWindow::reset_default_layout() {
     const int w = std::max(600, width());
     resizeDocks({playback_dock_, audio_dock_, toolbox_dock_},
                 {w * 2 / 5, w / 5, w * 2 / 5}, Qt::Horizontal);
+    // Set the default once when resetting the layout. Do not enforce this in
+    // resizeEvent: the user may drag the dock separator to choose a height.
+    resizeDocks({playback_dock_, audio_dock_, toolbox_dock_}, {200, 200, 200},
+                Qt::Vertical);
   }
   QTimer::singleShot(0, this, [this] {
+    bottom_row_heights_.fill(200);
+    restore_bottom_row();
+    QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
     for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
       update_control_dock_height(dock);
     }
@@ -449,6 +456,7 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   const auto state = prefs.value("window/state-v4").toByteArray();
   if (!state.isEmpty() && restoreState(state)) {
     QTimer::singleShot(0, this, [this] {
+      pin_bottom_row();
       for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
         update_control_dock_height(dock);
       }
@@ -615,6 +623,12 @@ void EditorMainWindow::remember_recent_project(const QString& path) {
 }
 
 bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
+  if (event->type() == QEvent::MouseButtonRelease && !native_resizing_) {
+    auto* widget = qobject_cast<QWidget*>(watched);
+    if (watched == this || (widget != nullptr && isAncestorOf(widget))) {
+      QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
+    }
+  }
   if (event->type() == QEvent::KeyPress && ui_manager_ != nullptr) {
     // Space is an application command. Handle it before any child widget,
     // including the Qt edit canvas, can consume it.
@@ -751,18 +765,54 @@ void EditorMainWindow::resizeEvent(QResizeEvent* event) {
   if (auto* window = static_cast<RealtimeVulkanWindow*>(editor_window_))
     window->set_resize_suspended(true);
   QMainWindow::resizeEvent(event);
+  restore_bottom_row();
+  QTimer::singleShot(0, this, &EditorMainWindow::restore_bottom_row);
   resize_settle_timer_.start();
 }
 
 void EditorMainWindow::update_control_dock_height(QDockWidget* dock) {
   if (dock == nullptr) return;
-  constexpr int kControlRowHeight = 200;
-  const bool bottom_docked = !dock->isFloating() &&
-                             dockWidgetArea(dock) == Qt::BottomDockWidgetArea;
-  dock->setMinimumHeight(bottom_docked ? kControlRowHeight : 0);
-  dock->setMaximumHeight(bottom_docked ? kControlRowHeight : QWIDGETSIZE_MAX);
-  dock->setSizePolicy(QSizePolicy::Expanding,
-                      bottom_docked ? QSizePolicy::Fixed : QSizePolicy::Preferred);
+  // This helper only restores a flexible policy after a dock is moved. The
+  // default height is applied by reset_default_layout() once; keeping min/max
+  // unconstrained here lets the user drag the bottom separator manually.
+  dock->setMinimumHeight(0);
+  dock->setMaximumHeight(QWIDGETSIZE_MAX);
+  dock->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+}
+
+void EditorMainWindow::pin_bottom_row() {
+  std::size_t i = 0;
+  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+    if (dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
+        dockWidgetArea(dock) == Qt::BottomDockWidgetArea && dock->height() > 0) {
+      bottom_row_heights_[i] = dock->height();
+    }
+    ++i;
+  }
+}
+
+void EditorMainWindow::restore_bottom_row() {
+  QList<QDockWidget*> row;
+  QList<int> sizes;
+  int viewport_delta = 0;
+  std::size_t i = 0;
+  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+    const int height = bottom_row_heights_[i++];
+    if (height > 0 && dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
+        dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
+      row.append(dock);
+      sizes.append(height);
+      if (row.size() == 1) viewport_delta = dock->height() - height;
+    }
+  }
+  for (auto* dock : {preview_dock_, editor_dock_}) {
+    if (dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
+        dockWidgetArea(dock) != Qt::BottomDockWidgetArea) {
+      row.append(dock);
+      sizes.append(std::max(dock->minimumSizeHint().height(), dock->height() + viewport_delta));
+    }
+  }
+  if (!row.isEmpty()) resizeDocks(row, sizes, Qt::Vertical);
 }
 
 bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {

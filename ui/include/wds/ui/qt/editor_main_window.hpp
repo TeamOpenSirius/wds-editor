@@ -84,6 +84,9 @@ class EditorMainWindow final : public QMainWindow {
   // height while docked along the bottom so all vertical resize slack is given
   // to the preview/editor row.
   void update_control_dock_height(QDockWidget* dock);
+  void pin_bottom_row();
+  void restore_bottom_row();
+  std::array<int, 3> bottom_row_heights_{};
   bool native_resizing_ = false;
 };
 }

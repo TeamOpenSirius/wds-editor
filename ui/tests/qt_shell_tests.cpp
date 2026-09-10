@@ -79,12 +79,7 @@ int main(int argc, char** argv) {
   auto* viewport = window.findChild<QDockWidget*>("editorViewportDock");
   require(playback && audio && toolbox && viewport, "Missing docks");
   const int bottom = playback->height();
-  require(playback->minimumHeight() == 200 && playback->maximumHeight() == 200,
-          "Playback dock is not pinned to the control-row height");
-  require(audio->minimumHeight() == 200 && audio->maximumHeight() == 200,
-          "Audio dock is not pinned to the control-row height");
-  require(toolbox->minimumHeight() == 200 && toolbox->maximumHeight() == 200,
-          "Toolbox dock is not pinned to the control-row height");
+  require(std::abs(bottom - 200) <= 4, "Default control-row height is not 200px");
   const int top = viewport->height();
   window.resize(1400, 850);
   settle();
@@ -94,16 +89,17 @@ int main(int argc, char** argv) {
   require(viewport->height() < top - 100, "Viewport did not absorb window resize");
   window.resizeDocks({playback}, {bottom + 50}, Qt::Vertical);
   settle();
-  require(std::abs(playback->height() - bottom) <= 2,
-          "Bottom control row accepted a vertical resize");
+  const int manual = playback->height();
+  require(manual > bottom + 20, "Manual splitter adjustment failed");
   window.resize(1400, 1000);
   settle();
-  require(std::abs(playback->height() - bottom) <= 2, "Bottom row height was lost");
+  require(std::abs(playback->height() - manual) <= 2,
+          "Manual bottom row height was lost after window resize");
   window.resize(1000, 500);
   settle();
   window.resize(1400, 1000);
   settle();
-  require(std::abs(playback->height() - bottom) <= 2,
+  require(std::abs(playback->height() - manual) <= 2,
           "Temporary minimum-size constraints changed the control row");
 
   int frames = 0;
