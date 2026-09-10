@@ -7,7 +7,6 @@
 #include <QEventLoop>
 #include <QFontDatabase>
 #include <QFileInfo>
-#include <QMouseEvent>
 #include <QPalette>
 #include <QResizeEvent>
 #include <QRegularExpression>
@@ -75,9 +74,17 @@ int main(int argc, char** argv) {
   window.resize(1400, 1000);
   settle();
   auto* playback = window.findChild<QDockWidget*>("playbackAudioDock");
+  auto* audio = window.findChild<QDockWidget*>("audioMixDock");
+  auto* toolbox = window.findChild<QDockWidget*>("editorToolboxDock");
   auto* viewport = window.findChild<QDockWidget*>("editorViewportDock");
-  require(playback && viewport, "Missing docks");
+  require(playback && audio && toolbox && viewport, "Missing docks");
   const int bottom = playback->height();
+  require(playback->minimumHeight() == 200 && playback->maximumHeight() == 200,
+          "Playback dock is not pinned to the control-row height");
+  require(audio->minimumHeight() == 200 && audio->maximumHeight() == 200,
+          "Audio dock is not pinned to the control-row height");
+  require(toolbox->minimumHeight() == 200 && toolbox->maximumHeight() == 200,
+          "Toolbox dock is not pinned to the control-row height");
   const int top = viewport->height();
   window.resize(1400, 850);
   settle();
@@ -87,21 +94,17 @@ int main(int argc, char** argv) {
   require(viewport->height() < top - 100, "Viewport did not absorb window resize");
   window.resizeDocks({playback}, {bottom + 50}, Qt::Vertical);
   settle();
-  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(10, 10), QPointF(10, 10),
-                      Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-  QApplication::sendEvent(&window, &release);
-  settle();
-  const int manual = playback->height();
-  require(manual > bottom + 20, "Manual splitter adjustment failed");
+  require(std::abs(playback->height() - bottom) <= 2,
+          "Bottom control row accepted a vertical resize");
   window.resize(1400, 1000);
   settle();
-  require(std::abs(playback->height() - manual) <= 2, "Manual bottom row height was lost");
+  require(std::abs(playback->height() - bottom) <= 2, "Bottom row height was lost");
   window.resize(1000, 500);
   settle();
   window.resize(1400, 1000);
   settle();
-  require(std::abs(playback->height() - manual) <= 2,
-          "Temporary minimum-size constraints overwrote preferred bottom height");
+  require(std::abs(playback->height() - bottom) <= 2,
+          "Temporary minimum-size constraints changed the control row");
 
   int frames = 0;
   editor->set_frame_callback([&](float, int, int, int, int, const auto&) { ++frames; });
