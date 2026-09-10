@@ -1329,6 +1329,41 @@ void test_selected_width_resize_affects_only_grabbed_note() {
   CHECK(h.panel.selected().count(b_id));
 }
 
+void test_jumpscratch_joint_halves_select_tail_and_next_head() {
+  Harness h;
+  const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+  const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  NotationNote head;
+  head.note_type = NoteType::ScratchHoldStart;
+  head.start_tick = 480;
+  head.end_tick = 480;
+  head.lane = 2;
+  head.width = 2;
+  const int32_t head_id = h.engine.add_note(head);
+  CHECK(head_id >= 0);
+
+  const auto joint = h.at_tick_lane(480, 2);
+  const float half_cap = h.panel.viewport().note_height_px() * 0.25f;
+  const Vec2 previous_side{joint.x, joint.y + half_cap};
+  h.panel.on_pointer_down(PointerDownEvent{previous_side, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{previous_side, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(prev_id));
+  CHECK(!h.panel.selected().count(next_id));
+  CHECK(!h.panel.selected().count(head_id));
+
+  const Vec2 next_side{joint.x, joint.y - half_cap};
+  h.panel.on_pointer_down(PointerDownEvent{next_side, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{next_side, PointerButton::Left, {}});
+  CHECK(!h.panel.selected().count(prev_id));
+  CHECK(!h.panel.selected().count(next_id));
+  CHECK(h.panel.selected().count(head_id));
+
+  h.panel.on_pointer_down(PointerDownEvent{previous_side, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{previous_side, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(prev_id));
+  CHECK(!h.panel.selected().count(head_id));
+}
+
 void test_first_click_on_narrow_note_edge_selects_without_resizing() {
   Harness h;
   NotationNote note;
@@ -1604,6 +1639,7 @@ int main() {
   test_hold_tail_adjust_follows_playback_resync();
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
+  test_jumpscratch_joint_halves_select_tail_and_next_head();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
   test_split_picker_search_filter();
   test_split_track_between_overlapping_lines();

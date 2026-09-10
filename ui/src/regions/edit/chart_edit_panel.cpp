@@ -531,12 +531,33 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     int priority;
     if (in_scratch_end_zone) {
       dist = std::abs(point.y - viewport_.y_at(note.end_tick));
-      priority = 3;
+      // A chain joint contains two independently editable pieces: the previous
+      // segment's tail below the joint and the next segment's tap head above it.
+      // Split the shared cap at its time line so the tail no longer permanently
+      // wins the hit-test tie over the next head.
+      const bool next_segment_side =
+          point.y < viewport_.y_at(note.end_tick) &&
+          wds::chart_editor::chained_next_scratch_hold(engine_.document(), note).has_value();
+      // Cancel the selected-note tie bonus on the next-segment half as well;
+      // otherwise a selected tail would make the head unreachable again.
+      priority = next_segment_side ? -8 : 3;
     } else {
       dist = std::abs(point.y - y0);
-      priority = wds::chart_editor::is_hold_head_note(note) ? 2
-                         : wds::chart_editor::is_hold_with_tail(note.note_type) ? 1
-                                                                               : 0;
+      if (wds::chart_editor::is_hold_head_note(note)) {
+        priority = 2;
+        // Mirror the joint-half rule for a currently selected next head, so a
+        // click on the previous-segment side can switch back to its tail.
+        if (point.y > y0) {
+          const auto body =
+              wds::chart_editor::paired_hold_body_for(engine_.document(), note);
+          if (body && wds::chart_editor::is_hold_chain_body(body->note_type) &&
+              wds::chart_editor::chained_prev_scratch_hold(engine_.document(), *body)) {
+            priority = -8;
+          }
+        }
+      } else {
+        priority = wds::chart_editor::is_hold_with_tail(note.note_type) ? 1 : 0;
+      }
     }
     consider(dist, priority, note);
   }
@@ -544,10 +565,11 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
 }
 
 float ChartEditPanel::width_edge_px(const NotationNote& note) const {
-  // Prefer ~6 logical px; never take more than ~28% of the note width per side.
+  // Keep a broad selectable center even when a one-lane note is very narrow.
+  // Handles may become thinner, but they never consume more than 20% per side.
   const float note_w = std::max(1.0f, viewport_.lane_width(std::max(1, note.width)));
-  const float lo = wds::interaction::theme::px(4.0f);
-  return std::clamp(std::min(width_edge_prefer_px(), note_w * 0.28f), lo, width_edge_max_px());
+  return std::max(1.0f, std::min({width_edge_prefer_px(), note_w * 0.20f,
+                                 width_edge_max_px()}));
 }
 
 float ChartEditPanel::time_edge_px(const NotationNote& note) const {
@@ -556,10 +578,10 @@ float ChartEditPanel::time_edge_px(const NotationNote& note) const {
   if (note.end_tick > note.start_tick) {
     const float hold_h =
         std::abs(viewport_.y_at(note.end_tick) - viewport_.y_at(note.start_tick));
-    // Keep a clear middle band for body drag (≥ ~44% of hold height).
-    edge = std::min(edge, hold_h * 0.28f);
+    // Keep a clear middle band for selecting/moving even for very short holds.
+    edge = std::min(edge, hold_h * 0.20f);
   }
-  return std::max(6.0f, edge);
+  return std::max(1.0f, edge);
 }
 
 bool ChartEditPanel::near_left_edge(const NotationNote& note, float x) const {

@@ -2,6 +2,7 @@
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/note_edit_ops.hpp>
+#include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
 
 #include <QKeyEvent>
@@ -13,7 +14,6 @@
 #include <QLinearGradient>
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 
 namespace wds::ui {
 ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
@@ -110,16 +110,18 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     if (image.isNull()) { p.fillRect(target, QColor(100, 190, 255)); return; }
     p.drawPixmap(target, image, image.rect());
   };
-  std::vector<std::size_t> draw_order(panel_->engine().document().notes().size());
-  std::iota(draw_order.begin(), draw_order.end(), std::size_t{0});
-  std::stable_sort(draw_order.begin(), draw_order.end(), [&](std::size_t a, std::size_t b) {
-    const auto& na = panel_->engine().document().notes()[a];
-    const auto& nb = panel_->engine().document().notes()[b];
-    if (na.start_tick != nb.start_tick) return na.start_tick > nb.start_tick;
-    // Within one tick the lower NoteType (Tap) is the later draw and must sit
-    // above HoldStart, matching the legacy reverse-GenerateNoteId order.
-    return static_cast<int>(na.note_type) > static_cast<int>(nb.note_type);
-  });
+  const auto& notes = panel_->engine().document().notes();
+  const auto& timing = panel_->engine().document().timing();
+  std::vector<std::size_t> draw_order;
+  // Use the same millisecond-based ordering contract as the Vulkan editor and
+  // preview. Tick order alone is wrong across BPM segments and can put a tap
+  // behind a cap that is rendered later at the same wall-clock position.
+  wds::chart_render::build_draw_order_indices(
+      notes.size(), draw_order,
+      [&](std::size_t i) {
+        return wds::chart_editor::tick_to_milliseconds(notes[i].start_tick, timing);
+      },
+      [&](std::size_t i) { return static_cast<int32_t>(notes[i].note_type); });
   // Paint every hold ribbon before any note sprite. A per-note body/cap pass
   // lets a later hold cover taps that happen to share its time range; the
   // editor must instead keep all selectable note art above every ribbon.
