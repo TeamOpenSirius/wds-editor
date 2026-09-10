@@ -41,7 +41,7 @@ xattr -cr "/Applications/WDS Editor.app"
 | Linux x86_64        | `win-x86_64`（MinGW 交叉编译） |
 | macOS Apple Silicon | `macos-arm`（本机）            |
 
-Windows本地编译尚未覆盖，需要自行探索。
+Windows 本地可使用 Qt 6 + Visual Studio/CMake 构建；发行门禁仍以 CI 配置为准。
 
 机器相关路径请写入本地环境文件，**不要写进示例文件**：
 
@@ -95,15 +95,15 @@ brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
 
 产物：`dist/wds-macos-arm.zip`、`dist/wds-macos-arm.dmg`。
 
-### C. Windows 本机编译（自行探索）
+### C. Windows 本机编译
 
-当前脚本与文档以 **Linux 交叉 MinGW** 为主路径。若在 Windows 上原生构建，需自行准备：
+当前跨平台脚本仍以 **Linux 交叉 MinGW** 为主路径。Windows 原生开发需准备：
 
 - Visual Studio 或 MinGW-w64、CMake
 - vcpkg（如 `x64-windows` 或 `x64-mingw-static`）提供 libpng / Vulkan
 - 将 `CMAKE_PREFIX_PATH`、`Vulkan_LIBRARY` 指向本机前缀
 
-欢迎把可复现步骤以 PR 形式补回文档。
+配置后可用标准 CMake workflow 构建 `wds_editor`；Qt 版 Release 打包入口为 `scripts/package-qt-release.ps1`。
 
 ### 构建模式速查
 
@@ -148,7 +148,7 @@ wds-editor/
 ├── chart-render/           # 舞台几何、皮肤图集、音符条带
 ├── audio-player/           # BASS 混音与 Transport 时钟
 ├── interaction-interface/  # 输入、控件、快捷键、主题
-├── ui/                     # 编辑器壳层 + wds_editor 可执行文件
+├── ui/                     # Qt Dock 壳层、QPainter 编辑器 + Vulkan 预览
 ├── cmake/                  # 平台默认值与交叉 toolchain
 ├── scripts/                # 构建 / 打包 / 图标
 └── skins/ effects/ icons/  # 运行时资源
@@ -171,7 +171,7 @@ ui → core → common
 | [`chart-render/`](chart-render/README.md)                   | `wds::chart_render`           | `wds::renderer`               | 谱面视觉辅助（无设备创建）          |
 | [`audio-player/`](audio-player/README.md)                   | `wds::audio_player`           | `wds::audio`                  | BASS + Transport                    |
 | [`interaction-interface/`](interaction-interface/README.md) | `wds::interaction`            | `wds::interaction`            | UI 控件与输入                       |
-| [`ui/`](ui/README.md)                                       | `wds::ui` + `wds_editor`      | `wds::ui`                     | 四区编辑器壳                        |
+| [`ui/`](ui/README.md)                                       | `wds::ui` + `wds_editor`      | `wds::ui`                     | Qt Dock 编辑器壳                    |
 
 各模块 README 含职责、目录结构与主要接口。
 
@@ -195,6 +195,8 @@ ui → core → common
 | 着色器     | `renderer/shaders/`                                     |
 | BASS       | `audio-player/third_party/bass/{macos-arm,win-x86_64}/` |
 | 应用图标源 | `logo.png` → `scripts/generate-app-icons.sh`            |
+
+Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
 
 ### 预览每帧数据流
 

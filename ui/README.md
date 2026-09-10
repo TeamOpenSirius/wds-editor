@@ -1,12 +1,13 @@
 # ui — `wds_ui` + `wds_editor`
 
-编辑器壳层：窗口、四区排版、`UiManager`、工程会话与原生文件对话框。  
+编辑器壳层：Qt 窗口与 Dock 工作区、`UiManager`、工程会话与原生文件对话框。
 组装 `core` / `audio` / `interaction` / `chart-render` / `renderer`，**不要**把谱面算法或 Vulkan 设备细节复制进 panel。
 
 ## 职责
 
-- Qt QWindow/QVulkanInstance 窗口 + Vulkan 表面注入（`VulkanHostSurface`）
-- 工具栏 / 预览 / 预览设置 / 编辑区布局
+- Qt Widgets 菜单、工具栏、属性/播放/音频/编辑工具箱 Dock
+- `QWindow`/`QVulkanInstance` 实时预览 + Vulkan 表面注入（`VulkanHostSurface`）
+- `QPainter` 谱面编辑画布（编辑交互仍由 `ChartEditPanel` 提供）
 - `.wdsproject` 打开保存、官方 CSV 只读导入、撤销重做
 - 资源路径解析（`skins/`、`effects/`、shaders、fonts、icons）
 
@@ -28,8 +29,9 @@ ui/
 │       ├── toolbar/        # EditorToolbar
 │       └── edit/           # ChartEditPanel, viewport, gutters
 ├── src/
-├── assets/                 # 字体、应用图标
-└── tests/                  # wds_ui_logic_tests（无 GPU）
+├── assets/                 # 字体、应用图标、OBS/Yami 主题资源
+├── wds_resources.qrc       # 必须内嵌的 Qt 资源（当前为应用图标）
+└── tests/                  # UI 逻辑与 Qt shell 回归测试
 ```
 
 | CMake 目标 | 角色 |
@@ -37,28 +39,33 @@ ui/
 | `wds_ui` | 静态库：regions / session / dialogs |
 | `wds_editor` | 可执行文件 |
 | `wds_ui_logic_tests` | 视口 / 会话逻辑 |
+| `wds_qt_shell_tests` | Qt 主题、Dock 尺寸和 resize suspension |
 
-## 布局
+## Qt Dock 布局
 
 ```text
-┌──────────────────────┬──────────────────────┐
-│     Preview          │                      │
-│                      │                      │
-├──────────────────────┤        Edit          │
-│     Settings         │                      │
-├──────────┬───────────┤                      │
-│ Toolbar  │ Convert   │                      │
-└──────────┴───────────┴──────────────────────┘
+┌─────────────────┬─────────────────┬──────────┐
+│ Vulkan Preview  │ QPainter Edit   │   属性   │
+│                 │                 │          │
+├─────────────────┴─────────────────┴──────────┤
+│         播放       │  音频  │   编辑工具箱   │
+└────────────────────┴────────┴────────────────┘
 ```
 
-- `EditorLayouter`：计算四区矩形与舞台 content bounds  
-- `ChartPreviewPanel` / `PlaybackPreviewView`：Vulkan 预览  
-- `PreviewSettingsPanel`：速度、进度、音量  
-- `EditorToolbar`：打开/保存/导入导出/音乐/撤销/网格/转换  
-- `ChartEditPanel`：铺平 tick×lane 编辑  
-- `EditorSession`：工程生命周期  
+- 顶行 Preview/Edit 自动吸收主窗口尺寸变化，底部控制行保持用户拖动后的高度。
+- 所有 Dock 可移动、浮动、关闭；“视图 → 重置布局”恢复默认比例。
+- Preview 内容保持舞台宽高比，Dock 本身可自由缩放；编辑画布自适应可用区域。
+- `ChartEditPanel` 保留 tick×lane 编辑算法，`ChartEditWidget` 负责 Qt 绘制和事件桥接。
 
-窗口固定 16:9。
+### 谱面画布命中与层级
+
+- Hold ribbon 先统一绘制，Tap、Hold cap、星标等可选 note sprite 始终在其上层。
+- 第一次点击用于选中；只有已选 note 才显示并响应宽度/时间 resize handle，避免窄 note 的热区吞掉选择。
+- ScratchHold 共享关节优先命中当前已选段，可分别选择前段尾和后段头再调整。
+
+### 工程加载
+
+工程与谱面解析、会话提交仍在 GUI 线程串行完成，以保证 Transport/Vulkan 的线程归属。耗时最大的整曲波形解码和双声道 FFT 在后台执行；主线程只接收最新一代结果并上传频谱纹理，因此加载期间窗口可以继续刷新。
 
 ### 预览 / 编辑滚轮
 
@@ -108,9 +115,15 @@ ui.session();
 - 官方 CSV 只读导入
 - dirty 提示与未保存对话框
 
-### `resource_paths`
+### `resource_paths` 与 Qt Resources
 
-发行包与 Debug 树通过 `WDS_REPO_ROOT` / 可执行文件旁资源定位 `skins/`、`effects/` 等。交叉编译的 Win Debug 需经 `package-target.sh --stage-win-debug` 拷贝资源。
+应用图标属于不可替换的 Qt chrome，编入 `wds_resources.qrc`。其余资源有意保留为发行包内的目录：
+
+- `skins/`、`effects/` 由 Vulkan/BASS 原生路径 API 使用，不能直接换成 `:/` URL；
+- `theme/` 与字体保留外置，便于主题枚举、用户替换及许可证随包分发；
+- CMake/打包脚本负责把这些目录放到可执行文件旁（macOS 为 App Resources），业务代码统一通过 `resource_paths` 解析。
+
+这样安装目录仍是自包含的，但不会把可定制资源和原生加载资源硬塞进可执行文件。交叉编译的 Win Debug 需经 `package-target.sh --stage-win-debug` 拷贝资源。
 
 ## 快捷键（节选）
 
