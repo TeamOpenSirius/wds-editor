@@ -114,6 +114,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool copy_selected();
   bool paste_at_pointer();
   bool delete_selected();
+  // Qt canvas bridge for the native BPM editor. Tick 0 edits the base BPM;
+  // other ticks create or update an authored BPM point through history.
+  bool set_bpm_at_tick(int32_t tick, double bpm);
   // Delete one note under the pointer; drops it from the selection if present.
   bool delete_note_at(wds::interaction::Vec2 point);
 

@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
   auto* editor_widget = new wds::ui::ChartEditWidget(editor.edit_panel(), &window);
   editor_widget->set_skins_directory(QString::fromStdString(wds::ui::resolve_skins_dir(argv[0])));
   editor_widget->set_global_key_handler([&editor](const wds::interaction::KeyDownEvent& event) {
-    editor.dispatch_shortcut(event);
+    return editor.dispatch_shortcut(event);
   });
   window.set_editor_widget(editor_widget);
   wds::renderer::PreviewVisualConfig visual;

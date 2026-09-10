@@ -13,6 +13,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QLabel>
@@ -311,6 +312,13 @@ AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
   auto* flow = make_flow_panel(this, root);
   auto* content = flow->parentWidget();
 
+  bpm_ = new QDoubleSpinBox(content);
+  bpm_->setRange(0.001, 10000.0);
+  bpm_->setDecimals(3);
+  bpm_->setSingleStep(1.0);
+  bpm_->setKeyboardTracking(false);
+  make_group(flow, {new QLabel(tr("基础 BPM"), content), bpm_});
+
   auto make_volume_slider = [content](QSlider*& slider, QLabel*& value) {
     slider = new QSlider(Qt::Horizontal, content);
     slider->setRange(0, 100);
@@ -340,6 +348,11 @@ AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
   };
   add_channel(tr("音乐"), music_volume_, music_value_, music_mute_);
   add_channel(tr("音效"), sfx_volume_, sfx_value_, sfx_mute_);
+
+  connect(bpm_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+          [this](double value) {
+            if (!syncing_) manager_->session().set_base_bpm(value);
+          });
 
   const auto apply_music = [this] {
     if (syncing_) return;
@@ -371,6 +384,11 @@ AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
 
 void AudioMixPanel::sync_from_runtime() {
   syncing_ = true;
+  if (!bpm_->hasFocus()) {
+    const QSignalBlocker blocker(bpm_);
+    bpm_->setValue(manager_->session().engine().document().timing().bpm);
+  }
+  bpm_->setEnabled(manager_->session().engine().is_editable());
   if (auto* settings = manager_->settings_panel()) {
     if (!music_volume_->isSliderDown()) {
       const QSignalBlocker blocker(music_volume_);

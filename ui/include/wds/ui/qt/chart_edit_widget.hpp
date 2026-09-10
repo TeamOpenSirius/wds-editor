@@ -15,7 +15,7 @@ class ChartEditWidget final : public QWidget {
  public:
   explicit ChartEditWidget(ChartEditPanel* panel, QWidget* parent = nullptr);
   void set_skins_directory(const QString& directory);
-  void set_global_key_handler(std::function<void(const wds::interaction::KeyDownEvent&)> handler) {
+  void set_global_key_handler(std::function<bool(const wds::interaction::KeyDownEvent&)> handler) {
     global_key_handler_ = std::move(handler);
   }
   QSize minimumSizeHint() const override { return {360, 300}; }
@@ -37,6 +37,6 @@ class ChartEditWidget final : public QWidget {
   ChartEditPanel* panel_ = nullptr;
   QPixmap background_, judgment_, red_, yellow_, blue_, purple_, tick_blue_, tick_purple_, arrow_;
   std::chrono::steady_clock::time_point last_tick_;
-  std::function<void(const wds::interaction::KeyDownEvent&)> global_key_handler_;
+  std::function<bool(const wds::interaction::KeyDownEvent&)> global_key_handler_;
 };
 }

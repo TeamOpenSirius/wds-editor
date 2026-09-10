@@ -141,6 +141,13 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   settingsDock->setObjectName(QStringLiteral("previewSettingsDock"));
   auto* settingsPanel = new QWidget(settingsDock);
   auto* form = new QFormLayout(settingsPanel);
+  auto* bpm = new QDoubleSpinBox(settingsPanel);
+  bpm->setRange(0.001, 10000.0);
+  bpm->setDecimals(3);
+  bpm->setSingleStep(1.0);
+  bpm->setKeyboardTracking(false);
+  bpm->setObjectName(QStringLiteral("baseBpm"));
+  form->addRow(tr("基础 BPM"), bpm);
   auto* speed = new QDoubleSpinBox(settingsPanel);
   speed->setRange(1.0, 15.0); speed->setValue(5.0); speed->setSingleStep(0.1);
   speed->setObjectName(QStringLiteral("noteSpeed"));
@@ -185,6 +192,18 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   connect(speed, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
     if (ui_manager_) ui_manager_->set_preview_note_speed(value);
   });
+  connect(bpm, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
+    if (ui_manager_) ui_manager_->session().set_base_bpm(value);
+  });
+  auto* bpm_sync = new QTimer(this);
+  bpm_sync->setInterval(250);
+  connect(bpm_sync, &QTimer::timeout, this, [this, bpm] {
+    if (!ui_manager_ || bpm->hasFocus()) return;
+    const QSignalBlocker blocker(bpm);
+    bpm->setValue(ui_manager_->session().engine().document().timing().bpm);
+    bpm->setEnabled(ui_manager_->session().engine().is_editable());
+  });
+  bpm_sync->start();
   auto applyDisplay = [this, speed, offset, noteHeight, splitOpacity] {
     if (!ui_manager_) return;
     ui_manager_->chart_preview().apply_display_settings(speed->value(), offset->value(),
@@ -340,7 +359,15 @@ void EditorMainWindow::create_playback_and_toolbox_docks() {
     connect(button, &QToolButton::clicked, this, [this, i, spec = specs[i]] {
       auto* edit = ui_manager_ != nullptr ? ui_manager_->edit_panel() : nullptr;
       if (edit == nullptr) return;
-      if (ui_manager_->new_note_place_logic()) {
+      if (!edit->selected().empty()) {
+        const std::optional<int32_t> direction =
+            spec.type == wds::chart_editor::NoteType::Flick
+                ? std::optional<int32_t>(spec.direction)
+                : std::nullopt;
+        if (edit->convert_selected(spec.type, direction)) {
+          ui_manager_->set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
+        }
+      } else if (ui_manager_->new_note_place_logic()) {
         // New-style flow: the buttons only pick the mouse place type; convert
         // stays a classic-mode feature.
         const auto intent = kPlaceIntents[i];
@@ -351,14 +378,6 @@ void EditorMainWindow::create_playback_and_toolbox_docks() {
           edit->set_place_intent_override(intent);
           ui_manager_->set_status(std::string("放置类型切换为 ") + spec.name,
                                   StatusLevel::Info);
-        }
-      } else if (!edit->selected().empty()) {
-        const std::optional<int32_t> direction =
-            spec.type == wds::chart_editor::NoteType::Flick
-                ? std::optional<int32_t>(spec.direction)
-                : std::nullopt;
-        if (edit->convert_selected(spec.type, direction)) {
-          ui_manager_->set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
         }
       } else {
         ui_manager_->set_status("未选中音符（可在设置→输入中开启新版放置逻辑）",

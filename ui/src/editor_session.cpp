@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <memory>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -1036,6 +1037,27 @@ bool EditorSession::import_music(const std::string& path) {
   }
   status("已导入音乐：" + path, StatusLevel::Info);
   return true;
+}
+
+bool EditorSession::set_base_bpm(double bpm) {
+  if (!engine().is_editable() || !std::isfinite(bpm) || bpm <= 0.0 || bpm > 10000.0) {
+    return false;
+  }
+  const auto before = engine().document().timing();
+  if (std::abs(before.bpm - bpm) < 1e-9) return true;
+
+  auto after = before;
+  after.bpm = bpm;
+  auto root = std::find_if(after.points.begin(), after.points.end(),
+                           [](const auto& point) { return point.tick == 0; });
+  if (root == after.points.end()) {
+    after.points.push_back({0, bpm, 4, 4, true, true});
+  } else {
+    root->bpm = bpm;
+    root->has_bpm = true;
+  }
+  return engine().execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
+      before, std::move(after), "Edit base BPM"));
 }
 
 bool EditorSession::set_offset_ms(int64_t offset_ms) {

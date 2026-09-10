@@ -4,6 +4,7 @@
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
+#include "wds/ui/regions/edit/edit_gutters.hpp"
 
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -12,6 +13,7 @@
 #include <QWheelEvent>
 #include <QDir>
 #include <QLinearGradient>
+#include <QInputDialog>
 #include <algorithm>
 #include <cmath>
 
@@ -112,6 +114,37 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   };
   const auto& notes = panel_->engine().document().notes();
   const auto& timing = panel_->engine().document().timing();
+
+  // The Qt canvas owns its paint pass, so restore the authored timing chips
+  // that used to be drawn by ChartEditPanel's renderer.
+  p.restore();
+  const wds::interaction::Rect timing_gutter{b.right(), b.y, 52.0f, b.h};
+  p.fillRect(QRectF(timing_gutter.x, timing_gutter.y, timing_gutter.w, timing_gutter.h),
+             QColor(27, 29, 37));
+  p.setPen(QColor(90, 94, 108));
+  p.drawLine(QPointF(timing_gutter.x, timing_gutter.y),
+             QPointF(timing_gutter.x, timing_gutter.y + timing_gutter.h));
+  const auto timing_hits = build_timing_label_hits(v, timing_gutter, timing);
+  for (auto it = timing_hits.rbegin(); it != timing_hits.rend(); ++it) {
+    const auto& hit = *it;
+    const auto point_it = std::find_if(timing.points.begin(), timing.points.end(),
+                                       [&](const auto& value) {
+                                         return value.tick == hit.point_tick;
+                                       });
+    if (point_it == timing.points.end()) continue;
+    const QRectF chip(hit.bounds.x, hit.bounds.y, hit.bounds.w, hit.bounds.h);
+    const bool is_bpm = hit.kind == TimingLabelKind::Bpm;
+    p.setPen(Qt::NoPen);
+    p.setBrush(is_bpm ? QColor(122, 76, 36) : QColor(26, 98, 63));
+    p.drawRoundedRect(chip, 2, 2);
+    p.setPen(QColor(250, 240, 220));
+    const QString label = is_bpm
+        ? QString::fromStdString(format_bpm_label(point_it->bpm))
+        : QStringLiteral("%1/%2").arg(point_it->numerator).arg(point_it->denominator);
+    p.drawText(chip.adjusted(3, 0, -2, 0), Qt::AlignLeft | Qt::AlignVCenter, label);
+  }
+  p.save();
+  p.setClipRect(playfield);
   std::vector<std::size_t> draw_order;
   // Use the same millisecond-based ordering contract as the Vulkan editor and
   // preview. Tick order alone is wrong across BPM segments and can put a tap
@@ -251,7 +284,46 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   }
   p.restore();
 }
-void ChartEditWidget::mousePressEvent(QMouseEvent* e) { if (!panel_) return; setFocus(); grabMouse(); const auto pos = point(e->position()); panel_->sync_global_pointer(pos); panel_->on_pointer_down({pos, button(e->button()), mods(e->modifiers())}); update(); }
+void ChartEditWidget::mousePressEvent(QMouseEvent* e) {
+  if (!panel_) return;
+  setFocus();
+  const auto pos = point(e->position());
+  panel_->sync_global_pointer(pos);
+  const auto bounds = panel_->viewport().bounds();
+  const wds::interaction::Rect timing_gutter{bounds.right(), bounds.y, 52.0f, bounds.h};
+  if (e->button() == Qt::LeftButton && timing_gutter.contains(pos) &&
+      panel_->engine().is_editable()) {
+    const auto& timing = panel_->engine().document().timing();
+    std::optional<int32_t> tick;
+    for (const auto& hit : build_timing_label_hits(panel_->viewport(), timing_gutter, timing)) {
+      if (hit.kind == TimingLabelKind::Bpm && hit.bounds.contains(pos)) {
+        tick = hit.point_tick;
+        break;
+      }
+    }
+    if (!tick) tick = timing_bpm_tick_at(panel_->viewport(), timing_gutter, timing, pos);
+    if (tick) {
+      const double initial = wds::chart_editor::timing_point_at(timing, *tick).bpm;
+      QInputDialog dialog(this);
+      dialog.setWindowTitle(tr("BPM 编辑"));
+      dialog.setLabelText(tr("BPM"));
+      dialog.setInputMode(QInputDialog::DoubleInput);
+      dialog.setDoubleRange(0.001, 10000.0);
+      dialog.setDoubleDecimals(3);
+      dialog.setDoubleValue(initial);
+      dialog.adjustSize();
+      dialog.setFixedSize(dialog.sizeHint());
+      if (dialog.exec() == QDialog::Accepted) {
+        panel_->set_bpm_at_tick(*tick, dialog.doubleValue());
+      }
+      update();
+      return;
+    }
+  }
+  grabMouse();
+  panel_->on_pointer_down({pos, button(e->button()), mods(e->modifiers())});
+  update();
+}
 void ChartEditWidget::mouseMoveEvent(QMouseEvent* e) {
   if (!panel_) return;
   const auto pos = point(e->position());
@@ -303,9 +375,15 @@ static wds::interaction::KeyCode key(int k) {
 void ChartEditWidget::keyPressEvent(QKeyEvent* e) {
   if (!panel_) return;
   const auto ev = wds::interaction::KeyDownEvent{key(e->key()), mods(e->modifiers()), e->isAutoRepeat()};
-  // Space is an application command, never an edit-canvas command.
-  if (ev.key == wds::interaction::KeyCode::Space && global_key_handler_) global_key_handler_(ev);
-  else panel_->on_key_down(ev);
+  // Modal editor popups own all input. Otherwise run the configurable editor
+  // shortcut namespace first (Delete included), then fall back to canvas-local
+  // editing keys when no shortcut consumed the event.
+  const bool handled = !panel_->captures_keys() && global_key_handler_ && global_key_handler_(ev);
+  if (!handled) {
+    panel_->on_key_down(ev);
+    const QString text = e->text();
+    if (!text.isEmpty()) panel_->on_text_input({text.toStdString()});
+  }
   update();
 }
 void ChartEditWidget::keyReleaseEvent(QKeyEvent* e) {

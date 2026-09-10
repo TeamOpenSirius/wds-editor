@@ -2601,6 +2601,33 @@ bool ChartEditPanel::delete_selected() {
   return true;
 }
 
+bool ChartEditPanel::set_bpm_at_tick(int32_t tick, double bpm) {
+  if (!engine_.is_editable() || tick < 0 || !std::isfinite(bpm) || bpm <= 0.0 ||
+      bpm > 10000.0) {
+    return false;
+  }
+  const auto before = engine_.document().timing();
+  auto timing = before;
+  auto point = std::find_if(timing.points.begin(), timing.points.end(),
+                            [tick](const auto& value) { return value.tick == tick; });
+  const bool existed = point != timing.points.end();
+  if (existed) {
+    if (point->has_bpm && std::abs(point->bpm - bpm) < 1e-9) return true;
+    point->bpm = bpm;
+    point->has_bpm = true;
+  } else {
+    wds::chart_editor::TimingPoint value;
+    value.tick = tick;
+    value.bpm = bpm;
+    value.has_bpm = true;
+    value.has_meter = false;
+    timing.points.push_back(value);
+  }
+  if (tick == 0) timing.bpm = bpm;
+  return engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
+      before, std::move(timing), existed ? "Edit BPM" : "Add BPM"));
+}
+
 bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {
   if (!engine_.is_editable()) return false;
   const auto hit = hit_test_note(point);

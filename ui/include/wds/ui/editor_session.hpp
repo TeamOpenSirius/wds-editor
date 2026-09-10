@@ -77,6 +77,9 @@ class EditorSession {
   // Export each chart as a separate .sus into `directory` (1.sus .. N.sus).
   bool export_sus_project(const std::string& directory);
   bool import_music(const std::string& path);
+  // Edit the active chart's tick-0 BPM through history so undo/redo and dirty
+  // tracking behave exactly like the timeline BPM editor.
+  bool set_base_bpm(double bpm);
   bool set_offset_ms(int64_t offset_ms);
   const std::vector<int32_t>& last_offset_violation_ids() const noexcept {
     return last_offset_violation_ids_;
