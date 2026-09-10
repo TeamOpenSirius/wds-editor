@@ -80,12 +80,10 @@ class EditorMainWindow final : public QMainWindow {
   ::QWindow* editor_window_ = nullptr;
   ::QWidget* editor_widget_ = nullptr;
   QTimer resize_settle_timer_;
-  // Pin the bottom control-dock row height across window resizes so the
-  // preview/editor row absorbs the slack; manual splitter drags update it.
-  void pin_bottom_row();
-  void restore_bottom_row();
-  std::array<int, 3> bottom_row_heights_{};
-  std::array<int, 3> bottom_row_widths_{};
+  // Bottom control docks are tool strips, not viewports. Keep them at a stable
+  // height while docked along the bottom so all vertical resize slack is given
+  // to the preview/editor row.
+  void update_control_dock_height(QDockWidget* dock);
   bool native_resizing_ = false;
 };
 }

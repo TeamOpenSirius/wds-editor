@@ -49,6 +49,7 @@
 #include <QApplication>
 #include <QProgressBar>
 #include <QMetaObject>
+#include <QSizePolicy>
 #include <wds/interaction/editor_input.hpp>
 #include "wds/ui/curve_template.hpp"
 #include <algorithm>
@@ -232,15 +233,11 @@ void EditorMainWindow::reset_default_layout() {
     const int w = std::max(600, width());
     resizeDocks({playback_dock_, audio_dock_, toolbox_dock_},
                 {w * 2 / 5, w / 5, w * 2 / 5}, Qt::Horizontal);
-    resizeDocks({playback_dock_, audio_dock_, toolbox_dock_}, {200, 200, 200}, Qt::Vertical);
   }
   QTimer::singleShot(0, this, [this] {
-    bottom_row_heights_.fill(200);
-    bottom_row_widths_.fill(0);
-    restore_bottom_row();
-    // Capture Qt's achievable size after applying the preferred height. If we
-    // pin first, a dock-only QMainWindow records an oversized bottom row.
-    QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
+    for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
+      update_control_dock_height(dock);
+    }
   });
 }
 
@@ -257,6 +254,10 @@ void EditorMainWindow::create_playback_and_toolbox_docks() {
   playback_panel_->set_add_chart_handler([this] { add_chart(); });
   playback_dock_->setWidget(playback_panel_);
   addDockWidget(Qt::BottomDockWidgetArea, playback_dock_);
+  connect(playback_dock_, &QDockWidget::dockLocationChanged, this,
+          [this](Qt::DockWidgetArea) { update_control_dock_height(playback_dock_); });
+  connect(playback_dock_, &QDockWidget::topLevelChanged, this,
+          [this](bool) { update_control_dock_height(playback_dock_); });
   viewMenu->addAction(playback_dock_->toggleViewAction());
 
   audio_dock_ = new QDockWidget(tr("音频"), this);
@@ -267,6 +268,10 @@ void EditorMainWindow::create_playback_and_toolbox_docks() {
                            QDockWidget::DockWidgetClosable);
   audio_dock_->setWidget(new AudioMixPanel(ui_manager_, audio_dock_));
   addDockWidget(Qt::BottomDockWidgetArea, audio_dock_);
+  connect(audio_dock_, &QDockWidget::dockLocationChanged, this,
+          [this](Qt::DockWidgetArea) { update_control_dock_height(audio_dock_); });
+  connect(audio_dock_, &QDockWidget::topLevelChanged, this,
+          [this](bool) { update_control_dock_height(audio_dock_); });
   splitDockWidget(playback_dock_, audio_dock_, Qt::Horizontal);
   viewMenu->addAction(audio_dock_->toggleViewAction());
 
@@ -369,6 +374,10 @@ void EditorMainWindow::create_playback_and_toolbox_docks() {
   toolboxScroll->setWidget(toolbox);
   toolbox_dock_->setWidget(toolboxScroll);
   addDockWidget(Qt::BottomDockWidgetArea, toolbox_dock_);
+  connect(toolbox_dock_, &QDockWidget::dockLocationChanged, this,
+          [this](Qt::DockWidgetArea) { update_control_dock_height(toolbox_dock_); });
+  connect(toolbox_dock_, &QDockWidget::topLevelChanged, this,
+          [this](bool) { update_control_dock_height(toolbox_dock_); });
   splitDockWidget(audio_dock_, toolbox_dock_, Qt::Horizontal);
   viewMenu->addAction(toolbox_dock_->toggleViewAction());
 }
@@ -737,84 +746,23 @@ void EditorMainWindow::set_editor_widget(QWidget* editor) {
 }
 
 void EditorMainWindow::resizeEvent(QResizeEvent* event) {
-  const int settings_width = (settings_dock_ && !settings_dock_->isFloating())
-                                 ? settings_dock_->width() : 0;
   if (auto* window = static_cast<RealtimeVulkanWindow*>(preview_window_))
     window->set_resize_suspended(true);
   if (auto* window = static_cast<RealtimeVulkanWindow*>(editor_window_))
     window->set_resize_suspended(true);
   QMainWindow::resizeEvent(event);
-  // Main-window width changes resize only the two primary viewports. Keep the
-  // inspector's user-selected width untouched and preserve a 1:1 preview/edit
-  // split for the remaining space.
-  if (preview_dock_ && editor_dock_ && settings_width > 0 &&
-      !preview_dock_->isFloating() && !editor_dock_->isFloating()) {
-    const int available = std::max(400, width() - settings_width);
-    resizeDocks({preview_dock_, editor_dock_}, {available / 2, available - available / 2},
-                Qt::Horizontal);
-  }
-  restore_bottom_row();
-  // Native child/layout events may finish after the main Resize delivery.
-  QTimer::singleShot(0, this, &EditorMainWindow::restore_bottom_row);
   resize_settle_timer_.start();
 }
 
-void EditorMainWindow::restore_bottom_row() {
-  // Keep the bottom control row at its pinned height; the viewport row grows.
-  {
-    QList<QDockWidget*> row;
-    QList<int> sizes;
-    int viewport_delta = 0;
-    std::size_t i = 0;
-    for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-      const int height = bottom_row_heights_[i++];
-      if (height > 0 && dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
-          dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
-        row.append(dock);
-        sizes.append(height);
-        if (row.size() == 1) viewport_delta = dock->height() - height;
-      }
-    }
-    // In a dock-only QMainWindow, sizing only the bottom area leaves Qt free to
-    // assign all surplus height back to it. Explicitly size the viewport area
-    // as well so it receives that surplus.
-    for (auto* dock : {preview_dock_, editor_dock_}) {
-      if (dock && !dock->isFloating() && !dock->isHidden() &&
-          (dockWidgetArea(dock) == Qt::TopDockWidgetArea ||
-           dockWidgetArea(dock) == Qt::LeftDockWidgetArea)) {
-        row.append(dock);
-        sizes.append(std::max(dock->minimumSizeHint().height(), dock->height() + viewport_delta));
-      }
-    }
-    if (!row.isEmpty()) {
-      resizeDocks(row, sizes, Qt::Vertical);
-      layout()->activate();
-    }
-    QList<QDockWidget*> width_row;
-    QList<int> width_sizes;
-    std::size_t wi = 0;
-    for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-      const int width = bottom_row_widths_[wi++];
-      if (width > 0 && dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
-          dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
-        width_row.append(dock);
-        width_sizes.append(width);
-      }
-    }
-    if (!width_row.isEmpty()) resizeDocks(width_row, width_sizes, Qt::Horizontal);
-  }
-}
-
-void EditorMainWindow::pin_bottom_row() {
-  std::size_t i = 0;
-  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-    if (dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
-        dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
-      bottom_row_heights_[i] = dock->height();
-      bottom_row_widths_[i] = dock->width();
-    }
-    ++i;
-  }
+void EditorMainWindow::update_control_dock_height(QDockWidget* dock) {
+  if (dock == nullptr) return;
+  constexpr int kControlRowHeight = 200;
+  const bool bottom_docked = !dock->isFloating() &&
+                             dockWidgetArea(dock) == Qt::BottomDockWidgetArea;
+  dock->setMinimumHeight(bottom_docked ? kControlRowHeight : 0);
+  dock->setMaximumHeight(bottom_docked ? kControlRowHeight : QWIDGETSIZE_MAX);
+  dock->setSizePolicy(QSizePolicy::Expanding,
+                      bottom_docked ? QSizePolicy::Fixed : QSizePolicy::Preferred);
 }
 
 bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
