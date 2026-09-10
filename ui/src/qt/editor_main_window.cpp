@@ -186,6 +186,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
     QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
     prefs.remove("window/geometry");
     prefs.remove("window/state-v4");
+    prefs.remove("window/bottom-row-heights");
     reset_default_layout();
   });
 
@@ -472,13 +473,34 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
 
   create_playback_and_toolbox_docks();
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  bool has_saved_bottom_heights = false;
+  const auto saved_bottom_heights = prefs.value("window/bottom-row-heights").toList();
+  if (saved_bottom_heights.size() == static_cast<int>(bottom_row_heights_.size())) {
+    has_saved_bottom_heights = true;
+    for (std::size_t i = 0; i < bottom_row_heights_.size(); ++i) {
+      bool ok = false;
+      const int height = saved_bottom_heights.at(static_cast<int>(i)).toInt(&ok);
+      if (!ok || height <= 0) {
+        has_saved_bottom_heights = false;
+        break;
+      }
+      bottom_row_heights_[i] = height;
+    }
+  }
   const auto state = prefs.value("window/state-v4").toByteArray();
   if (!state.isEmpty() && restoreState(state)) {
-    QTimer::singleShot(0, this, [this] {
-      pin_bottom_row();
+    QTimer::singleShot(0, this, [this, has_saved_bottom_heights] {
+      if (has_saved_bottom_heights) {
+        restore_bottom_row();
+      } else {
+        // Compatibility with settings written before explicit height storage:
+        // preserve the size Qt restored from the dock state when possible.
+        pin_bottom_row();
+      }
       for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
         update_control_dock_height(dock);
       }
+      QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
     });
   } else {
     reset_default_layout();
@@ -1025,9 +1047,14 @@ void EditorMainWindow::show_curve_templates() {
 
 void EditorMainWindow::closeEvent(QCloseEvent* event) {
   if (!confirm_pending_changes()) { event->ignore(); return; }
+  pin_bottom_row();
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   prefs.setValue("window/geometry", saveGeometry());
   prefs.setValue("window/state-v4", saveState());
+  QVariantList saved_bottom_heights;
+  saved_bottom_heights.reserve(static_cast<qsizetype>(bottom_row_heights_.size()));
+  for (const int height : bottom_row_heights_) saved_bottom_heights.push_back(height);
+  prefs.setValue("window/bottom-row-heights", saved_bottom_heights);
   event->accept();
 }
 

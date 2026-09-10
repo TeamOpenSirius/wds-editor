@@ -86,7 +86,7 @@ class EditorMainWindow final : public QMainWindow {
   void update_control_dock_height(QDockWidget* dock);
   void pin_bottom_row();
   void restore_bottom_row();
-  std::array<int, 3> bottom_row_heights_{};
+  std::array<int, 3> bottom_row_heights_{200, 200, 200};
   bool native_resizing_ = false;
 };
 }
