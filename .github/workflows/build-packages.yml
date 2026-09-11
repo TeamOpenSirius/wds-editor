@@ -70,6 +70,49 @@ jobs:
             zlib:x64-mingw-static \
             vulkan-loader:x64-mingw-static
 
+      - name: Install host Qt tools
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          archives: qtbase
+          cache: true
+          cache-key-prefix: qt-host-6.8.3-qtbase
+          dir: ${{ github.workspace }}/qt-host
+
+      - name: Install MinGW Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          archives: qtbase
+          cache: true
+          cache-key-prefix: qt-mingw-6.8.3-qtbase
+          dir: ${{ github.workspace }}/qt-mingw
+          set-env: false
+          setup-python: false
+          install-deps: false
+
+      - name: Record Qt paths
+        run: |
+          if [[ -z "${QT_ROOT_DIR:-}" ]]; then
+            host_cfg="$(find "${{ github.workspace }}/qt-host/Qt" -path '*/lib/cmake/Qt6/Qt6Config.cmake' -print -quit)"
+            test -n "${host_cfg}"
+            QT_ROOT_DIR="$(cd "$(dirname "${host_cfg}")/../../.." && pwd)"
+          fi
+          echo "QT_HOST_PATH=${QT_ROOT_DIR}" >> "${GITHUB_ENV}"
+          mingw_cfg="$(find "${{ github.workspace }}/qt-mingw/Qt" -path '*/lib/cmake/Qt6/Qt6Config.cmake' -print -quit)"
+          test -n "${mingw_cfg}"
+          mingw_root="$(cd "$(dirname "${mingw_cfg}")/../../.." && pwd)"
+          echo "WDS_QT_MINGW_ROOT=${mingw_root}" >> "${GITHUB_ENV}"
+          echo "Host Qt: ${QT_ROOT_DIR}"
+          echo "MinGW Qt: ${mingw_root}"
+          test -f "${mingw_root}/lib/cmake/Qt6/Qt6Config.cmake"
+
       - name: Build and package
         env:
           WDS_VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
