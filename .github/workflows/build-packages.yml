@@ -77,9 +77,9 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          archives: qtbase
+          archives: qtbase icu
           cache: true
-          cache-key-prefix: qt-host-6.8.3-qtbase
+          cache-key-prefix: qt-host-6.8.3-qtbase-icu
           dir: ${{ github.workspace }}/qt-host
 
       - name: Install MinGW Qt
