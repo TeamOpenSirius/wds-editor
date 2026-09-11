@@ -105,6 +105,8 @@ jobs:
             QT_ROOT_DIR="$(cd "$(dirname "${host_cfg}")/../../.." && pwd)"
           fi
           echo "QT_HOST_PATH=${QT_ROOT_DIR}" >> "${GITHUB_ENV}"
+          export LD_LIBRARY_PATH="${QT_ROOT_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "${GITHUB_ENV}"
           mingw_cfg="$(find "${{ github.workspace }}/qt-mingw/Qt" -path '*/lib/cmake/Qt6/Qt6Config.cmake' -print -quit)"
           test -n "${mingw_cfg}"
           mingw_root="$(cd "$(dirname "${mingw_cfg}")/../../.." && pwd)"
@@ -112,6 +114,7 @@ jobs:
           echo "Host Qt: ${QT_ROOT_DIR}"
           echo "MinGW Qt: ${mingw_root}"
           test -f "${mingw_root}/lib/cmake/Qt6/Qt6Config.cmake"
+          "${QT_ROOT_DIR}/libexec/rcc" -help >/dev/null
 
       - name: Build and package
         env:
