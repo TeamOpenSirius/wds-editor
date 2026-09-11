@@ -934,6 +934,49 @@ brew_prefix() {
   fi
 }
 
+qt_macos_root() {
+  if [[ -n "${WDS_QT_MACOS_ROOT:-}" && -d "${WDS_QT_MACOS_ROOT}/share/qt/plugins/platforms" ]]; then
+    echo "${WDS_QT_MACOS_ROOT}"
+    return 0
+  fi
+  local p=""
+  if command -v brew >/dev/null 2>&1; then
+    p="$(brew --prefix qtbase 2>/dev/null || true)"
+  fi
+  if [[ -n "$p" && -d "${p}/share/qt/plugins/platforms" ]]; then
+    echo "$p"
+    return 0
+  fi
+  return 1
+}
+
+resolve_macos_dep() {
+  local dep="$1" libdir="$2"
+  local rest cand qt_root
+  case "$dep" in
+    /usr/lib/*|/System/*) return 1 ;;
+    /*)
+      [[ -f "$dep" ]] || return 1
+      echo "$dep"
+      return 0
+      ;;
+    @rpath/*)
+      rest="${dep#@rpath/}"
+      qt_root="$(qt_macos_root 2>/dev/null || true)"
+      for cand in \
+        "${qt_root:+${qt_root}/lib/${rest}}" \
+        "$(brew_prefix)/lib/${rest}" \
+        "${libdir}/$(basename "$rest")"; do
+        [[ -n "$cand" && -f "$cand" ]] || continue
+        echo "$cand"
+        return 0
+      done
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 copy_macho_deps() {
   local bin="$1" libdir="$2"
   mkdir -p "$libdir"
@@ -951,16 +994,15 @@ copy_macho_deps() {
 
     while IFS= read -r dep; do
       [[ -z "$dep" ]] && continue
-      case "$dep" in
-        /usr/lib/*|/System/*) continue ;;
-      esac
-      [[ "$dep" == /* ]] || continue
+      local resolved=""
+      resolved="$(resolve_macos_dep "$dep" "$libdir" || true)"
+      [[ -n "$resolved" && -f "$resolved" ]] || continue
       local base dest
-      base="$(basename "$dep")"
+      base="$(basename "$resolved")"
       dest="${libdir}/${base}"
-      if [[ -f "$dep" && ! -e "$dest" ]]; then
+      if [[ ! -e "$dest" ]]; then
         # Homebrew bottles are often mode 444; keep copies writable for rpath rewrite / overwrite.
-        cp -aL "$dep" "$dest"
+        cp -aL "$resolved" "$dest"
         chmod u+w "$dest" 2>/dev/null || true
         queue+=("$dest")
       fi
@@ -969,19 +1011,21 @@ copy_macho_deps() {
   unset brew_root
 }
 
+macos_relpath() {
+  python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$1" "$2"
+}
+
 fix_macos_rpaths() {
-  # `payload` is the directory that contains the main binary and a lib/ folder
-  # (e.g. WDS.app/Contents/MacOS). Rewrite absolute Homebrew paths and set
-  # relocatable install names so the .app does not need brew at runtime.
+  # `payload` is Contents/MacOS. Rewrite Homebrew / @rpath links to bundled
+  # lib/ copies, including nested Qt plugins.
   local payload="$1"
+  local libdir="${payload}/lib"
   command -v install_name_tool >/dev/null 2>&1 || return 0
   local f
-  for f in "${payload}/wds_editor" "${payload}/wds_core_example" \
-           "${payload}/lib/"*; do
-    [[ -f "$f" ]] || continue
+  while IFS= read -r -d '' f; do
     file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
 
-    if [[ "$(dirname "$f")" == "${payload}/lib" ]]; then
+    if [[ "$(dirname "$f")" == "$libdir" ]]; then
       install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null || true
       install_name_tool -add_rpath '@loader_path' "$f" 2>/dev/null || true
     else
@@ -994,25 +1038,60 @@ fix_macos_rpaths() {
       case "$dep" in
         /usr/lib/*|/System/*) continue ;;
       esac
-      local base
+      local base dest rel
       base="$(basename "$dep")"
-      [[ -f "${payload}/lib/${base}" ]] || continue
-      if [[ "$(dirname "$f")" == "$payload" ]]; then
-        install_name_tool -change "$dep" "@loader_path/lib/${base}" "$f" 2>/dev/null || true
-      else
-        install_name_tool -change "$dep" "@loader_path/${base}" "$f" 2>/dev/null || true
-      fi
+      dest="${libdir}/${base}"
+      [[ -f "$dest" ]] || continue
+      rel="$(macos_relpath "$dest" "$(dirname "$f")")"
+      install_name_tool -change "$dep" "@loader_path/${rel}" "$f" 2>/dev/null || true
     done < <(otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}')
 
-    # Normalize @rpath/libbass*.dylib → @loader_path/... so rpath alone is enough.
+    # Normalize leftover @rpath/libbass*.dylib → @loader_path/... .
     if [[ "$(dirname "$f")" == "$payload" ]]; then
       install_name_tool -change '@rpath/libbass.dylib' '@loader_path/lib/libbass.dylib' "$f" 2>/dev/null || true
       install_name_tool -change '@rpath/libbassmix.dylib' '@loader_path/lib/libbassmix.dylib' "$f" 2>/dev/null || true
     else
-      install_name_tool -change '@rpath/libbass.dylib' '@loader_path/libbass.dylib' "$f" 2>/dev/null || true
-      install_name_tool -change '@rpath/libbassmix.dylib' '@loader_path/libbassmix.dylib' "$f" 2>/dev/null || true
+      local bass_rel
+      bass_rel="$(macos_relpath "${libdir}/libbass.dylib" "$(dirname "$f")")"
+      install_name_tool -change '@rpath/libbass.dylib' "@loader_path/${bass_rel}" "$f" 2>/dev/null || true
+      install_name_tool -change '@rpath/libbassmix.dylib' "@loader_path/$(macos_relpath "${libdir}/libbassmix.dylib" "$(dirname "$f")")" "$f" 2>/dev/null || true
     fi
-  done
+  done < <(find "$payload" -type f -print0)
+}
+
+copy_qt_macos_plugins() {
+  local payload="$1" resources="$2" exe="$3"
+  local qt_root plugin_src dest plugin
+  if ! otool -L "$exe" 2>/dev/null | grep -Eq 'Qt(Core|Gui|Widgets)'; then
+    echo "Qt plugins not needed (editor does not link Qt)"
+    return 0
+  fi
+  qt_root="$(qt_macos_root || true)"
+  plugin_src="${qt_root}/share/qt/plugins"
+  [[ -n "$qt_root" && -f "${plugin_src}/platforms/libqcocoa.dylib" ]] || \
+    die "Qt cocoa plugin missing; install qtbase (brew install qtbase)"
+
+  echo "Bundling Qt plugins from ${plugin_src}"
+  mkdir -p "${payload}/lib/plugins/platforms" "${payload}/lib/plugins/styles"
+  dest="${payload}/lib/plugins/platforms/libqcocoa.dylib"
+  cp -a "${plugin_src}/platforms/libqcocoa.dylib" "$dest"
+  chmod u+w "$dest" 2>/dev/null || true
+  copy_macho_deps "$dest" "${payload}/lib"
+
+  if [[ -d "${plugin_src}/styles" ]]; then
+    for plugin in "${plugin_src}/styles/"*.dylib; do
+      [[ -f "$plugin" ]] || continue
+      dest="${payload}/lib/plugins/styles/$(basename "$plugin")"
+      cp -a "$plugin" "$dest"
+      chmod u+w "$dest" 2>/dev/null || true
+      copy_macho_deps "$dest" "${payload}/lib"
+    done
+  fi
+
+  cat >"${resources}/qt.conf" <<'EOF'
+[Paths]
+Plugins = ../MacOS/lib/plugins
+EOF
 }
 
 write_macos_app_bundle() {
@@ -1053,6 +1132,8 @@ write_macos_app_bundle() {
 
   [[ -f "${payload}/lib/libMoltenVK.dylib" ]] || \
     die "libMoltenVK.dylib missing; install molten-vk (brew install molten-vk) and rebuild"
+
+  copy_qt_macos_plugins "$payload" "$resources" "${payload}/${demo_name}"
 
   # macos-arm package: drop foreign slices from universal vendor dylibs (e.g. bass).
   if command -v lipo >/dev/null 2>&1; then
@@ -1133,17 +1214,17 @@ codesign_macos_app() {
   need_cmd codesign
   local f
   # Ad-hoc resign after install_name_tool (fixes CODESIGNING / Invalid Page).
-  # Assets live in Contents/Resources; MacOS/ only has Mach-O + dylibs.
+  # Homebrew Qt copies are named QtCore/QtGui (no .dylib suffix).
   while IFS= read -r -d '' f; do
-    codesign --force --sign - "$f" >/dev/null 2>&1
-  done < <(
-    find "${app}/Contents/MacOS" -type f \( -name '*.dylib' -o -name 'wds_editor' \
-         -o -name 'wds_core_example' \) -print0
-  )
+    file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
+    codesign --force --sign - "$f" \
+      || die "codesign failed: $f"
+  done < <(find "${app}/Contents/MacOS" -type f -print0)
 
-  codesign --force --sign - "$app" >/dev/null
-  codesign --verify "$app" >/dev/null \
-    || die "codesign --verify failed for $app"
+  codesign --force --sign - "$app" \
+    || die "codesign failed: $app"
+  codesign --verify --deep --strict "$app" \
+    || die "codesign --verify --deep --strict failed for $app"
 }
 
 # Validate bundled ICD layout. Runtime vkCreateInstance is best-effort: GitHub
