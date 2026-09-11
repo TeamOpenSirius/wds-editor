@@ -12,6 +12,9 @@
 #include "wds/common/crash_handler.hpp"
 
 #include <QApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QIcon>
 #include <QSettings>
 #include <QStyleFactory>
@@ -20,8 +23,31 @@
 #include <QFontDatabase>
 #include <QFont>
 
+#if defined(Q_OS_MACOS)
+#include <limits.h>
+#include <mach-o/dyld.h>
+#endif
+
+namespace {
+void prepare_bundled_qt_plugins() {
+#if defined(Q_OS_MACOS)
+  // Flattened Homebrew Qt has no framework prefix, so QLibraryInfo cannot find
+  // plugins. Point Qt at the bundled cocoa plugin before QApplication starts.
+  char path[PATH_MAX];
+  uint32_t size = sizeof(path);
+  if (_NSGetExecutablePath(path, &size) != 0) return;
+  const QString plugins = QDir::cleanPath(
+      QFileInfo(QString::fromUtf8(path)).absoluteDir().filePath(QStringLiteral("lib/plugins")));
+  if (QDir(plugins + QStringLiteral("/platforms")).exists()) {
+    qputenv("QT_PLUGIN_PATH", QFile::encodeName(plugins));
+  }
+#endif
+}
+}  // namespace
+
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
+  prepare_bundled_qt_plugins();
   QApplication app(argc, argv);
   QCoreApplication::setApplicationVersion(QStringLiteral(WDS_APP_VERSION));
   QApplication::setWindowIcon(QIcon(QStringLiteral(":/wds/app_icon.png")));
