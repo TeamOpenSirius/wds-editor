@@ -1033,6 +1033,16 @@ fix_macos_rpaths() {
       install_name_tool -add_rpath '@loader_path' "$f" 2>/dev/null || true
     fi
 
+    # Drop absolute / build-tree rpaths so dyld cannot pick Homebrew vulkan.
+    local rpath
+    while IFS= read -r rpath; do
+      [[ -n "$rpath" ]] || continue
+      case "$rpath" in
+        @loader_path*|@executable_path*) continue ;;
+        *) install_name_tool -delete_rpath "$rpath" "$f" 2>/dev/null || true ;;
+      esac
+    done < <(otool -l "$f" 2>/dev/null | awk '/cmd LC_RPATH/{getline; getline; print $2}')
+
     while IFS= read -r dep; do
       [[ -z "$dep" ]] && continue
       case "$dep" in
@@ -1057,6 +1067,15 @@ fix_macos_rpaths() {
       install_name_tool -change '@rpath/libbassmix.dylib' "@loader_path/$(macos_relpath "${libdir}/libbassmix.dylib" "$(dirname "$f")")" "$f" 2>/dev/null || true
     fi
   done < <(find "$payload" -type f -print0)
+}
+
+coalesce_macos_vulkan_loader() {
+  local libdir="$1"
+  local ver="${libdir}/libvulkan.1.dylib"
+  local unversioned="${libdir}/libvulkan.dylib"
+  [[ -f "$ver" ]] || return 0
+  rm -f "$unversioned"
+  ln -s "libvulkan.1.dylib" "$unversioned"
 }
 
 copy_qt_macos_plugins() {
@@ -1114,9 +1133,11 @@ write_macos_app_bundle() {
 
   local bp extra
   bp="$(brew_prefix)"
+  # Ship one Vulkan loader only. Homebrew's libvulkan.dylib is a symlink to
+  # libvulkan.1.dylib; copying both as real files gives Qt and the editor two
+  # loader instances, and vkGetDeviceQueue then jumps to NULL.
   for extra in \
     "${bp}/lib/libvulkan.1.dylib" \
-    "${bp}/lib/libvulkan.dylib" \
     "${bp}/lib/libMoltenVK.dylib" \
     "${bp}/opt/molten-vk/lib/libMoltenVK.dylib" \
     "${bp}/opt/vulkan-loader/lib/libvulkan.1.dylib" \
@@ -1139,7 +1160,7 @@ write_macos_app_bundle() {
   if command -v lipo >/dev/null 2>&1; then
     local fat
     for fat in "${payload}/lib/"*; do
-      [[ -f "$fat" ]] || continue
+      [[ -f "$fat" && ! -L "$fat" ]] || continue
       file "$fat" 2>/dev/null | grep -q 'Mach-O' || continue
       if lipo -info "$fat" 2>/dev/null | grep -Eq 'Architectures in the fat file|x86_64|i386'; then
         if lipo -thin arm64 "$fat" -output "${fat}.arm64" 2>/dev/null; then
@@ -1164,6 +1185,7 @@ write_macos_app_bundle() {
 EOF
 
   fix_macos_rpaths "$payload"
+  coalesce_macos_vulkan_loader "${payload}/lib"
   copy_portable_resources "$resources" "$build_dir"
 
   local icns="${ROOT}/ui/assets/app_icon/wds.icns"
@@ -1240,6 +1262,9 @@ verify_macos_vulkan_icd() {
   [[ -f "$icd" ]] || die "missing auto-discovery ICD: $icd"
   [[ -f "$loader" ]] || die "missing bundled vulkan loader: $loader"
   [[ -f "$molten" ]] || die "missing bundled MoltenVK: $molten"
+  if [[ -e "${payload}/lib/libvulkan.dylib" && ! -L "${payload}/lib/libvulkan.dylib" ]]; then
+    die "libvulkan.dylib must be a symlink to libvulkan.1.dylib (two loaders crash at vkGetDeviceQueue)"
+  fi
 
   python3 - "$icd" "$molten" <<'PY' || die "MoltenVK_icd.json library_path invalid"
 import json, sys

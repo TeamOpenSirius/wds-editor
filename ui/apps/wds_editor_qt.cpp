@@ -6,6 +6,7 @@
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/resource_paths.hpp"
+#include "wds/ui/startup_deps.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/renderer/preview_visual_config.hpp"
@@ -48,6 +49,9 @@ void prepare_bundled_qt_plugins() {
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
   prepare_bundled_qt_plugins();
+  // Pin the bundled MoltenVK ICD before Qt or the loader enumerates Homebrew
+  // drivers. Two MoltenVK copies make vkGetDeviceQueue jump to NULL.
+  wds::ui::prepare_macos_vulkan_environment(argv[0]);
   QApplication app(argc, argv);
   QCoreApplication::setApplicationVersion(QStringLiteral(WDS_APP_VERSION));
   QApplication::setWindowIcon(QIcon(QStringLiteral(":/wds/app_icon.png")));
@@ -69,8 +73,14 @@ int main(int argc, char** argv) {
       QSettings("WDS", "WDS Editor").value("appearance/theme").toString();
   wds::ui::apply_wds_theme(app, theme_dir, theme_id);
 
+  auto deps = wds::ui::check_startup_dependencies(argv[0]);
+  if (!deps.ok()) return wds::ui::fail_startup_dependencies(deps);
+
   QVulkanInstance vk_instance;
-  if (!vk_instance.create()) return 2;
+  if (!vk_instance.create()) {
+    wds::ui::add_vulkan_unavailable(deps);
+    return wds::ui::fail_startup_dependencies(deps);
+  }
   wds::ui::EditorMainWindow window;
   auto* preview_window = new wds::ui::RealtimeVulkanWindow(&vk_instance);
   window.set_viewport_windows(preview_window, nullptr);
