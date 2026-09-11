@@ -95,7 +95,11 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
-          brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
+          # qtbase conflicts with a prelinked qt@5 keg on some images.
+          if brew list --versions qt@5 >/dev/null 2>&1; then
+            brew unlink qt@5
+          fi
+          brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase
 
       - name: Setup Python packaging tools
         run: |
