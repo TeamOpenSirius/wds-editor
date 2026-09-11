@@ -115,6 +115,8 @@ jobs:
           echo "MinGW Qt: ${mingw_root}"
           test -f "${mingw_root}/lib/cmake/Qt6/Qt6Config.cmake"
           "${QT_ROOT_DIR}/libexec/rcc" -help >/dev/null
+          python3 -m pip install --user pillow
+          python3 -c "from PIL import Image"
 
       - name: Build and package
         env:
