@@ -209,6 +209,20 @@ configure_macos_arm() {
     brew_png=""
   fi
 
+  # Prefer the qtbase keg so find_package(Qt6) works even when CMAKE_PREFIX_PATH
+  # is only $(brew --prefix) and the cmake files are not yet on the default prefix.
+  local brew_qt=""
+  if command -v brew >/dev/null 2>&1; then
+    brew_qt="$(brew --prefix qtbase 2>/dev/null || true)"
+  fi
+  if [[ -n "${brew_qt}" && -f "${brew_qt}/lib/cmake/Qt6/Qt6Config.cmake" ]]; then
+    if [[ -n "${prefix}" ]]; then
+      prefix="${brew_qt};${prefix}"
+    else
+      prefix="${brew_qt}"
+    fi
+  fi
+
   local -a args=(
     -S "${ROOT}"
     -B "${build_dir}"
