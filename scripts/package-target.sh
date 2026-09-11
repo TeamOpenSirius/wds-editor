@@ -5,7 +5,7 @@
 #   macos-arm  — Apple Silicon Mac with Homebrew deps
 #
 # External deps policy (ship everything we can):
-#   win   — static MinGW runtimes + vcpkg static png; ship bass.dll + vulkan-1.dll
+#   win   — static MinGW runtimes + vcpkg static png; ship bass.dll + vulkan-1.dll + Qt
 #   macOS — bundle Homebrew dylibs + MoltenVK into the .app
 set -euo pipefail
 
@@ -335,6 +335,83 @@ mingw_dll() {
   return 1
 }
 
+qt_mingw_root_from_build() {
+  local build_dir="$1"
+  if [[ -n "${WDS_QT_MINGW_ROOT:-}" && -f "${WDS_QT_MINGW_ROOT}/lib/cmake/Qt6/Qt6Config.cmake" ]]; then
+    echo "${WDS_QT_MINGW_ROOT}"
+    return 0
+  fi
+  local cache="${build_dir}/CMakeCache.txt" qt6_dir=""
+  [[ -f "$cache" ]] || return 1
+  qt6_dir="$(sed -n 's/^Qt6_DIR:PATH=//p' "$cache" | head -1)"
+  [[ -n "$qt6_dir" && -d "$qt6_dir" ]] || return 1
+  (cd "${qt6_dir}/../../.." && pwd)
+}
+
+copy_pe_dlls_from_dir() {
+  local start="$1" srcdir="$2" stage="$3"
+  local -a queue=("$start")
+  local seen_file cur dll src dest
+  seen_file="$(mktemp)"
+  while ((${#queue[@]})); do
+    cur="${queue[0]}"
+    queue=("${queue[@]:1}")
+    grep -Fxq -- "$cur" "$seen_file" 2>/dev/null && continue
+    printf '%s\n' "$cur" >>"$seen_file"
+    while IFS= read -r dll; do
+      [[ -n "$dll" ]] || continue
+      src="${srcdir}/${dll}"
+      dest="${stage}/${dll}"
+      if [[ -f "$src" && ! -e "$dest" ]]; then
+        cp -a "$src" "$dest"
+        chmod u+w "$dest" 2>/dev/null || true
+        queue+=("$dest")
+      fi
+    done < <("${WDS_MINGW_OBJDUMP}" -p "$cur" 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /DLL Name:/{print $3}')
+  done
+  rm -f "$seen_file"
+}
+
+copy_qt_win_runtime() {
+  local exe="$1" stage="$2" build_dir="$3"
+  local qt_root qt_bin plugin
+  qt_root="$(qt_mingw_root_from_build "$build_dir" || true)"
+  if [[ -z "$qt_root" || ! -d "${qt_root}/bin" ]]; then
+    if "${WDS_MINGW_OBJDUMP}" -p "$exe" 2>/dev/null | grep -qi 'DLL Name: Qt6'; then
+      die "exe imports Qt6 DLLs but MinGW Qt prefix was not found (set WDS_QT_MINGW_ROOT)"
+    fi
+    echo "Qt runtime not needed (no Qt6 DLL imports)"
+    return 0
+  fi
+  qt_bin="${qt_root}/bin"
+  echo "Bundling Qt runtime from ${qt_root}"
+  copy_pe_dlls_from_dir "$exe" "$qt_bin" "$stage"
+
+  mkdir -p "${stage}/plugins/platforms"
+  if [[ -f "${qt_root}/plugins/platforms/qwindows.dll" ]]; then
+    cp -a "${qt_root}/plugins/platforms/qwindows.dll" "${stage}/plugins/platforms/"
+    chmod u+w "${stage}/plugins/platforms/qwindows.dll" 2>/dev/null || true
+    copy_pe_dlls_from_dir "${stage}/plugins/platforms/qwindows.dll" "$qt_bin" "$stage"
+  else
+    die "missing ${qt_root}/plugins/platforms/qwindows.dll"
+  fi
+  if [[ -d "${qt_root}/plugins/styles" ]]; then
+    mkdir -p "${stage}/plugins/styles"
+    for plugin in "${qt_root}/plugins/styles/"*.dll; do
+      [[ -f "$plugin" ]] || continue
+      cp -a "$plugin" "${stage}/plugins/styles/"
+      chmod u+w "${stage}/plugins/styles/$(basename "$plugin")" 2>/dev/null || true
+      copy_pe_dlls_from_dir "${stage}/plugins/styles/$(basename "$plugin")" "$qt_bin" "$stage"
+    done
+  fi
+
+  cat >"${stage}/qt.conf" <<'EOF'
+[Paths]
+Prefix=.
+Plugins=plugins
+EOF
+}
+
 package_win() {
   local build_dir="$1"
   local cache="${build_dir}/CMakeCache.txt"
@@ -439,6 +516,7 @@ package_win() {
 
   copy_portable_resources "$stage" "$build_dir"
   copy_bass_runtime "$stage" win-x86_64
+  copy_qt_win_runtime "${stage}/$(basename "$demo")" "$stage" "$build_dir"
   # MSI Start Menu shortcut Icon= needs a real .ico (not the exe).
   local ico="${ROOT}/ui/assets/app_icon/wds.ico"
   [[ -f "$ico" ]] || die "missing Windows app icon: $ico (run scripts/generate-app-icons.sh)"

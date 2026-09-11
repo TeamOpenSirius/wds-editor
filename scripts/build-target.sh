@@ -97,8 +97,8 @@ apply_product_layer_defaults() {
 
 # If env.local / WDS_VCPKG_ROOT provided prefix paths, inject them unless already on CLI.
 apply_win_env_cmake_defaults() {
-  local a
-  local has_prefix=0 has_vulkan=0
+  local a prefix=""
+  local has_prefix=0 has_vulkan=0 has_qt_host=0
   if ! declare -p EXTRA_CMAKE_ARGS >/dev/null 2>&1; then
     EXTRA_CMAKE_ARGS=()
   fi
@@ -106,10 +106,26 @@ apply_win_env_cmake_defaults() {
     case "$a" in
       *CMAKE_PREFIX_PATH*) has_prefix=1 ;;
       *Vulkan_LIBRARY*) has_vulkan=1 ;;
+      *QT_HOST_PATH*) has_qt_host=1 ;;
     esac
   done
-  if [[ "${has_prefix}" -eq 0 && -n "${WDS_CMAKE_PREFIX_PATH:-}" ]]; then
-    EXTRA_CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${WDS_CMAKE_PREFIX_PATH}")
+  if [[ "${has_prefix}" -eq 0 ]]; then
+    if [[ -n "${WDS_QT_MINGW_ROOT:-}" ]]; then
+      prefix="${WDS_QT_MINGW_ROOT}"
+    fi
+    if [[ -n "${WDS_CMAKE_PREFIX_PATH:-}" ]]; then
+      if [[ -n "${prefix}" ]]; then
+        prefix="${prefix};${WDS_CMAKE_PREFIX_PATH}"
+      else
+        prefix="${WDS_CMAKE_PREFIX_PATH}"
+      fi
+    fi
+    if [[ -n "${prefix}" ]]; then
+      EXTRA_CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${prefix}")
+    fi
+  fi
+  if [[ "${has_qt_host}" -eq 0 && -n "${QT_HOST_PATH:-}" ]]; then
+    EXTRA_CMAKE_ARGS+=("-DQT_HOST_PATH=${QT_HOST_PATH}")
   fi
   if [[ "${has_vulkan}" -eq 0 && -n "${WDS_VULKAN_LIBRARY:-}" ]]; then
     EXTRA_CMAKE_ARGS+=("-DVulkan_LIBRARY=${WDS_VULKAN_LIBRARY}")

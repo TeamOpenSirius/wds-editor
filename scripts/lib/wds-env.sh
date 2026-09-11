@@ -84,7 +84,7 @@ fi
 
 # Print a redacted summary (set/unset only — no absolute home paths).
 wds_print_env_summary() {
-  echo "WDS env: VCPKG_ROOT=${WDS_VCPKG_ROOT:+set} PREFIX=${WDS_CMAKE_PREFIX_PATH:+set} VULKAN_LIB=${WDS_VULKAN_LIBRARY:+set} MINGW_CXX=${WDS_MINGW_CXX}" >&2
+  echo "WDS env: VCPKG_ROOT=${WDS_VCPKG_ROOT:+set} PREFIX=${WDS_CMAKE_PREFIX_PATH:+set} VULKAN_LIB=${WDS_VULKAN_LIBRARY:+set} QT_HOST=${QT_HOST_PATH:+set} QT_MINGW=${WDS_QT_MINGW_ROOT:+set} MINGW_CXX=${WDS_MINGW_CXX}" >&2
 }
 
 unset _wds_env_root
