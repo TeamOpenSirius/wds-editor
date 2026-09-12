@@ -3095,41 +3095,143 @@ void ChartEditPanel::close_split_picker() {
   split_scrollbar_dragging_ = false;
 }
 
-void ChartEditPanel::confirm_split_picker() {
-  if (!engine_.is_editable()) return;
-  if (split_picker_edit_id_ >= 0) {
-    auto prev = engine_.document().find_note(split_picker_edit_id_);
-    if (!prev || !wds::chart_editor::is_split_lane_gimmick(prev->gimmick_type)) {
-      close_split_picker();
-      return;
-    }
-    NotationNote updated = *prev;
-    updated.gimmick_type = wds::chart_editor::split_gimmick_for_count(split_picker_count_);
-    updated.scratch_length = split_picker_color_id_;
-    if (updated.gimmick_type != prev->gimmick_type ||
-        updated.scratch_length != prev->scratch_length) {
-      std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
-      changes[split_picker_edit_id_] = {*prev, updated};
-      commit_updates(changes, "Edit split");
-    }
-    remember_split_picker_count();
-    remember_split_picker_color();
-    close_split_picker();
-    return;
-  }
+bool ChartEditPanel::take_split_modal(SplitModalDraft& out) {
+  if (!split_picker_open_) return false;
+  out.tick = split_picker_tick_;
+  out.edit_id = split_picker_edit_id_;
+  out.count = split_picker_count_;
+  out.color_id = split_picker_color_id_;
+  close_split_picker();
+  return true;
+}
+
+bool ChartEditPanel::take_timing_modal(TimingModalDraft& out) {
+  if (!timing_popup_open_) return false;
+  out.bpm_mode = timing_popup_mode_ == TimingPopupMode::Bpm;
+  out.tick = timing_edit_tick_;
   const auto& timing = engine_.document().timing();
-  const int32_t tpq = std::max(1, timing.ticks_per_quarter);
+  if (out.bpm_mode) {
+    try {
+      out.bpm = std::stod(timing_bpm_text_);
+    } catch (...) {
+      out.bpm = wds::chart_editor::timing_point_at(timing, timing_edit_tick_).bpm;
+    }
+  } else {
+    try {
+      out.numerator = std::stoi(timing_num_text_);
+      out.denominator = std::stoi(timing_den_text_);
+    } catch (...) {
+      const auto& p = wds::chart_editor::timing_meter_at(timing, timing_edit_tick_);
+      out.numerator = p.numerator;
+      out.denominator = p.denominator;
+    }
+  }
+  close_timing_popup();
+  return true;
+}
+
+bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color_id) {
+  if (!engine_.is_editable()) return false;
+  if (wds::chart_editor::tick_to_milliseconds(tick, engine_.document().timing()) < 0) return false;
+  const int32_t tpq = std::max(1, engine_.document().timing().ticks_per_quarter);
   NotationNote note;
   note.note_type = NoteType::None;
-  note.gimmick_type = wds::chart_editor::split_gimmick_for_count(split_picker_count_);
-  note.scratch_length = split_picker_color_id_;
-  note.start_tick = split_picker_tick_;
+  note.gimmick_type = wds::chart_editor::split_gimmick_for_count(std::clamp(count, 1, 6));
+  note.scratch_length = color_id;
+  note.start_tick = tick;
   note.end_tick = note.start_tick + tpq;
   note.lane = 0;
   note.width = 12;
-  commit_notes({note}, "Add split");
+  if (!commit_notes({note}, "Add split")) return false;
+  split_picker_count_ = std::clamp(count, 1, 6);
+  split_picker_color_id_ = color_id;
   remember_split_picker_count();
   remember_split_picker_color();
+  return true;
+}
+
+bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t color_id) {
+  if (!engine_.is_editable()) return false;
+  auto prev = engine_.document().find_note(note_id);
+  if (!prev || !wds::chart_editor::is_split_lane_gimmick(prev->gimmick_type)) return false;
+  NotationNote updated = *prev;
+  updated.gimmick_type = wds::chart_editor::split_gimmick_for_count(std::clamp(count, 1, 6));
+  updated.scratch_length = color_id;
+  if (updated.gimmick_type != prev->gimmick_type ||
+      updated.scratch_length != prev->scratch_length) {
+    std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
+    changes[note_id] = {*prev, updated};
+    if (!commit_updates(changes, "Edit split")) return false;
+  }
+  split_picker_count_ = std::clamp(count, 1, 6);
+  split_picker_color_id_ = color_id;
+  remember_split_picker_count();
+  remember_split_picker_color();
+  return true;
+}
+
+bool ChartEditPanel::apply_bpm(int32_t tick, double bpm) {
+  if (!engine_.is_editable() || !std::isfinite(bpm) || !(bpm > 0.0)) return false;
+  const auto before = engine_.document().timing();
+  auto timing = before;
+  wds::chart_editor::TimingPoint* existing = nullptr;
+  for (auto& p : timing.points) {
+    if (p.tick == tick) {
+      existing = &p;
+      break;
+    }
+  }
+  if (existing) {
+    existing->bpm = bpm;
+    existing->has_bpm = true;
+  } else {
+    wds::chart_editor::TimingPoint point;
+    point.tick = tick;
+    point.bpm = bpm;
+    point.has_bpm = true;
+    point.has_meter = false;
+    timing.points.push_back(point);
+  }
+  return engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
+      before, std::move(timing), existing ? "Edit BPM" : "Add BPM"));
+}
+
+bool ChartEditPanel::apply_meter(int32_t tick, int32_t numerator, int32_t denominator) {
+  if (!engine_.is_editable() || numerator < 1 || denominator < 1) return false;
+  const auto before = engine_.document().timing();
+  auto timing = before;
+  wds::chart_editor::TimingPoint* existing = nullptr;
+  for (auto& p : timing.points) {
+    if (p.tick == tick) {
+      existing = &p;
+      break;
+    }
+  }
+  if (existing) {
+    existing->numerator = numerator;
+    existing->denominator = denominator;
+    existing->has_meter = true;
+  } else {
+    wds::chart_editor::TimingPoint point;
+    point.tick = tick;
+    point.numerator = numerator;
+    point.denominator = denominator;
+    point.has_bpm = false;
+    point.has_meter = true;
+    timing.points.push_back(point);
+  }
+  wds::chart_editor::normalize_timing_points(timing);
+  wds::chart_editor::prune_orphaned_meter_changes(timing, tick);
+  return engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
+      before, std::move(timing), existing ? "Edit meter" : "Add meter"));
+}
+
+void ChartEditPanel::confirm_split_picker() {
+  if (split_picker_edit_id_ >= 0) {
+    (void)edit_split_effect(split_picker_edit_id_, split_picker_count_, split_picker_color_id_);
+  } else {
+    (void)add_split_effect(split_picker_tick_, split_picker_count_, split_picker_color_id_);
+  }
   close_split_picker();
 }
 
@@ -3172,8 +3274,6 @@ void ChartEditPanel::open_meter_popup(int32_t tick) {
 void ChartEditPanel::close_timing_popup() { timing_popup_open_ = false; }
 
 void ChartEditPanel::commit_timing_popup() {
-  if (!engine_.is_editable()) return;
-
   auto parse_positive = [](const std::string& text) -> std::optional<double> {
     if (text.empty()) return std::nullopt;
     try {
@@ -3197,35 +3297,13 @@ void ChartEditPanel::commit_timing_popup() {
     }
   };
 
-  const auto before = engine_.document().timing();
-  auto timing = before;
-  wds::chart_editor::TimingPoint* existing = nullptr;
-  for (auto& p : timing.points) {
-    if (p.tick == timing_edit_tick_) {
-      existing = &p;
-      break;
-    }
-  }
-
   if (timing_popup_mode_ == TimingPopupMode::Bpm) {
     const auto bpm = parse_positive(timing_bpm_text_);
     if (!bpm) {
       timing_bpm_text_ = timing_bpm_committed_;
       return;
     }
-    if (existing) {
-      existing->bpm = *bpm;
-      existing->has_bpm = true;
-    } else {
-      wds::chart_editor::TimingPoint point;
-      point.tick = timing_edit_tick_;
-      point.bpm = *bpm;
-      point.has_bpm = true;
-      point.has_meter = false;
-      timing.points.push_back(point);
-    }
-    engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
-        before, std::move(timing), existing ? "Edit BPM" : "Add BPM"));
+    (void)apply_bpm(timing_edit_tick_, *bpm);
   } else {
     const auto num = parse_positive_int(timing_num_text_);
     const auto den = parse_positive_int(timing_den_text_);
@@ -3234,23 +3312,7 @@ void ChartEditPanel::commit_timing_popup() {
       timing_den_text_ = timing_den_committed_;
       return;
     }
-    if (existing) {
-      existing->numerator = *num;
-      existing->denominator = *den;
-      existing->has_meter = true;
-    } else {
-      wds::chart_editor::TimingPoint point;
-      point.tick = timing_edit_tick_;
-      point.numerator = *num;
-      point.denominator = *den;
-      point.has_bpm = false;
-      point.has_meter = true;
-      timing.points.push_back(point);
-    }
-    wds::chart_editor::normalize_timing_points(timing);
-    wds::chart_editor::prune_orphaned_meter_changes(timing, timing_edit_tick_);
-    engine_.execute_command(std::make_unique<wds::chart_editor::SetTimingCommand>(
-        before, std::move(timing), existing ? "Edit meter" : "Add meter"));
+    (void)apply_meter(timing_edit_tick_, *num, *den);
   }
   close_timing_popup();
 }
@@ -3458,6 +3520,13 @@ bool ChartEditPanel::handle_right_gutter_pointer_down(const wds::interaction::Po
   return true;
 }
 
+void ChartEditPanel::paint_side_columns(wds::interaction::UiPainter& painter) const {
+  sync_viewport();
+  sync_error_ticks();
+  paint_gutters(painter);
+  paint_gutter_overlays(painter);
+}
+
 void ChartEditPanel::paint_overlays(wds::interaction::UiPainter& painter) const {
   sync_viewport();
   std::optional<wds::interaction::Rect> marquee;
@@ -3465,6 +3534,11 @@ void ChartEditPanel::paint_overlays(wds::interaction::UiPainter& painter) const 
     marquee = marquee_screen_rect(pointer_);
   }
   renderer_.paint_overlays(painter, viewport_, engine_.document().notes(), selected_, marquee);
+  paint_gutter_overlays(painter);
+}
+
+void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter) const {
+  sync_viewport();
   // Compact split chips above skinned notes. Color ID only on hover/drag.
   // Hits are time-ascending; paint reverse so earlier labels stay on top.
   namespace th = wds::interaction::theme;

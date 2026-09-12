@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
     const auto families = QFontDatabase::applicationFontFamilies(font_id);
     if (!families.isEmpty()) {
       QFont font(families.front());
-      font.setPointSize(10);
+      font.setPointSize(12);
       font.setHintingPreference(QFont::PreferFullHinting);
       QApplication::setFont(font);
     }

@@ -137,6 +137,30 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint(wds::interaction::UiPainter& painter) const override;
   // Selection / marquee overlay — call after append_skin_batch so it draws on top.
   void paint_overlays(wds::interaction::UiPainter& painter) const;
+  // Qt canvas: split / BPM / meter / measure columns and chips (no form chrome).
+  void paint_side_columns(wds::interaction::UiPainter& painter) const;
+
+  struct SplitModalDraft {
+    int32_t tick = 0;
+    int32_t edit_id = -1;
+    int32_t count = 2;
+    int32_t color_id = 1;
+  };
+  struct TimingModalDraft {
+    bool bpm_mode = true;
+    int32_t tick = 0;
+    double bpm = 120.0;
+    int32_t numerator = 4;
+    int32_t denominator = 4;
+  };
+  // Snapshot + close an in-panel modal so a Qt dialog can own the form.
+  bool take_split_modal(SplitModalDraft& out);
+  bool take_timing_modal(TimingModalDraft& out);
+  bool add_split_effect(int32_t tick, int32_t count, int32_t color_id);
+  bool edit_split_effect(int32_t note_id, int32_t count, int32_t color_id);
+  bool apply_bpm(int32_t tick, double bpm);
+  bool apply_meter(int32_t tick, int32_t numerator, int32_t denominator);
+
   // Modal dialogs (split picker / timing) — paint after overlays, above everything.
   bool has_modal_popup() const noexcept { return split_picker_open_ || timing_popup_open_; }
   bool is_interaction_modal() const override { return has_modal_popup(); }
@@ -293,6 +317,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool handle_left_gutter_pointer_down(const wds::interaction::PointerDownEvent& event);
   bool handle_right_gutter_pointer_down(const wds::interaction::PointerDownEvent& event);
   void paint_gutters(wds::interaction::UiPainter& painter) const;
+  void paint_gutter_overlays(wds::interaction::UiPainter& painter) const;
   void open_split_picker(int32_t tick);
   void open_split_picker_for_edit(int32_t note_id);
   void scroll_split_picker_to_color(int32_t color_id);

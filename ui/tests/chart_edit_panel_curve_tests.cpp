@@ -11,6 +11,7 @@
 #include <wds/core/scratch_hold_curve.hpp>
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/events.hpp>
+#include <wds/interaction/ui_painter.hpp>
 #include <wds/interaction/widgets/button.hpp>
 #include <wds/interaction/widgets/dropdown.hpp>
 
@@ -1160,6 +1161,115 @@ void test_plain_primary_does_not_clear_hold_draft_during_draw() {
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 1);
 }
 
+void test_edit_side_columns_paint_and_modals() {
+  Harness h;
+  wds::interaction::UiPainter painter;
+  painter.set_defer_glyphs(true);
+  h.panel.paint_side_columns(painter);
+
+  bool left_bg = false;
+  bool right_bg = false;
+  bool measure_bg = false;
+  bool bpm_chip = false;
+  bool meter_chip = false;
+  for (const auto& r : painter.rects()) {
+    if (std::fabs(r.bounds.x) < 0.5f && std::fabs(r.bounds.w - 60.0f) < 0.5f && r.bounds.h > 100.0f) {
+      left_bg = true;
+    }
+    if (std::fabs(r.bounds.x - 708.0f) < 0.5f && std::fabs(r.bounds.w - 52.0f) < 0.5f &&
+        r.bounds.h > 100.0f) {
+      right_bg = true;
+    }
+    if (std::fabs(r.bounds.x - 760.0f) < 0.5f && std::fabs(r.bounds.w - 40.0f) < 0.5f &&
+        r.bounds.h > 100.0f) {
+      measure_bg = true;
+    }
+    if (r.color.r > 0.40f && r.color.g > 0.25f && r.color.g < 0.36f && r.color.b < 0.20f &&
+        r.bounds.h > 20.0f) {
+      bpm_chip = true;
+    }
+    if (r.color.r < 0.20f && r.color.g > 0.30f && r.color.b > 0.20f && r.color.b < 0.32f &&
+        r.bounds.h > 20.0f) {
+      meter_chip = true;
+    }
+  }
+  bool bpm_text = false;
+  bool meter_text = false;
+  bool measure_text = false;
+  for (const auto& label : painter.labels()) {
+    if (label.text == "120") bpm_text = true;
+    if (label.text == "4/4") meter_text = true;
+    if (label.text == "1") measure_text = true;
+  }
+  CHECK(left_bg);
+  CHECK(right_bg);
+  CHECK(measure_bg);
+  CHECK(bpm_chip);
+  CHECK(meter_chip);
+  CHECK(bpm_text);
+  CHECK(meter_text);
+  CHECK(measure_text);
+
+  const float split_y = h.panel.viewport().y_at(480);
+  h.panel.on_pointer_down(PointerDownEvent{{30.0f, split_y}, PointerButton::Left, {}});
+  CHECK(h.panel.has_modal_popup());
+  wds::interaction::UiPainter picker;
+  picker.set_defer_glyphs(true);
+  h.panel.paint_side_columns(picker);
+  bool painted_form = false;
+  for (const auto& label : picker.labels()) {
+    if (label.text == "分割轨道数" || label.text == "确认" || label.text == "取消") {
+      painted_form = true;
+    }
+  }
+  CHECK(!painted_form);
+  ChartEditPanel::SplitModalDraft split;
+  CHECK(h.panel.take_split_modal(split));
+  CHECK(!h.panel.has_modal_popup());
+  CHECK(h.panel.add_split_effect(split.tick, 2, 1));
+  bool added_split = false;
+  for (const auto& note : h.engine.document().notes()) {
+    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type) && note.start_tick == split.tick &&
+        note.scratch_length == 1) {
+      added_split = true;
+    }
+  }
+  CHECK(added_split);
+
+  const wds::interaction::Rect right_gutter{708.0f, 0.0f, 52.0f, 1000.0f};
+  const auto hits =
+      wds::ui::build_timing_label_hits(h.panel.viewport(), right_gutter, h.engine.document().timing());
+  CHECK(!hits.empty());
+  bool opened_bpm = false;
+  for (const auto& hit : hits) {
+    if (hit.kind != wds::ui::TimingLabelKind::Bpm) continue;
+    const float cx = hit.bounds.x + hit.bounds.w * 0.5f;
+    const float cy = hit.bounds.y + hit.bounds.h * 0.5f;
+    h.panel.on_pointer_down(PointerDownEvent{{cx, cy}, PointerButton::Left, {}});
+    opened_bpm = true;
+    break;
+  }
+  CHECK(opened_bpm);
+  CHECK(h.panel.has_modal_popup());
+  wds::interaction::UiPainter bpm;
+  bpm.set_defer_glyphs(true);
+  h.panel.paint_side_columns(bpm);
+  bool painted_bpm_form = false;
+  for (const auto& label : bpm.labels()) {
+    if (label.text == "BPM 编辑" || label.text == "确认" || label.text == "取消") {
+      painted_bpm_form = true;
+    }
+  }
+  CHECK(!painted_bpm_form);
+  ChartEditPanel::TimingModalDraft timing;
+  CHECK(h.panel.take_timing_modal(timing));
+  CHECK(timing.bpm_mode);
+  CHECK(!h.panel.has_modal_popup());
+  CHECK(h.panel.apply_bpm(timing.tick, 140.0));
+  CHECK(std::fabs(wds::chart_editor::timing_point_at(h.engine.document().timing(), timing.tick).bpm -
+                  140.0) < 0.001);
+}
+
 void test_split_picker_search_filter() {
   using wds::ui::filter_split_picker_color_ids;
   using wds::ui::is_split_picker_search_text_valid;
@@ -1578,6 +1688,7 @@ int main() {
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
+  test_edit_side_columns_paint_and_modals();
   test_split_picker_search_filter();
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();

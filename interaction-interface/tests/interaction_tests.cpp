@@ -162,6 +162,15 @@ int main() {
 
   UiPainter painter;
   expect(painter.measure_text("bitmap").x > 0.0f, "bitmap font measured");
+  {
+    UiPainter labels;
+    labels.set_defer_glyphs(true);
+    labels.label({0, 0, 80, 20}, "120", {1, 1, 1, 1}, 0.9f, false, 12.0f);
+    labels.label({0, 20, 80, 20}, "4/4", {1, 1, 1, 1});
+    expect(labels.labels().size() == 2, "defer_glyphs records labels");
+    expect(labels.labels()[0].text == "120", "first label text");
+    expect(labels.sprites().empty() && labels.rects().empty(), "defer_glyphs skips glyphs");
+  }
 
   {
     auto& font = FontAtlas::instance();
