@@ -230,6 +230,7 @@ void UiPainter::clear() noexcept {
   front_rects_.clear();
   sprites_.clear();
   behind_sprites_.clear();
+  labels_.clear();
 }
 
 void UiPainter::reserve_rects(std::size_t n) { rects_.reserve(rects_.size() + n); }
@@ -390,6 +391,10 @@ void UiPainter::text(const Rect& bounds, const std::string& text, const Color& c
 void UiPainter::label(const Rect& bounds, const std::string& text, const Color& color, float z,
                       bool wrap, float pixel_size, bool left_align) {
   if (text.empty()) {
+    return;
+  }
+  labels_.push_back({bounds, text, color, z, wrap, pixel_size, left_align});
+  if (defer_glyphs_) {
     return;
   }
 

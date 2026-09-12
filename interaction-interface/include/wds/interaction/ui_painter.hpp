@@ -32,6 +32,16 @@ struct UiPaintSprite {
   float alpha_top = -1.0f;
 };
 
+struct UiPaintLabel {
+  Rect bounds;
+  std::string text;
+  Color color;
+  float z = 0.91f;
+  bool wrap = false;
+  float pixel_size = 0.0f;
+  bool left_align = false;
+};
+
 // Collects screen-space paint commands; flush to DrawBatch with a 1×1 white texture.
 class UiPainter {
  public:
@@ -72,10 +82,15 @@ class UiPainter {
 
   void reserve_rects(std::size_t n);
 
+  // When true, label() records UiPaintLabel only (no FontAtlas / bitmap glyphs).
+  // Qt flushes those labels with QFont; Vulkan leaves this off.
+  void set_defer_glyphs(bool on) noexcept { defer_glyphs_ = on; }
+
   const std::vector<UiPaintRect>& rects() const noexcept { return rects_; }
   const std::vector<UiPaintRect>& front_rects() const noexcept { return front_rects_; }
   const std::vector<UiPaintSprite>& sprites() const noexcept { return sprites_; }
   const std::vector<UiPaintSprite>& behind_sprites() const noexcept { return behind_sprites_; }
+  const std::vector<UiPaintLabel>& labels() const noexcept { return labels_; }
 
   // Appends into `batch` (does not clear). Callers that rebuild a frame must
   // `batch.clear()` first; otherwise prior verts accumulate across frames.
@@ -88,7 +103,9 @@ class UiPainter {
   std::vector<UiPaintRect> front_rects_;
   std::vector<UiPaintSprite> sprites_;
   std::vector<UiPaintSprite> behind_sprites_;
+  std::vector<UiPaintLabel> labels_;
   wds::renderer::TextureInfo soft_disk_{};
+  bool defer_glyphs_ = false;
 };
 
 wds::renderer::Quad rect_to_quad(const Rect& rect, int framebuffer_width, int framebuffer_height,

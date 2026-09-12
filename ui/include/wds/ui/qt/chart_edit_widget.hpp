@@ -5,6 +5,8 @@
 #include <chrono>
 #include <functional>
 
+class QInputMethodEvent;
+
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 
 namespace wds::ui {
@@ -30,11 +32,14 @@ class ChartEditWidget final : public QWidget {
   void wheelEvent(QWheelEvent*) override;
   void keyPressEvent(QKeyEvent*) override;
   void keyReleaseEvent(QKeyEvent*) override;
+  void inputMethodEvent(QInputMethodEvent*) override;
 
  private:
   wds::interaction::Modifiers mods(Qt::KeyboardModifiers) const;
   wds::interaction::Vec2 point(const QPointF&) const;
+  void present_qt_modals();
   ChartEditPanel* panel_ = nullptr;
+  bool qt_modal_open_ = false;
   QPixmap background_, judgment_, red_, yellow_, blue_, purple_, tick_blue_, tick_purple_, arrow_;
   std::chrono::steady_clock::time_point last_tick_;
   std::function<void(const wds::interaction::KeyDownEvent&)> global_key_handler_;

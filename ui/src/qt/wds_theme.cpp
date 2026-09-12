@@ -23,7 +23,7 @@ namespace wds::ui {
 namespace {
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).
-constexpr double kFontScale = 10.0;  // pt
+constexpr double kFontScale = 12.0;  // pt — matches QApplication and edit-canvas labels
 constexpr double kPadding = 4.0;
 
 struct Var {
