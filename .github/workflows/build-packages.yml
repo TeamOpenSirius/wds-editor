@@ -77,9 +77,9 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          archives: qtbase icu
+          archives: qtbase qtsvg icu
           cache: true
-          cache-key-prefix: qt-host-6.8.3-qtbase-icu
+          cache-key-prefix: qt-host-6.8.3-qtbase-qtsvg-icu
           dir: ${{ github.workspace }}/qt-host
 
       - name: Install MinGW Qt
@@ -89,9 +89,9 @@ jobs:
           host: windows
           target: desktop
           arch: win64_mingw
-          archives: qtbase
+          archives: qtbase qtsvg
           cache: true
-          cache-key-prefix: qt-mingw-6.8.3-qtbase
+          cache-key-prefix: qt-mingw-6.8.3-qtbase-qtsvg
           dir: ${{ github.workspace }}/qt-mingw
           set-env: false
           setup-python: false
@@ -114,6 +114,8 @@ jobs:
           echo "Host Qt: ${QT_ROOT_DIR}"
           echo "MinGW Qt: ${mingw_root}"
           test -f "${mingw_root}/lib/cmake/Qt6/Qt6Config.cmake"
+          test -f "${mingw_root}/plugins/imageformats/qsvg.dll"
+          test -f "${mingw_root}/lib/cmake/Qt6Svg/Qt6SvgConfig.cmake"
           "${QT_ROOT_DIR}/libexec/rcc" -help >/dev/null
           python3 -m pip install --user pillow
           python3 -c "from PIL import Image"
@@ -147,7 +149,8 @@ jobs:
           if brew list --versions qt@5 >/dev/null 2>&1; then
             brew unlink qt@5
           fi
-          brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase
+          brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase qtsvg
+          test -f "$(brew --prefix qtsvg)/share/qt/plugins/imageformats/libqsvg.dylib"
 
       - name: Setup Python packaging tools
         run: |

@@ -125,6 +125,7 @@ std::string resolve_editor_config_path(const char* argv0);
 
 // Returns false if the file is missing or unreadable; `out` left unchanged on hard failure
 // of open, but partially parsed keys still apply when the file exists.
+// Legacy shortcut spellings (Cmd/Option/Shift+Ctrl) are rewritten to PortableText.
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out);
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg);
 

@@ -324,8 +324,18 @@ void UiManager::bind_editor_shortcuts() {
   editor.bind(chord_toggle_fullscreen(), [this] {
     if (fullscreen_toggler_) fullscreen_toggler_();
   });
-  editor.bind(chord_save(), [this] { save_current_project(); });
+  editor.bind(chord_save(), [this] {
+    if (save_project_handler_) {
+      save_project_handler_();
+      return;
+    }
+    save_current_project();
+  });
   editor.bind(chord_open(), [this] {
+    if (open_project_handler_) {
+      open_project_handler_();
+      return;
+    }
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
         (void)session_->open_wdsproject(*path);
@@ -583,12 +593,9 @@ void UiManager::resize_preview_viewport(int logical_width, int logical_height,
   const int fb_w = std::max(1, framebuffer_width);
   const int fb_h = std::max(1, framebuffer_height);
   chart_preview_->resize_framebuffer(fb_w, fb_h);
-  const float aspect = EditorLayouter::kPreviewAspect;
-  const int stage_w = std::max(1, std::min(fb_w, static_cast<int>(std::lround(fb_h * aspect))));
-  const int stage_h = std::max(1, static_cast<int>(std::lround(stage_w / aspect)));
-  chart_preview_->set_panel_bounds(0, 0, fb_w, fb_h);
-  chart_preview_->set_content_bounds((fb_w - stage_w) / 2, (fb_h - stage_h) / 2, stage_w,
-                                     stage_h);
+  const auto stage = preview_contain_rect(fb_w, fb_h);
+  chart_preview_->set_panel_bounds(stage.x, stage.y, stage.width, stage.height);
+  chart_preview_->set_content_bounds(stage.x, stage.y, stage.width, stage.height);
 }
 
 bool UiManager::save_current_project() {
@@ -779,16 +786,11 @@ void UiManager::resize(int logical_width, int logical_height, int framebuffer_wi
     const float full_h = static_cast<float>(height_);
     const float left_w = std::max(1.0f, full_w * 0.45f);
     const float edit_w = std::max(1.0f, full_w - left_w);
-    const float stage_w = std::min(left_w, full_h * EditorLayouter::kPreviewAspect);
-    const float stage_h = stage_w / EditorLayouter::kPreviewAspect;
+    const auto stage = preview_contain_rect(static_cast<int>(left_w), static_cast<int>(full_h));
     computed.regions = {};
     computed.regions.preview = {0.0f, 0.0f, left_w, full_h};
     computed.regions.edit = {left_w, 0.0f, edit_w, full_h};
-    computed.preview_content = {
-        static_cast<int>((left_w - stage_w) * 0.5f),
-        static_cast<int>((full_h - stage_h) * 0.5f),
-        std::max(1, static_cast<int>(stage_w)),
-        std::max(1, static_cast<int>(stage_h))};
+    computed.preview_content = stage;
   }
   layout_ = computed.regions;
   root_.set_bounds({0, 0, static_cast<float>(width_), static_cast<float>(height_)});

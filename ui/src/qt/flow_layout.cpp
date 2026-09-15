@@ -1,11 +1,28 @@
 #include "wds/ui/qt/flow_layout.hpp"
 
+#include "wds/ui/qt/spread_layout.hpp"
+
 #include <QWidget>
 
-namespace wds::ui {
+#include <algorithm>
+#include <vector>
 
-FlowLayout::FlowLayout(QWidget* parent, int margin, int h_spacing, int v_spacing)
-    : QLayout(parent), h_space_(h_spacing), v_space_(v_spacing) {
+namespace wds::ui {
+namespace {
+
+int item_hint_w(const QLayoutItem* item) {
+  return std::max(item->minimumSize().width(), item->sizeHint().width());
+}
+
+int item_hint_h(const QLayoutItem* item) {
+  return std::max(item->minimumSize().height(), item->sizeHint().height());
+}
+
+}  // namespace
+
+FlowLayout::FlowLayout(QWidget* parent, int margin, int h_spacing, int v_spacing,
+                       int h_spacing_max)
+    : QLayout(parent), h_space_(h_spacing), v_space_(v_spacing), h_space_max_(h_spacing_max) {
   setContentsMargins(margin, margin, margin, margin);
 }
 
@@ -32,7 +49,9 @@ QLayoutItem* FlowLayout::takeAt(int index) {
   return nullptr;
 }
 
-Qt::Orientations FlowLayout::expandingDirections() const { return {}; }
+Qt::Orientations FlowLayout::expandingDirections() const {
+  return Qt::Horizontal | Qt::Vertical;
+}
 
 bool FlowLayout::hasHeightForWidth() const { return true; }
 
@@ -45,11 +64,24 @@ void FlowLayout::setGeometry(const QRect& rect) {
   do_layout(rect, false);
 }
 
-QSize FlowLayout::sizeHint() const { return minimumSize(); }
+QSize FlowLayout::sizeHint() const {
+  int w = 0;
+  int h = 0;
+  const int gap = std::max(0, horizontalSpacing());
+  for (int i = 0; i < items_.size(); ++i) {
+    if (i > 0) w += gap;
+    w += item_hint_w(items_[i]);
+    h = std::max(h, item_hint_h(items_[i]));
+  }
+  const QMargins margins = contentsMargins();
+  return {w + margins.left() + margins.right(), h + margins.top() + margins.bottom()};
+}
 
 QSize FlowLayout::minimumSize() const {
   QSize size;
-  for (const QLayoutItem* item : items_) size = size.expandedTo(item->minimumSize());
+  for (const QLayoutItem* item : items_) {
+    size = size.expandedTo(QSize(item_hint_w(item), item_hint_h(item)));
+  }
   const QMargins margins = contentsMargins();
   size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom());
   return size;
@@ -62,34 +94,77 @@ int FlowLayout::do_layout(const QRect& rect, bool test_only) const {
   int bottom = 0;
   getContentsMargins(&left, &top, &right, &bottom);
   const QRect effective = rect.adjusted(left, top, -right, -bottom);
-  int x = effective.x();
-  int y = effective.y();
-  int line_height = 0;
+  const int min_gap = std::max(0, horizontalSpacing());
+  const int max_gap = h_space_max_ >= 0 ? h_space_max_ : kSpreadMaxGap;
+  const int space_y = std::max(0, verticalSpacing());
 
+  struct Line {
+    std::vector<QLayoutItem*> items;
+    int hint_w = 0;
+    int hint_h = 0;
+  };
+  std::vector<Line> lines;
+  Line current;
   for (QLayoutItem* item : items_) {
-    const QWidget* widget = item->widget();
-    int space_x = horizontalSpacing();
-    if (space_x == -1 && widget != nullptr) {
-      space_x = widget->style()->layoutSpacing(QSizePolicy::PushButton, QSizePolicy::PushButton,
-                                               Qt::Horizontal);
+    const int iw = item_hint_w(item);
+    const int ih = item_hint_h(item);
+    const int next_w = current.items.empty() ? iw : current.hint_w + min_gap + iw;
+    if (!current.items.empty() && next_w > effective.width() && effective.width() > 0) {
+      lines.push_back(current);
+      current = {};
     }
-    int space_y = verticalSpacing();
-    if (space_y == -1 && widget != nullptr) {
-      space_y = widget->style()->layoutSpacing(QSizePolicy::PushButton, QSizePolicy::PushButton,
-                                               Qt::Vertical);
-    }
-    int next_x = x + item->sizeHint().width() + space_x;
-    if (next_x - space_x > effective.right() && line_height > 0) {
-      x = effective.x();
-      y = y + line_height + space_y;
-      next_x = x + item->sizeHint().width() + space_x;
-      line_height = 0;
-    }
-    if (!test_only) item->setGeometry(QRect(QPoint(x, y), item->sizeHint()));
-    x = next_x;
-    line_height = qMax(line_height, item->sizeHint().height());
+    if (!current.items.empty()) current.hint_w += min_gap;
+    current.items.push_back(item);
+    current.hint_w += iw;
+    current.hint_h = std::max(current.hint_h, ih);
   }
-  return y + line_height - rect.y() + bottom;
+  if (!current.items.empty()) lines.push_back(current);
+
+  int tight_h = top + bottom;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    if (i > 0) tight_h += space_y;
+    tight_h += lines[i].hint_h;
+  }
+  if (test_only) return tight_h;
+
+  const int extra_h = std::max(0, rect.height() - tight_h);
+  const int slots = static_cast<int>(lines.size()) + 2;
+  const int pad = slots > 0 ? extra_h / slots : 0;
+  int rem = slots > 0 ? extra_h % slots : 0;
+  auto take = [&]() {
+    const int n = pad + (rem > 0 ? 1 : 0);
+    if (rem > 0) --rem;
+    return n;
+  };
+
+  int y = effective.y() + take();
+  for (std::size_t li = 0; li < lines.size(); ++li) {
+    const Line& line = lines[li];
+    const int line_h = line.hint_h + take();
+    const int n = static_cast<int>(line.items.size());
+    const int extra_w = std::max(0, effective.width() - line.hint_w);
+    const int gaps = std::max(0, n - 1);
+    const int gap_room = gaps * std::max(0, max_gap - min_gap);
+    const int gap_extra = std::min(extra_w, gap_room);
+    const int gap = gaps > 0 ? min_gap + gap_extra / gaps : min_gap;
+    int gap_rem = gaps > 0 ? gap_extra % gaps : 0;
+    const int used_w = line.hint_w + gap_extra;
+    int x = effective.x() + std::max(0, (effective.width() - used_w) / 2);
+    for (int i = 0; i < n; ++i) {
+      const int w = item_hint_w(line.items[i]);
+      const int h = item_hint_h(line.items[i]);
+      const int iy = y + std::max(0, (line_h - h) / 2);
+      line.items[i]->setGeometry(QRect(x, iy, w, h));
+      x += w;
+      if (i + 1 < n) {
+        x += gap + (gap_rem > 0 ? 1 : 0);
+        if (gap_rem > 0) --gap_rem;
+      }
+    }
+    y += line_h;
+    if (li + 1 < lines.size()) y += space_y;
+  }
+  return y + bottom - rect.y();
 }
 
 int FlowLayout::smart_spacing(QStyle::PixelMetric pm) const {

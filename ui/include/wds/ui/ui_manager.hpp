@@ -107,6 +107,12 @@ class UiManager {
   void set_fullscreen_toggler(std::function<void()> handler) {
     fullscreen_toggler_ = std::move(handler);
   }
+  void set_open_project_handler(std::function<void()> handler) {
+    open_project_handler_ = std::move(handler);
+  }
+  void set_save_project_handler(std::function<void()> handler) {
+    save_project_handler_ = std::move(handler);
+  }
   // If dirty, shows the in-app unsaved dialog and returns false (abort this close).
   // After Save/Discard, requests close again with a one-shot allow flag.
   bool confirm_close();
@@ -224,6 +230,8 @@ class UiManager {
   bool new_note_place_logic_ = false;
   std::function<void()> request_close_;
   std::function<void()> fullscreen_toggler_;
+  std::function<void()> open_project_handler_;
+  std::function<void()> save_project_handler_;
   std::function<void()> on_check_chart_;
   std::function<void(const CurveFillSelection&)> on_curve_fill_changed_;
   bool allow_close_once_ = false;

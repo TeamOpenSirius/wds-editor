@@ -7,19 +7,40 @@
 
 namespace wds::interaction::theme {
 
-// Material Design 3 dark surface tokens (simplified).
-inline constexpr Color kBackground{0.07f, 0.07f, 0.09f, 1.0f};
-inline constexpr Color kSurface{0.11f, 0.11f, 0.14f, 1.0f};
-inline constexpr Color kSurfaceVariant{0.16f, 0.16f, 0.20f, 1.0f};
-inline constexpr Color kPrimary{0.67f, 0.55f, 0.98f, 1.0f};
-inline constexpr Color kOnPrimary{0.10f, 0.06f, 0.18f, 1.0f};
-inline constexpr Color kOnSurface{0.90f, 0.89f, 0.93f, 1.0f};
-inline constexpr Color kOnSurfaceMuted{0.70f, 0.69f, 0.74f, 1.0f};
-inline constexpr Color kOutline{0.38f, 0.38f, 0.42f, 1.0f};
-inline constexpr Color kError{0.96f, 0.45f, 0.45f, 1.0f};
-inline constexpr Color kWarning{0.96f, 0.78f, 0.35f, 1.0f};
-inline constexpr Color kHoverOverlay{1.0f, 1.0f, 1.0f, 0.08f};
-inline constexpr Color kPressedOverlay{1.0f, 1.0f, 1.0f, 0.14f};
+enum class ColorScheme { Dark, Light };
+
+void apply_color_scheme(ColorScheme scheme) noexcept;
+ColorScheme color_scheme() noexcept;
+inline bool color_scheme_is_light() noexcept { return color_scheme() == ColorScheme::Light; }
+
+// Runtime surface tokens. Dark is the default; apply_color_scheme() switches Light.
+extern Color kBackground;
+extern Color kSurface;
+extern Color kSurfaceVariant;
+extern Color kPrimary;
+extern Color kOnPrimary;
+extern Color kOnSurface;
+extern Color kOnSurfaceMuted;
+extern Color kOutline;
+extern Color kError;
+extern Color kWarning;
+extern Color kHoverOverlay;
+extern Color kPressedOverlay;
+extern Color kEditChrome;
+extern Color kEditCanvas;
+extern Color kEditGutter;
+extern Color kEditLaneEdge;
+extern Color kEditLaneInner;
+extern Color kEditGridBeat;
+extern Color kEditGridSubdiv;
+extern Color kEditGridMeasure;
+extern Color kEditGridNegative;
+extern Color kEditWaveform;
+extern Color kEditMeasureIndex;
+// Same sky-blue selection in Light and Dark — yellow washes out on the light canvas.
+inline constexpr Color kEditSelection{0.25f, 0.77f, 1.00f, 1.0f};
+inline constexpr Color kEditSelectionGlow{0.22f, 0.70f, 1.00f, 0.28f};
+inline constexpr Color kEditSelectionInner{0.78f, 0.93f, 1.00f, 0.95f};
 
 inline constexpr float kPressedScale = 0.97f;
 

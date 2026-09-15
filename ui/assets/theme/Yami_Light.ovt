@@ -247,11 +247,15 @@ QDateTimeEdit::down-arrow:editable {
     image: url(theme:Light/collapse.svg);
 }
 
-QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
+QSpinBox::up-arrow:off, QDoubleSpinBox::up-arrow:off,
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {
     image: url(theme:Light/up.svg);
 }
 
-QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow,
+QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off,
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
     image: url(theme:Light/down.svg);
 }
 

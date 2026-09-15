@@ -37,6 +37,7 @@ class ShortcutNamespace {
   bool bind_primary(KeyCode key, ShortcutAction action, bool shift = false);
   void clear() noexcept;
   bool dispatch(const KeyDownEvent& event) const;
+  bool contains(const KeyDownEvent& event) const;
 
   std::size_t size() const noexcept { return bindings_.size(); }
 
@@ -52,6 +53,7 @@ class ShortcutManager {
   void set_active_namespace(const std::string& name);
   const std::string& active_namespace() const noexcept { return active_; }
 
+  bool contains(const KeyDownEvent& event) const;
   bool dispatch(const KeyDownEvent& event) const;
 
  private:

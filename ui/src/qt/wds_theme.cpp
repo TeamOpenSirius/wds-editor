@@ -1,15 +1,31 @@
 #include "wds/ui/qt/wds_theme.hpp"
 
+#include <wds/interaction/theme.hpp>
+
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QColor>
+#include <QCursor>
+#include <QSettings>
+#include <QStyleHints>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
+#include <QGuiApplication>
 #include <QHash>
+#include <QHeaderView>
+#include <QImageReader>
+#include <QMargins>
 #include <QMetaEnum>
 #include <QPalette>
+#include <QPointer>
 #include <QRegularExpression>
+#include <QScrollBar>
+#include <QStyle>
 #include <QStyleFactory>
 #include <QTextStream>
+#include <QTimer>
+#include <QWidget>
 
 #include <cmath>
 #include <algorithm>
@@ -21,6 +37,231 @@
 // deliberately not the full OBS engine (no watchers/user density).
 namespace wds::ui {
 namespace {
+
+// Yami QSS paints QScrollBar, which makes QStyleSheetStyle force
+// SH_ScrollBar_Transient=0 and PM_ScrollView_ScrollBarOverlap=0. Qt then insets
+// the viewport. Negative viewport margins cancel that inset so bars float over
+// the content instead of pushing it aside.
+class OverlayScrollAccess : public QAbstractScrollArea {
+ public:
+  using QAbstractScrollArea::setViewportMargins;
+  using QAbstractScrollArea::viewportMargins;
+};
+
+class OverlayScrollFilter final : public QObject {
+  struct AreaState {
+    QPointer<QAbstractScrollArea> area;
+    QTimer* hide_timer = nullptr;
+    bool hovered = false;
+  };
+
+ public:
+  explicit OverlayScrollFilter(QObject* parent) : QObject(parent) {}
+
+  void attach(QAbstractScrollArea* area) {
+    if (area == nullptr || qobject_cast<QHeaderView*>(area) || states_.contains(area)) return;
+    area->setProperty("wdsOverlayScroll", true);
+    auto* state = new AreaState;
+    state->area = area;
+    state->hide_timer = new QTimer(area);
+    state->hide_timer->setSingleShot(true);
+    state->hide_timer->setInterval(800);
+    QObject::connect(state->hide_timer, &QTimer::timeout, this, [this, area] { hide_idle(area); });
+    states_.insert(area, state);
+    QObject::connect(area, &QObject::destroyed, this, [this, area] { delete states_.take(area); });
+
+    const auto sync = [this, area](int, int) {
+      apply(area);
+      AreaState* state = states_.value(area);
+      if (state == nullptr) return;
+      set_visual(area, state->hovered || slider_down(area) || state->hide_timer->isActive());
+    };
+    QObject::connect(area->verticalScrollBar(), &QScrollBar::rangeChanged, area, sync);
+    QObject::connect(area->horizontalScrollBar(), &QScrollBar::rangeChanged, area, sync);
+    const auto flash = [this, area](int) { reveal(area); };
+    QObject::connect(area->verticalScrollBar(), &QScrollBar::valueChanged, area, flash);
+    QObject::connect(area->horizontalScrollBar(), &QScrollBar::valueChanged, area, flash);
+    QObject::connect(area->verticalScrollBar(), &QScrollBar::sliderPressed, area,
+                     [this, area] { reveal(area); });
+    QObject::connect(area->horizontalScrollBar(), &QScrollBar::sliderPressed, area,
+                     [this, area] { reveal(area); });
+    QObject::connect(area->verticalScrollBar(), &QScrollBar::sliderReleased, area,
+                     [this, area] { schedule_hide(area); });
+    QObject::connect(area->horizontalScrollBar(), &QScrollBar::sliderReleased, area,
+                     [this, area] { schedule_hide(area); });
+
+    if (QWidget* viewport = area->viewport()) {
+      viewport->setMouseTracking(true);
+      viewport->setAttribute(Qt::WA_Hover, true);
+    }
+    area->setMouseTracking(true);
+    apply(area);
+    set_visual(area, false);
+  }
+
+  void apply(QAbstractScrollArea* area) {
+    if (area == nullptr || qobject_cast<QHeaderView*>(area) ||
+        area->property("wdsOverlayBusy").toBool()) {
+      return;
+    }
+    area->setProperty("wdsOverlayBusy", true);
+    const int vw = area->verticalScrollBar()->sizeHint().width();
+    const int hh = area->horizontalScrollBar()->sizeHint().height();
+    const bool v = bar_needed(area->verticalScrollBar(), area->verticalScrollBarPolicy());
+    const bool h = bar_needed(area->horizontalScrollBar(), area->horizontalScrollBarPolicy());
+    const QMargins want(0, 0, v ? -vw : 0, h ? -hh : 0);
+    auto* access = static_cast<OverlayScrollAccess*>(area);
+    if (access->viewportMargins() != want) access->setViewportMargins(want);
+    if (QWidget* parent = area->verticalScrollBar()->parentWidget()) parent->raise();
+    if (QWidget* parent = area->horizontalScrollBar()->parentWidget()) parent->raise();
+    area->setProperty("wdsOverlayBusy", false);
+  }
+
+  bool eventFilter(QObject* watched, QEvent* event) override {
+    const auto type = event->type();
+    if (type == QEvent::Polish || type == QEvent::Show) {
+      if (auto* area = qobject_cast<QAbstractScrollArea*>(watched)) attach(area);
+      return false;
+    }
+    if (type == QEvent::StyleChange) {
+      if (auto* area = qobject_cast<QAbstractScrollArea*>(watched)) apply(area);
+      return false;
+    }
+    if (states_.isEmpty()) return false;
+    if (type != QEvent::MouseMove && type != QEvent::HoverMove && type != QEvent::Wheel &&
+        type != QEvent::Leave && type != QEvent::Enter && type != QEvent::HoverEnter &&
+        type != QEvent::HoverLeave) {
+      return false;
+    }
+    auto* widget = qobject_cast<QWidget*>(watched);
+    if (widget == nullptr) return false;
+    QAbstractScrollArea* area = enclosing_area(widget);
+    if (area == nullptr) return false;
+    if (type == QEvent::Wheel) reveal(area);
+    else update_hover(area);
+    return false;
+  }
+
+ private:
+  static bool bar_needed(QScrollBar* bar, Qt::ScrollBarPolicy policy) {
+    if (bar == nullptr || policy == Qt::ScrollBarAlwaysOff) return false;
+    if (policy == Qt::ScrollBarAlwaysOn) return true;
+    return bar->minimum() < bar->maximum();
+  }
+
+  static bool slider_down(const QAbstractScrollArea* area) {
+    return area->verticalScrollBar()->isSliderDown() ||
+           area->horizontalScrollBar()->isSliderDown();
+  }
+
+  static QWidget* bar_host(QScrollBar* bar) {
+    if (bar == nullptr) return nullptr;
+    return bar->parentWidget() != nullptr ? bar->parentWidget() : bar;
+  }
+
+  static bool point_over_bar(QAbstractScrollArea* area, const QPoint& global) {
+    auto hit = [&](QScrollBar* bar, Qt::ScrollBarPolicy policy) {
+      if (!bar_needed(bar, policy)) return false;
+      QWidget* host = bar_host(bar);
+      return host != nullptr && host->rect().contains(host->mapFromGlobal(global));
+    };
+    return hit(area->verticalScrollBar(), area->verticalScrollBarPolicy()) ||
+           hit(area->horizontalScrollBar(), area->horizontalScrollBarPolicy());
+  }
+
+  static void set_bar_idle(QScrollBar* bar, bool idle) {
+    if (bar->property("wdsIdle").toBool() == idle) return;
+    bar->setProperty("wdsIdle", idle);
+    if (QStyle* style = bar->style()) {
+      style->unpolish(bar);
+      style->polish(bar);
+    }
+    bar->update();
+  }
+
+  static void set_bar_visual(QScrollBar* bar, bool needed, bool shown) {
+    if (bar == nullptr) return;
+    QWidget* host = bar_host(bar);
+    if (!needed) {
+      bar->setVisible(false);
+      return;
+    }
+    bar->setVisible(true);
+    bar->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+    bar->setAttribute(Qt::WA_Hover, true);
+    bar->setMouseTracking(true);
+    if (host != nullptr) {
+      host->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+      host->setAttribute(Qt::WA_Hover, true);
+      host->setMouseTracking(true);
+      host->raise();
+    }
+    set_bar_idle(bar, !shown);
+  }
+
+  static void set_visual(QAbstractScrollArea* area, bool shown) {
+    set_bar_visual(area->verticalScrollBar(),
+                   bar_needed(area->verticalScrollBar(), area->verticalScrollBarPolicy()), shown);
+    set_bar_visual(area->horizontalScrollBar(),
+                   bar_needed(area->horizontalScrollBar(), area->horizontalScrollBarPolicy()),
+                   shown);
+  }
+
+  QAbstractScrollArea* enclosing_area(QWidget* widget) const {
+    for (QWidget* parent = widget; parent != nullptr; parent = parent->parentWidget()) {
+      if (auto* area = qobject_cast<QAbstractScrollArea*>(parent))
+        return states_.contains(area) ? area : nullptr;
+    }
+    return nullptr;
+  }
+
+  void reveal(QAbstractScrollArea* area) {
+    AreaState* state = states_.value(area);
+    if (state == nullptr) return;
+    set_visual(area, true);
+    if (state->hovered || slider_down(area)) state->hide_timer->stop();
+    else state->hide_timer->start();
+  }
+
+  void schedule_hide(QAbstractScrollArea* area) {
+    AreaState* state = states_.value(area);
+    if (state == nullptr || state->hovered || slider_down(area)) return;
+    state->hide_timer->start();
+  }
+
+  void hide_idle(QAbstractScrollArea* area) {
+    AreaState* state = states_.value(area);
+    if (state == nullptr || state->hovered || slider_down(area)) return;
+    set_visual(area, false);
+  }
+
+  void update_hover(QAbstractScrollArea* area) {
+    AreaState* state = states_.value(area);
+    if (state == nullptr) return;
+    const bool over = point_over_bar(area, QCursor::pos());
+    if (state->hovered == over) {
+      if (over) reveal(area);
+      return;
+    }
+    state->hovered = over;
+    if (over) reveal(area);
+    else schedule_hide(area);
+  }
+
+  QHash<QAbstractScrollArea*, AreaState*> states_;
+};
+
+void install_overlay_scrollbars(QApplication& app) {
+  static OverlayScrollFilter* filter = nullptr;
+  if (filter == nullptr) {
+    filter = new OverlayScrollFilter(&app);
+    app.installEventFilter(filter);
+  }
+  const auto widgets = app.allWidgets();
+  for (QWidget* widget : widgets) {
+    if (auto* area = qobject_cast<QAbstractScrollArea*>(widget)) filter->attach(area);
+  }
+}
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).
 constexpr double kFontScale = 12.0;  // pt — matches QApplication and edit-canvas labels
@@ -307,7 +548,47 @@ QString file_for_theme(const QString& theme_dir, const QString& theme_id) {
   return {};
 }
 
+constexpr auto kPrefSystem = "system";
+constexpr auto kPrefLight = "light";
+constexpr auto kPrefDark = "dark";
+constexpr auto kIdYami = "com.obsproject.Yami";
+constexpr auto kIdLight = "com.obsproject.Yami.Light";
+
 }  // namespace
+
+QString normalize_theme_preference(const QString& stored) {
+  if (stored == QLatin1String(kPrefLight) || stored == QLatin1String(kIdLight))
+    return QStringLiteral("light");
+  if (stored == QLatin1String(kPrefDark) || stored == QLatin1String(kIdYami))
+    return QStringLiteral("dark");
+  if (stored.startsWith(QLatin1String("com.obsproject.Yami"))) return QStringLiteral("dark");
+  return QStringLiteral("system");
+}
+
+QString resolve_obs_theme_id(const QString& preference) {
+  const QString pref = normalize_theme_preference(preference);
+  if (pref == QLatin1String(kPrefLight)) return QStringLiteral("com.obsproject.Yami.Light");
+  if (pref == QLatin1String(kPrefDark)) return QStringLiteral("com.obsproject.Yami");
+  const auto scheme = QGuiApplication::styleHints()->colorScheme();
+  return scheme == Qt::ColorScheme::Light ? QStringLiteral("com.obsproject.Yami.Light")
+                                          : QStringLiteral("com.obsproject.Yami");
+}
+
+void watch_system_color_scheme(QApplication& app, const QString& theme_dir) {
+  static QString dir;
+  dir = theme_dir;
+  static bool connected = false;
+  if (connected) return;
+  connected = true;
+  QObject::connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, &app,
+                   [&app](Qt::ColorScheme) {
+                     const QString pref = normalize_theme_preference(
+                         QSettings(QStringLiteral("WDS"), QStringLiteral("WDS Editor"))
+                             .value(QStringLiteral("appearance/theme"))
+                             .toString());
+                     if (pref == QLatin1String(kPrefSystem)) apply_wds_theme(app, dir, pref);
+                   });
+}
 
 QVector<ThemeInfo> available_themes(const QString& theme_dir) {
   QVector<ThemeInfo> out;
@@ -331,6 +612,12 @@ QVector<ThemeInfo> available_themes(const QString& theme_dir) {
 }
 
 void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString& theme_id) {
+  watch_system_color_scheme(app, theme_dir);
+  const QString obs_id = resolve_obs_theme_id(theme_id);
+  wds::interaction::theme::apply_color_scheme(
+      obs_id == QLatin1String("com.obsproject.Yami.Light")
+          ? wds::interaction::theme::ColorScheme::Light
+          : wds::interaction::theme::ColorScheme::Dark);
   QApplication::setStyle(QStyleFactory::create("Fusion"));
 
   const QString base_content = read_file(QDir(theme_dir).filePath(QStringLiteral("Yami.obt")));
@@ -338,8 +625,8 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
 
   // Optional variant layered on the base (overrides vars, appends QSS).
   QString variant_content;
-  if (!theme_id.isEmpty() && theme_id != QStringLiteral("com.obsproject.Yami")) {
-    const QString path = file_for_theme(theme_dir, theme_id);
+  if (!obs_id.isEmpty() && obs_id != QStringLiteral("com.obsproject.Yami")) {
+    const QString path = file_for_theme(theme_dir, obs_id);
     if (!path.isEmpty()) variant_content = read_file(path);
   }
 
@@ -364,11 +651,36 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
     qss.replace(QStringLiteral("var(%1)").arg(name), resolved_string(vars, name));
   }
 
-  // 4. Rewrite url(theme:...) to the bundled asset directory.
+  // 4. Rewrite theme: / :res/images/ urls to quoted absolute paths so spaces
+  // in "WDS Editor.app" do not break QSS parsing.
   const QString base = QDir(theme_dir).absolutePath();
-  qss.replace(QRegularExpression(R"(url\(\s*theme:)"),
-              QStringLiteral("url(%1/").arg(base));
-  qss.replace(QStringLiteral(":res/images/"), base + QStringLiteral("/Common/"));
+  {
+    static const QRegularExpression themeUrlRe(R"(url\(\s*theme:([^)]+)\))");
+    QString rewritten;
+    rewritten.reserve(qss.size() + 64);
+    int last = 0;
+    auto it = themeUrlRe.globalMatch(qss);
+    while (it.hasNext()) {
+      const auto m = it.next();
+      rewritten += qss.mid(last, m.capturedStart() - last);
+      const QString abs =
+          QDir::fromNativeSeparators(QDir(base).filePath(m.captured(1).trimmed()));
+      rewritten += QStringLiteral("url(\"%1\")").arg(abs);
+      last = m.capturedEnd();
+    }
+    rewritten += qss.mid(last);
+    qss = std::move(rewritten);
+  }
+  qss.replace(QStringLiteral(":res/images/"),
+              QDir::fromNativeSeparators(base + QStringLiteral("/Common/")));
+
+  // QtGui cannot decode SVG unless the Qt Svg image plugin is present. Yami
+  // paints QCheckBox (and other) indicators with image:url(*.svg); a missing
+  // decoder leaves a blank box. Drop those rules so Fusion draws the control.
+  if (!QImageReader::supportedImageFormats().contains("svg")) {
+    qss.remove(QRegularExpression(R"(image:\s*url\("[^"]+\.svg"\);)"));
+    qss.remove(QRegularExpression(R"(image:\s*url\([^)]+\.svg\);)"));
+  }
 
   // 5. Force the bundled Noto Sans SC as the primary family so CJK renders and
   // the theme's 'Open Sans' fallback (unbundled, Latin-only) doesn't win.
@@ -393,6 +705,9 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
   }
   app.setPalette(pal);
   app.setStyleSheet(qss);
+  install_overlay_scrollbars(app);
+  const auto widgets = app.allWidgets();
+  for (QWidget* widget : widgets) widget->update();
 }
 
 }  // namespace wds::ui

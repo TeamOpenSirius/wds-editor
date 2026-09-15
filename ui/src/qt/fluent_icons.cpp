@@ -6,6 +6,7 @@
 #include <QPainterPath>
 #include <QPalette>
 #include <QPixmap>
+#include <QSvgRenderer>
 
 namespace wds::ui {
 namespace {
@@ -63,6 +64,37 @@ QIcon fluent_icon(char32_t glyph, const QColor& color, int px) {
 
   QIcon icon(pm);
   // Provide a dim variant so disabled toolbar actions read correctly.
+  QPixmap disabled = pm;
+  {
+    QPainter dp(&disabled);
+    dp.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+    dp.fillRect(disabled.rect(), QColor(0, 0, 0, 90));
+  }
+  icon.addPixmap(disabled, QIcon::Disabled);
+  return icon;
+}
+
+QIcon themed_svg_icon(const QString& path, const QColor& color, int px) {
+  if (path.isEmpty() || px <= 0) return {};
+  QSvgRenderer renderer(path);
+  if (!renderer.isValid()) return {};
+  const qreal dpr = qApp != nullptr ? qApp->devicePixelRatio() : 1.0;
+  const QColor tint = color.isValid()
+                          ? color
+                          : (qApp != nullptr ? qApp->palette().color(QPalette::WindowText)
+                                             : QColor(Qt::white));
+
+  QPixmap pm(QSize(px, px) * dpr);
+  pm.setDevicePixelRatio(dpr);
+  pm.fill(Qt::transparent);
+  QPainter p(&pm);
+  p.setRenderHint(QPainter::Antialiasing);
+  renderer.render(&p, QRectF(0, 0, px, px));
+  p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+  p.fillRect(QRectF(0, 0, px, px), tint);
+  p.end();
+
+  QIcon icon(pm);
   QPixmap disabled = pm;
   {
     QPainter dp(&disabled);

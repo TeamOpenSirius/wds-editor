@@ -142,14 +142,10 @@ int main() {
          "vertical when dx from press is small even if note-center dx is large");
 
   Modifiers primary;
-#ifdef __APPLE__
-  primary.super = true;
-#else
   primary.control = true;
-#endif
   expect(primary_modifier_down(primary), "primary modifier recognized");
   const Modifiers normalized = normalize_primary(primary);
-  expect(normalized.control && !normalized.super, "primary normalized to control");
+  expect(normalized.control && !normalized.super, "primary is Qt ControlModifier");
 
   FloatStepper speed;
   speed.set_bounds({0, 0, 120, 32});
@@ -326,11 +322,7 @@ int main() {
   {
     Modifiers curve_chord;
     curve_chord.shift = true;
-#ifdef __APPLE__
-    curve_chord.super = true;
-#else
     curve_chord.control = true;
-#endif
     expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Right, curve_chord}, false),
            "curve chord is not a normal hold star");
     expect(!is_place_hold_star(PointerDownEvent{{0, 0}, PointerButton::Left, curve_chord}, true),
@@ -402,21 +394,30 @@ int main() {
       const std::string shown = format_shortcut_chord(*parsed);
       expect(shown.find('C') != std::string::npos, "format contains C");
 #ifdef __APPLE__
-      expect(shown.find("Cmd") != std::string::npos, "Apple format uses Cmd");
+      expect(shown.find("⌘") != std::string::npos, "Apple display uses ⌘");
 #else
-      expect(shown.find("Ctrl") != std::string::npos, "non-Apple format uses Ctrl");
+      expect(shown.find("Ctrl") != std::string::npos, "non-Apple display uses Ctrl");
 #endif
+      expect(format_shortcut_chord_portable(*parsed) == "Ctrl+Shift+C",
+             "portable save is Ctrl+Shift+C");
     }
     expect(parse_shortcut_chord("Cmd+S").has_value(), "parse Cmd+S");
+    expect(parse_shortcut_chord("⌘S").has_value(), "parse native ⌘S");
+    expect(parse_shortcut_chord("⇧⌘M").has_value() &&
+               parse_shortcut_chord("⇧⌘M")->mods.shift &&
+               parse_shortcut_chord("⇧⌘M")->mods.control,
+           "parse native ⇧⌘M");
     expect(parse_shortcut_chord("").has_value() == false, "empty parse fails");
     expect(parse_shortcut_chord("Shift").has_value() == false, "mods-only parse fails");
   }
-  // Round-trip every default binding through format/parse.
+  // Round-trip every default binding through display and portable format/parse.
   for (std::size_t i = 0; i < kEditorShortcutCount; ++i) {
     const auto id = static_cast<EditorShortcut>(i);
     const ShortcutChord def = default_editor_shortcut(id);
     const auto again = parse_shortcut_chord(format_shortcut_chord(def));
     expect(again.has_value() && *again == def, editor_shortcut_id(id));
+    const auto portable = parse_shortcut_chord(format_shortcut_chord_portable(def));
+    expect(portable.has_value() && *portable == def, editor_shortcut_id(id));
   }
   expect(!editor_shortcut_conflicts(EditorShortcut::Copy, chord_copy()),
          "self chord is not a conflict");
@@ -1306,11 +1307,7 @@ int main() {
   {
     Modifiers curve;
     curve.shift = true;
-#ifdef __APPLE__
-    curve.super = true;
-#else
     curve.control = true;
-#endif
     expect(is_curve_fill_modifiers(curve), "Shift+primary activates curve fill");
     expect(is_curve_fill_modifier_press(KeyDownEvent{KeyCode::Unknown, curve, false}),
            "non-repeat Shift+primary is a curve-fill press");
@@ -1330,13 +1327,9 @@ int main() {
 
     Modifiers wrong_primary;
     wrong_primary.shift = true;
-#ifdef __APPLE__
-    wrong_primary.control = true;
-#else
     wrong_primary.super = true;
-#endif
     expect(!is_curve_fill_modifiers(wrong_primary),
-           "non-platform primary with Shift does not activate");
+           "Meta+Shift does not activate curve fill");
 
     expect(is_curve_fill_placement_allowed(true, true),
            "PlaceHoldBody ScratchHold may enter curve fill");
@@ -1388,11 +1381,7 @@ int main() {
     expect(!is_visible_range_wheel_modifiers(Modifiers{}),
            "plain wheel does not adjust visible range");
     Modifiers extra_primary = primary_only;
-#ifdef __APPLE__
-    extra_primary.control = true;
-#else
     extra_primary.super = true;
-#endif
     expect(!is_visible_range_wheel_modifiers(extra_primary),
            "extra modifier blocks visible-range wheel");
   }

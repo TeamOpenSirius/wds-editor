@@ -1,17 +1,21 @@
 #include "wds/ui/qt/editor_main_window.hpp"
-#include "wds/ui/qt/flow_layout.hpp"
-#include "wds/ui/qt/note_icons.hpp"
+#include "wds/ui/qt/chart_edit_widget.hpp"
 #include "wds/ui/qt/playback_dock.hpp"
+#include "wds/ui/qt/qt_input_adapter.hpp"
 #include "wds/ui/qt/settings_dialog.hpp"
+#include "wds/ui/qt/curve_templates_panel.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/qt/about_dialog.hpp"
 #include "wds/ui/qt/busy_dialog.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/editor_session.hpp"
+#include "wds/ui/resource_paths.hpp"
+#include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/core/chart_editor_engine.hpp"
 #include <QCloseEvent>
+#include <QEvent>
 #include <QHideEvent>
 #include <QShowEvent>
 #include <QResizeEvent>
@@ -19,13 +23,10 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QDockWidget>
-#include <QFormLayout>
-#include <QDoubleSpinBox>
-#include <QSpinBox>
+#include <QList>
 #include <QPushButton>
 #include <QMenu>
 #include <QToolBar>
-#include <QToolButton>
 #include <QKeySequence>
 #include <QFileDialog>
 #include <QMessageBox>
@@ -36,34 +37,40 @@
 #include <QListWidget>
 #include <QLineEdit>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QLabel>
-#include <QGridLayout>
+#include <QSizePolicy>
+#include <QWindow>
+#include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QSignalBlocker>
-#include <QScrollArea>
+#include <QLayout>
 #include <QKeyEvent>
 #include <QAbstractSpinBox>
 #include <QAbstractItemView>
 #include <QKeySequenceEdit>
+#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QApplication>
+#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QProgressBar>
 #include <QMetaObject>
-#include <QSizePolicy>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 #include <wds/interaction/editor_input.hpp>
 #include "wds/ui/curve_template.hpp"
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
-#include <optional>
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
 #endif
 
 namespace wds::ui {
+
 EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   setWindowTitle("WDS Editor");
   resize(1440, 900);
@@ -86,34 +93,63 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   auto* fileMenu = menuBar()->actions().at(0)->menu();
   auto* editMenu = menuBar()->actions().at(1)->menu();
   auto* viewMenu = menuBar()->actions().at(2)->menu();
-  auto* toolbar = addToolBar(tr("功能区"));
-  toolbar->setObjectName(QStringLiteral("editorToolBar"));
-  toolbar->setIconSize(QSize(20, 20));
-  toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  // Same eight commands as the old toolbar; undo/redo live in the 编辑 menu.
-  auto addCommand = [this, fileMenu, toolbar](const QString& text, const QKeySequence& shortcut,
-                                              const QString& tooltip) {
+  command_toolbar_ = addToolBar(tr("功能区"));
+  command_toolbar_->setObjectName(QStringLiteral("editorToolBar"));
+  command_toolbar_->setIconSize(QSize(22, 22));
+  command_toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  command_toolbar_->setMovable(true);
+  command_toolbar_->setFloatable(true);
+  command_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
+  command_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  // Theme QToolBar spacing is ignored or stacked; pin item spacing to 0 so the
+  // 4px spacers are the only gap (same as the convert ribbon).
+  command_toolbar_->setStyleSheet(QStringLiteral("QToolBar#editorToolBar { spacing: 0px; }"));
+  // File/edit commands, then convert. A trailing gap keeps the convert ribbon
+  // from sitting flush against the last command button.
+  bool first_command = true;
+  auto addCommand = [this, &first_command](QMenu* menu, const QString& text,
+                                           const QKeySequence& shortcut) {
+    if (!first_command) {
+      auto* gap = new QWidget(command_toolbar_);
+      gap->setFixedWidth(4);
+      gap->setAttribute(Qt::WA_TransparentForMouseEvents);
+      command_toolbar_->addWidget(gap);
+    }
+    first_command = false;
     auto* action = new QAction(text, this);
     action->setShortcut(shortcut);
-    action->setToolTip(tooltip);
-    fileMenu->addAction(action);
-    toolbar->addAction(action);
+    // QKeySequence::NativeText: ⌘ on macOS, Ctrl on Windows.
+    action->setToolTip(shortcut.isEmpty()
+                           ? text
+                           : text + QStringLiteral("（") +
+                                 shortcut.toString(QKeySequence::NativeText) +
+                                 QStringLiteral("）"));
+    if (menu != nullptr) menu->addAction(action);
+    command_toolbar_->addAction(action);
     return action;
   };
-  open_action_ = addCommand(tr("打开工程"), QKeySequence::Open, tr("打开 WDS 工程"));
-  save_action_ = addCommand(tr("保存工程"), QKeySequence::Save, tr("保存当前工程"));
-  import_action_ = addCommand(tr("导入谱面"), QKeySequence(), tr("导入官方谱面（只读）"));
-  export_action_ = addCommand(tr("导出"), QKeySequence(), tr("导出谱面 / 项目"));
-  music_action_ = addCommand(tr("导入音乐"), QKeySequence(), tr("导入 ogg / wav / mp3 音乐"));
-  curve_templates_action_ = addCommand(tr("曲线模板"), QKeySequence(), tr("编辑曲线模板"));
-  check_action_ = addCommand(tr("检查谱面"), QKeySequence(), tr("检查谱面错误"));
-  open_action_->setIcon(fluent_icon(fluent::OpenFolder));
-  save_action_->setIcon(fluent_icon(fluent::Save));
-  import_action_->setIcon(fluent_icon(fluent::Import));
-  export_action_->setIcon(fluent_icon(fluent::Export));
-  music_action_->setIcon(fluent_icon(fluent::Music));
-  curve_templates_action_->setIcon(curve_template_icon());
-  check_action_->setIcon(fluent_icon(fluent::Checklist));
+  open_action_ = addCommand(fileMenu, tr("打开工程"), QKeySequence::Open);
+  save_action_ = addCommand(fileMenu, tr("保存工程"), QKeySequence::Save);
+  music_action_ = addCommand(fileMenu, tr("导入音乐"), {});
+  import_action_ = addCommand(fileMenu, tr("导入谱面"), {});
+  export_action_ = addCommand(fileMenu, tr("导出谱面"), {});
+  check_action_ = addCommand(fileMenu, tr("检查谱面"), {});
+  undo_action_ = addCommand(editMenu, tr("撤销"), QKeySequence::Undo);
+  redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
+  if (auto* layout = command_toolbar_->layout()) layout->setSpacing(0);
+  apply_command_icons();
+  auto* convert_gap = new QWidget(command_toolbar_);
+  convert_gap->setObjectName(QStringLiteral("commandConvertGap"));
+  convert_gap->setFixedWidth(48);
+  convert_gap->setAttribute(Qt::WA_TransparentForMouseEvents);
+  command_toolbar_->addWidget(convert_gap);
+  convert_toolbar_ = addToolBar(tr("转换"));
+  convert_toolbar_->setObjectName(QStringLiteral("convertToolBar"));
+  convert_toolbar_->setIconSize(QSize(26, 26));
+  convert_toolbar_->setMovable(true);
+  convert_toolbar_->setFloatable(true);
+  convert_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
+  convert_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   // 设置 lives in the top menu bar, not the toolbar.
   settings_action_ = new QAction(tr("设置"), this);
   settings_action_->setToolTip(tr("编辑器设置"));
@@ -126,77 +162,28 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
     AboutDialog(this).exec();
   });
 
-  undo_action_ = new QAction(tr("撤销"), this);
-  undo_action_->setShortcut(QKeySequence::Undo);
-  undo_action_->setIcon(fluent_icon(fluent::Undo));
-  redo_action_ = new QAction(tr("重做"), this);
-  redo_action_->setShortcut(QKeySequence::Redo);
-  redo_action_->setIcon(fluent_icon(fluent::Redo));
-  editMenu->addAction(undo_action_);
-  editMenu->addAction(redo_action_);
   statusBar()->showMessage(tr("就绪"));
 
-  settings_dock_ = new QDockWidget(tr("属性 / 设置"), this);
-  auto* settingsDock = settings_dock_;
-  settingsDock->setObjectName(QStringLiteral("previewSettingsDock"));
-  auto* settingsPanel = new QWidget(settingsDock);
-  auto* form = new QFormLayout(settingsPanel);
-  auto* speed = new QDoubleSpinBox(settingsPanel);
-  speed->setRange(1.0, 15.0); speed->setValue(5.0); speed->setSingleStep(0.1);
-  speed->setObjectName(QStringLiteral("noteSpeed"));
-  form->addRow(tr("音符速度"), speed);
-  auto* offset = new QSpinBox(settingsPanel);
-  offset->setRange(0, 100); offset->setSingleStep(5);
-  offset->setObjectName(QStringLiteral("noteStartOffset"));
-  form->addRow(tr("起始偏移"), offset);
-  auto* noteHeight = new QSpinBox(settingsPanel);
-  noteHeight->setRange(1, 10);
-  noteHeight->setObjectName(QStringLiteral("noteHeightLevel"));
-  form->addRow(tr("音符厚度"), noteHeight);
-  auto* splitOpacity = new QSpinBox(settingsPanel);
-  splitOpacity->setRange(10, 100); splitOpacity->setSingleStep(10);
-  splitOpacity->setObjectName(QStringLiteral("splitLineOpacity"));
-  form->addRow(tr("分割线透明度"), splitOpacity);
-  auto* lanes = new QSpinBox(settingsPanel);
-  lanes->setRange(1, 32); lanes->setValue(12);
-  lanes->setObjectName(QStringLiteral("laneCount"));
-  form->addRow(tr("轨道数量"), lanes);
-  // Scroll container keeps the form usable at any dock size / orientation.
-  auto* settingsScroll = new QScrollArea(settingsDock);
-  settingsScroll->setWidgetResizable(true);
-  settingsScroll->setFrameShape(QFrame::NoFrame);
-  settingsScroll->setWidget(settingsPanel);
-  settingsDock->setWidget(settingsScroll);
-  settingsDock->setMinimumWidth(200);
-  viewMenu->addAction(settingsDock->toggleViewAction());
-  auto* fullscreen = viewMenu->addAction(tr("全屏"));
-  fullscreen->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F11));
-  connect(fullscreen, &QAction::triggered, this, [this] {
+  fullscreen_action_ = viewMenu->addAction(tr("全屏"));
+  fullscreen_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F11));
+  fullscreen_action_->setToolTip(
+      tr("全屏") + QStringLiteral("（") +
+      fullscreen_action_->shortcut().toString(QKeySequence::NativeText) + QStringLiteral("）"));
+  connect(fullscreen_action_, &QAction::triggered, this, [this] {
     isFullScreen() ? showNormal() : showFullScreen();
   });
   auto* reset = viewMenu->addAction(tr("重置布局"));
   connect(reset, &QAction::triggered, this, [this] {
     QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
     prefs.remove("window/geometry");
-    prefs.remove("window/state-v4");
+    prefs.remove("window/state-v12");
+    prefs.remove("window/state-v13");
+    prefs.remove("window/state-v14");
+    prefs.remove("window/state-v15");
+    prefs.remove("window/state-v16");
     reset_default_layout();
   });
 
-  connect(speed, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
-    if (ui_manager_) ui_manager_->set_preview_note_speed(value);
-  });
-  auto applyDisplay = [this, speed, offset, noteHeight, splitOpacity] {
-    if (!ui_manager_) return;
-    ui_manager_->chart_preview().apply_display_settings(speed->value(), offset->value(),
-                                                         noteHeight->value(), splitOpacity->value());
-    ui_manager_->request_save_ui_config(false);
-  };
-  connect(offset, qOverload<int>(&QSpinBox::valueChanged), this, [applyDisplay](int) { applyDisplay(); });
-  connect(noteHeight, qOverload<int>(&QSpinBox::valueChanged), this, [applyDisplay](int) { applyDisplay(); });
-  connect(splitOpacity, qOverload<int>(&QSpinBox::valueChanged), this, [applyDisplay](int) { applyDisplay(); });
-  connect(lanes, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
-    if (ui_manager_) ui_manager_->set_preview_lane_count(value);
-  });
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   const auto geometry = prefs.value("window/geometry").toByteArray();
   if (geometry.isEmpty()) {
@@ -207,236 +194,200 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   // Dock state is restored in bind_ui_manager once every dock exists.
 }
 
-void EditorMainWindow::reset_default_layout() {
-  if (preview_dock_ == nullptr || editor_dock_ == nullptr) return;
-  const std::array<QDockWidget*, 6> docks = {preview_dock_,  editor_dock_, settings_dock_,
-                                             playback_dock_, audio_dock_,  toolbox_dock_};
-  for (auto* dock : docks) {
-    if (dock != nullptr) removeDockWidget(dock);
-  }
-  // Top row: preview | editor | 属性 (属性 pinned to its minimum on the right,
-  // preview/editor split the rest evenly). Bottom row: 播放 | 音频 | 工具箱.
-  addDockWidget(Qt::LeftDockWidgetArea, preview_dock_);
-  splitDockWidget(preview_dock_, editor_dock_, Qt::Horizontal);
-  if (settings_dock_ != nullptr) splitDockWidget(editor_dock_, settings_dock_, Qt::Horizontal);
-  if (playback_dock_ != nullptr) addDockWidget(Qt::BottomDockWidgetArea, playback_dock_);
-  if (playback_dock_ != nullptr && audio_dock_ != nullptr)
-    splitDockWidget(playback_dock_, audio_dock_, Qt::Horizontal);
-  if (audio_dock_ != nullptr && toolbox_dock_ != nullptr)
-    splitDockWidget(audio_dock_, toolbox_dock_, Qt::Horizontal);
-  for (auto* dock : docks) {
-    if (dock != nullptr) dock->show();
-  }
-  const int side = settings_dock_ != nullptr ? settings_dock_->minimumWidth() : 0;
-  const int half = std::max(200, (width() - side) / 2);
-  if (settings_dock_ != nullptr)
-    resizeDocks({preview_dock_, editor_dock_, settings_dock_}, {half, half, side},
-                Qt::Horizontal);
-  if (playback_dock_ != nullptr && audio_dock_ != nullptr && toolbox_dock_ != nullptr) {
-    const int w = std::max(600, width());
-    resizeDocks({playback_dock_, audio_dock_, toolbox_dock_},
-                {w * 2 / 5, w / 5, w * 2 / 5}, Qt::Horizontal);
-    // Set the default once when resetting the layout. Do not enforce this in
-    // resizeEvent: the user may drag the dock separator to choose a height.
-    resizeDocks({playback_dock_, audio_dock_, toolbox_dock_}, {200, 200, 200},
-                Qt::Vertical);
-  }
-  QTimer::singleShot(0, this, [this] {
-    bottom_row_heights_.fill(200);
-    restore_bottom_row();
-    QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
-    for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-      update_control_dock_height(dock);
-    }
-  });
+std::array<QDockWidget*, 6> EditorMainWindow::chrome_docks() const {
+  return {preview_dock_, editor_dock_, playback_dock_, toolbar_dock_, curve_dock_,
+          settings_dock_};
 }
 
-void EditorMainWindow::create_playback_and_toolbox_docks() {
+void EditorMainWindow::add_dock_toggle(QDockWidget* dock) {
+  if (dock == nullptr || fullscreen_action_ == nullptr) return;
   auto* viewMenu = menuBar()->actions().at(2)->menu();
+  viewMenu->insertAction(fullscreen_action_, dock->toggleViewAction());
+}
 
+void EditorMainWindow::apply_default_dock_sizes() {
+  if (preview_dock_ == nullptr || editor_dock_ == nullptr || playback_dock_ == nullptr ||
+      toolbar_dock_ == nullptr || curve_dock_ == nullptr || settings_dock_ == nullptr) {
+    return;
+  }
+  // Preview is 0.75× the previous 800px default; height follows 16:9.
+  const int right_w = 220;
+  const int max_left = std::max(320, width() - right_w - 200);
+  const int left_w = std::clamp(600, 320, max_left);
+  const int edit_w = std::max(200, std::max(1, width() - left_w - right_w - 24));
+  const int curve_h = std::max(220, height() / 2 - 40);
+  const int settings_h = std::max(200, height() - curve_h - 80);
+  const int play_min = std::max(72, playback_panel_->sizeHint().height() + 16);
+  const int tool_min = std::max(96, toolbar_widget_->sizeHint().height() + 16);
+  const int preview_h =
+      std::max(180, preview_content_height_for_width(left_w) + 28);
+  const int chrome = 96;
+  const int leftover =
+      std::max(0, height() - chrome - preview_h - play_min - tool_min);
+  const int play_share = leftover * 2 / 5;
+  const int play_h = play_min + play_share;
+  const int tool_h = tool_min + leftover - play_share;
+  resizeDocks({preview_dock_, editor_dock_, curve_dock_}, {left_w, edit_w, right_w},
+              Qt::Horizontal);
+  resizeDocks({preview_dock_, playback_dock_, toolbar_dock_}, {preview_h, play_h, tool_h},
+              Qt::Vertical);
+  resizeDocks({curve_dock_, settings_dock_}, {curve_h, settings_h}, Qt::Vertical);
+}
+
+void EditorMainWindow::reset_default_layout() {
+  if (preview_dock_ == nullptr || editor_dock_ == nullptr) return;
+  auto reset_toolbar = [this](QToolBar* bar) {
+    if (bar == nullptr) return;
+    removeToolBar(bar);
+    addToolBar(Qt::TopToolBarArea, bar);
+    bar->show();
+  };
+  reset_toolbar(command_toolbar_);
+  reset_toolbar(convert_toolbar_);
+  for (auto* dock : chrome_docks()) {
+    if (dock != nullptr) removeDockWidget(dock);
+  }
+  addDockWidget(Qt::LeftDockWidgetArea, preview_dock_);
+  splitDockWidget(preview_dock_, editor_dock_, Qt::Horizontal);
+  if (curve_dock_ != nullptr) splitDockWidget(editor_dock_, curve_dock_, Qt::Horizontal);
+  if (curve_dock_ != nullptr && settings_dock_ != nullptr)
+    splitDockWidget(curve_dock_, settings_dock_, Qt::Vertical);
+  if (playback_dock_ != nullptr) splitDockWidget(preview_dock_, playback_dock_, Qt::Vertical);
+  if (playback_dock_ != nullptr && toolbar_dock_ != nullptr)
+    splitDockWidget(playback_dock_, toolbar_dock_, Qt::Vertical);
+  for (auto* dock : chrome_docks()) {
+    if (dock != nullptr) dock->show();
+  }
+  QTimer::singleShot(0, this, [this] { apply_default_dock_sizes(); });
+}
+
+void EditorMainWindow::restore_or_reset_layout() {
+  if (preview_dock_ == nullptr || editor_dock_ == nullptr || playback_dock_ == nullptr ||
+      toolbar_dock_ == nullptr || curve_dock_ == nullptr || settings_dock_ == nullptr) {
+    return;
+  }
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  const auto state = prefs.value("window/state-v16").toByteArray();
+  if (state.isEmpty() || !restoreState(state)) reset_default_layout();
+}
+
+void EditorMainWindow::create_control_docks() {
   playback_dock_ = new QDockWidget(tr("播放"), this);
   playback_dock_->setObjectName(QStringLiteral("playbackAudioDock"));
   playback_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
   playback_dock_->setFeatures(QDockWidget::DockWidgetMovable |
                               QDockWidget::DockWidgetFloatable |
                               QDockWidget::DockWidgetClosable);
-  playback_panel_ = new PlaybackAudioPanel(ui_manager_, playback_dock_);
-  playback_panel_->set_add_chart_handler([this] { add_chart(); });
+  playback_panel_ = new PlaybackBar(ui_manager_, playback_dock_);
   playback_dock_->setWidget(playback_panel_);
+  playback_dock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  playback_dock_->setMinimumHeight(0);
+  playback_dock_->setMaximumHeight(QWIDGETSIZE_MAX);
   addDockWidget(Qt::BottomDockWidgetArea, playback_dock_);
-  connect(playback_dock_, &QDockWidget::dockLocationChanged, this,
-          [this](Qt::DockWidgetArea) { update_control_dock_height(playback_dock_); });
-  connect(playback_dock_, &QDockWidget::topLevelChanged, this,
-          [this](bool) { update_control_dock_height(playback_dock_); });
-  viewMenu->addAction(playback_dock_->toggleViewAction());
+  add_dock_toggle(playback_dock_);
 
-  audio_dock_ = new QDockWidget(tr("音频"), this);
-  audio_dock_->setObjectName(QStringLiteral("audioMixDock"));
-  audio_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
-  audio_dock_->setFeatures(QDockWidget::DockWidgetMovable |
-                           QDockWidget::DockWidgetFloatable |
-                           QDockWidget::DockWidgetClosable);
-  audio_dock_->setWidget(new AudioMixPanel(ui_manager_, audio_dock_));
-  addDockWidget(Qt::BottomDockWidgetArea, audio_dock_);
-  connect(audio_dock_, &QDockWidget::dockLocationChanged, this,
-          [this](Qt::DockWidgetArea) { update_control_dock_height(audio_dock_); });
-  connect(audio_dock_, &QDockWidget::topLevelChanged, this,
-          [this](bool) { update_control_dock_height(audio_dock_); });
-  splitDockWidget(playback_dock_, audio_dock_, Qt::Horizontal);
-  viewMenu->addAction(audio_dock_->toggleViewAction());
+  convert_bar_ = new ConvertBar(ui_manager_, skins_dir_, convert_toolbar_);
+  convert_bar_->set_ribbon_mode();
+  if (convert_toolbar_ != nullptr) convert_toolbar_->addWidget(convert_bar_);
 
-  toolbox_dock_ = new QDockWidget(tr("编辑工具箱"), this);
-  toolbox_dock_->setObjectName(QStringLiteral("editorToolboxDock"));
-  toolbox_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
-  toolbox_dock_->setFeatures(QDockWidget::DockWidgetMovable |
+  toolbar_dock_ = new QDockWidget(tr("工具栏"), this);
+  toolbar_dock_->setObjectName(QStringLiteral("editorToolbarDock"));
+  toolbar_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+  toolbar_dock_->setFeatures(QDockWidget::DockWidgetMovable |
                              QDockWidget::DockWidgetFloatable |
                              QDockWidget::DockWidgetClosable);
-  auto* toolboxScroll = new QScrollArea(toolbox_dock_);
-  toolboxScroll->setWidgetResizable(true);
-  toolboxScroll->setFrameShape(QFrame::NoFrame);
-  auto* toolbox = new QWidget(toolboxScroll);
-  // Flow layout: the big buttons re-wrap into rows/columns to fit any dock shape.
-  auto* toolboxLayout = new FlowLayout(toolbox, 4, 8, 8);
-  // Convert buttons carry the same skin previews + tooltips as the old toolbar.
-  const auto icons = build_convert_note_icons(skins_dir_);
-  struct ConvertSpec {
-    const char* name;
-    wds::chart_editor::NoteType type;
-    int direction;
-  };
-  const std::array<ConvertSpec, 8> specs = {{
-      {"Tap", wds::chart_editor::NoteType::Normal, 0},
-      {"ExTap", wds::chart_editor::NoteType::Critical, 0},
-      {"Hold Head", wds::chart_editor::NoteType::HoldStart, 0},
-      {"Hold", wds::chart_editor::NoteType::Hold, 0},
-      {"Left Flick", wds::chart_editor::NoteType::Flick, -1},
-      {"Flick", wds::chart_editor::NoteType::Flick, 0},
-      {"Right Flick", wds::chart_editor::NoteType::Flick, 1},
-      {"Scratch Hold", wds::chart_editor::NoteType::ScratchHold, 0},
-  }};
-  // New-style flow: with nothing selected the button locks the left-click place
-  // type instead (toggle in 设置 → 输入).
-  static constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
-      wds::interaction::PlaceIntent::None,  // Tap = classic default
-      wds::interaction::PlaceIntent::ExTap,
-      wds::interaction::PlaceIntent::HoldStart,
-      wds::interaction::PlaceIntent::HoldBody,
-      wds::interaction::PlaceIntent::FlickLeft,
-      wds::interaction::PlaceIntent::Flick,
-      wds::interaction::PlaceIntent::FlickRight,
-      wds::interaction::PlaceIntent::ScratchHoldBody,
-  }};
-  for (std::size_t i = 0; i < specs.size(); ++i) {
-    auto* button = new QToolButton(toolbox);
-    button->setIcon(icons[i]);
-    button->setIconSize(QSize(56, 56));
-    button->setMinimumSize(72, 72);
-    button->setToolTip(tr("转换为%1（无选中时切换放置类型）")
-                           .arg(QString::fromUtf8(specs[i].name)));
-    button->setCheckable(true);
-    button->setAutoRaise(true);
-    convert_buttons_[i] = button;
-    toolboxLayout->addWidget(button);
-    connect(button, &QToolButton::clicked, this, [this, i, spec = specs[i]] {
-      auto* edit = ui_manager_ != nullptr ? ui_manager_->edit_panel() : nullptr;
-      if (edit == nullptr) return;
-      if (ui_manager_->new_note_place_logic()) {
-        // New-style flow: the buttons only pick the mouse place type; convert
-        // stays a classic-mode feature.
-        const auto intent = kPlaceIntents[i];
-        if (edit->place_intent_override() == intent) {
-          edit->set_place_intent_override(wds::interaction::PlaceIntent::None);
-          ui_manager_->set_status("放置类型已恢复为 Tap", StatusLevel::Info);
-        } else {
-          edit->set_place_intent_override(intent);
-          ui_manager_->set_status(std::string("放置类型切换为 ") + spec.name,
-                                  StatusLevel::Info);
-        }
-      } else if (!edit->selected().empty()) {
-        const std::optional<int32_t> direction =
-            spec.type == wds::chart_editor::NoteType::Flick
-                ? std::optional<int32_t>(spec.direction)
-                : std::nullopt;
-        if (edit->convert_selected(spec.type, direction)) {
-          ui_manager_->set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
-        }
-      } else {
-        ui_manager_->set_status("未选中音符（可在设置→输入中开启新版放置逻辑）",
-                                StatusLevel::Info);
-      }
-      sync_toolbox_place_checks();
-    });
-  }
-  auto* widthGroup = new QWidget(toolbox);
-  auto* widthRow = new QHBoxLayout(widthGroup);
-  widthRow->setContentsMargins(0, 0, 0, 0);
-  widthRow->addWidget(new QLabel(tr("默认宽度"), widthGroup));
-  auto* width = new QSpinBox(widthGroup);
-  width->setRange(1, 12);
-  width->setValue(1);
-  widthRow->addWidget(width);
-  toolboxLayout->addWidget(widthGroup);
-  connect(width, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
-    if (ui_manager_ && ui_manager_->edit_panel()) ui_manager_->edit_panel()->set_default_width(value);
+  toolbar_widget_ = new EditorToolbarWidget(ui_manager_, toolbar_dock_);
+  toolbar_widget_->set_add_chart_handler([this] { add_chart(); });
+  toolbar_dock_->setWidget(toolbar_widget_);
+  toolbar_dock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  toolbar_dock_->setMinimumHeight(0);
+  toolbar_dock_->setMaximumHeight(QWIDGETSIZE_MAX);
+  addDockWidget(Qt::BottomDockWidgetArea, toolbar_dock_);
+  add_dock_toggle(toolbar_dock_);
+
+  curve_dock_ = new QDockWidget(tr("曲线模板"), this);
+  curve_dock_->setObjectName(QStringLiteral("curveTemplatesDock"));
+  curve_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+  curve_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable |
+                           QDockWidget::DockWidgetClosable);
+  curve_panel_ = new CurveTemplatesPanel(ui_manager_, curve_dock_);
+  curve_panel_->set_on_changed([this] {
+    if (toolbar_widget_ != nullptr) toolbar_widget_->refresh_curve_controls();
   });
-  curve_fill_widget_ = new CurveFillWidget(ui_manager_, toolbox);
-  toolboxLayout->addWidget(curve_fill_widget_);
-  toolboxScroll->setWidget(toolbox);
-  toolbox_dock_->setWidget(toolboxScroll);
-  addDockWidget(Qt::BottomDockWidgetArea, toolbox_dock_);
-  connect(toolbox_dock_, &QDockWidget::dockLocationChanged, this,
-          [this](Qt::DockWidgetArea) { update_control_dock_height(toolbox_dock_); });
-  connect(toolbox_dock_, &QDockWidget::topLevelChanged, this,
-          [this](bool) { update_control_dock_height(toolbox_dock_); });
-  splitDockWidget(audio_dock_, toolbox_dock_, Qt::Horizontal);
-  viewMenu->addAction(toolbox_dock_->toggleViewAction());
+  curve_dock_->setWidget(curve_panel_);
+  addDockWidget(Qt::RightDockWidgetArea, curve_dock_);
+  add_dock_toggle(curve_dock_);
+
+  settings_dock_ = new QDockWidget(tr("设置"), this);
+  settings_dock_->setObjectName(QStringLiteral("settingsDock"));
+  settings_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+  settings_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable |
+                              QDockWidget::DockWidgetClosable);
+  settings_panel_ = new SettingsPanel(ui_manager_, theme_dir_, settings_dock_);
+  settings_panel_->set_on_applied([this] { sync_toolbox_place_checks(); });
+  settings_dock_->setWidget(settings_panel_);
+  addDockWidget(Qt::RightDockWidgetArea, settings_dock_);
+  add_dock_toggle(settings_dock_);
 }
 
 void EditorMainWindow::sync_toolbox_place_checks() {
-  auto* edit = ui_manager_ != nullptr ? ui_manager_->edit_panel() : nullptr;
-  const bool enabled = ui_manager_ != nullptr && ui_manager_->new_note_place_logic();
-  static constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
-      wds::interaction::PlaceIntent::None,
-      wds::interaction::PlaceIntent::ExTap,
-      wds::interaction::PlaceIntent::HoldStart,
-      wds::interaction::PlaceIntent::HoldBody,
-      wds::interaction::PlaceIntent::FlickLeft,
-      wds::interaction::PlaceIntent::Flick,
-      wds::interaction::PlaceIntent::FlickRight,
-      wds::interaction::PlaceIntent::ScratchHoldBody,
-  }};
-  const auto current = edit != nullptr ? edit->place_intent_override()
-                                       : wds::interaction::PlaceIntent::None;
-  for (std::size_t i = 0; i < convert_buttons_.size(); ++i) {
-    if (convert_buttons_[i] == nullptr) continue;
-    const QSignalBlocker blocker(convert_buttons_[i]);
-    convert_buttons_[i]->setChecked(enabled && current != wds::interaction::PlaceIntent::None &&
-                                    kPlaceIntents[i] == current);
+  if (convert_bar_ != nullptr) convert_bar_->sync_place_checks();
+}
+
+void EditorMainWindow::set_icons_dir(std::string dir) {
+  icons_dir_ = std::move(dir);
+  apply_command_icons();
+}
+
+void EditorMainWindow::apply_command_icons() {
+  if (icons_dir_.empty()) {
+    const auto argv0 = QCoreApplication::applicationFilePath();
+    icons_dir_ = resolve_icons_dir(argv0.toUtf8().constData());
+  }
+  const QDir dir(QString::fromStdString(icons_dir_));
+  const auto icon_for = [&](const char* stem, char32_t fallback) {
+    const QIcon svg = themed_svg_icon(dir.filePath(QString::fromLatin1(stem) + QStringLiteral(".svg")));
+    return svg.isNull() ? fluent_icon(fallback) : svg;
+  };
+  if (open_action_ != nullptr) open_action_->setIcon(icon_for("open", fluent::OpenFolder));
+  if (save_action_ != nullptr) save_action_->setIcon(icon_for("save", fluent::Save));
+  if (undo_action_ != nullptr) undo_action_->setIcon(icon_for("undo", fluent::Undo));
+  if (redo_action_ != nullptr) redo_action_->setIcon(icon_for("redo", fluent::Redo));
+  if (import_action_ != nullptr) import_action_->setIcon(icon_for("import", fluent::Import));
+  if (export_action_ != nullptr) export_action_->setIcon(icon_for("export", fluent::Export));
+  if (music_action_ != nullptr) music_action_->setIcon(icon_for("import-audio", fluent::Music));
+  if (check_action_ != nullptr) check_action_->setIcon(icon_for("check", fluent::Checklist));
+}
+
+void EditorMainWindow::refresh_history_actions() {
+  if (ui_manager_ == nullptr || undo_action_ == nullptr || redo_action_ == nullptr) return;
+  const auto& history = ui_manager_->session().engine().history();
+  undo_action_->setEnabled(history.can_undo());
+  redo_action_->setEnabled(history.can_redo());
+}
+
+void EditorMainWindow::changeEvent(QEvent* event) {
+  QMainWindow::changeEvent(event);
+  if (event != nullptr && (event->type() == QEvent::PaletteChange ||
+                           event->type() == QEvent::ApplicationPaletteChange)) {
+    apply_command_icons();
   }
 }
 
 void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   ui_manager_ = manager;
   if (ui_manager_ == nullptr) return;
-  if (auto* speed = findChild<QDoubleSpinBox*>(QStringLiteral("noteSpeed"))) {
-    QSignalBlocker blocker(speed);
-    speed->setValue(ui_manager_->chart_preview().preview().config().note_speed);
-  }
-  if (auto* lanes = findChild<QSpinBox*>(QStringLiteral("laneCount"))) {
-    QSignalBlocker blocker(lanes);
-    lanes->setValue(ui_manager_->chart_preview().preview().config().lane_count);
-  }
-  const auto& visual = ui_manager_->chart_preview().preview().config();
-  if (auto* offset = findChild<QSpinBox*>(QStringLiteral("noteStartOffset"))) offset->setValue(visual.note_start_offset);
-  if (auto* noteHeight = findChild<QSpinBox*>(QStringLiteral("noteHeightLevel"))) noteHeight->setValue(visual.note_height_level);
-  if (auto* split = findChild<QSpinBox*>(QStringLiteral("splitLineOpacity")))
-    split->setValue(static_cast<int>(std::lround(visual.split_line_opacity * 100.0f)));
   ui_manager_->set_external_status_handler([this](std::string text, StatusLevel) {
     const QString message = QString::fromUtf8(text.c_str());
     QMetaObject::invokeMethod(this, [this, message] {
       if (statusBar() != nullptr) statusBar()->showMessage(message);
     }, Qt::QueuedConnection);
   });
+  ui_manager_->set_fullscreen_toggler([this] {
+    isFullScreen() ? showNormal() : showFullScreen();
+  });
+  ui_manager_->set_open_project_handler([this] { open_project(); });
+  ui_manager_->set_save_project_handler([this] { save_project(); });
   connect(open_action_, &QAction::triggered, this, &EditorMainWindow::open_project);
   connect(save_action_, &QAction::triggered, this, &EditorMainWindow::save_project);
   connect(undo_action_, &QAction::triggered, this,
@@ -448,26 +399,16 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   connect(music_action_, &QAction::triggered, this, &EditorMainWindow::import_music);
   connect(check_action_, &QAction::triggered, this, &EditorMainWindow::check_chart);
   connect(settings_action_, &QAction::triggered, this, &EditorMainWindow::show_settings);
-  connect(curve_templates_action_, &QAction::triggered, this,
-          &EditorMainWindow::show_curve_templates);
 
-  create_playback_and_toolbox_docks();
-  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
-  const auto state = prefs.value("window/state-v4").toByteArray();
-  if (!state.isEmpty() && restoreState(state)) {
-    QTimer::singleShot(0, this, [this] {
-      pin_bottom_row();
-      for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-        update_control_dock_height(dock);
-      }
-    });
-  } else {
-    reset_default_layout();
-  }
+  create_control_docks();
+  restore_or_reset_layout();
+  auto* history_timer = new QTimer(this);
+  history_timer->setInterval(200);
+  connect(history_timer, &QTimer::timeout, this, [this] { refresh_history_actions(); });
+  history_timer->start();
+  refresh_history_actions();
   // Space toggles playback anywhere in the app (except while typing).
   qApp->installEventFilter(this);
-  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_})
-    dock->widget()->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 }
 
 bool EditorMainWindow::show_startup_splash() {
@@ -623,30 +564,50 @@ void EditorMainWindow::remember_recent_project(const QString& path) {
 }
 
 bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
-  if (event->type() == QEvent::MouseButtonRelease && !native_resizing_) {
-    auto* widget = qobject_cast<QWidget*>(watched);
-    if (watched == this || (widget != nullptr && isAncestorOf(widget))) {
-      QTimer::singleShot(0, this, &EditorMainWindow::pin_bottom_row);
+  const auto type = event->type();
+  if ((type == QEvent::KeyPress || type == QEvent::KeyRelease ||
+       type == QEvent::ShortcutOverride) &&
+      ui_manager_ != nullptr) {
+    auto* key_event = static_cast<QKeyEvent*>(event);
+    const bool typing = [] {
+      QWidget* focus = QApplication::focusWidget();
+      if (focus == nullptr) return false;
+      if (qobject_cast<QLineEdit*>(focus) != nullptr ||
+          qobject_cast<QAbstractSpinBox*>(focus) != nullptr ||
+          qobject_cast<QKeySequenceEdit*>(focus) != nullptr ||
+          qobject_cast<QComboBox*>(focus) != nullptr ||
+          qobject_cast<QTextEdit*>(focus) != nullptr ||
+          qobject_cast<QPlainTextEdit*>(focus) != nullptr) {
+        return true;
+      }
+      if (auto* edit = dynamic_cast<ChartEditWidget*>(focus)) return edit->captures_keys();
+      return false;
+    }();
+    const bool blocked = typing || QApplication::activeModalWidget() != nullptr ||
+                         QApplication::activePopupWidget() != nullptr;
+    // macOS often omits Cmd from QKeyEvent/QMouseEvent modifiers. Query the OS
+    // so Shift+Cmd curve-fill and Cmd+click stay live even if the canvas
+    // never sees the modifier-only KeyPress.
+    if ((type == QEvent::KeyPress || type == QEvent::KeyRelease) && !key_event->isAutoRepeat() &&
+        QApplication::activeModalWidget() == nullptr) {
+      const auto live = type == QEvent::KeyRelease
+                            ? qt_live_modifiers()
+                            : qt_modifiers(key_event->modifiers() |
+                                           QGuiApplication::queryKeyboardModifiers());
+      if (auto* panel = ui_manager_->edit_panel()) panel->sync_active_modifiers(live);
+      if (editor_widget_ != nullptr) editor_widget_->update();
     }
-  }
-  if (event->type() == QEvent::KeyPress && ui_manager_ != nullptr) {
-    // Space is an application command. Handle it before any child widget,
-    // including the Qt edit canvas, can consume it.
-    {
-      auto* key_event = static_cast<QKeyEvent*>(event);
-      if (key_event->key() == Qt::Key_Space && !key_event->isAutoRepeat() &&
-          QApplication::activeModalWidget() == nullptr) {
-        QWidget* focus = QApplication::focusWidget();
-        const bool typing = qobject_cast<QLineEdit*>(focus) != nullptr ||
-                            qobject_cast<QAbstractSpinBox*>(focus) != nullptr ||
-                            qobject_cast<QKeySequenceEdit*>(focus) != nullptr;
-        if (!typing) {
-          wds::interaction::Modifiers mods;
-          mods.shift = key_event->modifiers().testFlag(Qt::ShiftModifier);
-          wds::interaction::KeyDownEvent command;
-          command.key = wds::interaction::KeyCode::Space;
-          command.mods = mods;
-          command.repeat = false;
+    if (!key_event->isAutoRepeat() && !blocked) {
+      const wds::interaction::KeyDownEvent command{
+          qt_key_code(key_event->key()),
+          qt_modifiers(key_event->modifiers() | QGuiApplication::queryKeyboardModifiers()),
+          false};
+      if (ui_manager_->shortcuts().contains(command)) {
+        if (type == QEvent::ShortcutOverride) {
+          key_event->accept();
+          return true;
+        }
+        if (type == QEvent::KeyPress) {
           ui_manager_->dispatch_shortcut(command);
           return true;
         }
@@ -699,21 +660,27 @@ void EditorMainWindow::check_chart() {
 void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
   preview_window_ = preview;
   editor_window_ = editor;
-  // Dock-only main window: an (even empty) central widget would sit between the
-  // viewport docks and the 属性 dock and eat the horizontal slack on resize.
   preview_dock_ = new QDockWidget(tr("实时预览"), this);
   preview_dock_->setObjectName(QStringLiteral("previewViewportDock"));
   preview_dock_->setAllowedAreas(Qt::AllDockWidgetAreas);
   preview_dock_->setFeatures(QDockWidget::DockWidgetMovable |
                              QDockWidget::DockWidgetFloatable |
                              QDockWidget::DockWidgetClosable);
+  // The Vulkan QWindow must fill this dock. Letterboxing a createWindowContainer
+  // with setGeometry leaves the Cocoa surface 0×0 / unexposed, so the stage
+  // never presents. 16:9 contain lives in resize_preview_viewport instead.
+  preview->setMinimumSize(QSize(160, 90));
   auto* preview_container = QWidget::createWindowContainer(preview, preview_dock_);
-  preview_container->setMinimumSize(260, 300);
-  // Viewport docks absorb window-resize slack; the bottom control docks keep
-  // their manually-set size (Preferred, set below).
+  preview_container->setMinimumSize(160, 90);
   preview_container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  preview_dock_->setContentsMargins(0, 0, 0, 0);
   preview_dock_->setWidget(preview_container);
+  preview_dock_->setMinimumHeight(0);
+  preview_dock_->setMaximumHeight(QWIDGETSIZE_MAX);
+  preview_dock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   addDockWidget(Qt::LeftDockWidgetArea, preview_dock_);
+  add_dock_toggle(preview_dock_);
+  preview_dock_->installEventFilter(this);
 
   if (editor == nullptr) return;
   editor_dock_ = new QDockWidget(tr("谱面编辑器"), this);
@@ -727,14 +694,7 @@ void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
   editor_container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   editor_dock_->setWidget(editor_container);
   splitDockWidget(preview_dock_, editor_dock_, Qt::Horizontal);
-  if (settings_dock_ != nullptr) {
-    addDockWidget(Qt::RightDockWidgetArea, settings_dock_);
-    splitDockWidget(editor_dock_, settings_dock_, Qt::Horizontal);
-    resizeDocks({preview_dock_, editor_dock_, settings_dock_}, {5, 5, 1}, Qt::Horizontal);
-  }
-  auto* viewMenu = menuBar()->actions().at(2)->menu();
-  viewMenu->addAction(preview_dock_->toggleViewAction());
-  viewMenu->addAction(editor_dock_->toggleViewAction());
+  add_dock_toggle(editor_dock_);
 }
 
 void EditorMainWindow::set_editor_widget(QWidget* editor) {
@@ -749,15 +709,10 @@ void EditorMainWindow::set_editor_widget(QWidget* editor) {
   editor_dock_->setWidget(editor);
   addDockWidget(Qt::LeftDockWidgetArea, editor_dock_);
   if (preview_dock_) splitDockWidget(preview_dock_, editor_dock_, Qt::Horizontal);
-  if (settings_dock_) splitDockWidget(editor_dock_, settings_dock_, Qt::Horizontal);
-  auto* viewMenu = menuBar()->actions().at(2)->menu();
-  viewMenu->addAction(editor_dock_->toggleViewAction());
+  add_dock_toggle(editor_dock_);
   // bind_ui_manager runs before the application supplies its viewport widgets,
   // so restore the dock state only now, after every named dock exists.
-  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
-  const auto state = prefs.value("window/state-v4").toByteArray();
-  if (!state.isEmpty()) restoreState(state);
-  else reset_default_layout();
+  restore_or_reset_layout();
 }
 
 void EditorMainWindow::resizeEvent(QResizeEvent* event) {
@@ -766,54 +721,7 @@ void EditorMainWindow::resizeEvent(QResizeEvent* event) {
   if (auto* window = static_cast<RealtimeVulkanWindow*>(editor_window_))
     window->set_resize_suspended(true);
   QMainWindow::resizeEvent(event);
-  restore_bottom_row();
-  QTimer::singleShot(0, this, &EditorMainWindow::restore_bottom_row);
   resize_settle_timer_.start();
-}
-
-void EditorMainWindow::update_control_dock_height(QDockWidget* dock) {
-  if (dock == nullptr) return;
-  // This helper only restores a flexible policy after a dock is moved. The
-  // default height is applied by reset_default_layout() once; keeping min/max
-  // unconstrained here lets the user drag the bottom separator manually.
-  dock->setMinimumHeight(0);
-  dock->setMaximumHeight(QWIDGETSIZE_MAX);
-  dock->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-}
-
-void EditorMainWindow::pin_bottom_row() {
-  std::size_t i = 0;
-  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-    if (dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
-        dockWidgetArea(dock) == Qt::BottomDockWidgetArea && dock->height() > 0) {
-      bottom_row_heights_[i] = dock->height();
-    }
-    ++i;
-  }
-}
-
-void EditorMainWindow::restore_bottom_row() {
-  QList<QDockWidget*> row;
-  QList<int> sizes;
-  int viewport_delta = 0;
-  std::size_t i = 0;
-  for (auto* dock : {playback_dock_, audio_dock_, toolbox_dock_}) {
-    const int height = bottom_row_heights_[i++];
-    if (height > 0 && dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
-        dockWidgetArea(dock) == Qt::BottomDockWidgetArea) {
-      row.append(dock);
-      sizes.append(height);
-      if (row.size() == 1) viewport_delta = dock->height() - height;
-    }
-  }
-  for (auto* dock : {preview_dock_, editor_dock_}) {
-    if (dock != nullptr && !dock->isFloating() && !dock->isHidden() &&
-        dockWidgetArea(dock) != Qt::BottomDockWidgetArea) {
-      row.append(dock);
-      sizes.append(std::max(dock->minimumSizeHint().height(), dock->height() + viewport_delta));
-    }
-  }
-  if (!row.isEmpty()) resizeDocks(row, sizes, Qt::Vertical);
 }
 
 bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
@@ -937,10 +845,12 @@ void EditorMainWindow::export_chart() {
   dialog.setWindowTitle(tr("导出"));
   auto* layout = new QVBoxLayout(&dialog);
   auto* formatRow = new QHBoxLayout;
-  formatRow->addWidget(new QLabel(tr("格式"), &dialog));
+  auto* format_label = new QLabel(tr("格式"), &dialog);
+  format_label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  formatRow->addWidget(format_label, 0, Qt::AlignVCenter);
   auto* format = new QComboBox(&dialog);
   format->addItems({tr("官方 CSV"), tr("SUS")});
-  formatRow->addWidget(format, 1);
+  formatRow->addWidget(format, 1, Qt::AlignVCenter);
   layout->addLayout(formatRow);
   auto* project = new QPushButton(tr("导出整个项目"), &dialog);
   auto* chart = new QPushButton(tr("仅导出当前谱面"), &dialog);
@@ -976,39 +886,17 @@ void EditorMainWindow::export_chart() {
 }
 
 void EditorMainWindow::show_settings() {
-  SettingsDialog dialog(ui_manager_, theme_dir_, this);
-  dialog.exec();
-  // Disabling the new place logic clears the lock; reflect it on the buttons.
+  if (settings_dock_ == nullptr) return;
+  settings_dock_->show();
+  settings_dock_->raise();
   sync_toolbox_place_checks();
-}
-
-void EditorMainWindow::show_curve_templates() {
-  QDialog dialog(this); dialog.setWindowTitle(tr("曲线模板")); dialog.setFixedSize(560, 360);
-  auto* root = new QVBoxLayout(&dialog);
-  auto* list = new QListWidget(&dialog);
-  auto state = ui_manager_->curve_template_state();
-  for (const auto& item : state.templates) list->addItem(QString::fromStdString(item.name));
-  root->addWidget(list);
-  auto* name = new QLineEdit(&dialog); name->setPlaceholderText(tr("名称")); root->addWidget(name);
-  auto* parameter = new QDoubleSpinBox(&dialog); parameter->setRange(-1000.0, 1000.0); parameter->setDecimals(4); root->addWidget(parameter);
-  auto* row = new QHBoxLayout; auto* add = new QPushButton(tr("添加"), &dialog); auto* remove = new QPushButton(tr("删除"), &dialog); row->addWidget(add); row->addWidget(remove); root->addLayout(row);
-  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog); root->addWidget(buttons);
-  connect(list, &QListWidget::currentRowChanged, &dialog, [&](int row) { if (row >= 0 && row < static_cast<int>(state.templates.size())) { name->setText(QString::fromStdString(state.templates[static_cast<std::size_t>(row)].name)); parameter->setValue(state.templates[static_cast<std::size_t>(row)].parameter); } });
-  connect(add, &QPushButton::clicked, &dialog, [&] { if (state.templates.size() >= wds::ui::kMaxCurveTemplates) return; wds::ui::CurveTemplate item; item.id = wds::ui::allocate_curve_template_id(state.templates); item.name = "Template " + std::to_string(state.templates.size() + 1); state.templates.push_back(item); list->addItem(QString::fromStdString(item.name)); list->setCurrentRow(list->count() - 1); });
-  connect(remove, &QPushButton::clicked, &dialog, [&] { const int row = list->currentRow(); if (row >= 0) { state.templates.erase(state.templates.begin() + row); delete list->takeItem(row); } });
-  connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] { const int row = list->currentRow(); if (row >= 0 && row < static_cast<int>(state.templates.size())) { state.templates[static_cast<std::size_t>(row)].name = name->text().toStdString(); state.templates[static_cast<std::size_t>(row)].parameter = parameter->value(); normalize_curve_template(state.templates[static_cast<std::size_t>(row)]); } dialog.accept(); });
-  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-  if (dialog.exec() == QDialog::Accepted) {
-    ui_manager_->set_curve_template_state_from_qt(std::move(state));
-    if (curve_fill_widget_ != nullptr) curve_fill_widget_->refresh_curve_controls();
-  }
 }
 
 void EditorMainWindow::closeEvent(QCloseEvent* event) {
   if (!confirm_pending_changes()) { event->ignore(); return; }
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   prefs.setValue("window/geometry", saveGeometry());
-  prefs.setValue("window/state-v4", saveState());
+  prefs.setValue("window/state-v16", saveState());
   event->accept();
 }
 
@@ -1016,16 +904,14 @@ void EditorMainWindow::hideEvent(QHideEvent* event) {
   QMainWindow::hideEvent(event);
   // Floating docks are independent top-level windows. Keep them visible when
   // the main shell is temporarily hidden (for example while switching apps).
-  for (auto* dock : {preview_dock_, editor_dock_, settings_dock_, playback_dock_, audio_dock_,
-                     toolbox_dock_}) {
+  for (auto* dock : chrome_docks()) {
     if (dock != nullptr && dock->isFloating()) dock->show();
   }
 }
 
 void EditorMainWindow::showEvent(QShowEvent* event) {
   QMainWindow::showEvent(event);
-  for (auto* dock : {preview_dock_, editor_dock_, settings_dock_, playback_dock_, audio_dock_,
-                     toolbox_dock_}) {
+  for (auto* dock : chrome_docks()) {
     if (dock != nullptr && dock->isFloating() && !dock->isHidden()) dock->raise();
   }
 }

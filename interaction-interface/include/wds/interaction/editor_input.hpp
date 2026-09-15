@@ -43,8 +43,8 @@ bool is_place_button(PointerButton button) noexcept;
 bool is_left_button(PointerButton button) noexcept;
 bool is_right_button(PointerButton button) noexcept;
 
-// ScratchHold curve-fill chord: Shift + platform primary (Cmd on macOS, Ctrl
-// elsewhere). Alt, or a missing Shift/primary, must not activate.
+// ScratchHold curve-fill chord: Shift + Qt ControlModifier (Cmd on macOS, Ctrl
+// on Windows). Alt, or a missing Shift/primary, must not activate.
 bool is_curve_fill_modifiers(const Modifiers& mods) noexcept;
 // Key-down edge for the chord. Repeat events are not a new transition.
 bool is_curve_fill_modifier_press(const KeyDownEvent& event) noexcept;

@@ -218,7 +218,7 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
               const wds::renderer::TextureInfo* spectrogram,
               EditSpectrumMode spectrum_mode) const {
   const auto& b = viewport.bounds();
-  painter.fill_rect(b, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f, 0.86f);
+  painter.fill_rect(b, wds::interaction::theme::kEditCanvas, 0.0f, 0.86f);
   const bool drew_spectrogram = spectrum_mode == EditSpectrumMode::Spectrogram &&
                                 spectrogram != nullptr && static_cast<bool>(*spectrogram) &&
                                 waveform != nullptr && waveform->duration_ms() > 0 && b.h > 0.5f &&
@@ -306,8 +306,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
       const bool edge = lane == 0 || lane == grid.lane_count;
       const float thickness = edge ? 1.5f : 1.0f;
       painter.fill_rect({viewport.x_at(lane) - thickness * 0.5f, clip_top, thickness, h},
-                        edge ? wds::interaction::Color{0.42f, 0.44f, 0.48f, 0.95f}
-                             : wds::interaction::Color{0.22f, 0.24f, 0.28f, 0.9f},
+                        edge ? wds::interaction::theme::kEditLaneEdge
+                             : wds::interaction::theme::kEditLaneInner,
                         0.0f, 0.90f);
     }
   };
@@ -478,11 +478,12 @@ void ChartEditRenderer::paint_overlays(
   constexpr float kPad = 3.5f;
   constexpr float kBorder = 2.5f;
   constexpr float kZ = 0.97f;
-  // Unified amber selection for all notes. Head+body together vs alone is told by
+  // Unified sky-blue selection for all notes. Head+body together vs alone is told by
   // box shape (full chain vs clipped body / head-only) and junction ticks — not color.
-  const wds::interaction::Color solo_glow{1.0f, 0.78f, 0.12f, 0.32f};
-  const wds::interaction::Color solo_outline{1.0f, 0.95f, 0.35f, 1.0f};
-  const wds::interaction::Color solo_inner{1.0f, 1.0f, 0.85f, 0.95f};
+  namespace th = wds::interaction::theme;
+  const wds::interaction::Color solo_glow = th::kEditSelectionGlow;
+  const wds::interaction::Color solo_outline = th::kEditSelection;
+  const wds::interaction::Color solo_inner = th::kEditSelectionInner;
 
   auto paired_head = [&](const NotationNote& hold) -> const NotationNote* {
     for (const auto& n : notes) {

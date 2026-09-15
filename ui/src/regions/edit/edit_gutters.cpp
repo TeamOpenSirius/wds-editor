@@ -154,10 +154,6 @@ GutterLabelHit assign_split_slot(const SplitCols& cols, int32_t note_id, bool is
 
 constexpr Color kBpmLabelColor{0.48f, 0.30f, 0.14f, 0.96f};
 constexpr Color kMeterLabelColor{0.10f, 0.38f, 0.24f, 0.96f};
-constexpr Color kSubdivLineColor{0.28f, 0.30f, 0.34f, 0.75f};
-constexpr Color kBeatLineColor{0.50f, 0.52f, 0.56f, 0.88f};
-constexpr Color kMeasureLineColor{0.72f, 0.74f, 0.78f, 0.95f};
-constexpr Color kNegativeTimeGridColor{0.10f, 0.10f, 0.12f, 0.85f};
 
 }  // namespace
 
@@ -457,7 +453,7 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
 
   auto grid_color = [&](int32_t tick, const Color& normal) -> Color {
     if (wds::chart_editor::tick_to_milliseconds(tick, timing) < 0) {
-      return kNegativeTimeGridColor;
+      return wds::interaction::theme::kEditGridNegative;
     }
     return normal;
   };
@@ -466,20 +462,23 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
   bool have_sub = false;
   for (int32_t tick : subdiv_ticks) {
     if (is_in(beat_ticks, tick) || is_in(measure_ticks, tick)) continue;
-    draw_h(tick, 1.0f, grid_color(tick, kSubdivLineColor), last_sub_y, have_sub);
+    draw_h(tick, 1.0f, grid_color(tick, wds::interaction::theme::kEditGridSubdiv), last_sub_y,
+           have_sub);
   }
 
   float last_beat_y = 0.0f;
   bool have_beat = false;
   for (int32_t tick : beat_ticks) {
     if (is_in(measure_ticks, tick)) continue;
-    draw_h(tick, 1.5f, grid_color(tick, kBeatLineColor), last_beat_y, have_beat);
+    draw_h(tick, 1.5f, grid_color(tick, wds::interaction::theme::kEditGridBeat), last_beat_y,
+           have_beat);
   }
 
   float last_measure_y = 0.0f;
   bool have_measure = false;
   for (int32_t tick : measure_ticks) {
-    draw_h(tick, 2.5f, grid_color(tick, kMeasureLineColor), last_measure_y, have_measure);
+    draw_h(tick, 2.5f, grid_color(tick, wds::interaction::theme::kEditGridMeasure), last_measure_y,
+           have_measure);
   }
 }
 
@@ -487,7 +486,7 @@ void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewpor
                          const Rect& gutter, const wds::chart_editor::MusicTiming& timing,
                          int32_t /*view_start_tick*/, int32_t /*view_end_tick*/,
                          bool show_timing_marks) {
-  painter.fill_rect(gutter, {0.06f, 0.07f, 0.09f, 1.0f}, 0.0f, 0.85f);
+  painter.fill_rect(gutter, wds::interaction::theme::kEditGutter, 0.0f, 0.85f);
   if (!show_timing_marks) {
     return;  // Official charts have no authored BPM/meter — hide grid + labels.
   }
@@ -519,7 +518,7 @@ void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewpor
 void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                                 const Rect& gutter, const wds::chart_editor::MusicTiming& timing,
                                 int32_t view_start_tick, int32_t view_end_tick) {
-  painter.fill_rect(gutter, {0.05f, 0.06f, 0.08f, 1.0f}, 0.0f, 0.85f);
+  painter.fill_rect(gutter, wds::interaction::theme::kEditGutter, 0.0f, 0.85f);
   if (view_end_tick < view_start_tick) return;
 
   // Number from the chart start so indices stay correct when scrolled mid-song.
@@ -534,14 +533,14 @@ void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const Edit
     if (y < gutter.y - label_h || y > gutter.bottom() + label_h) continue;
     const Rect bounds{gutter.x, y - label_h * 0.5f, gutter.w, label_h};
     painter.label(bounds, std::to_string(static_cast<int>(i) + 1),
-                  {0.78f, 0.80f, 0.84f, 0.95f}, 0.932f, false, font_px);
+                  wds::interaction::theme::kEditMeasureIndex, 0.932f, false, font_px);
   }
 }
 
 void paint_split_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                         const Rect& gutter, const std::vector<NotationNote>& notes,
                         const wds::renderer::SkinCatalog* /*skin*/, bool show_beat_grid) {
-  painter.fill_rect(gutter, {0.05f, 0.06f, 0.08f, 1.0f}, 0.0f, 0.85f);
+  painter.fill_rect(gutter, wds::interaction::theme::kEditGutter, 0.0f, 0.85f);
   if (show_beat_grid) {
     paint_horizontal_grid(painter, viewport, gutter);
   }
@@ -563,7 +562,7 @@ void paint_split_lane_preview(wds::interaction::UiPainter& painter, const Rect& 
   // soft sprite does not composite over the gray cell.
   const float bg_pad_x = line_w * 0.5f + 1.0f;
   const Rect bg{area.x - bg_pad_x, area.y, area.w + bg_pad_x * 2.0f, area.h};
-  painter.fill_rect(bg, {0.02f, 0.03f, 0.05f, 1.0f}, 2.0f, 0.996f);
+  painter.fill_rect(bg, wds::interaction::theme::kEditCanvas, 2.0f, 0.996f);
 
   auto draw_edge = [&](int32_t edge_lane, int32_t slot) {
     const float x = std::floor(area.x + static_cast<float>(edge_lane) * area.w /

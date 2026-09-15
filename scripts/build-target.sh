@@ -238,6 +238,17 @@ configure_macos_arm() {
       prefix="${brew_qt}"
     fi
   fi
+  local brew_qtsvg=""
+  if command -v brew >/dev/null 2>&1; then
+    brew_qtsvg="$(brew --prefix qtsvg 2>/dev/null || true)"
+  fi
+  if [[ -n "${brew_qtsvg}" && -f "${brew_qtsvg}/lib/cmake/Qt6Svg/Qt6SvgConfig.cmake" ]]; then
+    if [[ -n "${prefix}" ]]; then
+      prefix="${brew_qtsvg};${prefix}"
+    else
+      prefix="${brew_qtsvg}"
+    fi
+  fi
 
   local -a args=(
     -S "${ROOT}"
@@ -247,6 +258,9 @@ configure_macos_arm() {
   )
   if [[ -n "${prefix}" ]]; then
     args+=(-DCMAKE_PREFIX_PATH="${prefix}")
+  fi
+  if [[ -n "${brew_qtsvg}" && -f "${brew_qtsvg}/lib/cmake/Qt6Svg/Qt6SvgConfig.cmake" ]]; then
+    args+=(-DQt6Svg_DIR="${brew_qtsvg}/lib/cmake/Qt6Svg")
   fi
   if [[ -n "${brew_png}" ]]; then
     args+=(

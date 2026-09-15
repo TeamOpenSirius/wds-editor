@@ -2678,11 +2678,11 @@ void ChartEditPanel::paint_gutters(wds::interaction::UiPainter& painter) const {
   paint_measure_index_gutter(painter, viewport_, measure_gutter_, timing, range.first,
                              range.second);
   painter.fill_rect({left_gutter_.right() - 0.5f, left_gutter_.y, 1.0f, left_gutter_.h},
-                    {0.35f, 0.37f, 0.40f, 0.9f});
+                    wds::interaction::theme::kOutline);
   painter.fill_rect({right_gutter_.x - 0.5f, right_gutter_.y, 1.0f, right_gutter_.h},
-                    {0.35f, 0.37f, 0.40f, 0.9f});
+                    wds::interaction::theme::kOutline);
   painter.fill_rect({measure_gutter_.x - 0.5f, measure_gutter_.y, 1.0f, measure_gutter_.h},
-                    {0.35f, 0.37f, 0.40f, 0.9f});
+                    wds::interaction::theme::kOutline);
 }
 
 void ChartEditPanel::layout_popup_rects() const {
@@ -3529,12 +3529,14 @@ void ChartEditPanel::paint_side_columns(wds::interaction::UiPainter& painter) co
 
 void ChartEditPanel::paint_overlays(wds::interaction::UiPainter& painter) const {
   sync_viewport();
-  std::optional<wds::interaction::Rect> marquee;
-  if (mode_ == Mode::Marquee) {
-    marquee = marquee_screen_rect(pointer_);
-  }
-  renderer_.paint_overlays(painter, viewport_, engine_.document().notes(), selected_, marquee);
+  renderer_.paint_overlays(painter, viewport_, engine_.document().notes(), selected_,
+                           active_marquee_rect());
   paint_gutter_overlays(painter);
+}
+
+std::optional<wds::interaction::Rect> ChartEditPanel::active_marquee_rect() const {
+  if (mode_ != Mode::Marquee) return std::nullopt;
+  return marquee_screen_rect(pointer_);
 }
 
 void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter) const {
@@ -3606,6 +3608,35 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
   }
 }
 
+std::vector<EditGhost> ChartEditPanel::skinned_ghosts() const {
+  std::vector<EditGhost> ghosts;
+  const float alpha = mode_ == Mode::PlaceHoldBody ? 0.5f : 0.45f;
+  if (curve_mode_active_) {
+    for (const auto& s : curve_ghosts_) {
+      if (s.visible) ghosts.push_back({s.note, true, alpha});
+    }
+    return ghosts;
+  }
+  if (ghost_.visible &&
+      !wds::interaction::suppress_idle_placement_ghost(active_mods_, is_note_drawing())) {
+    // PlaceHoldBody may degrade zero-length holds to Tap/Flick in ghost_.note.
+    ghosts.push_back({ghost_.note, true, alpha});
+    for (const auto& s : hold_stars_) {
+      if (s.visible) ghosts.push_back({s.note, true, 0.4f});
+    }
+    // Preview auto head for first-chain / disconnected-preview drafts (same rules as
+    // finish_hold_body). Linked chain continuations stay headless.
+    const bool preview_auto_head = hold_chain_prev_id_ < 0 || !hold_chain_link_preview_;
+    if (wds::chart_editor::is_hold_with_tail(ghost_.note.note_type) &&
+        ghost_.note.end_tick > ghost_.note.start_tick && preview_auto_head) {
+      if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), ghost_.note)) {
+        ghosts.push_back({*head, true, alpha});
+      }
+    }
+  }
+  return ghosts;
+}
+
 void ChartEditPanel::append_skin_batch(wds::renderer::DrawBatch& batch,
                                        const wds::renderer::SkinCatalog& skin, int fb_w, int fb_h,
                                        wds::renderer::ScreenBounds screen,
@@ -3615,33 +3646,8 @@ void ChartEditPanel::append_skin_batch(wds::renderer::DrawBatch& batch,
   renderer_.append_skinned_notes(batch, skin, viewport_, engine_.document().notes(), selected_,
                                  fb_w, fb_h, screen, &offset_violation_ids_,
                                  offset_violation_strength());
-
-  std::optional<EditGhost> ghost;
-  const float alpha = mode_ == Mode::PlaceHoldBody ? 0.5f : 0.45f;
-  std::vector<EditGhost> extras;
-  if (curve_mode_active_) {
-    for (const auto& s : curve_ghosts_) {
-      if (s.visible) extras.push_back({s.note, true, alpha});
-    }
-  } else if (ghost_.visible &&
-             !wds::interaction::suppress_idle_placement_ghost(active_mods_, is_note_drawing())) {
-    // PlaceHoldBody may degrade zero-length holds to Tap/Flick in ghost_.note.
-    ghost = EditGhost{ghost_.note, true, alpha};
-    for (const auto& s : hold_stars_) {
-      if (s.visible) extras.push_back({s.note, true, 0.4f});
-    }
-    // Preview auto head for first-chain / disconnected-preview drafts (same rules as
-    // finish_hold_body). Linked chain continuations stay headless.
-    const bool preview_auto_head =
-        hold_chain_prev_id_ < 0 || !hold_chain_link_preview_;
-    if (ghost && wds::chart_editor::is_hold_with_tail(ghost->note.note_type) &&
-        ghost->note.end_tick > ghost->note.start_tick && preview_auto_head) {
-      if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), ghost->note)) {
-        extras.push_back({*head, true, alpha});
-      }
-    }
-  }
-  renderer_.append_skinned_ghosts(batch, skin, viewport_, ghost, extras, fb_w, fb_h, screen);
+  renderer_.append_skinned_ghosts(batch, skin, viewport_, std::nullopt, skinned_ghosts(), fb_w,
+                                 fb_h, screen);
 }
 
 void ChartEditPanel::update(float delta_seconds) {
@@ -5110,6 +5116,18 @@ void ChartEditPanel::handle_timeline_wheel(const wds::interaction::ScrollEvent& 
   }
   // Wheel scrub updates scroll without a pointer-move; keep ghosts under the cursor.
   resync_pointer_overlays();
+}
+
+void ChartEditPanel::sync_active_modifiers(wds::interaction::Modifiers mods) {
+  active_mods_ = mods;
+  if (wds::interaction::suppress_idle_placement_ghost(active_mods_, is_note_drawing())) {
+    hide_placement_ghost();
+  }
+  sync_curve_mode();
+  if (mode_ == Mode::Idle && pointer_over_edit_ &&
+      !wds::interaction::suppress_idle_placement_ghost(active_mods_, is_note_drawing())) {
+    update_ghost(pointer_);
+  }
 }
 
 void ChartEditPanel::on_key_down(const wds::interaction::KeyDownEvent& event) {

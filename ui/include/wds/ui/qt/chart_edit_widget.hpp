@@ -4,8 +4,10 @@
 #include <QPixmap>
 #include <chrono>
 #include <functional>
+#include <vector>
 
 class QInputMethodEvent;
+class QPainter;
 
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 
@@ -20,6 +22,7 @@ class ChartEditWidget final : public QWidget {
   void set_global_key_handler(std::function<void(const wds::interaction::KeyDownEvent&)> handler) {
     global_key_handler_ = std::move(handler);
   }
+  bool captures_keys() const { return panel_ != nullptr && panel_->captures_keys(); }
   QSize minimumSizeHint() const override { return {360, 300}; }
 
  protected:
@@ -37,6 +40,9 @@ class ChartEditWidget final : public QWidget {
  private:
   wds::interaction::Modifiers mods(Qt::KeyboardModifiers) const;
   wds::interaction::Vec2 point(const QPointF&) const;
+  void paint_notes(QPainter& painter,
+                   const std::vector<wds::chart_editor::NotationNote>& notes, float opacity,
+                   bool show_selection);
   void present_qt_modals();
   ChartEditPanel* panel_ = nullptr;
   bool qt_modal_open_ = false;

@@ -166,13 +166,14 @@
     --padding_base_border: calc(var(--padding_base) + 1px);
 
     --spinbox_min_width: calc(var(--input_height) * 2.5);
-    --spinbox_button_height: calc(var(--input_height_half) - 1px);
+    --spinbox_box_height: 26px;
+    --spinbox_button_height: 13px;
 
     --volume_slider: calc(calc(4px + var(--font_base_value)) / 4);
     --volume_slider_box: calc(var(--volume_slider) * 4);
     --volume_slider_label: calc(var(--volume_slider_box) * 2);
 
-    --scrollbar_size: 12px;
+    --scrollbar_size: 8px;
     --settings_scrollbar_size: calc(var(--scrollbar_size) + 9px);
     --scrollbar_handle: var(--grey4);
 
@@ -189,14 +190,15 @@
     --border_radius_small: 2px;
     --border_radius_large: 6px;
 
-    --input_font_scale: calc(var(--font_base_value) * 2.2);
-    --input_font_padding: calc(var(--padding_base_value) * 2);
+    --input_font_scale: calc(var(--font_base_value) * 1.45);
+    --input_font_padding: var(--padding_base_value);
 
-    --input_height_base: max(calc(var(--input_font_scale) + var(--input_font_padding)), 24);
-    --input_padding: calc(2px + var(--padding_base));
+    --input_height_base: max(calc(var(--input_font_scale) + var(--input_font_padding)), 22);
+    --input_padding: calc(1px + var(--padding_base));
     --input_text_padding: max(calc(6px + var(--padding_base)), 8px);
     --input_height: calc(var(--input_height_base) - calc(var(--input_padding) * 2px));
     --input_height_half: calc(var(--input_height_base) / 2);
+    --input_button_width: 16px;
     --spinbox_width: calc(var(--input_height_base) + calc(var(--input_padding) * 2px));
 
     --input_bg: var(--grey4);
@@ -965,14 +967,14 @@ QGroupBox::title {
 /* ScrollBars */
 
 QScrollBar {
-    background-color: var(--scrollbar_bg);
+    background-color: transparent;
     margin: 0px;
     border-radius: var(--border_radius);
-    border: 1px solid var(--grey6);
+    border: none;
 }
 
 ::corner {
-    background-color: var(--bg_window);
+    background-color: transparent;
     border: none;
 }
 
@@ -1018,7 +1020,7 @@ QScrollBar::sub-page:horizontal {
 
 QScrollBar::handle {
     background-color: var(--scrollbar_handle);
-    margin: 2px;
+    margin: 1px;
     border-radius: var(--border_radius_small);
     border: 1px solid var(--scrollbar_handle);
 }
@@ -1044,6 +1046,13 @@ QScrollBar::handle:horizontal {
 QScrollBar::handle:disabled {
     background: transparent;
     border-color: transparent;
+}
+
+QScrollBar[wdsIdle="true"]::handle,
+QScrollBar[wdsIdle="true"]::handle:hover,
+QScrollBar[wdsIdle="true"]::handle:pressed {
+    background: transparent;
+    border: none;
 }
 
 OBSDock QScrollBar {
@@ -1225,14 +1234,17 @@ QComboBox::drop-down,
 QDateTimeEdit::drop-down {
     border: none;
     border-left: 1px solid var(--grey6);
-    width: var(--input_height);
+    width: var(--input_button_width);
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
 }
 
 QComboBox::down-arrow,
 QDateTimeEdit::down-arrow {
-    qproperty-alignment: AlignTop;
+    qproperty-alignment: AlignVCenter;
     image: url(theme:Dark/collapse.svg);
-    width: 100%;
+    width: 10px;
+    height: 10px;
 }
 
 QComboBox:editable:hover {
@@ -1255,9 +1267,10 @@ QDateTimeEdit::drop-down:editable {
 
 QComboBox::down-arrow:editable,
 QDateTimeEdit::down-arrow:editable {
-    qproperty-alignment: AlignTop;
+    qproperty-alignment: AlignVCenter;
     image: url(theme:Dark/collapse.svg);
-    width: 100%;
+    width: 10px;
+    height: 10px;
 }
 
 /* Textedits etc */
@@ -1307,13 +1320,13 @@ QDoubleSpinBox {
     background-color: var(--input_bg);
     border: var(--input_border_width) solid var(--input_bg);
     border-radius: var(--border_radius);
-    padding: var(--input_padding) var(--input_text_padding);
-    padding-right: var(--padding_base);
-
-    height: var(--input_height);
-    min-width: var(--spinbox_width);
-    max-height: var(--input_height);
-    min-width: var(--spinbox_min_width);
+    /* Stepper column is 26px (13+13). With 1px borders and 2px margins
+       the laid-out box is 32px. */
+    padding: 0px var(--input_text_padding);
+    padding-right: var(--input_button_width);
+    min-height: var(--spinbox_box_height);
+    max-height: var(--spinbox_box_height);
+    height: var(--spinbox_box_height);
 }
 
 QSpinBox:hover,
@@ -1331,29 +1344,25 @@ QDoubleSpinBox:focus {
 QSpinBox::up-button,
 QDoubleSpinBox::up-button {
     subcontrol-origin: padding;
-    /* position at the top right corner */
     subcontrol-position: top right;
-
-    width: var(--input_height);
+    width: var(--input_button_width);
     height: var(--spinbox_button_height);
+    border: none;
     border-left: 1px solid var(--grey6);
-    border-bottom: 1px solid transparent;
     border-radius: 0px;
-    border-top-right-radius: var(--border_radius_small);
+    background: transparent;
 }
 
 QSpinBox::down-button,
 QDoubleSpinBox::down-button {
     subcontrol-origin: padding;
-    /* position at the top right corner */
     subcontrol-position: bottom right;
-
-    width: var(--input_height);
+    width: var(--input_button_width);
     height: var(--spinbox_button_height);
+    border: none;
     border-left: 1px solid var(--grey6);
-    border-top: 1px solid var(--grey6);
     border-radius: 0px;
-    border-bottom-right-radius: var(--border_radius_small);
+    background: transparent;
 }
 
 QSpinBox::up-button:hover,
@@ -1373,29 +1382,38 @@ QDoubleSpinBox::down-button:pressed {
 QSpinBox::up-button:disabled,
 QSpinBox::up-button:off,
 QSpinBox::down-button:disabled,
-QSpinBox::down-button:off {
-    background-color: var(--button_bg_disabled);
-}
-
+QSpinBox::down-button:off,
 QDoubleSpinBox::up-button:disabled,
 QDoubleSpinBox::up-button:off,
 QDoubleSpinBox::down-button:disabled,
 QDoubleSpinBox::down-button:off {
-    background-color: var(--button_bg_disabled);
+    background: transparent;
 }
 
 QSpinBox::up-arrow,
-QDoubleSpinBox::up-arrow {
+QSpinBox::up-arrow:off,
+QSpinBox::up-arrow:disabled,
+QDoubleSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow:off,
+QDoubleSpinBox::up-arrow:disabled {
     image: url(theme:Dark/up.svg);
-    width: 100%;
-    margin: 2px;
+    width: 10px;
+    height: 10px;
+    margin: 0px;
+    padding: 0px;
 }
 
 QSpinBox::down-arrow,
-QDoubleSpinBox::down-arrow {
+QSpinBox::down-arrow:off,
+QSpinBox::down-arrow:disabled,
+QDoubleSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow:off,
+QDoubleSpinBox::down-arrow:disabled {
     image: url(theme:Dark/down.svg);
-    width: 100%;
-    padding: 2px;
+    width: 10px;
+    height: 10px;
+    margin: 0px;
+    padding: 0px;
 }
 
 /* Controls Dock */
@@ -2257,7 +2275,8 @@ OBSYoutubeActions {
 QDateTimeEdit::down-arrow {
     qproperty-alignment: AlignTop;
     image: url(theme:Dark/down.svg);
-    width: 100%;
+    width: var(--icon_base);
+    height: var(--icon_base);
 }
 
 QDateTimeEdit:on {

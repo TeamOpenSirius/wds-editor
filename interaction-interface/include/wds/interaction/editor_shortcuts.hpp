@@ -60,11 +60,14 @@ std::array<ShortcutChord, kEditorShortcutCount> editor_shortcuts_snapshot() noex
 bool is_forbidden_shortcut_key(KeyCode key) noexcept;
 bool is_completing_shortcut_key(KeyCode key) noexcept;
 
-// Display: "C", "Cmd+C", "Shift+Cmd+C" (Cmd on Apple, Ctrl elsewhere).
+// On-screen label. macOS matches Qt NativeText (⌘S, ⇧⌘C); elsewhere Ctrl+S.
 std::string format_shortcut_chord(const ShortcutChord& chord);
-// Modifiers only while capturing (e.g. "Shift", "Shift+Cmd").
+// Modifiers only while capturing (e.g. ⇧⌘ / Shift+Ctrl).
 std::string format_shortcut_modifiers(const Modifiers& mods);
-// Parse "Ctrl+S" / "Cmd+S" / "Shift+Space" etc. Empty → nullopt.
+// Config I/O: Qt PortableText tokens, same on every OS ("Ctrl+S", "Ctrl+Shift+M").
+std::string format_shortcut_chord_portable(const ShortcutChord& chord);
+std::string format_shortcut_modifiers_portable(const Modifiers& mods);
+// Parse portable, legacy (Cmd/Option), and native symbols (⌘S). Empty → nullopt.
 std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text);
 
 // True when `chord` matches another binding (excluding `self`).

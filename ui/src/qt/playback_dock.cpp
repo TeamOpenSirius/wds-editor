@@ -1,7 +1,8 @@
 #include "wds/ui/qt/playback_dock.hpp"
 
-#include "wds/ui/qt/flow_layout.hpp"
+#include "wds/ui/qt/spread_layout.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/qt/note_icons.hpp"
 
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
@@ -10,16 +11,20 @@
 #include "wds/ui/ui_manager.hpp"
 
 #include <wds/audio/transport.hpp>
+#include <wds/interaction/editor_input.hpp>
 
+#include <QAbstractSlider>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QHBoxLayout>
+#include <QFont>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
@@ -28,12 +33,43 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
+#include <initializer_list>
 #include <cmath>
+#include <optional>
 
 namespace wds::ui {
 namespace {
 
 constexpr int kSeekSteps = 1000;
+
+constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
+    wds::interaction::PlaceIntent::None,
+    wds::interaction::PlaceIntent::ExTap,
+    wds::interaction::PlaceIntent::HoldStart,
+    wds::interaction::PlaceIntent::HoldBody,
+    wds::interaction::PlaceIntent::FlickLeft,
+    wds::interaction::PlaceIntent::Flick,
+    wds::interaction::PlaceIntent::FlickRight,
+    wds::interaction::PlaceIntent::ScratchHoldBody,
+}};
+
+struct ConvertSpec {
+  const char* name;
+  wds::chart_editor::NoteType type;
+  int direction;
+};
+
+constexpr std::array<ConvertSpec, 8> kConvertSpecs = {{
+    {"Tap", wds::chart_editor::NoteType::Normal, 0},
+    {"ExTap", wds::chart_editor::NoteType::Critical, 0},
+    {"Hold Head", wds::chart_editor::NoteType::HoldStart, 0},
+    {"Hold", wds::chart_editor::NoteType::Hold, 0},
+    {"Left Flick", wds::chart_editor::NoteType::Flick, -1},
+    {"Flick", wds::chart_editor::NoteType::Flick, 0},
+    {"Right Flick", wds::chart_editor::NoteType::Flick, 1},
+    {"Scratch Hold", wds::chart_editor::NoteType::ScratchHold, 0},
+}};
 
 float rate_from_combo(const QComboBox* combo) {
   QString text = combo->currentText();
@@ -43,43 +79,146 @@ float rate_from_combo(const QComboBox* combo) {
   return ok ? rate : 1.0f;
 }
 
-// Scroll + flow scaffold shared by the dock panels: controls wrap into
-// rows/columns so the dock stays usable at any size or orientation.
-FlowLayout* make_flow_panel(QWidget* panel, QVBoxLayout* root) {
-  auto* scroll = new QScrollArea(panel);
-  scroll->setWidgetResizable(true);
-  scroll->setFrameShape(QFrame::NoFrame);
-  auto* content = new QWidget(scroll);
-  auto* flow = new FlowLayout(content, 2, 12, 6);
-  scroll->setWidget(content);
-  root->addWidget(scroll, 1);
-  return flow;
+int volume_pct_from_combo(const QComboBox* combo) {
+  QString text = combo->currentText();
+  if (text.endsWith(QLatin1Char('%'))) text.chop(1);
+  bool ok = false;
+  const int pct = text.toInt(&ok);
+  return ok ? std::clamp(pct, 0, 100) : 100;
 }
 
-QWidget* make_group(FlowLayout* flow, std::initializer_list<QWidget*> widgets) {
-  auto* group = new QWidget(flow->parentWidget());
+int nearest_volume_index(int pct) {
+  static constexpr int kStops[] = {0, 25, 50, 75, 100};
+  int best = 4;
+  int best_d = 999;
+  for (int i = 0; i < 5; ++i) {
+    const int d = std::abs(kStops[i] - pct);
+    if (d < best_d) {
+      best_d = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+QString format_rate(float rate) {
+  if (std::fabs(rate - 0.25f) < 0.001f) return QStringLiteral("0.25x");
+  if (std::fabs(rate - 0.5f) < 0.001f) return QStringLiteral("0.5x");
+  if (std::fabs(rate - 0.75f) < 0.001f) return QStringLiteral("0.75x");
+  if (std::fabs(rate - 1.5f) < 0.001f) return QStringLiteral("1.5x");
+  if (std::fabs(rate - 2.0f) < 0.001f) return QStringLiteral("2x");
+  return QStringLiteral("1x");
+}
+
+constexpr int kToolbarFieldW = 120;
+constexpr int kChartInnerGap = 6;
+constexpr int kEaseButtonGap = 4;
+constexpr int kVolumeFieldW = 76;
+constexpr int kLabelFieldGap = 16;
+
+void apply_compact_field(QWidget* field, int width) {
+  field->setMaximumWidth(width);
+  field->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+}
+
+void apply_toolbar_field(QWidget* field, int width = kToolbarFieldW) {
+  field->setFixedWidth(width);
+  field->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+}
+
+int toolbar_field_height(const QWidget* field) {
+  return std::max(1, field->sizeHint().height());
+}
+
+QLabel* make_form_label(QWidget* host, const QString& title) {
+  auto* label = new QLabel(title, host);
+  label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  label->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  return label;
+}
+
+QWidget* make_hbox_group(QWidget* parent, std::initializer_list<QWidget*> widgets) {
+  auto* group = new QWidget(parent);
   auto* row = new QHBoxLayout(group);
   row->setContentsMargins(0, 0, 0, 0);
-  for (QWidget* widget : widgets) row->addWidget(widget);
-  flow->addWidget(group);
+  row->setSpacing(kLabelFieldGap);
+  for (QWidget* widget : widgets) {
+    row->addWidget(widget, 0, Qt::AlignVCenter);
+  }
   return group;
+}
+
+QWidget* make_labeled_field(QWidget* parent, const QString& title, QWidget* field) {
+  auto* cell = new QWidget(parent);
+  cell->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+  auto* grid = new QGridLayout(cell);
+  grid->setContentsMargins(0, 0, 0, 0);
+  grid->setHorizontalSpacing(kLabelFieldGap);
+  grid->setVerticalSpacing(0);
+  auto* label = make_form_label(cell, title);
+  const int field_h = field->sizeHint().height();
+  if (field_h > 0) label->setMinimumHeight(field_h);
+  grid->addWidget(label, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
+  grid->addWidget(field, 0, 1, Qt::AlignLeft | Qt::AlignVCenter);
+  grid->setColumnMinimumWidth(1, kToolbarFieldW);
+  return cell;
+}
+
+QWidget* center_in_cell(QWidget* parent, QWidget* inner) {
+  auto* cell = new QWidget(parent);
+  cell->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  auto* row = new QHBoxLayout(cell);
+  row->setContentsMargins(0, 0, 0, 0);
+  row->addStretch(1);
+  row->addWidget(inner, 0, Qt::AlignVCenter);
+  row->addStretch(1);
+  return cell;
+}
+
+int sync_min_width(std::initializer_list<QWidget*> widgets) {
+  int width = 0;
+  for (QWidget* widget : widgets) width = std::max(width, widget->sizeHint().width());
+  for (QWidget* widget : widgets) widget->setMinimumWidth(width);
+  return width;
+}
+
+QWidget* make_pair_row(QWidget* parent, QWidget* left, QWidget* right, int col_w) {
+  auto* row = new QWidget(parent);
+  row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  auto* pair = new TwoColumnThreeGapLayout(row);
+  auto add_col = [&](QWidget* inner) {
+    auto* cell = center_in_cell(row, inner);
+    cell->setMinimumWidth(col_w);
+    pair->addWidget(cell);
+  };
+  add_col(left);
+  add_col(right);
+  return row;
+}
+
+QComboBox* make_volume_combo(QWidget* parent) {
+  auto* combo = new QComboBox(parent);
+  combo->addItems({QStringLiteral("0%"), QStringLiteral("25%"), QStringLiteral("50%"),
+                   QStringLiteral("75%"), QStringLiteral("100%")});
+  combo->setCurrentIndex(4);
+  return combo;
 }
 
 }  // namespace
 
 // --- 播放 -------------------------------------------------------------------
 
-PlaybackAudioPanel::PlaybackAudioPanel(UiManager* manager, QWidget* parent)
+PlaybackBar::PlaybackBar(UiManager* manager, QWidget* parent)
     : QWidget(parent), manager_(manager) {
   build_ui();
   sync_timer_ = new QTimer(this);
   sync_timer_->setInterval(250);
-  connect(sync_timer_, &QTimer::timeout, this, &PlaybackAudioPanel::sync_from_runtime);
+  connect(sync_timer_, &QTimer::timeout, this, &PlaybackBar::sync_from_runtime);
   sync_timer_->start();
   sync_from_runtime();
 }
 
-void PlaybackAudioPanel::seek_to_slider(int value) {
+void PlaybackBar::seek_to_slider(int value) {
   auto* settings = manager_->settings_panel();
   if (settings == nullptr) return;
   int64_t start = 0;
@@ -89,16 +228,20 @@ void PlaybackAudioPanel::seek_to_slider(int value) {
   manager_->chart_preview().transport().request_seek_ms(start + span * value / kSeekSteps);
 }
 
-void PlaybackAudioPanel::build_ui() {
-  auto* root = new QVBoxLayout(this);
-  root->setContentsMargins(4, 4, 4, 4);
+void PlaybackBar::build_ui() {
+  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  auto* content = new QWidget;
+  auto* block = new QWidget(content);
+  block->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Expanding);
+  auto* box = new QVBoxLayout(block);
+  box->setContentsMargins(0, 0, 0, 0);
+  box->setSpacing(0);
 
-  auto* seekRow = new QHBoxLayout;
-  seek_ = new QSlider(Qt::Horizontal, this);
+  seek_ = new QSlider(Qt::Horizontal, block);
   seek_->setRange(0, kSeekSteps);
   seek_->setMinimumWidth(120);
-  play_ = new QPushButton(tr("播放"), this);
-  stop_ = new QPushButton(tr("回到开头"), this);
+  play_ = new QPushButton(tr("播放"), block);
+  stop_ = new QPushButton(tr("回到开头"), block);
   play_icon_ = fluent_icon(fluent::Play);
   pause_icon_ = fluent_icon(fluent::Pause);
   if (play_icon_.isNull()) play_icon_ = style()->standardIcon(QStyle::SP_MediaPlay);
@@ -114,56 +257,61 @@ void PlaybackAudioPanel::build_ui() {
     button->setIconSize(QSize(20, 20));
     button->setFixedSize(36, 32);
   }
-  seekRow->addWidget(seek_, 1);
-  seekRow->addWidget(play_);
-  seekRow->addWidget(stop_);
-  root->addLayout(seekRow);
+  auto* transport = new QWidget(block);
+  auto* transport_row = new QHBoxLayout(transport);
+  transport_row->setContentsMargins(0, 0, 0, 0);
+  transport_row->setSpacing(6);
+  transport_row->addWidget(play_);
+  transport_row->addWidget(stop_);
+  auto* seek_row = new QWidget(block);
+  auto* seek_layout = new QHBoxLayout(seek_row);
+  seek_layout->setContentsMargins(0, 0, 0, 0);
+  seek_layout->setSpacing(kLabelFieldGap);
+  seek_layout->addWidget(seek_, 1);
+  seek_layout->addWidget(transport, 0);
+  seek_row->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
-  auto* flow = make_flow_panel(this, root);
-  auto* content = flow->parentWidget();
-
-  rate_ = new QComboBox(content);
-  rate_->addItems({"0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x"});
+  auto* mix = new QWidget(block);
+  mix->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  auto* mix_row = new QHBoxLayout(mix);
+  mix_row->setContentsMargins(0, 0, 0, 0);
+  mix_row->setSpacing(kLabelFieldGap);
+  music_volume_ = make_volume_combo(mix);
+  apply_compact_field(music_volume_, kVolumeFieldW);
+  music_mute_ = new QCheckBox(tr("静音"), mix);
+  sfx_volume_ = make_volume_combo(mix);
+  apply_compact_field(sfx_volume_, kVolumeFieldW);
+  sfx_mute_ = new QCheckBox(tr("静音"), mix);
+  rate_ = new QComboBox(mix);
+  apply_compact_field(rate_, kVolumeFieldW);
+  rate_->addItems({QStringLiteral("0.25x"), QStringLiteral("0.5x"), QStringLiteral("0.75x"),
+                   QStringLiteral("1x"), QStringLiteral("1.5x"), QStringLiteral("2x")});
   rate_->setCurrentText(QStringLiteral("1x"));
-  make_group(flow, {new QLabel(tr("播放速度"), content), rate_});
+  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("音乐"), mix), music_volume_, music_mute_}));
+  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("音效"), mix), sfx_volume_, sfx_mute_}));
+  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("播放速度"), mix), rate_}));
+  box->addStretch(1);
+  box->addWidget(seek_row);
+  box->addStretch(1);
+  box->addWidget(mix);
+  box->addStretch(1);
 
-  delay_ms_ = new QSpinBox(content);
-  delay_ms_->setRange(-60000, 60000);
-  delay_ms_->setSuffix(QStringLiteral(" ms"));
-  delay_ms_->setKeyboardTracking(false);
-  make_group(flow, {new QLabel(tr("谱面延迟"), content), delay_ms_});
+  auto* host = new QVBoxLayout(content);
+  host->setContentsMargins(kSpreadMinMargin, 0, kSpreadMinMargin, 0);
+  auto* mid = new QHBoxLayout();
+  mid->setContentsMargins(0, 0, 0, 0);
+  mid->addStretch(1);
+  mid->addWidget(block, 0);
+  mid->addStretch(1);
+  host->addLayout(mid, 1);
 
-  visible_range_ = new QComboBox(content);
-  visible_range_->setEditable(true);
-  visible_range_->addItems({"10", "15", "20", "25", "30", "35", "40", "80"});
-  make_group(flow, {new QLabel(tr("可见范围"), content), visible_range_});
+  auto* scroll = new FillScrollArea(this);
+  scroll->setWidget(content);
+  auto* outer = new QVBoxLayout(this);
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->addWidget(scroll);
 
-  subdivisions_ = new QComboBox(content);
-  subdivisions_->setEditable(true);
-  subdivisions_->addItems({"2", "3", "4", "6", "8", "12", "16"});
-  make_group(flow, {new QLabel(tr("拍内分格"), content), subdivisions_});
-
-  chart_select_ = new QComboBox(content);
-  chart_select_->setMinimumWidth(110);
-  chart_add_ = new QPushButton(content);
-  auto add_icon = fluent_icon(fluent::Add);
-  if (add_icon.isNull()) add_icon = style()->standardIcon(QStyle::SP_FileDialogNewFolder);
-  chart_add_->setIcon(add_icon);
-  chart_add_->setIconSize(QSize(20, 20));
-  chart_add_->setFixedSize(32, 32);
-  chart_add_->setToolTip(tr("增加谱面"));
-  chart_add_->setAccessibleName(tr("增加谱面"));
-  make_group(flow, {new QLabel(tr("谱面"), content), chart_select_, chart_add_});
-
-  pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), content);
-  make_group(flow, {pause_at_current_});
-  split_width_follow_ = new QCheckBox(tr("音符默认对齐分割线轨道"), content);
-  make_group(flow, {split_width_follow_});
-
-  // Seek only when the drag is released (or on groove clicks) — live seeking
-  // while dragging restarts audio every few ms and crackles.
-  connect(seek_, &QSlider::sliderReleased, this,
-          [this] { seek_to_slider(seek_->value()); });
+  connect(seek_, &QSlider::sliderReleased, this, [this] { seek_to_slider(seek_->value()); });
   connect(seek_, &QSlider::actionTriggered, this, [this](int action) {
     if (action == QAbstractSlider::SliderMove || seek_->isSliderDown()) return;
     seek_to_slider(seek_->sliderPosition());
@@ -174,6 +322,34 @@ void PlaybackAudioPanel::build_ui() {
   });
   connect(stop_, &QPushButton::clicked, this,
           [this] { manager_->chart_preview().reset_playback(); });
+  const auto apply_music = [this] {
+    if (syncing_) return;
+    if (auto* settings = manager_->settings_panel()) {
+      settings->set_music_state_from_qt(volume_pct_from_combo(music_volume_) / 100.0f,
+                                        music_mute_->isChecked());
+      manager_->request_save_ui_config(false);
+    }
+  };
+  const auto apply_sfx = [this] {
+    if (syncing_) return;
+    if (auto* settings = manager_->settings_panel()) {
+      settings->set_sfx_state_from_qt(volume_pct_from_combo(sfx_volume_) / 100.0f,
+                                      sfx_mute_->isChecked());
+      manager_->request_save_ui_config(false);
+    }
+  };
+  connect(music_volume_, &QComboBox::textActivated, this, [this, apply_music](const QString&) {
+    if (syncing_) return;
+    music_mute_->setChecked(false);
+    apply_music();
+  });
+  connect(music_mute_, &QCheckBox::toggled, this, [apply_music](bool) { apply_music(); });
+  connect(sfx_volume_, &QComboBox::textActivated, this, [this, apply_sfx](const QString&) {
+    if (syncing_) return;
+    sfx_mute_->setChecked(false);
+    apply_sfx();
+  });
+  connect(sfx_mute_, &QCheckBox::toggled, this, [apply_sfx](bool) { apply_sfx(); });
   connect(rate_, &QComboBox::textActivated, this, [this](const QString&) {
     if (syncing_) return;
     if (auto* settings = manager_->settings_panel()) {
@@ -181,15 +357,245 @@ void PlaybackAudioPanel::build_ui() {
       manager_->request_save_ui_config(true);
     }
   });
+}
+
+void PlaybackBar::sync_from_runtime() {
+  syncing_ = true;
+  auto& transport = manager_->chart_preview().transport();
+
+  const QString action = transport.playing() ? tr("暂停") : tr("播放");
+  if (play_->toolTip() != action) {
+    play_->setIcon(transport.playing() ? pause_icon_ : play_icon_);
+    play_->setToolTip(action);
+    play_->setAccessibleName(action);
+  }
+  if (!seek_->isSliderDown()) {
+    if (auto* settings = manager_->settings_panel()) {
+      int64_t start = 0;
+      int64_t end = 1;
+      settings->seek_window_ms(start, end);
+      const int64_t span = std::max<int64_t>(end - start, 1);
+      const int64_t pos = std::clamp<int64_t>(transport.committed_ms() - start, 0, span);
+      const QSignalBlocker blocker(seek_);
+      seek_->setValue(static_cast<int>(pos * kSeekSteps / span));
+    }
+  }
+  if (auto* settings = manager_->settings_panel()) {
+    if (!music_volume_->hasFocus()) {
+      const QSignalBlocker blocker(music_volume_);
+      music_volume_->setCurrentIndex(
+          nearest_volume_index(static_cast<int>(std::lround(settings->music_gain() * 100.0f))));
+    }
+    if (!sfx_volume_->hasFocus()) {
+      const QSignalBlocker blocker(sfx_volume_);
+      sfx_volume_->setCurrentIndex(
+          nearest_volume_index(static_cast<int>(std::lround(settings->sfx_gain() * 100.0f))));
+    }
+    {
+      const QSignalBlocker m(music_mute_);
+      music_mute_->setChecked(settings->music_muted());
+      const QSignalBlocker s(sfx_mute_);
+      sfx_mute_->setChecked(settings->sfx_muted());
+    }
+    if (!rate_->hasFocus()) {
+      const QSignalBlocker blocker(rate_);
+      rate_->setCurrentText(format_rate(settings->playback_rate()));
+    }
+  }
+  syncing_ = false;
+}
+
+// --- 转换 -------------------------------------------------------------------
+
+ConvertBar::ConvertBar(UiManager* manager, const std::string& skins_dir, QWidget* parent)
+    : QWidget(parent), manager_(manager) {
+  build_ui(skins_dir);
+  sync_place_checks();
+}
+
+void ConvertBar::build_ui(const std::string& skins_dir) {
+  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+  auto* row = new QHBoxLayout(this);
+  row->setContentsMargins(6, 4, 6, 4);
+  row->setSpacing(0);
+  const auto icons = build_convert_note_icons(skins_dir);
+  for (std::size_t i = 0; i < kConvertSpecs.size(); ++i) {
+    if (i > 0) {
+      auto* gap = new QWidget(this);
+      gap->setFixedWidth(4);
+      gap->setAttribute(Qt::WA_TransparentForMouseEvents);
+      row->addWidget(gap, 0);
+    }
+    auto* button = new QToolButton(this);
+    button->setIcon(icons[i]);
+    button->setIconSize(QSize(36, 36));
+    button->setMinimumSize(40, 40);
+    button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    button->setToolTip(tr("转换为%1").arg(QString::fromUtf8(kConvertSpecs[i].name)));
+    button->setCheckable(true);
+    button->setAutoRaise(true);
+    convert_buttons_[i] = button;
+    row->addWidget(button, 1);
+    connect(button, &QToolButton::clicked, this, [this, i] {
+      auto* edit = manager_ != nullptr ? manager_->edit_panel() : nullptr;
+      if (edit == nullptr) return;
+      const auto& spec = kConvertSpecs[i];
+      if (manager_->new_note_place_logic()) {
+        const auto intent = kPlaceIntents[i];
+        if (edit->place_intent_override() == intent) {
+          edit->set_place_intent_override(wds::interaction::PlaceIntent::None);
+          manager_->set_status("放置类型已恢复为 Tap", StatusLevel::Info);
+        } else {
+          edit->set_place_intent_override(intent);
+          manager_->set_status(std::string("放置类型切换为 ") + spec.name, StatusLevel::Info);
+        }
+      } else if (!edit->selected().empty()) {
+        const std::optional<int32_t> direction =
+            spec.type == wds::chart_editor::NoteType::Flick
+                ? std::optional<int32_t>(spec.direction)
+                : std::nullopt;
+        if (edit->convert_selected(spec.type, direction)) {
+          manager_->set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
+        }
+      } else {
+        manager_->set_status("未选中音符（可在设置→输入中开启新版放置逻辑）",
+                             StatusLevel::Info);
+      }
+      sync_place_checks();
+    });
+  }
+}
+
+void ConvertBar::set_ribbon_mode() {
+  setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
+  if (auto* row = qobject_cast<QHBoxLayout*>(layout())) {
+    row->setContentsMargins(2, 0, 2, 0);
+    row->setSpacing(0);
+    for (int i = 0; i < row->count(); ++i) row->setStretch(i, 0);
+  }
+  for (auto* button : convert_buttons_) {
+    if (button == nullptr) continue;
+    button->setIconSize(QSize(24, 24));
+    button->setMinimumSize(28, 28);
+    button->setFixedSize(32, 32);
+    button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  }
+}
+
+void ConvertBar::sync_place_checks() {
+  auto* edit = manager_ != nullptr ? manager_->edit_panel() : nullptr;
+  const bool enabled = manager_ != nullptr && manager_->new_note_place_logic();
+  const auto current =
+      edit != nullptr ? edit->place_intent_override() : wds::interaction::PlaceIntent::None;
+  const bool editable = manager_ != nullptr && !manager_->session().read_only();
+  for (std::size_t i = 0; i < convert_buttons_.size(); ++i) {
+    if (convert_buttons_[i] == nullptr) continue;
+    convert_buttons_[i]->setEnabled(editable);
+    const QSignalBlocker blocker(convert_buttons_[i]);
+    convert_buttons_[i]->setChecked(enabled && current != wds::interaction::PlaceIntent::None &&
+                                    kPlaceIntents[i] == current);
+  }
+}
+
+// --- 工具栏 -----------------------------------------------------------------
+
+EditorToolbarWidget::EditorToolbarWidget(UiManager* manager, QWidget* parent)
+    : QWidget(parent), manager_(manager) {
+  build_ui();
+  sync_timer_ = new QTimer(this);
+  sync_timer_->setInterval(250);
+  connect(sync_timer_, &QTimer::timeout, this, &EditorToolbarWidget::sync_from_runtime);
+  sync_timer_->start();
+  sync_from_runtime();
+}
+
+void EditorToolbarWidget::build_ui() {
+  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  auto* content = new QWidget;
+  auto* stack = new EvenGapStackLayout(content);
+  stack->setSizeConstraint(QLayout::SetMinimumSize);
+
+  delay_ms_ = new QSpinBox(content);
+  delay_ms_->setRange(-60000, 60000);
+  delay_ms_->setSuffix(QStringLiteral(" ms"));
+  delay_ms_->setKeyboardTracking(false);
+  apply_toolbar_field(delay_ms_);
+  const int field_h = toolbar_field_height(delay_ms_);
+
+  chart_select_ = new QComboBox(content);
+  apply_toolbar_field(chart_select_, kToolbarFieldW - kChartInnerGap - field_h);
+  chart_add_ = new QPushButton(content);
+  auto add_icon = fluent_icon(fluent::Add);
+  if (add_icon.isNull()) add_icon = style()->standardIcon(QStyle::SP_FileDialogNewFolder);
+  chart_add_->setIcon(add_icon);
+  const int add_icon_px = std::max(12, field_h - 8);
+  chart_add_->setIconSize(QSize(add_icon_px, add_icon_px));
+  chart_add_->setFixedSize(field_h, field_h);
+  chart_add_->setToolTip(tr("增加谱面"));
+  chart_add_->setAccessibleName(tr("增加谱面"));
+  auto* chart_field = new QWidget(content);
+  chart_field->setFixedWidth(kToolbarFieldW);
+  chart_field->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  auto* chart_row = new QHBoxLayout(chart_field);
+  chart_row->setContentsMargins(0, 0, 0, 0);
+  chart_row->setSpacing(kChartInnerGap);
+  chart_row->addWidget(chart_select_);
+  chart_row->addWidget(chart_add_);
+
+  visible_range_ = new QSpinBox(content);
+  visible_range_->setRange(1, 1000);
+  visible_range_->setSingleStep(5);
+  visible_range_->setKeyboardTracking(false);
+  apply_toolbar_field(visible_range_);
+
+  subdivisions_ = new QSpinBox(content);
+  subdivisions_->setRange(1, 64);
+  subdivisions_->setSingleStep(1);
+  subdivisions_->setKeyboardTracking(false);
+  apply_toolbar_field(subdivisions_);
+  delay_ms_->setFixedHeight(field_h);
+  visible_range_->setFixedHeight(field_h);
+  chart_select_->setFixedHeight(field_h);
+  subdivisions_->setFixedHeight(field_h);
+
+  curve_fill_widget_ = new CurveFillWidget(manager_, content);
+  curve_fill_widget_->set_control_height(field_h);
+  curve_fill_widget_->buttons()->setFixedWidth(kToolbarFieldW);
+
+  auto* delay_cell = make_labeled_field(content, tr("谱面延迟"), delay_ms_);
+  auto* chart_cell = make_labeled_field(content, tr("谱面选择"), chart_field);
+  auto* visible_cell = make_labeled_field(content, tr("可见范围"), visible_range_);
+  auto* subdiv_cell = make_labeled_field(content, tr("拍内分割"), subdivisions_);
+  auto* curve_cell = make_labeled_field(content, tr("曲线选择"), curve_fill_widget_->combo());
+  auto* ease_cell = make_labeled_field(content, tr("缓动选择"), curve_fill_widget_->buttons());
+  pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), content);
+  split_width_follow_ = new QCheckBox(tr("音符默认对齐分割线轨道"), content);
+
+  const int left_form_w = sync_min_width({delay_cell, visible_cell, curve_cell});
+  const int right_form_w = sync_min_width({chart_cell, subdiv_cell, ease_cell});
+  const int col_w = std::max({left_form_w, right_form_w, pause_at_current_->sizeHint().width(),
+                             split_width_follow_->sizeHint().width()});
+
+  stack->addWidget(make_pair_row(content, delay_cell, chart_cell, col_w));
+  stack->addWidget(make_pair_row(content, visible_cell, subdiv_cell, col_w));
+  stack->addWidget(make_pair_row(content, curve_cell, ease_cell, col_w));
+  stack->addWidget(make_pair_row(content, pause_at_current_, split_width_follow_, col_w));
+
+  auto* scroll = new FillScrollArea(this);
+  scroll->setWidget(content);
+  auto* outer = new QVBoxLayout(this);
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->addWidget(scroll);
+
   connect(delay_ms_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
     if (!syncing_) apply_delay();
   });
-  connect(visible_range_, &QComboBox::textActivated, this, [this](const QString&) { apply_grid(); });
-  connect(visible_range_->lineEdit(), &QLineEdit::editingFinished, this,
-          [this] { apply_grid(); });
-  connect(subdivisions_, &QComboBox::textActivated, this, [this](const QString&) { apply_grid(); });
-  connect(subdivisions_->lineEdit(), &QLineEdit::editingFinished, this,
-          [this] { apply_grid(); });
+  connect(visible_range_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
+    if (!syncing_) apply_grid();
+  });
+  connect(subdivisions_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
+    if (!syncing_) apply_grid();
+  });
   connect(chart_select_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
     auto& session = manager_->session();
     if (index >= 0 && static_cast<std::size_t>(index) < session.chart_count())
@@ -214,7 +620,7 @@ void PlaybackAudioPanel::build_ui() {
   });
 }
 
-void PlaybackAudioPanel::apply_delay() {
+void EditorToolbarWidget::apply_delay() {
   auto& session = manager_->session();
   const int64_t value = std::clamp<int64_t>(delay_ms_->value(), -60000, 60000);
   if (value == session.offset_ms()) return;
@@ -225,43 +631,19 @@ void PlaybackAudioPanel::apply_delay() {
   }
 }
 
-void PlaybackAudioPanel::apply_grid() {
+void EditorToolbarWidget::apply_grid() {
   auto* edit = manager_->edit_panel();
   if (edit == nullptr) return;
   auto grid = edit->viewport().grid();
-  bool ok = false;
-  const int hectoms = visible_range_->currentText().toInt(&ok);
-  if (ok) grid.visible_hectoms = std::clamp(hectoms, 1, 1000);
-  ok = false;
-  const int divisions = subdivisions_->currentText().toInt(&ok);
-  if (ok) grid.subdivisions_per_beat = std::clamp(divisions, 1, 64);
+  grid.visible_hectoms = std::clamp(visible_range_->value(), 1, 1000);
+  grid.subdivisions_per_beat = std::clamp(subdivisions_->value(), 1, 64);
   edit->set_grid(grid);
   manager_->request_save_ui_config(true);
 }
 
-void PlaybackAudioPanel::sync_from_runtime() {
+void EditorToolbarWidget::sync_from_runtime() {
   syncing_ = true;
   auto& session = manager_->session();
-  auto& transport = manager_->chart_preview().transport();
-
-  const QString action = transport.playing() ? tr("暂停") : tr("播放");
-  if (play_->toolTip() != action) {
-    play_->setIcon(transport.playing() ? pause_icon_ : play_icon_);
-    play_->setToolTip(action);
-    play_->setAccessibleName(action);
-  }
-  if (!seek_->isSliderDown()) {
-    if (auto* settings = manager_->settings_panel()) {
-      int64_t start = 0;
-      int64_t end = 1;
-      settings->seek_window_ms(start, end);
-      const int64_t span = std::max<int64_t>(end - start, 1);
-      const int64_t pos = std::clamp<int64_t>(transport.committed_ms() - start, 0, span);
-      const QSignalBlocker blocker(seek_);
-      seek_->setValue(static_cast<int>(pos * kSeekSteps / span));
-    }
-  }
-
   if (!delay_ms_->hasFocus()) {
     const QSignalBlocker blocker(delay_ms_);
     delay_ms_->setValue(static_cast<int>(
@@ -269,13 +651,13 @@ void PlaybackAudioPanel::sync_from_runtime() {
   }
   if (auto* edit = manager_->edit_panel()) {
     const auto& grid = edit->viewport().grid();
-    if (!visible_range_->lineEdit()->hasFocus()) {
+    if (!visible_range_->hasFocus()) {
       const QSignalBlocker blocker(visible_range_);
-      visible_range_->setCurrentText(QString::number(grid.visible_hectoms));
+      visible_range_->setValue(grid.visible_hectoms);
     }
-    if (!subdivisions_->lineEdit()->hasFocus()) {
+    if (!subdivisions_->hasFocus()) {
       const QSignalBlocker blocker(subdivisions_);
-      subdivisions_->setCurrentText(QString::number(grid.subdivisions_per_beat));
+      subdivisions_->setValue(grid.subdivisions_per_beat);
     }
     {
       const QSignalBlocker p(pause_at_current_);
@@ -284,7 +666,6 @@ void PlaybackAudioPanel::sync_from_runtime() {
       split_width_follow_->setChecked(edit->split_width_follow());
     }
   }
-
   const int count = std::max<int>(1, static_cast<int>(session.chart_count()));
   if (chart_select_->count() != count) {
     const QSignalBlocker blocker(chart_select_);
@@ -302,113 +683,37 @@ void PlaybackAudioPanel::sync_from_runtime() {
   syncing_ = false;
 }
 
-// --- 音频 -------------------------------------------------------------------
-
-AudioMixPanel::AudioMixPanel(UiManager* manager, QWidget* parent)
-    : QWidget(parent), manager_(manager) {
-  auto* root = new QVBoxLayout(this);
-  root->setContentsMargins(4, 4, 4, 4);
-  auto* flow = make_flow_panel(this, root);
-  auto* content = flow->parentWidget();
-
-  auto make_volume_slider = [content](QSlider*& slider, QLabel*& value) {
-    slider = new QSlider(Qt::Horizontal, content);
-    slider->setRange(0, 100);
-    slider->setValue(100);
-    slider->setMinimumWidth(120);
-    value = new QLabel(QStringLiteral("100%"), content);
-    value->setMinimumWidth(38);
-    value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  };
-  make_volume_slider(music_volume_, music_value_);
-  music_mute_ = new QCheckBox(tr("静音"), content);
-  make_volume_slider(sfx_volume_, sfx_value_);
-  sfx_mute_ = new QCheckBox(tr("静音"), content);
-  const auto add_channel = [flow, content](const QString& title, QSlider* slider,
-                                          QLabel* value, QCheckBox* mute) {
-    auto* group = new QWidget(content);
-    auto* grid = new QGridLayout(group);
-    grid->setContentsMargins(0, 0, 0, 0);
-    grid->setHorizontalSpacing(6);
-    grid->setVerticalSpacing(4);
-    grid->addWidget(new QLabel(title, group), 0, 0);
-    grid->addWidget(slider, 0, 1);
-    grid->addWidget(value, 0, 2);
-    grid->addWidget(mute, 1, 1, 1, 2);
-    grid->setColumnStretch(1, 1);
-    flow->addWidget(group);
-  };
-  add_channel(tr("音乐"), music_volume_, music_value_, music_mute_);
-  add_channel(tr("音效"), sfx_volume_, sfx_value_, sfx_mute_);
-
-  const auto apply_music = [this] {
-    if (syncing_) return;
-    music_value_->setText(QString::number(music_volume_->value()) + "%");
-    if (auto* settings = manager_->settings_panel()) {
-      settings->set_music_state_from_qt(music_volume_->value() / 100.0f, music_mute_->isChecked());
-      manager_->request_save_ui_config(false);
-    }
-  };
-  const auto apply_sfx = [this] {
-    if (syncing_) return;
-    sfx_value_->setText(QString::number(sfx_volume_->value()) + "%");
-    if (auto* settings = manager_->settings_panel()) {
-      settings->set_sfx_state_from_qt(sfx_volume_->value() / 100.0f, sfx_mute_->isChecked());
-      manager_->request_save_ui_config(false);
-    }
-  };
-  connect(music_volume_, &QSlider::valueChanged, this, [apply_music](int) { apply_music(); });
-  connect(music_mute_, &QCheckBox::toggled, this, [apply_music](bool) { apply_music(); });
-  connect(sfx_volume_, &QSlider::valueChanged, this, [apply_sfx](int) { apply_sfx(); });
-  connect(sfx_mute_, &QCheckBox::toggled, this, [apply_sfx](bool) { apply_sfx(); });
-
-  sync_timer_ = new QTimer(this);
-  sync_timer_->setInterval(500);
-  connect(sync_timer_, &QTimer::timeout, this, &AudioMixPanel::sync_from_runtime);
-  sync_timer_->start();
-  sync_from_runtime();
-}
-
-void AudioMixPanel::sync_from_runtime() {
-  syncing_ = true;
-  if (auto* settings = manager_->settings_panel()) {
-    if (!music_volume_->isSliderDown()) {
-      const QSignalBlocker blocker(music_volume_);
-      const int pct = static_cast<int>(std::lround(settings->music_gain() * 100.0f));
-      music_volume_->setValue(pct);
-      music_value_->setText(QString::number(pct) + "%");
-    }
-    if (!sfx_volume_->isSliderDown()) {
-      const QSignalBlocker blocker(sfx_volume_);
-      const int pct = static_cast<int>(std::lround(settings->sfx_gain() * 100.0f));
-      sfx_volume_->setValue(pct);
-      sfx_value_->setText(QString::number(pct) + "%");
-    }
-    const QSignalBlocker m(music_mute_);
-    music_mute_->setChecked(settings->music_muted());
-    const QSignalBlocker s(sfx_mute_);
-    sfx_mute_->setChecked(settings->sfx_muted());
-  }
-  syncing_ = false;
+void EditorToolbarWidget::refresh_curve_controls() {
+  if (curve_fill_widget_ != nullptr) curve_fill_widget_->refresh_curve_controls();
 }
 
 // --- 曲线填充 ---------------------------------------------------------------
 
 CurveFillWidget::CurveFillWidget(UiManager* manager, QWidget* parent)
     : QWidget(parent), manager_(manager) {
-  auto* row = new QHBoxLayout(this);
-  row->setContentsMargins(0, 0, 0, 0);
-  row->addWidget(new QLabel(tr("曲线填充"), this));
-  curve_template_ = new QComboBox(this);
-  curve_template_->setMinimumWidth(140);
-  row->addWidget(curve_template_);
+  hide();
+  setMaximumSize(0, 0);
+  curve_template_ = new QComboBox(parent);
+  apply_toolbar_field(curve_template_);
+  buttons_ = new QWidget(parent);
+  const int side = (kToolbarFieldW - kEaseButtonGap * 3) / 4;
+  buttons_->setFixedSize(kToolbarFieldW, side);
+  buttons_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  auto* buttons_row = new QHBoxLayout(buttons_);
+  buttons_row->setContentsMargins(0, 0, 0, 0);
+  buttons_row->setSpacing(kEaseButtonGap);
   for (int i = 0; i < 4; ++i) {
-    auto* button = new QToolButton(this);
+    auto* button = new QToolButton(buttons_);
     button->setText(QString::fromUtf8(kCurveDirectionLabels[static_cast<std::size_t>(i)]));
     button->setCheckable(true);
     button->setAutoRaise(false);
+    button->setFixedSize(side, side);
+    QFont font = button->font();
+    font.setPointSize(std::max(13, font.pointSize() + 3));
+    button->setFont(font);
+    button->setStyleSheet(QStringLiteral("QToolButton { padding: 0px; }"));
     curve_directions_[static_cast<std::size_t>(i)] = button;
-    row->addWidget(button);
+    buttons_row->addWidget(button, 0);
     connect(button, &QToolButton::clicked, this, [this, i] {
       curve_controller_.select_direction_index(manager_->curve_template_state(), i);
       refresh_curve_controls();
@@ -423,6 +728,10 @@ CurveFillWidget::CurveFillWidget(UiManager* manager, QWidget* parent)
     manager_->request_save_ui_config(true);
   });
   refresh_curve_controls();
+}
+
+void CurveFillWidget::set_control_height(int height) {
+  if (curve_template_ != nullptr) curve_template_->setFixedHeight(std::max(1, height));
 }
 
 void CurveFillWidget::refresh_curve_controls() {
