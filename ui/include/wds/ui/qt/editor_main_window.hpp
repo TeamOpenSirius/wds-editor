@@ -5,23 +5,27 @@
 #include <QString>
 #include <QTimer>
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
+#include <array>
 #include <functional>
 #include <string>
-#include <array>
 class QWindow;
 class QDockWidget;
-class QToolButton;
+class QToolBar;
 
 namespace wds::ui {
 class UiManager;
-class PlaybackAudioPanel;
-class AudioMixPanel;
-class CurveFillWidget;
+class PlaybackBar;
+class ConvertBar;
+class EditorToolbarWidget;
+class SettingsPanel;
+class CurveTemplatesPanel;
 class EditorMainWindow final : public QMainWindow {
  public:
   explicit EditorMainWindow(QWidget* parent = nullptr);
   // Skin PNG directory for the convert-button note icons; call before bind_ui_manager.
   void set_skins_dir(std::string dir) { skins_dir_ = std::move(dir); }
+  // Repo / bundled icons/*.svg for the top command toolbar.
+  void set_icons_dir(std::string dir);
   // OBS theme directory, for the settings appearance picker.
   void set_theme_dir(QString dir) { theme_dir_ = std::move(dir); }
   void bind_ui_manager(UiManager* manager);
@@ -37,6 +41,7 @@ class EditorMainWindow final : public QMainWindow {
   void hideEvent(QHideEvent* event) override;
   void showEvent(QShowEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
+  void changeEvent(QEvent* event) override;
   bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
   bool confirm_pending_changes();
   void open_project();
@@ -47,14 +52,20 @@ class EditorMainWindow final : public QMainWindow {
   void add_chart();
   void check_chart();
   void show_settings();
-  void show_curve_templates();
   void remember_recent_project(const QString& path);
  private:
-  void create_playback_and_toolbox_docks();
+  void create_control_docks();
   void reset_default_layout();
+  void apply_default_dock_sizes();
+  void restore_or_reset_layout();
+  void add_dock_toggle(QDockWidget* dock);
   void sync_toolbox_place_checks();
+  void apply_command_icons();
+  void refresh_history_actions();
+  std::array<QDockWidget*, 6> chrome_docks() const;
   UiManager* ui_manager_ = nullptr;
   std::string skins_dir_;
+  std::string icons_dir_;
   QString theme_dir_;
   ::QAction* open_action_ = nullptr;
   ::QAction* save_action_ = nullptr;
@@ -66,27 +77,24 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* check_action_ = nullptr;
   ::QAction* settings_action_ = nullptr;
   ::QAction* about_action_ = nullptr;
-  ::QAction* curve_templates_action_ = nullptr;
+  ::QAction* fullscreen_action_ = nullptr;
+  ::QToolBar* command_toolbar_ = nullptr;
+  ::QToolBar* convert_toolbar_ = nullptr;
   ::QDockWidget* preview_dock_ = nullptr;
   ::QDockWidget* editor_dock_ = nullptr;
-  ::QDockWidget* settings_dock_ = nullptr;
   ::QDockWidget* playback_dock_ = nullptr;
-  ::QDockWidget* audio_dock_ = nullptr;
-  ::QDockWidget* toolbox_dock_ = nullptr;
-  PlaybackAudioPanel* playback_panel_ = nullptr;
-  CurveFillWidget* curve_fill_widget_ = nullptr;
-  std::array<::QToolButton*, 8> convert_buttons_{};
+  ::QDockWidget* toolbar_dock_ = nullptr;
+  ::QDockWidget* curve_dock_ = nullptr;
+  ::QDockWidget* settings_dock_ = nullptr;
+  PlaybackBar* playback_panel_ = nullptr;
+  ConvertBar* convert_bar_ = nullptr;
+  EditorToolbarWidget* toolbar_widget_ = nullptr;
+  SettingsPanel* settings_panel_ = nullptr;
+  CurveTemplatesPanel* curve_panel_ = nullptr;
   ::QWindow* preview_window_ = nullptr;
   ::QWindow* editor_window_ = nullptr;
   ::QWidget* editor_widget_ = nullptr;
   QTimer resize_settle_timer_;
-  // Bottom control docks are tool strips, not viewports. Keep them at a stable
-  // height while docked along the bottom so all vertical resize slack is given
-  // to the preview/editor row.
-  void update_control_dock_height(QDockWidget* dock);
-  void pin_bottom_row();
-  void restore_bottom_row();
-  std::array<int, 3> bottom_row_heights_{};
   bool native_resizing_ = false;
 };
 }

@@ -24,6 +24,8 @@ TimingEditDialog::TimingEditDialog(bool bpm_mode, double bpm, int32_t numerator,
 
   auto* root = new QVBoxLayout(this);
   auto* form = new QFormLayout;
+  form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
 
   if (bpm_mode_) {
     bpm_ = new QDoubleSpinBox(this);

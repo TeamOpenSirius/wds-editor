@@ -4,6 +4,7 @@
 
 #include <QEvent>
 #include <QCursor>
+#include <QGuiApplication>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -26,24 +27,25 @@ void QtInputAdapter::set_cursor(wds::interaction::CursorKind kind) {
   }
 }
 
-wds::interaction::Modifiers QtInputAdapter::mods(Qt::KeyboardModifiers value) const noexcept {
+wds::interaction::Modifiers qt_modifiers(Qt::KeyboardModifiers value) noexcept {
+  // Qt already unifies platforms: Command and Ctrl are ControlModifier, Option
+  // and Alt are AltModifier, physical Control / Win is MetaModifier.
   return {value.testFlag(Qt::ShiftModifier), value.testFlag(Qt::ControlModifier),
           value.testFlag(Qt::AltModifier), value.testFlag(Qt::MetaModifier)};
 }
 
-wds::interaction::PointerButton QtInputAdapter::button(Qt::MouseButton value) const noexcept {
-  if (value == Qt::RightButton) return wds::interaction::PointerButton::Right;
-  if (value == Qt::MiddleButton) return wds::interaction::PointerButton::Middle;
-  return wds::interaction::PointerButton::Left;
+wds::interaction::Modifiers qt_live_modifiers() noexcept {
+  return qt_modifiers(QGuiApplication::queryKeyboardModifiers());
 }
 
-int QtInputAdapter::button_index(wds::interaction::PointerButton value) const noexcept {
-  if (value == wds::interaction::PointerButton::Right) return 1;
-  if (value == wds::interaction::PointerButton::Middle) return 2;
-  return 0;
+void apply_scroll_invert(float& dx, float& dy) noexcept {
+  if (wds::interaction::invert_scroll_wheel()) {
+    dx = -dx;
+    dy = -dy;
+  }
 }
 
-wds::interaction::KeyCode QtInputAdapter::key(int value) const noexcept {
+wds::interaction::KeyCode qt_key_code(int value) noexcept {
   if (value >= Qt::Key_0 && value <= Qt::Key_9)
     return static_cast<wds::interaction::KeyCode>(48 + value - Qt::Key_0);
   if (value >= Qt::Key_A && value <= Qt::Key_Z)
@@ -68,6 +70,26 @@ wds::interaction::KeyCode QtInputAdapter::key(int value) const noexcept {
     case Qt::Key_Period: return static_cast<wds::interaction::KeyCode>('.');
     default: return wds::interaction::KeyCode::Unknown;
   }
+}
+
+wds::interaction::Modifiers QtInputAdapter::mods(Qt::KeyboardModifiers value) const noexcept {
+  return qt_modifiers(value);
+}
+
+wds::interaction::PointerButton QtInputAdapter::button(Qt::MouseButton value) const noexcept {
+  if (value == Qt::RightButton) return wds::interaction::PointerButton::Right;
+  if (value == Qt::MiddleButton) return wds::interaction::PointerButton::Middle;
+  return wds::interaction::PointerButton::Left;
+}
+
+int QtInputAdapter::button_index(wds::interaction::PointerButton value) const noexcept {
+  if (value == wds::interaction::PointerButton::Right) return 1;
+  if (value == wds::interaction::PointerButton::Middle) return 2;
+  return 0;
+}
+
+wds::interaction::KeyCode QtInputAdapter::key(int value) const noexcept {
+  return qt_key_code(value);
 }
 
 bool QtInputAdapter::eventFilter(QObject* watched, QEvent* event) {
@@ -110,7 +132,7 @@ bool QtInputAdapter::eventFilter(QObject* watched, QEvent* event) {
       pointer_ = {static_cast<float>(wheel->position().x()), static_cast<float>(wheel->position().y())};
       float dx = static_cast<float>(wheel->angleDelta().x()) / 120.0f;
       float dy = static_cast<float>(wheel->angleDelta().y()) / 120.0f;
-      if (wds::interaction::invert_scroll_wheel()) { dx = -dx; dy = -dy; }
+      apply_scroll_invert(dx, dy);
       queue_.push(wds::interaction::ScrollEvent{pointer_, dx, dy, mods(wheel->modifiers())});
       break;
     }

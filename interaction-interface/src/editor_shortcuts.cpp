@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <string_view>
 #include <vector>
 
 namespace wds::interaction {
@@ -355,31 +356,54 @@ bool is_completing_shortcut_key(KeyCode key) noexcept {
   }
 }
 
-std::string format_shortcut_modifiers(const Modifiers& mods) {
+std::string format_shortcut_modifiers_portable(const Modifiers& mods) {
   std::string out;
   auto append = [&](const char* token) {
     if (!out.empty()) out += '+';
     out += token;
   };
-  // Match user-facing order: Shift+Cmd+C
-  if (mods.shift) append("Shift");
-#ifdef __APPLE__
-  if (mods.alt) append("Option");
-  if (mods.control || mods.super) append("Cmd");
-#else
+  // Same order as QKeySequence::PortableText: Meta, Ctrl, Alt, Shift.
+  if (mods.super) append("Meta");
+  if (mods.control) append("Ctrl");
   if (mods.alt) append("Alt");
-  if (mods.control || mods.super) append("Ctrl");
-#endif
+  if (mods.shift) append("Shift");
   return out;
 }
 
-std::string format_shortcut_chord(const ShortcutChord& chord) {
-  std::string out = format_shortcut_modifiers(chord.mods);
+std::string format_shortcut_modifiers(const Modifiers& mods) {
+#ifdef __APPLE__
+  // Same glyphs and order as QKeySequence::NativeText on macOS.
+  std::string out;
+  if (mods.super) out += "⌃";
+  if (mods.alt) out += "⌥";
+  if (mods.shift) out += "⇧";
+  if (mods.control) out += "⌘";
+  return out;
+#else
+  return format_shortcut_modifiers_portable(mods);
+#endif
+}
+
+std::string format_shortcut_chord_portable(const ShortcutChord& chord) {
+  std::string out = format_shortcut_modifiers_portable(chord.mods);
   const std::string key = key_token(chord.key);
   if (key.empty()) return out;
   if (!out.empty()) out += '+';
   out += key;
   return out;
+}
+
+std::string format_shortcut_chord(const ShortcutChord& chord) {
+  const std::string key = key_token(chord.key);
+#ifdef __APPLE__
+  return format_shortcut_modifiers(chord.mods) + key;
+#else
+  std::string out = format_shortcut_modifiers(chord.mods);
+  if (key.empty()) return out;
+  if (!out.empty()) out += '+';
+  out += key;
+  return out;
+#endif
 }
 
 std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text) {
@@ -388,6 +412,27 @@ std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text) {
   for (char c : text) {
     if (!std::isspace(static_cast<unsigned char>(c))) s.push_back(c);
   }
+  if (s.empty()) return std::nullopt;
+
+  auto replace_utf8 = [&](std::string_view glyph, const char* token) {
+    for (std::string::size_type pos = 0; (pos = s.find(glyph, pos)) != std::string::npos;) {
+      const std::string repl = std::string("+") + token + "+";
+      s.replace(pos, glyph.size(), repl);
+      pos += repl.size();
+    }
+  };
+  replace_utf8("⌘", "Cmd");
+  replace_utf8("⌥", "Option");
+  replace_utf8("⇧", "Shift");
+  replace_utf8("⌃", "Meta");
+  std::string compact;
+  compact.reserve(s.size());
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '+' && (compact.empty() || compact.back() == '+')) continue;
+    compact.push_back(s[i]);
+  }
+  if (!compact.empty() && compact.back() == '+') compact.pop_back();
+  s = std::move(compact);
   if (s.empty()) return std::nullopt;
 
   std::vector<std::string> parts;
@@ -414,9 +459,12 @@ std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text) {
       mods.shift = true;
       continue;
     }
-    if (upper == "CTRL" || upper == "CONTROL" || upper == "CMD" || upper == "COMMAND" ||
-        upper == "SUPER" || upper == "WIN" || upper == "META") {
+    if (upper == "CTRL" || upper == "CONTROL" || upper == "CMD" || upper == "COMMAND") {
       mods.control = true;
+      continue;
+    }
+    if (upper == "SUPER" || upper == "WIN" || upper == "META") {
+      mods.super = true;
       continue;
     }
     if (upper == "ALT" || upper == "OPTION") {

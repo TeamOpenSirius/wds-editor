@@ -22,17 +22,22 @@ bool ShortcutNamespace::bind_primary(KeyCode key, ShortcutAction action, bool sh
 
 void ShortcutNamespace::clear() noexcept { bindings_.clear(); }
 
-bool ShortcutNamespace::dispatch(const KeyDownEvent& event) const {
-  // Ignore OS key-repeat for bound actions (play/pause, save, undo, …).
+bool ShortcutNamespace::contains(const KeyDownEvent& event) const {
   if (event.repeat) {
     return false;
   }
   const ShortcutChord chord{event.key, normalize_primary(event.mods)};
   const auto it = bindings_.find(chord);
-  if (it == bindings_.end() || !it->second) {
+  return it != bindings_.end() && static_cast<bool>(it->second);
+}
+
+bool ShortcutNamespace::dispatch(const KeyDownEvent& event) const {
+  // Ignore OS key-repeat for bound actions (play/pause, save, undo, …).
+  if (!contains(event)) {
     return false;
   }
-  it->second();
+  const ShortcutChord chord{event.key, normalize_primary(event.mods)};
+  bindings_.find(chord)->second();
   return true;
 }
 
@@ -45,6 +50,17 @@ const ShortcutNamespace& ShortcutManager::namespace_for(const std::string& name)
 }
 
 void ShortcutManager::set_active_namespace(const std::string& name) { active_ = name; }
+
+bool ShortcutManager::contains(const KeyDownEvent& event) const {
+  if (active_.empty()) {
+    return false;
+  }
+  const auto it = namespaces_.find(active_);
+  if (it == namespaces_.end()) {
+    return false;
+  }
+  return it->second.contains(event);
+}
 
 bool ShortcutManager::dispatch(const KeyDownEvent& event) const {
   if (active_.empty()) {

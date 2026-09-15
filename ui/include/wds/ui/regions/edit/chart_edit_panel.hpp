@@ -121,6 +121,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   CurveFillSelection curve_fill_selection() const noexcept { return curve_fill_selection_; }
   bool curve_mode_active() const noexcept { return curve_mode_active_; }
   std::vector<wds::chart_editor::NotationNote> curve_ghost_notes() const;
+  // Same placement / curve / hold-star ghosts as append_skinned_ghosts.
+  std::vector<EditGhost> skinned_ghosts() const;
 
   // Persistent overlap markers. Replaces the previous set; empty ticks clear.
   // Cleared when document content_generation differs from `content_generation`.
@@ -139,6 +141,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint_overlays(wds::interaction::UiPainter& painter) const;
   // Qt canvas: split / BPM / meter / measure columns and chips (no form chrome).
   void paint_side_columns(wds::interaction::UiPainter& painter) const;
+  // Live Cmd/Ctrl drag-select rectangle in screen space; empty when idle.
+  std::optional<wds::interaction::Rect> active_marquee_rect() const;
 
   struct SplitModalDraft {
     int32_t tick = 0;
@@ -184,6 +188,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void handle_timeline_wheel(const wds::interaction::ScrollEvent& event);
   void on_key_down(const wds::interaction::KeyDownEvent& event) override;
   void on_key_up(const wds::interaction::KeyUpEvent& event) override;
+  // Keep Shift/Cmd/Alt in sync when Qt drops them from mouse events.
+  void sync_active_modifiers(wds::interaction::Modifiers mods);
   void on_text_input(const wds::interaction::TextInputEvent& event) override;
 
   const char* trace_name() const override { return "ChartEditPanel"; }

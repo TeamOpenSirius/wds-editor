@@ -145,25 +145,19 @@ copy_fonts() {
   fi
 }
 
-strip_retired_toolbar_icons() {
-  local dest="$1"
-  rm -f "${dest}/undo.svg" "${dest}/redo.svg" "${dest}/undo.png" "${dest}/redo.png"
-}
-
 copy_icons() {
   local stage="$1" build_dir="$2"
-  # Wipe first: cp -a into an existing dest is a merge and can keep deleted undo/redo.
+  # Wipe first: cp -a into an existing dest is a merge and can keep stale files.
   rm -rf "${stage}/icons"
-  if [[ -d "${build_dir}/ui/icons" ]]; then
-    mkdir -p "${stage}/icons"
-    cp -a "${build_dir}/ui/icons/." "${stage}/icons/"
-  elif [[ -d "${ROOT}/icons" ]]; then
+  if [[ -d "${ROOT}/icons" ]]; then
     mkdir -p "${stage}/icons"
     cp -a "${ROOT}/icons/." "${stage}/icons/"
+  elif [[ -d "${build_dir}/ui/icons" ]]; then
+    mkdir -p "${stage}/icons"
+    cp -a "${build_dir}/ui/icons/." "${stage}/icons/"
   else
-    die "toolbar icons missing (expected build ui/icons or repo icons/)"
+    die "toolbar icons missing (expected repo icons/ or build ui/icons)"
   fi
-  strip_retired_toolbar_icons "${stage}/icons"
 }
 
 # App icon derived from logo.png (see scripts/generate-app-icons.sh).
@@ -403,6 +397,18 @@ copy_qt_win_runtime() {
       chmod u+w "${stage}/plugins/styles/$(basename "$plugin")" 2>/dev/null || true
       copy_pe_dlls_from_dir "${stage}/plugins/styles/$(basename "$plugin")" "$qt_bin" "$stage"
     done
+  fi
+  if [[ -d "${qt_root}/plugins/imageformats" ]]; then
+    mkdir -p "${stage}/plugins/imageformats"
+    for plugin in "${qt_root}/plugins/imageformats/"*.dll; do
+      [[ -f "$plugin" ]] || continue
+      cp -a "$plugin" "${stage}/plugins/imageformats/"
+      chmod u+w "${stage}/plugins/imageformats/$(basename "$plugin")" 2>/dev/null || true
+      copy_pe_dlls_from_dir "${stage}/plugins/imageformats/$(basename "$plugin")" "$qt_bin" "$stage"
+    done
+  fi
+  if [[ ! -f "${stage}/plugins/imageformats/qsvg.dll" ]]; then
+    die "missing Qt SVG image plugin (qsvg.dll); install qtsvg into the MinGW Qt prefix"
   fi
 
   cat >"${stage}/qt.conf" <<'EOF'
@@ -963,8 +969,13 @@ resolve_macos_dep() {
     @rpath/*)
       rest="${dep#@rpath/}"
       qt_root="$(qt_macos_root 2>/dev/null || true)"
+      local svg_root=""
+      if command -v brew >/dev/null 2>&1; then
+        svg_root="$(brew --prefix qtsvg 2>/dev/null || true)"
+      fi
       for cand in \
         "${qt_root:+${qt_root}/lib/${rest}}" \
+        "${svg_root:+${svg_root}/lib/${rest}}" \
         "$(brew_prefix)/lib/${rest}" \
         "${libdir}/$(basename "$rest")"; do
         [[ -n "$cand" && -f "$cand" ]] || continue
@@ -1088,23 +1099,43 @@ copy_qt_macos_plugins() {
   qt_root="$(qt_macos_root || true)"
   plugin_src="${qt_root}/share/qt/plugins"
   [[ -n "$qt_root" && -f "${plugin_src}/platforms/libqcocoa.dylib" ]] || \
-    die "Qt cocoa plugin missing; install qtbase (brew install qtbase)"
+    die "Qt cocoa plugin missing; install qtbase and qtsvg (brew install qtbase qtsvg)"
 
   echo "Bundling Qt plugins from ${plugin_src}"
-  mkdir -p "${payload}/lib/plugins/platforms" "${payload}/lib/plugins/styles"
+  mkdir -p "${payload}/lib/plugins/platforms" "${payload}/lib/plugins/styles" \
+    "${payload}/lib/plugins/imageformats"
   dest="${payload}/lib/plugins/platforms/libqcocoa.dylib"
   cp -a "${plugin_src}/platforms/libqcocoa.dylib" "$dest"
   chmod u+w "$dest" 2>/dev/null || true
   copy_macho_deps "$dest" "${payload}/lib"
 
-  if [[ -d "${plugin_src}/styles" ]]; then
-    for plugin in "${plugin_src}/styles/"*.dylib; do
+  copy_macos_qt_plugin_dir() {
+    local src_dir="$1" dest_dir="$2"
+    local plugin dest_plugin
+    [[ -d "$src_dir" ]] || return 0
+    mkdir -p "$dest_dir"
+    for plugin in "${src_dir}/"*.dylib; do
       [[ -f "$plugin" ]] || continue
-      dest="${payload}/lib/plugins/styles/$(basename "$plugin")"
-      cp -a "$plugin" "$dest"
-      chmod u+w "$dest" 2>/dev/null || true
-      copy_macho_deps "$dest" "${payload}/lib"
+      dest_plugin="${dest_dir}/$(basename "$plugin")"
+      cp -a "$plugin" "$dest_plugin"
+      chmod u+w "$dest_plugin" 2>/dev/null || true
+      copy_macho_deps "$dest_plugin" "${payload}/lib"
     done
+  }
+
+  copy_macos_qt_plugin_dir "${plugin_src}/styles" "${payload}/lib/plugins/styles"
+  copy_macos_qt_plugin_dir "${plugin_src}/imageformats" "${payload}/lib/plugins/imageformats"
+
+  local svg_plugins=""
+  if command -v brew >/dev/null 2>&1; then
+    svg_plugins="$(brew --prefix qtsvg 2>/dev/null || true)"
+  fi
+  if [[ -n "$svg_plugins" ]]; then
+    copy_macos_qt_plugin_dir "${svg_plugins}/share/qt/plugins/imageformats" \
+      "${payload}/lib/plugins/imageformats"
+  fi
+  if [[ ! -f "${payload}/lib/plugins/imageformats/libqsvg.dylib" ]]; then
+    die "missing Qt SVG image plugin (libqsvg.dylib); install qtsvg (brew install qtsvg)"
   fi
 
   cat >"${resources}/qt.conf" <<'EOF'
@@ -1583,7 +1614,6 @@ stage_win_debug() {
   if [[ ! -d "${stage}/icons" ]] || [[ -z "$(ls -A "${stage}/icons" 2>/dev/null || true)" ]]; then
     copy_icons "$stage" "$build_dir"
   fi
-  strip_retired_toolbar_icons "${stage}/icons"
   copy_bass_runtime "$stage" win-x86_64
 
   # Prefer already-extracted / staged vulkan-1.dll; otherwise download components zip.

@@ -82,7 +82,7 @@ cp scripts/env.example scripts/env.local
 
 ```bash
 xcode-select --install   # 若尚未安装
-brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
+brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase qtsvg
 ```
 
 **编译与打包**

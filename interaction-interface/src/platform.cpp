@@ -3,18 +3,11 @@
 namespace wds::interaction {
 
 bool primary_modifier_down(const Modifiers& modifiers) noexcept {
-#ifdef __APPLE__
-  return modifiers.super;
-#else
+  // Qt already maps Command → ControlModifier on macOS, same as Ctrl on Windows.
   return modifiers.control;
-#endif
 }
 
 Modifiers normalize_primary(Modifiers modifiers) noexcept {
-#ifdef __APPLE__
-  modifiers.control = modifiers.control || modifiers.super;
-  modifiers.super = false;
-#endif
   return modifiers;
 }
 

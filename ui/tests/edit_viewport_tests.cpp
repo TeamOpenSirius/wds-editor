@@ -164,6 +164,22 @@ int main() {
     wds::ui::EditorLayouter layouter;
     const auto official = layouter.compute(1280, 720);
     assert(std::fabs(wds::ui::EditorLayouter::kPreviewAspect - 16.0f / 9.0f) < 1e-6f);
+    assert(wds::ui::preview_content_height_for_width(1600) == 900);
+    assert(wds::ui::preview_content_height_for_width(640) == 360);
+    {
+      const auto fit = wds::ui::preview_contain_rect(1600, 900);
+      assert(fit.x == 0 && fit.y == 0 && fit.width == 1600 && fit.height == 900);
+      const auto wide = wds::ui::preview_contain_rect(1600, 500);
+      assert(wide.height == 500);
+      assert(wide.y == 0);
+      assert(wide.x > 0);
+      assert(wide.x + wide.width + wide.x == 1600 ||
+             std::abs((wide.x * 2 + wide.width) - 1600) <= 1);
+      const auto tall = wds::ui::preview_contain_rect(800, 900);
+      assert(tall.width == 800);
+      assert(tall.x == 0);
+      assert(tall.y > 0);
+    }
     assert(std::fabs(static_cast<float>(official.preview_content.width) /
                          std::max(1, official.preview_content.height) -
                      16.0f / 9.0f) < 0.03f);

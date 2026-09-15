@@ -64,11 +64,7 @@ using wds::ui::UiManager;
 
 Modifiers primary_mods() {
   Modifiers mods;
-#ifdef __APPLE__
-  mods.super = true;
-#else
   mods.control = true;
-#endif
   return mods;
 }
 
@@ -1147,11 +1143,7 @@ void test_plain_primary_does_not_clear_hold_draft_during_draw() {
   h.enter_hold(true, 0, 480, 2);
   CHECK(!h.panel.curve_mode_active());
   Modifiers primary;
-#ifdef __APPLE__
-  primary.super = true;
-#else
   primary.control = true;
-#endif
   h.panel.on_key_down(KeyDownEvent{KeyCode::Unknown, primary, false});
   h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(720, 2), primary});
   CHECK(!h.panel.curve_mode_active());

@@ -122,7 +122,7 @@ WDS_VCPKG_ROOT="/path/to/vcpkg"
 ## Native macOS (arm64)
 
 ```bash
-brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader
+brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase qtsvg
 ./scripts/build-target.sh macos-arm
 ```
 

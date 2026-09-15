@@ -280,7 +280,8 @@ void apply_curve_load(EditorUiConfig& cfg, const CurveLoadState& state) {
   normalize_curve_config(cfg.curve_templates, cfg.curve_selected_template_id);
 }
 
-void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& value) {
+void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& value,
+               bool* shortcut_legacy = nullptr) {
   if (key == "note_speed") {
     double v = cfg.note_speed;
     if (parse_double(value, v)) {
@@ -387,6 +388,10 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
         if (const auto parsed = wds::interaction::parse_shortcut_chord(value)) {
           cfg.shortcuts[i] = *parsed;
           cfg.shortcuts_initialized = true;
+          if (shortcut_legacy != nullptr &&
+              value != wds::interaction::format_shortcut_chord_portable(*parsed)) {
+            *shortcut_legacy = true;
+          }
         }
         break;
       }
@@ -480,6 +485,7 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
   EditorUiConfig cfg = out;
   ensure_shortcut_defaults(cfg);
   CurveLoadState curve_state;
+  bool shortcut_legacy = false;
   std::istringstream in(bytes);
   std::string line;
   while (std::getline(in, line)) {
@@ -495,11 +501,14 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
     if (key.rfind("curve_", 0) == 0) {
       apply_curve_key(curve_state, key, value);
     } else {
-      apply_key(cfg, key, value);
+      apply_key(cfg, key, value, &shortcut_legacy);
     }
   }
   apply_curve_load(cfg, curve_state);
   out = cfg;
+  if (shortcut_legacy) {
+    (void)save_editor_ui_config(path, cfg);
+  }
   return true;
 }
 
@@ -568,15 +577,9 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
     const auto chord = cfg.shortcuts_initialized
                            ? cfg.shortcuts[i]
                            : wds::interaction::default_editor_shortcut(id);
-    // Persist with Ctrl (platform-neutral primary); load accepts Cmd/Ctrl.
     wds::interaction::ShortcutChord stored = chord;
     stored.mods = wds::interaction::normalize_primary(stored.mods);
-    std::string text = wds::interaction::format_shortcut_chord(stored);
-    // format_* uses Cmd on Apple — rewrite every token for a stable config file.
-    for (std::string::size_type pos = 0; (pos = text.find("Cmd", pos)) != std::string::npos;) {
-      text.replace(pos, 3, "Ctrl");
-      pos += 4;
-    }
+    const std::string text = wds::interaction::format_shortcut_chord_portable(stored);
     out << "shortcut_" << wds::interaction::editor_shortcut_id(id) << ": " << text << '\n';
   }
 

@@ -41,6 +41,21 @@ void prepare_bundled_qt_plugins() {
       QFileInfo(QString::fromUtf8(path)).absoluteDir().filePath(QStringLiteral("lib/plugins")));
   if (QDir(plugins + QStringLiteral("/platforms")).exists()) {
     qputenv("QT_PLUGIN_PATH", QFile::encodeName(plugins));
+    return;
+  }
+#endif
+#if defined(WDS_QT_SVG_PLUGIN_DIR)
+  // Homebrew splits qtsvg into its own keg; qtbase's plugin root has no libqsvg.
+  const QString svg_plugins = QString::fromUtf8(WDS_QT_SVG_PLUGIN_DIR);
+  if (QDir(svg_plugins).exists()) {
+    const QByteArray extra = QFile::encodeName(svg_plugins);
+    const QByteArray cur = qgetenv("QT_PLUGIN_PATH");
+#if defined(Q_OS_WIN)
+    const char sep = ';';
+#else
+    const char sep = ':';
+#endif
+    qputenv("QT_PLUGIN_PATH", cur.isEmpty() ? extra : extra + sep + cur);
   }
 #endif
 }
@@ -94,6 +109,7 @@ int main(int argc, char** argv) {
     return editor.chart_preview().ready() && editor.chart_preview().transport().playing();
   });
   window.set_skins_dir(wds::ui::resolve_skins_dir(argv[0]));
+  window.set_icons_dir(wds::ui::resolve_icons_dir(argv[0]));
   window.set_theme_dir(theme_dir);
   window.bind_ui_manager(&editor);
   editor.set_request_close([&window] { window.close(); });
@@ -120,6 +136,7 @@ int main(int argc, char** argv) {
     v.note_height_level = loaded.note_height_level;
     v.split_line_opacity = loaded.split_line_opacity;
     v.lane_count = loaded.lane_count;
+    v.msaa_samples = loaded.msaa_samples;
     return v;
   };
 

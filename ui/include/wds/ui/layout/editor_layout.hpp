@@ -4,6 +4,7 @@
 #include <wds/interaction/types.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 namespace wds::ui {
 
@@ -107,5 +108,28 @@ class EditorLayouter {
 
   EditorLayoutResult compute(int framebuffer_width, int framebuffer_height) const noexcept;
 };
+
+// Preview panel client height for a 16:9 stage at `width`.
+inline int preview_content_height_for_width(int width) noexcept {
+  return std::max(1, static_cast<int>(std::lround(static_cast<float>(std::max(1, width)) /
+                                                  EditorLayouter::kPreviewAspect)));
+}
+
+// Largest 16:9 rectangle that fits in `box_w`×`box_h`, centered. At most one
+// pair of sides has leftover (none if the box is already 16:9).
+inline PreviewContentRect preview_contain_rect(int box_w, int box_h) noexcept {
+  const float aspect = EditorLayouter::kPreviewAspect;
+  const int w = std::max(1, box_w);
+  const int h = std::max(1, box_h);
+  int stage_w = w;
+  int stage_h = static_cast<int>(std::lround(static_cast<float>(stage_w) / aspect));
+  if (stage_h > h) {
+    stage_h = h;
+    stage_w = static_cast<int>(std::lround(static_cast<float>(stage_h) * aspect));
+  }
+  stage_w = std::max(1, stage_w);
+  stage_h = std::max(1, stage_h);
+  return {(w - stage_w) / 2, (h - stage_h) / 2, stage_w, stage_h};
+}
 
 }  // namespace wds::ui

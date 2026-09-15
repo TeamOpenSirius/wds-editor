@@ -10,7 +10,7 @@ namespace wds::ui {
 class FlowLayout final : public QLayout {
  public:
   explicit FlowLayout(QWidget* parent = nullptr, int margin = -1, int h_spacing = -1,
-                      int v_spacing = -1);
+                      int v_spacing = -1, int h_spacing_max = -1);
   ~FlowLayout() override;
 
   void addItem(QLayoutItem* item) override;
@@ -33,6 +33,7 @@ class FlowLayout final : public QLayout {
   QList<QLayoutItem*> items_;
   int h_space_;
   int v_space_;
+  int h_space_max_;
 };
 
 }  // namespace wds::ui

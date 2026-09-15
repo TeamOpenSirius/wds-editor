@@ -1,4 +1,5 @@
 #include "wds/ui/qt/chart_edit_widget.hpp"
+#include "wds/ui/qt/qt_input_adapter.hpp"
 #include "wds/ui/qt/split_picker_dialog.hpp"
 #include "wds/ui/qt/timing_edit_dialog.hpp"
 #include <wds/core/chart_editor_engine.hpp>
@@ -6,6 +7,7 @@
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
+#include <wds/interaction/theme.hpp>
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
@@ -83,7 +85,8 @@ void paint_lane_guides(QPainter& p, const EditViewport& v, const wds::interactio
     if (bot <= top) return;
     for (int i = 0; i <= lanes; ++i) {
       const bool edge = i == 0 || i == lanes;
-      p.setPen(QPen(edge ? QColor(110, 115, 130) : QColor(55, 60, 72), edge ? 1.5 : 1.0));
+      namespace th = wds::interaction::theme;
+      p.setPen(QPen(qcolor(edge ? th::kEditLaneEdge : th::kEditLaneInner), edge ? 1.5 : 1.0));
       p.drawLine(QPointF(v.x_at(i), top), QPointF(v.x_at(i), bot));
     }
   };
@@ -156,7 +159,9 @@ ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
   setFocusPolicy(Qt::StrongFocus);
   setMouseTracking(true);
   setAutoFillBackground(false);
-  setAttribute(Qt::WA_InputMethodEnabled, true);
+  // Timing / split pickers are Qt dialogs. IME on the canvas swallows Shift/Cmd
+  // letter chords under CJK input methods.
+  setAttribute(Qt::WA_InputMethodEnabled, false);
 }
 
 void ChartEditWidget::set_skins_directory(const QString& directory) {
@@ -175,8 +180,7 @@ void ChartEditWidget::set_skins_directory(const QString& directory) {
 }
 
 wds::interaction::Modifiers ChartEditWidget::mods(Qt::KeyboardModifiers m) const {
-  return {m.testFlag(Qt::ShiftModifier), m.testFlag(Qt::ControlModifier),
-          m.testFlag(Qt::AltModifier), m.testFlag(Qt::MetaModifier)};
+  return qt_modifiers(m | QGuiApplication::queryKeyboardModifiers());
 }
 wds::interaction::Vec2 ChartEditWidget::point(const QPointF& p) const {
   return {static_cast<float>(p.x()), static_cast<float>(p.y())};
@@ -192,7 +196,7 @@ void ChartEditWidget::resizeEvent(QResizeEvent*) {
 }
 void ChartEditWidget::paintEvent(QPaintEvent*) {
   QPainter p(this); p.setRenderHint(QPainter::Antialiasing, true);
-  p.fillRect(rect(), QColor(18, 20, 27));
+  p.fillRect(rect(), qcolor(wds::interaction::theme::kEditChrome));
   if (!panel_) return;
   wds::interaction::UiPainter chrome;
   chrome.set_defer_glyphs(true);
@@ -205,7 +209,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   p.save(); p.setClipRect(playfield);
   // The editor intentionally does not use the preview's ingame background.
   // Its neutral authoring surface keeps lane contrast and waveform readable.
-  p.fillRect(playfield, QColor(24, 27, 36));
+  p.fillRect(playfield, qcolor(wds::interaction::theme::kEditCanvas));
 
   // Waveform is sampled in the same wall-clock coordinate system as EditViewport.
   if (const auto* waveform = panel_->waveform(); waveform && !waveform->empty()) {
@@ -223,7 +227,8 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
       const float peak = waveform->peak_in_range(v.ms_at_y(float(y)), v.ms_at_y(float(y + 1)));
       wave.lineTo(center - std::sqrt(std::clamp(peak, 0.0f, 1.0f)) * max_w, y);
     }
-    wave.closeSubpath(); p.fillPath(wave, QColor(145, 160, 188, 70));
+    wave.closeSubpath();
+    p.fillPath(wave, qcolor(wds::interaction::theme::kEditWaveform));
   }
 
   // Beat/subdivision lines, kept lightweight by stepping only the visible range.
@@ -233,7 +238,9 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   if (tick < range.first) tick += step;
   for (; tick <= range.second; tick += step) {
     const bool beat = tick % std::max(1, v.grid().ticks_per_quarter) == 0;
-    p.setPen(QPen(beat ? QColor(125, 135, 158, 125) : QColor(75, 82, 99, 65), beat ? 1.2 : 1.0));
+    p.setPen(QPen(qcolor(beat ? wds::interaction::theme::kEditGridBeat
+                               : wds::interaction::theme::kEditGridSubdiv),
+                  beat ? 1.2 : 1.0));
     const qreal y = v.y_at(tick); p.drawLine(QPointF(b.x, y), QPointF(b.right(), y));
   }
   paint_lane_guides(p, v, b, notes, timing, preview);
@@ -244,6 +251,32 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     p.drawPixmap(QRectF(b.x, v.judgeline_y() - h * .5f, b.w, h), judgment_, judgment_.rect());
   }
 
+  paint_notes(p, notes, 1.0f, true);
+  for (const auto& ghost : panel_->skinned_ghosts()) {
+    if (!ghost.visible) continue;
+    paint_notes(p, {ghost.note}, ghost.alpha, false);
+  }
+  if (const auto marquee = panel_->active_marquee_rect()) {
+    const QRectF box = qrect(*marquee);
+    if (box.width() > 0.5 && box.height() > 0.5) {
+      p.fillRect(box, qcolor(wds::interaction::theme::kEditSelectionGlow));
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.0));
+      p.drawRect(box);
+    }
+  }
+  p.restore();
+  flush_ui_painter(p, chrome);
+}
+
+void ChartEditWidget::paint_notes(QPainter& p,
+                                  const std::vector<wds::chart_editor::NotationNote>& notes,
+                                  float opacity, bool show_selection) {
+  if (!panel_ || notes.empty() || opacity <= 0.001f) return;
+  const auto& v = panel_->viewport();
+  const auto& timing = panel_->engine().document().timing();
+  p.save();
+  p.setOpacity(opacity);
   const auto draw_skin = [&](const QPixmap& image, const QRectF& target) {
     if (image.isNull()) { p.fillRect(target, QColor(100, 190, 255)); return; }
     p.drawPixmap(target, image, image.rect());
@@ -262,7 +295,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   // lets a later hold cover taps that happen to share its time range; the
   // editor must instead keep all selectable note art above every ribbon.
   for (const std::size_t index : draw_order) {
-    const auto& n = panel_->engine().document().notes()[index];
+    const auto& n = notes[index];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth ||
         wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) ||
         n.end_tick <= n.start_tick ||
@@ -289,7 +322,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
                       std::max(2.0f, std::abs(y1 - y0))), hold);
   }
   for (const std::size_t index : draw_order) {
-    const auto& n = panel_->engine().document().notes()[index];
+    const auto& n = notes[index];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth) continue;
     if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
     const float y0 = v.y_at(n.start_tick), y1 = v.y_at(n.end_tick > n.start_tick ? n.end_tick : n.start_tick);
@@ -343,21 +376,9 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
         }
       }
     }
-    // A ScratchHoldStart uses the purple head skin but has no arrows; arrows
-    // belong to Flick notes (and to the terminal cap of a ScratchHold body).
-    if (false && !hold_body && n.note_type == NT::Flick && !arrow_.isNull()) {
-      const float ah = v.note_height_px();
-      const float aw = std::min(w, std::clamp(v.lane_width(1) * .55f, 8.0f, ah * 1.2f));
-      wds::chart_render::StaticArrowLayoutParams ap;
-      ap.span_left = x; ap.span_right = x + w; ap.arrow_w = aw; ap.scratch_length = n.scratch_length;
-      const QImage mirrored = arrow_.toImage().mirrored(true, false);
-      for (const auto& a : wds::chart_render::layout_static_scratch_arrows(ap)) {
-        const QRectF ar(a.x0, y0-ah*.5f, a.x1-a.x0, ah);
-        if (a.flip_x) p.drawImage(ar, mirrored); else p.drawPixmap(ar, arrow_, arrow_.rect());
-      }
-    }
-    if (panel_->selected().count(n.id)) {
-      p.setBrush(Qt::NoBrush); p.setPen(QPen(QColor(255, 221, 70), 2.5));
+    if (show_selection && panel_->selected().count(n.id)) {
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.5));
       if (hold_body) {
         const float left = std::min(x, tail_x), right = std::max(x + w, tail_x + tail_w);
         const float top = std::min(y0, y1) - v.note_height_px()*.5f;
@@ -372,7 +393,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   // a chain's terminal arrow above the following segment's tap cap.
   if (!arrow_.isNull()) {
     const QImage mirrored = arrow_.toImage().mirrored(true, false);
-    for (const auto& n : panel_->engine().document().notes()) {
+    for (const auto& n : notes) {
       if (n.note_type != wds::chart_editor::NoteType::Flick) continue;
       const float y = v.y_at(n.start_tick), inset = v.note_inset_px(n.width);
       const float sx = v.x_at(n.lane) + inset, sw = std::max(4.0f, v.lane_width(n.width) - inset * 2.0f);
@@ -386,7 +407,6 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     }
   }
   p.restore();
-  flush_ui_painter(p, chrome);
 }
 void ChartEditWidget::present_qt_modals() {
   if (!panel_ || qt_modal_open_ || !panel_->has_modal_popup()) return;
@@ -467,37 +487,16 @@ void ChartEditWidget::wheelEvent(QWheelEvent* e) {
   const QPoint pixel = e->pixelDelta();
   // Keep Qt's high-resolution trackpad deltas continuous; legacy wheels use
   // the same 120-unit normalization as the old input adapter.
-  const float dx = pixel.x() != 0 ? pixel.x() / 10.0f : angle.x() / 40.0f;
-  const float dy = pixel.y() != 0 ? pixel.y() / 10.0f : angle.y() / 40.0f;
-  auto modifiers = mods(e->modifiers());
-  if (modifiers.control && !modifiers.shift && !modifiers.alt) {
-    modifiers.control = false; modifiers.alt = true;
-  }
-  panel_->on_scroll({point(e->position()), dx, dy, modifiers}); update();
-}
-static wds::interaction::KeyCode key(int k) {
-  switch (k) {
-    case Qt::Key_Space: return wds::interaction::KeyCode::Space;
-    case Qt::Key_Delete: return wds::interaction::KeyCode::Delete;
-    case Qt::Key_Backspace: return wds::interaction::KeyCode::Backspace;
-    case Qt::Key_Left: return wds::interaction::KeyCode::Left;
-    case Qt::Key_Right: return wds::interaction::KeyCode::Right;
-    case Qt::Key_Up: return wds::interaction::KeyCode::Up;
-    case Qt::Key_Down: return wds::interaction::KeyCode::Down;
-    case Qt::Key_Escape: return wds::interaction::KeyCode::Escape;
-    case Qt::Key_Return: case Qt::Key_Enter: return wds::interaction::KeyCode::Enter;
-    case Qt::Key_Tab: return wds::interaction::KeyCode::Tab;
-    default: break;
-  }
-  if (k >= Qt::Key_0 && k <= Qt::Key_9)
-    return static_cast<wds::interaction::KeyCode>(static_cast<int>(wds::interaction::KeyCode::Num0) + k - Qt::Key_0);
-  if (k >= Qt::Key_A && k <= Qt::Key_Z)
-    return static_cast<wds::interaction::KeyCode>(static_cast<int>(wds::interaction::KeyCode::A) + k - Qt::Key_A);
-  return wds::interaction::KeyCode::Unknown;
+  float dx = pixel.x() != 0 ? pixel.x() / 10.0f : angle.x() / 40.0f;
+  float dy = pixel.y() != 0 ? pixel.y() / 10.0f : angle.y() / 40.0f;
+  apply_scroll_invert(dx, dy);
+  // Option/Alt+wheel zooms visible range. Primary (Cmd/Ctrl)+wheel scrubs.
+  panel_->on_scroll({point(e->position()), dx, dy, mods(e->modifiers())});
+  update();
 }
 void ChartEditWidget::keyPressEvent(QKeyEvent* e) {
   if (!panel_) return;
-  const auto ev = wds::interaction::KeyDownEvent{key(e->key()), mods(e->modifiers()), e->isAutoRepeat()};
+  const auto ev = wds::interaction::KeyDownEvent{qt_key_code(e->key()), mods(e->modifiers()), e->isAutoRepeat()};
   // Space is an application command, never an edit-canvas command. Qt dialogs
   // own their own keyboard; the old painted popups no longer take keys here.
   if (ev.key == wds::interaction::KeyCode::Space && global_key_handler_ &&
@@ -513,8 +512,11 @@ void ChartEditWidget::keyPressEvent(QKeyEvent* e) {
 }
 void ChartEditWidget::keyReleaseEvent(QKeyEvent* e) {
   if (!panel_) return;
-  const auto ev = wds::interaction::KeyUpEvent{key(e->key()), mods(e->modifiers())};
+  // queryKeyboardModifiers() is the live OS state after the release; OR-ing
+  // e->modifiers() would keep Shift/Cmd stuck on (Qt still reports them).
+  const auto ev = wds::interaction::KeyUpEvent{qt_key_code(e->key()), qt_live_modifiers()};
   if (ev.key != wds::interaction::KeyCode::Space || panel_->captures_keys()) panel_->on_key_up(ev);
+  update();
 }
 void ChartEditWidget::inputMethodEvent(QInputMethodEvent* e) {
   if (panel_ && panel_->has_modal_popup() && !e->commitString().isEmpty()) {

@@ -230,7 +230,7 @@ WidthSlotsDialog::WidthSlotsDialog() {
     add_child(std::move(clear));
   }
 
-  auto sus = std::make_unique<wds::interaction::Checkbox>("导入 sus 谱面时自动转换（实验性）");
+  auto sus = std::make_unique<wds::interaction::Checkbox>("导入 sus 谱面时自动转换");
   sus_auto_convert_ = sus.get();
   add_child(std::move(sus));
 
