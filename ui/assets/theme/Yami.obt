@@ -603,27 +603,11 @@ QCheckBox {
 }
 
 QComboBox,
-QCheckBox,
 QPushButton,
 QSpinBox,
 QDoubleSpinBox {
     margin-top: var(--spacing_input);
     margin-bottom: var(--spacing_input);
-}
-
-/* Do not inherit the input-field vertical margin: it makes the contents
-   taller than the first text line, so Windows CJK captions sit below the
-   16px indicator. Keep the box on the caption line. */
-QCheckBox {
-    margin-top: 0;
-    margin-bottom: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-}
-
-QCheckBox::indicator {
-    subcontrol-origin: content;
-    subcontrol-position: left top;
 }
 
 QListView QWidget,
@@ -2070,6 +2054,12 @@ QTableView::indicator {
     margin-right: var(--spacing_large);
 }
 
+/* Match settings wrap-row gap (QHBoxLayout spacing 6). --spacing_large
+   caps at 4px and is not enough once the indicator is a 16px square. */
+QCheckBox::indicator {
+    margin-right: 6px;
+}
+
 /* Settings rows move the caption into a wrapping QLabel; kill the
    text-side indicator margin and input margins so the box lines up. */
 QCheckBox#settingsWrapCheck {
@@ -2079,6 +2069,8 @@ QCheckBox#settingsWrapCheck {
 
 QCheckBox#settingsWrapCheck::indicator {
     margin-right: 0;
+    subcontrol-origin: content;
+    subcontrol-position: left center;
 }
 
 QGroupBox::indicator {

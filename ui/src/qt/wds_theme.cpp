@@ -484,6 +484,9 @@ class YamiIndicatorStyle final : public QProxyStyle {
         const int side = std::min(bounds.width(), bounds.height());
         QRect square(0, 0, side, side);
         square.moveCenter(bounds.center());
+        // Keep the 1:1 box on the left so QSS margin-right stays as
+        // caption gap (settings wrap rows use 6px). Centering ate it.
+        square.moveLeft(bounds.left());
         renderer->render(painter, QRectF(square));
         return;
       }
@@ -494,15 +497,6 @@ class YamiIndicatorStyle final : public QProxyStyle {
   int pixelMetric(PixelMetric metric, const QStyleOption* option, const QWidget* widget) const override {
     if (metric == PM_IndicatorWidth || metric == PM_IndicatorHeight) return 16;
     return QProxyStyle::pixelMetric(metric, option, widget);
-  }
-
-  QSize sizeFromContents(ContentsType type, const QStyleOption* option, const QSize& size,
-                         const QWidget* widget) const override {
-    QSize sz = QProxyStyle::sizeFromContents(type, option, size, widget);
-    if (type == CT_CheckBox && widget != nullptr) {
-      sz.setHeight(std::max(16, widget->fontMetrics().height()));
-    }
-    return sz;
   }
 
  private:
