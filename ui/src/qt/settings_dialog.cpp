@@ -212,8 +212,8 @@ constexpr std::array<const char*, kSettingsSectionCount> kSettingsTabJournalIds 
 
 QColor nav_rail_fill(const QPalette& palette) {
   const QColor window = palette.color(QPalette::Window);
-  const QColor alt = palette.color(QPalette::AlternateBase);
-  if (std::abs(alt.lightness() - window.lightness()) >= 14) return alt;
+  const QColor base = palette.color(QPalette::Base);
+  if (std::abs(base.lightness() - window.lightness()) >= 14) return base;
   return window.lightness() > 128 ? window.darker(112) : window.lighter(128);
 }
 

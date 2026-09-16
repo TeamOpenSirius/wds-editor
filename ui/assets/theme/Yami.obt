@@ -263,6 +263,7 @@
     --palette_window: var(--bg_window);
     --palette_windowText: var(--text);
     --palette_base: var(--bg_base);
+    --palette_alternateBase: var(--bg_base);
 
     --palette_light: var(--grey2);
     --palette_mid: var(--grey7);
@@ -270,6 +271,7 @@
 
     --palette_highlight: var(--primary);
     --palette_highlightedText: var(--text);
+    --palette_accent: var(--primary);
 
     --palette_text: var(--text);
     --palette_link: var(--blue2);
@@ -554,6 +556,7 @@
 
 QWidget {
     alternate-background-color: var(--bg_base);
+    accent-color: var(--primary);
     color: var(--text);
     selection-background-color: var(--primary);
     selection-color: var(--text);

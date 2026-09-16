@@ -724,28 +724,32 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
     qss.replace(QStringLiteral("var(%1)").arg(name), resolved_string(vars, name));
   }
 
-  // 4. Rewrite theme: / :res/images/ urls to quoted absolute paths so spaces
-  // in "WDS Editor.app" do not break QSS parsing.
+  // 4. Rewrite theme: / :res/images/ urls to quoted filesystem paths. QSS
+  // image: loads with QImage(path); a file:/// URL is treated as a missing
+  // file and leaves a blank checkbox. Quotes keep spaces and Windows C:
+  // from being parsed as a CSS url scheme.
   const QString base = QDir(theme_dir).absolutePath();
-  {
-    static const QRegularExpression themeUrlRe(R"(url\(\s*theme:([^)]+)\))");
+  const auto qss_local_path = [](const QString& local_path) {
+    return QDir::fromNativeSeparators(QDir::cleanPath(local_path));
+  };
+  const auto rewrite_urls = [&](const QRegularExpression& re, const auto& path_for) {
     QString rewritten;
     rewritten.reserve(qss.size() + 64);
     int last = 0;
-    auto it = themeUrlRe.globalMatch(qss);
+    auto it = re.globalMatch(qss);
     while (it.hasNext()) {
       const auto m = it.next();
       rewritten += qss.mid(last, m.capturedStart() - last);
-      const QString abs =
-          QDir::fromNativeSeparators(QDir(base).filePath(m.captured(1).trimmed()));
-      rewritten += QStringLiteral("url(\"%1\")").arg(abs);
+      rewritten += QStringLiteral("url(\"%1\")").arg(qss_local_path(path_for(m.captured(1).trimmed())));
       last = m.capturedEnd();
     }
     rewritten += qss.mid(last);
     qss = std::move(rewritten);
-  }
-  qss.replace(QStringLiteral(":res/images/"),
-              QDir::fromNativeSeparators(base + QStringLiteral("/Common/")));
+  };
+  rewrite_urls(QRegularExpression(R"(url\(\s*theme:([^)]+)\))"),
+               [&](const QString& rel) { return QDir(base).filePath(rel); });
+  rewrite_urls(QRegularExpression(R"(url\(\s*:res/images/([^)]+)\))"),
+               [&](const QString& rel) { return QDir(base).filePath(QStringLiteral("Common/") + rel); });
 
   // QtGui cannot decode SVG unless the Qt Svg image plugin is present. Yami
   // paints QCheckBox (and other) indicators with image:url(*.svg); a missing
