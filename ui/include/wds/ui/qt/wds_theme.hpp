@@ -20,6 +20,10 @@ class WdsApplication final : public QApplication {
 
 void install_no_wheel_value_inputs(QApplication& app);
 
+// 12pt at 96 DPI. On 72-DPI Cocoa this is 16pt so the pixel size matches
+// Windows; QSS font-size: Npt would otherwise keep Mac text at 12px.
+double wds_ref_font_pt();
+
 struct ThemeInfo {
   QString id;    // e.g. com.obsproject.Yami.Grey
   QString name;  // e.g. Grey
