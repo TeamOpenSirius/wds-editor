@@ -1,6 +1,7 @@
 #include "wds/ui/qt/playback_dock.hpp"
 
 #include "wds/ui/qt/spread_layout.hpp"
+#include "wds/ui/qt/caption_check.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/qt/note_icons.hpp"
 
@@ -291,17 +292,19 @@ void PlaybackBar::build_ui() {
   mix_row->setSpacing(kLabelFieldGap);
   music_volume_ = make_volume_combo(mix);
   apply_compact_field(music_volume_, kVolumeFieldW);
-  music_mute_ = new QCheckBox(tr("静音"), mix);
+  auto* music_mute_row = new CaptionCheckRow(tr("静音"), mix, false);
+  music_mute_ = music_mute_row->box();
   sfx_volume_ = make_volume_combo(mix);
   apply_compact_field(sfx_volume_, kVolumeFieldW);
-  sfx_mute_ = new QCheckBox(tr("静音"), mix);
+  auto* sfx_mute_row = new CaptionCheckRow(tr("静音"), mix, false);
+  sfx_mute_ = sfx_mute_row->box();
   rate_ = new QComboBox(mix);
   apply_compact_field(rate_, kVolumeFieldW);
   rate_->addItems({QStringLiteral("0.25x"), QStringLiteral("0.5x"), QStringLiteral("0.75x"),
                    QStringLiteral("1x"), QStringLiteral("1.5x"), QStringLiteral("2x")});
   rate_->setCurrentText(QStringLiteral("1x"));
-  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("音乐"), mix), music_volume_, music_mute_}));
-  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("音效"), mix), sfx_volume_, sfx_mute_}));
+  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("音乐"), mix), music_volume_, music_mute_row}));
+  mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("音效"), mix), sfx_volume_, sfx_mute_row}));
   mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("播放速度"), mix), rate_}));
   box->addStretch(1);
   box->addWidget(seek_row);
@@ -602,18 +605,20 @@ void EditorToolbarWidget::build_ui() {
   auto* subdiv_cell = make_labeled_field(content, tr("拍内分割"), subdivisions_);
   auto* curve_cell = make_labeled_field(content, tr("曲线选择"), curve_fill_widget_->combo());
   auto* ease_cell = make_labeled_field(content, tr("缓动选择"), curve_fill_widget_->buttons());
-  pause_at_current_ = new QCheckBox(tr("停止播放后停在当前时间"), content);
-  split_width_follow_ = new QCheckBox(tr("音符默认对齐分割线轨道"), content);
+  auto* pause_row = new CaptionCheckRow(tr("停止播放后停在当前时间"), content);
+  pause_at_current_ = pause_row->box();
+  auto* split_row = new CaptionCheckRow(tr("音符默认对齐分割线轨道"), content);
+  split_width_follow_ = split_row->box();
 
   const int left_form_w = sync_min_width({delay_cell, visible_cell, curve_cell});
   const int right_form_w = sync_min_width({chart_cell, subdiv_cell, ease_cell});
-  const int col_w = std::max({left_form_w, right_form_w, pause_at_current_->sizeHint().width(),
-                             split_width_follow_->sizeHint().width()});
+  const int col_w = std::max({left_form_w, right_form_w, pause_row->sizeHint().width(),
+                             split_row->sizeHint().width()});
 
   stack->addWidget(make_pair_row(content, delay_cell, chart_cell, col_w));
   stack->addWidget(make_pair_row(content, visible_cell, subdiv_cell, col_w));
   stack->addWidget(make_pair_row(content, curve_cell, ease_cell, col_w));
-  stack->addWidget(make_pair_row(content, pause_at_current_, split_width_follow_, col_w));
+  stack->addWidget(make_pair_row(content, pause_row, split_row, col_w));
 
   auto* scroll = new FillScrollArea(this);
   scroll->setWidget(content);

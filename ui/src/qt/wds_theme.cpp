@@ -15,6 +15,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFont>
 #include <QGuiApplication>
 #include <QKeySequenceEdit>
 #ifndef QT_NO_GESTURES
@@ -34,6 +35,7 @@
 #include <QRegularExpression>
 #include <QStyleOption>
 #include <QSvgRenderer>
+#include <QScreen>
 #include <QScrollBar>
 #include <QStyle>
 #include <QStyleFactory>
@@ -522,7 +524,6 @@ class YamiIndicatorStyle final : public QProxyStyle {
 };
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).
-constexpr double kFontScale = 12.0;  // pt — matches QApplication and edit-canvas labels
 constexpr double kPadding = 4.0;
 
 struct Var {
@@ -814,6 +815,15 @@ constexpr auto kIdLight = "com.obsproject.Yami.Light";
 
 }  // namespace
 
+double wds_ref_font_pt() {
+  qreal dpi = 96.0;
+  if (QScreen* screen = QGuiApplication::primaryScreen()) {
+    dpi = screen->logicalDotsPerInch();
+  }
+  if (dpi > 0.0 && dpi < 90.0) return 12.0 * (96.0 / dpi);
+  return 12.0;
+}
+
 void install_no_wheel_value_inputs(QApplication& app) {
   static NoWheelValueFilter* filter = nullptr;
   if (filter == nullptr) {
@@ -911,8 +921,11 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
   collect_vars(base_content, vars);
   if (!variant_content.isEmpty()) collect_vars(variant_content, vars);
   // Runtime-injected values.
-  vars["--obsFontScale"] = parse_value(QString::number(kFontScale));
+  vars["--obsFontScale"] = parse_value(QString::number(wds_ref_font_pt(), 'g', 8));
   vars["--obsPadding"] = parse_value(QString::number(kPadding));
+  QFont app_font = app.font();
+  app_font.setPointSizeF(wds_ref_font_pt());
+  app.setFont(app_font);
 
   // 2. QSS body: base then variant appended.
   QString qss = qss_body(base_content);

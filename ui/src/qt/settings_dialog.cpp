@@ -3,6 +3,7 @@
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
+#include "wds/ui/qt/caption_check.hpp"
 #include "wds/common/crash_handler.hpp"
 
 #include <QApplication>
@@ -144,23 +145,6 @@ QComboBox* make_combo(const QStringList& items, QWidget* parent) {
   return combo;
 }
 
-class LabelToggleFilter final : public QObject {
- public:
-  LabelToggleFilter(QCheckBox* box, QObject* parent) : QObject(parent), box_(box) {}
-
- protected:
-  bool eventFilter(QObject*, QEvent* event) override {
-    if (event->type() == QEvent::MouseButtonRelease && box_ != nullptr) {
-      box_->toggle();
-      return true;
-    }
-    return false;
-  }
-
- private:
-  QCheckBox* box_ = nullptr;
-};
-
 // QLabel::heightForWidth on Windows often keeps the previous two-line
 // layout after the widget gets wider. Measure the string against the new
 // width instead of asking the label for a cached HFW.
@@ -225,76 +209,8 @@ class RelayoutOnResizeFilter final : public QObject {
   }
 };
 
-void sync_wrap_check_row(QWidget* row) {
-  if (row == nullptr || !row->property("wdsWrapRow").toBool() || row->width() <= 0) return;
-  auto* box = row->findChild<QCheckBox*>(QString(), Qt::FindDirectChildrenOnly);
-  auto* label = row->findChild<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
-  if (box == nullptr || label == nullptr) return;
-  const QMargins margins = row->contentsMargins();
-  const int label_w = label->width() > 0
-                          ? label->width()
-                          : std::max(1, row->width() - box->width() - 6 - margins.left() - margins.right());
-  const int text_h = wrap_text_height(label->font(), label->text(), label_w, label->contentsMargins());
-  pin_widget_height(label, text_h);
-  pin_widget_height(row, std::max(box->minimumHeight(), text_h));
-}
-
-class WrappingCheckRow final : public QWidget {
- public:
-  WrappingCheckRow(const QString& text, QWidget* parent) : QWidget(parent) {
-    setProperty("wdsWrapRow", true);
-    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    box_ = new QCheckBox(this);
-    box_->setObjectName(QStringLiteral("settingsWrapCheck"));
-    box_->setText(QString());
-    box_->setAccessibleName(text);
-    const int side =
-        std::max({box_->style()->pixelMetric(QStyle::PM_IndicatorWidth, nullptr, box_),
-                  box_->style()->pixelMetric(QStyle::PM_IndicatorHeight, nullptr, box_), 16});
-    label_ = new QLabel(text, this);
-    label_->setWordWrap(true);
-    label_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    label_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    label_->setCursor(Qt::PointingHandCursor);
-    label_->installEventFilter(new LabelToggleFilter(box_, label_));
-    box_->setFixedWidth(side);
-    box_->setFixedHeight(std::max(side, label_->fontMetrics().height()));
-    auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(6);
-    row->addWidget(box_, 0, Qt::AlignTop);
-    row->addWidget(label_, 1, Qt::AlignTop);
-  }
-
-  QCheckBox* box() const { return box_; }
-
-  bool hasHeightForWidth() const override { return true; }
-
-  int heightForWidth(int w) const override {
-    const QMargins margins = contentsMargins();
-    const int label_w = std::max(1, w - box_->width() - 6 - margins.left() - margins.right());
-    return std::max(box_->minimumHeight(), wrap_text_height(label_->font(), label_->text(), label_w,
-                                                            label_->contentsMargins()));
-  }
-
-  QSize sizeHint() const override {
-    const int w = width() > 0 ? width() : QWidget::sizeHint().width();
-    return QSize(QWidget::sizeHint().width(), heightForWidth(w));
-  }
-
- protected:
-  void resizeEvent(QResizeEvent* event) override {
-    QWidget::resizeEvent(event);
-    sync_wrap_check_row(this);
-  }
-
- private:
-  QCheckBox* box_ = nullptr;
-  QLabel* label_ = nullptr;
-};
-
 QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* parent) {
-  auto* row = new WrappingCheckRow(text, parent);
+  auto* row = new CaptionCheckRow(text, parent);
   layout->addWidget(row);
   return row->box();
 }
@@ -543,7 +459,7 @@ void SettingsPanel::resizeEvent(QResizeEvent* event) {
     if (content == nullptr) return;
     const auto widgets = content->findChildren<QWidget*>();
     for (QWidget* widget : widgets) {
-      if (widget->property("wdsWrapRow").toBool()) sync_wrap_check_row(widget);
+      if (widget->property("wdsWrapRow").toBool()) sync_caption_check_row(widget);
     }
     const auto labels = content->findChildren<QLabel*>();
     for (QLabel* label : labels) sync_wrap_label_height(label);

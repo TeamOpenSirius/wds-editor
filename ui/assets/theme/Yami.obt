@@ -2062,11 +2062,14 @@ QCheckBox::indicator {
 
 /* Settings rows move the caption into a wrapping QLabel; kill the
    text-side indicator margin and input margins so the box lines up. */
+QCheckBox#captionCheck,
 QCheckBox#settingsWrapCheck {
     margin-top: 0;
     margin-bottom: 0;
+    spacing: 0;
 }
 
+QCheckBox#captionCheck::indicator,
 QCheckBox#settingsWrapCheck::indicator {
     margin-right: 0;
     subcontrol-origin: content;
