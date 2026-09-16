@@ -1101,6 +1101,8 @@ void write_posix_signal_report(int fd, int sig, const siginfo_t* info, void* uct
   const int n = ::backtrace(frames, 64);
   if (n > 0) {
     ::backtrace_symbols_fd(frames, n, fd);
+  } else {
+    asafe_write_cstr_fd(fd, "  (backtrace unavailable)\n");
   }
   write_report_tail(fd, frames, n);
 }
@@ -1125,6 +1127,8 @@ void write_posix_text_report(int fd, const char* kind, const char* detail,
   const int n = ::backtrace(frames, 64);
   if (n > 0) {
     ::backtrace_symbols_fd(frames, n, fd);
+  } else {
+    asafe_write_cstr_fd(fd, "  (backtrace unavailable)\n");
   }
   write_report_tail(fd, frames, n);
 }
