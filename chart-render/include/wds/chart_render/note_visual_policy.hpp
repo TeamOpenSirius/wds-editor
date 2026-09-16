@@ -65,6 +65,17 @@ struct HoldTailLayers {
 HoldTailLayers hold_tail_layers(const wds::renderer::SkinCatalog& skin,
                                 bool scratch_hold) noexcept;
 
+// Official HoldLongNotes bake (157×8, Sprite.border L/R = 10). Shared by the
+// Vulkan preview atlas and the Qt editor so both ribbons use one profile.
+inline constexpr int kHoldLongTexW = 157;
+inline constexpr int kHoldLongTexH = 8;
+inline constexpr float kHoldLongSliceBorderL = 10.0f;
+inline constexpr float kHoldLongSliceBorderR = 10.0f;
+// drawHoldEighth idle alpha (PreviewVisualConfig::hold_body_alpha).
+inline constexpr float kHoldBodyAlpha = 0.8f;
+
+std::vector<unsigned char> bake_hold_long_rgba(bool scratch);
+
 // scratch_length: - left only, + right only, 0 both (Sirius / utils.cpp).
 struct ScratchArrowSides {
   bool draw_left = false;
