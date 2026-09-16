@@ -255,24 +255,32 @@ __declspec(dllexport) UINT __stdcall ApplyUserShortcuts(MSIHANDLE hInstall) {
   WCHAR data[1024];
   WCHAR installdir[512];
   WCHAR exe[512];
-  WCHAR* parts[4];
+  WCHAR* parts[5];
   WCHAR empty[] = L"";
   HRESULT co;
   BOOL removing;
   BOOL desktop_on;
   BOOL startmenu_on;
 
-  parts[0] = parts[1] = parts[2] = parts[3] = empty;
+  parts[0] = parts[1] = parts[2] = parts[3] = parts[4] = empty;
   installdir[0] = L'\0';
 
-  /* Deferred: only CustomActionData is available (installdir|desktop|startmenu|remove). */
+  /* Deferred: installdir|desktop|startmenu|remove|upgradingproductcode */
   if (get_prop(hInstall, L"CustomActionData", data, ARRAYSIZE(data))) {
-    split_data(data, parts, 4);
+    split_data(data, parts, 5);
     lstrcpynW(installdir, parts[0], ARRAYSIZE(installdir));
+    /* Old product uninstall during MajorUpgrade must not delete .lnk files
+       the new product already wrote (ApplyUserShortcuts ran before late REP). */
+    if (parts[4][0] != L'\0') {
+      return ERROR_SUCCESS;
+    }
     removing = lstrcmpiW(parts[3], L"ALL") == 0;
     desktop_on = !removing && parts[1][0] == L'1';
     startmenu_on = !removing && parts[2][0] == L'1';
   } else {
+    if (get_prop(hInstall, L"UPGRADINGPRODUCTCODE", data, ARRAYSIZE(data))) {
+      return ERROR_SUCCESS;
+    }
     removing = prop_equals(hInstall, L"REMOVE", L"ALL");
     desktop_on = !removing && prop_is_one(hInstall, L"CREATE_DESKTOP_SHORTCUT");
     startmenu_on = !removing && prop_is_one(hInstall, L"CREATE_STARTMENU_SHORTCUT");
