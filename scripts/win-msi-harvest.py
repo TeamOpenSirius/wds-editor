@@ -8,8 +8,9 @@ INSTALLDIR (shortcut says Program Files, Repair later copies files there).
 This script:
   1) Hoists every Name="." directory into its parent (real XML, not regex).
   2) Forces Win64="yes" on every Component.
-  3) Pulls wds_editor.exe + private runtime DLLs into one stable-GUID
-     component directly under INSTALLDIR (exe is KeyPath).
+  3) Pulls wds_editor.exe + private runtime DLLs into one component
+     directly under INSTALLDIR (exe is KeyPath). Guid="*" so a leftover
+     registration from an earlier broken payload GUID cannot skip InstallFiles.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from pathlib import Path
 WIX = "http://schemas.microsoft.com/wix/2006/wi"
 ET.register_namespace("", WIX)
 
-PAYLOAD_GUID = "8F3A2C1D-4B5E-4A67-9C8D-1E2F3A4B5C6D"
 REQUIRED = (
     "wds_editor.exe",
     "bass.dll",
@@ -121,7 +121,7 @@ def rewrite(path: Path) -> None:
         q("Component"),
         {
             "Id": "WdsEditorPayload",
-            "Guid": PAYLOAD_GUID,
+            "Guid": "*",
             "Win64": "yes",
         },
     )
@@ -133,6 +133,8 @@ def rewrite(path: Path) -> None:
             attrs["KeyPath"] = "yes"
         payload.append(ET.Element(q("File"), attrs))
     dirref.insert(0, payload)
+    if list(dirref)[0] is not payload:
+        raise SystemExit("WdsEditorPayload must be a direct child of DirectoryRef INSTALLDIR")
 
     group = None
     for cand in root.iter(q("ComponentGroup")):
@@ -166,7 +168,7 @@ def rewrite(path: Path) -> None:
             raise SystemExit(f"{name} missing from heat WXS after rewrite")
     print(
         "MSI harvest: hoisted Name='.'; Win64=yes; "
-        "pinned wds_editor.exe + runtime DLLs as WdsEditorPayload under INSTALLDIR"
+        "pinned wds_editor.exe + runtime DLLs as WdsEditorPayload (Guid=*) under INSTALLDIR"
     )
 
 
