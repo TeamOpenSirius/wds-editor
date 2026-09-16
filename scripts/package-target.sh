@@ -1001,8 +1001,10 @@ make_win_msi() {
     die "ApplyUserShortcuts (${apply_seq:-unset}) must be after InstallFiles (${files_seq:-unset})"
   [[ -n "${data_seq}" && "${data_seq}" -lt "${apply_seq}" ]] || \
     die "SetApplyShortcutsData (${data_seq:-unset}) must be before ApplyUserShortcuts (${apply_seq:-unset})"
-  [[ -n "${rep_seq}" && -n "${files_seq}" && "${rep_seq}" -lt "${files_seq}" ]] || \
-    die "RemoveExistingProducts (${rep_seq:-unset}) must be before InstallFiles (${files_seq:-unset})"
+  [[ -n "${rep_seq}" && -n "${files_seq}" && "${rep_seq}" -gt "${files_seq}" ]] || \
+    die "RemoveExistingProducts (${rep_seq:-unset}) must be after InstallFiles (${files_seq:-unset}) so same-version overlays keep the new copy"
+  grep -Fq $'REINSTALLMODE\tamus' <<<"${props}" || \
+    die "MSI missing REINSTALLMODE=amus (same-version overlay must overwrite files)"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
   grep -q 'FindDesktopPref' <<<"${regs}" || \
@@ -1023,6 +1025,10 @@ make_win_msi() {
   grep -Fq 'libwinpthread-1.dll' <<<"${files_tbl}" || die "MSI File table missing libwinpthread-1.dll"
   grep -Eq $'WdsEditorPayload\t.*INSTALLDIR' <<<"${comps_tbl}" || \
     die "WdsEditorPayload must live under INSTALLDIR"
+  grep -Eq $'WdsEditorPayload\t\\*' <<<"${comps_tbl}" && \
+    die "WdsEditorPayload must have a path-stable GUID, not Guid=*"
+  grep -Fq 'UPGRADINGPRODUCTCODE' <<<"${customs}" || \
+    die "SetApplyShortcutsData must pass UPGRADINGPRODUCTCODE (upgrade uninstall must not drop .lnk files)"
   grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" || \
     die "MSI missing ShortcutPrefs component"
   grep -Fq 'CreateDesktopShortcut' <<<"${registry}" || \
