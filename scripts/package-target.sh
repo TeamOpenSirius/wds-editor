@@ -736,6 +736,8 @@ make_win_msi() {
   local work="${DIST_DIR}/staging/msi-win-x86_64-work"
   local heat_wxs="${work}/files.wxs"
   local version="${WDS_PRODUCT_VERSION}"
+  # WiX ProductVersion is numeric only (major.minor.patch).
+  local msi_version="${version%%-*}"
   rm -rf "$work"
   mkdir -p "$work"
 
@@ -893,7 +895,7 @@ PY
     wixl -a x64 -o "$msi_path" \
       -D "SourceDir=${stage}" \
       -D "Win64=yes" \
-      -D "ProductVersion=${version}" \
+      -D "ProductVersion=${msi_version}" \
       --wxidir "${wixl_share}/include" \
       --extdir "${wixl_share}/ext" \
       --ext ui \

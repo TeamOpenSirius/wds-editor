@@ -15,7 +15,10 @@ if(NOT CMAKE_TOOLCHAIN_FILE AND DEFINED WDS_TARGET AND NOT WDS_TARGET STREQUAL "
   endif()
 endif()
 
-project(wds VERSION 0.2.0 LANGUAGES CXX)
+project(wds VERSION 1.0.0 LANGUAGES CXX)
+# CMake project() VERSION is numeric only. About, crash reports, and packages
+# use this marketing string (may include a prerelease suffix).
+set(WDS_APP_VERSION "1.0.0-beta1")
 
 include("${CMAKE_SOURCE_DIR}/cmake/WdsPlatform.cmake")
 
