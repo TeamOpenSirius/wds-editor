@@ -831,32 +831,8 @@ make_win_msi() {
 
   make_win_msi_bmp_icon "$stage"
 
-  # Immediate CA DLL (embedded in Binary table; not installed as a product file).
-  local mingw_cc="${WDS_MINGW_CC:-${WDS_MINGW_TRIPLE}-gcc}"
-  command -v "${mingw_cc}" >/dev/null 2>&1 || die "MinGW CC (${mingw_cc}) required to build wds_msi_ca.dll"
-  echo "Building wds_msi_ca.dll with MinGW…"
-  # Static libgcc + winpthread + --kill-at: msiexec LoadLibrary's this DLL from
-  # a temp dir with no MinGW runtimes on PATH. A missing libgcc_s_*.dll /
-  # libwinpthread-1.dll fails the first install ("cannot run a required
-  # program"); Repair skips first-install-only CAs and "succeeds".
-  "${mingw_cc}" -O2 -shared -s -static-libgcc \
-    -Wl,--kill-at \
-    -o "${stage}/wds_msi_ca.dll" \
-    "${ROOT}/scripts/wds_msi_ca.c" \
-    "${ROOT}/scripts/wds_msi_ca.def" \
-    -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
-    -lmsi -lole32 -luuid -lshell32 -ladvapi32 || die "failed to build wds_msi_ca.dll"
-  if command -v "${WDS_MINGW_TRIPLE}-objdump" >/dev/null 2>&1; then
-    local ca_dump=""
-    ca_dump="$("${WDS_MINGW_TRIPLE}-objdump" -p "${stage}/wds_msi_ca.dll")"
-    grep -Eq 'ApplyUserShortcuts' <<<"${ca_dump}" \
-      || die "wds_msi_ca.dll missing stdcall exports (check .def / --kill-at)"
-    grep -Eiq 'DLL Name: (libgcc_s|libstdc\+\+|libwinpthread)' <<<"${ca_dump}" \
-      && die "wds_msi_ca.dll still imports MinGW runtime DLLs (msiexec LoadLibrary will fail)"
-  fi
-
   # Heat wants paths relative to --prefix; keep README for users browsing Program Files.
-  # Exclude packaging-only BMP ICO / CA DLL from the installed payload.
+  # Exclude packaging-only BMP ICO / leftover CA DLL from the installed payload.
   # Sort find output so harvest order (and Directory nesting) is deterministic.
   stage_base="$(basename "$stage")"
   stage_parent="$(dirname "$stage")"
@@ -892,8 +868,8 @@ make_win_msi() {
   [[ -f "$msi_path" ]] || die "wixl did not produce $msi_path"
 
   # wixl ignores Property/@Secure and crashes if SecureCustomProperties is authored
-  # in the .wxs. Append CREATE_* / WDS_INSTALLDIR onto whatever wixl already wrote
-  # (do not replace — that dropped ADDLOCAL/REMOVE and broke overlay installs).
+  # in the .wxs. Append CREATE_* / path / REINSTALL onto whatever wixl already wrote
+  # (do not replace — that dropped ADDLOCAL/REMOVE).
   need_cmd msibuild
   need_cmd msiinfo
   msiinfo --help >/dev/null 2>&1 || die "msiinfo is not runnable (check LD_LIBRARY_PATH / msitools install)"
@@ -901,7 +877,7 @@ make_win_msi() {
   props="$(msiinfo_export "$msi_path" Property | tr -d '\r')" || die "msiinfo failed: Property"
   local scp="" extra p
   scp="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
-  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT"
+  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE"
   IFS=';'
   for p in $extra; do
     [[ -z "$p" ]] && continue
@@ -914,7 +890,7 @@ make_win_msi() {
   msibuild "$msi_path" -q \
     "UPDATE Property SET Value='${scp}' WHERE Property='SecureCustomProperties'" \
     || die "msibuild failed to patch SecureCustomProperties"
-  echo "Patched SecureCustomProperties (append CREATE_* / WDS_INSTALLDIR)"
+  echo "Patched SecureCustomProperties (append CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL)"
 
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
@@ -948,63 +924,73 @@ make_win_msi() {
   grep -Fq $'[CREATE_STARTMENU_SHORTCUT]\t0\tNOT CREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing explicit CREATE_STARTMENU_SHORTCUT=0 on uncheck"
   grep -Fq $'AddLocal\tDesktopFeature' <<<"${events}" && \
-    die "MSI still uses AddLocal DesktopFeature (shortcuts are CA-owned)"
+    die "MSI still uses AddLocal DesktopFeature (shortcuts are Condition-owned)"
   grep -q 'DesktopFeature' <<<"${features}" && \
-    die "MSI still has DesktopFeature (shortcuts are CA-owned)"
+    die "MSI still has DesktopFeature (shortcuts are Condition-owned)"
   grep -q 'StartMenuFeature' <<<"${features}" && \
-    die "MSI still has StartMenuFeature (shortcuts are CA-owned)"
+    die "MSI still has StartMenuFeature (shortcuts are Condition-owned)"
   grep -q 'BrowseDlg' <<<"${dialogs}" || die "MSI missing BrowseDlg"
   grep -Fq 'SetInstallDirFromBrowse' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromBrowse custom action"
   grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
-  grep -Fq 'ApplyUserShortcuts' <<<"${customs}" || \
-    die "MSI missing ApplyUserShortcuts custom action"
-  grep -Fq 'SetApplyShortcutsData' <<<"${customs}" || \
-    die "MSI missing SetApplyShortcutsData custom action"
   grep -Fq 'ApplyWdsInstallDir' <<<"${customs}" || \
     die "MSI missing ApplyWdsInstallDir custom action"
+  grep -Fq 'SetReinstallAll' <<<"${customs}" || \
+    die "MSI missing SetReinstallAll custom action"
+  grep -Fq 'ApplyUserShortcuts' <<<"${customs}" && \
+    die "MSI must not schedule ApplyUserShortcuts (Shortcut table owns .lnk files)"
   grep -Fq 'LoadShortcutPrefs' <<<"${customs}" && \
     die "MSI must not schedule LoadShortcutPrefs (AppSearch owns CREATE_* prefs)"
   grep -Fq $'CREATE_DESKTOP_SHORTCUT' <<<"${props}" || \
     die "MSI missing CREATE_DESKTOP_SHORTCUT property"
   grep -Fq $'WDS_INSTALLDIR' <<<"${props}" || \
     die "MSI missing WDS_INSTALLDIR property"
+  grep -Fq $'8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907' <<<"${props}" || \
+    die "MSI ProductCode must stay 8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907 (same-product reinstall)"
   grep -Fq $'SecureCustomProperties' <<<"${props}" || \
     die "MSI missing SecureCustomProperties"
-  grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+  local scp_val=""
+  scp_val="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
+  grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"${scp_val}" || \
     die "SecureCustomProperties must include CREATE_DESKTOP_SHORTCUT (UI→Execute)"
-  grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+  grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"${scp_val}" || \
     die "SecureCustomProperties must include CREATE_STARTMENU_SHORTCUT (UI→Execute)"
-  grep -Fq 'WDS_INSTALLDIR' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+  grep -Fq 'WDS_INSTALLDIR' <<<"${scp_val}" || \
     die "SecureCustomProperties must include WDS_INSTALLDIR (UI→Execute)"
+  [[ ";${scp_val};" == *";INSTALLDIR;"* ]] || \
+    die "SecureCustomProperties must include INSTALLDIR (UI→Execute)"
+  [[ ";${scp_val};" == *";REINSTALL;"* ]] || \
+    die "SecureCustomProperties must include REINSTALL (UI→Execute)"
   local exe_seq=""
   exe_seq="$(msiinfo_export "$msi_path" InstallExecuteSequence | tr -d '\r')" || \
     die "msiinfo failed: InstallExecuteSequence"
-  grep -Fq 'ApplyUserShortcuts' <<<"${exe_seq}" || \
-    die "MSI missing ApplyUserShortcuts in InstallExecuteSequence"
-  grep -Fq 'SetApplyShortcutsData' <<<"${exe_seq}" || \
-    die "MSI missing SetApplyShortcutsData in InstallExecuteSequence"
+  grep -Fq 'ApplyUserShortcuts' <<<"${exe_seq}" && \
+    die "InstallExecuteSequence must not run ApplyUserShortcuts"
   grep -Fq 'LoadShortcutPrefs' <<<"${ui_seq}" && \
     die "InstallUISequence must not run LoadShortcutPrefs (DLL load must not gate first install)"
   grep -Fq 'RemoveExistingProducts' <<<"${exe_seq}" || \
-    die "MSI missing RemoveExistingProducts in InstallExecuteSequence"
+    die "MSI missing RemoveExistingProducts (needed to retire old Id='*' packages)"
+  grep -Fq 'SetReinstallAll' <<<"${exe_seq}" || \
+    die "MSI missing SetReinstallAll in InstallExecuteSequence"
   grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
     die "MSI missing InitWdsInstallDir in InstallUISequence"
-  local apply_seq files_seq data_seq rep_seq init_seq
-  apply_seq="$(awk -F'\t' '$1=="ApplyUserShortcuts"{print $3; exit}' <<<"${exe_seq}")"
+  grep -Fq $'REINSTALL\tALL' <<<"${events}" || \
+    die "UpdateDlg must set REINSTALL=ALL when Installed"
+  local apply_dir_seq costinit_seq files_seq rep_seq init_seq
+  apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
+  costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${exe_seq}")"
   files_seq="$(awk -F'\t' '$1=="InstallFiles"{print $3; exit}' <<<"${exe_seq}")"
-  data_seq="$(awk -F'\t' '$1=="SetApplyShortcutsData"{print $3; exit}' <<<"${exe_seq}")"
   rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
   init_seq="$(awk -F'\t' '$1=="InitWdsInstallDir"{print $3; exit}' <<<"${ui_seq}")"
-  [[ -n "${apply_seq}" && -n "${files_seq}" && "${apply_seq}" -gt "${files_seq}" ]] || \
-    die "ApplyUserShortcuts (${apply_seq:-unset}) must be after InstallFiles (${files_seq:-unset})"
-  [[ -n "${data_seq}" && "${data_seq}" -lt "${apply_seq}" ]] || \
-    die "SetApplyShortcutsData (${data_seq:-unset}) must be before ApplyUserShortcuts (${apply_seq:-unset})"
+  [[ -n "${apply_dir_seq}" && -n "${costinit_seq}" && "${apply_dir_seq}" -lt "${costinit_seq}" ]] || \
+    die "ApplyWdsInstallDir (${apply_dir_seq:-unset}) must be before CostInitialize (${costinit_seq:-unset})"
   [[ -n "${rep_seq}" && -n "${files_seq}" && "${rep_seq}" -gt "${files_seq}" ]] || \
-    die "RemoveExistingProducts (${rep_seq:-unset}) must be after InstallFiles (${files_seq:-unset}) so same-version overlays keep the new copy"
+    die "RemoveExistingProducts (${rep_seq:-unset}) must be after InstallFiles (${files_seq:-unset}) so leftover Id='*' uninstalls keep the new copy"
+  grep -q 'FindWdsInstallDir32' <<<"${regs}" || \
+    die "MSI missing FindWdsInstallDir32 registry search"
   grep -Fq $'REINSTALLMODE\tamus' <<<"${props}" || \
-    die "MSI missing REINSTALLMODE=amus (same-version overlay must overwrite files)"
+    die "MSI missing REINSTALLMODE=amus (same-product reinstall must overwrite files)"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
   grep -q 'FindDesktopPref' <<<"${regs}" || \
@@ -1027,10 +1013,12 @@ make_win_msi() {
     die "WdsEditorPayload must live under INSTALLDIR"
   grep -Eq $'WdsEditorPayload\t\\*' <<<"${comps_tbl}" && \
     die "WdsEditorPayload must have a path-stable GUID, not Guid=*"
-  grep -Fq 'UPGRADINGPRODUCTCODE' <<<"${customs}" || \
-    die "SetApplyShortcutsData must pass UPGRADINGPRODUCTCODE (upgrade uninstall must not drop .lnk files)"
   grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" || \
     die "MSI missing ShortcutPrefs component"
+  grep -Eq $'DesktopShortcut\t' <<<"${comps_tbl}" || \
+    die "MSI missing DesktopShortcut component"
+  grep -Eq $'StartMenuShortcut\t' <<<"${comps_tbl}" || \
+    die "MSI missing StartMenuShortcut component"
   grep -Fq 'CreateDesktopShortcut' <<<"${registry}" || \
     die "MSI Registry table missing CreateDesktopShortcut (prefs must be MSI-owned)"
   grep -Fq 'CreateStartMenuShortcut' <<<"${registry}" || \
@@ -1039,6 +1027,8 @@ make_win_msi() {
     die "MSI AppSearch missing CREATE_DESKTOP_SHORTCUT (overlay cannot remember prefs)"
   grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"${appsearch}" || \
     die "MSI AppSearch missing CREATE_STARTMENU_SHORTCUT"
+  grep -Fq 'CREATE_DESKTOP_SHORTCUT="1"' <<<"${comps_tbl}" || \
+    die "DesktopShortcut component must be conditioned on CREATE_DESKTOP_SHORTCUT"
   local folder_type=""
   folder_type="$(awk -F'\t' '$1=="InstallDirDlg" && $2=="Folder"{print $3; exit}' <<<"${controls}")"
   [[ "${folder_type}" == "Edit" ]] || \
@@ -1047,8 +1037,12 @@ make_win_msi() {
     die "InstallDirDlg must not use PathEdit (first-install wipe)"
   local shortcut_tbl=""
   shortcut_tbl="$(msiinfo_export "$msi_path" Shortcut 2>/dev/null | tr -d '\r' || true)"
-  grep -Eq 'WdsEditor(Desktop|StartMenu)' <<<"${shortcut_tbl}" && \
-    die "MSI must not author WdsEditor* shortcuts (ApplyUserShortcuts owns .lnk files)"
+  grep -Fq 'WdsEditorDesktop' <<<"${shortcut_tbl}" || \
+    die "MSI Shortcut table missing WdsEditorDesktop"
+  grep -Fq 'WdsEditorStartMenu' <<<"${shortcut_tbl}" || \
+    die "MSI Shortcut table missing WdsEditorStartMenu"
+  grep -Fq 'WdsFile_wds_editor_exe' <<<"${shortcut_tbl}" || \
+    die "MSI shortcuts must target [#WdsFile_wds_editor_exe] (non-advertised)"
   # InstallDirDlg must run after costing + InitWdsInstallDir (not sequence 1).
   local dir_seq
   dir_seq="$(awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}' <<<"${ui_seq}")"

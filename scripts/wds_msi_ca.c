@@ -1,4 +1,7 @@
-/* MSI custom actions for WDS Editor (MinGW DLL, Binary table — not installed).
+/* Retired: dest MSIs now use a fixed ProductCode + Shortcut table.
+ * Kept only as a reference; package-target.sh no longer builds this DLL.
+ *
+ * MSI custom actions for WDS Editor (MinGW DLL, Binary table — not installed).
  *
  * Checkbox memory is AppSearch + WriteRegistryValues in the .wxs, not a
  * UI-sequence DLL (LoadLibrary failure there aborted first install; Repair
@@ -29,6 +32,7 @@
 #endif
 
 #define WDS_REG_KEY L"Software\\WDS\\Editor"
+#define WDS_REG_INSTALLDIR L"InstallDir"
 #define WDS_REG_DESKTOP L"CreateDesktopShortcut"
 #define WDS_REG_STARTMENU L"CreateStartMenuShortcut"
 #define WDS_LNK_NAME L"WDS Editor.lnk"
@@ -269,19 +273,18 @@ __declspec(dllexport) UINT __stdcall ApplyUserShortcuts(MSIHANDLE hInstall) {
   if (get_prop(hInstall, L"CustomActionData", data, ARRAYSIZE(data))) {
     split_data(data, parts, 5);
     lstrcpynW(installdir, parts[0], ARRAYSIZE(installdir));
-    /* Old product uninstall during MajorUpgrade must not delete .lnk files
-       the new product already wrote (ApplyUserShortcuts ran before late REP). */
-    if (parts[4][0] != L'\0') {
+    removing = lstrcmpiW(parts[3], L"ALL") == 0;
+    /* Being replaced: do not delete the .lnk files the new product just wrote. */
+    if (removing && parts[4][0] != L'\0') {
       return ERROR_SUCCESS;
     }
-    removing = lstrcmpiW(parts[3], L"ALL") == 0;
     desktop_on = !removing && parts[1][0] == L'1';
     startmenu_on = !removing && parts[2][0] == L'1';
   } else {
-    if (get_prop(hInstall, L"UPGRADINGPRODUCTCODE", data, ARRAYSIZE(data))) {
+    removing = prop_equals(hInstall, L"REMOVE", L"ALL");
+    if (removing && get_prop(hInstall, L"UPGRADINGPRODUCTCODE", data, ARRAYSIZE(data))) {
       return ERROR_SUCCESS;
     }
-    removing = prop_equals(hInstall, L"REMOVE", L"ALL");
     desktop_on = !removing && prop_is_one(hInstall, L"CREATE_DESKTOP_SHORTCUT");
     startmenu_on = !removing && prop_is_one(hInstall, L"CREATE_STARTMENU_SHORTCUT");
     get_prop(hInstall, L"INSTALLDIR", installdir, ARRAYSIZE(installdir));
@@ -297,6 +300,7 @@ __declspec(dllexport) UINT __stdcall ApplyUserShortcuts(MSIHANDLE hInstall) {
   if (!removing) {
     write_pref(WDS_REG_DESKTOP, desktop_on ? L"1" : L"0");
     write_pref(WDS_REG_STARTMENU, startmenu_on ? L"1" : L"0");
+    if (installdir[0]) write_pref(WDS_REG_INSTALLDIR, installdir);
   }
   return ERROR_SUCCESS;
 }
