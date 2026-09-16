@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  First-run UI for WDS Editor MSI (wixl ext ui).
+  First-run / reinstall UI for WDS Editor MSI (wixl ext ui).
 
-  Sequence (NOT Installed):
+  Sequence:
     InstallDirDlg  - choose install path (fresh install only)
-    UpdateDlg      - update notice when a previous install is detected
-                     (WIX_*_UPGRADE_DETECTED and/or HKLM InstallDir); no path picker
+    UpdateDlg      - Installed (same ProductCode reinstall) or leftover
+                     Id='*' product (WIX_*_UPGRADE_DETECTED); no path picker
     ShortcutsDlg   - desktop / Start Menu shortcut checkboxes
     ProgressDlg    - from UI extension
     ExitDialog     - completion
@@ -18,9 +18,10 @@
   - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
   - Unchecked boxes clear the property; Next writes explicit "0" so
     SecureCustomProperties passes the off state into elevated Execute
-  - Shortcuts are created by ApplyUserShortcuts (DLL), not AddLocal/Remove
+  - Shortcuts are Shortcut-table components gated by CREATE_*
   - Defaults on update come from HKLM via AppSearch (RegistrySearch)
-  - CREATE_* / WDS_INSTALLDIR are appended to SecureCustomProperties after wixl
+  - CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL are appended to
+    SecureCustomProperties after wixl
   - ASCII UI strings only (MSI codepage 1252)
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -128,11 +129,16 @@
         <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes"
                  Text="This setup will update your existing installation."/>
         <Control Id="UpdateInfo" Type="Text" X="20" Y="70" Width="330" Height="100" NoPrefix="yes"
-                 Text="[ProductName] is already installed. Files will be updated in place; the install folder cannot be changed.&#xA;&#xA;Update folder:&#xA;[INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
+                 Text="[ProductName] is already installed. Files will be updated in place; the install folder cannot be changed.&#xA;&#xA;Update folder:&#xA;[WDS_INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
-          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="1">1</Publish>
-          <Publish Event="NewDialog" Value="ShortcutsDlg" Order="2">1</Publish>
+          <!-- Same ProductCode: reinstall in place. Do not retarget INSTALLDIR. -->
+          <Publish Property="REINSTALL" Value="ALL" Order="1" Condition="Installed"/>
+          <Publish Property="REINSTALLMODE" Value="amus" Order="2" Condition="Installed"/>
+          <!-- Leftover Id='*' product: new ProductCode install over remembered path. -->
+          <Publish Event="DoAction" Value="ApplyWdsInstallDir" Order="3" Condition="NOT Installed"/>
+          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="4" Condition="NOT Installed"/>
+          <Publish Event="NewDialog" Value="ShortcutsDlg" Order="5">1</Publish>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
@@ -155,9 +161,9 @@
                  Text="Create a Start Menu shortcut"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
           <Publish Event="NewDialog" Value="InstallDirDlg" Order="1"
-                   Condition="NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED AND NOT WDS_PREVIOUS_INSTALL"/>
+                   Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED"/>
           <Publish Event="NewDialog" Value="UpdateDlg" Order="2"
-                   Condition="WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR WDS_PREVIOUS_INSTALL"/>
+                   Condition="Installed OR WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED"/>
         </Control>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
           <!-- CheckBox clears the property when unchecked; SecureCustomProperties only
@@ -183,15 +189,14 @@
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Condition="Installed AND NOT PATCH"/>
 
       <InstallUISequence>
-        <!-- After InitWdsInstallDir so the Edit field has the resolved Program
-             Files path before the dialog paints. After MigrateFeatureStates was
-             too easy to reorder ahead of that init. -->
+        <!-- After InitWdsInstallDir so the path text is the resolved folder. -->
         <Show Dialog="InstallDirDlg" After="InitWdsInstallDir" Overridable="yes"
-              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED AND NOT WDS_PREVIOUS_INSTALL"/>
+              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED"/>
         <Show Dialog="UpdateDlg" After="InitWdsInstallDir" Overridable="yes"
-              Condition="NOT Installed AND (WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR WDS_PREVIOUS_INSTALL)"/>
+              Condition="Installed OR WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED"/>
+        <!-- Same-product dest rebuilds use UpdateDlg, not Repair/Remove. -->
         <Show Dialog="MaintenanceWelcomeDlg" Before="ProgressDlg" Overridable="yes"
-              Condition="Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH"/>
+              Condition="0"/>
         <Show Dialog="ExitDialog" OnExit="success" Overridable="yes"/>
       </InstallUISequence>
     </UI>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize wixl-heat output so first install and overlay upgrades both work.
+"""Normalize wixl-heat output so first install and dest rebuilds both work.
 
 wixl-heat wraps root files in <Directory Name=".">. That extra directory
 plus regex "hoist + merge" has produced MSIs whose payload lands outside
