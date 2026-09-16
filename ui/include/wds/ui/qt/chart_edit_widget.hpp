@@ -3,6 +3,8 @@
 #include <QWidget>
 #include <QPixmap>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -24,6 +26,8 @@ class ChartEditWidget final : public QWidget {
   }
   bool captures_keys() const { return panel_ != nullptr && panel_->captures_keys(); }
   QSize minimumSizeHint() const override { return {360, 300}; }
+  int64_t last_paint_us() const noexcept { return last_paint_us_; }
+  uint64_t paint_count() const noexcept { return paint_count_; }
 
  protected:
   void paintEvent(QPaintEvent*) override;
@@ -42,12 +46,28 @@ class ChartEditWidget final : public QWidget {
   wds::interaction::Vec2 point(const QPointF&) const;
   void paint_notes(QPainter& painter,
                    const std::vector<wds::chart_editor::NotationNote>& notes, float opacity,
-                   bool show_selection);
+                   bool show_selection, int32_t range_lo, int32_t range_hi);
+  void paint_waveform(QPainter& painter, const EditViewport& v, const wds::interaction::Rect& bounds);
   void present_qt_modals();
   ChartEditPanel* panel_ = nullptr;
   bool qt_modal_open_ = false;
-  QPixmap background_, judgment_, red_, yellow_, blue_, purple_, tick_blue_, tick_purple_, arrow_;
+  QPixmap background_, judgment_, red_, yellow_, blue_, purple_, tick_blue_, tick_purple_, arrow_,
+      arrow_mirrored_;
   std::chrono::steady_clock::time_point last_tick_;
   std::function<void(const wds::interaction::KeyDownEvent&)> global_key_handler_;
+  int64_t last_paint_us_ = 0;
+  uint64_t paint_count_ = 0;
+  std::vector<std::size_t> visible_note_indices_;
+  std::vector<std::size_t> note_draw_order_;
+  std::vector<wds::chart_editor::NotationNote> ghost_scratch_;
+  std::vector<wds::chart_editor::NotationNote> split_notes_scratch_;
+  const void* wave_cache_key_ = nullptr;
+  float wave_cache_pw_ = 0;
+  float wave_cache_ph_ = 0;
+  qreal wave_cache_dpr_ = 1;
+  int32_t wave_cache_visible_ms_ = 0;
+  float wave_peaks_scroll_ms_ = 0;
+  int wave_peaks_y0_ = 0;
+  std::vector<float> wave_row_peaks_;
 };
 }

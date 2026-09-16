@@ -93,11 +93,30 @@ ui/
 
 仅当环境变量 **精确** 为 `WDS_FRAME_DIAG=1` 时开启（`1` 以外、大小写变体均关），与编译期 `WDS_ENABLE_LOGGING` 无关。默认不打诊断时钟、不建日志文件。
 
-macOS 已验证路径：`~/Library/Application Support/WDS/logs/frame-diag.log`。约每秒一行：fps、playing 帧占比、wall / hitch（原始帧间隔 >25ms）、poll / update / tick / batch / render，以及 fence / acquire / submit / present。打开失败不致命。不要把 Debug 控制台当诊断输出（避免 I/O 伪卡顿）。
+macOS 已验证路径：`~/Library/Application Support/WDS/logs/frame-diag.log`（`QStandardPaths::GenericDataLocation` + `/WDS/logs/`）。Qt 壳（`ui/apps/wds_editor_qt.cpp` 的 `FrameDiagLogger`）约每秒一行 `t=… frames= fps= playing= wall_avg/wall_max hitch= delta_avg/max tick_avg/max render_avg/max fence/acquire/submit/present paint_avg/max paints= ui_avg/max swapchain_recreate= create_texture_rgba= …`；原始帧间隔 >25ms 的帧另写一行 `HITCH …` 记录该帧各段耗时。行先缓存在内存、每秒随摘要 flush 一次；打开失败不致命。不要把 Debug 控制台当诊断输出（避免 I/O 伪卡顿）。
+
+无人值守采样用的启动参数（缺省均为 no-op）：
+
+| 参数 | 作用 |
+| --- | --- |
+| `--open <path.wdsproject>` | 启动时直接打开工程，跳过启动页 |
+| `--autoplay` | 预览就绪后约 2.5s 自动播放（与播放按钮同一路径） |
+| `--quit-after <秒>` | 到时自动退出 |
+| `--screenshot <png>[@<ms>]` | `window.show()` 后 `<ms>`（默认 6000）用 `QScreen::grabWindow` 存主窗口 PNG（含 Vulkan 子窗口）；可重复给多次，用两张图比对预览区域即可判断预览是否在刷新 |
+
+macOS 上 Qt 壳启动时默认 `QT_MTL_NO_TRANSACTION=1`（可被用户显式设置覆盖）：Qt 6.6+ 的 `QMetalLayer` 每帧 `displayLayer:` 的写锁 + `presentsWithTransaction` 切换会与 MoltenVK 主线程 present 竞争，导致预览在起播时停止刷新；退回普通 `CAMetalLayer` 后消失。
 
 ```bash
-WDS_FRAME_DIAG=1 ./build-macos-arm-debug/ui/wds_editor
+WDS_FRAME_DIAG=1 "/Applications/WDS Editor.app/Contents/MacOS/wds_editor" \
+  --open /path/to/bench.wdsproject --autoplay --quit-after 25
+# 开发树二进制不是 .app，需要自己指到 Homebrew 的 MoltenVK ICD：
+VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
+VK_DRIVER_FILES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
+DYLD_LIBRARY_PATH=/opt/homebrew/lib \
+WDS_FRAME_DIAG=1 ./build-macos-arm/ui/wds_editor --open … --autoplay --quit-after 10
 ```
+
+`QT_LOGGING_RULES="qt.qpa.drawing=true"` 可确认 `requestUpdate` 走的是 display-link 还是 5ms timer（每帧一行，只用于短时排查）。
 
 ## 主要接口
 

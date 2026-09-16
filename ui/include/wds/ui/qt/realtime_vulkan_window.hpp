@@ -58,5 +58,6 @@ class RealtimeVulkanWindow final : public QWindow {
   QTimer resize_settle_timer_;
   bool resizing_ = false;
   bool host_resize_suspended_ = false;
+  bool was_exposed_ = false;
 };
 }

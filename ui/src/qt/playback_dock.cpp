@@ -36,12 +36,11 @@
 #include <array>
 #include <initializer_list>
 #include <cmath>
+#include <limits>
 #include <optional>
 
 namespace wds::ui {
 namespace {
-
-constexpr int kSeekSteps = 1000;
 
 constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
     wds::interaction::PlaceIntent::None,
@@ -224,8 +223,8 @@ void PlaybackBar::seek_to_slider(int value) {
   int64_t start = 0;
   int64_t end = 1;
   settings->seek_window_ms(start, end);
-  const int64_t span = std::max<int64_t>(end - start, 1);
-  manager_->chart_preview().transport().request_seek_ms(start + span * value / kSeekSteps);
+  (void)end;
+  manager_->chart_preview().transport().request_seek_ms(start + value);
 }
 
 void PlaybackBar::build_ui() {
@@ -238,7 +237,7 @@ void PlaybackBar::build_ui() {
   box->setSpacing(0);
 
   seek_ = new QSlider(Qt::Horizontal, block);
-  seek_->setRange(0, kSeekSteps);
+  seek_->setRange(0, 1);
   seek_->setMinimumWidth(120);
   play_ = new QPushButton(tr("播放"), block);
   stop_ = new QPushButton(tr("回到开头"), block);
@@ -359,8 +358,7 @@ void PlaybackBar::build_ui() {
   });
 }
 
-void PlaybackBar::sync_from_runtime() {
-  syncing_ = true;
+void PlaybackBar::sync_position() {
   auto& transport = manager_->chart_preview().transport();
 
   const QString action = transport.playing() ? tr("暂停") : tr("播放");
@@ -374,12 +372,24 @@ void PlaybackBar::sync_from_runtime() {
       int64_t start = 0;
       int64_t end = 1;
       settings->seek_window_ms(start, end);
-      const int64_t span = std::max<int64_t>(end - start, 1);
-      const int64_t pos = std::clamp<int64_t>(transport.committed_ms() - start, 0, span);
+      const int64_t span64 = std::max<int64_t>(end - start, 1);
+      const int span = static_cast<int>(
+          std::min<int64_t>(span64, static_cast<int64_t>(std::numeric_limits<int>::max())));
+      const int64_t pos = std::clamp<int64_t>(transport.committed_ms() - start, 0, span64);
       const QSignalBlocker blocker(seek_);
-      seek_->setValue(static_cast<int>(pos * kSeekSteps / span));
+      if (seek_->maximum() != span) {
+        seek_->setRange(0, span);
+        seek_->setSingleStep(std::max(1, span / 1000));
+        seek_->setPageStep(std::max(1, span / 100));
+      }
+      seek_->setValue(static_cast<int>(std::min<int64_t>(pos, static_cast<int64_t>(span))));
     }
   }
+}
+
+void PlaybackBar::sync_from_runtime() {
+  sync_position();
+  syncing_ = true;
   if (auto* settings = manager_->settings_panel()) {
     if (!music_volume_->hasFocus()) {
       const QSignalBlocker blocker(music_volume_);

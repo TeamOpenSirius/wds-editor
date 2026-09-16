@@ -2,6 +2,7 @@
 #include "wds/ui/qt/qt_input_adapter.hpp"
 #include "wds/ui/qt/split_picker_dialog.hpp"
 #include "wds/ui/qt/timing_edit_dialog.hpp"
+#include <wds/audio/waveform_overview.hpp>
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/note_edit_ops.hpp>
@@ -12,6 +13,7 @@
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
 #include <QGuiApplication>
+#include <QImage>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -23,6 +25,9 @@
 #include <QLinearGradient>
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 namespace wds::ui {
 namespace {
@@ -34,10 +39,22 @@ QColor qcolor(const wds::interaction::Color& c) {
 
 QRectF qrect(const wds::interaction::Rect& r) { return {r.x, r.y, r.w, r.h}; }
 
+struct ScopedAA {
+  QPainter& p;
+  explicit ScopedAA(QPainter& painter) : p(painter) { p.setRenderHint(QPainter::Antialiasing, true); }
+  ~ScopedAA() { p.setRenderHint(QPainter::Antialiasing, false); }
+};
+
+bool note_in_tick_window(const wds::chart_editor::NotationNote& n, int32_t lo, int32_t hi) {
+  return n.start_tick <= hi && std::max(n.end_tick, n.start_tick) >= lo;
+}
+
+
 void fill_ui_rect(QPainter& p, const wds::interaction::UiPaintRect& r) {
   p.setPen(Qt::NoPen);
   p.setBrush(qcolor(r.color));
   if (r.corner_radius > 0.5f) {
+    ScopedAA aa(p);
     p.drawRoundedRect(qrect(r.bounds), r.corner_radius, r.corner_radius);
   } else {
     p.drawRect(qrect(r.bounds));
@@ -176,6 +193,12 @@ void ChartEditWidget::set_skins_directory(const QString& directory) {
   tick_blue_ = load("Sirius Note Tick Blue.png");
   tick_purple_ = load("Sirius Note Tick Purple.png");
   arrow_ = load("Sirius Scratch Arrow.png");
+  if (arrow_.isNull()) {
+    arrow_mirrored_ = {};
+  } else {
+    arrow_mirrored_ = QPixmap::fromImage(arrow_.toImage().flipped(Qt::Horizontal));
+    arrow_mirrored_.setDevicePixelRatio(arrow_.devicePixelRatio());
+  }
   update();
 }
 
@@ -195,7 +218,20 @@ void ChartEditWidget::resizeEvent(QResizeEvent*) {
   update();
 }
 void ChartEditWidget::paintEvent(QPaintEvent*) {
-  QPainter p(this); p.setRenderHint(QPainter::Antialiasing, true);
+  const auto paint_t0 = std::chrono::steady_clock::now();
+  struct PaintCost {
+    ChartEditWidget* self;
+    std::chrono::steady_clock::time_point t0;
+    ~PaintCost() {
+      self->last_paint_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count();
+      ++self->paint_count_;
+    }
+  } paint_cost{this, paint_t0};
+
+  QPainter p(this);
+  p.setRenderHint(QPainter::Antialiasing, false);
   p.fillRect(rect(), qcolor(wds::interaction::theme::kEditChrome));
   if (!panel_) return;
   wds::interaction::UiPainter chrome;
@@ -211,55 +247,78 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   // Its neutral authoring surface keeps lane contrast and waveform readable.
   p.fillRect(playfield, qcolor(wds::interaction::theme::kEditCanvas));
 
-  // Waveform is sampled in the same wall-clock coordinate system as EditViewport.
-  if (const auto* waveform = panel_->waveform(); waveform && !waveform->empty()) {
-    QPainterPath wave;
-    const float center = b.x + b.w * 0.5f;
-    const float max_w = b.w * 0.46f;
-    wave.moveTo(center, b.y);
-    for (int y = std::max(0, int(std::floor(b.y))); y <= std::min(height(), int(std::ceil(b.bottom()))); ++y) {
-      const double ms0 = v.ms_at_y(float(y));
-      const double ms1 = v.ms_at_y(float(y + 1));
-      const float peak = waveform->peak_in_range(ms0, ms1);
-      wave.lineTo(center + std::sqrt(std::clamp(peak, 0.0f, 1.0f)) * max_w, y);
-    }
-    for (int y = std::min(height(), int(std::ceil(b.bottom()))); y >= std::max(0, int(std::floor(b.y))); --y) {
-      const float peak = waveform->peak_in_range(v.ms_at_y(float(y)), v.ms_at_y(float(y + 1)));
-      wave.lineTo(center - std::sqrt(std::clamp(peak, 0.0f, 1.0f)) * max_w, y);
-    }
-    wave.closeSubpath();
-    p.fillPath(wave, qcolor(wds::interaction::theme::kEditWaveform));
-  }
+  paint_waveform(p, v, b);
 
   // Beat/subdivision lines, kept lightweight by stepping only the visible range.
   const auto range = v.visible_tick_range();
+  // Note art hangs half a note-height (plus selection pad) past its tick.
+  // Convert that pixel pad to ticks; long holds still pass the span test.
+  const float pad_ms =
+      (v.note_height_px() + 8.0f) * static_cast<float>(v.visible_ms()) / std::max(b.h, 1.0f);
+  const float view_ms_lo_cull = v.scroll_ms();
+  const float view_ms_hi_cull = view_ms_lo_cull + static_cast<float>(v.visible_ms());
+  const int32_t cull_lo = wds::chart_editor::milliseconds_to_tick(
+      static_cast<int64_t>(std::llround(static_cast<double>(view_ms_lo_cull - pad_ms))), timing);
+  const int32_t cull_hi = wds::chart_editor::milliseconds_to_tick(
+      static_cast<int64_t>(std::llround(static_cast<double>(view_ms_hi_cull + pad_ms))), timing);
   const int step = std::max(1, wds::chart_editor::subdivision_tick_step(v.grid()));
   int tick = (range.first / step) * step;
   if (tick < range.first) tick += step;
-  for (; tick <= range.second; tick += step) {
-    const bool beat = tick % std::max(1, v.grid().ticks_per_quarter) == 0;
-    p.setPen(QPen(qcolor(beat ? wds::interaction::theme::kEditGridBeat
-                               : wds::interaction::theme::kEditGridSubdiv),
-                  beat ? 1.2 : 1.0));
-    const qreal y = v.y_at(tick); p.drawLine(QPointF(b.x, y), QPointF(b.right(), y));
+  {
+    // y_at() is fractional; AA keeps beat/lane strokes pixel-identical to the
+    // previous whole-paint hint.
+    ScopedAA aa(p);
+    for (; tick <= range.second; tick += step) {
+      const bool beat = tick % std::max(1, v.grid().ticks_per_quarter) == 0;
+      p.setPen(QPen(qcolor(beat ? wds::interaction::theme::kEditGridBeat
+                                 : wds::interaction::theme::kEditGridSubdiv),
+                    beat ? 1.2 : 1.0));
+      const qreal y = v.y_at(tick); p.drawLine(QPointF(b.x, y), QPointF(b.right(), y));
+    }
+    const int64_t appear_ms = std::max<int64_t>(
+        1, static_cast<int64_t>(std::llround(
+               static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
+    const int64_t disappear_ms = std::max<int64_t>(
+        1, static_cast<int64_t>(std::llround(
+               static_cast<double>(preview.split_line_animation_end_sec) * 1000.0)));
+    const float view_ms_lo = v.scroll_ms();
+    const float view_ms_hi = view_ms_lo + static_cast<float>(v.visible_ms());
+    const int32_t fade_lo = wds::chart_editor::milliseconds_to_tick(
+        static_cast<int64_t>(std::llround(static_cast<double>(view_ms_lo) -
+                                          static_cast<double>(disappear_ms))),
+        timing);
+    const int32_t fade_hi = wds::chart_editor::milliseconds_to_tick(
+        static_cast<int64_t>(
+            std::llround(static_cast<double>(view_ms_hi) + static_cast<double>(appear_ms))),
+        timing);
+    const int32_t split_lo = std::min(cull_lo, fade_lo);
+    const int32_t split_hi = std::max(cull_hi, fade_hi);
+    split_notes_scratch_.clear();
+    for (const auto& note : notes) {
+      if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+      if (note_in_tick_window(note, split_lo, split_hi)) split_notes_scratch_.push_back(note);
+    }
+    paint_lane_guides(p, v, b, split_notes_scratch_, timing, preview);
   }
-  paint_lane_guides(p, v, b, notes, timing, preview);
-  paint_split_lines(p, v, b, notes, timing, preview);
+  paint_split_lines(p, v, b, split_notes_scratch_, timing, preview);
   // Judgment-area skin sits below notes and spans the authored playfield.
   if (!judgment_.isNull()) {
     const float h = v.judgeline_height_px();
     p.drawPixmap(QRectF(b.x, v.judgeline_y() - h * .5f, b.w, h), judgment_, judgment_.rect());
   }
 
-  paint_notes(p, notes, 1.0f, true);
+  paint_notes(p, notes, 1.0f, true, cull_lo, cull_hi);
   for (const auto& ghost : panel_->skinned_ghosts()) {
     if (!ghost.visible) continue;
-    paint_notes(p, {ghost.note}, ghost.alpha, false);
+    ghost_scratch_.clear();
+    ghost_scratch_.push_back(ghost.note);
+    paint_notes(p, ghost_scratch_, ghost.alpha, false, cull_lo, cull_hi);
   }
   if (const auto marquee = panel_->active_marquee_rect()) {
     const QRectF box = qrect(*marquee);
     if (box.width() > 0.5 && box.height() > 0.5) {
       p.fillRect(box, qcolor(wds::interaction::theme::kEditSelectionGlow));
+      ScopedAA aa(p);
       p.setBrush(Qt::NoBrush);
       p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.0));
       p.drawRect(box);
@@ -269,33 +328,117 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   flush_ui_painter(p, chrome);
 }
 
+void ChartEditWidget::paint_waveform(QPainter& p, const EditViewport& v,
+                                    const wds::interaction::Rect& b) {
+  const auto* waveform = panel_ ? panel_->waveform() : nullptr;
+  if (!waveform || waveform->empty() || b.w <= 1.0f || b.h <= 1.0f) return;
+
+  const float vis = static_cast<float>(std::max(1, v.visible_ms()));
+  const float view_lo = v.scroll_ms();
+  const qreal dpr = std::max<qreal>(1.0, devicePixelRatioF());
+  const float H = std::max(b.h, 1.0f);
+  const int y0 = std::max(0, static_cast<int>(std::floor(b.y)));
+  const int y1 = std::min(height(), static_cast<int>(std::ceil(b.bottom())));
+  if (y1 < y0) return;
+  const int rows = y1 - y0 + 1;
+  const float ms_per_px = vis / H;
+
+  auto sample_row = [&](int y) {
+    return waveform->peak_in_range(v.ms_at_y(static_cast<float>(y)),
+                                   v.ms_at_y(static_cast<float>(y + 1)));
+  };
+
+  const bool geom_ok = waveform == wave_cache_key_ &&
+                       std::abs(wave_cache_pw_ - b.w) < 0.5f &&
+                       std::abs(wave_cache_ph_ - b.h) < 0.5f &&
+                       wave_cache_visible_ms_ == v.visible_ms() &&
+                       std::abs(wave_cache_dpr_ - dpr) < 0.01 &&
+                       wave_peaks_y0_ == y0 &&
+                       static_cast<int>(wave_row_peaks_.size()) == rows;
+
+  if (!geom_ok) {
+    wave_cache_key_ = waveform;
+    wave_cache_pw_ = b.w;
+    wave_cache_ph_ = b.h;
+    wave_cache_dpr_ = dpr;
+    wave_cache_visible_ms_ = v.visible_ms();
+    wave_peaks_y0_ = y0;
+    wave_row_peaks_.resize(static_cast<std::size_t>(rows));
+    for (int i = 0; i < rows; ++i) wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
+    wave_peaks_scroll_ms_ = view_lo;
+  } else {
+    const int drow =
+        static_cast<int>(std::lround(static_cast<double>(view_lo - wave_peaks_scroll_ms_) /
+                                     static_cast<double>(ms_per_px)));
+    if (drow == 0) {
+      // Same whole-pixel scroll: reuse cached peaks.
+    } else if (drow >= rows || drow <= -rows) {
+      for (int i = 0; i < rows; ++i) wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
+      wave_peaks_scroll_ms_ = view_lo;
+    } else if (drow > 0) {
+      // Playback: later time at each y. Old row i moves to i+drow.
+      std::memmove(wave_row_peaks_.data() + drow, wave_row_peaks_.data(),
+                   static_cast<std::size_t>(rows - drow) * sizeof(float));
+      for (int i = 0; i < drow; ++i) wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
+      wave_peaks_scroll_ms_ += static_cast<float>(drow) * ms_per_px;
+    } else {
+      const int up = -drow;
+      std::memmove(wave_row_peaks_.data(), wave_row_peaks_.data() + up,
+                   static_cast<std::size_t>(rows - up) * sizeof(float));
+      for (int i = rows - up; i < rows; ++i)
+        wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
+      wave_peaks_scroll_ms_ += static_cast<float>(drow) * ms_per_px;
+    }
+  }
+
+  const float center = b.x + b.w * 0.5f;
+  const float max_w = b.w * 0.46f;
+  const QColor wave_color = qcolor(wds::interaction::theme::kEditWaveform);
+  for (int i = 0; i < rows; ++i) {
+    const float amp =
+        std::sqrt(std::clamp(wave_row_peaks_[static_cast<std::size_t>(i)], 0.0f, 1.0f)) * max_w;
+    if (amp <= 0.5f) continue;
+    p.fillRect(QRectF(center - amp, y0 + i, amp * 2.0f, 1.0f), wave_color);
+  }
+}
+
 void ChartEditWidget::paint_notes(QPainter& p,
                                   const std::vector<wds::chart_editor::NotationNote>& notes,
-                                  float opacity, bool show_selection) {
+                                  float opacity, bool show_selection, int32_t range_lo,
+                                  int32_t range_hi) {
   if (!panel_ || notes.empty() || opacity <= 0.001f) return;
   const auto& v = panel_->viewport();
   const auto& timing = panel_->engine().document().timing();
+  visible_note_indices_.clear();
+  if (visible_note_indices_.capacity() < notes.size()) visible_note_indices_.reserve(notes.size());
+  for (std::size_t i = 0; i < notes.size(); ++i) {
+    if (note_in_tick_window(notes[i], range_lo, range_hi)) visible_note_indices_.push_back(i);
+  }
+  if (visible_note_indices_.empty()) return;
   p.save();
-  p.setOpacity(opacity);
+  if (opacity < 0.999f) p.setOpacity(opacity);
+  const auto& playfield = v.bounds();
   const auto draw_skin = [&](const QPixmap& image, const QRectF& target) {
     if (image.isNull()) { p.fillRect(target, QColor(100, 190, 255)); return; }
     p.drawPixmap(target, image, image.rect());
   };
-  std::vector<std::size_t> draw_order;
   // Use the same millisecond-based ordering contract as the Vulkan editor and
   // preview. Tick order alone is wrong across BPM segments and can put a tap
   // behind a cap that is rendered later at the same wall-clock position.
   wds::chart_render::build_draw_order_indices(
-      notes.size(), draw_order,
+      visible_note_indices_.size(), note_draw_order_,
       [&](std::size_t i) {
-        return wds::chart_editor::tick_to_milliseconds(notes[i].start_tick, timing);
+        return wds::chart_editor::tick_to_milliseconds(
+            notes[visible_note_indices_[i]].start_tick, timing);
       },
-      [&](std::size_t i) { return static_cast<int32_t>(notes[i].note_type); });
+      [&](std::size_t i) {
+        return static_cast<int32_t>(notes[visible_note_indices_[i]].note_type);
+      });
   // Paint every hold ribbon before any note sprite. A per-note body/cap pass
   // lets a later hold cover taps that happen to share its time range; the
   // editor must instead keep all selectable note art above every ribbon.
-  for (const std::size_t index : draw_order) {
-    const auto& n = notes[index];
+  for (const std::size_t vis : note_draw_order_) {
+    const auto& n = notes[visible_note_indices_[vis]];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth ||
         wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) ||
         n.end_tick <= n.start_tick ||
@@ -318,11 +461,14 @@ void ChartEditWidget::paint_notes(QPainter& p,
     hold.setColorAt(0, edge);
     hold.setColorAt(.5, mid);
     hold.setColorAt(1, edge);
-    p.fillRect(QRectF(body_x, std::min(y0, y1), body_w,
-                      std::max(2.0f, std::abs(y1 - y0))), hold);
+    const float body_top = std::max(std::min(y0, y1), playfield.y - 2.0f);
+    const float body_bot = std::min(std::max(y0, y1), playfield.bottom() + 2.0f);
+    if (body_bot > body_top) {
+      p.fillRect(QRectF(body_x, body_top, body_w, body_bot - body_top), hold);
+    }
   }
-  for (const std::size_t index : draw_order) {
-    const auto& n = notes[index];
+  for (const std::size_t vis : note_draw_order_) {
+    const auto& n = notes[visible_note_indices_[vis]];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth) continue;
     if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
     const float y0 = v.y_at(n.start_tick), y1 = v.y_at(n.end_tick > n.start_tick ? n.end_tick : n.start_tick);
@@ -369,14 +515,15 @@ void ChartEditWidget::paint_notes(QPainter& p,
         const float aw = std::min(tail_w, std::clamp(v.lane_width(1) * .55f, 8.0f, ah * 1.2f));
         wds::chart_render::StaticArrowLayoutParams ap;
         ap.span_left = tail_x; ap.span_right = tail_x + tail_w; ap.arrow_w = aw; ap.scratch_length = n.scratch_length;
-        const QImage mirrored = arrow_.toImage().mirrored(true, false);
         for (const auto& a : wds::chart_render::layout_static_scratch_arrows(ap)) {
           const QRectF ar(a.x0, y1-ah*.5f, a.x1-a.x0, ah);
-          if (a.flip_x) p.drawImage(ar, mirrored); else p.drawPixmap(ar, arrow_, arrow_.rect());
+          if (a.flip_x) p.drawPixmap(ar, arrow_mirrored_, arrow_mirrored_.rect());
+          else p.drawPixmap(ar, arrow_, arrow_.rect());
         }
       }
     }
     if (show_selection && panel_->selected().count(n.id)) {
+      ScopedAA aa(p);
       p.setBrush(Qt::NoBrush);
       p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.5));
       if (hold_body) {
@@ -392,8 +539,8 @@ void ChartEditWidget::paint_notes(QPainter& p,
   // Flick sprites are a separate top pass in the legacy renderer. This keeps
   // a chain's terminal arrow above the following segment's tap cap.
   if (!arrow_.isNull()) {
-    const QImage mirrored = arrow_.toImage().mirrored(true, false);
-    for (const auto& n : notes) {
+    for (const std::size_t index : visible_note_indices_) {
+      const auto& n = notes[index];
       if (n.note_type != wds::chart_editor::NoteType::Flick) continue;
       const float y = v.y_at(n.start_tick), inset = v.note_inset_px(n.width);
       const float sx = v.x_at(n.lane) + inset, sw = std::max(4.0f, v.lane_width(n.width) - inset * 2.0f);
@@ -402,7 +549,8 @@ void ChartEditWidget::paint_notes(QPainter& p,
       wds::chart_render::StaticArrowLayoutParams ap{sx, sx + sw, aw, n.scratch_length};
       for (const auto& a : wds::chart_render::layout_static_scratch_arrows(ap)) {
         const QRectF ar(a.x0, y - ah * .5f, a.x1 - a.x0, ah);
-        if (a.flip_x) p.drawImage(ar, mirrored); else p.drawPixmap(ar, arrow_, arrow_.rect());
+        if (a.flip_x) p.drawPixmap(ar, arrow_mirrored_, arrow_mirrored_.rect());
+        else p.drawPixmap(ar, arrow_, arrow_.rect());
       }
     }
   }

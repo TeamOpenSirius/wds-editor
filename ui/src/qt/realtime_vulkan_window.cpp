@@ -122,10 +122,15 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
 }
 
 void RealtimeVulkanWindow::exposeEvent(QExposeEvent*) {
-  if (isExposed()) {
+  // Qt 6.6+ on macOS uses QMetalLayer; [QNSView displayLayer:] calls
+  // handleExposeEvent on every presented frame. Resetting last_frame_ here
+  // would truncate the UpdateRequest delta (wall ~16.7 ms → measured ~8 ms).
+  if (isExposed() && !was_exposed_) {
     last_frame_ = std::chrono::steady_clock::now();
+    pending_elapsed_us_ = 0;
     schedule_frame();
   }
+  was_exposed_ = isExposed();
 }
 
 void RealtimeVulkanWindow::resizeEvent(QResizeEvent*) {
