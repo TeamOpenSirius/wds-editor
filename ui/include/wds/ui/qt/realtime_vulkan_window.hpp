@@ -21,6 +21,7 @@ class RealtimeVulkanWindow final : public QWindow {
   explicit RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* parent = nullptr);
   ~RealtimeVulkanWindow() override;
   bool event(QEvent* event) override;
+  // Empty clears the callback; event(UpdateRequest) and schedule_frame no-op.
   void set_frame_callback(FrameCallback callback) { frame_callback_ = std::move(callback); }
   // Limit idle rendering for secondary viewports; pending input still renders
   // immediately so editing remains responsive.

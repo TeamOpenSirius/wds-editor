@@ -17,16 +17,22 @@ source "${ROOT}/scripts/lib/wds-env.sh"
 CACHE_DIR="${WDS_RUNTIME_CACHE:-${ROOT}/.cache/runtime}"
 DIST_DIR="${ROOT}/dist"
 MSITOOLS_PREFIX="${WDS_MSITOOLS_PREFIX}"
+# 1 = split dSYM / GNU DWARF into dist/<target>/symbols (default). 0 = skip.
+PACKAGE_SYMBOLS="${WDS_PACKAGE_SYMBOLS:-1}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <target> [--build-dir DIR]
+Usage: $(basename "$0") <target> [--build-dir DIR] [--no-symbols]
        $(basename "$0") --stage-win-debug <build-dir>
 
 Targets: win-x86_64 | macos-arm
 
 Writes: dist/wds-win-x86_64.msi   (+ portable dist/wds-win-x86_64.zip)
         dist/wds-macos-arm.zip + dist/wds-macos-arm.dmg
+        dist/<target>/symbols/   (dSYM / .debug; skip with --no-symbols)
+
+--no-symbols:
+  Skip dsymutil / objcopy debug-split (also WDS_PACKAGE_SYMBOLS=0). Default on.
 
 --stage-win-debug:
   Copy skins/effects/shaders/fonts/icons + vulkan-1.dll next to
@@ -39,6 +45,7 @@ Environment (see scripts/env.example):
   WDS_MSITOOLS_PREFIX / WDS_MSITOOLS_LIB_DIR / WDS_WIXL_SHARE_DIRS / WDS_WIXL_VERSION
   WDS_MINGW_CXX / WDS_MINGW_OBJDUMP / WDS_MINGW_DLL_DIRS
   WDS_PRODUCT_VERSION
+  WDS_PACKAGE_SYMBOLS   0 = skip dSYM/objcopy split (default 1)
 EOF
 }
 
@@ -46,6 +53,46 @@ die() { echo "error: $*" >&2; exit 1; }
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+package_symbols_enabled() {
+  [[ "${PACKAGE_SYMBOLS}" != "0" ]]
+}
+
+# True for third-party PE names that must not be objcopy-split (no project DWARF).
+is_third_party_win_bin() {
+  local base="$1"
+  case "$base" in
+    Qt*.dll|qt*.dll)
+      return 0 ;;
+    bass.dll|bassmix.dll|bass*.dll)
+      return 0 ;;
+    libstdc++*.dll|libgcc_s_*.dll|libwinpthread*.dll|libssp*.dll)
+      return 0 ;;
+    vulkan-1.dll|wds_msi_ca.dll|icu*.dll|D3Dcompiler*.dll|opengl32sw.dll)
+      return 0 ;;
+    qwindows.dll|qwindowsvistastyle.dll|qmodernwindowsstyle.dll)
+      return 0 ;;
+    qsvg.dll|qgif.dll|qjpeg.dll|qico.dll|qwbmp.dll|qwebp.dll)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Prefer the same MinGW binutils prefix the toolchain / WDS_MINGW_TRIPLE uses.
+resolve_win_objcopy() {
+  local cand
+  for cand in \
+      ${WDS_MINGW_OBJCOPY:+"${WDS_MINGW_OBJCOPY}"} \
+      "${WDS_MINGW_TRIPLE}-objcopy" \
+      llvm-objcopy; do
+    [[ -n "$cand" ]] || continue
+    if command -v "$cand" >/dev/null 2>&1; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Prefer PATH, then a user-extracted msitools tree (usr/bin + usr/lib).
@@ -530,8 +577,55 @@ package_win() {
   rm -rf "${stage}/config"
 
   write_readme "$stage" win-x86_64
+  extract_win_debug_symbols "$stage"
   make_zip "$stage" "${DIST_DIR}/wds-win-x86_64.zip"
   make_win_msi "$stage" "${DIST_DIR}/wds-win-x86_64.msi"
+}
+
+# Split DWARF from staged project PE files into dist/win-x86_64/symbols/.
+# --strip-debug keeps the symbol table; missing objcopy must not fail packaging.
+extract_win_debug_symbols() {
+  local stage="$1"
+  if ! package_symbols_enabled; then
+    echo "Skipping Windows DWARF split (WDS_PACKAGE_SYMBOLS=${PACKAGE_SYMBOLS})"
+    return 0
+  fi
+
+  local objcopy=""
+  if ! objcopy="$(resolve_win_objcopy)"; then
+    echo "warning: no ${WDS_MINGW_TRIPLE}-objcopy or llvm-objcopy; skipping DWARF split" >&2
+    return 0
+  fi
+
+  local symbols_dir="${DIST_DIR}/win-x86_64/symbols"
+  rm -rf "$symbols_dir"
+  mkdir -p "$symbols_dir"
+
+  local f base name debug
+  for f in "${stage}"/*.exe "${stage}"/*.dll; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f")"
+    if is_third_party_win_bin "$base"; then
+      continue
+    fi
+    name="$base"
+    name="${name%.exe}"
+    name="${name%.dll}"
+    debug="${symbols_dir}/${name}.debug"
+    echo "Splitting DWARF: ${base} -> ${debug} (objcopy=${objcopy})"
+    if ! "${objcopy}" --only-keep-debug "$f" "$debug"; then
+      echo "warning: objcopy --only-keep-debug failed for ${base}; leaving binary unchanged" >&2
+      rm -f "$debug"
+      continue
+    fi
+    if ! "${objcopy}" --strip-debug "$f"; then
+      echo "warning: objcopy --strip-debug failed for ${base}; ${debug} kept" >&2
+      continue
+    fi
+    if ! "${objcopy}" --add-gnu-debuglink="$debug" "$f"; then
+      echo "warning: objcopy --add-gnu-debuglink failed for ${base}; ${debug} is still usable by name" >&2
+    fi
+  done
 }
 
 # Build a standard per-machine MSI from the staged Windows payload (wixl / msitools).
@@ -1144,6 +1238,110 @@ Plugins = ../MacOS/lib/plugins
 EOF
 }
 
+# Project Mach-O files that still have our DWARF:
+#   Contents/MacOS/*          (the editor executable; not lib/ third-party dylibs)
+#   Contents/Frameworks/**    (future project dylibs; skip Qt*.framework / libbass*)
+macos_is_project_debug_bin() {
+  local path="$1"
+  local base
+  base="$(basename "$path")"
+  case "$base" in
+    Qt*|libQt*|libbass.dylib|libbassmix.dylib|libbass*.dylib)
+      return 1 ;;
+  esac
+  case "$path" in
+    */Qt*.framework/*)
+      return 1 ;;
+  esac
+  return 0
+}
+
+# dsymutil then strip -S (DWARF only; keep the symbol table for dladdr /
+# backtrace_symbols_fd). Must run after rpath rewrite and before codesign.
+extract_macos_debug_symbols() {
+  local app="$1"
+  if ! package_symbols_enabled; then
+    echo "Skipping macOS dSYM split (WDS_PACKAGE_SYMBOLS=${PACKAGE_SYMBOLS})"
+    return 0
+  fi
+
+  if ! command -v dsymutil >/dev/null 2>&1; then
+    echo "warning: dsymutil not found; skipping dSYM split" >&2
+    return 0
+  fi
+
+  local symbols_dir="${DIST_DIR}/macos-arm/symbols"
+  rm -rf "$symbols_dir"
+  mkdir -p "$symbols_dir"
+
+  local uuid_notes=""
+  local macos_dir="${app}/Contents/MacOS"
+  local fw_dir="${app}/Contents/Frameworks"
+  local f base dsym
+
+  collect_and_split() {
+    local bin="$1"
+    [[ -f "$bin" && ! -L "$bin" ]] || return 0
+    file "$bin" 2>/dev/null | grep -q 'Mach-O' || return 0
+    macos_is_project_debug_bin "$bin" || return 0
+    base="$(basename "$bin")"
+    dsym="${symbols_dir}/${base}.dSYM"
+    echo "Writing dSYM: ${bin} -> ${dsym}"
+    if ! dsymutil "$bin" -o "$dsym"; then
+      echo "warning: dsymutil failed for ${base}; leaving DWARF in the binary" >&2
+      return 0
+    fi
+    if command -v dwarfdump >/dev/null 2>&1; then
+      uuid_notes="${uuid_notes}$(dwarfdump --uuid "$bin" 2>/dev/null || true)"$'\n'
+    fi
+    if ! strip -S "$bin"; then
+      echo "warning: strip -S failed for ${base}; dSYM kept at ${dsym}" >&2
+    fi
+  }
+
+  if [[ -d "$macos_dir" ]]; then
+    for f in "${macos_dir}"/*; do
+      collect_and_split "$f"
+    done
+  fi
+  if [[ -d "$fw_dir" ]]; then
+    while IFS= read -r -d '' f; do
+      collect_and_split "$f"
+    done < <(find "$fw_dir" -type f -print0)
+  fi
+
+  local readme="${symbols_dir}/README.txt"
+  cat >"$readme" <<EOF
+WDS Editor macOS debug symbols (macos-arm)
+
+These dSYM bundles were produced from the staged app before strip -S and
+codesign. The shipped WDS Editor.app keeps its symbol table (function names
+in backtrace_symbols_fd / dladdr) but no DWARF.
+
+Crash reports currently print backtrace_symbols_fd frames. A later handler
+may also print main_slide= (dyld ASLR slide) and per-frame base+offset.
+
+Symbolize PCs with atos against the DWARF file inside the matching dSYM:
+
+  atos -o "<name>.dSYM/Contents/Resources/DWARF/<name>" -arch arm64 -l <load_address> <pc...>
+
+load_address is the image base (dladdr dli_fbase). If the report prints
+main_slide= rather than the load address, the usual arm64 MH_EXECUTE
+preferred base is 0x100000000:
+
+  load_address = main_slide + 0x100000000
+
+Example (replace the hex values from the crash report):
+
+  atos -o "wds_editor.dSYM/Contents/Resources/DWARF/wds_editor" -arch arm64 -l 0x100000000 <pc...>
+
+Match this build via LC_UUID (dwarfdump --uuid on the unstripped binary):
+
+${uuid_notes}
+EOF
+  echo "Wrote ${readme}"
+}
+
 write_macos_app_bundle() {
   # Self-contained "WDS Editor.app":
   #   Contents/MacOS  — executable + dylibs only (required for codesign seal)
@@ -1254,6 +1452,9 @@ EOF
 EOF
 
   chmod +x "${payload}/${demo_name}"
+
+  # Split DWARF before codesign (strip -S invalidates an existing signature).
+  extract_macos_debug_symbols "$app"
 
   # install_name_tool invalidates existing ad-hoc signatures on copied Homebrew
   # dylibs; modern macOS then SIGKILLs at load with "Code Signature Invalid".
@@ -1663,6 +1864,10 @@ while [[ $# -gt 0 ]]; do
     --build-dir)
       BUILD_DIR="$2"
       shift 2
+      ;;
+    --no-symbols)
+      PACKAGE_SYMBOLS=0
+      shift
       ;;
     -h|--help)
       usage

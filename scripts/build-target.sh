@@ -20,10 +20,10 @@ BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <target> [--debug|--release] [--no-package] [--no-run] [--] [extra cmake args...]
+Usage: $(basename "$0") <target> [--debug|--release] [--no-package] [--no-run] [--no-symbols] [--] [extra cmake args...]
        $(basename "$0") --check
        $(basename "$0") --help
-       $(basename "$0") --package-only <target>
+       $(basename "$0") --package-only <target> [--no-symbols] [--build-dir DIR]
 
 Targets:
   win-x86_64     Windows x86_64 (MinGW-w64 + vcpkg; typical Linux host)
@@ -42,6 +42,8 @@ Build flavors:
 Other:
   --no-package   Skip packaging even in Release
   --no-run       Skip auto-run even in Debug
+  --no-symbols   Skip dSYM / DWARF split during packaging (or set WDS_PACKAGE_SYMBOLS=0).
+                 Default is on. Does not affect --debug (Debug is never packaged).
 
 Examples:
   # Copy scripts/env.example → scripts/env.local and set WDS_VCPKG_ROOT, then:
@@ -60,6 +62,7 @@ Environment (see scripts/env.example):
   WDS_MINGW_TRIPLE / WDS_MINGW_CXX
   WDS_MSITOOLS_PREFIX / WDS_PRODUCT_VERSION / WDS_RUNTIME_CACHE
   CMAKE_BUILD_TYPE / CMAKE_BUILD_PARALLEL_LEVEL
+  WDS_PACKAGE_SYMBOLS   0 = skip dSYM/objcopy split in package-target.sh (default 1)
 EOF
 }
 
@@ -335,8 +338,8 @@ case "$1" in
     ;;
   --package-only)
     shift
-    [[ $# -ge 1 ]] || { echo "usage: $0 --package-only <target>" >&2; exit 1; }
-    exec "${ROOT}/scripts/package-target.sh" "$1"
+    [[ $# -ge 1 ]] || { echo "usage: $0 --package-only <target> [--no-symbols] [--build-dir DIR]" >&2; exit 1; }
+    exec "${ROOT}/scripts/package-target.sh" "$@"
     ;;
   linux*)
     echo "error: Linux is not a supported product target." >&2
@@ -350,6 +353,7 @@ TARGET=""
 EXTRA_CMAKE_ARGS=()
 NO_PACKAGE_FLAG=0
 NO_RUN_FLAG=0
+NO_SYMBOLS_FLAG=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug)
@@ -366,6 +370,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-run)
       NO_RUN_FLAG=1
+      shift
+      ;;
+    --no-symbols)
+      NO_SYMBOLS_FLAG=1
       shift
       ;;
     --)
@@ -446,7 +454,11 @@ echo "Done build: ${BUILD_DIR}"
 
 if [[ "${DO_PACKAGE}" -eq 1 ]]; then
   echo "Packaging ${TARGET}"
-  "${ROOT}/scripts/package-target.sh" "${TARGET}" --build-dir "${BUILD_DIR}"
+  if [[ "${NO_SYMBOLS_FLAG}" -eq 1 ]]; then
+    "${ROOT}/scripts/package-target.sh" "${TARGET}" --build-dir "${BUILD_DIR}" --no-symbols
+  else
+    "${ROOT}/scripts/package-target.sh" "${TARGET}" --build-dir "${BUILD_DIR}"
+  fi
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
   echo "Skipping package (Debug builds are not packaged)"
   if [[ "${TARGET}" == "win-x86_64" ]]; then

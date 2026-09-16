@@ -61,6 +61,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   EditViewport& viewport() noexcept { return viewport_; }
   wds::interaction::CursorKind hover_cursor() const noexcept { return hover_cursor_; }
   wds::chart_editor::ChartEditorEngine& engine() const noexcept { return engine_; }
+  // Cheap visual fingerprint: document generation + viewport + selection/hover/ghost.
+  uint64_t visual_revision() const;
 
   const EditDrawDepthConfig& draw_depth() const noexcept { return renderer_.draw_depth(); }
   EditDrawDepthConfig& draw_depth() noexcept { return renderer_.draw_depth(); }

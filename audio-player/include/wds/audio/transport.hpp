@@ -69,6 +69,12 @@ class Transport {
   wds::common::Microseconds committed_position() const noexcept { return committed_position_; }
   int64_t committed_ms() const noexcept { return wds::common::us_to_ms_floor(committed_position_); }
   bool playing() const noexcept { return playing_; }
+  // Logical playing state after queued play/pause intents are applied.
+  bool intends_playing() const noexcept {
+    return (playing_ || pending_play_) && !pending_pause_;
+  }
+  bool pending_play() const noexcept { return pending_play_; }
+  bool pending_pause() const noexcept { return pending_pause_; }
 
  private:
   wds::common::Microseconds clamp_time(wds::common::Microseconds time) const;

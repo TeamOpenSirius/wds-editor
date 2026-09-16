@@ -41,6 +41,13 @@ enum class ExportFormat {
   Sus,
 };
 
+// Structural session changes that the Qt shell mirrors without polling.
+enum class SessionUiChange {
+  Offset,
+  Charts,
+  Document,
+};
+
 // Owns editor-level state while ChartPreviewPanel owns the live engine/transport.
 // Multiple charts are kept in memory; only the active one is loaded into the engine.
 // CHART_DELAY_MS is song-level chart delay: shifts document timing (edit-area blank)
@@ -55,6 +62,9 @@ class EditorSession {
   // Optional sink for user-visible status lines (wired to the bottom status bar).
   void set_status_handler(std::function<void(std::string, StatusLevel)> handler) {
     status_handler_ = std::move(handler);
+  }
+  void set_ui_change_handler(std::function<void(SessionUiChange)> handler) {
+    on_ui_change_ = std::move(handler);
   }
   void report_status(std::string text, StatusLevel level = StatusLevel::Info) {
     status(std::move(text), level);
@@ -113,6 +123,9 @@ class EditorSession {
   };
 
   void status(std::string text, StatusLevel level);
+  void notify_ui_change(SessionUiChange change);
+  void notify_project_reloaded();
+  void publish_crash_context() const;
   // Sync active chart snapshot into its slot (does not touch undo history).
   void sync_active_chart();
   // sync_active_chart + move engine history into the slot (chart switch only).
@@ -131,6 +144,7 @@ class EditorSession {
 
   ChartPreviewPanel& preview_;
   std::function<void(std::string, StatusLevel)> status_handler_;
+  std::function<void(SessionUiChange)> on_ui_change_;
   std::string project_path_;
   std::string music_path_;
   std::vector<ChartSlot> charts_;

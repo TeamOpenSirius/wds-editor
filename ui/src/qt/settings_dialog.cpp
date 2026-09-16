@@ -3,6 +3,7 @@
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
+#include "wds/common/crash_handler.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -16,6 +17,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCursor>
+#include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QEnterEvent>
@@ -38,6 +40,7 @@
 #include <QSizePolicy>
 #include <QSpinBox>
 #include <QStyle>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -196,6 +199,17 @@ std::array<QString, kSettingsSectionCount> settings_section_titles() {
   };
 }
 
+constexpr std::array<const char*, kSettingsSectionCount> kSettingsTabJournalIds = {{
+    "settings.tab_appearance",
+    "settings.tab_file",
+    "settings.tab_audio",
+    "settings.tab_input",
+    "settings.tab_display",
+    "settings.tab_width",
+    "settings.tab_shortcuts",
+    "settings.tab_privacy",
+}};
+
 QColor nav_rail_fill(const QPalette& palette) {
   const QColor window = palette.color(QPalette::Window);
   const QColor alt = palette.color(QPalette::AlternateBase);
@@ -265,6 +279,7 @@ class SettingsNavRail final : public QFrame {
       group_->addButton(button, i);
       root->addWidget(button);
       connect(button, &QAbstractButton::clicked, this, [this, i] {
+        journal_menu_action(kSettingsTabJournalIds[static_cast<std::size_t>(i)]);
         if (on_row_changed_) on_row_changed_(i);
       });
     }
@@ -601,14 +616,25 @@ void SettingsPanel::build_pages() {
         wds::interaction::editor_shortcut_label(id, cfg_.pause_at_current)));
     clear->setToolTip(clear_label);
     clear->setAccessibleName(clear_label);
-    connect(clear, &QPushButton::clicked, edit, &QKeySequenceEdit::clear);
+    connect(clear, &QPushButton::clicked, this, [edit] {
+      journal_menu_action("settings.shortcut_clear");
+      edit->clear();
+    });
     shortcutsLayout->addWidget(clear, row, 2, Qt::AlignVCenter);
   }
   shortcuts_box->addLayout(shortcutsLayout);
 
   auto* privacy = section_at(7);
+  auto* privacy_host = privacy->parentWidget();
   allow_crash_log_sensitive_ = add_wrapping_check(
-      privacy, tr("允许崩溃日志记录真实文本与文件路径"), privacy->parentWidget());
+      privacy, tr("允许崩溃日志记录真实文本与文件路径"), privacy_host);
+  auto* open_logs = new QPushButton(tr("打开崩溃日志文件夹"), privacy_host);
+  connect(open_logs, &QPushButton::clicked, this, [] {
+    journal_menu_action("settings.open_logs");
+    QDesktopServices::openUrl(
+        QUrl::fromLocalFile(QString::fromUtf8(wds::common::crash_log_directory())));
+  });
+  privacy->addWidget(open_logs);
 
   scroll_pad_ = new QWidget(content);
   scroll_pad_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -652,8 +678,14 @@ void SettingsPanel::build_pages() {
     connect(edit, &QKeySequenceEdit::keySequenceChanged, this, [live](const QKeySequence&) {
       live();
     });
+    connect(edit, &QKeySequenceEdit::editingFinished, this, [] {
+      journal_menu_action("settings.shortcut_edit");
+    });
   }
-  connect(allow_crash_log_sensitive_, &QCheckBox::toggled, this, [live](bool) { live(); });
+  connect(allow_crash_log_sensitive_, &QCheckBox::toggled, this, [this, live](bool) {
+    if (!applying_) journal_menu_action("settings.privacy_toggle");
+    live();
+  });
 }
 
 void SettingsPanel::load_from_config() {
@@ -764,7 +796,10 @@ SettingsDialog::SettingsDialog(UiManager* manager, QString theme_dir, QWidget* p
   root->addWidget(new SettingsPanel(manager, std::move(theme_dir), this), 1);
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
   root->addWidget(buttons);
-  connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(buttons, &QDialogButtonBox::rejected, this, [this] {
+    journal_menu_action("settings.ok");
+    reject();
+  });
 }
 
 }  // namespace wds::ui

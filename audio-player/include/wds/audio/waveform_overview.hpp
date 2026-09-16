@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -39,7 +40,8 @@ class WaveformOverview {
 
   // Decode `path` through a dedicated BASS decode stream. Requires BASS_Init
   // (AudioEngine already running). Empty path clears. False on failure (clears).
-  bool load(const std::string& path);
+  // When `cancel` is set, hop/chunk loops abort and return false (clears).
+  bool load(const std::string& path, const std::atomic<bool>* cancel = nullptr);
 
   // Max peak in half-open [ms_lo, ms_hi). 0 when empty or fully outside audio.
   float peak_in_range(double ms_lo, double ms_hi) const noexcept;

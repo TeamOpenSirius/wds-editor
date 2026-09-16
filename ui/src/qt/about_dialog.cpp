@@ -1,11 +1,16 @@
 #include "wds/ui/qt/about_dialog.hpp"
 
 #include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/ui_manager.hpp"
+#include "wds/common/crash_handler.hpp"
 
+#include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QTabWidget>
+#include <QUrl>
 #include <QVBoxLayout>
 
 namespace wds::ui {
@@ -71,8 +76,20 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
   root->addWidget(license, 1);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-  connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+  auto* open_logs = buttons->addButton(tr("打开崩溃日志文件夹"), QDialogButtonBox::ActionRole);
+  connect(open_logs, &QPushButton::clicked, this, [] {
+    journal_menu_action("about.open_logs");
+    QDesktopServices::openUrl(
+        QUrl::fromLocalFile(QString::fromUtf8(wds::common::crash_log_directory())));
+  });
+  connect(buttons, &QDialogButtonBox::rejected, this, [this] {
+    journal_menu_action("about.close");
+    accept();
+  });
+  connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+    journal_menu_action("about.close");
+    accept();
+  });
   root->addWidget(buttons);
 }
 

@@ -8,8 +8,11 @@
 #include <functional>
 #include <vector>
 
+class QEnterEvent;
+class QFocusEvent;
 class QInputMethodEvent;
 class QPainter;
+class QShowEvent;
 
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 
@@ -28,10 +31,20 @@ class ChartEditWidget final : public QWidget {
   QSize minimumSizeHint() const override { return {360, 300}; }
   int64_t last_paint_us() const noexcept { return last_paint_us_; }
   uint64_t paint_count() const noexcept { return paint_count_; }
+  void mark_dirty() noexcept { dirty_ = true; }
+  bool needs_repaint() const noexcept { return dirty_; }
+  // Consumes dirty for this frame. Always true while `playing`. Hidden widgets
+  // return false. Also true when visual_revision() changed or 250 ms elapsed.
+  bool take_dirty_for_frame(bool playing);
 
  protected:
   void paintEvent(QPaintEvent*) override;
   void resizeEvent(QResizeEvent*) override;
+  void showEvent(QShowEvent*) override;
+  void enterEvent(QEnterEvent*) override;
+  void leaveEvent(QEvent*) override;
+  void focusInEvent(QFocusEvent*) override;
+  void focusOutEvent(QFocusEvent*) override;
   void mousePressEvent(QMouseEvent*) override;
   void mouseMoveEvent(QMouseEvent*) override;
   void mouseReleaseEvent(QMouseEvent*) override;
@@ -53,8 +66,10 @@ class ChartEditWidget final : public QWidget {
   bool qt_modal_open_ = false;
   QPixmap background_, judgment_, red_, yellow_, blue_, purple_, tick_blue_, tick_purple_, arrow_,
       arrow_mirrored_, hold_blue_, hold_purple_;
-  std::chrono::steady_clock::time_point last_tick_;
   std::function<void(const wds::interaction::KeyDownEvent&)> global_key_handler_;
+  bool dirty_ = true;
+  uint64_t last_visual_revision_ = ~uint64_t{0};
+  std::chrono::steady_clock::time_point last_paint_at_{};
   int64_t last_paint_us_ = 0;
   uint64_t paint_count_ = 0;
   std::vector<std::size_t> visible_note_indices_;

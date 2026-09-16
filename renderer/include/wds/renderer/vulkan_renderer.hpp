@@ -502,6 +502,8 @@ class VulkanRenderer {
   RendererPathSample last_path_sample() const noexcept { return path_diag_.last; }
   // Last selected physical device name (empty until create()).
   const char* device_name() const noexcept { return device_name_; }
+  uint32_t device_driver_version() const noexcept { return device_driver_version_; }
+  uint32_t device_api_version() const noexcept { return device_api_version_; }
 
   struct DescriptorPoolDiagnostics {
     uint32_t block_count = 0;
@@ -550,7 +552,7 @@ class VulkanRenderer {
   int framebuffer_height() const noexcept { return height_; }
 
  private:
-  void emit_health(RendererHealthEvent event) noexcept;
+  void emit_health(RendererHealthEvent event, VkResult result = VK_SUCCESS) noexcept;
   bool check_device_result(VkResult result) noexcept;
   bool apply_wsi_action(WsiRecoverAction action);
   bool apply_zero_extent_now() noexcept;
@@ -563,12 +565,15 @@ class VulkanRenderer {
   std::unique_ptr<Impl> impl_;
   bool ready_ = false;
   RendererHealth health_ = RendererHealth::Uninitialized;
+  bool fatal_reported_ = false;
   int width_ = 1;
   int height_ = 1;
   int preferred_msaa_ = 1;
   bool path_diag_enabled_ = false;
   RendererPathSnapshot path_diag_{};
   char device_name_[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
+  uint32_t device_driver_version_ = 0;
+  uint32_t device_api_version_ = 0;
 };
 
 }  // namespace wds::renderer

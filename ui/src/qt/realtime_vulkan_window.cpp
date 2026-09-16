@@ -83,6 +83,9 @@ wds::renderer::VulkanHostSurface RealtimeVulkanWindow::host_surface() const {
 
 bool RealtimeVulkanWindow::event(QEvent* event) {
   if (event->type() == QEvent::UpdateRequest) {
+    if (!frame_callback_) {
+      return true;
+    }
     // A request already queued before the resize must not reach the renderer,
     // even if input is pending. Resume with one frame at the final dimensions.
     if (resizing_ || host_resize_suspended_) {
@@ -97,7 +100,7 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
       const bool has_input = !input_queue_.events().empty();
       const bool bypass_idle_cap =
-          idle_throttle_bypass_ && idle_throttle_bypass_();
+          static_cast<bool>(idle_throttle_bypass_) && idle_throttle_bypass_();
       // 2 ms slack: at exactly one vsync per interval the accumulator lands a
       // hair under the cap and every other frame gets skipped (60→30 fps).
       if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap &&
@@ -139,6 +142,7 @@ void RealtimeVulkanWindow::resizeEvent(QResizeEvent*) {
 }
 
 void RealtimeVulkanWindow::schedule_frame() {
+  if (!frame_callback_) return;
   if (!resizing_ && !host_resize_suspended_ && isExposed()) requestUpdate();
 }
 }

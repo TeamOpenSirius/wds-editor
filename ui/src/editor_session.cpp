@@ -4,6 +4,8 @@
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/regions/status/status_bar.hpp"
 
+#include <wds/common/crash_handler.hpp>
+#include <wds/common/crash_input_journal.hpp>
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/chart_serializer.hpp>
 #include <wds/core/file_io.hpp>
@@ -349,6 +351,16 @@ void EditorSession::status(std::string text, StatusLevel level) {
   if (status_handler_) status_handler_(std::move(text), level);
 }
 
+void EditorSession::notify_ui_change(SessionUiChange change) {
+  if (on_ui_change_) on_ui_change_(change);
+}
+
+void EditorSession::notify_project_reloaded() {
+  notify_ui_change(SessionUiChange::Offset);
+  notify_ui_change(SessionUiChange::Charts);
+  notify_ui_change(SessionUiChange::Document);
+}
+
 wds::chart_editor::ChartEditorEngine& EditorSession::engine() noexcept { return preview_.engine(); }
 const wds::chart_editor::ChartEditorEngine& EditorSession::engine() const noexcept {
   return preview_.engine();
@@ -437,6 +449,15 @@ bool EditorSession::activate_chart(std::size_t index) {
   return true;
 }
 
+void EditorSession::publish_crash_context() const {
+  char project[512];
+  char music[512];
+  wds::common::journal_copy_path(project, sizeof(project), project_path_.c_str());
+  wds::common::journal_copy_path(music, sizeof(music), music_path_.c_str());
+  wds::common::crash_set_context(wds::common::CrashContextField::ProjectPath, project);
+  wds::common::crash_set_context(wds::common::CrashContextField::MusicPath, music);
+}
+
 bool EditorSession::new_project() {
   wds::chart_editor::MusicTiming timing;
   timing.offset_ms = 0;
@@ -460,6 +481,8 @@ bool EditorSession::new_project() {
   preview_.load_music({}, false);  // clear any previously imported BGM
   preview_.reset_playback();
   status("已新建工程", StatusLevel::Info);
+  notify_project_reloaded();
+  publish_crash_context();
   return true;
 }
 
@@ -548,11 +571,14 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
   reset_music_config_meta();
 
   if (!activate_chart(active_chart_index_)) {
+    publish_crash_context();
     status("打开失败：无法激活谱面", StatusLevel::Error);
     return false;
   }
   preview_.reset_playback();
   status("已打开工程：" + project_path_ + music_note, StatusLevel::Info);
+  notify_project_reloaded();
+  publish_crash_context();
   return true;
 }
 
@@ -632,6 +658,8 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
   metadata_dirty_ = false;
   engine().mark_saved();
   status("已保存工程：" + project_path, StatusLevel::Info);
+  notify_ui_change(SessionUiChange::Document);
+  publish_crash_context();
   return true;
 }
 
@@ -701,11 +729,14 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
     preview_.load_music({}, false);
   }
   if (!activate_chart(0)) {
+    publish_crash_context();
     status("导入失败：无法激活谱面", StatusLevel::Error);
     return false;
   }
   preview_.reset_playback();
   status("已导入官方曲包（只读预览）：" + music_config_path, StatusLevel::Info);
+  notify_project_reloaded();
+  publish_crash_context();
   return true;
 }
 
@@ -775,6 +806,8 @@ bool EditorSession::import_official(const std::string& chart_path,
   preview_.load_music({}, false);
   preview_.reset_playback();
   status("已导入官方谱面（只读预览）：" + chart_path, StatusLevel::Info);
+  notify_project_reloaded();
+  publish_crash_context();
   return true;
 }
 
@@ -824,6 +857,7 @@ bool EditorSession::import_sus(const std::string& path) {
   }
   // Reload into Editable (convert) or keep OfficialPreviewOnly (preview-only).
   if (!activate_chart(0)) {
+    publish_crash_context();
     status("导入失败：无法激活 SUS 谱面", StatusLevel::Error);
     return false;
   }
@@ -842,6 +876,8 @@ bool EditorSession::import_sus(const std::string& path) {
   } else {
     status(std::move(msg), StatusLevel::Info);
   }
+  notify_project_reloaded();
+  publish_crash_context();
   return true;
 }
 
@@ -1035,6 +1071,8 @@ bool EditorSession::import_music(const std::string& path) {
     }
   }
   status("已导入音乐：" + path, StatusLevel::Info);
+  notify_ui_change(SessionUiChange::Document);
+  publish_crash_context();
   return true;
 }
 
@@ -1069,6 +1107,8 @@ bool EditorSession::set_offset_ms(int64_t offset_ms) {
     metadata_dirty_ = true;
   }
   apply_chart_delay();
+  notify_ui_change(SessionUiChange::Offset);
+  notify_ui_change(SessionUiChange::Document);
   return true;
 }
 
@@ -1076,7 +1116,10 @@ bool EditorSession::switch_chart(std::size_t index) {
   // Allowed in read-only pack imports so users can preview each difficulty.
   if (index >= charts_.size() || index == active_chart_index_) return false;
   stash_active();
-  return activate_chart(index);
+  if (!activate_chart(index)) return false;
+  notify_ui_change(SessionUiChange::Charts);
+  notify_ui_change(SessionUiChange::Document);
+  return true;
 }
 
 bool EditorSession::add_chart() {
@@ -1092,7 +1135,10 @@ bool EditorSession::add_chart() {
   slot.dirty = true;
   charts_.push_back(std::move(slot));
   metadata_dirty_ = true;
-  return activate_chart(charts_.size() - 1);
+  if (!activate_chart(charts_.size() - 1)) return false;
+  notify_ui_change(SessionUiChange::Charts);
+  notify_ui_change(SessionUiChange::Document);
+  return true;
 }
 
 bool EditorSession::add_chart_from_file(const std::string& path) {
@@ -1108,7 +1154,10 @@ bool EditorSession::add_chart_from_file(const std::string& path) {
     charts_.push_back(std::move(slot));
   }
   metadata_dirty_ = true;
-  return activate_chart(charts_.size() - 1);
+  if (!activate_chart(charts_.size() - 1)) return false;
+  notify_ui_change(SessionUiChange::Charts);
+  notify_ui_change(SessionUiChange::Document);
+  return true;
 }
 
 bool EditorSession::dirty() const noexcept {

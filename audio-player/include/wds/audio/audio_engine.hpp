@@ -86,8 +86,18 @@ class AudioEngine {
   // Playback rate for BGM only (pitch scales with rate via BASS_ATTRIB_FREQ). SFX stay at 1x.
   void set_playback_rate(float rate);
 
-  // BASS mixtime/playtime sync entry — not for UI callers.
+  // BASS MIXTIME POS SYNCPROC entry. `payload` is a stable SfxSyncSlot* from the
+  // fixed Impl pool (never a heap object that can be freed while BASS is alive).
+  // Not for UI callers.
   void handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip);
+
+  // Pending-slot snapshot for lifetime tests. Pointers stay valid until
+  // shutdown() releases Impl; after clear they are stale SYNCPROC user pointers.
+  size_t snapshot_pending_sfx_syncs(void** out_slots, unsigned long long* out_handles,
+                                    size_t max_count) const noexcept;
+  // Read one pool slot. False if `slot` is not in this engine's pool (or no Impl).
+  bool inspect_sfx_sync_slot(const void* slot, unsigned long long* handle, int* claim,
+                             bool* in_use) const noexcept;
 
  private:
   friend struct AudioEngineTestAccess;
@@ -107,7 +117,9 @@ class AudioEngine {
   std::uint64_t music_heard_bytes() const;
 
   struct Impl;
-  // shared_ptr so in-flight BASS SYNCPROCs can keep Impl alive across shutdown.
+  // Published via std::atomic_load / std::atomic_store (C++17 shared_ptr
+  // overloads). Impl owns a fixed SfxSyncSlot pool; SYNCPROC user pointers are
+  // those slot addresses and stay valid for the life of Impl.
   std::shared_ptr<Impl> impl_;
   bool ready_ = false;
   std::atomic<bool> sfx_ready_{false};

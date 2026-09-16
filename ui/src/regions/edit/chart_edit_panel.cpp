@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -139,6 +141,65 @@ bool apply_note_map(wds::chart_editor::ChartDocument& doc,
 }  // namespace
 
 ChartEditPanel::ChartEditPanel(wds::chart_editor::ChartEditorEngine& engine) : engine_(engine) {
+}
+
+uint64_t ChartEditPanel::visual_revision() const {
+  auto mix = [](uint64_t h, uint64_t v) noexcept {
+    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    return h;
+  };
+  auto mix_i32 = [&](uint64_t h, int32_t v) noexcept {
+    return mix(h, static_cast<uint64_t>(static_cast<uint32_t>(v)));
+  };
+
+  uint64_t h = engine_.document().content_generation();
+  h = mix(h, engine_.snapshot().revision);
+  const float scroll = viewport_.scroll_ms();
+  uint32_t scroll_bits = 0;
+  static_assert(sizeof(scroll) == sizeof(scroll_bits));
+  std::memcpy(&scroll_bits, &scroll, sizeof(scroll_bits));
+  h = mix(h, scroll_bits);
+  h = mix_i32(h, viewport_.visible_ms());
+  h = mix_i32(h, viewport_.grid().visible_hectoms);
+  h = mix_i32(h, viewport_.grid().lane_count);
+  h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().w * 4.0f)));
+  h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().h * 4.0f)));
+
+  uint64_t sel = static_cast<uint64_t>(selected_.size());
+  for (int32_t id : selected_) {
+    sel ^= static_cast<uint64_t>(static_cast<uint32_t>(id)) * 0x9e3779b97f4a7c15ull;
+  }
+  h = mix(h, sel);
+
+  h = mix(h, static_cast<uint64_t>(hover_cursor_));
+  h = mix(h, ghost_.visible ? 1ull : 0ull);
+  h = mix_i32(h, ghost_.note.id);
+  h = mix_i32(h, ghost_.note.start_tick);
+  h = mix_i32(h, ghost_.note.end_tick);
+  h = mix_i32(h, ghost_.note.lane);
+  h = mix_i32(h, ghost_.note.width);
+  h = mix(h, static_cast<uint64_t>(mode_));
+  h = mix_i32(h, hovered_split_note_id_);
+  h = mix(h, hovered_split_is_end_ ? 1ull : 0ull);
+  h = mix(h, pointer_over_edit_ ? 1ull : 0ull);
+  h = mix(h, static_cast<uint64_t>(spectrum_mode_));
+  h = mix(h, curve_mode_active_ ? 1ull : 0ull);
+  h = mix(h, static_cast<uint64_t>(curve_ghosts_.size()));
+  h = mix(h, static_cast<uint64_t>(gutter_ghosts_.size()));
+  h = mix(h, static_cast<uint64_t>(hold_stars_.size()));
+  h = mix_i32(h, hold_draft_.start_tick);
+  h = mix_i32(h, hold_draft_.end_tick);
+  h = mix_i32(h, hold_draft_.lane);
+  h = mix_i32(h, marquee_start_tick_);
+  if (waveform_ != nullptr) {
+    h = mix(h, static_cast<uint64_t>(waveform_->size()));
+  }
+  if (!offset_violation_ids_.empty()) {
+    h = mix(h, static_cast<uint64_t>(offset_violation_ids_.size()));
+    h = mix(h, static_cast<uint64_t>(
+                   std::lround(static_cast<double>(offset_violation_elapsed_) * 30.0)));
+  }
+  return h;
 }
 
 PlaceIntent ChartEditPanel::effective_place_intent(PlaceIntent intent) const noexcept {

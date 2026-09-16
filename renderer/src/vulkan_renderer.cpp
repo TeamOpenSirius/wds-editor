@@ -3,6 +3,7 @@
 #include "wds/renderer/log.hpp"
 #include "wds/renderer/upload_result.hpp"
 
+#include <wds/common/crash_handler.hpp>
 #include <wds/common/utf8_path.hpp>
 
 #include <algorithm>
@@ -27,6 +28,59 @@ namespace {
 constexpr int kMaxFramesInFlight = 3;
 // Fixed per-frame host-visible VB capacity (grows only if a frame exceeds this).
 constexpr size_t kRingVertexCapacityBytes = 2 * 1024 * 1024;
+
+const char* vk_result_name(VkResult result) noexcept {
+  switch (result) {
+    case VK_SUCCESS:
+      return "VK_SUCCESS";
+    case VK_NOT_READY:
+      return "VK_NOT_READY";
+    case VK_TIMEOUT:
+      return "VK_TIMEOUT";
+    case VK_EVENT_SET:
+      return "VK_EVENT_SET";
+    case VK_EVENT_RESET:
+      return "VK_EVENT_RESET";
+    case VK_INCOMPLETE:
+      return "VK_INCOMPLETE";
+    case VK_ERROR_OUT_OF_HOST_MEMORY:
+      return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+      return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_INITIALIZATION_FAILED:
+      return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_DEVICE_LOST:
+      return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_MEMORY_MAP_FAILED:
+      return "VK_ERROR_MEMORY_MAP_FAILED";
+    case VK_ERROR_LAYER_NOT_PRESENT:
+      return "VK_ERROR_LAYER_NOT_PRESENT";
+    case VK_ERROR_EXTENSION_NOT_PRESENT:
+      return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case VK_ERROR_FEATURE_NOT_PRESENT:
+      return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_INCOMPATIBLE_DRIVER:
+      return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case VK_ERROR_TOO_MANY_OBJECTS:
+      return "VK_ERROR_TOO_MANY_OBJECTS";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED:
+      return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_FRAGMENTED_POOL:
+      return "VK_ERROR_FRAGMENTED_POOL";
+#ifdef VK_ERROR_UNKNOWN
+    case VK_ERROR_UNKNOWN:
+      return "VK_ERROR_UNKNOWN";
+#endif
+    case VK_ERROR_OUT_OF_DATE_KHR:
+      return "VK_ERROR_OUT_OF_DATE_KHR";
+    case VK_ERROR_SURFACE_LOST_KHR:
+      return "VK_ERROR_SURFACE_LOST_KHR";
+    case VK_SUBOPTIMAL_KHR:
+      return "VK_SUBOPTIMAL_KHR";
+    default:
+      return "VkResult";
+  }
+}
 
 struct GpuTexture {
   VkImage image = VK_NULL_HANDLE;
@@ -2219,6 +2273,8 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     vkGetPhysicalDeviceProperties(impl_->physical, &props);
     std::strncpy(device_name_, props.deviceName, sizeof(device_name_) - 1);
     device_name_[sizeof(device_name_) - 1] = '\0';
+    device_driver_version_ = props.driverVersion;
+    device_api_version_ = props.apiVersion;
     WDS_LOG("selected GPU='%s' api=%u.%u.%u queue_family=%u msaa=%u\n", props.deviceName,
             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
             VK_VERSION_PATCH(props.apiVersion), impl_->graphics_family,
@@ -2551,9 +2607,31 @@ void VulkanRenderer::release_fullscreen_exclusive() {
   impl_->exclusive_fullscreen_desired = false;
 }
 
-void VulkanRenderer::emit_health(RendererHealthEvent event) noexcept {
+void VulkanRenderer::emit_health(RendererHealthEvent event, VkResult result) noexcept {
+  const bool was_unrecoverable = renderer_health_unrecoverable(health_);
   health_ = apply_renderer_health(health_, event);
   ready_ = renderer_health_ready(health_);
+  if (event == RendererHealthEvent::Destroyed) {
+    fatal_reported_ = false;
+    return;
+  }
+  if (was_unrecoverable || !renderer_health_unrecoverable(health_) || fatal_reported_) {
+    return;
+  }
+  fatal_reported_ = true;
+  VkResult shown = result;
+  if (shown == VK_SUCCESS) {
+    shown = (event == RendererHealthEvent::DeviceLost) ? VK_ERROR_DEVICE_LOST : result;
+  }
+  char detail[512];
+  if (shown != VK_SUCCESS) {
+    std::snprintf(detail, sizeof(detail), "%s (%d), device=%s", vk_result_name(shown),
+                  static_cast<int>(shown), device_name_[0] != '\0' ? device_name_ : "?");
+  } else {
+    std::snprintf(detail, sizeof(detail), "Fatal, device=%s",
+                  device_name_[0] != '\0' ? device_name_ : "?");
+  }
+  wds::common::report_fatal("Vulkan device lost", detail);
 }
 
 bool VulkanRenderer::apply_zero_extent_now() noexcept {
@@ -2603,7 +2681,8 @@ bool VulkanRenderer::check_device_result(VkResult result) noexcept {
     return true;
   }
   emit_health(result == VK_ERROR_DEVICE_LOST ? RendererHealthEvent::DeviceLost
-                                            : RendererHealthEvent::Fatal);
+                                            : RendererHealthEvent::Fatal,
+              result);
   return false;
 }
 
@@ -3094,10 +3173,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]);
   if (submit_r != VK_SUCCESS) {
     if (submit_r == VK_ERROR_DEVICE_LOST) {
-      emit_health(RendererHealthEvent::DeviceLost);
+      emit_health(RendererHealthEvent::DeviceLost, submit_r);
       return false;
     }
-    emit_health(RendererHealthEvent::Fatal);
+    emit_health(RendererHealthEvent::Fatal, submit_r);
     // Fence was reset but not submitted — signal it via drain so the next frame wait returns.
     VkPipelineStageFlags drain_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -3107,7 +3186,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     const VkResult drain_r =
         vkQueueSubmit(impl_->graphics_queue, 1, &drain, impl_->in_flight[frame]);
     if (drain_r == VK_ERROR_DEVICE_LOST) {
-      emit_health(RendererHealthEvent::DeviceLost);
+      emit_health(RendererHealthEvent::DeviceLost, drain_r);
       return false;
     }
     if (drain_r == VK_SUCCESS) {

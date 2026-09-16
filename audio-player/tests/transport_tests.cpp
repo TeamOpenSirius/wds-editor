@@ -651,6 +651,95 @@ void test_pause_in_place_follows_audio_position(Transport& transport, TestDouble
   expect(transport.committed_ms() == 2508, "pause without seek follows audio position");
 }
 
+void test_intends_playing_reflects_pending(Transport& transport, TestDouble&) {
+  expect(!transport.playing(), "starts paused");
+  expect(!transport.intends_playing(), "paused does not intend playing");
+  expect(!transport.pending_play(), "no pending play");
+  expect(!transport.pending_pause(), "no pending pause");
+
+  transport.request_play();
+  expect(!transport.playing(), "play is not committed before poll");
+  expect(transport.pending_play(), "request_play queues play");
+  expect(!transport.pending_pause(), "request_play clears pause");
+  expect(transport.intends_playing(), "pending play intends playing");
+
+  transport.request_pause();
+  expect(transport.pending_pause(), "request_pause queues pause");
+  expect(!transport.pending_play(), "request_pause clears play");
+  expect(!transport.intends_playing(), "pending pause does not intend playing");
+
+  transport.poll(0);
+  expect(!transport.playing(), "pause applied");
+  expect(transport.intends_playing() == transport.playing(),
+         "after poll intends matches playing");
+
+  transport.request_play();
+  expect(transport.intends_playing(), "play queued");
+  transport.poll(0);
+  expect(transport.playing(), "play applied");
+  expect(transport.intends_playing() == transport.playing(),
+         "after play poll intends matches playing");
+}
+
+void test_rapid_toggle_collapses_to_last_intent(Transport& transport, TestDouble&) {
+  transport.request_seek_ms(2500);
+  transport.poll(0);
+  expect(transport.committed_ms() == 2500, "start paused at a known cursor");
+
+  int64_t play_anchor_ms = 0;
+  const auto toggle = [&] {
+    if (!transport.intends_playing()) {
+      play_anchor_ms = transport.committed_ms();
+      transport.request_play();
+      return;
+    }
+    transport.request_seek_ms(play_anchor_ms);
+    transport.request_pause();
+  };
+
+  const int64_t first_anchor = transport.committed_ms();
+  toggle();
+  toggle();
+  toggle();
+  toggle();
+  expect(!transport.intends_playing(), "4 toggles from paused end paused");
+  expect(play_anchor_ms == first_anchor, "first-press anchor is unchanged");
+  transport.poll(0);
+  expect(!transport.playing(), "poll commits the last pause");
+  expect(transport.committed_ms() == first_anchor, "pause seek keeps the original anchor");
+
+  toggle();
+  toggle();
+  toggle();
+  expect(transport.intends_playing(), "3 toggles from paused end playing");
+  expect(play_anchor_ms == first_anchor, "3 toggles keep the original anchor");
+  transport.poll(0);
+  expect(transport.playing(), "poll commits the last play");
+  expect(transport.committed_ms() == first_anchor, "play resumes at the original anchor");
+}
+
+void test_pause_with_failed_seek_keeps_target(Transport& transport, TestDouble& fake) {
+  fake.position = Microseconds{5'000'000};
+  transport.request_seek_ms(5000);
+  play_and_start(transport);
+  expect(transport.playing(), "playing at 5000");
+  expect(transport.committed_ms() == 5000, "started at 5000");
+
+  fake.set_position_ok = false;
+  transport.request_seek_ms(1000);
+  transport.request_pause();
+  transport.poll(16000);
+  expect(!transport.playing(), "seek+pause pauses");
+  expect(transport.committed_ms() == 1000, "failed seek+pause publishes the target");
+  expect(transport.music_seek_pending(), "failed seek stays pending while paused");
+
+  fake.set_position_ok = true;
+  transport.poll(50000);
+  expect(!transport.music_seek_pending(), "paused retry lands the seek");
+  expect(transport.committed_ms() == 1000, "committed stays on the target");
+  expect(fake.position == Microseconds{1'000'000}, "audio position is 1000ms");
+}
+
 void test_sfx_sync_admit_policy() {
   constexpr int64_t heard = 1'000'000;
   expect(admit_sfx_sync(heard, heard, 0) == SfxSyncAdmit::PastOrDue, "equal is PastOrDue");
@@ -1231,6 +1320,27 @@ int main() {
     bind_fake_music(here_t, here_fake);
     test_pause_in_place_follows_audio_position(here_t, here_fake);
     here_t.shutdown();
+  }
+  {
+    Transport intend_t;
+    TestDouble intend_fake;
+    bind_fake_music(intend_t, intend_fake);
+    test_intends_playing_reflects_pending(intend_t, intend_fake);
+    intend_t.shutdown();
+  }
+  {
+    Transport toggle_t;
+    TestDouble toggle_fake;
+    bind_fake_music(toggle_t, toggle_fake);
+    test_rapid_toggle_collapses_to_last_intent(toggle_t, toggle_fake);
+    toggle_t.shutdown();
+  }
+  {
+    Transport fail_seek_t;
+    TestDouble fail_seek_fake;
+    bind_fake_music(fail_seek_t, fail_seek_fake);
+    test_pause_with_failed_seek_keeps_target(fail_seek_t, fail_seek_fake);
+    fail_seek_t.shutdown();
   }
 
   test_waveform_peak_in_range();
