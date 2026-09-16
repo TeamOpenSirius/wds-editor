@@ -43,6 +43,8 @@
 #include "wds/common/utf8_path.hpp"
 #if defined(_MSC_VER)
 #include <crtdbg.h>
+#else
+#include <cxxabi.h>
 #endif
 #ifndef MiniDumpWithIndirectlyReferencedMemory
 #define MiniDumpWithIndirectlyReferencedMemory static_cast<MINIDUMP_TYPE>(0x0040)
