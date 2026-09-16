@@ -374,6 +374,10 @@ void EditorMainWindow::changeEvent(QEvent* event) {
   }
 }
 
+void EditorMainWindow::on_preview_frame() {
+  if (playback_panel_ != nullptr) playback_panel_->sync_position();
+}
+
 void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   ui_manager_ = manager;
   if (ui_manager_ == nullptr) return;

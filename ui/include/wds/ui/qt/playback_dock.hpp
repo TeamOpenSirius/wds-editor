@@ -24,6 +24,7 @@ class UiManager;
 class PlaybackBar final : public QWidget {
  public:
   explicit PlaybackBar(UiManager* manager, QWidget* parent = nullptr);
+  void sync_position();
 
  private:
   void build_ui();

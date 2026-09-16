@@ -29,6 +29,7 @@ class EditorMainWindow final : public QMainWindow {
   // OBS theme directory, for the settings appearance picker.
   void set_theme_dir(QString dir) { theme_dir_ = std::move(dir); }
   void bind_ui_manager(UiManager* manager);
+  void on_preview_frame();
   // Shows the startup chooser. Returns true when the editor should continue,
   // false when the user closed the splash and the application should exit.
   bool show_startup_splash();
