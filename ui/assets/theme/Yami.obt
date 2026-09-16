@@ -271,7 +271,9 @@
 
     --palette_highlight: var(--primary);
     --palette_highlightedText: var(--text);
-    --palette_accent: var(--primary);
+    /* Stroke grey of Yami/checkbox_*.svg — not --primary, or Fusion
+       fallbacks become the same blue as the Windows accent leak. */
+    --palette_accent: #B0AFB3;
 
     --palette_text: var(--text);
     --palette_link: var(--blue2);
@@ -556,7 +558,7 @@
 
 QWidget {
     alternate-background-color: var(--bg_base);
-    accent-color: var(--primary);
+    accent-color: var(--palette_accent);
     color: var(--text);
     selection-background-color: var(--primary);
     selection-color: var(--text);
@@ -2051,6 +2053,17 @@ QTableView::indicator {
     width: var(--icon_base);
     height: var(--icon_base);
     margin-right: var(--spacing_large);
+}
+
+/* Settings rows move the caption into a wrapping QLabel; kill the
+   text-side indicator margin and input margins so the box lines up. */
+QCheckBox#settingsWrapCheck {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+QCheckBox#settingsWrapCheck::indicator {
+    margin-right: 0;
 }
 
 QGroupBox::indicator {

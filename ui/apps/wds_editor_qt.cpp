@@ -52,9 +52,31 @@
 #include <limits.h>
 #include <mach-o/dyld.h>
 #endif
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
-void prepare_bundled_qt_plugins() {
+void add_qt_plugin_path(const QString& plugins, bool prepend) {
+  if (plugins.isEmpty() || !QDir(plugins).exists()) return;
+  const QByteArray extra = QFile::encodeName(QDir::cleanPath(plugins));
+  const QByteArray cur = qgetenv("QT_PLUGIN_PATH");
+#if defined(Q_OS_WIN)
+  const char sep = ';';
+#else
+  const char sep = ':';
+#endif
+  if (cur.isEmpty()) {
+    qputenv("QT_PLUGIN_PATH", extra);
+  } else if (!cur.contains(extra)) {
+    qputenv("QT_PLUGIN_PATH", prepend ? extra + sep + cur : cur + sep + extra);
+  }
+}
+
+void prepare_bundled_qt_plugins(const char* argv0) {
 #if defined(Q_OS_MACOS)
   // Qt 6.6+ backs Vulkan/Metal QWindows with QMetalLayer, whose per-frame
   // displayLayer: cycle (display lock + presentsWithTransaction toggling around a
@@ -66,27 +88,30 @@ void prepare_bundled_qt_plugins() {
   // plugins. Point Qt at the bundled cocoa plugin before QApplication starts.
   char path[PATH_MAX];
   uint32_t size = sizeof(path);
-  if (_NSGetExecutablePath(path, &size) != 0) return;
-  const QString plugins = QDir::cleanPath(
-      QFileInfo(QString::fromUtf8(path)).absoluteDir().filePath(QStringLiteral("lib/plugins")));
-  if (QDir(plugins + QStringLiteral("/platforms")).exists()) {
-    qputenv("QT_PLUGIN_PATH", QFile::encodeName(plugins));
-    return;
+  if (_NSGetExecutablePath(path, &size) == 0) {
+    add_qt_plugin_path(QFileInfo(QString::fromUtf8(path)).absoluteDir().filePath(
+                          QStringLiteral("lib/plugins")),
+                      true);
   }
+#endif
+#if defined(Q_OS_WIN)
+  wchar_t exe[MAX_PATH];
+  if (GetModuleFileNameW(nullptr, exe, MAX_PATH) != 0) {
+    add_qt_plugin_path(QFileInfo(QString::fromWCharArray(exe)).absoluteDir().filePath(
+                          QStringLiteral("plugins")),
+                      true);
+  } else if (argv0 != nullptr) {
+    add_qt_plugin_path(QFileInfo(QString::fromLocal8Bit(argv0)).absoluteDir().filePath(
+                          QStringLiteral("plugins")),
+                      true);
+  }
+#else
+  (void)argv0;
 #endif
 #if defined(WDS_QT_SVG_PLUGIN_DIR)
-  // Homebrew splits qtsvg into its own keg; qtbase's plugin root has no libqsvg.
-  const QString svg_plugins = QString::fromUtf8(WDS_QT_SVG_PLUGIN_DIR);
-  if (QDir(svg_plugins).exists()) {
-    const QByteArray extra = QFile::encodeName(svg_plugins);
-    const QByteArray cur = qgetenv("QT_PLUGIN_PATH");
-#if defined(Q_OS_WIN)
-    const char sep = ';';
-#else
-    const char sep = ':';
-#endif
-    qputenv("QT_PLUGIN_PATH", cur.isEmpty() ? extra : extra + sep + cur);
-  }
+  // Homebrew / MinGW splits qtsvg into its own prefix; qtbase's plugin root
+  // has no qsvg. Packaged builds already have it under the paths above.
+  add_qt_plugin_path(QString::fromUtf8(WDS_QT_SVG_PLUGIN_DIR), false);
 #endif
 }
 
@@ -405,12 +430,13 @@ void maybe_notify_previous_crash(QWidget* parent) {
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
   g_prev_qt_handler = qInstallMessageHandler(&wds_qt_message_handler);
-  prepare_bundled_qt_plugins();
+  prepare_bundled_qt_plugins(argv[0]);
   // Pin the bundled MoltenVK ICD before Qt or the loader enumerates Homebrew
   // drivers. Two MoltenVK copies make vkGetDeviceQueue jump to NULL.
   wds::ui::prepare_macos_vulkan_environment(argv[0]);
-  QApplication app(argc, argv);
+  wds::ui::WdsApplication app(argc, argv);
   QCoreApplication::setApplicationVersion(QStringLiteral(WDS_APP_VERSION));
+  wds::ui::install_no_wheel_value_inputs(app);
   QApplication::setWindowIcon(QIcon(QStringLiteral(":/wds/app_icon.png")));
   // Fonts must register before the theme QSS (which names 'Noto Sans SC').
   const auto bundled_font = wds::ui::resolve_ui_font_path(argv[0]);

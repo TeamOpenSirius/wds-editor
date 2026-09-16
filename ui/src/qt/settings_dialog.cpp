@@ -28,6 +28,7 @@
 #include <QHBoxLayout>
 #include <QKeySequenceEdit>
 #include <QLabel>
+#include <QLayout>
 #include <QPainter>
 #include <array>
 #include <utility>
@@ -158,25 +159,55 @@ class LabelToggleFilter final : public QObject {
   QCheckBox* box_ = nullptr;
 };
 
+// Word-wrapped QLabel does not emit a layout request when its width changes,
+// so a 2-line hint stays 2-line tall after the window grows. Retrigger HFW.
+class WrappingLabel final : public QLabel {
+ public:
+  using QLabel::QLabel;
+
+ protected:
+  void resizeEvent(QResizeEvent* event) override {
+    QLabel::resizeEvent(event);
+    if (wordWrap()) updateGeometry();
+  }
+};
+
+class RelayoutOnResizeFilter final : public QObject {
+ public:
+  using QObject::QObject;
+
+ protected:
+  bool eventFilter(QObject* watched, QEvent* event) override {
+    if (event->type() == QEvent::Resize) {
+      if (auto* widget = qobject_cast<QWidget*>(watched)) widget->updateGeometry();
+    }
+    return false;
+  }
+};
+
 QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* parent) {
   auto* box = new QCheckBox(parent);
+  box->setObjectName(QStringLiteral("settingsWrapCheck"));
   box->setText(QString());
   box->setAccessibleName(text);
   const int side = std::max({box->style()->pixelMetric(QStyle::PM_IndicatorWidth, nullptr, box),
                              box->style()->pixelMetric(QStyle::PM_IndicatorHeight, nullptr, box), 16});
-  box->setFixedSize(side, side);
-  auto* label = new QLabel(text, parent);
+  auto* label = new WrappingLabel(text, parent);
   label->setWordWrap(true);
-  label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+  label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
   label->setCursor(Qt::PointingHandCursor);
   label->installEventFilter(new LabelToggleFilter(box, label));
+  // Match the first text line so the Fusion/SVG indicator (VCentered in the
+  // box) sits on the caption, not above a VCentered multi-line block.
+  box->setFixedWidth(side);
+  box->setFixedHeight(std::max(side, label->fontMetrics().height()));
   auto* row = new QWidget(parent);
   auto* h = new QHBoxLayout(row);
   h->setContentsMargins(0, 0, 0, 0);
   h->setSpacing(6);
   h->addWidget(box, 0, Qt::AlignTop);
-  h->addWidget(label, 1);
+  h->addWidget(label, 1, Qt::AlignTop);
   layout->addWidget(row);
   return box;
 }
@@ -349,9 +380,9 @@ void wrap_form(QFormLayout* form) {
   form->setRowWrapPolicy(QFormLayout::WrapLongRows);
   form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
   form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
-  // Word-wrapped labels report height-for-width; QFormLayout then top-aligns
-  // them against taller combos/spin boxes. Stretch the label to the field
-  // height and keep both roles vertically centered.
+  // Word-wrapped labels report height-for-width. Keep the label at least as
+  // tall as the field so a one-line caption centers on the spin/combo; do
+  // not use Expanding or leftover height never returns when the text unwraps.
   form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
   for (int i = 0; i < form->rowCount(); ++i) {
     auto* label_item = form->itemAt(i, QFormLayout::LabelRole);
@@ -360,7 +391,8 @@ void wrap_form(QFormLayout* form) {
     if (label == nullptr) continue;
     label->setWordWrap(true);
     label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    label->installEventFilter(new RelayoutOnResizeFilter(label));
     if (QWidget* field = field_item != nullptr ? field_item->widget() : nullptr) {
       field->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
       const int h = field->sizeHint().height();
@@ -419,6 +451,10 @@ void SettingsPanel::layout_nav_rail() {
 void SettingsPanel::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
   layout_nav_rail();
+  if (QWidget* content = scroll_ != nullptr ? scroll_->widget() : nullptr) {
+    if (QLayout* lay = content->layout()) lay->invalidate();
+    content->updateGeometry();
+  }
   update_section_scroll_pad();
   sync_nav_from_scroll();
 }
@@ -587,7 +623,7 @@ void SettingsPanel::build_pages() {
   for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
     const auto id = static_cast<wds::interaction::EditorShortcut>(i);
     const int row = static_cast<int>(i);
-    auto* shortcut_label = new QLabel(
+    auto* shortcut_label = new WrappingLabel(
         QString::fromUtf8(wds::interaction::editor_shortcut_label(id, cfg_.pause_at_current)),
         shortcuts_host);
     shortcut_label->setWordWrap(true);
