@@ -496,6 +496,15 @@ class YamiIndicatorStyle final : public QProxyStyle {
     return QProxyStyle::pixelMetric(metric, option, widget);
   }
 
+  QSize sizeFromContents(ContentsType type, const QStyleOption* option, const QSize& size,
+                         const QWidget* widget) const override {
+    QSize sz = QProxyStyle::sizeFromContents(type, option, size, widget);
+    if (type == CT_CheckBox && widget != nullptr) {
+      sz.setHeight(std::max(16, widget->fontMetrics().height()));
+    }
+    return sz;
+  }
+
  private:
   QSvgRenderer* renderer_for(const QStyleOption& option) const {
     const bool on = option.state.testFlag(State_On) || option.state.testFlag(State_NoChange);

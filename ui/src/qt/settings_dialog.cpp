@@ -29,6 +29,7 @@
 #include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLayout>
+#include <QMargins>
 #include <QPainter>
 #include <array>
 #include <utility>
@@ -160,15 +161,45 @@ class LabelToggleFilter final : public QObject {
   QCheckBox* box_ = nullptr;
 };
 
-// Word-wrapped QLabel paints to the new width but keeps the old layout
-// height: updateGeometry() is ignored while the parent still allocates the
-// stale two-line size. Pin height to heightForWidth so the row can shrink.
+// QLabel::heightForWidth on Windows often keeps the previous two-line
+// layout after the widget gets wider. Measure the string against the new
+// width instead of asking the label for a cached HFW.
+int wrap_text_height(const QFont& font, const QString& text, int width, const QMargins& margins) {
+  const QFontMetrics metrics(font);
+  const int inner = std::max(1, width - margins.left() - margins.right());
+  const QRect bounds = metrics.boundingRect(QRect(0, 0, inner, 100000),
+                                            Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop, text);
+  return std::max(metrics.height(), bounds.height()) + margins.top() + margins.bottom();
+}
+
+void pin_widget_height(QWidget* widget, int height) {
+  if (widget == nullptr || height <= 0) return;
+  if (widget->minimumHeight() != height || widget->maximumHeight() != height) {
+    widget->setFixedHeight(height);
+  }
+}
+
 void sync_wrap_label_height(QLabel* label) {
   if (label == nullptr || !label->wordWrap() || label->width() <= 0) return;
   const int floor = label->property("wdsMinH").toInt();
-  const int h = std::max({1, floor, label->heightForWidth(label->width())});
-  if (label->minimumHeight() != h || label->maximumHeight() != h) label->setFixedHeight(h);
+  const int h = std::max(floor, wrap_text_height(label->font(), label->text(), label->width(),
+                                                 label->contentsMargins()));
+  pin_widget_height(label, h);
 }
+
+class HfwWidget final : public QWidget {
+ public:
+  using QWidget::QWidget;
+  bool hasHeightForWidth() const override { return true; }
+  int heightForWidth(int w) const override {
+    if (QLayout* lay = layout()) return lay->totalHeightForWidth(w);
+    return QWidget::heightForWidth(w);
+  }
+  QSize sizeHint() const override {
+    const int w = width() > 0 ? width() : QWidget::sizeHint().width();
+    return QSize(QWidget::sizeHint().width(), heightForWidth(w));
+  }
+};
 
 class WrappingLabel final : public QLabel {
  public:
@@ -194,32 +225,78 @@ class RelayoutOnResizeFilter final : public QObject {
   }
 };
 
+void sync_wrap_check_row(QWidget* row) {
+  if (row == nullptr || !row->property("wdsWrapRow").toBool() || row->width() <= 0) return;
+  auto* box = row->findChild<QCheckBox*>(QString(), Qt::FindDirectChildrenOnly);
+  auto* label = row->findChild<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+  if (box == nullptr || label == nullptr) return;
+  const QMargins margins = row->contentsMargins();
+  const int label_w = label->width() > 0
+                          ? label->width()
+                          : std::max(1, row->width() - box->width() - 6 - margins.left() - margins.right());
+  const int text_h = wrap_text_height(label->font(), label->text(), label_w, label->contentsMargins());
+  pin_widget_height(label, text_h);
+  pin_widget_height(row, std::max(box->minimumHeight(), text_h));
+}
+
+class WrappingCheckRow final : public QWidget {
+ public:
+  WrappingCheckRow(const QString& text, QWidget* parent) : QWidget(parent) {
+    setProperty("wdsWrapRow", true);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    box_ = new QCheckBox(this);
+    box_->setObjectName(QStringLiteral("settingsWrapCheck"));
+    box_->setText(QString());
+    box_->setAccessibleName(text);
+    const int side =
+        std::max({box_->style()->pixelMetric(QStyle::PM_IndicatorWidth, nullptr, box_),
+                  box_->style()->pixelMetric(QStyle::PM_IndicatorHeight, nullptr, box_), 16});
+    label_ = new QLabel(text, this);
+    label_->setWordWrap(true);
+    label_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    label_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    label_->setCursor(Qt::PointingHandCursor);
+    label_->installEventFilter(new LabelToggleFilter(box_, label_));
+    box_->setFixedWidth(side);
+    box_->setFixedHeight(std::max(side, label_->fontMetrics().height()));
+    auto* row = new QHBoxLayout(this);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(6);
+    row->addWidget(box_, 0, Qt::AlignTop);
+    row->addWidget(label_, 1, Qt::AlignTop);
+  }
+
+  QCheckBox* box() const { return box_; }
+
+  bool hasHeightForWidth() const override { return true; }
+
+  int heightForWidth(int w) const override {
+    const QMargins margins = contentsMargins();
+    const int label_w = std::max(1, w - box_->width() - 6 - margins.left() - margins.right());
+    return std::max(box_->minimumHeight(), wrap_text_height(label_->font(), label_->text(), label_w,
+                                                            label_->contentsMargins()));
+  }
+
+  QSize sizeHint() const override {
+    const int w = width() > 0 ? width() : QWidget::sizeHint().width();
+    return QSize(QWidget::sizeHint().width(), heightForWidth(w));
+  }
+
+ protected:
+  void resizeEvent(QResizeEvent* event) override {
+    QWidget::resizeEvent(event);
+    sync_wrap_check_row(this);
+  }
+
+ private:
+  QCheckBox* box_ = nullptr;
+  QLabel* label_ = nullptr;
+};
+
 QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* parent) {
-  auto* box = new QCheckBox(parent);
-  box->setObjectName(QStringLiteral("settingsWrapCheck"));
-  box->setText(QString());
-  box->setAccessibleName(text);
-  const int side = std::max({box->style()->pixelMetric(QStyle::PM_IndicatorWidth, nullptr, box),
-                             box->style()->pixelMetric(QStyle::PM_IndicatorHeight, nullptr, box), 16});
-  auto* label = new WrappingLabel(text, parent);
-  label->setWordWrap(true);
-  label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-  label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-  label->setCursor(Qt::PointingHandCursor);
-  label->installEventFilter(new LabelToggleFilter(box, label));
-  // Match the first text line so the Fusion/SVG indicator (VCentered in the
-  // box) sits on the caption, not above a VCentered multi-line block.
-  box->setFixedWidth(side);
-  box->setFixedHeight(std::max(side, label->fontMetrics().height()));
-  auto* row = new QWidget(parent);
-  row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-  auto* h = new QHBoxLayout(row);
-  h->setContentsMargins(0, 0, 0, 0);
-  h->setSpacing(6);
-  h->addWidget(box, 0, Qt::AlignTop);
-  h->addWidget(label, 1, Qt::AlignTop);
+  auto* row = new WrappingCheckRow(text, parent);
   layout->addWidget(row);
-  return box;
+  return row->box();
 }
 
 constexpr int kNavCollapsedW = 16;
@@ -464,13 +541,17 @@ void SettingsPanel::resizeEvent(QResizeEvent* event) {
   QTimer::singleShot(0, this, [this] {
     QWidget* content = scroll_ != nullptr ? scroll_->widget() : nullptr;
     if (content == nullptr) return;
+    const auto widgets = content->findChildren<QWidget*>();
+    for (QWidget* widget : widgets) {
+      if (widget->property("wdsWrapRow").toBool()) sync_wrap_check_row(widget);
+    }
     const auto labels = content->findChildren<QLabel*>();
     for (QLabel* label : labels) sync_wrap_label_height(label);
     if (QLayout* lay = content->layout()) {
       lay->invalidate();
       lay->activate();
     }
-    content->adjustSize();
+    content->updateGeometry();
     update_section_scroll_pad();
     sync_nav_from_scroll();
   });
@@ -508,20 +589,24 @@ void SettingsPanel::update_section_scroll_pad() {
   auto* content = scroll_->widget();
   if (last == nullptr || content == nullptr) return;
   const int view_h = scroll_->viewport()->height();
-  const int without_pad = std::max(0, content->height() - scroll_pad_->height());
+  const int pad_was = scroll_pad_->height();
+  if (pad_was != 0) scroll_pad_->setFixedHeight(0);
+  const int without_pad = content->hasHeightForWidth()
+                              ? content->heightForWidth(std::max(1, content->width()))
+                              : content->sizeHint().height();
   const int pad = without_pad > view_h ? std::max(0, view_h - last->height()) : 0;
-  if (scroll_pad_->height() != pad) scroll_pad_->setFixedHeight(pad);
+  if (pad != 0) scroll_pad_->setFixedHeight(pad);
 }
 
 void SettingsPanel::build_pages() {
-  auto* content = new QWidget;
+  auto* content = new HfwWidget;
   auto* layout = new QVBoxLayout(content);
   layout->setContentsMargins(4, 4, 16, 8);
   layout->setSpacing(0);
 
   const auto titles = settings_section_titles();
   auto section_at = [&](int index) -> QVBoxLayout* {
-    auto* section = new QWidget(content);
+    auto* section = new HfwWidget(content);
     auto* v = new QVBoxLayout(section);
     v->setContentsMargins(0, index == 0 ? 10 : 14, 4, 8);
     v->setSpacing(8);
