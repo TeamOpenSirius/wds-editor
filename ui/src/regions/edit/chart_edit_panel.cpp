@@ -164,6 +164,7 @@ uint64_t ChartEditPanel::visual_revision() const {
   h = mix_i32(h, viewport_.grid().lane_count);
   h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().w * 4.0f)));
   h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().h * 4.0f)));
+  h = mix_i32(h, viewport_.note_height_level());
 
   uint64_t sel = static_cast<uint64_t>(selected_.size());
   for (int32_t id : selected_) {

@@ -267,15 +267,29 @@ void install_overlay_scrollbars(QApplication& app) {
   }
 }
 
-// Hover+wheel must not step QSpinBox / QDoubleSpinBox / QComboBox. Those
-// controls sit on the toolbar and in the settings scroll area, so a page
-// scroll over the field is otherwise an accidental value change.
+// Hover+wheel must not step or focus QSpinBox / QDoubleSpinBox / QComboBox.
+// Those controls sit on the toolbar and in the settings scroll area, so a
+// page scroll over the field is otherwise an accidental value change and
+// keyboard-focus steal. Qt gives WheelFocus in QApplication::notify *before*
+// event filters run, so swallowing Wheel is not enough — also drop WheelFocus.
+void strip_wheel_focus(QWidget* widget) {
+  if (qobject_cast<QAbstractSpinBox*>(widget) == nullptr &&
+      qobject_cast<QComboBox*>(widget) == nullptr) {
+    return;
+  }
+  if (widget->focusPolicy() == Qt::WheelFocus) widget->setFocusPolicy(Qt::StrongFocus);
+}
+
 class NoWheelValueFilter final : public QObject {
  public:
   explicit NoWheelValueFilter(QObject* parent) : QObject(parent) {}
 
   bool eventFilter(QObject* watched, QEvent* event) override {
-    if (event->type() != QEvent::Wheel) return false;
+    const auto type = event->type();
+    if (type == QEvent::Polish || type == QEvent::Show || type == QEvent::StyleChange) {
+      if (auto* widget = qobject_cast<QWidget*>(watched)) strip_wheel_focus(widget);
+    }
+    if (type != QEvent::Wheel) return false;
     auto* widget = qobject_cast<QWidget*>(watched);
     if (widget == nullptr || !steals_wheel_value(widget)) return false;
 
@@ -314,9 +328,12 @@ class NoWheelValueFilter final : public QObject {
 
 void install_no_wheel_value_inputs(QApplication& app) {
   static NoWheelValueFilter* filter = nullptr;
-  if (filter != nullptr) return;
-  filter = new NoWheelValueFilter(&app);
-  app.installEventFilter(filter);
+  if (filter == nullptr) {
+    filter = new NoWheelValueFilter(&app);
+    app.installEventFilter(filter);
+  }
+  const auto widgets = app.allWidgets();
+  for (QWidget* widget : widgets) strip_wheel_focus(widget);
 }
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).

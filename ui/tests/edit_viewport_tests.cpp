@@ -83,6 +83,45 @@ int main() {
             "4-lane tap inset");
     require(viewport.note_inset_px(4) / four < viewport.note_inset_px(1) / one,
             "4-lane inset fraction smaller");
+
+    using wds::chart_editor::official_preview_note_height_px;
+    using wds::chart_editor::official_preview_sound_note_height_px;
+    const float ref_h = wds::ui::EditViewport::kPreviewRefContentHeight;
+    const float h_default = viewport.note_height_px();
+    require(std::fabs(h_default - official_preview_note_height_px(8, ref_h)) < 1e-3f,
+            "default dest_h = preview judgeline note");
+    require(h_default < 28.0f && h_default > 18.0f, "default dest_h near preview ~23px");
+    viewport.set_bounds({0, 0, 120, 800});
+    require(std::fabs(viewport.note_height_px() - h_default) < 1e-4f, "pane height ignored");
+    viewport.set_bounds({0, 0, 800, 240});
+    require(std::fabs(viewport.note_height_px() - h_default) < 1e-4f, "pane width ignored for dest_h");
+    viewport.set_bounds({0, 0, 120, 240});
+    viewport.set_note_height_level(1);
+    require(std::fabs(viewport.note_height_px() - official_preview_note_height_px(1, ref_h)) < 1e-3f,
+            "thickness 1 → preview tilt");
+    viewport.set_note_height_level(10);
+    require(std::fabs(viewport.note_height_px() - official_preview_note_height_px(10, ref_h)) < 1e-3f,
+            "thickness 10 → preview tilt");
+    require(viewport.note_height_px() > official_preview_note_height_px(1, ref_h),
+            "higher 厚度 → taller preview note");
+    viewport.set_note_height_level(8);
+
+    wds::chart_editor::NotationNote star;
+    star.note_type = wds::chart_editor::NoteType::Sound;
+    star.lane = 2;
+    star.width = 1;
+    star.start_tick = 0;
+    const auto a = viewport.mid_star_screen_rect(star);
+    require(std::fabs(a.w - official_preview_sound_note_height_px(ref_h)) < 1e-3f,
+            "star = official 1.12 at Rx=0");
+    require(std::fabs(a.h - a.w) < 1e-4f, "star square");
+    viewport.set_bounds({0, 0, 800, 800});
+    viewport.set_note_height_level(1);
+    const auto b = viewport.mid_star_screen_rect(star);
+    require(std::fabs(b.w - a.w) < 1e-4f && std::fabs(b.h - a.h) < 1e-4f,
+            "star size ignores pane and 厚度");
+    viewport.set_bounds({0, 0, 120, 240});
+    viewport.set_note_height_level(8);
   }
 
   // Scroll forward by 250 ms → +240 ticks at 120 BPM.

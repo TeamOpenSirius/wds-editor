@@ -58,6 +58,8 @@ inline constexpr float kOfficialNoteLocalZBottom = -0.01f;
 inline constexpr float kOfficialNoteLocalZTop = -0.1f;
 // A_SoundNotes / SoundPurpleNotes: 112×112 @ 100 ppu. SoundNote NotesTop Z=-0.05.
 // Prefab m_Size 1.56×0.64 is stale (Simple draw uses native 1.12×1.12).
+// SoundNote.prefab Rx is identity. SoundNoteObject.Set only stores the entity
+// (libil2cpp Sirius_Game_SoundNoteObject__Set); GetNoteHeight writes Tap only.
 inline constexpr float kOfficialSoundNoteSpriteSize = 1.12f;
 inline constexpr float kOfficialSoundNoteLocalZ = -0.05f;
 inline constexpr float kOfficialNoteStartPositionY = 58.0f;
@@ -396,6 +398,35 @@ inline OfficialNdc project_note_layer(float lane_x, float note_y, float sprite_x
   const float y = sprite_y * c - layer_z * s;
   const float z = sprite_y * s + layer_z * c;
   return project_judge_xyz(lane_x + sprite_x, note_y + y, z, aspect);
+}
+
+// NDC height of a note-layer sprite at the judgeline (same path as preview).
+inline float official_preview_sprite_ndc_height(float sprite_half, float layer_z, float tilt_deg,
+                                                float aspect = kOfficialPreviewAspect) noexcept {
+  const OfficialNdc top =
+      project_note_layer(0.0f, 0.0f, 0.0f, sprite_half, layer_z, tilt_deg, aspect);
+  const OfficialNdc bot =
+      project_note_layer(0.0f, 0.0f, 0.0f, -sprite_half, layer_z, tilt_deg, aspect);
+  return std::fabs(top.y - bot.y);
+}
+
+inline float official_preview_note_ndc_height(int note_height_level) noexcept {
+  return official_preview_sprite_ndc_height(kOfficialNoteSpriteHeight * 0.5f, 0.0f,
+                                            official_note_height_rotation_x(note_height_level));
+}
+
+inline float official_preview_sound_note_ndc_height() noexcept {
+  return official_preview_sprite_ndc_height(kOfficialSoundNoteSpriteSize * 0.5f,
+                                            kOfficialSoundNoteLocalZ, 0.0f);
+}
+
+// content_h is the preview stage height in pixels (NDC ±1 spans that height).
+inline float official_preview_note_height_px(int note_height_level, float content_h) noexcept {
+  return official_preview_note_ndc_height(note_height_level) * 0.5f * std::max(content_h, 1.0f);
+}
+
+inline float official_preview_sound_note_height_px(float content_h) noexcept {
+  return official_preview_sound_note_ndc_height() * 0.5f * std::max(content_h, 1.0f);
 }
 
 inline float official_hidden_line_center_y(
