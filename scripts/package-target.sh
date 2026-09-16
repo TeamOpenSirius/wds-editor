@@ -554,7 +554,8 @@ Plugins=plugins
 EOF
 
   # Qt DLLs always need MinGW runtimes even when the exe is -static-libstdc++.
-  ensure_mingw_runtime_dlls "$stage" "$qt_bin"
+  ensure_mingw_runtime_dlls "$stage" "$qt_bin" \
+    "/usr/${WDS_MINGW_TRIPLE}/lib" "/usr/${WDS_MINGW_TRIPLE}/bin"
 }
 
 package_win() {
@@ -641,6 +642,11 @@ package_win() {
   copy_portable_resources "$stage" "$build_dir"
   copy_bass_runtime "$stage" win-x86_64
   copy_qt_win_runtime "${stage}/$(basename "$demo")" "$stage" "$build_dir"
+  local required_dll
+  for required_dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+    [[ -f "${stage}/${required_dll}" ]] || \
+      die "Windows stage missing ${required_dll} (Qt MinGW runtime); packaging refused"
+  done
   # MSI Start Menu shortcut Icon= needs a real .ico (not the exe).
   local ico="${ROOT}/ui/assets/app_icon/wds.ico"
   [[ -f "$ico" ]] || die "missing Windows app icon: $ico (run scripts/generate-app-icons.sh)"
