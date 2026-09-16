@@ -41,13 +41,10 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   const float note_h = viewport.note_height_px();
   const float y0 = viewport.y_at(note.start_tick);
   const float y1 = note.end_tick > note.start_tick ? viewport.y_at(note.end_tick) : y0;
-  if (std::max(y0, y1) < bounds.y - note_h || std::min(y0, y1) > bounds.bottom() + note_h) {
+  const float cull_pad = std::max(note_h, viewport.mid_star_size_px());
+  if (std::max(y0, y1) < bounds.y - cull_pad || std::min(y0, y1) > bounds.bottom() + cull_pad) {
     return;
   }
-
-  const float inset = viewport.note_inset_px(note.width);
-  const float x = viewport.x_at(note.lane) + inset;
-  const float width = std::max(4.0f, viewport.lane_width(note.width) - inset * 2.0f);
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
   const bool hold_body =
@@ -72,21 +69,9 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
 
   if (pass == NoteVisualPass::MidStar) {
     if (!sprites.is_tick || !sprites.tick) return;
-    // Tick art is square (112×112); size by note height and keep native aspect so
-    // a 1-lane-wide quad does not flatten the star.
-    const float aspect =
-        sprites.tick.height > 0
-            ? static_cast<float>(sprites.tick.width) / static_cast<float>(sprites.tick.height)
-            : 1.0f;
-    float th = note_h;
-    float tw = th * aspect;
-    if (tw > width && width > 1.0f) {
-      tw = width;
-      th = tw / aspect;
-    }
-    const float cx = x + width * 0.5f;
-    const auto q = wds::interaction::rect_to_quad({cx - tw * 0.5f, y0 - th * 0.5f, tw, th}, fb_w,
-                                                  fb_h, screen);
+    const auto star = viewport.mid_star_screen_rect(note);
+    const auto q = wds::interaction::rect_to_quad({star.x, star.y, star.w, star.h}, fb_w, fb_h,
+                                                  screen);
     batch.add_sprite(sprites.tick, q, z, alpha, tint_r, tint_g, tint_b);
     return;
   }

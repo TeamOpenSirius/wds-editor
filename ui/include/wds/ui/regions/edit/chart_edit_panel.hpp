@@ -96,6 +96,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   }
   void set_spectrum_mode(EditSpectrumMode mode) noexcept { spectrum_mode_ = mode; }
   EditSpectrumMode spectrum_mode() const noexcept { return spectrum_mode_; }
+  void set_note_height_level(int level) noexcept { viewport_.set_note_height_level(level); }
 
   // New-style toolbox flow: while set, a plain left click places this intent
   // instead of Tap. Swipe gestures keep their old meaning; HoldBody /

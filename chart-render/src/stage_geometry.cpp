@@ -405,11 +405,12 @@ Quad StageGeometry::star_quad(int32_t lane, int32_t end_lane, float percent) con
   const float y = percent_to_judge_y(percent);
   const float x = official_span_center_x(lane, end_lane);
   const float half = kOfficialSoundNoteSpriteSize * 0.5f;
-  const float tilt = official_note_height_rotation_x(config_.note_height_level);
+  // SoundNote.prefab Rx is identity; SoundNoteObject never writes GetNoteHeight.
+  constexpr float kSoundTilt = 0.0f;
   const float aspect = content_aspect();
   auto corner = [&](float sx, float sy) {
     return ndc_to_content(
-        project_note_layer(x, y, sx, sy, kOfficialSoundNoteLocalZ, tilt, aspect));
+        project_note_layer(x, y, sx, sy, kOfficialSoundNoteLocalZ, kSoundTilt, aspect));
   };
   Quad q;
   q.lb = corner(-half, -half);

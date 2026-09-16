@@ -68,20 +68,22 @@ QPixmap pixmap_from_hold_bake(bool scratch) {
   return QPixmap::fromImage(img.copy());
 }
 
-void paint_sliced_hold(QPainter& p, const QPixmap& tex, const QRectF& dest, float dest_world_w) {
+// Horizontal 3-slice (official Sprite.border L/R). Caps are fractions of
+// dest_world_w so a wider edit pane scales dest_w; dest_h matches preview 厚度.
+// Only a 1-wide tap (caps > dest) shrinks the sides and drops the middle.
+void paint_sliced_sprite(QPainter& p, const QPixmap& tex, const QRectF& dest, float border_l_px,
+                         float border_r_px, float dest_world_w) {
   if (tex.isNull() || dest.width() < 1.0 || dest.height() < 0.5) return;
   const float tex_w = static_cast<float>(tex.width());
   const float tex_h = static_cast<float>(tex.height());
-  float u_bl = std::clamp(wds::chart_render::kHoldLongSliceBorderL / tex_w, 0.0f, 0.49f);
-  float u_br = std::clamp(wds::chart_render::kHoldLongSliceBorderR / tex_w, 0.0f, 0.49f);
+  float u_bl = std::clamp(border_l_px / tex_w, 0.0f, 0.49f);
+  float u_br = std::clamp(border_r_px / tex_w, 0.0f, 0.49f);
   if (u_bl + u_br > 0.98f) {
     const float s = 0.98f / (u_bl + u_br);
     u_bl *= s;
     u_br *= s;
   }
-  const auto layout = wds::chart_render::sliced_cap_layout(
-      wds::chart_render::kHoldLongSliceBorderL, wds::chart_render::kHoldLongSliceBorderR,
-      dest_world_w);
+  const auto layout = wds::chart_render::sliced_cap_layout(border_l_px, border_r_px, dest_world_w);
   const qreal src_l = static_cast<qreal>(tex_w * u_bl);
   const qreal src_r = static_cast<qreal>(tex_w * u_br);
   const qreal dst_l = dest.width() * static_cast<qreal>(layout.bl);
@@ -99,6 +101,16 @@ void paint_sliced_hold(QPainter& p, const QPixmap& tex, const QRectF& dest, floa
   }
   draw({dest.x() + dest.width() - dst_r, dest.y(), dst_r, dest.height()},
        {tex_w - src_r, 0.0, src_r, tex_h});
+}
+
+void paint_sliced_hold(QPainter& p, const QPixmap& tex, const QRectF& dest, float dest_world_w) {
+  paint_sliced_sprite(p, tex, dest, wds::chart_render::kHoldLongSliceBorderL,
+                      wds::chart_render::kHoldLongSliceBorderR, dest_world_w);
+}
+
+void paint_sliced_note(QPainter& p, const QPixmap& tex, const QRectF& dest, float dest_world_w) {
+  paint_sliced_sprite(p, tex, dest, wds::chart_render::kNoteSliceBorderL,
+                      wds::chart_render::kNoteSliceBorderR, dest_world_w);
 }
 
 struct ScopedAA {
@@ -522,11 +534,15 @@ void ChartEditWidget::paint_notes(QPainter& p,
   }
   if (visible_note_indices_.empty()) return;
   p.save();
+  p.setRenderHint(QPainter::SmoothPixmapTransform, true);
   if (opacity < 0.999f) p.setOpacity(opacity);
   const auto& playfield = v.bounds();
-  const auto draw_skin = [&](const QPixmap& image, const QRectF& target) {
-    if (image.isNull()) { p.fillRect(target, QColor(100, 190, 255)); return; }
-    p.drawPixmap(target, image, image.rect());
+  const auto draw_skin = [&](const QPixmap& image, const QRectF& target, float dest_world_w) {
+    if (image.isNull()) {
+      p.fillRect(target, QColor(100, 190, 255));
+      return;
+    }
+    paint_sliced_note(p, image, target, dest_world_w);
   };
   // Use the same millisecond-based ordering contract as the Vulkan editor and
   // preview. Tick order alone is wrong across BPM segments and can put a tap
@@ -601,12 +617,21 @@ void ChartEditWidget::paint_notes(QPainter& p,
     else if (n.note_type == NT::Hold || n.note_type == NT::HoldStart || n.note_type == NT::BlueTap ||
              n.note_type == NT::NontailHold) skin = &blue_;
     QRectF head(x, y0 - v.note_height_px()*.5f, w, v.note_height_px());
-    if (n.note_type == NT::Sound || n.note_type == NT::ScratchSound) {
-      const float side = std::min(w, v.note_height_px()); head = {x + (w-side)*.5f, y0-side*.5f, side, side};
+    const bool is_tick = n.note_type == NT::Sound || n.note_type == NT::ScratchSound;
+    if (is_tick) {
+      const auto star = v.mid_star_screen_rect(n);
+      head = {star.x, star.y, star.w, star.h};
     }
     // Hold bodies do not own a start cap; their paired HoldStart does. This is
     // essential at ScratchHold chain joints where two caps otherwise overlap.
-    if (!hold_body) draw_skin(*skin, head);
+    if (!hold_body) {
+      if (is_tick) {
+        if (skin->isNull()) p.fillRect(head, QColor(100, 190, 255));
+        else p.drawPixmap(head, *skin, skin->rect());
+      } else {
+        draw_skin(*skin, head, v.tap_visual_world_width(n.width));
+      }
+    }
     if (hold_body) {
       // Tail caps are real note sprites, not just the ribbon endpoint.  Draw
       // them independently so a terminal ScratchHold still exposes its flick.
@@ -615,7 +640,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
       const QPixmap* tail_skin =
           wds::chart_editor::is_scratch_hold_body(n.note_type) ? &purple_ : &blue_;
       QRectF tail(tail_x, y1 - v.note_height_px()*.5f, tail_w, v.note_height_px());
-      draw_skin(*tail_skin, tail);
+      draw_skin(*tail_skin, tail, v.tap_visual_world_width(end_width));
       if (scratch && !arrow_.isNull()) {
         const float ah = v.note_height_px();
         const float aw = std::min(tail_w, std::clamp(v.lane_width(1) * .55f, 8.0f, ah * 1.2f));

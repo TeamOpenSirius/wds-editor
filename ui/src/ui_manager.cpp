@@ -58,6 +58,12 @@ void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& 
   preview.preview().apply_msaa(cfg.msaa_samples);
 }
 
+void apply_display_to_edit(ChartEditPanel* edit, const EditorUiConfig& cfg) {
+  if (edit == nullptr) return;
+  edit->set_note_height_level(cfg.note_height_level);
+  edit->set_spectrum_mode(cfg.spectrum_display);
+}
+
 }  // namespace
 
 void journal_menu_action(const char* id) noexcept {
@@ -306,7 +312,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
         wds::interaction::set_editor_shortcuts(cfg.shortcuts);
       }
       apply_display_to_preview(*chart_preview_, cfg);
-      if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
+      apply_display_to_edit(edit_panel_, cfg);
       bind_editor_shortcuts();
       wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
       persist();
@@ -797,9 +803,9 @@ void UiManager::load_ui_config() {
     bind_editor_shortcuts();
   }
   apply_display_to_preview(*chart_preview_, cfg);
+  apply_display_to_edit(edit_panel_, cfg);
   chart_preview_->set_lane_count(std::clamp(cfg.lane_count, 1, 32));
   new_note_place_logic_ = cfg.new_note_place_logic;
-  if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
   capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
@@ -847,8 +853,8 @@ void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
     wds::interaction::set_editor_shortcuts(cfg.shortcuts);
   }
   apply_display_to_preview(*chart_preview_, cfg);
+  apply_display_to_edit(edit_panel_, cfg);
   set_new_note_place_logic(cfg.new_note_place_logic);
-  if (edit_panel_ != nullptr) edit_panel_->set_spectrum_mode(cfg.spectrum_display);
   bind_editor_shortcuts();
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
   save_ui_config();

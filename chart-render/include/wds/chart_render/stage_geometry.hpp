@@ -93,7 +93,7 @@ class StageGeometry {
   Quad hold_line_quad(int32_t lane, int32_t end_lane, float percent_near,
                       float percent_far) const;
   Quad tick_quad(int32_t lane, int32_t end_lane, float percent) const;
-  // Mid-star: official 1.12×1.12 SoundNote, centered, never stretched to hold width.
+  // Mid-star: official 1.12×1.12 SoundNote, Rx=0, centered, never stretched or tilted.
   Quad star_quad(int32_t lane, int32_t end_lane, float percent) const;
   // Official ConcurrentLine: notation-wide × 0.1, Rx=90° on JudgeArea (no tap margin).
   Quad sync_line_quad(int32_t lane, int32_t end_lane, float percent) const;

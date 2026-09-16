@@ -406,6 +406,29 @@ void test_star_quad_is_centered_official_size_not_span_width() {
   CHECK(width(star) < width(one_lane) * 1.70f);
 }
 
+void test_star_quad_ignores_note_height_level() {
+  wds::renderer::PreviewVisualConfig thin;
+  thin.note_height_level = 1;
+  wds::renderer::PreviewVisualConfig thick;
+  thick.note_height_level = 10;
+  wds::renderer::StageGeometry a;
+  wds::renderer::StageGeometry b;
+  a.configure(thin);
+  b.configure(thick);
+  a.resize(1280, 720);
+  b.resize(1280, 720);
+  const float p = 0.42f;
+  const auto sa = a.star_quad(5, 5, p);
+  const auto sb = b.star_quad(5, 5, p);
+  const auto na = a.note_quad(5, 5, p);
+  const auto nb = b.note_quad(5, 5, p);
+  auto height = [](const wds::renderer::Quad& q) {
+    return 0.5f * (std::fabs(q.lt.y - q.lb.y) + std::fabs(q.rt.y - q.rb.y));
+  };
+  CHECK(std::fabs(height(sa) - height(sb)) < 1e-5f);
+  CHECK(height(nb) > height(na) + 1e-5f);
+}
+
 void test_content_aspect_is_official_16_9() {
   CHECK(std::fabs(wds::renderer::PreviewVisualConfig{}.target_aspect_ratio -
                   wds::chart_editor::kOfficialPreviewAspect) < 1e-6f);
@@ -445,6 +468,7 @@ int main() {
   test_bomb_quads_follow_judge_plane_perspective();
   test_adjacent_tap_notes_leave_official_margin_gap();
   test_star_quad_is_centered_official_size_not_span_width();
+  test_star_quad_ignores_note_height_level();
   test_content_aspect_is_official_16_9();
   if (g_fails == 0) {
     std::printf("All split_line official color tests passed.\n");

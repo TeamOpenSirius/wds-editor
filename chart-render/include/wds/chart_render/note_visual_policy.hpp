@@ -71,6 +71,10 @@ inline constexpr int kHoldLongTexW = 157;
 inline constexpr int kHoldLongTexH = 8;
 inline constexpr float kHoldLongSliceBorderL = 10.0f;
 inline constexpr float kHoldLongSliceBorderR = 10.0f;
+// Flat A_*Notes* (268×108, Sprite.border L/R = 65). Qt editor 3-slice uses the
+// same world-space caps as add_sliced_note (shrink only when 1-wide).
+inline constexpr float kNoteSliceBorderL = 65.0f;
+inline constexpr float kNoteSliceBorderR = 65.0f;
 // drawHoldEighth idle alpha (PreviewVisualConfig::hold_body_alpha).
 inline constexpr float kHoldBodyAlpha = 0.8f;
 

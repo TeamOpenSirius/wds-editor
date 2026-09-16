@@ -21,15 +21,22 @@ class EditViewport {
       wds::chart_editor::EditLeadIn::kJudgelineMarginBottom;
   // Matches PreviewVisualConfig::note_border_percent.
   static constexpr float kNoteBorderPercent = 0.02f;
-  // Matches PreviewVisualConfig::note_height (authored vs 640 half-height units).
-  static constexpr float kNoteHeightFactor = 85.0f / 640.0f;
-  // Vertical stretch for flattened note / judgeline skins.
+  // Vertical stretch for flattened judgeline skins.
   static constexpr float kVerticalStretch = 2.0f;  // was 1.5; ×4/3 thicker edit notes/judgeline
+  // dest_h matches official preview notes at the judgeline on the default
+  // editor preview (1280×800 → stage 584.7552×328.9248). Pane size does not
+  // scale dest_h; 「note厚度」 is GetNoteHeight Rx (Tap only). Mid-stars stay
+  // official 1.12 at Rx=0.
+  static constexpr float kPreviewRefContentHeight = 328.9248f;
   static constexpr int32_t kMsPerHectom = wds::chart_editor::EditLeadIn::kMsPerHectom;
 
   void set_bounds(wds::interaction::Rect bounds) { bounds_ = bounds; }
   void set_grid(wds::chart_editor::EditGridConfig grid) { grid_ = grid; }
   void set_timing(wds::chart_editor::MusicTiming timing) { timing_ = std::move(timing); }
+  void set_note_height_level(int level) {
+    note_height_level_ = wds::chart_editor::official_clamp_note_height_level(level);
+  }
+  int note_height_level() const noexcept { return note_height_level_; }
 
   int32_t visible_ms() const noexcept {
     return wds::chart_editor::EditLeadIn::visible_ms_from_hectoms(grid_.visible_hectoms);
@@ -100,7 +107,11 @@ class EditViewport {
   float x_at(int32_t lane) const { return bounds_.x + lane * bounds_.w / grid_.lane_count; }
   float lane_width(int32_t width) const { return width * bounds_.w / grid_.lane_count; }
   float note_height_px() const {
-    return std::clamp(lane_width(1) * kNoteHeightFactor * 2.2f * kVerticalStretch, 20.0f, 52.0f);
+    return wds::chart_editor::official_preview_note_height_px(note_height_level_,
+                                                             kPreviewRefContentHeight);
+  }
+  float mid_star_size_px() const {
+    return wds::chart_editor::official_preview_sound_note_height_px(kPreviewRefContentHeight);
   }
   float judgeline_y() const {
     return bounds_.y + bounds_.h * (1.0f - kJudgelineMarginBottom);
@@ -122,21 +133,16 @@ class EditViewport {
     return visual_inset_px(width, hold_visual_world_width(width));
   }
 
-  // Screen rect of a Sound / ScratchSound mid-star (square ~note_h, centered in lanes).
+  // Screen rect of a Sound / ScratchSound mid-star. Side is official 1.12 at
+  // Rx=0 (not 厚度); center follows the hold span / tick.
   wds::interaction::Rect mid_star_screen_rect(const wds::chart_editor::NotationNote& note) const {
-    const float note_h = note_height_px();
     const float inset = note_inset_px(note.width);
     const float x = x_at(note.lane) + inset;
     const float width = std::max(4.0f, lane_width(note.width) - inset * 2.0f);
     const float y0 = y_at(note.start_tick);
-    float th = note_h;
-    float tw = th;  // square hit / selection matching tick art
-    if (tw > width && width > 1.0f) {
-      tw = width;
-      th = tw;
-    }
+    const float side = mid_star_size_px();
     const float cx = x + width * 0.5f;
-    return {cx - tw * 0.5f, y0 - th * 0.5f, tw, th};
+    return {cx - side * 0.5f, y0 - side * 0.5f, side, side};
   }
 
   // Playhead always on the judgeline at 1:1 — no lead-in ease / speed change.
@@ -166,6 +172,7 @@ class EditViewport {
   wds::interaction::Rect bounds_{};
   wds::chart_editor::EditGridConfig grid_{};
   wds::chart_editor::MusicTiming timing_{};
+  int note_height_level_ = wds::chart_editor::kOfficialDefaultNoteHeightLevel;
   // May be negative within [-judgeline_margin, +∞) for blank below the line.
   float scroll_ms_ = 0.0f;
 };

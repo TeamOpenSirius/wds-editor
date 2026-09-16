@@ -230,8 +230,8 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
   soft_split_line = cache.get(kSoftSplitKey);
   soft_disk = cache.get(kSoftDiskKey);
 
-  note_slice_border_l = 65.0f;
-  note_slice_border_r = 65.0f;
+  note_slice_border_l = wds::chart_render::kNoteSliceBorderL;
+  note_slice_border_r = wds::chart_render::kNoteSliceBorderR;
   hold_slice_border_l = wds::chart_render::kHoldLongSliceBorderL;
   hold_slice_border_r = wds::chart_render::kHoldLongSliceBorderR;
   sync_slice_border_l = wds::chart_editor::kOfficialConcurrentLineBorderL;

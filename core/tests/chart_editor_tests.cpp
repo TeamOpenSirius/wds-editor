@@ -1632,6 +1632,10 @@ void test_official_hidden_line_and_note_height_defaults() {
   CHECK(std::fabs(official_lane_mask_scale_y(0) - 12.5f) < 1e-4f);
   CHECK(std::fabs(official_note_height_rotation_x(8) + 15.0f) < 1e-5f);
   CHECK(std::fabs(official_note_height_rotation_x(1) - 6.0f) < 1e-5f);
+  CHECK(official_preview_note_ndc_height(8) > official_preview_note_ndc_height(1));
+  CHECK(official_preview_sound_note_ndc_height() > official_preview_note_ndc_height(8));
+  CHECK(std::fabs(official_preview_note_height_px(8, 328.9248f) - 22.7127f) < 0.05f);
+  CHECK(std::fabs(official_preview_sound_note_height_px(328.9248f) - 31.8984f) < 0.05f);
   CHECK(std::fabs(official_hidden_line_center_y() -
                   (official_note_visible_position_y(0) + kOfficialStartLineSpriteLocalY)) < 1e-5f);
   CHECK(std::fabs(official_hidden_line_center_y(35) -
