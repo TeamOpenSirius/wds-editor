@@ -3,8 +3,11 @@
 #include <wds/interaction/theme.hpp>
 
 #include <QAbstractScrollArea>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QColor>
+#include <QComboBox>
+#include <QCoreApplication>
 #include <QCursor>
 #include <QSettings>
 #include <QStyleHints>
@@ -25,6 +28,7 @@
 #include <QStyleFactory>
 #include <QTextStream>
 #include <QTimer>
+#include <QWheelEvent>
 #include <QWidget>
 
 #include <cmath>
@@ -261,6 +265,58 @@ void install_overlay_scrollbars(QApplication& app) {
   for (QWidget* widget : widgets) {
     if (auto* area = qobject_cast<QAbstractScrollArea*>(widget)) filter->attach(area);
   }
+}
+
+// Hover+wheel must not step QSpinBox / QDoubleSpinBox / QComboBox. Those
+// controls sit on the toolbar and in the settings scroll area, so a page
+// scroll over the field is otherwise an accidental value change.
+class NoWheelValueFilter final : public QObject {
+ public:
+  explicit NoWheelValueFilter(QObject* parent) : QObject(parent) {}
+
+  bool eventFilter(QObject* watched, QEvent* event) override {
+    if (event->type() != QEvent::Wheel) return false;
+    auto* widget = qobject_cast<QWidget*>(watched);
+    if (widget == nullptr || !steals_wheel_value(widget)) return false;
+
+    auto* wheel = static_cast<QWheelEvent*>(event);
+    if (QAbstractScrollArea* area = enclosing_scroll_area(widget)) {
+      if (QWidget* viewport = area->viewport(); viewport != nullptr && viewport != widget) {
+        const QPointF local = viewport->mapFromGlobal(wheel->globalPosition());
+        QWheelEvent forwarded(local, wheel->globalPosition(), wheel->pixelDelta(),
+                              wheel->angleDelta(), wheel->buttons(), wheel->modifiers(),
+                              wheel->phase(), wheel->inverted(), wheel->source());
+        QCoreApplication::sendEvent(viewport, &forwarded);
+      }
+    }
+    return true;
+  }
+
+ private:
+  static bool steals_wheel_value(const QWidget* widget) {
+    if (qobject_cast<const QAbstractSpinBox*>(widget) != nullptr ||
+        qobject_cast<const QComboBox*>(widget) != nullptr) {
+      return true;
+    }
+    const QWidget* parent = widget->parentWidget();
+    return parent != nullptr && (qobject_cast<const QAbstractSpinBox*>(parent) != nullptr ||
+                                 qobject_cast<const QComboBox*>(parent) != nullptr);
+  }
+
+  static QAbstractScrollArea* enclosing_scroll_area(QWidget* widget) {
+    for (QWidget* parent = widget->parentWidget(); parent != nullptr;
+         parent = parent->parentWidget()) {
+      if (auto* area = qobject_cast<QAbstractScrollArea*>(parent)) return area;
+    }
+    return nullptr;
+  }
+};
+
+void install_no_wheel_value_inputs(QApplication& app) {
+  static NoWheelValueFilter* filter = nullptr;
+  if (filter != nullptr) return;
+  filter = new NoWheelValueFilter(&app);
+  app.installEventFilter(filter);
 }
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).
@@ -706,6 +762,7 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
   app.setPalette(pal);
   app.setStyleSheet(qss);
   install_overlay_scrollbars(app);
+  install_no_wheel_value_inputs(app);
   const auto widgets = app.allWidgets();
   for (QWidget* widget : widgets) widget->update();
 }
