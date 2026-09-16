@@ -158,8 +158,18 @@ download() {
   mv "${out}.partial" "$out"
 }
 
+copy_theme() {
+  local stage="$1"
+  if [[ ! -f "${ROOT}/ui/assets/theme/Yami.obt" ]]; then
+    die "theme missing (expected ui/assets/theme/Yami.obt)"
+  fi
+  rm -rf "${stage}/theme"
+  mkdir -p "${stage}/theme"
+  cp -a "${ROOT}/ui/assets/theme/." "${stage}/theme/"
+}
+
 # Portable resource tree shared by every platform (zip root or Contents/Resources):
-#   skins/ effects/ fonts/ icons/ shaders/ wds.png [licenses/] [optional sample ogg]
+#   skins/ effects/ fonts/ icons/ shaders/ theme/ wds.png [licenses/] [optional sample ogg]
 copy_skins_effects() {
   local stage="$1"
   mkdir -p "${stage}"
@@ -247,6 +257,7 @@ copy_portable_resources() {
   copy_skins_effects "$stage"
   copy_fonts "$stage" "$build_dir"
   copy_icons "$stage" "$build_dir"
+  copy_theme "$stage"
   copy_app_icon "$stage"
   copy_shaders "$stage" "$build_dir"
 }
@@ -1902,6 +1913,9 @@ stage_win_debug() {
   fi
   if [[ ! -d "${stage}/icons" ]] || [[ -z "$(ls -A "${stage}/icons" 2>/dev/null || true)" ]]; then
     copy_icons "$stage" "$build_dir"
+  fi
+  if [[ ! -f "${stage}/theme/Yami.obt" ]]; then
+    copy_theme "$stage"
   fi
   copy_bass_runtime "$stage" win-x86_64
 

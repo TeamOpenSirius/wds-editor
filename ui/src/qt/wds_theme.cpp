@@ -26,10 +26,14 @@
 #include <QLibraryInfo>
 #include <QMargins>
 #include <QMetaEnum>
+#include <QPainter>
 #include <QPalette>
 #include <QPluginLoader>
 #include <QPointer>
+#include <QProxyStyle>
 #include <QRegularExpression>
+#include <QStyleOption>
+#include <QSvgRenderer>
 #include <QScrollBar>
 #include <QStyle>
 #include <QStyleFactory>
@@ -420,14 +424,99 @@ bool ensure_svg_image_plugin() {
   QStringList roots = QCoreApplication::libraryPaths();
   const QString plugins = QLibraryInfo::path(QLibraryInfo::PluginsPath);
   if (!plugins.isEmpty()) roots.prepend(plugins);
+  static QList<QPluginLoader*> pinned;
   for (const QString& root : roots) {
     const QString path = QDir(root).filePath(QStringLiteral("imageformats/") + plugin_name);
     if (!QFile::exists(path)) continue;
-    QPluginLoader loader(path);
-    if (loader.load()) break;
+    auto* loader = new QPluginLoader(path);
+    if (loader->load()) {
+      pinned.append(loader);
+      break;
+    }
+    delete loader;
   }
   return QImageReader::supportedImageFormats().contains("svg");
 }
+
+// QSS image:url(theme:...) has failed three Windows attempts (C: scheme,
+// file:///, search-path + qsvg). QStyleSheetStyle::loadPixmap feeds the raw
+// string to QPixmap; if the rule is present and the pixmap is null the box
+// stays blank, and if the rule is stripped Fusion paints Highlight/Accent
+// blue. Draw the Yami SVGs here with Qt6::Svg so neither path is used.
+class YamiIndicatorStyle final : public QProxyStyle {
+ public:
+  explicit YamiIndicatorStyle(QStyle* base) : QProxyStyle(base) {}
+
+  void load_from(const QString& theme_dir, bool light) {
+    qDeleteAll(renderers_);
+    renderers_.clear();
+    const QString folder = light ? QStringLiteral("Light") : QStringLiteral("Yami");
+    const QDir dir(QDir(theme_dir).filePath(folder));
+    const QStringList names = {QStringLiteral("checkbox_unchecked"),
+                               QStringLiteral("checkbox_unchecked_focus"),
+                               QStringLiteral("checkbox_checked"),
+                               QStringLiteral("checkbox_checked_focus"),
+                               QStringLiteral("checkbox_checked_disabled"),
+                               QStringLiteral("checkbox_unchecked_disabled")};
+    for (const QString& name : names) {
+      const QString path = dir.filePath(name + QStringLiteral(".svg"));
+      QFile file(path);
+      auto* renderer = new QSvgRenderer(this);
+      if (file.open(QIODevice::ReadOnly)) renderer->load(file.readAll());
+      if (!renderer->isValid()) {
+        qWarning("WDS theme: missing checkbox SVG %s", qUtf8Printable(path));
+        delete renderer;
+        continue;
+      }
+      renderers_.insert(name, renderer);
+    }
+  }
+
+  void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter,
+                     const QWidget* widget) const override {
+    if ((element == PE_IndicatorCheckBox || element == PE_IndicatorItemViewItemCheck) &&
+        option != nullptr && painter != nullptr) {
+      if (QSvgRenderer* renderer = renderer_for(*option)) {
+        // option->rect is often not square: empty wrap-row boxes are
+        // line-height tall, and QSS margin-right inflates the width.
+        // Stretching the 1:1 SVG into that rect makes a rectangle.
+        const QRect bounds = option->rect;
+        const int side = std::min(bounds.width(), bounds.height());
+        QRect square(0, 0, side, side);
+        square.moveCenter(bounds.center());
+        renderer->render(painter, QRectF(square));
+        return;
+      }
+    }
+    QProxyStyle::drawPrimitive(element, option, painter, widget);
+  }
+
+  int pixelMetric(PixelMetric metric, const QStyleOption* option, const QWidget* widget) const override {
+    if (metric == PM_IndicatorWidth || metric == PM_IndicatorHeight) return 16;
+    return QProxyStyle::pixelMetric(metric, option, widget);
+  }
+
+ private:
+  QSvgRenderer* renderer_for(const QStyleOption& option) const {
+    const bool on = option.state.testFlag(State_On) || option.state.testFlag(State_NoChange);
+    const bool enabled = option.state.testFlag(State_Enabled);
+    const bool hot = option.state.testFlag(State_MouseOver) ||
+                     option.state.testFlag(State_HasFocus) || option.state.testFlag(State_Sunken);
+    QString name;
+    if (!enabled) {
+      name = on ? QStringLiteral("checkbox_checked_disabled")
+                : QStringLiteral("checkbox_unchecked_disabled");
+    } else if (hot) {
+      name = on ? QStringLiteral("checkbox_checked_focus")
+                : QStringLiteral("checkbox_unchecked_focus");
+    } else {
+      name = on ? QStringLiteral("checkbox_checked") : QStringLiteral("checkbox_unchecked");
+    }
+    return renderers_.value(name);
+  }
+
+  QHash<QString, QSvgRenderer*> renderers_;
+};
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).
 constexpr double kFontScale = 12.0;  // pt — matches QApplication and edit-canvas labels
@@ -799,7 +888,10 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
       obs_id == QLatin1String("com.obsproject.Yami.Light")
           ? wds::interaction::theme::ColorScheme::Light
           : wds::interaction::theme::ColorScheme::Dark);
-  QApplication::setStyle(QStyleFactory::create("Fusion"));
+  const bool light = obs_id == QLatin1String("com.obsproject.Yami.Light");
+  auto* indicators = new YamiIndicatorStyle(QStyleFactory::create("Fusion"));
+  indicators->load_from(theme_dir, light);
+  QApplication::setStyle(indicators);
 
   const QString base_content = read_file(QDir(theme_dir).filePath(QStringLiteral("Yami.obt")));
   if (base_content.isEmpty()) return;
@@ -840,14 +932,12 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
   QDir::setSearchPaths(QStringLiteral("resimg"), {QDir(base).filePath(QStringLiteral("Common"))});
   qss.replace(QStringLiteral(":res/images/"), QStringLiteral("resimg:"));
 
-  // QtGui cannot decode SVG unless the Qt Svg image plugin is present. Yami
-  // paints QCheckBox (and other) indicators with image:url(*.svg); a missing
-  // decoder leaves a blank box. Drop those rules so Fusion draws the control
-  // (Accent is the checkbox stroke grey, not the system/theme blue).
-  if (!ensure_svg_image_plugin()) {
-    qss.remove(QRegularExpression(R"(image:\s*url\("[^"]+\.svg"\);)"));
-    qss.remove(QRegularExpression(R"(image:\s*url\([^)]+\.svg\);)"));
-  }
+  // Checkbox SVGs are drawn by YamiIndicatorStyle. Leave those image rules
+  // in QSS and QStyleSheetStyle treats hasImage as true even when the pixmap
+  // is null, which paints an empty box and never reaches the proxy.
+  qss.remove(QRegularExpression(
+      QStringLiteral(R"(image:\s*url\(\s*"?(?:theme:Yami|theme:Light)/checkbox_[^")]+"?\s*\);)")));
+  ensure_svg_image_plugin();
 
   // 5. Force the bundled Noto Sans SC as the primary family so CJK renders and
   // the theme's 'Open Sans' fallback (unbundled, Latin-only) doesn't win.

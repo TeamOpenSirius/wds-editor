@@ -41,6 +41,7 @@
 #include <QSizePolicy>
 #include <QSpinBox>
 #include <QStyle>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -159,8 +160,16 @@ class LabelToggleFilter final : public QObject {
   QCheckBox* box_ = nullptr;
 };
 
-// Word-wrapped QLabel does not emit a layout request when its width changes,
-// so a 2-line hint stays 2-line tall after the window grows. Retrigger HFW.
+// Word-wrapped QLabel paints to the new width but keeps the old layout
+// height: updateGeometry() is ignored while the parent still allocates the
+// stale two-line size. Pin height to heightForWidth so the row can shrink.
+void sync_wrap_label_height(QLabel* label) {
+  if (label == nullptr || !label->wordWrap() || label->width() <= 0) return;
+  const int floor = label->property("wdsMinH").toInt();
+  const int h = std::max({1, floor, label->heightForWidth(label->width())});
+  if (label->minimumHeight() != h || label->maximumHeight() != h) label->setFixedHeight(h);
+}
+
 class WrappingLabel final : public QLabel {
  public:
   using QLabel::QLabel;
@@ -168,7 +177,7 @@ class WrappingLabel final : public QLabel {
  protected:
   void resizeEvent(QResizeEvent* event) override {
     QLabel::resizeEvent(event);
-    if (wordWrap()) updateGeometry();
+    sync_wrap_label_height(this);
   }
 };
 
@@ -179,7 +188,7 @@ class RelayoutOnResizeFilter final : public QObject {
  protected:
   bool eventFilter(QObject* watched, QEvent* event) override {
     if (event->type() == QEvent::Resize) {
-      if (auto* widget = qobject_cast<QWidget*>(watched)) widget->updateGeometry();
+      if (auto* label = qobject_cast<QLabel*>(watched)) sync_wrap_label_height(label);
     }
     return false;
   }
@@ -195,7 +204,7 @@ QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* par
   auto* label = new WrappingLabel(text, parent);
   label->setWordWrap(true);
   label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-  label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   label->setCursor(Qt::PointingHandCursor);
   label->installEventFilter(new LabelToggleFilter(box, label));
   // Match the first text line so the Fusion/SVG indicator (VCentered in the
@@ -203,6 +212,7 @@ QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* par
   box->setFixedWidth(side);
   box->setFixedHeight(std::max(side, label->fontMetrics().height()));
   auto* row = new QWidget(parent);
+  row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
   auto* h = new QHBoxLayout(row);
   h->setContentsMargins(0, 0, 0, 0);
   h->setSpacing(6);
@@ -391,12 +401,12 @@ void wrap_form(QFormLayout* form) {
     if (label == nullptr) continue;
     label->setWordWrap(true);
     label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     label->installEventFilter(new RelayoutOnResizeFilter(label));
     if (QWidget* field = field_item != nullptr ? field_item->widget() : nullptr) {
       field->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
       const int h = field->sizeHint().height();
-      if (h > 0) label->setMinimumHeight(h);
+      if (h > 0) label->setProperty("wdsMinH", h);
     }
   }
 }
@@ -451,12 +461,19 @@ void SettingsPanel::layout_nav_rail() {
 void SettingsPanel::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
   layout_nav_rail();
-  if (QWidget* content = scroll_ != nullptr ? scroll_->widget() : nullptr) {
-    if (QLayout* lay = content->layout()) lay->invalidate();
-    content->updateGeometry();
-  }
-  update_section_scroll_pad();
-  sync_nav_from_scroll();
+  QTimer::singleShot(0, this, [this] {
+    QWidget* content = scroll_ != nullptr ? scroll_->widget() : nullptr;
+    if (content == nullptr) return;
+    const auto labels = content->findChildren<QLabel*>();
+    for (QLabel* label : labels) sync_wrap_label_height(label);
+    if (QLayout* lay = content->layout()) {
+      lay->invalidate();
+      lay->activate();
+    }
+    content->adjustSize();
+    update_section_scroll_pad();
+    sync_nav_from_scroll();
+  });
 }
 
 void SettingsPanel::jump_to_section(int row) {
@@ -628,7 +645,7 @@ void SettingsPanel::build_pages() {
         shortcuts_host);
     shortcut_label->setWordWrap(true);
     shortcut_label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    shortcut_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    shortcut_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     shortcutsLayout->addWidget(shortcut_label, row, 0, Qt::AlignVCenter);
     auto* edit = new QKeySequenceEdit(shortcuts_host);
     // QKeySequenceEdit already paints NativeText (⌘ on macOS, Ctrl on Windows).
