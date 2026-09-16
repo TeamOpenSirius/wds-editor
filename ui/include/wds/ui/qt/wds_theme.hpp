@@ -1,11 +1,24 @@
 #pragma once
 
+#include <QApplication>
 #include <QString>
 #include <QVector>
 
-class QApplication;
+class QEvent;
+class QObject;
 
 namespace wds::ui {
+
+// QApplication::notify calls giveFocusAccordingToFocusPolicy on Wheel before
+// any event filter. Intercept there so hover-wheel cannot focus spin/combo
+// fields or step their values.
+class WdsApplication final : public QApplication {
+ public:
+  using QApplication::QApplication;
+  bool notify(QObject* receiver, QEvent* event) override;
+};
+
+void install_no_wheel_value_inputs(QApplication& app);
 
 struct ThemeInfo {
   QString id;    // e.g. com.obsproject.Yami.Grey

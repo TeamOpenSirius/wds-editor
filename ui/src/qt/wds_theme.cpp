@@ -5,6 +5,7 @@
 #include <QAbstractScrollArea>
 #include <QAbstractSpinBox>
 #include <QApplication>
+#include <QChildEvent>
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -15,12 +16,18 @@
 #include <QEvent>
 #include <QFile>
 #include <QGuiApplication>
+#include <QKeySequenceEdit>
+#ifndef QT_NO_GESTURES
+#include <QNativeGestureEvent>
+#endif
 #include <QHash>
 #include <QHeaderView>
 #include <QImageReader>
+#include <QLibraryInfo>
 #include <QMargins>
 #include <QMetaEnum>
 #include <QPalette>
+#include <QPluginLoader>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QScrollBar>
@@ -37,8 +44,9 @@
 // Compact, self-contained baker for OBS-style .obt themes. Handles the subset
 // the bundled Yami theme uses: @OBSThemeVars declarations (color / size /
 // number / string / var() alias / calc()/min()/max()), var() substitution in
-// the QSS body, palette_* -> QPalette, and url(theme:...) rewriting. This is
-// deliberately not the full OBS engine (no watchers/user density).
+// the QSS body, palette_* -> QPalette, and theme: / :res/images/ as QDir
+// search prefixes (no absolute C:/ or file:/// URLs). This is deliberately
+// not the full OBS engine (no watchers/user density).
 namespace wds::ui {
 namespace {
 
@@ -267,17 +275,108 @@ void install_overlay_scrollbars(QApplication& app) {
   }
 }
 
-// Hover+wheel must not step or focus QSpinBox / QDoubleSpinBox / QComboBox.
-// Those controls sit on the toolbar and in the settings scroll area, so a
-// page scroll over the field is otherwise an accidental value change and
-// keyboard-focus steal. Qt gives WheelFocus in QApplication::notify *before*
-// event filters run, so swallowing Wheel is not enough — also drop WheelFocus.
-void strip_wheel_focus(QWidget* widget) {
-  if (qobject_cast<QAbstractSpinBox*>(widget) == nullptr &&
-      qobject_cast<QComboBox*>(widget) == nullptr) {
-    return;
+// Hover+wheel must not step or focus numeric / combo / shortcut fields. Those
+// sit on the toolbar and in the settings scroll area, so a page scroll over
+// the field is otherwise an accidental value change. QApplication::notify
+// calls giveFocusAccordingToFocusPolicy *before* event filters, so the real
+// intercept lives in WdsApplication::notify; this filter only keeps
+// WheelFocus stripped (and is a fallback if notify is bypassed).
+bool is_wheel_value_input(const QWidget* widget) {
+  return qobject_cast<const QAbstractSpinBox*>(widget) != nullptr ||
+         qobject_cast<const QComboBox*>(widget) != nullptr ||
+         qobject_cast<const QKeySequenceEdit*>(widget) != nullptr;
+}
+
+void drop_wheel_focus_bit(QWidget* widget) {
+  if (widget == nullptr) return;
+  if ((widget->focusPolicy() & Qt::WheelFocus) == Qt::WheelFocus) {
+    widget->setFocusPolicy(Qt::StrongFocus);
   }
-  if (widget->focusPolicy() == Qt::WheelFocus) widget->setFocusPolicy(Qt::StrongFocus);
+}
+
+void strip_wheel_focus(QWidget* widget) {
+  if (widget == nullptr) return;
+  QWidget* owner = nullptr;
+  for (QWidget* cursor = widget; cursor != nullptr; cursor = cursor->parentWidget()) {
+    if (is_wheel_value_input(cursor)) {
+      owner = cursor;
+      break;
+    }
+  }
+  if (owner == nullptr) return;
+  drop_wheel_focus_bit(owner);
+  const auto children = owner->findChildren<QWidget*>();
+  for (QWidget* child : children) drop_wheel_focus_bit(child);
+}
+
+bool steals_wheel_value(const QWidget* widget) {
+  for (const QWidget* cursor = widget; cursor != nullptr; cursor = cursor->parentWidget()) {
+    if (is_wheel_value_input(cursor)) return true;
+  }
+  return false;
+}
+
+QAbstractScrollArea* enclosing_scroll_area(QWidget* widget) {
+  for (QWidget* parent = widget->parentWidget(); parent != nullptr;
+       parent = parent->parentWidget()) {
+    if (auto* area = qobject_cast<QAbstractScrollArea*>(parent)) return area;
+  }
+  return nullptr;
+}
+
+bool inside_active_popup(const QWidget* widget) {
+  const QWidget* popup = QApplication::activePopupWidget();
+  return popup != nullptr && widget != nullptr && widget->window() == popup;
+}
+
+void forward_wheel_to_scroll_area(QWidget* widget, QWheelEvent* wheel) {
+  QAbstractScrollArea* area = enclosing_scroll_area(widget);
+  if (area == nullptr) return;
+  QWidget* viewport = area->viewport();
+  if (viewport == nullptr || viewport == widget) return;
+  const QPointF local = viewport->mapFromGlobal(wheel->globalPosition());
+  QWheelEvent forwarded(local, wheel->globalPosition(), wheel->pixelDelta(), wheel->angleDelta(),
+                        wheel->buttons(), wheel->modifiers(), wheel->phase(), wheel->inverted(),
+                        wheel->source());
+  QCoreApplication::sendEvent(viewport, &forwarded);
+}
+
+bool intercept_no_wheel_value(QObject* receiver, QEvent* event) {
+  const auto type = event->type();
+#ifndef QT_NO_GESTURES
+  const bool pan_gesture =
+      type == QEvent::NativeGesture &&
+      static_cast<const QNativeGestureEvent*>(event)->gestureType() == Qt::PanNativeGesture;
+#else
+  const bool pan_gesture = false;
+#endif
+  if (type != QEvent::Wheel && !pan_gesture) return false;
+  auto* widget = qobject_cast<QWidget*>(receiver);
+  if (widget == nullptr) return false;
+  strip_wheel_focus(widget);
+  if (inside_active_popup(widget) || !steals_wheel_value(widget)) return false;
+  if (type == QEvent::Wheel) {
+    auto* wheel = static_cast<QWheelEvent*>(event);
+    if (!wheel->spontaneous()) return false;
+    forward_wheel_to_scroll_area(widget, wheel);
+    return true;
+  }
+#ifndef QT_NO_GESTURES
+  auto* gesture = static_cast<QNativeGestureEvent*>(event);
+  const QPoint pixel = gesture->delta().toPoint();
+  if (pixel.isNull()) return true;
+  QAbstractScrollArea* area = enclosing_scroll_area(widget);
+  if (area == nullptr) return true;
+  QWidget* viewport = area->viewport();
+  if (viewport == nullptr || viewport == widget) return true;
+  const QPointF local = viewport->mapFromGlobal(gesture->globalPosition());
+  QWheelEvent to_view(local, gesture->globalPosition(), pixel, QPoint(), Qt::NoButton,
+                      gesture->modifiers(), Qt::NoScrollPhase, false);
+  QCoreApplication::sendEvent(viewport, &to_view);
+  return true;
+#else
+  return false;
+#endif
 }
 
 class NoWheelValueFilter final : public QObject {
@@ -286,54 +385,48 @@ class NoWheelValueFilter final : public QObject {
 
   bool eventFilter(QObject* watched, QEvent* event) override {
     const auto type = event->type();
-    if (type == QEvent::Polish || type == QEvent::Show || type == QEvent::StyleChange) {
-      if (auto* widget = qobject_cast<QWidget*>(watched)) strip_wheel_focus(widget);
-    }
-    if (type != QEvent::Wheel) return false;
-    auto* widget = qobject_cast<QWidget*>(watched);
-    if (widget == nullptr || !steals_wheel_value(widget)) return false;
-
-    auto* wheel = static_cast<QWheelEvent*>(event);
-    if (QAbstractScrollArea* area = enclosing_scroll_area(widget)) {
-      if (QWidget* viewport = area->viewport(); viewport != nullptr && viewport != widget) {
-        const QPointF local = viewport->mapFromGlobal(wheel->globalPosition());
-        QWheelEvent forwarded(local, wheel->globalPosition(), wheel->pixelDelta(),
-                              wheel->angleDelta(), wheel->buttons(), wheel->modifiers(),
-                              wheel->phase(), wheel->inverted(), wheel->source());
-        QCoreApplication::sendEvent(viewport, &forwarded);
+    if (type == QEvent::Polish || type == QEvent::Show || type == QEvent::StyleChange ||
+        type == QEvent::ChildPolished) {
+      if (type == QEvent::ChildPolished) {
+        if (auto* child = qobject_cast<QWidget*>(static_cast<QChildEvent*>(event)->child())) {
+          strip_wheel_focus(child);
+        }
+      } else if (auto* widget = qobject_cast<QWidget*>(watched)) {
+        strip_wheel_focus(widget);
+      }
+    } else if (type == QEvent::ChildAdded) {
+      if (auto* child = qobject_cast<QWidget*>(static_cast<QChildEvent*>(event)->child())) {
+        QPointer<QWidget> later(child);
+        QTimer::singleShot(0, child, [later] {
+          if (later) strip_wheel_focus(later);
+        });
       }
     }
-    return true;
-  }
-
- private:
-  static bool steals_wheel_value(const QWidget* widget) {
-    if (qobject_cast<const QAbstractSpinBox*>(widget) != nullptr ||
-        qobject_cast<const QComboBox*>(widget) != nullptr) {
-      return true;
-    }
-    const QWidget* parent = widget->parentWidget();
-    return parent != nullptr && (qobject_cast<const QAbstractSpinBox*>(parent) != nullptr ||
-                                 qobject_cast<const QComboBox*>(parent) != nullptr);
-  }
-
-  static QAbstractScrollArea* enclosing_scroll_area(QWidget* widget) {
-    for (QWidget* parent = widget->parentWidget(); parent != nullptr;
-         parent = parent->parentWidget()) {
-      if (auto* area = qobject_cast<QAbstractScrollArea*>(parent)) return area;
-    }
-    return nullptr;
+    // WdsApplication::notify already consumes steal-wheels before filters.
+    // This path only matters if a plain QApplication is used.
+    return intercept_no_wheel_value(watched, event);
   }
 };
 
-void install_no_wheel_value_inputs(QApplication& app) {
-  static NoWheelValueFilter* filter = nullptr;
-  if (filter == nullptr) {
-    filter = new NoWheelValueFilter(&app);
-    app.installEventFilter(filter);
+bool ensure_svg_image_plugin() {
+  if (QImageReader::supportedImageFormats().contains("svg")) return true;
+#if defined(Q_OS_WIN)
+  const QString plugin_name = QStringLiteral("qsvg.dll");
+#elif defined(Q_OS_MACOS)
+  const QString plugin_name = QStringLiteral("libqsvg.dylib");
+#else
+  const QString plugin_name = QStringLiteral("libqsvg.so");
+#endif
+  QStringList roots = QCoreApplication::libraryPaths();
+  const QString plugins = QLibraryInfo::path(QLibraryInfo::PluginsPath);
+  if (!plugins.isEmpty()) roots.prepend(plugins);
+  for (const QString& root : roots) {
+    const QString path = QDir(root).filePath(QStringLiteral("imageformats/") + plugin_name);
+    if (!QFile::exists(path)) continue;
+    QPluginLoader loader(path);
+    if (loader.load()) break;
   }
-  const auto widgets = app.allWidgets();
-  for (QWidget* widget : widgets) strip_wheel_focus(widget);
+  return QImageReader::supportedImageFormats().contains("svg");
 }
 
 // Runtime values OBS injects; fixed here (no density/font-scale UI).
@@ -629,6 +722,21 @@ constexpr auto kIdLight = "com.obsproject.Yami.Light";
 
 }  // namespace
 
+void install_no_wheel_value_inputs(QApplication& app) {
+  static NoWheelValueFilter* filter = nullptr;
+  if (filter == nullptr) {
+    filter = new NoWheelValueFilter(&app);
+    app.installEventFilter(filter);
+  }
+  const auto widgets = app.allWidgets();
+  for (QWidget* widget : widgets) strip_wheel_focus(widget);
+}
+
+bool WdsApplication::notify(QObject* receiver, QEvent* event) {
+  if (intercept_no_wheel_value(receiver, event)) return true;
+  return QApplication::notify(receiver, event);
+}
+
 QString normalize_theme_preference(const QString& stored) {
   if (stored == QLatin1String(kPrefLight) || stored == QLatin1String(kIdLight))
     return QStringLiteral("light");
@@ -724,37 +832,19 @@ void apply_wds_theme(QApplication& app, const QString& theme_dir, const QString&
     qss.replace(QStringLiteral("var(%1)").arg(name), resolved_string(vars, name));
   }
 
-  // 4. Rewrite theme: / :res/images/ urls to quoted filesystem paths. QSS
-  // image: loads with QImage(path); a file:/// URL is treated as a missing
-  // file and leaves a blank checkbox. Quotes keep spaces and Windows C:
-  // from being parsed as a CSS url scheme.
+  // 4. Keep theme: urls as QDir search-path prefixes so QSS never sees a
+  // Windows drive letter (url("C:/...") → scheme "C") or a file:/// string
+  // that QImage treats as a missing file. :res/images/ is OBS's Common/.
   const QString base = QDir(theme_dir).absolutePath();
-  const auto qss_local_path = [](const QString& local_path) {
-    return QDir::fromNativeSeparators(QDir::cleanPath(local_path));
-  };
-  const auto rewrite_urls = [&](const QRegularExpression& re, const auto& path_for) {
-    QString rewritten;
-    rewritten.reserve(qss.size() + 64);
-    int last = 0;
-    auto it = re.globalMatch(qss);
-    while (it.hasNext()) {
-      const auto m = it.next();
-      rewritten += qss.mid(last, m.capturedStart() - last);
-      rewritten += QStringLiteral("url(\"%1\")").arg(qss_local_path(path_for(m.captured(1).trimmed())));
-      last = m.capturedEnd();
-    }
-    rewritten += qss.mid(last);
-    qss = std::move(rewritten);
-  };
-  rewrite_urls(QRegularExpression(R"(url\(\s*theme:([^)]+)\))"),
-               [&](const QString& rel) { return QDir(base).filePath(rel); });
-  rewrite_urls(QRegularExpression(R"(url\(\s*:res/images/([^)]+)\))"),
-               [&](const QString& rel) { return QDir(base).filePath(QStringLiteral("Common/") + rel); });
+  QDir::setSearchPaths(QStringLiteral("theme"), {base});
+  QDir::setSearchPaths(QStringLiteral("resimg"), {QDir(base).filePath(QStringLiteral("Common"))});
+  qss.replace(QStringLiteral(":res/images/"), QStringLiteral("resimg:"));
 
   // QtGui cannot decode SVG unless the Qt Svg image plugin is present. Yami
   // paints QCheckBox (and other) indicators with image:url(*.svg); a missing
-  // decoder leaves a blank box. Drop those rules so Fusion draws the control.
-  if (!QImageReader::supportedImageFormats().contains("svg")) {
+  // decoder leaves a blank box. Drop those rules so Fusion draws the control
+  // (Accent is the checkbox stroke grey, not the system/theme blue).
+  if (!ensure_svg_image_plugin()) {
     qss.remove(QRegularExpression(R"(image:\s*url\("[^"]+\.svg"\);)"));
     qss.remove(QRegularExpression(R"(image:\s*url\([^)]+\.svg\);)"));
   }

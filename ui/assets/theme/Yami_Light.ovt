@@ -63,6 +63,8 @@
     --scrollbar_hover: var(--grey6);
     --scrollbar_down: var(--grey8);
     --scrollbar_border: var(--grey7);
+
+    --palette_accent: #2e2e2e;
 }
 
 /* --------------------- */
