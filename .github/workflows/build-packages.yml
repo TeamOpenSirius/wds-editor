@@ -90,8 +90,10 @@ jobs:
           target: desktop
           arch: win64_mingw
           archives: qtbase qtsvg
+          # Matching compiler runtimes (libstdc++-6.dll / libgcc / winpthread) for Qt MinGW.
+          tools: tools_mingw1310,qt.tools.mingw1310
           cache: true
-          cache-key-prefix: qt-mingw-6.8.3-qtbase-qtsvg
+          cache-key-prefix: qt-mingw-6.8.3-qtbase-qtsvg-mingw1310
           dir: ${{ github.workspace }}/qt-mingw
           set-env: false
           setup-python: false
@@ -111,6 +113,20 @@ jobs:
           test -n "${mingw_cfg}"
           mingw_root="$(cd "$(dirname "${mingw_cfg}")/../../.." && pwd)"
           echo "WDS_QT_MINGW_ROOT=${mingw_root}" >> "${GITHUB_ENV}"
+          # Prefer Qt-matching MinGW runtimes over the distro cross-compiler DLLs.
+          mingw_tools_bin="$(find "${{ github.workspace }}/qt-mingw" -type f -name 'libstdc++-6.dll' -printf '%h\n' -quit)"
+          if [[ -z "${mingw_tools_bin}" ]]; then
+            mingw_tools_bin="$(find "${{ github.workspace }}/qt-mingw" -type d -name 'bin' -path '*mingw*' -print -quit)"
+          fi
+          if [[ -n "${mingw_tools_bin}" && \
+                -f "${mingw_tools_bin}/libstdc++-6.dll" && \
+                -f "${mingw_tools_bin}/libgcc_s_seh-1.dll" && \
+                -f "${mingw_tools_bin}/libwinpthread-1.dll" ]]; then
+            echo "WDS_MINGW_DLL_DIRS=${mingw_tools_bin}" >> "${GITHUB_ENV}"
+            echo "MinGW runtime DLLs: ${mingw_tools_bin}"
+          else
+            echo "warning: tools_mingw1310 runtimes incomplete; packaging will search Qt + system MinGW" >&2
+          fi
           echo "Host Qt: ${QT_ROOT_DIR}"
           echo "MinGW Qt: ${mingw_root}"
           test -f "${mingw_root}/lib/cmake/Qt6/Qt6Config.cmake"

@@ -5,7 +5,8 @@
 #   macos-arm  — Apple Silicon Mac with Homebrew deps
 #
 # External deps policy (ship everything we can):
-#   win   — static MinGW runtimes + vcpkg static png; ship bass.dll + vulkan-1.dll + Qt
+#   win   — static MinGW runtimes on the exe when possible + vcpkg static png;
+#           ship bass.dll + vulkan-1.dll + Qt + MinGW runtimes required by Qt DLLs
 #   macOS — bundle Homebrew dylibs + MoltenVK into the .app
 set -euo pipefail
 
@@ -290,7 +291,7 @@ This zip is a portable copy of the same payload.
 Bundled next to wds_editor.exe:
   skins\ effects\ fonts\ icons\ shaders\ wds.png
   bass.dll, bassmix.dll, vulkan-1.dll, Uninstall.exe
-MinGW libgcc/libstdc++/winpthread are statically linked into the exe when possible.
+  MinGW runtimes when required by Qt (libstdc++-6 / libgcc_s_seh / libwinpthread)
 
 1. Keep this folder layout intact, then double-click wds_editor.exe.
 2. If Vulkan fails to start, install a Vulkan Runtime from
@@ -344,36 +345,124 @@ make_zip() {
 mingw_dll() {
   local name="$1"
   local path cxx="${WDS_MINGW_CXX}"
+  local -a search=()
+  local d parent libdir g found IFS=':'
+
+  add_search_dir() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    search+=("$dir")
+  }
+
+  if [[ -n "${WDS_MINGW_DLL_DIRS:-}" ]]; then
+    for d in ${WDS_MINGW_DLL_DIRS}; do
+      add_search_dir "$d"
+    done
+  fi
+  for d in "${search[@]}"; do
+    [[ -f "${d}/${name}" ]] && { echo "${d}/${name}"; return 0; }
+  done
+
   path="$("${cxx}" -print-file-name="$name" 2>/dev/null || true)"
   if [[ -n "$path" && "$path" != "$name" && -f "$path" ]]; then
     echo "$path"
     return 0
   fi
-  # Optional colon-separated dirs from env; otherwise probe compiler libdir + common layouts.
-  local -a search=()
-  local d IFS=':'
-  if [[ -n "${WDS_MINGW_DLL_DIRS:-}" ]]; then
-    IFS=':' read -r -a search <<< "${WDS_MINGW_DLL_DIRS}"
-  else
-    local libdir
-    libdir="$("${cxx}" -print-file-name=libstdc++.a 2>/dev/null || true)"
-    if [[ -n "$libdir" && "$libdir" != "libstdc++.a" ]]; then
-      search+=("$(dirname "$libdir")")
-    fi
-    search+=(
-      "/usr/lib/gcc/${WDS_MINGW_TRIPLE}"
-      "/usr/${WDS_MINGW_TRIPLE}/lib"
-    )
-    # Expand versioned gcc dirs if present
-    local g
-    for g in /usr/lib/gcc/${WDS_MINGW_TRIPLE}/*; do
-      [[ -d "$g" ]] && search+=("$g" "${g}-posix" "${g}-win32")
+
+  libdir="$("${cxx}" -print-file-name=libstdc++.a 2>/dev/null || true)"
+  if [[ -n "$libdir" && "$libdir" != "libstdc++.a" ]]; then
+    parent="$(dirname "$libdir")"
+    add_search_dir "$parent"
+    add_search_dir "$(cd "${parent}/.." 2>/dev/null && pwd)/bin"
+    add_search_dir "$(cd "${parent}/../.." 2>/dev/null && pwd)/bin"
+  fi
+  add_search_dir "/usr/lib/gcc/${WDS_MINGW_TRIPLE}"
+  add_search_dir "/usr/${WDS_MINGW_TRIPLE}/lib"
+  add_search_dir "/usr/${WDS_MINGW_TRIPLE}/bin"
+  for g in /usr/lib/gcc/${WDS_MINGW_TRIPLE}/*; do
+    [[ -d "$g" ]] || continue
+    add_search_dir "$g"
+    add_search_dir "${g}-posix"
+    add_search_dir "${g}-win32"
+  done
+  if [[ -n "${WDS_QT_MINGW_ROOT:-}" ]]; then
+    add_search_dir "${WDS_QT_MINGW_ROOT}/bin"
+    parent="$(cd "${WDS_QT_MINGW_ROOT}/.." && pwd)"
+    add_search_dir "${parent}/Tools"
+  fi
+
+  for d in "${search[@]}"; do
+    [[ -f "${d}/${name}" ]] && { echo "${d}/${name}"; return 0; }
+  done
+
+  local -a find_roots=()
+  if [[ -n "${WDS_QT_MINGW_ROOT:-}" && -d "${WDS_QT_MINGW_ROOT}" ]]; then
+    find_roots+=("${WDS_QT_MINGW_ROOT}")
+    parent="$(cd "${WDS_QT_MINGW_ROOT}/.." && pwd)"
+    find_roots+=("$parent")
+    for d in "${parent}/Tools"/mingw*/bin; do
+      add_search_dir "$d"
     done
   fi
+  find_roots+=(
+    "/usr/lib/gcc/${WDS_MINGW_TRIPLE}"
+    "/usr/${WDS_MINGW_TRIPLE}"
+  )
   for d in "${search[@]}"; do
-    [[ -n "$d" && -f "${d}/${name}" ]] && { echo "${d}/${name}"; return 0; }
+    [[ -f "${d}/${name}" ]] && { echo "${d}/${name}"; return 0; }
   done
+  found="$(find "${find_roots[@]}" -maxdepth 6 -type f -name "$name" 2>/dev/null | head -1 || true)"
+  if [[ -n "$found" && -f "$found" ]]; then
+    echo "$found"
+    return 0
+  fi
   return 1
+}
+
+# Qt MinGW DLLs always need these next to the exe, even when the exe is
+# -static-libstdc++. libssp is only copied when a staged PE actually imports it.
+ensure_mingw_runtime_dlls() {
+  local stage="$1"
+  shift
+  local -a prefer_dirs=("$@")
+  local -a required=(libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
+  local -A needed=()
+  local pe dll name src d
+
+  for name in "${required[@]}"; do
+    needed["$name"]=1
+  done
+
+  while IFS= read -r -d '' pe; do
+    while IFS= read -r dll; do
+      case "$dll" in
+        libssp-0.dll) needed["$dll"]=1 ;;
+      esac
+    done < <("${WDS_MINGW_OBJDUMP}" -p "$pe" 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /DLL Name:/{print $3}')
+  done < <(find "$stage" -type f \( -iname '*.exe' -o -iname '*.dll' \) \
+            ! -name 'wds_msi_ca.dll' -print0 2>/dev/null)
+
+  for name in "${required[@]}" libssp-0.dll; do
+    [[ -n "${needed[$name]:-}" ]] || continue
+    [[ -f "${stage}/${name}" ]] && continue
+    src=""
+    for d in "${prefer_dirs[@]}"; do
+      if [[ -n "$d" && -f "${d}/${name}" ]]; then
+        src="${d}/${name}"
+        break
+      fi
+    done
+    if [[ -z "$src" ]]; then
+      src="$(mingw_dll "$name" || true)"
+    fi
+    if [[ -n "$src" && -f "$src" ]]; then
+      echo "Bundling MinGW runtime ${name} from ${src}"
+      cp -a "$src" "${stage}/${name}"
+      chmod u+w "${stage}/${name}" 2>/dev/null || true
+    else
+      die "missing MinGW runtime ${name} (needed by Qt). Set WDS_MINGW_DLL_DIRS to the matching MinGW bin, e.g. Qt/Tools/mingw1310_64/bin"
+    fi
+  done
 }
 
 qt_mingw_root_from_build() {
@@ -463,6 +552,9 @@ copy_qt_win_runtime() {
 Prefix=.
 Plugins=plugins
 EOF
+
+  # Qt DLLs always need MinGW runtimes even when the exe is -static-libstdc++.
+  ensure_mingw_runtime_dlls "$stage" "$qt_bin"
 }
 
 package_win() {
@@ -523,35 +615,14 @@ package_win() {
   fi
   rm -rf "${stage}/config"
 
-  # Prefer statically linked MinGW runtimes; only copy DLLs when the link was dynamic.
-  local dll
-  for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-    if "${WDS_MINGW_OBJDUMP}" -p "${stage}/$(basename "$demo")" 2>/dev/null | \
-         grep -qi "DLL Name: ${dll}"; then
-      local src
-      if src="$(mingw_dll "$dll")"; then
-        cp -a "$src" "${stage}/"
-      else
-        echo "warning: exe imports ${dll} but it was not found" >&2
-      fi
-    fi
-  done
-
-  # Any DLLs already next to the built exe (POST_BUILD bass, rare shared deps).
+  # Side-by-side DLLs from the build tree (POST_BUILD bass, etc.).
+  # MinGW runtimes are resolved after Qt bundling via ensure_mingw_runtime_dlls.
   local side
   for side in "$(dirname "$demo")"/*.dll; do
     [[ -f "$side" ]] || continue
     case "$(basename "$side")" in
-      libstdc++-6.dll|libgcc_s_seh-1.dll|libwinpthread-1.dll)
-        # Skip unless the exe actually imports them (handled above).
-        if "${WDS_MINGW_OBJDUMP}" -p "${stage}/$(basename "$demo")" 2>/dev/null | \
-             grep -qi "DLL Name: $(basename "$side")"; then
-          cp -a "$side" "${stage}/"
-        fi
-        ;;
-      *)
-        cp -a "$side" "${stage}/"
-        ;;
+      libstdc++-6.dll|libgcc_s_seh-1.dll|libwinpthread-1.dll|libssp-0.dll) ;;
+      *) cp -a "$side" "${stage}/" ;;
     esac
   done
 
@@ -792,6 +863,13 @@ text = re.sub(
 text = text.replace('Win64="$(var.Win64)"', 'Win64="yes"')
 
 RUNTIME_DLLS = ("bass.dll", "bassmix.dll", "vulkan-1.dll")
+# Present when Qt MinGW DLLs need them; merge so Repair isn't required.
+OPTIONAL_RUNTIME_DLLS = (
+    "libstdc++-6.dll",
+    "libgcc_s_seh-1.dll",
+    "libwinpthread-1.dll",
+    "libssp-0.dll",
+)
 EXE_NAME = "wds_editor.exe"
 
 
@@ -815,7 +893,7 @@ for m in blocks:
     base = file_source_basename(m.group(0))
     if base == EXE_NAME:
         exe_match = m
-    elif base in RUNTIME_DLLS:
+    elif base in RUNTIME_DLLS or base in OPTIONAL_RUNTIME_DLLS:
         dll_matches[base] = m
 
 if exe_match is None:
@@ -824,10 +902,12 @@ missing = [n for n in RUNTIME_DLLS if n not in dll_matches]
 if missing:
     raise SystemExit(f"heat WXS missing runtime DLL component(s): {', '.join(missing)}")
 
+merge_names = [n for n in RUNTIME_DLLS] + [n for n in OPTIONAL_RUNTIME_DLLS if n in dll_matches]
+
 # Collect DLL <File .../> elements (non-keypath) and drop their Components.
 dll_files = []
 dll_ids = []
-for name in RUNTIME_DLLS:
+for name in merge_names:
     m = dll_matches[name]
     comp = m.group(0)
     cid = re.search(r'\bId="([^"]+)"', comp).group(1)
@@ -836,7 +916,7 @@ for name in RUNTIME_DLLS:
         dll_files.append(strip_keypath(fm.group(0)))
 
 # Newest-last so index math stays valid while deleting.
-for m in sorted(dll_matches.values(), key=lambda x: x.start(), reverse=True):
+for m in sorted((dll_matches[n] for n in merge_names), key=lambda x: x.start(), reverse=True):
     text = text[: m.start()] + text[m.end() :]
 
 # Re-find exe component after deletions.

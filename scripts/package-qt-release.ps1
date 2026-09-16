@@ -37,6 +37,52 @@ if ([string]::IsNullOrWhiteSpace($Windeployqt) -or
 & $Windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw $stagedExe
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
 
+# windeployqt does not copy MinGW C++ runtimes; Qt6*.dll still need all three.
+$qtBin = Split-Path -Parent $Windeployqt
+$mingwSearch = New-Object System.Collections.Generic.List[string]
+$mingwSearch.Add($qtBin)
+$qtRoot = Split-Path -Parent (Split-Path -Parent $qtBin)
+if ($qtRoot) {
+  $tools = Join-Path (Split-Path -Parent $qtRoot) 'Tools'
+  if (Test-Path -LiteralPath $tools) {
+    Get-ChildItem -LiteralPath $tools -Directory -Filter 'mingw*' -ErrorAction SilentlyContinue |
+      ForEach-Object { $mingwSearch.Add((Join-Path $_.FullName 'bin')) }
+  }
+}
+$gxx = Get-Command g++.exe -ErrorAction SilentlyContinue
+if ($gxx) {
+  $printed = & $gxx.Source -print-file-name=libstdc++-6.dll 2>$null
+  if ($printed -and (Test-Path -LiteralPath $printed)) {
+    $mingwSearch.Add((Split-Path -Parent $printed))
+  }
+}
+
+function Find-MingwDll([string]$name) {
+  foreach ($dir in $mingwSearch) {
+    if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+    $candidate = Join-Path $dir $name
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  return $null
+}
+
+foreach ($dll in @(
+  'libstdc++-6.dll',
+  'libgcc_s_seh-1.dll',
+  'libwinpthread-1.dll',
+  'libssp-0.dll'
+)) {
+  $dest = Join-Path $OutputDir $dll
+  if (Test-Path -LiteralPath $dest) { continue }
+  $src = Find-MingwDll $dll
+  if ($src) { Copy-Item -LiteralPath $src -Destination $dest -Force }
+}
+$missingMingw = @('libstdc++-6.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll') |
+  Where-Object { -not (Test-Path -LiteralPath (Join-Path $OutputDir $_)) }
+if ($missingMingw.Count -gt 0) {
+  throw ("Missing MinGW runtime DLL(s) next to wds_editor.exe: " + ($missingMingw -join ', ') + ". Copy them from Qt Tools\mingw*\bin (same folder as g++.exe).")
+}
+
 function Copy-Tree([string]$source, [string]$name) {
   if (-not (Test-Path -LiteralPath $source)) { throw "Required resource directory missing: $source" }
   Copy-Item -LiteralPath $source -Destination (Join-Path $OutputDir $name) -Recurse -Force
