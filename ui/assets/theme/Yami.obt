@@ -611,6 +611,21 @@ QDoubleSpinBox {
     margin-bottom: var(--spacing_input);
 }
 
+/* Do not inherit the input-field vertical margin: it makes the contents
+   taller than the first text line, so Windows CJK captions sit below the
+   16px indicator. Keep the box on the caption line. */
+QCheckBox {
+    margin-top: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+QCheckBox::indicator {
+    subcontrol-origin: content;
+    subcontrol-position: left top;
+}
+
 QListView QWidget,
 QListWidget QWidget {
     margin-top: 0;
