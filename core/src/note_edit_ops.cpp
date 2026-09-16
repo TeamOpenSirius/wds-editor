@@ -112,7 +112,6 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
   const bool target_hold = is_bindable_hold_body(target);
   const bool was_chain = is_hold_chain_body(note.note_type);
   const bool target_chain = is_hold_chain_body(target);
-  const bool target_scratch_chain = is_scratch_hold_body(target) && target_chain;
   const bool split = is_split_lane_gimmick(note.gimmick_type);
 
   if (target_hold) {
@@ -131,7 +130,9 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
     note.gimmick_type = GimmickType::None;
   }
 
-  // scratch_length: flick/Scratch direction, hold-chain end span, or split color.
+  // scratch_length: flick direction, hold-chain end span, or split color.
+  // Hold tail direction is computed from chain geometry unless authored; converting
+  // a non-chain note (Flick ±1 included) always starts as equal-width bidirectional.
   if (!split) {
     if (target == NoteType::Flick) {
       // Hold-chain stores ±width (or wider JumpScratch spans); collapse to flick ±1.
@@ -140,16 +141,7 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
         else if (note.scratch_length > 0) note.scratch_length = 1;
         else note.scratch_length = 0;
       }
-    } else if (target_scratch_chain) {
-      // Flick/Scratch encode ±1; ScratchHold equal-width direction uses ±width.
-      // Hold↔ScratchHold keeps the existing JumpScratch span.
-      if (!was_chain) {
-        if (note.scratch_length < 0) note.scratch_length = -std::max(1, note.width);
-        else if (note.scratch_length > 0) note.scratch_length = std::max(1, note.width);
-        else note.scratch_length = 0;
-      }
     } else if (target_chain) {
-      // Regular hold-chain: keep span only when the source was already a chain.
       if (!was_chain) note.scratch_length = 0;
     } else {
       note.scratch_length = 0;

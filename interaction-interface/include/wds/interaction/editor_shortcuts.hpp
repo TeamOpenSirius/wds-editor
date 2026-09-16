@@ -39,6 +39,14 @@ enum class EditorShortcut : int {
   PlaybackRate2,
   PlaybackRate3,
   ToggleSfxMute,
+  PlaceType0,
+  PlaceType1,
+  PlaceType2,
+  PlaceType3,
+  PlaceType4,
+  PlaceType5,
+  PlaceType6,
+  PlaceType7,
   Count
 };
 
@@ -56,7 +64,7 @@ void set_editor_shortcuts(const std::array<ShortcutChord, kEditorShortcutCount>&
 void reset_editor_shortcuts() noexcept;
 std::array<ShortcutChord, kEditorShortcutCount> editor_shortcuts_snapshot() noexcept;
 
-// Digits / period and other text-field typables cannot be shortcut keys.
+// Period and other text-field typables cannot be shortcut keys; digits are allowed.
 bool is_forbidden_shortcut_key(KeyCode key) noexcept;
 bool is_completing_shortcut_key(KeyCode key) noexcept;
 

@@ -159,6 +159,22 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "playback_rate_3";
     case EditorShortcut::ToggleSfxMute:
       return "toggle_sfx_mute";
+    case EditorShortcut::PlaceType0:
+      return "place_type_0";
+    case EditorShortcut::PlaceType1:
+      return "place_type_1";
+    case EditorShortcut::PlaceType2:
+      return "place_type_2";
+    case EditorShortcut::PlaceType3:
+      return "place_type_3";
+    case EditorShortcut::PlaceType4:
+      return "place_type_4";
+    case EditorShortcut::PlaceType5:
+      return "place_type_5";
+    case EditorShortcut::PlaceType6:
+      return "place_type_6";
+    case EditorShortcut::PlaceType7:
+      return "place_type_7";
     case EditorShortcut::Count:
       break;
   }
@@ -222,6 +238,22 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "播放速度 1x";
     case EditorShortcut::ToggleSfxMute:
       return "音效静音";
+    case EditorShortcut::PlaceType0:
+      return "Tap";
+    case EditorShortcut::PlaceType1:
+      return "ExTap";
+    case EditorShortcut::PlaceType2:
+      return "Hold Head";
+    case EditorShortcut::PlaceType3:
+      return "Hold";
+    case EditorShortcut::PlaceType4:
+      return "Left Flick";
+    case EditorShortcut::PlaceType5:
+      return "Flick";
+    case EditorShortcut::PlaceType6:
+      return "Right Flick";
+    case EditorShortcut::PlaceType7:
+      return "Scratch Hold";
     case EditorShortcut::Count:
       break;
   }
@@ -287,6 +319,22 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return {KeyCode::F4, {}};
     case EditorShortcut::ToggleSfxMute:
       return {static_cast<KeyCode>('X'), {}};
+    case EditorShortcut::PlaceType0:
+      return {KeyCode::Num1, {}};
+    case EditorShortcut::PlaceType1:
+      return {KeyCode::Num2, {}};
+    case EditorShortcut::PlaceType2:
+      return {KeyCode::Num3, {}};
+    case EditorShortcut::PlaceType3:
+      return {KeyCode::Num4, {}};
+    case EditorShortcut::PlaceType4:
+      return {KeyCode::Num5, {}};
+    case EditorShortcut::PlaceType5:
+      return {KeyCode::Num6, {}};
+    case EditorShortcut::PlaceType6:
+      return {KeyCode::Num7, {}};
+    case EditorShortcut::PlaceType7:
+      return {KeyCode::Num8, {}};
     case EditorShortcut::Count:
       break;
   }
@@ -326,8 +374,7 @@ std::array<ShortcutChord, kEditorShortcutCount> editor_shortcuts_snapshot() noex
 }
 
 bool is_forbidden_shortcut_key(KeyCode key) noexcept {
-  if (is_digit_key(key)) return true;
-  // Period and other typable punctuation that text fields accept.
+  // Period and other typable punctuation that text fields accept. Digits are allowed.
   if (static_cast<int>(key) == 46) return true;  // '.'
   return false;
 }
@@ -336,6 +383,7 @@ bool is_completing_shortcut_key(KeyCode key) noexcept {
   if (key == KeyCode::Unknown) return false;
   if (is_forbidden_shortcut_key(key)) return false;
   if (is_letter_key(key)) return true;
+  if (is_digit_key(key)) return true;
   switch (key) {
     case KeyCode::Space:
     case KeyCode::Delete:

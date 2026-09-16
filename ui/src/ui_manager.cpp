@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <QCoreApplication>
@@ -491,6 +492,13 @@ void UiManager::bind_editor_shortcuts() {
       notify_ui_change(UiChange::PlaybackSettings);
     }
   });
+  for (int slot = 0; slot < 8; ++slot) {
+    const auto id = static_cast<wds::interaction::EditorShortcut>(
+        static_cast<int>(wds::interaction::EditorShortcut::PlaceType0) + slot);
+    editor.bind(wds::interaction::editor_shortcut(id), [this, slot] {
+      activate_convert_bar_slot(slot);
+    });
+  }
 }
 
 UiManager::~UiManager() {
@@ -613,8 +621,55 @@ void UiManager::jump_to_error_tick(int32_t tick) {
 
 void UiManager::set_new_note_place_logic(bool enabled) {
   new_note_place_logic_ = enabled;
-  if (!enabled && edit_panel_ != nullptr) {
-    edit_panel_->set_place_intent_override(wds::interaction::PlaceIntent::None);
+  if (edit_panel_ != nullptr) {
+    edit_panel_->set_toolbox_place_mode(enabled);
+  }
+  notify_ui_change(UiChange::PlaceTool);
+}
+
+void UiManager::activate_convert_bar_slot(int slot) {
+  if (slot < 0 || slot >= 8 || has_blocking_modal_dialog()) return;
+  if (session_->read_only()) return;
+  auto* panel = edit_panel();
+  if (panel == nullptr) return;
+
+  static constexpr wds::interaction::PlaceIntent kPlaceTypes[8] = {
+      wds::interaction::PlaceIntent::Tap,           wds::interaction::PlaceIntent::ExTap,
+      wds::interaction::PlaceIntent::HoldStart,     wds::interaction::PlaceIntent::HoldBody,
+      wds::interaction::PlaceIntent::FlickLeft,     wds::interaction::PlaceIntent::Flick,
+      wds::interaction::PlaceIntent::FlickRight,    wds::interaction::PlaceIntent::ScratchHoldBody,
+  };
+  struct ConvertSpec {
+    const char* name;
+    wds::chart_editor::NoteType type;
+    bool flick_direction;
+    int32_t direction;
+  };
+  static constexpr ConvertSpec kSpecs[8] = {
+      {"Tap", wds::chart_editor::NoteType::Normal, false, 0},
+      {"ExTap", wds::chart_editor::NoteType::Critical, false, 0},
+      {"Hold Head", wds::chart_editor::NoteType::HoldStart, false, 0},
+      {"Hold", wds::chart_editor::NoteType::Hold, false, 0},
+      {"Left Flick", wds::chart_editor::NoteType::Flick, true, -1},
+      {"Flick", wds::chart_editor::NoteType::Flick, true, 0},
+      {"Right Flick", wds::chart_editor::NoteType::Flick, true, 1},
+      {"Scratch Hold", wds::chart_editor::NoteType::ScratchHold, false, 0},
+  };
+  const auto& spec = kSpecs[slot];
+  if (new_note_place_logic_) {
+    panel->set_place_intent_override(kPlaceTypes[slot]);
+    notify_ui_change(UiChange::PlaceTool);
+    set_status(std::string("放置类型切换为 ") + spec.name, StatusLevel::Info);
+    return;
+  }
+  if (panel->selected().empty()) {
+    set_status("未选中音符（可在设置→输入中开启类Ched放置逻辑）", StatusLevel::Info);
+    return;
+  }
+  const std::optional<int32_t> direction =
+      spec.flick_direction ? std::optional<int32_t>(spec.direction) : std::nullopt;
+  if (panel->convert_selected(spec.type, direction)) {
+    set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
   }
 }
 
@@ -805,7 +860,7 @@ void UiManager::load_ui_config() {
   apply_display_to_preview(*chart_preview_, cfg);
   apply_display_to_edit(edit_panel_, cfg);
   chart_preview_->set_lane_count(std::clamp(cfg.lane_count, 1, 32));
-  new_note_place_logic_ = cfg.new_note_place_logic;
+  set_new_note_place_logic(cfg.new_note_place_logic);
   capture_curve_template_state(cfg, curve_template_state_);
   if (width_slots_dialog_ != nullptr) width_slots_dialog_->set_config(cfg);
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);

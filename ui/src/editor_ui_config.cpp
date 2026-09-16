@@ -400,10 +400,12 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
 }
 
 void ensure_shortcut_defaults(EditorUiConfig& cfg) {
-  if (cfg.shortcuts_initialized) return;
   for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
-    cfg.shortcuts[i] =
-        wds::interaction::default_editor_shortcut(static_cast<wds::interaction::EditorShortcut>(i));
+    if (!cfg.shortcuts_initialized ||
+        cfg.shortcuts[i].key == wds::interaction::KeyCode::Unknown) {
+      cfg.shortcuts[i] = wds::interaction::default_editor_shortcut(
+          static_cast<wds::interaction::EditorShortcut>(i));
+    }
   }
   cfg.shortcuts_initialized = true;
 }
@@ -505,6 +507,9 @@ bool load_editor_ui_config(const std::string& path, EditorUiConfig& out) {
     }
   }
   apply_curve_load(cfg, curve_state);
+  // Fill missing PlaceType (or any Unknown) even when shortcuts_initialized is already
+  // true, so older configs pick up the 8 new default bindings.
+  ensure_shortcut_defaults(cfg);
   out = cfg;
   if (shortcut_legacy) {
     (void)save_editor_ui_config(path, cfg);

@@ -203,7 +203,43 @@ uint64_t ChartEditPanel::visual_revision() const {
   return h;
 }
 
+void ChartEditPanel::set_toolbox_place_mode(bool enabled) noexcept {
+  toolbox_place_mode_ = enabled;
+  if (enabled) {
+    if (place_intent_override_ == PlaceIntent::None) {
+      place_intent_override_ = PlaceIntent::Tap;
+    }
+  } else {
+    place_intent_override_ = PlaceIntent::None;
+  }
+}
+
+PlaceIntent ChartEditPanel::toolbox_place_intent() const noexcept {
+  return place_intent_override_ == PlaceIntent::None ? PlaceIntent::Tap : place_intent_override_;
+}
+
+bool ChartEditPanel::toolbox_hold_selected() const noexcept {
+  if (!toolbox_place_mode_) return false;
+  const PlaceIntent intent = toolbox_place_intent();
+  return intent == PlaceIntent::HoldBody || intent == PlaceIntent::ScratchHoldBody;
+}
+
+bool ChartEditPanel::hold_button_swap() const noexcept {
+  return hold_scratch_ && !toolbox_place_mode_;
+}
+
 PlaceIntent ChartEditPanel::effective_place_intent(PlaceIntent intent) const noexcept {
+  if (toolbox_place_mode_) {
+    const PlaceIntent selected = toolbox_place_intent();
+    if (selected != PlaceIntent::HoldBody && selected != PlaceIntent::ScratchHoldBody) {
+      return selected;
+    }
+    if (intent == PlaceIntent::HoldBody || intent == PlaceIntent::ScratchHoldBody ||
+        intent == PlaceIntent::Tap) {
+      return selected;
+    }
+    return intent;
+  }
   if (place_intent_override_ == PlaceIntent::None) return intent;
   if (intent == PlaceIntent::Tap) {
     switch (place_intent_override_) {
@@ -924,12 +960,14 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
   // swipe overshoots into BPM / split gutters or leaves the playfield.
   if (mode_ == Mode::PlaceGesture) {
     hide_gutter_ghost();
-    const auto swipe = update_place_swipe(point);
-    const PlaceIntent intent = effective_place_intent(wds::interaction::resolve_place_intent(
-        active_button_, swipe, swipe == SwipeDirection::None));
-    // Type/length may change; position stays on the snapped place anchor.
-    // Feed note-center so lane/tick re-snap matches place_anchor_.
-    apply_intent(intent, place_note_center());
+    if (toolbox_place_mode_) {
+      apply_intent(toolbox_place_intent(), place_note_center());
+    } else {
+      const auto swipe = update_place_swipe(point);
+      const PlaceIntent intent = effective_place_intent(wds::interaction::resolve_place_intent(
+          active_button_, swipe, swipe == SwipeDirection::None));
+      apply_intent(intent, place_note_center());
+    }
     ghost_.visible = true;
     return;
   }
@@ -959,6 +997,20 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
 
   ghost_.note = make_base_note(point);
   ghost_.note.note_type = NoteType::Normal;
+  ghost_.note.scratch_length = 0;
+  ghost_.note.end_tick = ghost_.note.start_tick;
+  if (toolbox_place_mode_) {
+    apply_intent(toolbox_place_intent(), point);
+    if (toolbox_hold_selected()) {
+      ghost_.note.note_type =
+          wds::chart_editor::drawn_hold_body_type(
+              toolbox_place_intent() == PlaceIntent::ScratchHoldBody, active_mods_.shift);
+      ghost_.note.end_tick = ghost_.note.start_tick + min_hold_duration_ticks();
+      ghost_.note.scratch_length = 0;
+    }
+    ghost_.visible = true;
+    return;
+  }
   switch (effective_place_intent(PlaceIntent::Tap)) {
     case PlaceIntent::ExTap:
       ghost_.note.note_type = NoteType::Critical;
@@ -1461,6 +1513,10 @@ void ChartEditPanel::sync_hold_draft_to_pointer(HoldDraftSync sync) {
   // Upward only: end may grow later in time, never earlier than the head.
   hold_draft_.start_tick = start;
   hold_draft_.end_tick = std::max(start, cur);
+  if (toolbox_place_mode_ && hold_chain_prev_id_ < 0) {
+    hold_draft_.end_tick = std::max(hold_draft_.end_tick, start + min_hold_duration_ticks());
+    hold_draft_.scratch_length = 0;
+  }
   if (curve_mode_active_) {
     hold_draft_.width = default_width_;
     ghost_.visible = false;
@@ -1645,6 +1701,12 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // Upward-only placement: never invert head/tail.
   if (hold_draft_.end_tick < hold_draft_.start_tick) {
     hold_draft_.end_tick = hold_draft_.start_tick;
+  }
+  // Toolbox first-segment click is exactly one subdivision — never degrade to Tap.
+  if (toolbox_place_mode_ && hold_chain_prev_id_ < 0 &&
+      hold_draft_.end_tick < hold_draft_.start_tick + min_dur) {
+    hold_draft_.end_tick = hold_draft_.start_tick + min_dur;
+    hold_draft_.scratch_length = 0;
   }
   // Below-minimum length: first segment degrades to Tap / Flick. Chained next with no
   // vertical pull is flick-tail-only — finish commits the previous end cover;
@@ -1860,11 +1922,12 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
 }
 
 void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent& event) {
-  // Axis-locked place swipe (not angle classify). was_click only when there was
-  // no axial swipe, so short left/right flicks are not collapsed into bidirectional.
-  const auto swipe = update_place_swipe(event.position);
-  const PlaceIntent intent = effective_place_intent(wds::interaction::resolve_place_intent(
-      active_button_, swipe, swipe == SwipeDirection::None));
+  PlaceIntent intent = toolbox_place_intent();
+  if (!toolbox_place_mode_) {
+    const auto swipe = update_place_swipe(event.position);
+    intent = effective_place_intent(wds::interaction::resolve_place_intent(
+        active_button_, swipe, swipe == SwipeDirection::None));
+  }
   if (pending_chain_extend_id_ >= 0 && intent == PlaceIntent::Tap) {
     clear_pending_chain_extend();
     mode_ = Mode::Idle;
@@ -1887,6 +1950,11 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
       begin_regular_hold_placement(anchor);
       const int32_t end = viewport_.tick_at(event.position.y);
       hold_draft_.end_tick = std::max(hold_draft_.start_tick, end);
+      if (toolbox_place_mode_) {
+        hold_draft_.end_tick =
+            std::max(hold_draft_.end_tick, hold_draft_.start_tick + min_hold_duration_ticks());
+        hold_draft_.scratch_length = 0;
+      }
       finish_hold_body(false);
       break;
     }
@@ -1903,6 +1971,11 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
       begin_scratch_hold_placement(anchor);
       const int32_t end = viewport_.tick_at(event.position.y);
       hold_draft_.end_tick = std::max(hold_draft_.start_tick, end);
+      if (toolbox_place_mode_) {
+        hold_draft_.end_tick =
+            std::max(hold_draft_.end_tick, hold_draft_.start_tick + min_hold_duration_ticks());
+        hold_draft_.scratch_length = 0;
+      }
       finish_hold_body(false);
       break;
     }
@@ -3770,26 +3843,26 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   }
 
   if (mode_ == Mode::PlaceHoldBody && curve_mode_active_ &&
-      wds::interaction::is_curve_fill_confirm(event, hold_scratch_)) {
+      wds::interaction::is_curve_fill_confirm(event, hold_button_swap())) {
     commit_curve_fill();
     return;
   }
 
   if (mode_ == Mode::PlaceHoldBody &&
-      wds::interaction::is_place_hold_star(event, hold_scratch_)) {
+      wds::interaction::is_place_hold_star(event, hold_button_swap())) {
     add_hold_star_at(event.position);
     return;
   }
   if (mode_ == Mode::PlaceHoldBody &&
-      wds::interaction::is_chain_hold_body(event, hold_scratch_)) {
+      wds::interaction::is_chain_hold_body(event, hold_button_swap())) {
     finish_hold_body(true);
     return;
   }
   // Shift on the star-side button with extra modifiers is not a star and must
   // not start a nested placement or hit-test while the hold is still drawing.
   if (mode_ == Mode::PlaceHoldBody && event.mods.shift) {
-    const bool star_side = hold_scratch_ ? wds::interaction::is_left_button(event.button)
-                                         : wds::interaction::is_right_button(event.button);
+    const bool star_side = hold_button_swap() ? wds::interaction::is_left_button(event.button)
+                                             : wds::interaction::is_right_button(event.button);
     if (star_side) return;
   }
 
@@ -4098,6 +4171,35 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   if (!wds::interaction::is_place_button(event.button)) return;
   if (viewport_.ms_at_y(event.position.y) < 0.0f) return;
 
+  if (toolbox_place_mode_) {
+    place_anchor_ = make_base_note(event.position);
+    place_swipe_.reset();
+    place_gold_head_ = event.mods.shift;
+    const bool scratch = toolbox_place_intent() == PlaceIntent::ScratchHoldBody;
+    if (wds::interaction::is_right_button(event.button)) {
+      if (toolbox_hold_selected()) {
+        try_arm_pending_chain_extend(event.position, scratch);
+        if (pending_chain_extend_id_ >= 0) {
+          if (scratch) begin_scratch_hold_placement(place_note_center());
+          else begin_regular_hold_placement(place_note_center());
+        }
+      }
+      return;
+    }
+    if (!wds::interaction::is_left_button(event.button)) return;
+    if (toolbox_hold_selected()) {
+      if (scratch) begin_scratch_hold_placement(place_note_center());
+      else begin_regular_hold_placement(place_note_center());
+      hold_draft_.end_tick = hold_draft_.start_tick + min_hold_duration_ticks();
+      hold_draft_.scratch_length = 0;
+      sync_hold_placement_ghost();
+      return;
+    }
+    mode_ = Mode::PlaceGesture;
+    update_ghost(event.position);
+    return;
+  }
+
   // Empty area: start placement. Right-click on a selected purple terminal
   // end-cap (including outer-edge slop that hit_test misses) arms chain-extend.
   clear_pending_chain_extend();
@@ -4142,19 +4244,23 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     return;
   }
   if (mode_ == Mode::PlaceGesture) {
-    const auto swipe = update_place_swipe(event.position);
-    if (swipe == SwipeDirection::Up) {
-      const PlaceIntent intent =
-          wds::interaction::resolve_place_intent(active_button_, swipe, false);
-      if (intent == PlaceIntent::HoldBody) {
-        begin_regular_hold_placement(place_note_center());
-      } else if (intent == PlaceIntent::ScratchHoldBody) {
-        begin_scratch_hold_placement(place_note_center());
+    if (toolbox_place_mode_) {
+      update_ghost(event.position);
+    } else {
+      const auto swipe = update_place_swipe(event.position);
+      if (swipe == SwipeDirection::Up) {
+        const PlaceIntent intent =
+            wds::interaction::resolve_place_intent(active_button_, swipe, false);
+        if (intent == PlaceIntent::HoldBody) {
+          begin_regular_hold_placement(place_note_center());
+        } else if (intent == PlaceIntent::ScratchHoldBody) {
+          begin_scratch_hold_placement(place_note_center());
+        } else {
+          update_ghost(event.position);
+        }
       } else {
         update_ghost(event.position);
       }
-    } else {
-      update_ghost(event.position);
     }
   }
   if (mode_ == Mode::PlaceHoldBody) {
@@ -5088,11 +5194,11 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     // Chain/star use the opposite button (down); only the hold's primary button
     // release finishes. ScratchHold finishes on right-up; normal Hold on left-up.
     if (curve_mode_active_ &&
-        (wds::interaction::is_curve_fill_confirm(event, hold_scratch_) ||
-         wds::interaction::is_finish_hold_body(event.button, hold_scratch_))) {
+        (wds::interaction::is_curve_fill_confirm(event, hold_button_swap()) ||
+         wds::interaction::is_finish_hold_body(event.button, hold_button_swap()))) {
       if (commit_curve_fill()) return;
     }
-    if (wds::interaction::is_finish_hold_body(event.button, hold_scratch_)) {
+    if (wds::interaction::is_finish_hold_body(event.button, hold_button_swap())) {
       finish_hold_body(false);
     }
     return;

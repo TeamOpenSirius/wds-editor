@@ -98,9 +98,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   EditSpectrumMode spectrum_mode() const noexcept { return spectrum_mode_; }
   void set_note_height_level(int level) noexcept { viewport_.set_note_height_level(level); }
 
-  // New-style toolbox flow: while set, a plain left click places this intent
-  // instead of Tap. Swipe gestures keep their old meaning; HoldBody /
-  // ScratchHoldBody overrides only redirect the left swipe-up hold type.
+  // Toolbox (new-note-place) mode: left click places the current override type.
+  // Tests call this directly; UiManager wires it from new_note_place_logic.
+  void set_toolbox_place_mode(bool enabled) noexcept;
+  bool toolbox_place_mode() const noexcept { return toolbox_place_mode_; }
+
+  // Selected place type while toolbox mode is on. Tap is the default (not None).
   void set_place_intent_override(wds::interaction::PlaceIntent intent) noexcept {
     place_intent_override_ = intent;
   }
@@ -512,8 +515,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Locked when PlaceGesture starts: Shift was already down at mouse press.
   // The same Shift still places stars; releasing it mid-draw does not retint.
   bool place_gold_head_ = false;
-  // New-style toolbox lock; PlaceIntent::None keeps the classic Tap default.
+  // Toolbox lock. None means classic Tap-default / no lock; toolbox treats None as Tap.
   wds::interaction::PlaceIntent place_intent_override_ = wds::interaction::PlaceIntent::None;
+  bool toolbox_place_mode_ = false;
+  wds::interaction::PlaceIntent toolbox_place_intent() const noexcept;
+  bool toolbox_hold_selected() const noexcept;
+  // Classic ScratchHold swaps L/R; toolbox uses the regular-Hold map for both.
+  bool hold_button_swap() const noexcept;
   wds::interaction::PlaceIntent effective_place_intent(
       wds::interaction::PlaceIntent intent) const noexcept;
 

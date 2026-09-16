@@ -72,6 +72,71 @@
 #include <qt_windows.h>
 #endif
 
+namespace {
+
+// No Ctrl/Alt/Meta (Shift and keypad are ok): letters, digits, punctuation,
+// space, and field-edit keys. Used so typing "1"/"Q" cannot become a shortcut.
+bool is_plain_text_or_field_edit_key(const QKeyEvent* event) {
+  if (event == nullptr) return false;
+  const auto chord_mods =
+      event->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
+  if (chord_mods != Qt::NoModifier) return false;
+
+  switch (event->key()) {
+    case Qt::Key_Backspace:
+    case Qt::Key_Delete:
+    case Qt::Key_Left:
+    case Qt::Key_Right:
+    case Qt::Key_Up:
+    case Qt::Key_Down:
+    case Qt::Key_Home:
+    case Qt::Key_End:
+    case Qt::Key_Space:
+      return true;
+    default:
+      break;
+  }
+
+  const int key = event->key();
+  if (key >= Qt::Key_A && key <= Qt::Key_Z) return true;
+  if (key >= Qt::Key_0 && key <= Qt::Key_9) return true;
+  // Remaining US-ASCII punctuation (',' '!' etc.). Letters/digits already matched.
+  if (key >= 0x21 && key <= 0x7e) return true;
+
+  const QString text = event->text();
+  return !text.isEmpty() && text.at(0).isPrint();
+}
+
+bool matches_standard_edit_chord(const QKeyEvent* event) {
+  return event != nullptr &&
+         (event->matches(QKeySequence::Copy) || event->matches(QKeySequence::Cut) ||
+          event->matches(QKeySequence::Paste) || event->matches(QKeySequence::Undo) ||
+          event->matches(QKeySequence::Redo) || event->matches(QKeySequence::SelectAll));
+}
+
+bool focus_records_shortcut(QWidget* focus) {
+  for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+    if (qobject_cast<QKeySequenceEdit*>(widget) != nullptr) return true;
+  }
+  return false;
+}
+
+bool focus_is_typing_field(QWidget* focus) {
+  if (focus == nullptr) return false;
+  if (qobject_cast<QLineEdit*>(focus) != nullptr ||
+      qobject_cast<QAbstractSpinBox*>(focus) != nullptr ||
+      qobject_cast<QComboBox*>(focus) != nullptr ||
+      qobject_cast<QTextEdit*>(focus) != nullptr ||
+      qobject_cast<QPlainTextEdit*>(focus) != nullptr ||
+      qobject_cast<QKeySequenceEdit*>(focus) != nullptr) {
+    return true;
+  }
+  if (auto* edit = dynamic_cast<wds::ui::ChartEditWidget*>(focus)) return edit->captures_keys();
+  return false;
+}
+
+}  // namespace
+
 namespace wds::ui {
 
 EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -521,6 +586,9 @@ void EditorMainWindow::handle_ui_change(UiChange change) {
     case UiChange::Document:
       refresh_window_title();
       break;
+    case UiChange::PlaceTool:
+      sync_toolbox_place_checks();
+      break;
   }
 }
 
@@ -764,27 +832,14 @@ bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
        type == QEvent::ShortcutOverride) &&
       ui_manager_ != nullptr) {
     auto* key_event = static_cast<QKeyEvent*>(event);
-    const bool typing = [] {
-      QWidget* focus = QApplication::focusWidget();
-      if (focus == nullptr) return false;
-      if (qobject_cast<QLineEdit*>(focus) != nullptr ||
-          qobject_cast<QAbstractSpinBox*>(focus) != nullptr ||
-          qobject_cast<QKeySequenceEdit*>(focus) != nullptr ||
-          qobject_cast<QComboBox*>(focus) != nullptr ||
-          qobject_cast<QTextEdit*>(focus) != nullptr ||
-          qobject_cast<QPlainTextEdit*>(focus) != nullptr) {
-        return true;
-      }
-      if (auto* edit = dynamic_cast<ChartEditWidget*>(focus)) return edit->captures_keys();
-      return false;
-    }();
-    const bool blocked = typing || QApplication::activeModalWidget() != nullptr ||
-                         QApplication::activePopupWidget() != nullptr;
+    QWidget* focus = QApplication::focusWidget();
+    const bool typing = focus_is_typing_field(focus);
+    const bool recording = focus_records_shortcut(focus);
     // macOS often omits Cmd from QKeyEvent/QMouseEvent modifiers. Query the OS
     // so Shift+Cmd curve-fill and Cmd+click stay live even if the canvas
-    // never sees the modifier-only KeyPress.
-    if ((type == QEvent::KeyPress || type == QEvent::KeyRelease) && !key_event->isAutoRepeat() &&
-        QApplication::activeModalWidget() == nullptr) {
+    // never sees the modifier-only KeyPress. Skip while recording a shortcut.
+    if (!recording && (type == QEvent::KeyPress || type == QEvent::KeyRelease) &&
+        !key_event->isAutoRepeat() && QApplication::activeModalWidget() == nullptr) {
       const auto live = type == QEvent::KeyRelease
                             ? qt_live_modifiers()
                             : qt_modifiers(key_event->modifiers() |
@@ -792,7 +847,18 @@ bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
       if (auto* panel = ui_manager_->edit_panel()) panel->sync_active_modifiers(live);
       if (editor_widget_ != nullptr) editor_widget_->update();
     }
-    if (!key_event->isAutoRepeat() && !blocked) {
+    if (recording && (type == QEvent::ShortcutOverride || type == QEvent::KeyPress)) {
+      return false;
+    }
+    if (typing && is_plain_text_or_field_edit_key(key_event)) {
+      if (type == QEvent::ShortcutOverride) {
+        key_event->accept();
+        return true;
+      }
+      if (type == QEvent::KeyPress) return false;
+    }
+    if (typing && matches_standard_edit_chord(key_event)) return false;
+    if (!key_event->isAutoRepeat()) {
       const wds::interaction::KeyDownEvent command{
           qt_key_code(key_event->key()),
           qt_modifiers(key_event->modifiers() | QGuiApplication::queryKeyboardModifiers()),
