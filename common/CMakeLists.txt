@@ -15,7 +15,9 @@ target_include_directories(wds_common
 
 target_compile_features(wds_common PUBLIC cxx_std_17)
 
-set(WDS_APP_VERSION "dev" CACHE STRING "WDS application version string")
+if(NOT WDS_APP_VERSION)
+  set(WDS_APP_VERSION "${PROJECT_VERSION}")
+endif()
 set(WDS_GIT_HASH "unknown")
 find_package(Git QUIET)
 if(Git_FOUND)

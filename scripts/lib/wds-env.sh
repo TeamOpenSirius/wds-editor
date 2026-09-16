@@ -39,9 +39,12 @@ fi
 : "${WDS_MINGW_OBJDUMP:=${WDS_MINGW_TRIPLE}-objdump}"
 : "${WDS_VCPKG_TRIPLET:=x64-mingw-static}"
 : "${WDS_WIXL_VERSION:=0.103}"
-# Product version defaults to the same project() declaration used by the app.
+# Product version defaults to the marketing string in CMakeLists, then project().
 if [[ -z "${WDS_PRODUCT_VERSION:-}" ]]; then
-  WDS_PRODUCT_VERSION="$(sed -nE 's/^project\(wds VERSION ([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' "${_wds_env_root}/CMakeLists.txt")"
+  WDS_PRODUCT_VERSION="$(sed -nE 's/^set\(WDS_APP_VERSION "([^"]+)"\).*/\1/p' "${_wds_env_root}/CMakeLists.txt")"
+  if [[ -z "${WDS_PRODUCT_VERSION}" ]]; then
+    WDS_PRODUCT_VERSION="$(sed -nE 's/^project\(wds VERSION ([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' "${_wds_env_root}/CMakeLists.txt")"
+  fi
 fi
 : "${WDS_MSITOOLS_PREFIX:=${HOME}/.local/opt/msitools}"
 
