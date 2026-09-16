@@ -835,11 +835,19 @@ make_win_msi() {
   local mingw_cc="${WDS_MINGW_CC:-${WDS_MINGW_TRIPLE}-gcc}"
   command -v "${mingw_cc}" >/dev/null 2>&1 || die "MinGW CC (${mingw_cc}) required to build wds_msi_ca.dll"
   echo "Building wds_msi_ca.dll with MinGW…"
-  "${mingw_cc}" -O2 -shared -s \
+  # Static libgcc + --kill-at: msiexec LoadLibrary's this DLL from a temp dir
+  # with no MinGW runtimes on PATH. A missing libgcc_s_*.dll fails the first
+  # install ("cannot run a required program"); Repair skips NOT Installed CAs.
+  "${mingw_cc}" -O2 -shared -s -static-libgcc \
+    -Wl,--kill-at \
     -o "${stage}/wds_msi_ca.dll" \
     "${ROOT}/scripts/wds_msi_ca.c" \
     "${ROOT}/scripts/wds_msi_ca.def" \
-    -lmsi || die "failed to build wds_msi_ca.dll"
+    -lmsi -lole32 -luuid -lshell32 -ladvapi32 || die "failed to build wds_msi_ca.dll"
+  if command -v "${WDS_MINGW_TRIPLE}-objdump" >/dev/null 2>&1; then
+    "${WDS_MINGW_TRIPLE}-objdump" -p "${stage}/wds_msi_ca.dll" | grep -Eq 'LoadShortcutPrefs|ApplyUserShortcuts' \
+      || die "wds_msi_ca.dll missing stdcall exports (check .def / --kill-at)"
+  fi
 
   # Heat wants paths relative to --prefix; keep README for users browsing Program Files.
   # Exclude packaging-only BMP ICO / CA DLL from the installed payload.
@@ -857,132 +865,8 @@ make_win_msi() {
           --win64
   ) >"$heat_wxs"
 
-  # Fix heat output for a reliable first-install payload:
-  # 1) Hoist <Directory Name="."> root files directly under INSTALLDIR.
-  # 2) Force Win64="yes" (avoid broken $(var.Win64) expansion → 32-bit components).
-  # 3) Merge private runtime DLLs into the wds_editor.exe component so they cannot be
-  #    skipped independently (classic "missing bass.dll until Repair" failure mode).
-  python3 - "$heat_wxs" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-
-# Hoist every <Directory Name=".">…</Directory> block (one or many Components).
-text = re.sub(
-    r'<Directory Id="[^"]+" Name="\.">\s*([\s\S]*?)\s*</Directory>',
-    r"\1",
-    text,
-)
-
-text = text.replace('Win64="$(var.Win64)"', 'Win64="yes"')
-
-RUNTIME_DLLS = ("bass.dll", "bassmix.dll", "vulkan-1.dll")
-# Present when Qt MinGW DLLs need them; merge so Repair isn't required.
-OPTIONAL_RUNTIME_DLLS = (
-    "libstdc++-6.dll",
-    "libgcc_s_seh-1.dll",
-    "libwinpthread-1.dll",
-    "libssp-0.dll",
-)
-EXE_NAME = "wds_editor.exe"
-
-
-def component_blocks(xml):
-    return list(re.finditer(r"<Component\b[^>]*>[\s\S]*?</Component>", xml))
-
-
-def file_source_basename(comp_xml):
-    m = re.search(r'Source="[^"]*[/\\]([^"/\\]+)"', comp_xml)
-    return m.group(1) if m else None
-
-
-def strip_keypath(file_xml):
-    return re.sub(r'\s+KeyPath="yes"', "", file_xml, count=1)
-
-
-blocks = component_blocks(text)
-exe_match = None
-dll_matches = {}
-for m in blocks:
-    base = file_source_basename(m.group(0))
-    if base == EXE_NAME:
-        exe_match = m
-    elif base in RUNTIME_DLLS or base in OPTIONAL_RUNTIME_DLLS:
-        dll_matches[base] = m
-
-if exe_match is None:
-    raise SystemExit(f"heat WXS missing {EXE_NAME} component")
-missing = [n for n in RUNTIME_DLLS if n not in dll_matches]
-if missing:
-    raise SystemExit(f"heat WXS missing runtime DLL component(s): {', '.join(missing)}")
-
-merge_names = [n for n in RUNTIME_DLLS] + [n for n in OPTIONAL_RUNTIME_DLLS if n in dll_matches]
-
-# Collect DLL <File .../> elements (non-keypath) and drop their Components.
-dll_files = []
-dll_ids = []
-for name in merge_names:
-    m = dll_matches[name]
-    comp = m.group(0)
-    cid = re.search(r'\bId="([^"]+)"', comp).group(1)
-    dll_ids.append(cid)
-    for fm in re.finditer(r"<File\b[^>]*/>", comp):
-        dll_files.append(strip_keypath(fm.group(0)))
-
-# Newest-last so index math stays valid while deleting.
-for m in sorted((dll_matches[n] for n in merge_names), key=lambda x: x.start(), reverse=True):
-    text = text[: m.start()] + text[m.end() :]
-
-# Re-find exe component after deletions.
-exe_match = None
-for m in component_blocks(text):
-    if file_source_basename(m.group(0)) == EXE_NAME:
-        exe_match = m
-        break
-if exe_match is None:
-    raise SystemExit(f"lost {EXE_NAME} component while merging runtime DLLs")
-
-exe_comp = exe_match.group(0)
-if "</Component>" not in exe_comp:
-    raise SystemExit("malformed exe component")
-merged = exe_comp.replace(
-    "</Component>",
-    "".join(f"\n      {f}" for f in dll_files) + "\n    </Component>",
-    1,
-)
-text = text[: exe_match.start()] + merged + text[exe_match.end() :]
-
-# Drop ComponentRefs for removed DLL components.
-for cid in dll_ids:
-    text = re.sub(
-        rf'\s*<ComponentRef Id="{re.escape(cid)}"/>\s*',
-        "\n",
-        text,
-    )
-
-path.write_text(text, encoding="utf-8")
-
-# Hard fail if merge did not stick (packaging host must not ship a broken MSI).
-final = path.read_text(encoding="utf-8")
-if "bass.dll" not in final or "bassmix.dll" not in final or "vulkan-1.dll" not in final:
-    raise SystemExit("runtime DLLs missing from heat WXS after merge")
-if final.count("bass.dll") != 1 or final.count("bassmix.dll") != 1 or final.count("vulkan-1.dll") != 1:
-    raise SystemExit("runtime DLL Source paths must appear exactly once after merge")
-exe_blocks = [
-    m.group(0)
-    for m in component_blocks(final)
-    if file_source_basename(m.group(0)) == EXE_NAME
-]
-if len(exe_blocks) != 1 or "bass.dll" not in exe_blocks[0] or "bassmix.dll" not in exe_blocks[0] or "vulkan-1.dll" not in exe_blocks[0]:
-    raise SystemExit("bass.dll/bassmix.dll/vulkan-1.dll must live inside the wds_editor.exe component")
-print(
-    "MSI harvest: hoisted root files; Win64=yes; "
-    "merged bass.dll+bassmix.dll+vulkan-1.dll into wds_editor.exe component"
-)
-PY
+  python3 "${ROOT}/scripts/win-msi-harvest.py" "$heat_wxs" \
+    || die "win-msi-harvest.py failed"
 
   mkdir -p "$(dirname "$msi_path")"
   rm -f "$msi_path"
@@ -1002,30 +886,34 @@ PY
   [[ -f "$msi_path" ]] || die "wixl did not produce $msi_path"
 
   # wixl ignores Property/@Secure and crashes if SecureCustomProperties is authored
-  # in the .wxs. Patch the built MSI so CREATE_* checkbox values reach elevated Execute
-  # (Persist + ApplyShortcutFeatureStates). Without this, Execute resets them to "1".
+  # in the .wxs. Append CREATE_* / WDS_INSTALLDIR onto whatever wixl already wrote
+  # (do not replace — that dropped ADDLOCAL/REMOVE and broke overlay installs).
   need_cmd msibuild
+  need_cmd msiinfo
+  msiinfo --help >/dev/null 2>&1 || die "msiinfo is not runnable (check LD_LIBRARY_PATH / msitools install)"
+  local props=""
+  props="$(msiinfo_export "$msi_path" Property | tr -d '\r')" || die "msiinfo failed: Property"
+  local scp="" extra p
+  scp="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
+  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT"
+  IFS=';'
+  for p in $extra; do
+    [[ -z "$p" ]] && continue
+    if [[ ";${scp};" != *";${p};"* ]]; then
+      scp="${scp:+${scp};}${p}"
+    fi
+  done
+  unset IFS
+  [[ -n "$scp" ]] || die "SecureCustomProperties is empty after merge"
   msibuild "$msi_path" -q \
-    "UPDATE Property SET Value='CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WIX_UPGRADE_DETECTED;WIX_SAME_VERSION_UPGRADE_DETECTED;WIX_DOWNGRADE_DETECTED' WHERE Property='SecureCustomProperties'" \
+    "UPDATE Property SET Value='${scp}' WHERE Property='SecureCustomProperties'" \
     || die "msibuild failed to patch SecureCustomProperties"
-  echo "Patched SecureCustomProperties (CREATE_* UI→Execute)"
-
-  # MigrateFeatureStates (after CostFinalize) re-applies the previous product's
-  # shortcut feature states and defeats AddLocal for previously-absent shortcuts.
-  # ProductFeature is Level=1 and always installed; shortcut features are driven by
-  # CREATE_* via ApplyShortcutFeatureStatesPreCost before CostFinalize.
-  msibuild "$msi_path" -q \
-    "DELETE FROM InstallExecuteSequence WHERE Action='MigrateFeatureStates'" \
-    || die "msibuild failed to remove MigrateFeatureStates"
-  echo "Removed MigrateFeatureStates (shortcut feature selection)"
+  echo "Patched SecureCustomProperties (append CREATE_* / WDS_INSTALLDIR)"
 
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
   # used to look like "missing BrowseDlg" when libmsi was not loadable.
-  need_cmd msiinfo
-  msiinfo --help >/dev/null 2>&1 || die "msiinfo is not runnable (check LD_LIBRARY_PATH / msitools install)"
-
-  local ui_seq="" events="" features="" customs="" dialogs="" props="" regs="" upgrades=""
+  local ui_seq="" events="" features="" customs="" dialogs="" regs="" upgrades=""
   ui_seq="$(msiinfo_export "$msi_path" InstallUISequence | tr -d '\r')" || die "msiinfo failed: InstallUISequence"
   events="$(msiinfo_export "$msi_path" ControlEvent | tr -d '\r')" || die "msiinfo failed: ControlEvent"
   features="$(msiinfo_export "$msi_path" Feature | tr -d '\r')" || die "msiinfo failed: Feature"
@@ -1049,69 +937,74 @@ PY
     die "MSI missing explicit CREATE_DESKTOP_SHORTCUT=0 on uncheck"
   grep -Fq $'[CREATE_STARTMENU_SHORTCUT]\t0\tNOT CREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
     die "MSI missing explicit CREATE_STARTMENU_SHORTCUT=0 on uncheck"
-  grep -Fq $'AddLocal\tDesktopFeature\tCREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
-    die "MSI missing conditional AddLocal for DesktopFeature"
-  grep -Fq $'Remove\tDesktopFeature\tNOT CREATE_DESKTOP_SHORTCUT="1"' <<<"${events}" || \
-    die "MSI missing conditional Remove for DesktopFeature"
-  grep -Fq $'AddLocal\tStartMenuFeature\tCREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
-    die "MSI missing conditional AddLocal for StartMenuFeature"
-  grep -Fq $'Remove\tStartMenuFeature\tNOT CREATE_STARTMENU_SHORTCUT="1"' <<<"${events}" || \
-    die "MSI missing conditional Remove for StartMenuFeature"
-  grep -q 'DesktopFeature' <<<"${features}" || die "MSI missing DesktopFeature"
-  grep -q 'StartMenuFeature' <<<"${features}" || die "MSI missing StartMenuFeature"
+  grep -Fq $'AddLocal\tDesktopFeature' <<<"${events}" && \
+    die "MSI still uses AddLocal DesktopFeature (shortcuts are CA-owned)"
+  grep -q 'DesktopFeature' <<<"${features}" && \
+    die "MSI still has DesktopFeature (shortcuts are CA-owned)"
+  grep -q 'StartMenuFeature' <<<"${features}" && \
+    die "MSI still has StartMenuFeature (shortcuts are CA-owned)"
   grep -q 'BrowseDlg' <<<"${dialogs}" || die "MSI missing BrowseDlg"
   grep -Fq 'SetInstallDirFromBrowse' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromBrowse custom action"
   grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
-  grep -Fq 'ApplyDesktopPrefFromReg' <<<"${customs}" || \
-    die "MSI missing ApplyDesktopPrefFromReg custom action"
-  grep -Fq 'PersistDesktopShortcutOn' <<<"${customs}" || \
-    die "MSI missing PersistDesktopShortcutOn custom action"
-  grep -Fq 'ApplyShortcutFeatureStatesPreCost' <<<"${customs}" || \
-    die "MSI missing ApplyShortcutFeatureStatesPreCost custom action"
-  grep -Fq 'ApplyShortcutFeatureStates' <<<"${customs}" || \
-    die "MSI missing ApplyShortcutFeatureStates custom action"
+  grep -Fq 'LoadShortcutPrefs' <<<"${customs}" || \
+    die "MSI missing LoadShortcutPrefs custom action"
+  grep -Fq 'ApplyUserShortcuts' <<<"${customs}" || \
+    die "MSI missing ApplyUserShortcuts custom action"
+  grep -Fq 'SetApplyShortcutsData' <<<"${customs}" || \
+    die "MSI missing SetApplyShortcutsData custom action"
+  grep -Fq 'ApplyWdsInstallDir' <<<"${customs}" || \
+    die "MSI missing ApplyWdsInstallDir custom action"
   grep -Fq $'CREATE_DESKTOP_SHORTCUT' <<<"${props}" || \
     die "MSI missing CREATE_DESKTOP_SHORTCUT property"
+  grep -Fq $'WDS_INSTALLDIR' <<<"${props}" || \
+    die "MSI missing WDS_INSTALLDIR property"
   grep -Fq $'SecureCustomProperties' <<<"${props}" || \
     die "MSI missing SecureCustomProperties"
   grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
     die "SecureCustomProperties must include CREATE_DESKTOP_SHORTCUT (UI→Execute)"
   grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
     die "SecureCustomProperties must include CREATE_STARTMENU_SHORTCUT (UI→Execute)"
+  grep -Fq 'WDS_INSTALLDIR' <<<"$(awk -F'\t' '$1=="SecureCustomProperties"{print $2}' <<<"${props}")" || \
+    die "SecureCustomProperties must include WDS_INSTALLDIR (UI→Execute)"
   local exe_seq=""
   exe_seq="$(msiinfo_export "$msi_path" InstallExecuteSequence | tr -d '\r')" || \
     die "msiinfo failed: InstallExecuteSequence"
-  grep -Fq 'ApplyShortcutFeatureStatesPreCost' <<<"${exe_seq}" || \
-    die "MSI missing ApplyShortcutFeatureStatesPreCost in InstallExecuteSequence"
-  grep -Fq 'ApplyShortcutFeatureStates' <<<"${exe_seq}" || \
-    die "MSI missing ApplyShortcutFeatureStates in InstallExecuteSequence"
-  grep -Fq 'MigrateFeatureStates' <<<"${exe_seq}" && \
-    die "MSI still schedules MigrateFeatureStates (blocks shortcut ABSENT→LOCAL)"
-  # PreCost must run after FileCost and before CostFinalize.
-  local precost_seq filecost_seq cost_seq
-  precost_seq="$(awk -F'\t' '$1=="ApplyShortcutFeatureStatesPreCost"{print $3; exit}' <<<"${exe_seq}")"
-  filecost_seq="$(awk -F'\t' '$1=="FileCost"{print $3; exit}' <<<"${exe_seq}")"
-  cost_seq="$(awk -F'\t' '$1=="CostFinalize"{print $3; exit}' <<<"${exe_seq}")"
-  [[ -n "${precost_seq}" && -n "${filecost_seq}" && -n "${cost_seq}" \
-      && "${precost_seq}" -gt "${filecost_seq}" && "${precost_seq}" -lt "${cost_seq}" ]] || \
-    die "ApplyShortcutFeatureStatesPreCost (${precost_seq:-unset}) must be after FileCost (${filecost_seq:-unset}) and before CostFinalize (${cost_seq:-unset})"
+  grep -Fq 'ApplyUserShortcuts' <<<"${exe_seq}" || \
+    die "MSI missing ApplyUserShortcuts in InstallExecuteSequence"
+  grep -Fq 'SetApplyShortcutsData' <<<"${exe_seq}" || \
+    die "MSI missing SetApplyShortcutsData in InstallExecuteSequence"
+  grep -Fq 'LoadShortcutPrefs' <<<"${ui_seq}" || \
+    die "MSI missing LoadShortcutPrefs in InstallUISequence"
+  local apply_seq files_seq data_seq
+  apply_seq="$(awk -F'\t' '$1=="ApplyUserShortcuts"{print $3; exit}' <<<"${exe_seq}")"
+  files_seq="$(awk -F'\t' '$1=="InstallFiles"{print $3; exit}' <<<"${exe_seq}")"
+  data_seq="$(awk -F'\t' '$1=="SetApplyShortcutsData"{print $3; exit}' <<<"${exe_seq}")"
+  [[ -n "${apply_seq}" && -n "${files_seq}" && "${apply_seq}" -gt "${files_seq}" ]] || \
+    die "ApplyUserShortcuts (${apply_seq:-unset}) must be after InstallFiles (${files_seq:-unset})"
+  [[ -n "${data_seq}" && "${data_seq}" -lt "${apply_seq}" ]] || \
+    die "SetApplyShortcutsData (${data_seq:-unset}) must be before ApplyUserShortcuts (${apply_seq:-unset})"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
-  grep -q 'FindDesktopShortcutPref' <<<"${regs}" || \
-    die "MSI missing FindDesktopShortcutPref registry search"
-  grep -q 'FindStartMenuShortcutPref' <<<"${regs}" || \
-    die "MSI missing FindStartMenuShortcutPref registry search"
   grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing MajorUpgrade Upgrade table entry"
-  # Runtime DLLs must be in the File table (merged into the exe component at harvest).
-  local files_tbl=""
+  local files_tbl="" comps_tbl=""
   files_tbl="$(msiinfo_export "$msi_path" File | tr -d '\r')" || die "msiinfo failed: File"
+  comps_tbl="$(msiinfo_export "$msi_path" Component | tr -d '\r')" || die "msiinfo failed: Component"
   grep -Fq 'bass.dll' <<<"${files_tbl}" || die "MSI File table missing bass.dll"
   grep -Fq 'bassmix.dll' <<<"${files_tbl}" || die "MSI File table missing bassmix.dll"
   grep -Fq 'vulkan-1.dll' <<<"${files_tbl}" || die "MSI File table missing vulkan-1.dll"
   grep -Fq 'wds_editor.exe' <<<"${files_tbl}" || die "MSI File table missing wds_editor.exe"
+  grep -Fq 'libstdc++-6.dll' <<<"${files_tbl}" || die "MSI File table missing libstdc++-6.dll"
+  grep -Fq 'libgcc_s_seh-1.dll' <<<"${files_tbl}" || die "MSI File table missing libgcc_s_seh-1.dll"
+  grep -Fq 'libwinpthread-1.dll' <<<"${files_tbl}" || die "MSI File table missing libwinpthread-1.dll"
+  grep -Eq $'WdsEditorPayload\t.*INSTALLDIR' <<<"${comps_tbl}" || \
+    die "WdsEditorPayload must live under INSTALLDIR"
+  local shortcut_tbl=""
+  shortcut_tbl="$(msiinfo_export "$msi_path" Shortcut 2>/dev/null | tr -d '\r' || true)"
+  grep -Eq 'WdsEditor(Desktop|StartMenu)' <<<"${shortcut_tbl}" && \
+    die "MSI must not author WdsEditor* shortcuts (ApplyUserShortcuts owns .lnk files)"
   # InstallDirDlg must run after FindRelatedProducts / costing (not sequence 1).
   local dir_seq
   dir_seq="$(awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}' <<<"${ui_seq}")"

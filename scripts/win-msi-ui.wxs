@@ -11,15 +11,14 @@
     ExitDialog     - completion
 
   Notes for wixl 0.103:
-  - PathEdit without Indirect (Indirect is ignored / unstable in wixl)
+  - PathEdit binds to WDS_INSTALLDIR (not INSTALLDIR). Binding PathEdit to the
+    Directory property can wipe the Program Files path on first install.
   - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
-  - Shortcut toggles via AddLocal/Remove ControlEvents (no Component/Feature Condition)
-  - Unchecked boxes clear the property; Next writes explicit "0" so SecureCustomProperties
-    passes the choice into elevated Execute (otherwise Execute keeps Property default "1")
-  - Execute applies CREATE_* before CostFinalize (and again after MigrateFeatureStates)
-  - Conditions use CREATE_*="1" so registry-loaded "0" stays unchecked / removed
-  - Defaults on update come from HKLM Create*Shortcut (see win-msi-product.wxs)
-  - CREATE_* are patched into SecureCustomProperties after wixl (see package-target.sh)
+  - Unchecked boxes clear the property; Next writes explicit "0" so
+    SecureCustomProperties passes the off state into elevated Execute
+  - Shortcuts are created by ApplyUserShortcuts (DLL), not AddLocal/Remove
+  - Defaults on update come from HKLM via LoadShortcutPrefs
+  - CREATE_* / WDS_INSTALLDIR are appended to SecureCustomProperties after wixl
   - ASCII UI strings only (MSI codepage 1252)
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -58,7 +57,7 @@
         <Control Id="FolderLabel" Type="Text" X="20" Y="60" Width="330" Height="20" NoPrefix="yes"
                  Text="Folder:"/>
         <Control Id="Folder" Type="PathEdit" X="20" Y="100" Width="245" Height="18"
-                 Property="INSTALLDIR"/>
+                 Property="WDS_INSTALLDIR"/>
         <Control Id="Browse" Type="PushButton" X="275" Y="99" Width="75" Height="20" Text="Browse...">
           <!-- Start the folder picker under Program Files; OK appends \WDS Editor. -->
           <Publish Property="WDSINSTALLPARENT" Value="[ProgramFiles64Folder]" Order="1">1</Publish>
@@ -68,8 +67,9 @@
                  Text="Use Browse to pick a parent folder. The installer always appends \WDS Editor to that folder."/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
-          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="1">1</Publish>
-          <Publish Event="NewDialog" Value="ShortcutsDlg" Order="2">1</Publish>
+          <Publish Event="DoAction" Value="ApplyWdsInstallDir" Order="1">1</Publish>
+          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="2">1</Publish>
+          <Publish Event="NewDialog" Value="ShortcutsDlg" Order="3">1</Publish>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
@@ -108,8 +108,9 @@
                  Property="WDSINSTALLPARENT"/>
         <Control Id="OK" Type="PushButton" X="180" Y="243" Width="56" Height="17" Default="yes" Text="OK">
           <Publish Event="DoAction" Value="SetInstallDirFromBrowse" Order="1">1</Publish>
-          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="2">1</Publish>
-          <Publish Event="EndDialog" Value="Return" Order="3">1</Publish>
+          <Publish Event="DoAction" Value="InitWdsInstallDir" Order="2">1</Publish>
+          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="3">1</Publish>
+          <Publish Event="EndDialog" Value="Return" Order="4">1</Publish>
         </Control>
         <Control Id="CancelBrowse" Type="PushButton" X="244" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="EndDialog" Value="Return">1</Publish>
@@ -159,21 +160,12 @@
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
           <!-- CheckBox clears the property when unchecked; SecureCustomProperties only
                forwards *set* values, so an empty CREATE_* leaves Execute at default "1".
-               Force "0" before AddLocal/Remove so Persist + feature CAs see the real choice.
                wixl only honors Condition= attribute (not Publish element body). -->
           <Publish Property="CREATE_DESKTOP_SHORTCUT" Value="0" Order="1"
                    Condition="NOT CREATE_DESKTOP_SHORTCUT=&quot;1&quot;"/>
           <Publish Property="CREATE_STARTMENU_SHORTCUT" Value="0" Order="2"
                    Condition="NOT CREATE_STARTMENU_SHORTCUT=&quot;1&quot;"/>
-          <Publish Event="AddLocal" Value="DesktopFeature" Order="3"
-                   Condition="CREATE_DESKTOP_SHORTCUT=&quot;1&quot;"/>
-          <Publish Event="Remove" Value="DesktopFeature" Order="4"
-                   Condition="NOT CREATE_DESKTOP_SHORTCUT=&quot;1&quot;"/>
-          <Publish Event="AddLocal" Value="StartMenuFeature" Order="5"
-                   Condition="CREATE_STARTMENU_SHORTCUT=&quot;1&quot;"/>
-          <Publish Event="Remove" Value="StartMenuFeature" Order="6"
-                   Condition="NOT CREATE_STARTMENU_SHORTCUT=&quot;1&quot;"/>
-          <Publish Event="EndDialog" Value="Return" Order="7">1</Publish>
+          <Publish Event="EndDialog" Value="Return" Order="3">1</Publish>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>

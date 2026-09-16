@@ -1,3 +1,4 @@
 LIBRARY wds_msi_ca
 EXPORTS
-    ApplyShortcutFeatureStates
+    LoadShortcutPrefs
+    ApplyUserShortcuts
