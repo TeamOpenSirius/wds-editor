@@ -835,18 +835,24 @@ make_win_msi() {
   local mingw_cc="${WDS_MINGW_CC:-${WDS_MINGW_TRIPLE}-gcc}"
   command -v "${mingw_cc}" >/dev/null 2>&1 || die "MinGW CC (${mingw_cc}) required to build wds_msi_ca.dll"
   echo "Building wds_msi_ca.dll with MinGW…"
-  # Static libgcc + --kill-at: msiexec LoadLibrary's this DLL from a temp dir
-  # with no MinGW runtimes on PATH. A missing libgcc_s_*.dll fails the first
-  # install ("cannot run a required program"); Repair skips NOT Installed CAs.
+  # Static libgcc + winpthread + --kill-at: msiexec LoadLibrary's this DLL from
+  # a temp dir with no MinGW runtimes on PATH. A missing libgcc_s_*.dll /
+  # libwinpthread-1.dll fails the first install ("cannot run a required
+  # program"); Repair skips first-install-only CAs and "succeeds".
   "${mingw_cc}" -O2 -shared -s -static-libgcc \
     -Wl,--kill-at \
     -o "${stage}/wds_msi_ca.dll" \
     "${ROOT}/scripts/wds_msi_ca.c" \
     "${ROOT}/scripts/wds_msi_ca.def" \
+    -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
     -lmsi -lole32 -luuid -lshell32 -ladvapi32 || die "failed to build wds_msi_ca.dll"
   if command -v "${WDS_MINGW_TRIPLE}-objdump" >/dev/null 2>&1; then
-    "${WDS_MINGW_TRIPLE}-objdump" -p "${stage}/wds_msi_ca.dll" | grep -Eq 'LoadShortcutPrefs|ApplyUserShortcuts' \
+    local ca_dump=""
+    ca_dump="$("${WDS_MINGW_TRIPLE}-objdump" -p "${stage}/wds_msi_ca.dll")"
+    grep -Eq 'ApplyUserShortcuts' <<<"${ca_dump}" \
       || die "wds_msi_ca.dll missing stdcall exports (check .def / --kill-at)"
+    grep -Eiq 'DLL Name: (libgcc_s|libstdc\+\+|libwinpthread)' <<<"${ca_dump}" \
+      && die "wds_msi_ca.dll still imports MinGW runtime DLLs (msiexec LoadLibrary will fail)"
   fi
 
   # Heat wants paths relative to --prefix; keep README for users browsing Program Files.
@@ -914,6 +920,7 @@ make_win_msi() {
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
   # used to look like "missing BrowseDlg" when libmsi was not loadable.
   local ui_seq="" events="" features="" customs="" dialogs="" regs="" upgrades=""
+  local controls="" registry="" appsearch=""
   ui_seq="$(msiinfo_export "$msi_path" InstallUISequence | tr -d '\r')" || die "msiinfo failed: InstallUISequence"
   events="$(msiinfo_export "$msi_path" ControlEvent | tr -d '\r')" || die "msiinfo failed: ControlEvent"
   features="$(msiinfo_export "$msi_path" Feature | tr -d '\r')" || die "msiinfo failed: Feature"
@@ -922,6 +929,9 @@ make_win_msi() {
   props="$(msiinfo_export "$msi_path" Property | tr -d '\r')" || die "msiinfo failed: Property"
   regs="$(msiinfo_export "$msi_path" RegLocator | tr -d '\r')" || die "msiinfo failed: RegLocator"
   upgrades="$(msiinfo_export "$msi_path" Upgrade | tr -d '\r')" || die "msiinfo failed: Upgrade"
+  controls="$(msiinfo_export "$msi_path" Control | tr -d '\r')" || die "msiinfo failed: Control"
+  registry="$(msiinfo_export "$msi_path" Registry | tr -d '\r')" || die "msiinfo failed: Registry"
+  appsearch="$(msiinfo_export "$msi_path" AppSearch | tr -d '\r')" || die "msiinfo failed: AppSearch"
 
   # Use <<< (not echo|grep): with pipefail, grep -q exiting early SIGPIPEs echo and
   # falsely trips `|| die` (seen as "MSI File table missing wds_editor.exe").
@@ -948,14 +958,14 @@ make_win_msi() {
     die "MSI missing SetInstallDirFromBrowse custom action"
   grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
-  grep -Fq 'LoadShortcutPrefs' <<<"${customs}" || \
-    die "MSI missing LoadShortcutPrefs custom action"
   grep -Fq 'ApplyUserShortcuts' <<<"${customs}" || \
     die "MSI missing ApplyUserShortcuts custom action"
   grep -Fq 'SetApplyShortcutsData' <<<"${customs}" || \
     die "MSI missing SetApplyShortcutsData custom action"
   grep -Fq 'ApplyWdsInstallDir' <<<"${customs}" || \
     die "MSI missing ApplyWdsInstallDir custom action"
+  grep -Fq 'LoadShortcutPrefs' <<<"${customs}" && \
+    die "MSI must not schedule LoadShortcutPrefs (AppSearch owns CREATE_* prefs)"
   grep -Fq $'CREATE_DESKTOP_SHORTCUT' <<<"${props}" || \
     die "MSI missing CREATE_DESKTOP_SHORTCUT property"
   grep -Fq $'WDS_INSTALLDIR' <<<"${props}" || \
@@ -975,18 +985,30 @@ make_win_msi() {
     die "MSI missing ApplyUserShortcuts in InstallExecuteSequence"
   grep -Fq 'SetApplyShortcutsData' <<<"${exe_seq}" || \
     die "MSI missing SetApplyShortcutsData in InstallExecuteSequence"
-  grep -Fq 'LoadShortcutPrefs' <<<"${ui_seq}" || \
-    die "MSI missing LoadShortcutPrefs in InstallUISequence"
-  local apply_seq files_seq data_seq
+  grep -Fq 'LoadShortcutPrefs' <<<"${ui_seq}" && \
+    die "InstallUISequence must not run LoadShortcutPrefs (DLL load must not gate first install)"
+  grep -Fq 'RemoveExistingProducts' <<<"${exe_seq}" || \
+    die "MSI missing RemoveExistingProducts in InstallExecuteSequence"
+  grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
+    die "MSI missing InitWdsInstallDir in InstallUISequence"
+  local apply_seq files_seq data_seq rep_seq init_seq
   apply_seq="$(awk -F'\t' '$1=="ApplyUserShortcuts"{print $3; exit}' <<<"${exe_seq}")"
   files_seq="$(awk -F'\t' '$1=="InstallFiles"{print $3; exit}' <<<"${exe_seq}")"
   data_seq="$(awk -F'\t' '$1=="SetApplyShortcutsData"{print $3; exit}' <<<"${exe_seq}")"
+  rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
+  init_seq="$(awk -F'\t' '$1=="InitWdsInstallDir"{print $3; exit}' <<<"${ui_seq}")"
   [[ -n "${apply_seq}" && -n "${files_seq}" && "${apply_seq}" -gt "${files_seq}" ]] || \
     die "ApplyUserShortcuts (${apply_seq:-unset}) must be after InstallFiles (${files_seq:-unset})"
   [[ -n "${data_seq}" && "${data_seq}" -lt "${apply_seq}" ]] || \
     die "SetApplyShortcutsData (${data_seq:-unset}) must be before ApplyUserShortcuts (${apply_seq:-unset})"
+  [[ -n "${rep_seq}" && -n "${files_seq}" && "${rep_seq}" -lt "${files_seq}" ]] || \
+    die "RemoveExistingProducts (${rep_seq:-unset}) must be before InstallFiles (${files_seq:-unset})"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
+  grep -q 'FindDesktopPref' <<<"${regs}" || \
+    die "MSI missing FindDesktopPref registry search"
+  grep -q 'FindStartMenuPref' <<<"${regs}" || \
+    die "MSI missing FindStartMenuPref registry search"
   grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing MajorUpgrade Upgrade table entry"
   local files_tbl="" comps_tbl=""
@@ -1001,15 +1023,33 @@ make_win_msi() {
   grep -Fq 'libwinpthread-1.dll' <<<"${files_tbl}" || die "MSI File table missing libwinpthread-1.dll"
   grep -Eq $'WdsEditorPayload\t.*INSTALLDIR' <<<"${comps_tbl}" || \
     die "WdsEditorPayload must live under INSTALLDIR"
+  grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" || \
+    die "MSI missing ShortcutPrefs component"
+  grep -Fq 'CreateDesktopShortcut' <<<"${registry}" || \
+    die "MSI Registry table missing CreateDesktopShortcut (prefs must be MSI-owned)"
+  grep -Fq 'CreateStartMenuShortcut' <<<"${registry}" || \
+    die "MSI Registry table missing CreateStartMenuShortcut"
+  grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"${appsearch}" || \
+    die "MSI AppSearch missing CREATE_DESKTOP_SHORTCUT (overlay cannot remember prefs)"
+  grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"${appsearch}" || \
+    die "MSI AppSearch missing CREATE_STARTMENU_SHORTCUT"
+  local folder_type=""
+  folder_type="$(awk -F'\t' '$1=="InstallDirDlg" && $2=="Folder"{print $3; exit}' <<<"${controls}")"
+  [[ "${folder_type}" == "Edit" ]] || \
+    die "InstallDirDlg Folder must be Edit (got ${folder_type:-unset}); PathEdit clears a missing first-install path"
+  grep -Eq $'InstallDirDlg\tFolder\tPathEdit' <<<"${controls}" && \
+    die "InstallDirDlg must not use PathEdit (first-install wipe)"
   local shortcut_tbl=""
   shortcut_tbl="$(msiinfo_export "$msi_path" Shortcut 2>/dev/null | tr -d '\r' || true)"
   grep -Eq 'WdsEditor(Desktop|StartMenu)' <<<"${shortcut_tbl}" && \
     die "MSI must not author WdsEditor* shortcuts (ApplyUserShortcuts owns .lnk files)"
-  # InstallDirDlg must run after FindRelatedProducts / costing (not sequence 1).
+  # InstallDirDlg must run after costing + InitWdsInstallDir (not sequence 1).
   local dir_seq
   dir_seq="$(awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}' <<<"${ui_seq}")"
   [[ -n "${dir_seq}" && "${dir_seq}" -ge 1000 ]] || \
     die "InstallDirDlg sequence ${dir_seq:-unset} is too early (want >= 1000)"
+  [[ -n "${init_seq}" && "${init_seq}" -lt "${dir_seq}" ]] || \
+    die "InitWdsInstallDir (${init_seq:-unset}) must be before InstallDirDlg (${dir_seq:-unset})"
 
   rm -f "${stage}/wds-msi.ico" "${stage}/wds_msi_ca.dll"
   rm -rf "$work"

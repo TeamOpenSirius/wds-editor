@@ -8,18 +8,23 @@
 
   Language must stay 1033 to match wixl Template summary (x64;1033).
 
-  Shortcuts are NOT MSI Shortcut/Feature items. wixl defaults Advertise=yes,
-  overlay upgrades migrate those feature states, and SecureCustomProperties
-  (wixl ignores Property/@Secure) dropped ADDLOCAL/REMOVE — so the UI could
-  not remember or change the first-install choice. LoadShortcutPrefs /
-  ApplyUserShortcuts (deferred CA in wds_msi_ca.dll) read/write HKLM and
-  create/delete per-machine .lnk files from CREATE_* after InstallFiles.
+  Shortcuts are NOT MSI Shortcut/Feature items (wixl defaults Advertise=yes,
+  and overlay upgrades migrate those feature states). ApplyUserShortcuts
+  creates/deletes per-machine .lnk files from CREATE_* after InstallFiles.
 
-  package-target.sh appends CREATE_* and WDS_INSTALLDIR to
-  SecureCustomProperties so the elevated Execute sequence sees the UI values.
+  Remembering checkboxes does NOT go through a UI-sequence DLL:
+  AppSearch (RegistrySearch) loads HKLM Create*Shortcut into CREATE_*,
+  WriteRegistryValues persists [CREATE_*] after early RemoveExistingProducts.
+  package-target.sh appends CREATE_* / WDS_INSTALLDIR to SecureCustomProperties
+  so the elevated Execute sequence sees the UI values.
+
+  InstallDirDlg uses Edit (not PathEdit). PathEdit on a not-yet-created
+  INSTALLDIR clears the property on first install; files then miss Program
+  Files and only a later Repair (no path dialog) puts the exe in place.
 
   Upgrades:
-  - Same UpgradeCode + MajorUpgrade removes the previous product (single ARP entry).
+  - Same UpgradeCode + MajorUpgrade + explicit RemoveExistingProducts
+    after InstallValidate (old product gone before InstallFiles).
   - HKLM InstallDir is remembered so UpdateDlg installs over the existing folder.
   - HKLM Create*Shortcut prefs are remembered so ShortcutsDlg defaults match
     the last choice; ApplyUserShortcuts honors the new checkboxes.
@@ -45,12 +50,26 @@
     <MediaTemplate EmbedCab="yes"/>
 
     <Property Id="ARPPRODUCTICON" Value="WdsEditorIcon"/>
-    <!-- Fresh install defaults to both shortcuts on; LoadShortcutPrefs overlays prefs. -->
-    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes"/>
-    <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes"/>
-    <!-- Parent folder chosen in BrowseDlg; CustomAction appends "WDS Editor". -->
+    <!-- Fresh install defaults to both shortcuts on; AppSearch overlays HKLM prefs. -->
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes">
+      <RegistrySearch Id="FindDesktopPref"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="CreateDesktopShortcut"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes">
+      <RegistrySearch Id="FindStartMenuPref"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="CreateStartMenuShortcut"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <!-- Parent folder chosen in BrowseDlg; CustomAction appends "\WDS Editor". -->
     <Property Id="WDSINSTALLPARENT" Secure="yes"/>
-    <!-- PathEdit binds here so it cannot wipe the Directory-table INSTALLDIR. -->
+    <!-- Edit (not PathEdit) binds here. Copied to INSTALLDIR on Next. -->
     <Property Id="WDS_INSTALLDIR" Secure="yes"/>
     <!-- Remembered install path from the previous MSI (Win64 HKLM). -->
     <Property Id="WDS_PREVIOUS_INSTALL" Secure="yes">
@@ -63,7 +82,7 @@
     </Property>
     <CustomAction Id="SetInstallDirFromBrowse"
                   Property="INSTALLDIR"
-                  Value="[WDSINSTALLPARENT]WDS Editor"/>
+                  Value="[WDSINSTALLPARENT]\WDS Editor"/>
     <CustomAction Id="SetInstallDirFromPrevious"
                   Property="INSTALLDIR"
                   Value="[WDS_PREVIOUS_INSTALL]"/>
@@ -78,9 +97,6 @@
                   Value="[INSTALLDIR]"/>
 
     <Binary Id="WdsMsiCa" SourceFile="$(var.SourceDir)/wds_msi_ca.dll"/>
-    <CustomAction Id="LoadShortcutPrefs"
-                  BinaryKey="WdsMsiCa"
-                  DllEntry="LoadShortcutPrefs"/>
     <!-- Immediate: pack properties for the deferred CA (elevated, after REP). -->
     <CustomAction Id="SetApplyShortcutsData"
                   Property="ApplyUserShortcuts"
@@ -98,39 +114,37 @@
       <Custom Action="SetInstallDirFromPrevious" After="AppSearch">
         WDS_PREVIOUS_INSTALL AND NOT Installed
       </Custom>
-      <Custom Action="LoadShortcutPrefs" After="SetInstallDirFromPrevious">
-        NOT Installed
-      </Custom>
-      <!-- After costing so INSTALLDIR is the resolved Program Files path. -->
+      <!-- After costing so INSTALLDIR is the resolved Program Files path.
+           Dialogs are After this action so the Edit field is never empty. -->
       <Custom Action="InitWdsInstallDir" After="CostFinalize">
         NOT WDS_INSTALLDIR
       </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
+      <!-- Old product must be gone before InstallFiles. wixl MajorUpgrade also
+           schedules this; authoring it keeps the order visible and checkable. -->
+      <RemoveExistingProducts After="InstallValidate"/>
       <Custom Action="SetInstallDirFromPrevious" After="AppSearch">
         WDS_PREVIOUS_INSTALL AND NOT Installed
-      </Custom>
-      <!-- Quiet installs have no ShortcutsDlg; load HKLM prefs here only. -->
-      <Custom Action="LoadShortcutPrefs" After="SetInstallDirFromPrevious">
-        UILevel=2 AND NOT Installed
       </Custom>
       <Custom Action="InitWdsInstallDir" After="CostFinalize">
         NOT WDS_INSTALLDIR
       </Custom>
+      <!-- Only copy a user-typed path on a fresh install. Never apply a
+           PathEdit-cleared / empty value over a valid Directory-table path. -->
       <Custom Action="ApplyWdsInstallDir" After="InitWdsInstallDir">
-        WDS_INSTALLDIR
+        WDS_INSTALLDIR AND NOT Installed AND NOT WDS_PREVIOUS_INSTALL AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED
       </Custom>
       <Custom Action="SetArpInstallLocation" After="InstallValidate">
         NOT REMOVE="ALL"
       </Custom>
-      <!-- After InstallInitialize so the deferred CA is in-script; data is snapshotted first.
-           After InstallFiles: early RemoveExistingProducts has already dropped the old
-           product (and its HKLM values), so prefs we write here survive the upgrade. -->
+      <!-- Snapshot after InstallInitialize (in-script). Always run so Repair
+           reapplies .lnk files from AppSearch prefs, and uninstall deletes them. -->
       <Custom Action="SetApplyShortcutsData" After="InstallInitialize">
-        NOT Installed OR REMOVE="ALL"
+        1
       </Custom>
       <Custom Action="ApplyUserShortcuts" After="InstallFiles" Before="InstallFinalize">
-        NOT Installed OR REMOVE="ALL"
+        1
       </Custom>
     </InstallExecuteSequence>
 
@@ -149,6 +163,21 @@
                        Value="[INSTALLDIR]"
                        KeyPath="yes"/>
       </Component>
+      <!-- MSI-owned prefs (WriteRegistryValues). AppSearch reads these back
+           on the next overlay. Do not rely on a UI-sequence CA to persist. -->
+      <Component Id="ShortcutPrefs" Guid="A91B2C3D-4E5F-6780-91A2-B3C4D5E6F708" Win64="yes">
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="CreateDesktopShortcut"
+                       Type="string"
+                       Value="[CREATE_DESKTOP_SHORTCUT]"
+                       KeyPath="yes"/>
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="CreateStartMenuShortcut"
+                       Type="string"
+                       Value="[CREATE_STARTMENU_SHORTCUT]"/>
+      </Component>
     </DirectoryRef>
 
     <!-- Prefer BMP-only ICO generated at package time (PNG-compressed ICO can crash msiexec UI). -->
@@ -157,6 +186,7 @@
     <Feature Id="ProductFeature" Title="WDS Editor" Level="1" AllowAdvertise="no" Absent="disallow">
       <ComponentGroupRef Id="ProductFiles"/>
       <ComponentRef Id="RegistryInstallDir"/>
+      <ComponentRef Id="ShortcutPrefs"/>
     </Feature>
   </Product>
 </Wix>

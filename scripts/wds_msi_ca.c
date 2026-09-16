@@ -1,19 +1,18 @@
 /* MSI custom actions for WDS Editor (MinGW DLL, Binary table — not installed).
  *
- * LoadShortcutPrefs (immediate, UI + quiet Execute):
- *   Read HKLM\Software\WDS\Editor Create*Shortcut (64-bit view, HKCU fallback)
- *   and set CREATE_* so ShortcutsDlg / quiet installs match the last choice.
+ * Checkbox memory is AppSearch + WriteRegistryValues in the .wxs, not a
+ * UI-sequence DLL (LoadLibrary failure there aborted first install; Repair
+ * skipped the CA and looked "successful").
  *
  * ApplyUserShortcuts (deferred, after InstallFiles):
- *   Create or delete per-machine .lnk files from CustomActionData, then persist
- *   the choice to HKLM. Must be in-script after RemoveExistingProducts so an
- *   upgrade cannot delete the prefs we just wrote. MSI Feature/Shortcut tables
- *   are not used: wixl feature migration pinned overlay installs to the first
- *   choice.
+ *   Create or delete per-machine .lnk files from CustomActionData, then also
+ *   write HKLM Create*Shortcut as a belt-and-suspenders persist. Must run
+ *   after early RemoveExistingProducts so an upgrade cannot delete the values.
  *
- * Built with -static-libgcc --kill-at so msiexec can LoadLibrary the DLL
- * without MinGW runtimes on PATH (missing DLL → first install fails, Repair
- * skips NOT Installed CAs and "succeeds").
+ * LoadShortcutPrefs remains exported for diagnostics; it is not scheduled.
+ *
+ * Built with -static-libgcc, static winpthread, --kill-at so msiexec
+ * LoadLibrary works from a temp dir with no MinGW runtimes on PATH.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

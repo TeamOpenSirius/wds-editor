@@ -11,13 +11,15 @@
     ExitDialog     - completion
 
   Notes for wixl 0.103:
-  - PathEdit binds to WDS_INSTALLDIR (not INSTALLDIR). Binding PathEdit to the
-    Directory property can wipe the Program Files path on first install.
+  - Folder is Edit (not PathEdit). PathEdit validates the path and clears the
+    property when C:\Program Files\WDS Editor does not exist yet — first
+    install then writes files nowhere useful; Repair skips this dialog.
+  - wixl ignores Indirect, so we cannot bind PathEdit to the Directory property
   - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
   - Unchecked boxes clear the property; Next writes explicit "0" so
     SecureCustomProperties passes the off state into elevated Execute
   - Shortcuts are created by ApplyUserShortcuts (DLL), not AddLocal/Remove
-  - Defaults on update come from HKLM via LoadShortcutPrefs
+  - Defaults on update come from HKLM via AppSearch (RegistrySearch)
   - CREATE_* / WDS_INSTALLDIR are appended to SecureCustomProperties after wixl
   - ASCII UI strings only (MSI codepage 1252)
 -->
@@ -56,7 +58,7 @@
                  Text="Choose where to install [ProductName]."/>
         <Control Id="FolderLabel" Type="Text" X="20" Y="60" Width="330" Height="20" NoPrefix="yes"
                  Text="Folder:"/>
-        <Control Id="Folder" Type="PathEdit" X="20" Y="100" Width="245" Height="18"
+        <Control Id="Folder" Type="Edit" X="20" Y="100" Width="245" Height="18"
                  Property="WDS_INSTALLDIR"/>
         <Control Id="Browse" Type="PushButton" X="275" Y="99" Width="75" Height="20" Text="Browse...">
           <!-- Start the folder picker under Program Files; OK appends \WDS Editor. -->
@@ -64,7 +66,7 @@
           <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2">1</Publish>
         </Control>
         <Control Id="PathHint" Type="Text" X="20" Y="130" Width="330" Height="50" NoPrefix="yes"
-                 Text="Use Browse to pick a parent folder. The installer always appends \WDS Editor to that folder."/>
+                 Text="Type a full destination path, or use Browse to pick a parent folder. Browse always appends \WDS Editor."/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
           <Publish Event="DoAction" Value="ApplyWdsInstallDir" Order="1">1</Publish>
@@ -181,10 +183,12 @@
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Condition="Installed AND NOT PATCH"/>
 
       <InstallUISequence>
-        <!-- After MigrateFeatureStates so upgrade/registry detection is available. -->
-        <Show Dialog="InstallDirDlg" After="MigrateFeatureStates" Overridable="yes"
+        <!-- After InitWdsInstallDir so the Edit field has the resolved Program
+             Files path before the dialog paints. After MigrateFeatureStates was
+             too easy to reorder ahead of that init. -->
+        <Show Dialog="InstallDirDlg" After="InitWdsInstallDir" Overridable="yes"
               Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED AND NOT WDS_PREVIOUS_INSTALL"/>
-        <Show Dialog="UpdateDlg" After="MigrateFeatureStates" Overridable="yes"
+        <Show Dialog="UpdateDlg" After="InitWdsInstallDir" Overridable="yes"
               Condition="NOT Installed AND (WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED OR WDS_PREVIOUS_INSTALL)"/>
         <Show Dialog="MaintenanceWelcomeDlg" Before="ProgressDlg" Overridable="yes"
               Condition="Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH"/>
