@@ -1,6 +1,5 @@
 #include "wds/ui/qt/busy_dialog.hpp"
 
-#include <QApplication>
 #include <QDialog>
 #include <QLabel>
 #include <QProgressBar>
@@ -27,9 +26,6 @@ BusyScope::BusyScope(QWidget* parent, const QString& message) {
 
   dialog_->show();
   dialog_->raise();
-  // Force one paint pass so the overlay is visible before the blocking call.
-  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 }
 
 BusyScope::~BusyScope() {

@@ -3,22 +3,23 @@
 #include "wds/renderer/log.hpp"
 #include "wds/ui/layout/editor_layout.hpp"
 
+#include <wds/common/crash_handler.hpp>
 #include <wds/core/official_playfield.hpp>
 
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace wds::ui {
 namespace {
-
-constexpr int kFallbackDisplayHz = 60;
 
 // Body (Md/Gutter) and tip sizes are baked separately so each draw stays near 1:1.
 float ui_font_body_bake_px(float tier) {
@@ -42,6 +43,16 @@ float toolbar_tip_logical_px(float left_w_logical) {
 
 // Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
 bool ui_font_mild_sharpen(float tier) { return tier <= 1.5f + 0.001f; }
+
+void publish_vulkan_device_context(const wds::renderer::VulkanRenderer& vk) {
+  const std::uint32_t drv = vk.device_driver_version();
+  const std::uint32_t api = vk.device_api_version();
+  char buf[512];
+  std::snprintf(buf, sizeof(buf), "%s | driver %u.%u.%u | api %u.%u.%u", vk.device_name(),
+                VK_VERSION_MAJOR(drv), VK_VERSION_MINOR(drv), VK_VERSION_PATCH(drv),
+                VK_VERSION_MAJOR(api), VK_VERSION_MINOR(api), VK_VERSION_PATCH(api));
+  wds::common::crash_set_context(wds::common::CrashContextField::VulkanDevice, buf);
+}
 
 }  // namespace
 
@@ -153,6 +164,7 @@ bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface
     transport_.shutdown();
     return false;
   }
+  publish_vulkan_device_context(preview_.vulkan());
   if (initialize_audio) preview_.attach_audio(&transport_.audio());
 
   {
@@ -223,19 +235,7 @@ void ChartPreviewPanel::shutdown() {
     preview_.vulkan().destroy_texture(solid_texture_.id);
     solid_texture_ = {};
   }
-  // Dedicated decode streams may still be using BASS. Join them before the
-  // transport shuts the audio engine down; this wait only occurs on exit.
-  ++waveform_generation_;
-  for (auto& pending : pending_waveforms_) {
-    if (pending.result.valid()) {
-      try {
-        (void)pending.result.get();
-      } catch (...) {
-        WDS_LOG("ChartPreviewPanel: waveform worker failed during shutdown\n");
-      }
-    }
-  }
-  pending_waveforms_.clear();
+  join_waveform_workers();
   destroy_spectrogram_texture();
   preview_.shutdown();
   transport_.shutdown();
@@ -383,6 +383,9 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   if (!ready_) {
     return false;
   }
+  // Join first: AudioEngine::shutdown() / BASS_Free() must not run while a
+  // waveform worker still holds a process-global BASS decode stream.
+  join_waveform_workers();
   const auto effects = preview_.config().effects_directory;
   const bool was_playing = preserve_playback && transport_.playing();
   const int64_t pos =
@@ -423,6 +426,29 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   return true;
 }
 
+void ChartPreviewPanel::join_waveform_workers() {
+  // WaveformOverview::load() creates its own BASS decode stream on the same
+  // process-global device (BASS_StreamCreateFile / BASS_ChannelGetData /
+  // BASS_StreamFree). AudioEngine::shutdown() ends in BASS_Free(), so every
+  // pending worker must be joined before any transport/engine shutdown.
+  ++waveform_generation_;
+  for (auto& pending : pending_waveforms_) {
+    if (pending.cancel) {
+      pending.cancel->store(true, std::memory_order_relaxed);
+    }
+  }
+  for (auto& pending : pending_waveforms_) {
+    if (pending.result.valid()) {
+      try {
+        (void)pending.result.get();
+      } catch (...) {
+        WDS_LOG("ChartPreviewPanel: waveform worker failed during shutdown\n");
+      }
+    }
+  }
+  pending_waveforms_.clear();
+}
+
 void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
   destroy_spectrogram_texture();
   waveform_.clear();
@@ -433,12 +459,16 @@ void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
   // Decoding the full song and calculating two FFTs per hop is the expensive
   // part of project opening. Keep it off the Qt/render thread; tick() installs
   // only the newest completed result and performs the Vulkan upload there.
+  auto cancel = std::make_shared<std::atomic<bool>>(false);
   pending_waveforms_.push_back(PendingWaveform{
-      generation,
-      std::async(std::launch::async, [music_path] {
+      generation, cancel,
+      std::async(std::launch::async, [music_path, cancel] {
+        wds::common::install_thread_crash_stack();
         wds::audio::WaveformOverview decoded;
-        if (!decoded.load(music_path)) {
-          WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
+        if (!decoded.load(music_path, cancel.get())) {
+          if (!cancel->load(std::memory_order_relaxed)) {
+            WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
+          }
           decoded.clear();
         }
         return decoded;
@@ -459,9 +489,10 @@ void ChartPreviewPanel::collect_ready_waveforms() {
       WDS_LOG("ChartPreviewPanel: waveform worker failed\n");
       decoded.clear();
     }
+    const bool cancelled = it->cancel && it->cancel->load(std::memory_order_relaxed);
     const bool current = it->generation == waveform_generation_;
     it = pending_waveforms_.erase(it);
-    if (!current) continue;
+    if (cancelled || !current || decoded.empty()) continue;
     waveform_ = std::move(decoded);
     bake_spectrogram_texture();
   }

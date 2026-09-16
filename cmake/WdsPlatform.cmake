@@ -50,6 +50,21 @@ add_compile_definitions(
   $<$<NOT:$<CONFIG:Debug>>:WDS_ENABLE_LOGGING=0>
 )
 
+# Non-Debug configs keep their optimization (-O3 / /O2) and NDEBUG, but emit
+# debug info so crash reports can be symbolized. scripts/package-target.sh
+# splits dSYM / GNU DWARF / PDB out of the shipped binaries (strip -S /
+# --strip-debug keeps the symbol table for backtrace_symbols_fd / dladdr).
+# Quote each genex so the inner ';' stays part of the expression.
+# Included after project() — CMAKE_*_COMPILER_ID is already known.
+if(MSVC)
+  add_compile_options("$<$<NOT:$<CONFIG:Debug>>:/Zi>")
+  add_link_options("$<$<NOT:$<CONFIG:Debug>>:/DEBUG;/OPT:REF;/OPT:ICF>")
+else()
+  add_compile_options(
+    "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<CXX_COMPILER_ID:Clang,AppleClang,GNU>>:-g;-fno-omit-frame-pointer>"
+  )
+endif()
+
 # Cross builds: skip tests by default (host ctest cannot run foreign binaries without qemu/wine).
 set(WDS_CORE_BUILD_EXAMPLE_DEFAULT ON)
 if(CMAKE_CROSSCOMPILING)

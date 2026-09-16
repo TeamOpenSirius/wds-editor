@@ -173,6 +173,7 @@ void CurveTemplatesPanel::build_ui() {
 
   connect(list_, &QListWidget::currentRowChanged, this, [this](int) {
     if (syncing_ || manager_ == nullptr) return;
+    journal_menu_action("curve_templates.select");
     auto state = manager_->curve_template_state();
     const int row = list_->currentRow();
     if (row >= 0 && static_cast<std::size_t>(row) < state.templates.size()) {
@@ -183,6 +184,7 @@ void CurveTemplatesPanel::build_ui() {
     if (on_changed_) on_changed_();
   });
   connect(add_, &QPushButton::clicked, this, [this] {
+    journal_menu_action("curve_templates.add");
     if (manager_ == nullptr) return;
     auto state = manager_->curve_template_state();
     if (state.templates.size() >= kMaxCurveTemplates) return;
@@ -198,6 +200,7 @@ void CurveTemplatesPanel::build_ui() {
     if (on_changed_) on_changed_();
   });
   connect(remove_, &QPushButton::clicked, this, [this] {
+    journal_menu_action("curve_templates.delete");
     if (manager_ == nullptr) return;
     auto state = manager_->curve_template_state();
     const int row = list_->currentRow();
@@ -215,9 +218,14 @@ void CurveTemplatesPanel::build_ui() {
     reload_from_manager();
     if (on_changed_) on_changed_();
   });
-  connect(name_, &QLineEdit::editingFinished, this, [this] { apply_live(); });
-  connect(algorithm_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-          [this](int) { apply_live(); });
+  connect(name_, &QLineEdit::editingFinished, this, [this] {
+    journal_menu_action("curve_templates.rename");
+    apply_live();
+  });
+  connect(algorithm_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+    if (!syncing_) journal_menu_action("curve_templates.algorithm");
+    apply_live();
+  });
   connect(parameter_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
           [this](double) { apply_live(); });
 }

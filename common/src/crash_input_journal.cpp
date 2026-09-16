@@ -1,7 +1,12 @@
 #include "wds/common/crash_input_journal.hpp"
 
-#include <chrono>
 #include <cstring>
+
+#if defined(_WIN32)
+#include <chrono>
+#else
+#include <time.h>
+#endif
 
 namespace wds::common {
 namespace {
@@ -19,7 +24,16 @@ std::uint32_t g_count = 0;
 CrashInputSlot* g_current = nullptr;
 PendingMove g_pending{};
 bool g_allow_sensitive = false;
+#if defined(_WIN32)
 const auto g_start = std::chrono::steady_clock::now();
+#else
+timespec make_start_ts() {
+  timespec ts{};
+  (void)::clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts;
+}
+const timespec g_start_ts = make_start_ts();
+#endif
 
 CrashInputSlot* last_slot() noexcept {
   if (g_count == 0) {
@@ -276,10 +290,23 @@ void journal_set_allow_sensitive(bool allow) noexcept { g_allow_sensitive = allo
 bool journal_allow_sensitive() noexcept { return g_allow_sensitive; }
 
 std::uint64_t journal_uptime_ms() noexcept {
+#if defined(_WIN32)
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
                                                             g_start)
           .count());
+#else
+  // clock_gettime(CLOCK_MONOTONIC) is async-signal-safe (POSIX.1-2008).
+  timespec now{};
+  if (::clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+    return 0;
+  }
+  const std::uint64_t start_ms = static_cast<std::uint64_t>(g_start_ts.tv_sec) * 1000ull +
+                                 static_cast<std::uint64_t>(g_start_ts.tv_nsec) / 1000000ull;
+  const std::uint64_t now_ms = static_cast<std::uint64_t>(now.tv_sec) * 1000ull +
+                               static_cast<std::uint64_t>(now.tv_nsec) / 1000000ull;
+  return now_ms >= start_ms ? now_ms - start_ms : 0;
+#endif
 }
 
 void journal_begin_event(CrashInputKind kind, float x, float y, float dx, float dy,

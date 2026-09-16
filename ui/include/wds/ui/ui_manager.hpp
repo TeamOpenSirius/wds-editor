@@ -11,6 +11,7 @@
 #include "wds/interaction/ui_painter.hpp"
 #include "wds/interaction/widget_root.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -37,6 +38,17 @@ class UnsavedChangesDialog;
 namespace detail { }
 struct EditorUiConfig;
 
+// Qt shell change hub. All notify_ui_change() calls run on the GUI thread
+// (model writes do today; off-thread calls are queued to that thread).
+enum class UiChange {
+  PlaybackSettings,
+  Grid,
+  Offset,
+  Charts,
+  History,
+  Document,
+};
+
 // Shell orchestrator: owns the four regions and applies EditorLayouter results.
 class UiManager {
  public:
@@ -45,6 +57,11 @@ class UiManager {
 
   ChartPreviewPanel& chart_preview() noexcept { return *chart_preview_; }
   const ChartPreviewPanel& chart_preview() const noexcept { return *chart_preview_; }
+
+  // Space / dock play: queue play or pause from logical transport state.
+  // shift_pause_variant is Shift+Space (swapped when pause_at_current is on).
+  void toggle_playback(bool shift_pause_variant);
+  bool playback_intends_playing() const;
 
   wds::interaction::WidgetRoot& root() noexcept { return root_; }
   wds::interaction::ShortcutManager& shortcuts() noexcept { return shortcuts_; }
@@ -76,6 +93,11 @@ class UiManager {
   bool new_note_place_logic() const noexcept { return new_note_place_logic_; }
   void set_new_note_place_logic(bool enabled);
   void set_on_check_chart(std::function<void()> handler) { on_check_chart_ = std::move(handler); }
+
+  void set_ui_change_handler(std::function<void(UiChange)> handler) {
+    on_ui_change_ = std::move(handler);
+  }
+  void notify_ui_change(UiChange change);
 
   // Selected curve-fill template + resolved easing for ChartEditPanel (Task 5).
   CurveFillSelection curve_fill_selection() const;
@@ -149,9 +171,7 @@ class UiManager {
   const EditorLayoutRects& layout() const noexcept { return layout_; }
 
   void update(float delta_seconds, const std::vector<wds::interaction::InputEvent>& events);
-  bool dispatch_shortcut(const wds::interaction::KeyDownEvent& event) {
-    return shortcuts_.dispatch(event);
-  }
+  bool dispatch_shortcut(const wds::interaction::KeyDownEvent& event);
   // Last update() phase costs (µs). Used by frame-diag; always updated.
   int64_t last_update_flush_us() const noexcept { return last_update_flush_us_; }
   int64_t last_update_bounds_us() const noexcept { return last_update_bounds_us_; }
@@ -200,6 +220,7 @@ class UiManager {
   void schedule_pending_after_save_prompt(bool save_first);
   void flush_pending_after_save_prompt();
   bool has_blocking_modal_dialog() const noexcept;
+  void poll_ui_change_notifications();
 
   std::unique_ptr<ChartPreviewPanel> chart_preview_;
   bool editor_batch_dirty_ = true;
@@ -234,6 +255,11 @@ class UiManager {
   std::function<void()> save_project_handler_;
   std::function<void()> on_check_chart_;
   std::function<void(const CurveFillSelection&)> on_curve_fill_changed_;
+  std::function<void(UiChange)> on_ui_change_;
+  std::uint64_t last_doc_revision_ = 0;
+  bool last_can_undo_ = false;
+  bool last_can_redo_ = false;
+  bool last_dirty_ = false;
   bool allow_close_once_ = false;
   // Run pending open/import/close after the click frame finishes (native panels need this).
   bool flush_pending_after_save_ = false;
@@ -253,5 +279,8 @@ class UiManager {
   bool ui_config_dirty_ = false;
   int64_t ui_config_dirty_us_ = 0;
 };
+
+// Qt menu / toolbar / dock breadcrumb. `id` must be a string literal (no alloc).
+void journal_menu_action(const char* id) noexcept;
 
 }  // namespace wds::ui

@@ -28,7 +28,6 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
-#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -68,6 +67,24 @@ constexpr std::array<ConvertSpec, 8> kConvertSpecs = {{
     {"Flick", wds::chart_editor::NoteType::Flick, 0},
     {"Right Flick", wds::chart_editor::NoteType::Flick, 1},
     {"Scratch Hold", wds::chart_editor::NoteType::ScratchHold, 0},
+}};
+
+constexpr std::array<const char*, 8> kConvertJournalIds = {{
+    "convert.to_tap",
+    "convert.to_extap",
+    "convert.to_hold_start",
+    "convert.to_hold",
+    "convert.to_flick_left",
+    "convert.to_flick",
+    "convert.to_flick_right",
+    "convert.to_scratch_hold",
+}};
+
+constexpr std::array<const char*, 4> kCurveEaseJournalIds = {{
+    "curve.ease_in",
+    "curve.ease_out",
+    "curve.ease_in_out",
+    "curve.ease_out_in",
 }};
 
 float rate_from_combo(const QComboBox* combo) {
@@ -210,11 +227,7 @@ QComboBox* make_volume_combo(QWidget* parent) {
 PlaybackBar::PlaybackBar(UiManager* manager, QWidget* parent)
     : QWidget(parent), manager_(manager) {
   build_ui();
-  sync_timer_ = new QTimer(this);
-  sync_timer_->setInterval(250);
-  connect(sync_timer_, &QTimer::timeout, this, &PlaybackBar::sync_from_runtime);
-  sync_timer_->start();
-  sync_from_runtime();
+  refresh_settings_widgets();
 }
 
 void PlaybackBar::seek_to_slider(int value) {
@@ -310,17 +323,25 @@ void PlaybackBar::build_ui() {
   outer->setContentsMargins(0, 0, 0, 0);
   outer->addWidget(scroll);
 
-  connect(seek_, &QSlider::sliderReleased, this, [this] { seek_to_slider(seek_->value()); });
+  connect(seek_, &QSlider::sliderReleased, this, [this] {
+    journal_menu_action("playback.seek");
+    seek_to_slider(seek_->value());
+  });
   connect(seek_, &QSlider::actionTriggered, this, [this](int action) {
     if (action == QAbstractSlider::SliderMove || seek_->isSliderDown()) return;
+    journal_menu_action("playback.seek");
     seek_to_slider(seek_->sliderPosition());
   });
   connect(play_, &QPushButton::clicked, this, [this] {
-    auto& transport = manager_->chart_preview().transport();
-    transport.playing() ? transport.request_pause() : transport.request_play();
+    journal_menu_action("playback.play");
+    manager_->toggle_playback(false);
+    apply_play_icon(manager_->playback_intends_playing());
   });
-  connect(stop_, &QPushButton::clicked, this,
-          [this] { manager_->chart_preview().reset_playback(); });
+  connect(stop_, &QPushButton::clicked, this, [this] {
+    journal_menu_action("playback.stop");
+    manager_->chart_preview().reset_playback();
+    apply_play_icon(manager_->playback_intends_playing());
+  });
   const auto apply_music = [this] {
     if (syncing_) return;
     if (auto* settings = manager_->settings_panel()) {
@@ -338,19 +359,28 @@ void PlaybackBar::build_ui() {
     }
   };
   connect(music_volume_, &QComboBox::textActivated, this, [this, apply_music](const QString&) {
+    journal_menu_action("playback.music_volume");
     if (syncing_) return;
     music_mute_->setChecked(false);
     apply_music();
   });
-  connect(music_mute_, &QCheckBox::toggled, this, [apply_music](bool) { apply_music(); });
+  connect(music_mute_, &QCheckBox::toggled, this, [this, apply_music](bool) {
+    if (!syncing_) journal_menu_action("playback.music_mute");
+    apply_music();
+  });
   connect(sfx_volume_, &QComboBox::textActivated, this, [this, apply_sfx](const QString&) {
+    journal_menu_action("playback.sfx_volume");
     if (syncing_) return;
     sfx_mute_->setChecked(false);
     apply_sfx();
   });
-  connect(sfx_mute_, &QCheckBox::toggled, this, [apply_sfx](bool) { apply_sfx(); });
+  connect(sfx_mute_, &QCheckBox::toggled, this, [this, apply_sfx](bool) {
+    if (!syncing_) journal_menu_action("playback.sfx_mute");
+    apply_sfx();
+  });
   connect(rate_, &QComboBox::textActivated, this, [this](const QString&) {
     if (syncing_) return;
+    journal_menu_action("playback.rate");
     if (auto* settings = manager_->settings_panel()) {
       settings->set_playback_rate_from_qt(rate_from_combo(rate_));
       manager_->request_save_ui_config(true);
@@ -358,15 +388,18 @@ void PlaybackBar::build_ui() {
   });
 }
 
-void PlaybackBar::sync_position() {
-  auto& transport = manager_->chart_preview().transport();
-
-  const QString action = transport.playing() ? tr("暂停") : tr("播放");
+void PlaybackBar::apply_play_icon(bool playing) {
+  const QString action = playing ? tr("暂停") : tr("播放");
   if (play_->toolTip() != action) {
-    play_->setIcon(transport.playing() ? pause_icon_ : play_icon_);
+    play_->setIcon(playing ? pause_icon_ : play_icon_);
     play_->setToolTip(action);
     play_->setAccessibleName(action);
   }
+}
+
+void PlaybackBar::sync_position() {
+  auto& transport = manager_->chart_preview().transport();
+  apply_play_icon(transport.intends_playing());
   if (!seek_->isSliderDown()) {
     if (auto* settings = manager_->settings_panel()) {
       int64_t start = 0;
@@ -387,8 +420,8 @@ void PlaybackBar::sync_position() {
   }
 }
 
-void PlaybackBar::sync_from_runtime() {
-  sync_position();
+void PlaybackBar::refresh_settings_widgets() {
+  if (manager_ == nullptr) return;
   syncing_ = true;
   if (auto* settings = manager_->settings_panel()) {
     if (!music_volume_->hasFocus()) {
@@ -447,6 +480,7 @@ void ConvertBar::build_ui(const std::string& skins_dir) {
     convert_buttons_[i] = button;
     row->addWidget(button, 1);
     connect(button, &QToolButton::clicked, this, [this, i] {
+      journal_menu_action(kConvertJournalIds[i]);
       auto* edit = manager_ != nullptr ? manager_->edit_panel() : nullptr;
       if (edit == nullptr) return;
       const auto& spec = kConvertSpecs[i];
@@ -512,11 +546,11 @@ void ConvertBar::sync_place_checks() {
 EditorToolbarWidget::EditorToolbarWidget(UiManager* manager, QWidget* parent)
     : QWidget(parent), manager_(manager) {
   build_ui();
-  sync_timer_ = new QTimer(this);
-  sync_timer_->setInterval(250);
-  connect(sync_timer_, &QTimer::timeout, this, &EditorToolbarWidget::sync_from_runtime);
-  sync_timer_->start();
-  sync_from_runtime();
+  refresh_offset_field();
+  refresh_grid_fields();
+  refresh_flags();
+  refresh_chart_selector();
+  refresh_enabled_states();
 }
 
 void EditorToolbarWidget::build_ui() {
@@ -598,24 +632,33 @@ void EditorToolbarWidget::build_ui() {
   outer->addWidget(scroll);
 
   connect(delay_ms_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
-    if (!syncing_) apply_delay();
+    if (syncing_) return;
+    journal_menu_action("toolbar.delay");
+    apply_delay();
   });
   connect(visible_range_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
-    if (!syncing_) apply_grid();
+    if (syncing_) return;
+    journal_menu_action("toolbar.visible_range");
+    apply_grid();
   });
   connect(subdivisions_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) {
-    if (!syncing_) apply_grid();
+    if (syncing_) return;
+    journal_menu_action("toolbar.subdivisions");
+    apply_grid();
   });
   connect(chart_select_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+    journal_menu_action("toolbar.chart_select");
     auto& session = manager_->session();
     if (index >= 0 && static_cast<std::size_t>(index) < session.chart_count())
       session.switch_chart(static_cast<std::size_t>(index));
   });
   connect(chart_add_, &QPushButton::clicked, this, [this] {
+    journal_menu_action("toolbar.chart_add");
     if (on_add_chart_) on_add_chart_();
   });
   connect(pause_at_current_, &QCheckBox::toggled, this, [this](bool checked) {
     if (syncing_) return;
+    journal_menu_action("toolbar.pause_at_current");
     if (auto* edit = manager_->edit_panel()) {
       edit->set_pause_at_current(checked);
       manager_->request_save_ui_config(true);
@@ -623,6 +666,7 @@ void EditorToolbarWidget::build_ui() {
   });
   connect(split_width_follow_, &QCheckBox::toggled, this, [this](bool checked) {
     if (syncing_) return;
+    journal_menu_action("toolbar.split_width_follow");
     if (auto* edit = manager_->edit_panel()) {
       edit->set_split_width_follow(checked);
       manager_->request_save_ui_config(true);
@@ -651,7 +695,8 @@ void EditorToolbarWidget::apply_grid() {
   manager_->request_save_ui_config(true);
 }
 
-void EditorToolbarWidget::sync_from_runtime() {
+void EditorToolbarWidget::refresh_offset_field() {
+  if (manager_ == nullptr || delay_ms_ == nullptr) return;
   syncing_ = true;
   auto& session = manager_->session();
   if (!delay_ms_->hasFocus()) {
@@ -659,23 +704,43 @@ void EditorToolbarWidget::sync_from_runtime() {
     delay_ms_->setValue(static_cast<int>(
         std::clamp<int64_t>(session.offset_ms(), int64_t{-60000}, int64_t{60000})));
   }
+  syncing_ = false;
+}
+
+void EditorToolbarWidget::refresh_grid_fields() {
+  if (manager_ == nullptr) return;
+  syncing_ = true;
   if (auto* edit = manager_->edit_panel()) {
     const auto& grid = edit->viewport().grid();
-    if (!visible_range_->hasFocus()) {
+    if (visible_range_ != nullptr && !visible_range_->hasFocus()) {
       const QSignalBlocker blocker(visible_range_);
       visible_range_->setValue(grid.visible_hectoms);
     }
-    if (!subdivisions_->hasFocus()) {
+    if (subdivisions_ != nullptr && !subdivisions_->hasFocus()) {
       const QSignalBlocker blocker(subdivisions_);
       subdivisions_->setValue(grid.subdivisions_per_beat);
     }
-    {
-      const QSignalBlocker p(pause_at_current_);
-      pause_at_current_->setChecked(edit->pause_at_current());
-      const QSignalBlocker w(split_width_follow_);
-      split_width_follow_->setChecked(edit->split_width_follow());
-    }
   }
+  syncing_ = false;
+}
+
+void EditorToolbarWidget::refresh_flags() {
+  if (manager_ == nullptr || pause_at_current_ == nullptr || split_width_follow_ == nullptr) {
+    return;
+  }
+  syncing_ = true;
+  if (auto* edit = manager_->edit_panel()) {
+    const QSignalBlocker p(pause_at_current_);
+    pause_at_current_->setChecked(edit->pause_at_current());
+    const QSignalBlocker w(split_width_follow_);
+    split_width_follow_->setChecked(edit->split_width_follow());
+  }
+  syncing_ = false;
+}
+
+void EditorToolbarWidget::refresh_chart_selector() {
+  if (manager_ == nullptr || chart_select_ == nullptr) return;
+  auto& session = manager_->session();
   const int count = std::max<int>(1, static_cast<int>(session.chart_count()));
   if (chart_select_->count() != count) {
     const QSignalBlocker blocker(chart_select_);
@@ -686,11 +751,17 @@ void EditorToolbarWidget::sync_from_runtime() {
     const QSignalBlocker blocker(chart_select_);
     chart_select_->setCurrentIndex(static_cast<int>(session.active_chart_index()));
   }
+}
+
+void EditorToolbarWidget::refresh_enabled_states() {
+  if (manager_ == nullptr) return;
+  auto& session = manager_->session();
   const bool editable = !session.read_only();
-  delay_ms_->setEnabled(session.delay_editable());
-  chart_select_->setEnabled(editable || session.chart_count() > 1);
-  chart_add_->setEnabled(editable);
-  syncing_ = false;
+  if (delay_ms_ != nullptr) delay_ms_->setEnabled(session.delay_editable());
+  if (chart_select_ != nullptr) {
+    chart_select_->setEnabled(editable || session.chart_count() > 1);
+  }
+  if (chart_add_ != nullptr) chart_add_->setEnabled(editable);
 }
 
 void EditorToolbarWidget::refresh_curve_controls() {
@@ -725,11 +796,13 @@ CurveFillWidget::CurveFillWidget(UiManager* manager, QWidget* parent)
     curve_directions_[static_cast<std::size_t>(i)] = button;
     buttons_row->addWidget(button, 0);
     connect(button, &QToolButton::clicked, this, [this, i] {
+      journal_menu_action(kCurveEaseJournalIds[static_cast<std::size_t>(i)]);
       curve_controller_.select_direction_index(manager_->curve_template_state(), i);
       refresh_curve_controls();
     });
   }
   connect(curve_template_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+    journal_menu_action("curve.select");
     curve_controller_.select_dropdown_index(manager_->curve_template_state(), index);
     refresh_curve_controls();
   });

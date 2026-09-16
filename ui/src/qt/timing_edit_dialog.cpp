@@ -1,6 +1,7 @@
 #include "wds/ui/qt/timing_edit_dialog.hpp"
 
 #include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/ui_manager.hpp"
 
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -57,8 +58,14 @@ TimingEditDialog::TimingEditDialog(bool bpm_mode, double bpm, int32_t numerator,
   auto* cancel = buttons->addButton(tr("取消"), QDialogButtonBox::RejectRole);
   cancel->setIcon(fluent_icon(fluent::Clear));
   root->addWidget(buttons);
-  connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+    journal_menu_action("timing.ok");
+    accept();
+  });
+  connect(buttons, &QDialogButtonBox::rejected, this, [this] {
+    journal_menu_action("timing.cancel");
+    reject();
+  });
 }
 
 double TimingEditDialog::bpm() const { return bpm_ != nullptr ? bpm_->value() : 120.0; }

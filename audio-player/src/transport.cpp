@@ -268,15 +268,21 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     }
 
     if (want_pause) {
-      if (audio_.has_music() && !sought_this_poll_ && committed_position_.count() >= 0) {
+      if (want_seek) {
+        if (!sought_this_poll_) {
+          committed_position_ = clamp_time(seek_time);
+        }
+      } else if (audio_.has_music() && !sought_this_poll_ && committed_position_.count() >= 0) {
         committed_position_ = clamp_time(audio_.position());
       }
       audio_.pause_music();
       audio_.begin_timeline_control();
       playing_ = false;
       music_start_pending_ = false;
-      music_seek_pending_ = false;
-      recovery_.reset();
+      if (!(want_seek && music_seek_pending_)) {
+        music_seek_pending_ = false;
+        recovery_.reset();
+      }
       filtered_audio_us_ = committed_position_.count();
       audio_filter_valid_ = false;
     }
@@ -325,7 +331,12 @@ bool Transport::start_pending_music() {
   if (!music_start_pending_) {
     return true;
   }
-  if (!playing_ || !audio_.has_music() || committed_position_.count() < 0) {
+  if (!playing_) {
+    // Stay paused; keep a failed user-seek target for paused retry / next play.
+    music_start_pending_ = false;
+    return true;
+  }
+  if (!audio_.has_music() || committed_position_.count() < 0) {
     music_start_pending_ = false;
     music_seek_pending_ = false;
     recovery_.reset();

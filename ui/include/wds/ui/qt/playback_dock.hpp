@@ -13,7 +13,6 @@ class QComboBox;
 class QPushButton;
 class QSlider;
 class QSpinBox;
-class QTimer;
 class QToolButton;
 
 namespace wds::ui {
@@ -25,14 +24,14 @@ class PlaybackBar final : public QWidget {
  public:
   explicit PlaybackBar(UiManager* manager, QWidget* parent = nullptr);
   void sync_position();
+  void refresh_settings_widgets();
 
  private:
   void build_ui();
-  void sync_from_runtime();
   void seek_to_slider(int value);
+  void apply_play_icon(bool playing);
 
   UiManager* manager_ = nullptr;
-  QTimer* sync_timer_ = nullptr;
 
   QSlider* seek_ = nullptr;
   QPushButton* play_ = nullptr;
@@ -70,15 +69,18 @@ class EditorToolbarWidget final : public QWidget {
     on_add_chart_ = std::move(handler);
   }
   void refresh_curve_controls();
+  void refresh_grid_fields();
+  void refresh_offset_field();
+  void refresh_chart_selector();
+  void refresh_enabled_states();
+  void refresh_flags();
 
  private:
   void build_ui();
-  void sync_from_runtime();
   void apply_delay();
   void apply_grid();
 
   UiManager* manager_ = nullptr;
-  QTimer* sync_timer_ = nullptr;
   std::function<void()> on_add_chart_;
   class CurveFillWidget* curve_fill_widget_ = nullptr;
 

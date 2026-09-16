@@ -118,6 +118,7 @@ target_include_directories(wds_ui
 
 target_link_libraries(wds_ui
   PUBLIC
+    wds::common
     wds::interaction
     wds::renderer
     wds::chart_render

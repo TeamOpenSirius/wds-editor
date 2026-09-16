@@ -12,9 +12,13 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/renderer/preview_visual_config.hpp"
 #include "wds/common/crash_handler.hpp"
+#include "wds/common/log.hpp"
 
+#include <QAbstractButton>
 #include <QApplication>
+#include <QPushButton>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -26,16 +30,21 @@
 #include <QStandardPaths>
 #include <QStyleFactory>
 #include <QTimer>
+#include <QUrl>
 #include <QMessageBox>
+#include <QWidget>
 #include <QFontDatabase>
 #include <QFont>
 #include <QPixmap>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <exception>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -348,10 +357,54 @@ class FrameDiagLogger {
   wds::renderer::RendererPathCounts path_counts0_{};
   wds::renderer::RendererPathCounts last_path_counts_{};
 };
+
+QtMessageHandler g_prev_qt_handler = nullptr;
+
+void wds_qt_message_handler(QtMsgType type, const QMessageLogContext& context, const QString& msg) {
+  if (type == QtFatalMsg) {
+    const QByteArray utf8 = msg.toUtf8();
+    wds::common::report_fatal("Qt fatal", utf8.constData());
+    std::abort();
+  }
+  if (type == QtCriticalMsg || type == QtWarningMsg) {
+    const QByteArray utf8 = msg.toUtf8();
+    WDS_LOG("qt: %s\n", utf8.constData());
+    return;
+  }
+#if !defined(NDEBUG)
+  if (g_prev_qt_handler != nullptr) {
+    g_prev_qt_handler(type, context, msg);
+  }
+#else
+  (void)context;
+#endif
+}
+
+void maybe_notify_previous_crash(QWidget* parent) {
+  if (qEnvironmentVariableIsSet("WDS_CRASH_NO_DIALOG")) return;
+  char path[1024] = {};
+  if (!wds::common::previous_session_crashed(path, sizeof(path))) return;
+  QMessageBox box(parent);
+  box.setIcon(QMessageBox::Warning);
+  box.setWindowTitle(QStringLiteral("上次运行异常退出"));
+  box.setText(QStringLiteral("上一次运行 WDS Editor 时发生了崩溃。崩溃报告：%1")
+                  .arg(QString::fromUtf8(path)));
+  auto* open = box.addButton(QStringLiteral("打开日志文件夹"), QMessageBox::ActionRole);
+  box.addButton(QStringLiteral("关闭"), QMessageBox::RejectRole);
+  box.exec();
+  if (box.clickedButton() == static_cast<QAbstractButton*>(open)) {
+    wds::ui::journal_menu_action("crash_notice.open_logs");
+    QDesktopServices::openUrl(
+        QUrl::fromLocalFile(QString::fromUtf8(wds::common::crash_log_directory())));
+  } else {
+    wds::ui::journal_menu_action("crash_notice.close");
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
+  g_prev_qt_handler = qInstallMessageHandler(&wds_qt_message_handler);
   prepare_bundled_qt_plugins();
   // Pin the bundled MoltenVK ICD before Qt or the loader enumerates Homebrew
   // drivers. Two MoltenVK copies make vkGetDeviceQueue jump to NULL.
@@ -378,11 +431,15 @@ int main(int argc, char** argv) {
   wds::ui::apply_wds_theme(app, theme_dir, theme_id);
 
   auto deps = wds::ui::check_startup_dependencies(argv[0]);
-  if (!deps.ok()) return wds::ui::fail_startup_dependencies(deps);
+  if (!deps.ok()) {
+    wds::common::mark_clean_exit();
+    return wds::ui::fail_startup_dependencies(deps);
+  }
 
   QVulkanInstance vk_instance;
   if (!vk_instance.create()) {
     wds::ui::add_vulkan_unavailable(deps);
+    wds::common::mark_clean_exit();
     return wds::ui::fail_startup_dependencies(deps);
   }
   wds::ui::EditorMainWindow window;
@@ -435,10 +492,29 @@ int main(int argc, char** argv) {
 
   auto last_editor_tick = std::make_shared<std::chrono::steady_clock::time_point>(
       std::chrono::steady_clock::now() - std::chrono::seconds(1));
+  auto ui_alive = std::make_shared<std::atomic<bool>>(true);
+
+  const auto clamped_tick_delta = [](std::chrono::steady_clock::time_point now,
+                                     std::chrono::steady_clock::time_point last) -> float {
+    const float raw = std::chrono::duration<float>(now - last).count();
+    return std::clamp(raw, 0.0f, 0.08f);
+  };
+
+  std::function<void(float)> finish_editor_frame = [&](float delta) {
+    editor.resize_editor_viewport(editor_widget->width(), editor_widget->height(),
+                                  editor_widget->width(), editor_widget->height());
+    editor.update(delta, {});
+    const bool playing = editor.chart_preview().ready() &&
+                         editor.chart_preview().transport().intends_playing();
+    if (editor_widget->isVisible() && editor_widget->take_dirty_for_frame(playing)) {
+      editor_widget->update();
+    }
+    *last_editor_tick = std::chrono::steady_clock::now();
+  };
 
   preview_window->set_frame_callback([&editor, &window, preview_window, visual, ui_font,
-                                      overlay_loaded_display, &frame_diag, editor_widget,
-                                      last_editor_tick](
+                                      overlay_loaded_display, &frame_diag, editor_widget, ui_alive,
+                                      &finish_editor_frame](
                                          float delta, int logical_w, int logical_h, int fb_w,
                                          int fb_h,
                                          const std::vector<wds::interaction::InputEvent>& events) mutable {
@@ -462,7 +538,8 @@ int main(int argc, char** argv) {
         // Do not decode the project audio inside the first exposed frame. Let
         // Qt paint the shell and schedule the decode on the next event turn.
         const std::string music = editor.session().music_path();
-        QTimer::singleShot(0, &window, [&editor, music] {
+        QTimer::singleShot(0, &window, [ui_alive, &editor, music] {
+          if (!ui_alive->load()) return;
           (void)editor.chart_preview().load_music(music, false);
         });
       }
@@ -488,11 +565,7 @@ int main(int argc, char** argv) {
     }
     editor.chart_preview().flush_retired_font_textures();
     window.on_preview_frame();
-    editor.resize_editor_viewport(editor_widget->width(), editor_widget->height(),
-                                  editor_widget->width(), editor_widget->height());
-    editor.update(delta, {});
-    editor_widget->update();
-    *last_editor_tick = std::chrono::steady_clock::now();
+    finish_editor_frame(delta);
     if (diag) {
       frame_diag.finish_frame(editor, *editor_widget, wall_us,
                              static_cast<int64_t>(delta * 1000000.0f), tick_us, render_us);
@@ -503,16 +576,32 @@ int main(int argc, char** argv) {
   auto* edit_timer = new QTimer(&window);
   edit_timer->setTimerType(Qt::CoarseTimer);
   QObject::connect(edit_timer, &QTimer::timeout, &window,
-                   [&editor, editor_widget, last_editor_tick] {
+                   [&editor, &window, editor_widget, last_editor_tick, preview_window, edit_timer,
+                    &finish_editor_frame, clamped_tick_delta] {
+                     const bool ready = editor.chart_preview().ready();
+                     const bool intends =
+                         ready && editor.chart_preview().transport().intends_playing();
+                     const int interval_ms = intends ? 16 : 33;
+                     if (edit_timer->interval() != interval_ms) {
+                       edit_timer->setInterval(interval_ms);
+                     }
+
                      const auto now = std::chrono::steady_clock::now();
+                     const bool unexposed =
+                         !preview_window->isExposed() || !preview_window->isVisible();
+                     if (unexposed && ready) {
+                       if (now - *last_editor_tick < std::chrono::milliseconds(interval_ms - 2)) {
+                         return;
+                       }
+                       const float delta = clamped_tick_delta(now, *last_editor_tick);
+                       editor.chart_preview().tick(static_cast<int64_t>(delta * 1000000.0f));
+                       window.on_preview_frame();
+                       finish_editor_frame(delta);
+                       return;
+                     }
+
                      if (now - *last_editor_tick < std::chrono::milliseconds(50)) return;
-                     const float raw = std::chrono::duration<float>(now - *last_editor_tick).count();
-                     const float delta = std::clamp(raw, 0.0f, 0.08f);
-                     editor.resize_editor_viewport(editor_widget->width(), editor_widget->height(),
-                                                   editor_widget->width(), editor_widget->height());
-                     editor.update(delta, {});
-                     editor_widget->update();
-                     *last_editor_tick = std::chrono::steady_clock::now();
+                     finish_editor_frame(clamped_tick_delta(now, *last_editor_tick));
                    });
   edit_timer->start(33);
 
@@ -554,7 +643,11 @@ int main(int argc, char** argv) {
 
   window.setWindowIcon(QApplication::windowIcon());
   if (!args.contains("--smoke-test")) {
-    if (!window.show_startup_splash()) return 0;
+    maybe_notify_previous_crash(nullptr);
+    if (!window.show_startup_splash()) {
+      wds::common::mark_clean_exit();
+      return 0;
+    }
   }
   window.show();
   window.raise();
@@ -599,7 +692,23 @@ int main(int argc, char** argv) {
   }
   if (args.contains("--smoke-test"))
     QTimer::singleShot(1200, &app, &QApplication::quit);
-  const int rc = app.exec();
+  int rc = 1;
+  try {
+    rc = app.exec();
+  } catch (const std::exception& e) {
+    wds::common::report_fatal("uncaught exception (event loop)", e.what());
+    std::abort();
+  } catch (...) {
+    wds::common::report_fatal("uncaught exception (event loop)", "unknown");
+    std::abort();
+  }
+  ui_alive->store(false);
+  preview_window->set_frame_callback({});
+  preview_window->set_idle_throttle_bypass({});
+  edit_timer->stop();
+  window.detach_ui_manager();
+  editor_widget->set_global_key_handler({});
   frame_diag.close();
+  wds::common::mark_clean_exit();
   return rc;
 }

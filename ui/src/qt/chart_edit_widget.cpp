@@ -8,10 +8,14 @@
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
+#include <wds/common/crash_input_journal.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
+#include <QEnterEvent>
+#include <QEvent>
+#include <QFocusEvent>
 #include <QGuiApplication>
 #include <QImage>
 #include <QInputMethodEvent>
@@ -19,6 +23,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QShowEvent>
 #include <QWheelEvent>
 #include <QDir>
 #include <QFont>
@@ -27,6 +32,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 namespace wds::ui {
 namespace {
@@ -37,6 +43,23 @@ QColor qcolor(const wds::interaction::Color& c) {
 }
 
 QRectF qrect(const wds::interaction::Rect& r) { return {r.x, r.y, r.w, r.h}; }
+
+std::uint8_t pack_mods(const wds::interaction::Modifiers& mods) {
+  return static_cast<std::uint8_t>((mods.shift ? 1 : 0) | (mods.control ? 2 : 0) |
+                                   (mods.alt ? 4 : 0) | (mods.super ? 8 : 0));
+}
+
+struct ChartEditJournal {
+  ChartEditJournal(wds::common::CrashInputKind kind, float x, float y, float dx, float dy,
+                   std::int32_t key, std::uint8_t mods, std::uint8_t button,
+                   std::uint8_t repeat) {
+    wds::common::journal_begin_event(kind, x, y, dx, dy, key, mods, button, repeat);
+    wds::common::journal_set_route("ChartEditPanel", wds::common::CrashRouteVia::Host);
+  }
+  ~ChartEditJournal() { wds::common::journal_end_event(); }
+  ChartEditJournal(const ChartEditJournal&) = delete;
+  ChartEditJournal& operator=(const ChartEditJournal&) = delete;
+};
 
 QPixmap pixmap_from_hold_bake(bool scratch) {
   const auto px = wds::chart_render::bake_hold_long_rgba(scratch);
@@ -211,7 +234,7 @@ void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interactio
 }  // namespace
 
 ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
-    : QWidget(parent), panel_(panel), last_tick_(std::chrono::steady_clock::now()) {
+    : QWidget(parent), panel_(panel) {
   setFocusPolicy(Qt::StrongFocus);
   setMouseTracking(true);
   setAutoFillBackground(false);
@@ -240,7 +263,25 @@ void ChartEditWidget::set_skins_directory(const QString& directory) {
     arrow_mirrored_ = QPixmap::fromImage(arrow_.toImage().flipped(Qt::Horizontal));
     arrow_mirrored_.setDevicePixelRatio(arrow_.devicePixelRatio());
   }
+  mark_dirty();
   update();
+}
+
+bool ChartEditWidget::take_dirty_for_frame(bool playing) {
+  if (!isVisible()) return false;
+  if (panel_) {
+    const uint64_t rev = panel_->visual_revision();
+    if (rev != last_visual_revision_) {
+      last_visual_revision_ = rev;
+      dirty_ = true;
+    }
+  }
+  if (playing) dirty_ = true;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_paint_at_ >= std::chrono::milliseconds(250)) dirty_ = true;
+  if (!dirty_) return false;
+  dirty_ = false;
+  return true;
 }
 
 wds::interaction::Modifiers ChartEditWidget::mods(Qt::KeyboardModifiers m) const {
@@ -256,17 +297,41 @@ static wds::interaction::PointerButton button(Qt::MouseButton b) {
 }
 void ChartEditWidget::resizeEvent(QResizeEvent*) {
   if (panel_) panel_->set_bounds({0, 0, static_cast<float>(width()), static_cast<float>(height())});
+  mark_dirty();
   update();
 }
+void ChartEditWidget::showEvent(QShowEvent* e) {
+  mark_dirty();
+  QWidget::showEvent(e);
+}
+void ChartEditWidget::enterEvent(QEnterEvent* e) {
+  mark_dirty();
+  QWidget::enterEvent(e);
+  update();
+}
+void ChartEditWidget::leaveEvent(QEvent* e) {
+  mark_dirty();
+  QWidget::leaveEvent(e);
+  update();
+}
+void ChartEditWidget::focusInEvent(QFocusEvent* e) {
+  mark_dirty();
+  QWidget::focusInEvent(e);
+}
+void ChartEditWidget::focusOutEvent(QFocusEvent* e) {
+  mark_dirty();
+  QWidget::focusOutEvent(e);
+}
 void ChartEditWidget::paintEvent(QPaintEvent*) {
+  dirty_ = false;
   const auto paint_t0 = std::chrono::steady_clock::now();
   struct PaintCost {
     ChartEditWidget* self;
     std::chrono::steady_clock::time_point t0;
     ~PaintCost() {
-      self->last_paint_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - t0)
-                                 .count();
+      const auto now = std::chrono::steady_clock::now();
+      self->last_paint_us_ = std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count();
+      self->last_paint_at_ = now;
       ++self->paint_count_;
     }
   } paint_cost{this, paint_t0};
@@ -616,6 +681,7 @@ void ChartEditWidget::present_qt_modals() {
         (void)panel_->add_split_effect(split.tick, dialog.count(), dialog.color_id());
       }
     }
+    mark_dirty();
     update();
     return;
   }
@@ -633,6 +699,7 @@ void ChartEditWidget::present_qt_modals() {
         (void)panel_->apply_meter(timing.tick, dialog.numerator(), dialog.denominator());
       }
     }
+    mark_dirty();
     update();
   }
 }
@@ -642,15 +709,23 @@ void ChartEditWidget::mousePressEvent(QMouseEvent* e) {
   setFocus();
   grabMouse();
   const auto pos = point(e->position());
+  const auto btn = button(e->button());
+  const auto m = mods(e->modifiers());
+  ChartEditJournal scope(wds::common::CrashInputKind::PointerDown, pos.x, pos.y, 0.0f, 0.0f, 0,
+                         pack_mods(m), static_cast<std::uint8_t>(btn), 0);
   panel_->sync_global_pointer(pos);
-  panel_->on_pointer_down({pos, button(e->button()), mods(e->modifiers())});
+  panel_->on_pointer_down({pos, btn, m});
   if (panel_->has_modal_popup()) releaseMouse();
   present_qt_modals();
+  mark_dirty();
   update();
 }
 void ChartEditWidget::mouseMoveEvent(QMouseEvent* e) {
   if (!panel_) return;
   const auto pos = point(e->position());
+  // 0 hover / 1 drag / 2 scrub. Pointer moves are hover or drag; wheel is Scroll.
+  const std::uint8_t mode = (e->buttons() != Qt::NoButton) ? std::uint8_t{1} : std::uint8_t{0};
+  wds::common::journal_note_move(pos.x, pos.y, mode);
   panel_->sync_global_pointer(pos);
   panel_->on_pointer_move({pos, mods(e->modifiers())});
   switch (panel_->hover_cursor()) {
@@ -658,18 +733,34 @@ void ChartEditWidget::mouseMoveEvent(QMouseEvent* e) {
     case wds::interaction::CursorKind::ResizeVertical: setCursor(Qt::SizeVerCursor); break;
     default: setCursor(Qt::ArrowCursor); break;
   }
+  mark_dirty();
   update();
 }
 void ChartEditWidget::mouseReleaseEvent(QMouseEvent* e) {
   if (!panel_) return;
   const auto pos = point(e->position());
+  const auto btn = button(e->button());
+  const auto m = mods(e->modifiers());
+  ChartEditJournal scope(wds::common::CrashInputKind::PointerUp, pos.x, pos.y, 0.0f, 0.0f, 0,
+                         pack_mods(m), static_cast<std::uint8_t>(btn), 0);
   panel_->sync_global_pointer(pos);
-  panel_->on_pointer_up({pos, button(e->button()), mods(e->modifiers())});
+  panel_->on_pointer_up({pos, btn, m});
   if (e->buttons() == Qt::NoButton) releaseMouse();
   present_qt_modals();
+  mark_dirty();
   update();
 }
-void ChartEditWidget::mouseDoubleClickEvent(QMouseEvent* e) { if (!panel_) return; panel_->on_double_click({point(e->position()), button(e->button()), mods(e->modifiers())}); update(); }
+void ChartEditWidget::mouseDoubleClickEvent(QMouseEvent* e) {
+  if (!panel_) return;
+  const auto pos = point(e->position());
+  const auto btn = button(e->button());
+  const auto m = mods(e->modifiers());
+  ChartEditJournal scope(wds::common::CrashInputKind::DoubleClick, pos.x, pos.y, 0.0f, 0.0f, 0,
+                         pack_mods(m), static_cast<std::uint8_t>(btn), 0);
+  panel_->on_double_click({pos, btn, m});
+  mark_dirty();
+  update();
+}
 void ChartEditWidget::wheelEvent(QWheelEvent* e) {
   if (!panel_) return;
   const QPoint angle = e->angleDelta();
@@ -679,24 +770,40 @@ void ChartEditWidget::wheelEvent(QWheelEvent* e) {
   float dx = pixel.x() != 0 ? pixel.x() / 10.0f : angle.x() / 40.0f;
   float dy = pixel.y() != 0 ? pixel.y() / 10.0f : angle.y() / 40.0f;
   apply_scroll_invert(dx, dy);
+  const auto pos = point(e->position());
+  const auto m = mods(e->modifiers());
+  ChartEditJournal scope(wds::common::CrashInputKind::Scroll, pos.x, pos.y, dx, dy, 0, pack_mods(m),
+                         0, 0);
   // Option/Alt+wheel zooms visible range. Primary (Cmd/Ctrl)+wheel scrubs.
-  panel_->on_scroll({point(e->position()), dx, dy, mods(e->modifiers())});
+  panel_->on_scroll({pos, dx, dy, m});
+  mark_dirty();
   update();
 }
 void ChartEditWidget::keyPressEvent(QKeyEvent* e) {
   if (!panel_) return;
   const auto ev = wds::interaction::KeyDownEvent{qt_key_code(e->key()), mods(e->modifiers()), e->isAutoRepeat()};
-  // Space is an application command, never an edit-canvas command. Qt dialogs
-  // own their own keyboard; the old painted popups no longer take keys here.
-  if (ev.key == wds::interaction::KeyCode::Space && global_key_handler_ &&
-      !panel_->captures_keys()) {
-    global_key_handler_(ev);
-  } else {
-    panel_->on_key_down(ev);
+  {
+    ChartEditJournal scope(wds::common::CrashInputKind::KeyDown, 0.0f, 0.0f, 0.0f, 0.0f,
+                           static_cast<std::int32_t>(ev.key), pack_mods(ev.mods), 0,
+                           ev.repeat ? 1 : 0);
+    // Space is an application command, never an edit-canvas command. Qt dialogs
+    // own their own keyboard; the old painted popups no longer take keys here.
+    if (ev.key == wds::interaction::KeyCode::Space && global_key_handler_ &&
+        !panel_->captures_keys()) {
+      global_key_handler_(ev);
+    } else {
+      panel_->on_key_down(ev);
+    }
   }
   if (!e->isAutoRepeat() && !e->text().isEmpty() && panel_->has_modal_popup()) {
-    panel_->on_text_input({e->text().toUtf8().toStdString()});
+    const std::string text = e->text().toUtf8().toStdString();
+    ChartEditJournal scope(wds::common::CrashInputKind::TextInput, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0,
+                           0);
+    wds::common::journal_set_text(wds::common::journal_allow_sensitive() ? text.c_str() : nullptr,
+                                  text.size());
+    panel_->on_text_input({text});
   }
+  mark_dirty();
   update();
 }
 void ChartEditWidget::keyReleaseEvent(QKeyEvent* e) {
@@ -704,12 +811,21 @@ void ChartEditWidget::keyReleaseEvent(QKeyEvent* e) {
   // queryKeyboardModifiers() is the live OS state after the release; OR-ing
   // e->modifiers() would keep Shift/Cmd stuck on (Qt still reports them).
   const auto ev = wds::interaction::KeyUpEvent{qt_key_code(e->key()), qt_live_modifiers()};
+  ChartEditJournal scope(wds::common::CrashInputKind::KeyUp, 0.0f, 0.0f, 0.0f, 0.0f,
+                         static_cast<std::int32_t>(ev.key), pack_mods(ev.mods), 0, 0);
   if (ev.key != wds::interaction::KeyCode::Space || panel_->captures_keys()) panel_->on_key_up(ev);
+  mark_dirty();
   update();
 }
 void ChartEditWidget::inputMethodEvent(QInputMethodEvent* e) {
   if (panel_ && panel_->has_modal_popup() && !e->commitString().isEmpty()) {
-    panel_->on_text_input({e->commitString().toUtf8().toStdString()});
+    const std::string text = e->commitString().toUtf8().toStdString();
+    ChartEditJournal scope(wds::common::CrashInputKind::TextInput, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0,
+                           0);
+    wds::common::journal_set_text(wds::common::journal_allow_sensitive() ? text.c_str() : nullptr,
+                                  text.size());
+    panel_->on_text_input({text});
+    mark_dirty();
     update();
   }
   QWidget::inputMethodEvent(e);

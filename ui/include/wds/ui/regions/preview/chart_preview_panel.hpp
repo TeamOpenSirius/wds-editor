@@ -9,8 +9,10 @@
 
 #include <wds/core/chart_editor_engine.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -87,6 +89,7 @@ class ChartPreviewPanel {
                          const std::string& ui_font_path, bool initialize_audio = true);
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
+  void join_waveform_workers();
   void rebuild_waveform(const std::string& music_path);
   void collect_ready_waveforms();
   void destroy_spectrogram_texture();
@@ -101,6 +104,7 @@ class ChartPreviewPanel {
   wds::audio::WaveformOverview waveform_;
   struct PendingWaveform {
     std::uint64_t generation = 0;
+    std::shared_ptr<std::atomic<bool>> cancel;
     std::future<wds::audio::WaveformOverview> result;
   };
   std::vector<PendingWaveform> pending_waveforms_;

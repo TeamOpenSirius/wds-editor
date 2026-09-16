@@ -9,6 +9,7 @@
 #include "bass.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -250,8 +251,12 @@ bool WaveformOverview::rasterize_rgba(std::vector<unsigned char>& out, int& out_
   return true;
 }
 
-bool WaveformOverview::load(const std::string& path) {
+bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* cancel) {
   clear();
+  const auto cancelled = [cancel]() noexcept {
+    return cancel != nullptr && cancel->load(std::memory_order_relaxed);
+  };
+  if (cancelled()) return false;
   if (path.empty()) return true;
 
   std::error_code ec;
@@ -363,7 +368,14 @@ bool WaveformOverview::load(const std::string& path) {
   std::uint64_t pcm_frame = 0;
   float max_peak = 0.0f;
 
+  const auto abort_decode = [&]() -> bool {
+    BASS_StreamFree(dec);
+    clear();
+    return false;
+  };
+
   while (true) {
+    if (cancelled()) return abort_decode();
     const DWORD want = static_cast<DWORD>(buf.size() * sizeof(float));
     const DWORD got = BASS_ChannelGetData(dec, buf.data(), want);
     if (got == static_cast<DWORD>(-1) || got == 0) break;
@@ -397,12 +409,14 @@ bool WaveformOverview::load(const std::string& path) {
           (samples_seen - static_cast<std::uint64_t>(kFftSize)) %
                   static_cast<std::uint64_t>(kFftHop) ==
               0) {
+        if (cancelled()) return abort_decode();
         emit_fft_frame();
       }
       ++pcm_frame;
     }
   }
 
+  if (cancelled()) return abort_decode();
   BASS_StreamFree(dec);
 
   if (max_peak > 1.0e-6f) {

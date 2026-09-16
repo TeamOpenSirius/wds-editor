@@ -20,9 +20,12 @@
 #include <wds/core/notation.hpp>
 
 #include <wds/common/crash_input_journal.hpp>
+#include <wds/common/log.hpp>
 #include <wds/common/time.hpp>
 
 #include <wds/interaction/editor_input.hpp>
+#include <wds/interaction/editor_shortcuts.hpp>
+#include <wds/interaction/platform.hpp>
 #include <wds/interaction/theme.hpp>
 
 #include <algorithm>
@@ -57,8 +60,68 @@ void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& 
 
 }  // namespace
 
+void journal_menu_action(const char* id) noexcept {
+  wds::common::journal_begin_event(wds::common::CrashInputKind::Menu, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0,
+                                   0, 0);
+  wds::common::journal_set_route(id, wds::common::CrashRouteVia::Menu);
+  wds::common::journal_end_event();
+}
+
+bool UiManager::dispatch_shortcut(const wds::interaction::KeyDownEvent& event) {
+  if (!shortcuts_.contains(event)) {
+    return false;
+  }
+  using wds::interaction::EditorShortcut;
+  using wds::interaction::editor_shortcut;
+  using wds::interaction::editor_shortcut_id;
+  using wds::interaction::normalize_primary;
+
+  const auto mods = normalize_primary(event.mods);
+  std::int32_t sid = -1;
+  const char* route = "Shortcut";
+  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
+    const auto id = static_cast<EditorShortcut>(i);
+    const auto& chord = editor_shortcut(id);
+    if (chord.key == event.key && chord.mods == mods) {
+      sid = static_cast<std::int32_t>(i);
+      route = editor_shortcut_id(id);
+      break;
+    }
+  }
+  const std::uint8_t packed =
+      static_cast<std::uint8_t>((event.mods.shift ? 1 : 0) | (event.mods.control ? 2 : 0) |
+                                (event.mods.alt ? 4 : 0) | (event.mods.super ? 8 : 0));
+  wds::common::journal_begin_event(wds::common::CrashInputKind::KeyDown, 0.0f, 0.0f, 0.0f, 0.0f,
+                                   static_cast<std::int32_t>(event.key), packed, 0,
+                                   event.repeat ? 1 : 0);
+  wds::common::journal_set_route(route, wds::common::CrashRouteVia::Shortcut);
+  wds::common::journal_set_shortcut(sid);
+  struct EndJournal {
+    ~EndJournal() { wds::common::journal_end_event(); }
+  } end;
+  return shortcuts_.dispatch(event);
+}
+
 UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   session_ = std::make_unique<EditorSession>(*chart_preview_);
+  last_doc_revision_ = session_->engine().document().content_generation();
+  last_can_undo_ = session_->engine().history().can_undo();
+  last_can_redo_ = session_->engine().history().can_redo();
+  last_dirty_ = session_->dirty();
+  session_->set_ui_change_handler([this](SessionUiChange change) {
+    switch (change) {
+      case SessionUiChange::Offset:
+        notify_ui_change(UiChange::Offset);
+        break;
+      case SessionUiChange::Charts:
+        notify_ui_change(UiChange::Charts);
+        notify_ui_change(UiChange::History);
+        break;
+      case SessionUiChange::Document:
+        notify_ui_change(UiChange::Document);
+        break;
+    }
+  });
   session_->set_status_handler([this](std::string text, StatusLevel level) {
     auto* app = QCoreApplication::instance();
     if (app != nullptr && QThread::currentThread() != app->thread()) {
@@ -80,6 +143,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
     }
+    notify_ui_change(UiChange::Grid);
     request_save_ui_config(false);
   });
   auto preview_hit = std::make_unique<PreviewHitWidget>();
@@ -266,15 +330,43 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     });
   }
   if (auto* settings_panel = this->settings_panel()) {
-    settings_panel->set_persist_handler(persist);
+    settings_panel->set_persist_handler([this, persist] {
+      persist();
+      notify_ui_change(UiChange::PlaybackSettings);
+    });
   }
   if (auto* toolbar_panel = this->toolbar_panel()) {
-    toolbar_panel->set_persist_handler(persist);
+    toolbar_panel->set_persist_handler([this, persist] {
+      persist();
+      notify_ui_change(UiChange::Grid);
+    });
   }
 
   shortcuts_.set_active_namespace("editor");
   bind_editor_shortcuts();
   push_curve_fill_selection();
+}
+
+void UiManager::toggle_playback(bool shift_pause_variant) {
+  auto& transport = chart_preview_->transport();
+  auto* edit = edit_panel();
+  const bool pause_at_current = edit != nullptr && edit->pause_at_current();
+  if (!transport.intends_playing()) {
+    play_anchor_ms_ = transport.committed_ms();
+    transport.request_play();
+    return;
+  }
+  // Default: Space → return to play start + pause; Shift+Space → pause in place.
+  // Checked: swap those two Space behaviors.
+  const bool pause_here = pause_at_current ? !shift_pause_variant : shift_pause_variant;
+  if (!pause_here) {
+    transport.request_seek_ms(play_anchor_ms_);
+  }
+  transport.request_pause();
+}
+
+bool UiManager::playback_intends_playing() const {
+  return chart_preview_->transport().intends_playing();
 }
 
 void UiManager::bind_editor_shortcuts() {
@@ -302,25 +394,8 @@ void UiManager::bind_editor_shortcuts() {
   using wds::interaction::playback_rate_for_slot;
   using wds::interaction::width_slot_values_const;
 
-  const auto handle_playback = [this](bool shift) {
-    auto& transport = chart_preview_->transport();
-    auto* edit = edit_panel();
-    const bool pause_at_current = edit != nullptr && edit->pause_at_current();
-    if (!transport.playing()) {
-      play_anchor_ms_ = transport.committed_ms();
-      transport.request_play();
-      return;
-    }
-    // Default: Space → return to play start + pause; Shift+Space → pause in place.
-    // Checked: swap those two Space behaviors.
-    const bool pause_here = pause_at_current ? !shift : shift;
-    if (!pause_here) {
-      transport.request_seek_ms(play_anchor_ms_);
-    }
-    transport.request_pause();
-  };
-  editor.bind(chord_toggle_playback(), [handle_playback] { handle_playback(false); });
-  editor.bind(chord_pause_playback(), [handle_playback] { handle_playback(true); });
+  editor.bind(chord_toggle_playback(), [this] { toggle_playback(false); });
+  editor.bind(chord_pause_playback(), [this] { toggle_playback(true); });
   editor.bind(chord_toggle_fullscreen(), [this] {
     if (fullscreen_toggler_) fullscreen_toggler_();
   });
@@ -342,8 +417,16 @@ void UiManager::bind_editor_shortcuts() {
       }
     });
   });
-  editor.bind(chord_undo(), [this] { session_->engine().undo(); });
-  editor.bind(chord_redo(), [this] { session_->engine().redo(); });
+  editor.bind(chord_undo(), [this] {
+    session_->engine().undo();
+    notify_ui_change(UiChange::History);
+    notify_ui_change(UiChange::Document);
+  });
+  editor.bind(chord_redo(), [this] {
+    session_->engine().redo();
+    notify_ui_change(UiChange::History);
+    notify_ui_change(UiChange::Document);
+  });
   editor.bind(chord_copy(), [this] {
     if (auto* panel = edit_panel()) panel->copy_selected();
   });
@@ -389,12 +472,18 @@ void UiManager::bind_editor_shortcuts() {
       if (has_blocking_modal_dialog()) return;
       const auto rate = playback_rate_for_slot(slot);
       if (!rate) return;
-      if (auto* settings = settings_panel()) settings->set_playback_rate(*rate);
+      if (auto* settings = settings_panel()) {
+        settings->set_playback_rate(*rate);
+        notify_ui_change(UiChange::PlaybackSettings);
+      }
     });
   }
   editor.bind(chord_toggle_sfx_mute(), [this] {
     if (has_blocking_modal_dialog()) return;
-    if (auto* settings = settings_panel()) settings->toggle_sfx_mute();
+    if (auto* settings = settings_panel()) {
+      settings->toggle_sfx_mute();
+      notify_ui_change(UiChange::PlaybackSettings);
+    }
   });
 }
 
@@ -425,6 +514,35 @@ StatusBar* UiManager::status_bar() noexcept { return status_bar_; }
 void UiManager::set_status(std::string text, StatusLevel level) {
   if (status_bar_ != nullptr) status_bar_->set_message(text, level);
   if (external_status_handler_) external_status_handler_(std::move(text), level);
+}
+
+void UiManager::notify_ui_change(UiChange change) {
+  auto* app = QCoreApplication::instance();
+  if (app != nullptr && QThread::currentThread() != app->thread()) {
+    WDS_LOG("UiChange %d delivered off GUI thread; queueing\n", static_cast<int>(change));
+    QMetaObject::invokeMethod(
+        app, [this, change] { notify_ui_change(change); }, Qt::QueuedConnection);
+    return;
+  }
+  if (on_ui_change_) on_ui_change_(change);
+}
+
+void UiManager::poll_ui_change_notifications() {
+  if (session_ == nullptr) return;
+  const std::uint64_t rev = session_->engine().document().content_generation();
+  const bool can_undo = session_->engine().history().can_undo();
+  const bool can_redo = session_->engine().history().can_redo();
+  if (rev != last_doc_revision_ || can_undo != last_can_undo_ || can_redo != last_can_redo_) {
+    last_doc_revision_ = rev;
+    last_can_undo_ = can_undo;
+    last_can_redo_ = can_redo;
+    notify_ui_change(UiChange::History);
+  }
+  const bool dirty = session_->dirty();
+  if (dirty != last_dirty_) {
+    last_dirty_ = dirty;
+    notify_ui_change(UiChange::Document);
+  }
 }
 
 WidthSlotsDialog* UiManager::width_slots_dialog() noexcept { return width_slots_dialog_; }
@@ -691,6 +809,8 @@ void UiManager::load_ui_config() {
     toolbar->refresh_curve_controls();
   }
   push_curve_fill_selection();
+  notify_ui_change(UiChange::PlaybackSettings);
+  notify_ui_change(UiChange::Grid);
 }
 
 void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
@@ -732,6 +852,7 @@ void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   bind_editor_shortcuts();
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
   save_ui_config();
+  notify_ui_change(UiChange::Grid);
 }
 
 void UiManager::save_ui_config() {
@@ -893,6 +1014,7 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   root_.process_frame(delta_seconds, events, &shortcuts_);
   last_update_process_us_ = phase_us(t0);
   flush_pending_ui_config();
+  poll_ui_change_notifications();
 }
 
 void UiManager::paint(wds::interaction::UiPainter& painter) const {

@@ -56,9 +56,12 @@
 #include <QGuiApplication>
 #include <QProgressBar>
 #include <QMetaObject>
+#include <QTimer>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 #include <wds/interaction/editor_input.hpp>
+#include <wds/common/crash_handler.hpp>
+#include <wds/common/log.hpp>
 #include "wds/ui/curve_template.hpp"
 #include <algorithm>
 #include <array>
@@ -159,6 +162,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   about_action_->setIcon(fluent_icon(fluent::Info));
   menuBar()->addAction(about_action_);
   connect(about_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.about");
     AboutDialog(this).exec();
   });
 
@@ -170,10 +174,12 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
       tr("全屏") + QStringLiteral("（") +
       fullscreen_action_->shortcut().toString(QKeySequence::NativeText) + QStringLiteral("）"));
   connect(fullscreen_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.fullscreen");
     isFullScreen() ? showNormal() : showFullScreen();
   });
   auto* reset = viewMenu->addAction(tr("重置布局"));
   connect(reset, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.reset_layout");
     QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
     prefs.remove("window/geometry");
     prefs.remove("window/state-v12");
@@ -202,7 +208,29 @@ std::array<QDockWidget*, 6> EditorMainWindow::chrome_docks() const {
 void EditorMainWindow::add_dock_toggle(QDockWidget* dock) {
   if (dock == nullptr || fullscreen_action_ == nullptr) return;
   auto* viewMenu = menuBar()->actions().at(2)->menu();
-  viewMenu->insertAction(fullscreen_action_, dock->toggleViewAction());
+  auto* action = dock->toggleViewAction();
+  viewMenu->insertAction(fullscreen_action_, action);
+  struct DockJournalId {
+    const char* object_name;
+    const char* route;
+  };
+  static constexpr DockJournalId kDockJournalIds[] = {
+      {"previewViewportDock", "menu.view.preview"},
+      {"editorViewportDock", "menu.view.edit"},
+      {"playbackAudioDock", "menu.view.playback"},
+      {"editorToolbarDock", "menu.view.toolbar"},
+      {"curveTemplatesDock", "menu.view.curve"},
+      {"settingsDock", "menu.view.settings"},
+  };
+  const char* id = "menu.view.dock";
+  const auto name = dock->objectName();
+  for (const auto& entry : kDockJournalIds) {
+    if (name == QLatin1String(entry.object_name)) {
+      id = entry.route;
+      break;
+    }
+  }
+  connect(action, &QAction::toggled, this, [id](bool) { journal_menu_action(id); });
 }
 
 void EditorMainWindow::apply_default_dock_sizes() {
@@ -375,12 +403,14 @@ void EditorMainWindow::changeEvent(QEvent* event) {
 }
 
 void EditorMainWindow::on_preview_frame() {
+  if (ui_manager_ == nullptr) return;
   if (playback_panel_ != nullptr) playback_panel_->sync_position();
 }
 
 void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   ui_manager_ = manager;
   if (ui_manager_ == nullptr) return;
+  ui_manager_->set_ui_change_handler([this](UiChange change) { handle_ui_change(change); });
   ui_manager_->set_external_status_handler([this](std::string text, StatusLevel) {
     const QString message = QString::fromUtf8(text.c_str());
     QMetaObject::invokeMethod(this, [this, message] {
@@ -392,27 +422,167 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   });
   ui_manager_->set_open_project_handler([this] { open_project(); });
   ui_manager_->set_save_project_handler([this] { save_project(); });
-  connect(open_action_, &QAction::triggered, this, &EditorMainWindow::open_project);
-  connect(save_action_, &QAction::triggered, this, &EditorMainWindow::save_project);
-  connect(undo_action_, &QAction::triggered, this,
-          [this] { ui_manager_->session().engine().undo(); });
-  connect(redo_action_, &QAction::triggered, this,
-          [this] { ui_manager_->session().engine().redo(); });
-  connect(import_action_, &QAction::triggered, this, &EditorMainWindow::import_chart);
-  connect(export_action_, &QAction::triggered, this, &EditorMainWindow::export_chart);
-  connect(music_action_, &QAction::triggered, this, &EditorMainWindow::import_music);
-  connect(check_action_, &QAction::triggered, this, &EditorMainWindow::check_chart);
-  connect(settings_action_, &QAction::triggered, this, &EditorMainWindow::show_settings);
+  connect(open_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.open");
+    open_project();
+  });
+  connect(save_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.save");
+    save_project();
+  });
+  connect(undo_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.undo");
+    ui_manager_->session().engine().undo();
+    ui_manager_->notify_ui_change(UiChange::History);
+    ui_manager_->notify_ui_change(UiChange::Document);
+  });
+  connect(redo_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.redo");
+    ui_manager_->session().engine().redo();
+    ui_manager_->notify_ui_change(UiChange::History);
+    ui_manager_->notify_ui_change(UiChange::Document);
+  });
+  connect(import_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.import_chart");
+    import_chart();
+  });
+  connect(export_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.export_chart");
+    export_chart();
+  });
+  connect(music_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.import_music");
+    import_music();
+  });
+  connect(check_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.check_chart");
+    check_chart();
+  });
+  connect(settings_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.settings");
+    show_settings();
+  });
 
   create_control_docks();
   restore_or_reset_layout();
-  auto* history_timer = new QTimer(this);
-  history_timer->setInterval(200);
-  connect(history_timer, &QTimer::timeout, this, [this] { refresh_history_actions(); });
-  history_timer->start();
+  if (playback_panel_ != nullptr) playback_panel_->refresh_settings_widgets();
+  if (toolbar_widget_ != nullptr) {
+    toolbar_widget_->refresh_offset_field();
+    toolbar_widget_->refresh_grid_fields();
+    toolbar_widget_->refresh_flags();
+    toolbar_widget_->refresh_chart_selector();
+    toolbar_widget_->refresh_enabled_states();
+  }
   refresh_history_actions();
+  refresh_window_title();
   // Space toggles playback anywhere in the app (except while typing).
   qApp->installEventFilter(this);
+}
+
+EditorMainWindow::~EditorMainWindow() {
+  ++open_generation_;
+  wait_open_project_watchers();
+}
+
+void EditorMainWindow::detach_ui_manager() {
+  if (ui_manager_ != nullptr) {
+    ui_manager_->set_ui_change_handler({});
+  }
+  ui_manager_ = nullptr;
+}
+
+void EditorMainWindow::handle_ui_change(UiChange change) {
+  switch (change) {
+    case UiChange::PlaybackSettings:
+      if (playback_panel_ != nullptr) playback_panel_->refresh_settings_widgets();
+      break;
+    case UiChange::Grid:
+      if (toolbar_widget_ != nullptr) {
+        toolbar_widget_->refresh_grid_fields();
+        toolbar_widget_->refresh_flags();
+      }
+      break;
+    case UiChange::Offset:
+      if (toolbar_widget_ != nullptr) {
+        toolbar_widget_->refresh_offset_field();
+        toolbar_widget_->refresh_enabled_states();
+      }
+      break;
+    case UiChange::Charts:
+      if (toolbar_widget_ != nullptr) {
+        toolbar_widget_->refresh_chart_selector();
+        toolbar_widget_->refresh_enabled_states();
+      }
+      refresh_window_title();
+      break;
+    case UiChange::History:
+      refresh_history_actions();
+      break;
+    case UiChange::Document:
+      refresh_window_title();
+      break;
+  }
+}
+
+void EditorMainWindow::refresh_window_title() {
+  QString title = QStringLiteral("WDS Editor");
+  if (ui_manager_ != nullptr) {
+    const auto& session = ui_manager_->session();
+    if (session.dirty()) title += QStringLiteral(" *");
+    if (!session.project_path().empty()) {
+      title += QStringLiteral(" — ");
+      title += QFileInfo(QString::fromStdString(session.project_path())).fileName();
+    }
+  }
+  setWindowTitle(title);
+}
+
+void EditorMainWindow::run_with_busy(const QString& title, std::function<void()> work,
+                                     std::function<void()> done) {
+  if (busy_active_) {
+    WDS_LOG("run_with_busy queued while busy: %s\n", qUtf8Printable(title));
+  }
+  busy_queue_.push_back(BusyJob{title, std::move(work), std::move(done)});
+  if (!busy_active_) start_busy_job();
+}
+
+void EditorMainWindow::start_busy_job() {
+  if (busy_queue_.empty()) {
+    busy_active_ = false;
+    return;
+  }
+  busy_active_ = true;
+  auto job = std::move(busy_queue_.front());
+  busy_queue_.pop_front();
+  auto overlay = std::make_shared<BusyScope>(this, job.title);
+  QTimer::singleShot(0, this, [this, overlay, job = std::move(job)]() mutable {
+    if (job.work) job.work();
+    overlay.reset();
+    if (job.done) job.done();
+    if (!busy_queue_.empty()) {
+      start_busy_job();
+    } else {
+      busy_active_ = false;
+    }
+  });
+}
+
+void EditorMainWindow::track_open_watcher(QObject* watcher) {
+  if (watcher == nullptr) return;
+  open_watchers_.push_back(watcher);
+}
+
+void EditorMainWindow::untrack_open_watcher(QObject* watcher) {
+  open_watchers_.erase(std::remove(open_watchers_.begin(), open_watchers_.end(), watcher),
+                       open_watchers_.end());
+}
+
+void EditorMainWindow::wait_open_project_watchers() {
+  const auto watchers = open_watchers_;
+  for (auto* obj : watchers) {
+    if (obj == nullptr) continue;
+    static_cast<QFutureWatcher<PreparedWdsProject>*>(obj)->waitForFinished();
+  }
 }
 
 bool EditorMainWindow::show_startup_splash() {
@@ -502,13 +672,21 @@ bool EditorMainWindow::show_startup_splash() {
     loading->setText(tr("正在加载工程…"));
     loading->setVisible(true);
     progress->setVisible(true);
+    const std::uint64_t gen = ++open_generation_;
     auto* watcher = new QFutureWatcher<PreparedWdsProject>(&splash);
+    track_open_watcher(watcher);
     connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, &splash,
             [this, &splash, path, recent, open, create, later, settings, about,
-             loading, progress, watcher] {
+             loading, progress, watcher, gen] {
+              if (gen != open_generation_ || ui_manager_ == nullptr) {
+                untrack_open_watcher(watcher);
+                watcher->deleteLater();
+                return;
+              }
               auto future = watcher->future();
               const bool result = ui_manager_->session().apply_prepared_wdsproject(
                   future.takeResult());
+              untrack_open_watcher(watcher);
               watcher->deleteLater();
               for (auto* button : {open, create, later, settings, about})
                 button->setEnabled(true);
@@ -526,32 +704,45 @@ bool EditorMainWindow::show_startup_splash() {
             });
     const std::string native_path = path.toStdString();
     watcher->setFuture(QtConcurrent::run([native_path] {
+      wds::common::install_thread_crash_stack();
       return EditorSession::prepare_wdsproject(native_path);
     }));
   };
   connect(recent, &QListWidget::itemDoubleClicked, &splash,
           [start_load](QListWidgetItem* item) {
+            journal_menu_action("splash.recent");
             start_load(item->data(Qt::UserRole).toString());
           });
   connect(open, &QPushButton::clicked, &splash, [this, &splash, start_load] {
+    journal_menu_action("splash.open");
     const auto path = QFileDialog::getOpenFileName(&splash, tr("打开 WDS 工程"), {},
                                                    tr("WDS 工程 (*.wdsproject)"));
     start_load(path);
   });
   connect(create, &QPushButton::clicked, &splash, [this, &splash] {
+    journal_menu_action("splash.new");
     ui_manager_->session().new_project();
     splash.accept();
   });
-  connect(later, &QPushButton::clicked, &splash, &QDialog::accept);
+  connect(later, &QPushButton::clicked, &splash, [&splash] {
+    journal_menu_action("splash.skip");
+    splash.accept();
+  });
   connect(settings, &QPushButton::clicked, &splash, [this, &splash] {
+    journal_menu_action("splash.settings");
     SettingsDialog dialog(ui_manager_, theme_dir_, &splash);
     dialog.exec();
     sync_toolbox_place_checks();
   });
   connect(about, &QPushButton::clicked, &splash, [this, &splash] {
+    journal_menu_action("splash.about");
     AboutDialog(&splash).exec();
   });
   const int result = splash.exec();
+  if (result != QDialog::Accepted) {
+    ++open_generation_;
+  }
+  wait_open_project_watchers();
   // Closing the startup page means the user chose to exit, since the main
   // window has not been shown yet. The caller owns showing the editor.
   return result == QDialog::Accepted;
@@ -743,8 +934,12 @@ bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, q
   return QMainWindow::nativeEvent(eventType, message, result);
 }
 
-bool EditorMainWindow::confirm_pending_changes() {
-  if (ui_manager_ == nullptr || !ui_manager_->session().dirty()) return true;
+void EditorMainWindow::confirm_pending_changes(std::function<void()> on_proceed) {
+  if (!on_proceed) return;
+  if (ui_manager_ == nullptr || !ui_manager_->session().dirty()) {
+    on_proceed();
+    return;
+  }
   QMessageBox box(QMessageBox::Warning, tr("未保存的修改"),
                   tr("当前工程有未保存的修改。"), QMessageBox::NoButton, this);
   auto* save = box.addButton(tr("保存"), QMessageBox::AcceptRole);
@@ -752,79 +947,120 @@ bool EditorMainWindow::confirm_pending_changes() {
   box.addButton(tr("取消"), QMessageBox::RejectRole);
   box.exec();
   if (box.clickedButton() == save) {
-    save_project();
-    return !ui_manager_->session().dirty();
+    save_project_then([this, on_proceed = std::move(on_proceed)] {
+      if (ui_manager_ != nullptr && !ui_manager_->session().dirty()) on_proceed();
+    });
+    return;
   }
-  return box.clickedButton() == discard;
+  if (box.clickedButton() == discard) on_proceed();
 }
 
 void EditorMainWindow::open_project() {
-  if (!confirm_pending_changes()) return;
-  const auto path = QFileDialog::getOpenFileName(this, tr("打开 WDS 工程"), {},
-                                                  tr("WDS 工程 (*.wdsproject)"));
-  if (path.isEmpty()) return;
-  auto busy = std::make_shared<BusyScope>(this, tr("正在打开工程…"));
-  auto* watcher = new QFutureWatcher<PreparedWdsProject>(this);
-  connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, this,
-          [this, path, busy = std::move(busy), watcher]() mutable {
-            auto future = watcher->future();
-            const bool ok = ui_manager_->session().apply_prepared_wdsproject(
-                future.takeResult());
-            watcher->deleteLater();
-            busy.reset();
-            if (!ok) {
-              QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
-            } else {
-              remember_recent_project(path);
-            }
-          });
-  const std::string native_path = path.toStdString();
-  watcher->setFuture(QtConcurrent::run([native_path] {
-    return EditorSession::prepare_wdsproject(native_path);
-  }));
+  confirm_pending_changes([this] {
+    const auto path = QFileDialog::getOpenFileName(this, tr("打开 WDS 工程"), {},
+                                                    tr("WDS 工程 (*.wdsproject)"));
+    if (path.isEmpty() || ui_manager_ == nullptr) return;
+    // Parse off the GUI thread; the overlay stays up and the preview keeps
+    // ticking while the worker runs. Apply happens on the GUI thread in
+    // `finished`, guarded by open_generation_ so an older load cannot
+    // overwrite a newer one.
+    auto overlay = std::make_shared<BusyScope>(this, tr("正在打开工程…"));
+    const std::uint64_t gen = ++open_generation_;
+    auto* watcher = new QFutureWatcher<PreparedWdsProject>(this);
+    track_open_watcher(watcher);
+    connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, this,
+            [this, path, watcher, gen, overlay]() mutable {
+              untrack_open_watcher(watcher);
+              watcher->deleteLater();
+              if (gen != open_generation_ || ui_manager_ == nullptr) {
+                overlay.reset();
+                return;
+              }
+              auto future = watcher->future();
+              const bool ok =
+                  ui_manager_->session().apply_prepared_wdsproject(future.takeResult());
+              overlay.reset();
+              if (!ok) {
+                QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
+              } else {
+                remember_recent_project(path);
+              }
+            });
+    const std::string native_path = path.toStdString();
+    watcher->setFuture(QtConcurrent::run([native_path] {
+      wds::common::install_thread_crash_stack();
+      return EditorSession::prepare_wdsproject(native_path);
+    }));
+  });
 }
 
-void EditorMainWindow::save_project() {
+void EditorMainWindow::save_project() { save_project_then({}); }
+
+void EditorMainWindow::save_project_then(std::function<void()> done) {
   if (ui_manager_ == nullptr) return;
   auto& session = ui_manager_->session();
-  if (session.read_only()) { QMessageBox::warning(this, tr("只读"), tr("只读预览无法保存。")); return; }
-  QString path = QString::fromStdString(session.project_path());
-  if (path.isEmpty()) path = QFileDialog::getSaveFileName(this, tr("保存 WDS 工程"),
-                                                          QStringLiteral("untitled.wdsproject"),
-                                                          tr("WDS 工程 (*.wdsproject)"));
-  if (path.isEmpty()) return;
-  bool ok = false;
-  {
-    BusyScope busy(this, tr("正在保存工程…"));
-    ok = session.project_path().empty() ? session.save_as(path.toStdString()) : session.save();
+  if (session.read_only()) {
+    QMessageBox::warning(this, tr("只读"), tr("只读预览无法保存。"));
+    return;
   }
-  if (!ok) QMessageBox::warning(this, tr("保存失败"), tr("无法保存工程。"));
-  else remember_recent_project(path);
+  QString path = QString::fromStdString(session.project_path());
+  if (path.isEmpty()) {
+    path = QFileDialog::getSaveFileName(this, tr("保存 WDS 工程"),
+                                        QStringLiteral("untitled.wdsproject"),
+                                        tr("WDS 工程 (*.wdsproject)"));
+  }
+  if (path.isEmpty()) return;
+  auto ok = std::make_shared<bool>(false);
+  run_with_busy(
+      tr("正在保存工程…"),
+      [this, path, ok] {
+        if (ui_manager_ == nullptr) return;
+        auto& session = ui_manager_->session();
+        *ok = session.project_path().empty() ? session.save_as(path.toStdString())
+                                             : session.save();
+      },
+      [this, path, ok, done = std::move(done)] {
+        if (!*ok) {
+          QMessageBox::warning(this, tr("保存失败"), tr("无法保存工程。"));
+        } else {
+          remember_recent_project(path);
+        }
+        if (*ok && done) done();
+      });
 }
 
 void EditorMainWindow::import_chart() {
-  if (!confirm_pending_changes()) return;
-  const auto path = QFileDialog::getOpenFileName(this, tr("导入官方谱面"), {},
-                                                  tr("谱面文件 (*.csv *.sus)"));
-  if (path.isEmpty()) return;
-  bool ok = false;
-  {
-    BusyScope busy(this, tr("正在导入谱面…"));
-    ok = ui_manager_->session().import_official(path.toStdString());
-  }
-  if (!ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选谱面。"));
+  confirm_pending_changes([this] {
+    const auto path = QFileDialog::getOpenFileName(this, tr("导入官方谱面"), {},
+                                                    tr("谱面文件 (*.csv *.sus)"));
+    if (path.isEmpty() || ui_manager_ == nullptr) return;
+    auto ok = std::make_shared<bool>(false);
+    run_with_busy(
+        tr("正在导入谱面…"),
+        [this, path, ok] {
+          if (ui_manager_ == nullptr) return;
+          *ok = ui_manager_->session().import_official(path.toStdString());
+        },
+        [this, ok] {
+          if (!*ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选谱面。"));
+        });
+  });
 }
 
 void EditorMainWindow::import_music() {
   const auto path = QFileDialog::getOpenFileName(this, tr("导入音乐"), {},
                                                   tr("音频文件 (*.ogg *.wav *.mp3)"));
-  if (path.isEmpty()) return;
-  bool ok = false;
-  {
-    BusyScope busy(this, tr("正在导入音乐…"));
-    ok = ui_manager_->session().import_music(path.toStdString());
-  }
-  if (!ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选音乐。"));
+  if (path.isEmpty() || ui_manager_ == nullptr) return;
+  auto ok = std::make_shared<bool>(false);
+  run_with_busy(
+      tr("正在导入音乐…"),
+      [this, path, ok] {
+        if (ui_manager_ == nullptr) return;
+        *ok = ui_manager_->session().import_music(path.toStdString());
+      },
+      [this, ok] {
+        if (!*ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选音乐。"));
+      });
 }
 
 void EditorMainWindow::add_chart() {
@@ -897,10 +1133,23 @@ void EditorMainWindow::show_settings() {
 }
 
 void EditorMainWindow::closeEvent(QCloseEvent* event) {
-  if (!confirm_pending_changes()) { event->ignore(); return; }
+  if (busy_active_ && !force_close_) {
+    event->ignore();
+    return;
+  }
+  if (!force_close_ && ui_manager_ != nullptr && ui_manager_->session().dirty()) {
+    event->ignore();
+    confirm_pending_changes([this] {
+      force_close_ = true;
+      close();
+    });
+    return;
+  }
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   prefs.setValue("window/geometry", saveGeometry());
   prefs.setValue("window/state-v16", saveState());
+  ++open_generation_;
+  wait_open_project_watchers();
   event->accept();
 }
 

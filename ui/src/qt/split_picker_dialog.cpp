@@ -1,6 +1,7 @@
 #include "wds/ui/qt/split_picker_dialog.hpp"
 
 #include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/ui_manager.hpp"
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 
 #include <QButtonGroup>
@@ -109,6 +110,7 @@ SplitPickerDialog::SplitPickerDialog(int32_t count, int32_t color_id, QWidget* p
   root->addWidget(buttons);
 
   connect(counts_, &QButtonGroup::idClicked, this, [this](int id) {
+    journal_menu_action("split_picker.count");
     count_ = std::clamp(id, 1, 6);
     rebuild_colors();
   });
@@ -117,9 +119,21 @@ SplitPickerDialog::SplitPickerDialog(int32_t count, int32_t color_id, QWidget* p
           [this](QListWidgetItem* cur, QListWidgetItem*) {
             if (cur != nullptr) color_id_ = cur->data(Qt::UserRole).toInt();
           });
-  connect(colors_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { accept(); });
-  connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(colors_, &QListWidget::itemClicked, this, [](QListWidgetItem*) {
+    journal_menu_action("split_picker.color");
+  });
+  connect(colors_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) {
+    journal_menu_action("split_picker.ok");
+    accept();
+  });
+  connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+    journal_menu_action("split_picker.ok");
+    accept();
+  });
+  connect(buttons, &QDialogButtonBox::rejected, this, [this] {
+    journal_menu_action("split_picker.cancel");
+    reject();
+  });
 
   rebuild_colors();
 }
