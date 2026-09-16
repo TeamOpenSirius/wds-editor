@@ -22,7 +22,6 @@
 #include <QWheelEvent>
 #include <QDir>
 #include <QFont>
-#include <QLinearGradient>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -38,6 +37,46 @@ QColor qcolor(const wds::interaction::Color& c) {
 }
 
 QRectF qrect(const wds::interaction::Rect& r) { return {r.x, r.y, r.w, r.h}; }
+
+QPixmap pixmap_from_hold_bake(bool scratch) {
+  const auto px = wds::chart_render::bake_hold_long_rgba(scratch);
+  const QImage img(px.data(), wds::chart_render::kHoldLongTexW, wds::chart_render::kHoldLongTexH,
+                   wds::chart_render::kHoldLongTexW * 4, QImage::Format_RGBA8888);
+  return QPixmap::fromImage(img.copy());
+}
+
+void paint_sliced_hold(QPainter& p, const QPixmap& tex, const QRectF& dest, float dest_world_w) {
+  if (tex.isNull() || dest.width() < 1.0 || dest.height() < 0.5) return;
+  const float tex_w = static_cast<float>(tex.width());
+  const float tex_h = static_cast<float>(tex.height());
+  float u_bl = std::clamp(wds::chart_render::kHoldLongSliceBorderL / tex_w, 0.0f, 0.49f);
+  float u_br = std::clamp(wds::chart_render::kHoldLongSliceBorderR / tex_w, 0.0f, 0.49f);
+  if (u_bl + u_br > 0.98f) {
+    const float s = 0.98f / (u_bl + u_br);
+    u_bl *= s;
+    u_br *= s;
+  }
+  const auto layout = wds::chart_render::sliced_cap_layout(
+      wds::chart_render::kHoldLongSliceBorderL, wds::chart_render::kHoldLongSliceBorderR,
+      dest_world_w);
+  const qreal src_l = static_cast<qreal>(tex_w * u_bl);
+  const qreal src_r = static_cast<qreal>(tex_w * u_br);
+  const qreal dst_l = dest.width() * static_cast<qreal>(layout.bl);
+  const qreal dst_r = dest.width() * static_cast<qreal>(layout.br);
+  const qreal src_mid = std::max<qreal>(1.0, tex_w - src_l - src_r);
+  const qreal dst_mid = dest.width() - dst_l - dst_r;
+  const auto draw = [&](const QRectF& d, const QRectF& s) {
+    if (d.width() > 0.5 && d.height() > 0.5 && s.width() > 0.5 && s.height() > 0.5) {
+      p.drawPixmap(d, tex, s);
+    }
+  };
+  draw({dest.x(), dest.y(), dst_l, dest.height()}, {0.0, 0.0, src_l, tex_h});
+  if (layout.emit_middle) {
+    draw({dest.x() + dst_l, dest.y(), dst_mid, dest.height()}, {src_l, 0.0, src_mid, tex_h});
+  }
+  draw({dest.x() + dest.width() - dst_r, dest.y(), dst_r, dest.height()},
+       {tex_w - src_r, 0.0, src_r, tex_h});
+}
 
 struct ScopedAA {
   QPainter& p;
@@ -179,6 +218,8 @@ ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
   // Timing / split pickers are Qt dialogs. IME on the canvas swallows Shift/Cmd
   // letter chords under CJK input methods.
   setAttribute(Qt::WA_InputMethodEnabled, false);
+  hold_blue_ = pixmap_from_hold_bake(false);
+  hold_purple_ = pixmap_from_hold_bake(true);
 }
 
 void ChartEditWidget::set_skins_directory(const QString& directory) {
@@ -234,6 +275,10 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   p.setRenderHint(QPainter::Antialiasing, false);
   p.fillRect(rect(), qcolor(wds::interaction::theme::kEditChrome));
   if (!panel_) return;
+  // Viewport is synced in UiManager::update after the transport tick. Ghosts
+  // and drag targets live in tick space; rematerialize them from the last
+  // pointer so a stationary mouse is not scrolled away with the playhead.
+  panel_->resync_pointer_overlays();
   wds::interaction::UiPainter chrome;
   chrome.set_defer_glyphs(true);
   panel_->paint_side_columns(chrome);
@@ -249,8 +294,14 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
 
   paint_waveform(p, v, b);
 
-  // Beat/subdivision lines, kept lightweight by stepping only the visible range.
-  const auto range = v.visible_tick_range();
+  // Same subdiv / beat / measure strokes as the side gutters so the thick
+  // bar lines continue across the playfield.
+  {
+    wds::interaction::UiPainter grid;
+    paint_horizontal_grid(grid, v, b);
+    flush_ui_painter(p, grid);
+  }
+
   // Note art hangs half a note-height (plus selection pad) past its tick.
   // Convert that pixel pad to ticks; long holds still pass the span test.
   const float pad_ms =
@@ -261,20 +312,10 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
       static_cast<int64_t>(std::llround(static_cast<double>(view_ms_lo_cull - pad_ms))), timing);
   const int32_t cull_hi = wds::chart_editor::milliseconds_to_tick(
       static_cast<int64_t>(std::llround(static_cast<double>(view_ms_hi_cull + pad_ms))), timing);
-  const int step = std::max(1, wds::chart_editor::subdivision_tick_step(v.grid()));
-  int tick = (range.first / step) * step;
-  if (tick < range.first) tick += step;
   {
-    // y_at() is fractional; AA keeps beat/lane strokes pixel-identical to the
+    // y_at() is fractional; AA keeps lane strokes pixel-identical to the
     // previous whole-paint hint.
     ScopedAA aa(p);
-    for (; tick <= range.second; tick += step) {
-      const bool beat = tick % std::max(1, v.grid().ticks_per_quarter) == 0;
-      p.setPen(QPen(qcolor(beat ? wds::interaction::theme::kEditGridBeat
-                                 : wds::interaction::theme::kEditGridSubdiv),
-                    beat ? 1.2 : 1.0));
-      const qreal y = v.y_at(tick); p.drawLine(QPointF(b.x, y), QPointF(b.right(), y));
-    }
     const int64_t appear_ms = std::max<int64_t>(
         1, static_cast<int64_t>(std::llround(
                static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
@@ -445,26 +486,22 @@ void ChartEditWidget::paint_notes(QPainter& p,
         !wds::chart_editor::is_hold_with_tail(n.note_type)) {
       continue;
     }
-    using NT = wds::chart_editor::NoteType;
-    const bool scratch = n.note_type == NT::ScratchHold ||
-                         n.note_type == NT::ScratchCriticalHold ||
-                         n.note_type == NT::NontailScratchHold ||
-                         n.note_type == NT::NontailScratchCriticalHold;
+    const bool scratch = wds::chart_editor::is_scratch_hold_body(n.note_type);
     const float y0 = v.y_at(n.start_tick);
     const float y1 = v.y_at(n.end_tick);
     const float body_inset = v.hold_inset_px(n.width);
     const float body_x = v.x_at(n.lane) + body_inset;
     const float body_w = std::max(4.0f, v.lane_width(n.width) - body_inset * 2.0f);
-    QLinearGradient hold(body_x, 0, body_x + body_w, 0);
-    const QColor edge = scratch ? QColor(145, 55, 220, 105) : QColor(45, 150, 235, 105);
-    const QColor mid = scratch ? QColor(225, 125, 255, 205) : QColor(110, 235, 255, 205);
-    hold.setColorAt(0, edge);
-    hold.setColorAt(.5, mid);
-    hold.setColorAt(1, edge);
     const float body_top = std::max(std::min(y0, y1), playfield.y - 2.0f);
     const float body_bot = std::min(std::max(y0, y1), playfield.bottom() + 2.0f);
     if (body_bot > body_top) {
-      p.fillRect(QRectF(body_x, body_top, body_w, body_bot - body_top), hold);
+      const QPixmap& ribbon = scratch ? hold_purple_ : hold_blue_;
+      p.save();
+      p.setOpacity(static_cast<qreal>(opacity) * wds::chart_render::kHoldBodyAlpha);
+      p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+      paint_sliced_hold(p, ribbon, QRectF(body_x, body_top, body_w, body_bot - body_top),
+                        v.hold_visual_world_width(n.width));
+      p.restore();
     }
   }
   for (const std::size_t vis : note_draw_order_) {
@@ -508,8 +545,12 @@ void ChartEditWidget::paint_notes(QPainter& p,
     if (hold_body) {
       // Tail caps are real note sprites, not just the ribbon endpoint.  Draw
       // them independently so a terminal ScratchHold still exposes its flick.
+      // Gold-head bodies stay blue/purple at the tail — only the paired
+      // CriticalHoldStart / ScratchCriticalHoldStart is yellow.
+      const QPixmap* tail_skin =
+          wds::chart_editor::is_scratch_hold_body(n.note_type) ? &purple_ : &blue_;
       QRectF tail(tail_x, y1 - v.note_height_px()*.5f, tail_w, v.note_height_px());
-      draw_skin(*skin, tail);
+      draw_skin(*tail_skin, tail);
       if (scratch && !arrow_.isNull()) {
         const float ah = v.note_height_px();
         const float aw = std::min(tail_w, std::clamp(v.lane_width(1) * .55f, 8.0f, ah * 1.2f));

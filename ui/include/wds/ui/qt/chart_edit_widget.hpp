@@ -52,7 +52,7 @@ class ChartEditWidget final : public QWidget {
   ChartEditPanel* panel_ = nullptr;
   bool qt_modal_open_ = false;
   QPixmap background_, judgment_, red_, yellow_, blue_, purple_, tick_blue_, tick_purple_, arrow_,
-      arrow_mirrored_;
+      arrow_mirrored_, hold_blue_, hold_purple_;
   std::chrono::steady_clock::time_point last_tick_;
   std::function<void(const wds::interaction::KeyDownEvent&)> global_key_handler_;
   int64_t last_paint_us_ = 0;
