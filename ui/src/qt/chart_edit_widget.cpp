@@ -272,7 +272,7 @@ void ChartEditWidget::set_skins_directory(const QString& directory) {
   if (arrow_.isNull()) {
     arrow_mirrored_ = {};
   } else {
-    arrow_mirrored_ = QPixmap::fromImage(arrow_.toImage().flipped(Qt::Horizontal));
+    arrow_mirrored_ = QPixmap::fromImage(arrow_.toImage().mirrored(true, false));
     arrow_mirrored_.setDevicePixelRatio(arrow_.devicePixelRatio());
   }
   mark_dirty();
