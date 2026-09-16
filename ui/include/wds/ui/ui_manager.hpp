@@ -47,6 +47,7 @@ enum class UiChange {
   Charts,
   History,
   Document,
+  PlaceTool,
 };
 
 // Shell orchestrator: owns the four regions and applies EditorLayouter results.
@@ -92,6 +93,9 @@ class UiManager {
   // New-style toolbox flow: convert buttons also lock the left-click place type.
   bool new_note_place_logic() const noexcept { return new_note_place_logic_; }
   void set_new_note_place_logic(bool enabled);
+  // Convert-bar slots 0–7 (Tap…Scratch Hold). New-logic: lock place type.
+  // Classic: convert the current selection. Same path as the 1–8 shortcuts.
+  void activate_convert_bar_slot(int slot);
   void set_on_check_chart(std::function<void()> handler) { on_check_chart_ = std::move(handler); }
 
   void set_ui_change_handler(std::function<void(UiChange)> handler) {

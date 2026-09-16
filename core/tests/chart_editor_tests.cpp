@@ -2209,7 +2209,8 @@ void test_edit_grid_and_note_operations() {
   CHECK_EQ(static_cast<int>(back_to_tap.note_type), static_cast<int>(NoteType::Normal));
   CHECK_EQ(back_to_tap.scratch_length, 0);
 
-  // Flick direction is not a hold end-span: Flick → Hold drops it.
+  // Flick direction is not a hold end-span: Flick → Hold / ScratchHold is
+  // equal-width bidirectional (scratch_length 0). Tail arrows are computed later.
   NotationNote flick_left = make_tap(240, 2);
   flick_left.note_type = NoteType::Flick;
   flick_left.scratch_length = -1;
@@ -2217,6 +2218,13 @@ void test_edit_grid_and_note_operations() {
   CHECK_EQ(static_cast<int>(flick_to_hold.note_type), static_cast<int>(NoteType::Hold));
   CHECK_EQ(flick_to_hold.end_tick, 720);
   CHECK_EQ(flick_to_hold.scratch_length, 0);
+  NotationNote flick_right = flick_left;
+  flick_right.scratch_length = 1;
+  const NotationNote flick_to_scratch = convert_note_type(flick_right, NoteType::ScratchHold, 480);
+  CHECK_EQ(static_cast<int>(flick_to_scratch.note_type), static_cast<int>(NoteType::ScratchHold));
+  CHECK_EQ(flick_to_scratch.end_tick, 720);
+  CHECK_EQ(flick_to_scratch.scratch_length, 0);
+  CHECK_EQ(flick_to_scratch.width, flick_right.width);
 
   // Nontail bodies keep duration when staying a hold; collapse when leaving.
   NotationNote nontail = make_tap(0, 3);

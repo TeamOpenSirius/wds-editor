@@ -520,7 +520,7 @@ void SettingsPanel::build_pages() {
   invert_scroll_wheel_ = add_wrapping_check(input, tr("反转时间轴滚轮方向"), input_host);
   invert_visible_range_scroll_ =
       add_wrapping_check(input, tr("反转滚轮调节可见范围大小方向"), input_host);
-  new_note_place_logic_ = add_wrapping_check(input, tr("启用新版音符放置逻辑"), input_host);
+  new_note_place_logic_ = add_wrapping_check(input, tr("启用类Ched放置逻辑"), input_host);
   auto* speedForm = new QFormLayout;
   scroll_wheel_speed_ = make_combo({"0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "1.75x",
                                     "2x", "2.5x", "3x"},

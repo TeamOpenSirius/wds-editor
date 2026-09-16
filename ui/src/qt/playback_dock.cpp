@@ -12,6 +12,7 @@
 
 #include <wds/audio/transport.hpp>
 #include <wds/interaction/editor_input.hpp>
+#include <wds/interaction/editor_shortcuts.hpp>
 
 #include <QAbstractSlider>
 #include <QCheckBox>
@@ -42,7 +43,7 @@ namespace wds::ui {
 namespace {
 
 constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
-    wds::interaction::PlaceIntent::None,
+    wds::interaction::PlaceIntent::Tap,
     wds::interaction::PlaceIntent::ExTap,
     wds::interaction::PlaceIntent::HoldStart,
     wds::interaction::PlaceIntent::HoldBody,
@@ -474,37 +475,13 @@ void ConvertBar::build_ui(const std::string& skins_dir) {
     button->setIconSize(QSize(36, 36));
     button->setMinimumSize(40, 40);
     button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    button->setToolTip(tr("转换为%1").arg(QString::fromUtf8(kConvertSpecs[i].name)));
     button->setCheckable(true);
     button->setAutoRaise(true);
     convert_buttons_[i] = button;
     row->addWidget(button, 1);
     connect(button, &QToolButton::clicked, this, [this, i] {
       journal_menu_action(kConvertJournalIds[i]);
-      auto* edit = manager_ != nullptr ? manager_->edit_panel() : nullptr;
-      if (edit == nullptr) return;
-      const auto& spec = kConvertSpecs[i];
-      if (manager_->new_note_place_logic()) {
-        const auto intent = kPlaceIntents[i];
-        if (edit->place_intent_override() == intent) {
-          edit->set_place_intent_override(wds::interaction::PlaceIntent::None);
-          manager_->set_status("放置类型已恢复为 Tap", StatusLevel::Info);
-        } else {
-          edit->set_place_intent_override(intent);
-          manager_->set_status(std::string("放置类型切换为 ") + spec.name, StatusLevel::Info);
-        }
-      } else if (!edit->selected().empty()) {
-        const std::optional<int32_t> direction =
-            spec.type == wds::chart_editor::NoteType::Flick
-                ? std::optional<int32_t>(spec.direction)
-                : std::nullopt;
-        if (edit->convert_selected(spec.type, direction)) {
-          manager_->set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
-        }
-      } else {
-        manager_->set_status("未选中音符（可在设置→输入中开启新版放置逻辑）",
-                             StatusLevel::Info);
-      }
+      if (manager_ != nullptr) manager_->activate_convert_bar_slot(static_cast<int>(i));
       sync_place_checks();
     });
   }
@@ -529,15 +506,28 @@ void ConvertBar::set_ribbon_mode() {
 void ConvertBar::sync_place_checks() {
   auto* edit = manager_ != nullptr ? manager_->edit_panel() : nullptr;
   const bool enabled = manager_ != nullptr && manager_->new_note_place_logic();
-  const auto current =
+  auto current =
       edit != nullptr ? edit->place_intent_override() : wds::interaction::PlaceIntent::None;
+  if (enabled && current == wds::interaction::PlaceIntent::None) {
+    current = wds::interaction::PlaceIntent::Tap;
+  }
   const bool editable = manager_ != nullptr && !manager_->session().read_only();
   for (std::size_t i = 0; i < convert_buttons_.size(); ++i) {
     if (convert_buttons_[i] == nullptr) continue;
     convert_buttons_[i]->setEnabled(editable);
+    const QString name = QString::fromUtf8(kConvertSpecs[i].name);
+    const auto id = static_cast<wds::interaction::EditorShortcut>(
+        static_cast<int>(wds::interaction::EditorShortcut::PlaceType0) +
+        static_cast<int>(i));
+    const auto chord = wds::interaction::editor_shortcut(id);
+    const std::string chord_text = wds::interaction::format_shortcut_chord(chord);
+    const QString labeled =
+        enabled ? name : tr("转换为%1").arg(name);
+    convert_buttons_[i]->setToolTip(
+        chord_text.empty() ? labeled
+                           : tr("%1（%2）").arg(labeled, QString::fromStdString(chord_text)));
     const QSignalBlocker blocker(convert_buttons_[i]);
-    convert_buttons_[i]->setChecked(enabled && current != wds::interaction::PlaceIntent::None &&
-                                    kPlaceIntents[i] == current);
+    convert_buttons_[i]->setChecked(enabled && kPlaceIntents[i] == current);
   }
 }
 

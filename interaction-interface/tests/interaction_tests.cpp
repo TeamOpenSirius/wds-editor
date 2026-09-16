@@ -378,13 +378,21 @@ int main() {
   expect(chord_width_slot(3).key == KeyCode::A, "width slot A");
   expect(chord_width_slot(5).key == static_cast<KeyCode>('D'), "width slot D");
 
-  expect(is_forbidden_shortcut_key(KeyCode::Num1), "digit forbidden as shortcut");
+  expect(!is_forbidden_shortcut_key(KeyCode::Num1), "digit allowed as shortcut");
   expect(is_forbidden_shortcut_key(static_cast<KeyCode>(46)), "period forbidden as shortcut");
   expect(!is_forbidden_shortcut_key(static_cast<KeyCode>('C')), "letter allowed as shortcut");
   expect(is_completing_shortcut_key(KeyCode::Space), "space completes shortcut");
   expect(is_completing_shortcut_key(KeyCode::F11), "F11 completes shortcut");
   expect(!is_completing_shortcut_key(KeyCode::Unknown), "unknown does not complete");
-  expect(!is_completing_shortcut_key(KeyCode::Num5), "digit does not complete");
+  expect(is_completing_shortcut_key(KeyCode::Num5), "digit completes shortcut");
+  expect(default_editor_shortcut(EditorShortcut::PlaceType0).key == KeyCode::Num1,
+         "PlaceType0 default is Num1");
+  expect(default_editor_shortcut(EditorShortcut::PlaceType7).key == KeyCode::Num8,
+         "PlaceType7 default is Num8");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType0)) == "place_type_0",
+         "PlaceType0 id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType7)) == "place_type_7",
+         "PlaceType7 id");
   {
     const auto parsed = parse_shortcut_chord("Shift+Ctrl+C");
     expect(parsed.has_value(), "parse Shift+Ctrl+C");
@@ -474,8 +482,8 @@ int main() {
     expect(field.conflict_highlight(), "parent can mark conflict highlight");
 
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
-    field.on_key_down(KeyDownEvent{KeyCode::Num3, {}, false});
-    expect(field.chord().key == blocked.key, "digit rejected");
+    field.on_key_down(KeyDownEvent{static_cast<KeyCode>(46), {}, false});
+    expect(field.chord().key == blocked.key, "period rejected");
 
     field.on_key_down(KeyDownEvent{KeyCode::Escape, {}, false});
     expect(field.visual_state() == WidgetState::Normal, "escape cancels capture");
