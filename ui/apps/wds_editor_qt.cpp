@@ -435,6 +435,9 @@ int main(int argc, char** argv) {
   // drivers. Two MoltenVK copies make vkGetDeviceQueue jump to NULL.
   wds::ui::prepare_macos_vulkan_environment(argv[0]);
   wds::ui::WdsApplication app(argc, argv);
+  QCoreApplication::setOrganizationName(QStringLiteral("WDS"));
+  QCoreApplication::setApplicationName(QStringLiteral("WDS Editor"));
+  QGuiApplication::setApplicationDisplayName(QStringLiteral("WDS Editor"));
   QCoreApplication::setApplicationVersion(QStringLiteral(WDS_APP_VERSION));
   wds::ui::install_no_wheel_value_inputs(app);
   QApplication::setWindowIcon(QIcon(QStringLiteral(":/wds/app_icon.png")));

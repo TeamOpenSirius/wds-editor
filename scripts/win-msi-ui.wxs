@@ -39,10 +39,11 @@
     SecureCustomProperties passes the off state into elevated Execute
   - Shortcuts are Shortcut-table components gated by CREATE_*
     (Component.Condition is patched after wixl; 0.103 cannot parse it)
-  - Defaults on update come from HKLM via AppSearch. CREATE_* must NOT have
-    a Property-table value: AppSearch will not overlay one, and a baked-in
-    1 made every rebuild show both boxes checked. The default 1 is a Type 51
-    CA that runs only when the search found nothing.
+  - Defaults on update come from HKLM via AppSearch into WDS_SAVED_* (never
+    CREATE_*). msiexec drops a stored 0, so a leftover "0" plus a prior
+    install is treated as off; new writes are yes/no. CREATE_* must NOT have
+    a Property-table value. The default 1 is a Type 51 CA only when neither
+    0 nor 1 has been applied yet.
   - CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL are appended to
     SecureCustomProperties after wixl
   - ASCII UI strings only (MSI codepage 1252)
