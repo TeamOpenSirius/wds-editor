@@ -250,10 +250,10 @@
       </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
-      <!-- Only ever runs for a leftover Product Id='*' product (different
-           ProductCode). FindRelatedProducts skips maintenance of this exact
-           ProductCode, so a same-product dest rebuild never removes itself.
-           Placement is window 2 - see the header; InstallFiles is 2613. -->
+      <!-- Removes any other ProductCode that FindRelatedProducts listed
+           (leftover Id='*' dest / main). Skips this exact ProductCode, so a
+           dest rebuild is a reinstall. Placement is window 2; InstallFiles
+           is error 2613. -->
       <RemoveExistingProducts After="InstallInitialize"/>
       <Custom Action="AdoptPreviousInstall32" After="AppSearch">
         WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
