@@ -39,6 +39,8 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
+#include <QPalette>
+#include <QColor>
 #include <QSizePolicy>
 #include <QWindow>
 #include <QWidget>
@@ -155,6 +157,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
     if (auto* window = static_cast<RealtimeVulkanWindow*>(editor_window_))
       window->set_resize_suspended(false);
   });
+  menuBar()->setNativeMenuBar(true);
   menuBar()->addMenu(tr("文件"));
   menuBar()->addMenu(tr("编辑"));
   menuBar()->addMenu(tr("视图"));
@@ -218,26 +221,25 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   convert_toolbar_->setFloatable(true);
   convert_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
   convert_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-  // Settings: Mac application menu (PreferencesRole). Windows has no 设置
-  // menu item; the settings dock is still in 视图.
+  // About/Preferences roles only take effect when the action lives in a QMenu.
+  // menuBar()->addAction() makes a top-level title and macOS ignores the role.
   settings_action_ = new QAction(tr("设置"), this);
   settings_action_->setToolTip(tr("编辑器设置"));
   settings_action_->setIcon(fluent_icon(fluent::Settings));
-#ifdef Q_OS_MACOS
-  settings_action_->setMenuRole(QAction::PreferencesRole);
-  menuBar()->addAction(settings_action_);
-#else
-  settings_action_->setMenuRole(QAction::NoRole);
-#endif
   about_action_ = new QAction(tr("关于"), this);
   about_action_->setIcon(fluent_icon(fluent::Info));
+  auto* help_menu = menuBar()->addMenu(tr("帮助"));
 #ifdef Q_OS_MACOS
   about_action_->setText(tr("关于 WDS Editor"));
   about_action_->setMenuRole(QAction::AboutRole);
+  settings_action_->setMenuRole(QAction::PreferencesRole);
+  help_menu->addAction(about_action_);
+  help_menu->addAction(settings_action_);
 #else
   about_action_->setMenuRole(QAction::NoRole);
+  settings_action_->setMenuRole(QAction::NoRole);
+  help_menu->addAction(about_action_);
 #endif
-  menuBar()->addAction(about_action_);
   connect(about_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.about");
     AboutDialog(this).exec();
@@ -676,6 +678,19 @@ bool EditorMainWindow::show_startup_splash() {
   splash.resize(720, 480);
   splash.setMinimumSize(720, 480);
   splash.setWindowFlag(Qt::WindowCloseButtonHint, true);
+#ifdef Q_OS_MACOS
+  // The hidden main window does not own the menu bar while this dialog is
+  // frontmost. AboutRole only migrates from a QMenu on a native QMenuBar.
+  auto* splash_menus = new QMenuBar(&splash);
+  splash_menus->setNativeMenuBar(true);
+  auto* splash_help = splash_menus->addMenu(tr("帮助"));
+  auto* splash_about = splash_help->addAction(tr("关于 WDS Editor"));
+  splash_about->setMenuRole(QAction::AboutRole);
+  connect(splash_about, &QAction::triggered, &splash, [&splash] {
+    journal_menu_action("splash.about");
+    AboutDialog(&splash).exec();
+  });
+#endif
   auto* root = new QVBoxLayout(&splash);
   root->setContentsMargins(24, 20, 24, 18);
   root->setSpacing(10);
@@ -708,7 +723,16 @@ bool EditorMainWindow::show_startup_splash() {
     row_layout->setSpacing(8);
     auto* name_label = new QLabel(QFileInfo(path).completeBaseName(), row);
     auto* path_label = new QLabel(path, row);
-    path_label->setStyleSheet(QStringLiteral("color: palette(mid); font-size: 11px;"));
+    name_label->ensurePolished();
+    const QColor fg = name_label->palette().color(QPalette::WindowText);
+    // palette(mid) is Yami grey7 (#1D1F26), same as the list chrome — unreadable.
+    // Dim the label color itself so the path stays on the same side of the
+    // contrast as the name (white→gray on dark, black→gray on light).
+    const QColor muted = fg.lightness() >= 128 ? fg.darker(140) : fg.lighter(180);
+    QFont path_font = path_label->font();
+    path_font.setPointSizeF(std::max(10.0, path_font.pointSizeF() - 1.5));
+    path_label->setFont(path_font);
+    path_label->setStyleSheet(QStringLiteral("color: %1;").arg(muted.name()));
     path_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     row_layout->addWidget(name_label, 0, Qt::AlignVCenter);
     row_layout->addWidget(path_label, 1, Qt::AlignVCenter);
