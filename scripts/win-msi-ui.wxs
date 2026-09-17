@@ -18,11 +18,11 @@
     ProgressDlg        - from UI extension
     ExitDialog         - completion
 
-  Repair and update need separate entry points because msiexec cannot tell them
-  apart by itself: the same ProductCode is installed in both cases. The build
-  stamp decides - WDS_INSTALLED_TS equal to this package's WDS_BUILD_TS shows
-  the maintenance screen, anything else (including an older installation with no
-  stamp at all) goes straight to UpdateDlg.
+  Repair and update need separate entry points. The same .msi file (same
+  ProductCode + same stamp) shows the maintenance screen. A newer dest MSI
+  has a new ProductCode, so Installed is 0 and FindRelatedProducts sets
+  WIX_UPGRADE_DETECTED: that path, an older install with no stamp, or a
+  leftover Id='*' product all go straight to UpdateDlg.
 
   MaintenanceWelcomeDlg stays out of the sequence (Condition="0") so the three
   buttons are the first thing a repairer sees; MaintenanceTypeDlg's Back still
