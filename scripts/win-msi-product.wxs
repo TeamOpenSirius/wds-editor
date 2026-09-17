@@ -16,8 +16,10 @@
 
   Shortcuts are MSI Shortcut table entries (Advertise=no + Target=exe).
   wixl defaults Advertise=yes; the Target path keeps them non-advertised.
-  CREATE_* + component Condition chooses which .lnk files exist. AppSearch
-  + ShortcutPrefs remember the last checkbox state.
+  CREATE_* + Component.Condition chooses which .lnk files exist. wixl 0.103
+  crashes on <Component><Condition> (added in 0.106); package-target.sh
+  writes those Condition columns after wixl. AppSearch + ShortcutPrefs
+  remember the last checkbox state.
 
   InstallDirDlg uses Edit (not PathEdit). PathEdit on a not-yet-created
   INSTALLDIR can clear the property; Edit plus InitWdsInstallDir keeps it.
@@ -179,9 +181,11 @@
       </Component>
     </DirectoryRef>
 
+    <!-- Do not author <Condition> here: wixl 0.103 dumps core
+         ("unhandled child Component node Condition"). The Condition
+         column is set after compile: CREATE_DESKTOP_SHORTCUT="1". -->
     <DirectoryRef Id="DesktopFolder">
       <Component Id="DesktopShortcut" Guid="B20DDB70-DD5E-50A4-ABF8-F068021441F6" Win64="yes">
-        <Condition>CREATE_DESKTOP_SHORTCUT="1"</Condition>
         <Shortcut Id="WdsEditorDesktop"
                   Directory="DesktopFolder"
                   Name="WDS Editor"
@@ -199,9 +203,9 @@
       </Component>
     </DirectoryRef>
 
+    <!-- Condition column patched after wixl: CREATE_STARTMENU_SHORTCUT="1". -->
     <DirectoryRef Id="WdsStartMenuFolder">
       <Component Id="StartMenuShortcut" Guid="0E08832A-9A77-5EE6-9097-E9871258C748" Win64="yes">
-        <Condition>CREATE_STARTMENU_SHORTCUT="1"</Condition>
         <Shortcut Id="WdsEditorStartMenu"
                   Directory="WdsStartMenuFolder"
                   Name="WDS Editor"
