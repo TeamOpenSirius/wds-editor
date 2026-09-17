@@ -64,7 +64,8 @@ struct NotationNote {
   int32_t lane = 0;   // 0-based (official leftLane is 1-based)
   int32_t width = 1;  // official laneLength
   GimmickType gimmick_type = GimmickType::None;
-  // Official scratchLength: flick/scratch span; JumpScratch span; split
+  // Official scratchLength: flick/scratch signed span (0 / ±width); JumpScratch
+  // span; split
   // Addressable SplitEffects/{id} (fadeIn growth follows LineHight rotation).
   int32_t scratch_length = 0;
   // Editor-only: Sound / ScratchSound / HoldEighth parent hold body id.

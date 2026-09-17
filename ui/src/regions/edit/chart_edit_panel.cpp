@@ -381,14 +381,18 @@ void ChartEditPanel::set_default_width(int width) noexcept {
 void ChartEditPanel::apply_width_to_locked_placement() {
   if (mode_ == Mode::PlaceGesture) {
     if (!ghost_.visible) return;
+    const int32_t prev_w = ghost_.note.width;
     apply_placement_lane_width(place_note_center(), ghost_.note.lane, ghost_.note.width);
+    wds::chart_editor::sync_flick_scratch_length_for_width(ghost_.note, prev_w);
     place_anchor_.lane = ghost_.note.lane;
     place_anchor_.width = ghost_.note.width;
     return;
   }
   if (mode_ == Mode::Idle) {
     if (ghost_.visible) {
+      const int32_t prev_w = ghost_.note.width;
       apply_placement_lane_width(pointer_, ghost_.note.lane, ghost_.note.width);
+      wds::chart_editor::sync_flick_scratch_length_for_width(ghost_.note, prev_w);
     }
     return;
   }
@@ -933,14 +937,18 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         break;
       case PlaceIntent::Flick:
         ghost_.note.note_type = NoteType::Flick;
+        ghost_.note.scratch_length =
+            wds::chart_editor::encode_flick_scratch_length(0, ghost_.note.width);
         break;
       case PlaceIntent::FlickLeft:
         ghost_.note.note_type = NoteType::Flick;
-        ghost_.note.scratch_length = -1;
+        ghost_.note.scratch_length =
+            wds::chart_editor::encode_flick_scratch_length(-1, ghost_.note.width);
         break;
       case PlaceIntent::FlickRight:
         ghost_.note.note_type = NoteType::Flick;
-        ghost_.note.scratch_length = 1;
+        ghost_.note.scratch_length =
+            wds::chart_editor::encode_flick_scratch_length(1, ghost_.note.width);
         break;
       case PlaceIntent::ScratchHoldBody:
         ghost_.note.note_type = wds::chart_editor::drawn_hold_body_type(
@@ -1020,14 +1028,18 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
       break;
     case PlaceIntent::Flick:
       ghost_.note.note_type = NoteType::Flick;
+      ghost_.note.scratch_length =
+          wds::chart_editor::encode_flick_scratch_length(0, ghost_.note.width);
       break;
     case PlaceIntent::FlickLeft:
       ghost_.note.note_type = NoteType::Flick;
-      ghost_.note.scratch_length = -1;
+      ghost_.note.scratch_length =
+          wds::chart_editor::encode_flick_scratch_length(-1, ghost_.note.width);
       break;
     case PlaceIntent::FlickRight:
       ghost_.note.note_type = NoteType::Flick;
-      ghost_.note.scratch_length = 1;
+      ghost_.note.scratch_length =
+          wds::chart_editor::encode_flick_scratch_length(1, ghost_.note.width);
       break;
     default:
       break;
@@ -1060,7 +1072,9 @@ void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
                                    int32_t scratch_length) {
   auto note = make_base_note(point);
   note.note_type = type;
-  note.scratch_length = scratch_length;
+  note.scratch_length = type == NoteType::Flick
+                            ? wds::chart_editor::encode_flick_scratch_length(scratch_length, note.width)
+                            : scratch_length;
   if (wds::chart_editor::note_intersects_negative_music_time(note, engine_.document().timing())) {
     return;
   }
@@ -4292,6 +4306,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         n.lane = new_lane;
         n.width = new_width;
       }
+      wds::chart_editor::sync_flick_scratch_length_for_width(n, orig.width);
       if (!wds::chart_editor::lane_in_bounds(n.lane, n.width, lane_count)) return std::nullopt;
       return n;
     };
@@ -5070,6 +5085,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         n.lane = new_lane;
         n.width = new_width;
       }
+      wds::chart_editor::sync_flick_scratch_length_for_width(n, orig.width);
       if (!wds::chart_editor::lane_in_bounds(n.lane, n.width, lane_count)) {
         return;
       }

@@ -111,8 +111,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
     return place_intent_override_;
   }
 
-  // scratch_length: for Flick / ScratchHold direction (-1 left, 0 both, +1 right).
-  // Pass nullopt to leave scratch_length to convert_note_type defaults.
+  // scratch_length: Flick / ScratchHold direction intent (-1 left, 0 both, +1 right).
+  // Flick is stored as the official signed span (0 / ±width). ScratchHold uses
+  // ±width for equal-width tails. Pass nullopt for convert_note_type defaults.
   bool convert_selected(wds::chart_editor::NoteType target,
                         std::optional<int32_t> scratch_length = std::nullopt);
   bool mirror_selected(bool about_center);

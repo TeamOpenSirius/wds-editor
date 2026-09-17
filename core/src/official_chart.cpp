@@ -180,9 +180,6 @@ void apply_sound_purple_cuts(std::vector<NotationNote>& notes, int32_t& next_id,
       flick.end_tick = flick.start_tick;
       flick.note_type = NoteType::Flick;
       flick.gimmick_type = GimmickType::None;
-      if (flick.scratch_length != 0 && std::abs(flick.scratch_length) > 1) {
-        flick.scratch_length = (flick.scratch_length < 0) ? -1 : 1;
-      }
       notes.push_back(flick);
       continue;
     }
@@ -455,6 +452,11 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
       gimmick = GimmickType::JumpScratch;
     }
 
+    const int32_t scratch_length =
+        (options.expand_legacy_flick_direction && note.note_type == NoteType::Flick)
+            ? official_flick_scratch_length(note.scratch_length, note.width)
+            : note.scratch_length;
+
     ss << start_sec << ',';
     if (end_sec < 0.0) {
       ss << "-1.0";
@@ -462,7 +464,7 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
       ss << end_sec;
     }
     ss << ',' << static_cast<int32_t>(note.note_type) << ',' << lane << ',' << width << ','
-       << format_gimmick(gimmick, options.use_gimmick_names) << ',' << note.scratch_length
+       << format_gimmick(gimmick, options.use_gimmick_names) << ',' << scratch_length
        << '\n';
   }
 

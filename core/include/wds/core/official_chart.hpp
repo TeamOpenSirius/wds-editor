@@ -22,10 +22,13 @@ namespace wds::chart_editor {
 //   leftLane      — leftmost lane, official 1..12; split rows use -1
 //   laneLength    — width in lanes; split rows use 0
 //   gimmickType   — numeric GimmickType, or "JumpScratch" / "OneDirection"
-//   scratchLength — flick/scratch span (signed); JumpScratch target span;
-//                   split Addressable SplitEffects/{id} (also fadeIn growth:
-//                   LineHight z=180 = tip-anchored; not gimmickType, not id%2)
+//   scratchLength — flick/scratch signed span (0 / ±laneLength); JumpScratch
+//                   target span; split Addressable SplitEffects/{id} (also
+//                   fadeIn growth: LineHight z=180 = tip-anchored)
 //                   → stored as NotationNote::scratch_length
+//   Official CSV and old editor CSV share this 7-column text. Import never
+//   rewrites ±1 (cannot tell them apart). Export of editor-authored Flick
+//   may expand historic ±1 to ±width (see OfficialChartSaveOptions).
 //
 // Times are converted to ticks (BPM 60 + TPQ 480 by default) for editor precision;
 // wdschart never stores absolute seconds.
@@ -63,6 +66,9 @@ struct OfficialChartSaveOptions {
   bool convert_lane_to_one_based = true;
   // Write JumpScratch / OneDirection as names (official) instead of 1 / 2.
   bool use_gimmick_names = true;
+  // Editor historically stored Flick direction as ±1. Expand those to ±width
+  // on export only. Import never does this — the file value is authoritative.
+  bool expand_legacy_flick_direction = true;
 };
 
 class OfficialChartFormat {
