@@ -956,6 +956,8 @@ make_win_msi() {
     die "MSI missing ApplyWdsInstallDir custom action"
   grep -Fq 'SetReinstallAll' <<<"${customs}" || \
     die "MSI missing SetReinstallAll custom action"
+  grep -Fq $'SetReinstallMode\t51\tREINSTALLMODE\tvamus' <<<"${customs}" || \
+    die "MSI missing SetReinstallMode custom action (silent reinstall must set REINSTALLMODE=vamus)"
   grep -Fq 'ApplyUserShortcuts' <<<"${customs}" && \
     die "MSI must not schedule ApplyUserShortcuts (Shortcut table owns .lnk files)"
   grep -Fq 'LoadShortcutPrefs' <<<"${customs}" && \
@@ -995,12 +997,17 @@ make_win_msi() {
     die "MSI missing RemoveExistingProducts (needed to retire old Id='*' packages)"
   grep -Fq 'SetReinstallAll' <<<"${exe_seq}" || \
     die "MSI missing SetReinstallAll in InstallExecuteSequence"
+  grep -Fq 'SetReinstallMode' <<<"${exe_seq}" || \
+    die "MSI missing SetReinstallMode in InstallExecuteSequence"
   grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
     die "MSI missing InitWdsInstallDir in InstallUISequence"
   # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
   grep -Fq $'UpdateDlg\tNext\t[REINSTALL]\tALL\tInstalled' <<<"${events}" || \
     die "UpdateDlg must set REINSTALL=ALL when Installed"
+  grep -Fq $'UpdateDlg\tNext\t[REINSTALLMODE]\tvamus\tInstalled' <<<"${events}" || \
+    die "UpdateDlg must set REINSTALLMODE=vamus when Installed (recache the local package)"
   local apply_dir_seq costinit_seq rep_seq init_seq inst_init_seq proccomp_seq
+  local reinstall_mode_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
   costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${exe_seq}")"
   rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
@@ -1016,10 +1023,19 @@ make_win_msi() {
   [[ -n "${rep_seq}" && -n "${inst_init_seq}" && -n "${proccomp_seq}" \
      && "${rep_seq}" -gt "${inst_init_seq}" && "${rep_seq}" -lt "${proccomp_seq}" ]] || \
     die "RemoveExistingProducts (${rep_seq:-unset}) must sit between InstallInitialize (${inst_init_seq:-unset}) and ProcessComponents (${proccomp_seq:-unset}); elsewhere msiexec fails with error 2613"
+  reinstall_mode_seq="$(awk -F'\t' '$1=="SetReinstallMode"{print $3; exit}' <<<"${exe_seq}")"
+  [[ -n "${reinstall_mode_seq}" && -n "${costinit_seq}" && "${reinstall_mode_seq}" -lt "${costinit_seq}" ]] || \
+    die "SetReinstallMode (${reinstall_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset}) so the recache flag is set before costing"
   grep -q 'FindWdsInstallDir32' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir32 registry search"
+  # Package-level REINSTALLMODE covers a normal install, where msiexec forbids
+  # the 'v' recache flag; only the Installed-only paths above may add it.
   grep -Fq $'REINSTALLMODE\tamus' <<<"${props}" || \
     die "MSI missing REINSTALLMODE=amus (same-product reinstall must overwrite files)"
+  local reinstall_mode=""
+  reinstall_mode="$(awk -F'\t' '$1=="REINSTALLMODE"{print $2; exit}' <<<"${props}")"
+  [[ "${reinstall_mode}" != *v* ]] || \
+    die "package-level REINSTALLMODE (${reinstall_mode}) must not contain v: msiexec forbids v on a first installation"
   grep -q 'FindWdsInstallDir' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir registry search"
   grep -q 'FindDesktopPref' <<<"${regs}" || \

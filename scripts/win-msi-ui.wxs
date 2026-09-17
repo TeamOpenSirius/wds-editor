@@ -133,9 +133,11 @@
                  Text="[ProductName] is already installed. Files will be updated in place; the install folder cannot be changed.&#xA;&#xA;Update folder:&#xA;[WDS_INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
-          <!-- Same ProductCode: reinstall in place. Do not retarget INSTALLDIR. -->
+          <!-- Same ProductCode: reinstall in place. Do not retarget INSTALLDIR.
+               'v' recaches the local package, so it may only appear here (the
+               Installed branch): msiexec forbids it on a first installation. -->
           <Publish Property="REINSTALL" Value="ALL" Order="1" Condition="Installed"/>
-          <Publish Property="REINSTALLMODE" Value="amus" Order="2" Condition="Installed"/>
+          <Publish Property="REINSTALLMODE" Value="vamus" Order="2" Condition="Installed"/>
           <!-- Leftover Id='*' product: new ProductCode install over remembered path. -->
           <Publish Event="DoAction" Value="ApplyWdsInstallDir" Order="3" Condition="NOT Installed"/>
           <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="4" Condition="NOT Installed"/>

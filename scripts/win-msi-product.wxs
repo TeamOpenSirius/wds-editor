@@ -70,7 +70,11 @@
     <MediaTemplate EmbedCab="yes"/>
 
     <Property Id="ARPPRODUCTICON" Value="WdsEditorIcon"/>
-    <!-- Reinstall overwrites same-version files. Ignored on a first install. -->
+    <!-- Overwrite mode for a normal install: force every file, rewrite machine
+         and user registry, reinstall shortcuts. The recache flag 'v' is
+         deliberately NOT here - msiexec forbids it on a first installation -
+         and is added only by the Installed-only reinstall paths (SetReinstallMode
+         and the UpdateDlg Next publish). -->
     <Property Id="REINSTALLMODE" Value="amus"/>
     <!-- Fresh install defaults to both shortcuts on; AppSearch overlays HKLM prefs. -->
     <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes">
@@ -132,6 +136,12 @@
     <CustomAction Id="SetReinstallAll"
                   Property="REINSTALL"
                   Value="ALL"/>
+    <!-- Silent reinstall path (no UI): add the recache flag so the package
+         cached in %WINDIR%\Installer is refreshed from the MSI being run.
+         Without it a later Repair can restore stale files from the old cache. -->
+    <CustomAction Id="SetReinstallMode"
+                  Property="REINSTALLMODE"
+                  Value="vamus"/>
 
     <UIRef Id="WdsUI"/>
 
@@ -165,6 +175,10 @@
         WDS_INSTALLDIR AND NOT Installed
       </Custom>
       <Custom Action="SetReinstallAll" After="AppSearch" Before="CostInitialize">
+        Installed AND NOT REMOVE AND NOT REINSTALL AND NOT RESUME AND NOT PATCH
+      </Custom>
+      <!-- Same condition as SetReinstallAll: only ever a maintenance install. -->
+      <Custom Action="SetReinstallMode" After="AppSearch" Before="CostInitialize">
         Installed AND NOT REMOVE AND NOT REINSTALL AND NOT RESUME AND NOT PATCH
       </Custom>
       <Custom Action="SetArpInstallLocation" After="InstallValidate">
