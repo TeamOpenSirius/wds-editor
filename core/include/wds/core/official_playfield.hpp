@@ -298,6 +298,20 @@ inline float official_note_position_x(int32_t lane_number_1based, float note_wid
          lane_border_width * 0.5f;
 }
 
+// ScratchHoldNoteObject.SetJumpScratch: dest = GetNotePositionX(Lane, jumpW),
+// start = GetNotePositionX(Lane, bodyW); negative GimmickValue flips the sign.
+// Lane is 0-based here (official 1-based = lane + 1).
+inline float official_jump_scratch_end_offset_x(int32_t lane_0based, int32_t body_width,
+                                                int32_t gimmick_value) noexcept {
+  const int32_t jump_lanes = std::max(1, std::abs(gimmick_value));
+  const float body_w = official_note_width(std::max(1, body_width));
+  const float jump_w = official_note_width(jump_lanes);
+  const int32_t lane1 = std::max(1, lane_0based + 1);
+  const float offset =
+      official_note_position_x(lane1, jump_w) - official_note_position_x(lane1, body_w);
+  return gimmick_value < 0 ? -offset : offset;
+}
+
 inline float official_lane_center_x(int32_t lane_0based) noexcept {
   const int32_t lane1 = std::max(1, lane_0based + 1);
   return official_note_position_x(lane1, kOfficialNoteWidthPerLane);

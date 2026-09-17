@@ -101,6 +101,9 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     params.span_right = ax0 + aw;
     params.arrow_w = arrow_w;
     params.scratch_length = note.scratch_length;
+    params.official_one_direction =
+        note.note_type == wds::chart_editor::NoteType::Flick &&
+        wds::chart_editor::is_one_direction(note.gimmick_type);
     for (const auto& inst : wds::chart_render::layout_static_scratch_arrows(params)) {
       wds::renderer::Quad q = wds::interaction::rect_to_quad(
           {inst.x0, y - arrow_h * 0.5f, inst.x1 - inst.x0, arrow_h}, fb_w, fb_h, screen);

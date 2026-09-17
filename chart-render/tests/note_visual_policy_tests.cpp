@@ -75,6 +75,12 @@ void test_scratch_arrow_sides() {
   assert(scratch_arrow_sides(-3).draw_left && !scratch_arrow_sides(-3).draw_right);
   assert(!scratch_arrow_sides(4).draw_left && scratch_arrow_sides(4).draw_right);
   assert(scratch_arrow_sides(0).draw_left && scratch_arrow_sides(0).draw_right);
+  assert(scratch_arrow_sides_compat(false, -3).draw_left &&
+         !scratch_arrow_sides_compat(false, -3).draw_right);
+  assert(scratch_arrow_sides_compat(true, 0).draw_left &&
+         !scratch_arrow_sides_compat(true, 0).draw_right);
+  assert(!scratch_arrow_sides_compat(true, 1).draw_left &&
+         scratch_arrow_sides_compat(true, 1).draw_right);
 }
 
 void test_static_arrows_respect_sides() {

@@ -1935,7 +1935,7 @@ void test_official_chart_import_and_roundtrip() {
     else ++authored;
   }
   CHECK_EQ(authored, 12);
-  CHECK(eighths > 0);
+  CHECK_EQ(eighths, 1);
 
   // Document sorts by start time — first note is the split at t=0, not CSV row 0.
   const auto& first = notes[0];
@@ -2008,10 +2008,12 @@ void test_official_chart_load_auto() {
   NotationChart chart;
   const auto result = ChartSerializer::load_auto(chart_path.string(), chart);
   CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(static_cast<int32_t>(chart.notes.size()), 12);
+  CHECK_EQ(static_cast<int32_t>(chart.notes.size()), 13);
+  int eighths = 0;
   for (const auto& n : chart.notes) {
-    CHECK(n.note_type != NoteType::HoldEighth);
+    if (n.note_type == NoteType::HoldEighth) ++eighths;
   }
+  CHECK_EQ(eighths, 1);
 }
 
 void test_load_repo_test_official_charts() {
@@ -2490,7 +2492,7 @@ void test_wdschart_omits_and_ignores_eighths() {
   }
 }
 
-void test_official_ignores_file_eighth_and_export_generates() {
+void test_official_keeps_file_eighth_and_export_generates() {
   const std::string csv =
       "0.0,2.0,100,1,2,0,0\n"
       "0.25,-1.0,900,1,2,0,0\n";  // 0.25s is off the tpq/2 grid from 0
@@ -2499,15 +2501,15 @@ void test_official_ignores_file_eighth_and_export_generates() {
   load_opt.convert_lane_to_zero_based = true;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, parsed, load_opt).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(count_chart_note_type(parsed, NoteType::HoldEighth), 0);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::HoldEighth), 1);
   CHECK_EQ(count_chart_note_type(parsed, NoteType::Hold), 1);
 
   ChartEditorEngine engine;
   engine.load_chart(parsed, ChartEditMode::OfficialPreviewOnly);
-  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 3);
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 1);
   for (const auto& n : engine.document().notes()) {
     if (n.note_type == NoteType::HoldEighth) {
-      CHECK(n.start_tick != 120);
+      CHECK_EQ(n.start_tick, 120);
     }
   }
 
@@ -2576,8 +2578,12 @@ void test_sus_ignores_file_eighth_and_export_generates() {
   CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::HoldEighth), 0);
   CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Sound), 0);
 
+  const fs::path path = temp_chart_path("eighth.sus");
+  CHECK_EQ(static_cast<int>(SusChartFormat::save_file(chart, path.string(), options).error),
+           static_cast<int>(SerializeError::Ok));
   ChartEditorEngine engine;
-  engine.load_chart(loaded.chart, ChartEditMode::OfficialPreviewOnly);
+  CHECK_EQ(static_cast<int>(engine.load_sus_from_file(path.string()).error),
+           static_cast<int>(SerializeError::Ok));
   CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 3);
 }
 
@@ -2605,7 +2611,7 @@ void test_official_csv_tempo_map_export() {
   CHECK(std::abs(start_sec - 0.75) < 1e-3);
 }
 
-// Official Flick scratchLength is a signed span (0 / ±width), not ternary direction.
+// Editor Flick stays 0/±width; official CSV writes OneDirection 0/1.
 void test_official_csv_flick_scratch_length_encodes_width() {
   CHECK_EQ(encode_flick_scratch_length(-1, 4), -4);
   CHECK_EQ(encode_flick_scratch_length(1, 3), 3);
@@ -2647,6 +2653,8 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   save_opt.convert_lane_to_one_based = true;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, csv, save_opt).error),
            static_cast<int>(SerializeError::Ok));
+  CHECK(csv.find("OneDirection,0") != std::string::npos);
+  CHECK(csv.find("OneDirection,1") != std::string::npos);
 
   NotationChart parsed;
   OfficialChartLoadOptions load_opt;
@@ -2688,7 +2696,7 @@ void test_official_csv_flick_scratch_length_encodes_width() {
     CHECK_EQ(hold->scratch_length, -1);
   }
 
-  // File-authored ±1 must survive import (official vs old-editor CSV look alike).
+  // Old editor None,±1/±width must survive import as left/right (not official both).
   {
     const std::string raw = "1.0,-1.0,50,1,4,0,-1\n";
     NotationChart raw_chart;
@@ -2699,8 +2707,82 @@ void test_official_csv_flick_scratch_length_encodes_width() {
       CHECK_EQ(static_cast<int>(raw_chart.notes[0].note_type), static_cast<int>(NoteType::Flick));
       CHECK_EQ(raw_chart.notes[0].width, 4);
       CHECK_EQ(raw_chart.notes[0].scratch_length, -1);
+      CHECK_EQ(static_cast<int>(raw_chart.notes[0].gimmick_type), static_cast<int>(GimmickType::None));
     }
   }
+
+  // Official OneDirection 0/1 → editor-internal None + ±width. None,0 stays both.
+  {
+    const std::string official =
+        "1.0,-1.0,50,2,3,OneDirection,0\n"
+        "2.0,-1.0,50,2,3,OneDirection,1\n"
+        "3.0,-1.0,50,2,3,0,0\n"
+        "4.0,-1.0,50,2,3,JumpScratch,6\n"
+        "5.0,-1.0,50,2,3,JumpScratch,-6\n";
+    NotationChart official_chart;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(official, official_chart, load_opt).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK_EQ(static_cast<int>(official_chart.notes.size()), 5);
+    const NotationNote* left = nullptr;
+    const NotationNote* right = nullptr;
+    const NotationNote* both = nullptr;
+    const NotationNote* jump_r = nullptr;
+    const NotationNote* jump_l = nullptr;
+    for (const auto& n : official_chart.notes) {
+      if (n.start_tick == 480) left = &n;
+      if (n.start_tick == 960) right = &n;
+      if (n.start_tick == 1440) both = &n;
+      if (n.start_tick == 1920) jump_r = &n;
+      if (n.start_tick == 2400) jump_l = &n;
+    }
+    CHECK(left && right && both && jump_r && jump_l);
+    if (left) {
+      CHECK_EQ(static_cast<int>(left->gimmick_type), static_cast<int>(GimmickType::None));
+      CHECK_EQ(left->scratch_length, -3);
+      CHECK_EQ(left->width, 3);
+    }
+    if (right) {
+      CHECK_EQ(static_cast<int>(right->gimmick_type), static_cast<int>(GimmickType::None));
+      CHECK_EQ(right->scratch_length, 3);
+    }
+    if (both) {
+      CHECK_EQ(static_cast<int>(both->gimmick_type), static_cast<int>(GimmickType::None));
+      CHECK_EQ(both->scratch_length, 0);
+    }
+    if (jump_r) {
+      CHECK_EQ(static_cast<int>(jump_r->gimmick_type), static_cast<int>(GimmickType::JumpScratch));
+      CHECK_EQ(jump_r->scratch_length, 6);
+      CHECK_EQ(jump_r->width, 3);
+      const auto [lo, hi] = get_scratch_end_lane_range(*jump_r);
+      CHECK_EQ(lo, jump_r->lane);
+      CHECK_EQ(hi, jump_r->lane + 5);
+      CHECK_EQ(official_scratch_arrow_lane_count(*jump_r), 6);
+      CHECK_EQ(official_scratch_arrow_count(6, true), 18);
+      CHECK(std::fabs(official_jump_scratch_end_offset_x(jump_r->lane, jump_r->width, 6) -
+                      1.3875f) < 1e-4f);
+    }
+    if (jump_l) {
+      CHECK_EQ(jump_l->scratch_length, -6);
+      const auto [lo, hi] = get_scratch_end_lane_range(*jump_l);
+      CHECK_EQ(hi, jump_l->end_lane());
+      CHECK_EQ(lo, jump_l->end_lane() - 5);
+      CHECK(std::fabs(official_jump_scratch_end_offset_x(jump_l->lane, jump_l->width, -6) +
+                      1.3875f) < 1e-4f);
+    }
+
+    std::string exported;
+    CHECK_EQ(static_cast<int>(
+                 OfficialChartFormat::serialize_chart(official_chart, exported, save_opt).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(exported.find("OneDirection,0") != std::string::npos);
+    CHECK(exported.find("OneDirection,1") != std::string::npos);
+    CHECK(exported.find("JumpScratch,6") != std::string::npos);
+    CHECK(exported.find("JumpScratch,-6") != std::string::npos);
+  }
+
+  CHECK_EQ(official_scratch_arrow_side_sign(GimmickType::None, -4), 0);
+  CHECK_EQ(official_scratch_arrow_side_sign(GimmickType::OneDirection, 0), -1);
+  CHECK_EQ(official_scratch_arrow_side_sign(GimmickType::OneDirection, 1), 1);
 
   // Convert-bar direction intent expands to ±width.
   {
@@ -2755,7 +2837,7 @@ void test_official_sound_purple_split_and_row_semantics() {
   CHECK_EQ(scratch_holds, 2);
   CHECK_EQ(jump, 1);
   CHECK_EQ(stars, 1);
-  CHECK_EQ(eighths, 0);
+  CHECK_EQ(eighths, 1);
 
   // Export: HoldEighth endTime=-1; Split leftLane=-1; JumpScratch name when scratch≠0.
   NotationChart export_chart;
@@ -3645,14 +3727,25 @@ void test_official_and_wdschart_roundtrip_hold_chain_fragment() {
   NotationChart reparsed;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(exported, reparsed, load_opt).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(static_cast<int>(reparsed.notes.size()), static_cast<int>(chart.notes.size()));
+
+  auto drop_eighths = [](std::vector<NotationNote> notes) {
+    notes.erase(std::remove_if(notes.begin(), notes.end(),
+                               [](const NotationNote& n) {
+                                 return n.note_type == NoteType::HoldEighth;
+                               }),
+                notes.end());
+    return notes;
+  };
+  auto authored_chart = drop_eighths(chart.notes);
+  auto authored_reparsed = drop_eighths(reparsed.notes);
+  CHECK_EQ(static_cast<int>(authored_reparsed.size()), static_cast<int>(authored_chart.size()));
 
   auto key = [](const NotationNote& n) {
     return std::tuple{static_cast<int32_t>(n.note_type), n.lane, n.width,
                       static_cast<int32_t>(n.gimmick_type), n.scratch_length, n.start_tick};
   };
-  auto a = chart.notes;
-  auto b = reparsed.notes;
+  auto a = authored_chart;
+  auto b = authored_reparsed;
   std::sort(a.begin(), a.end(), [&](const auto& l, const auto& r) { return key(l) < key(r); });
   std::sort(b.begin(), b.end(), [&](const auto& l, const auto& r) { return key(l) < key(r); });
   for (size_t i = 0; i < a.size(); ++i) {
@@ -7549,7 +7642,7 @@ int main() {
   test_timing_bpm_meter_split_and_prune();
   test_truncated_wdschart_rejected();
   test_wdschart_omits_and_ignores_eighths();
-  test_official_ignores_file_eighth_and_export_generates();
+  test_official_keeps_file_eighth_and_export_generates();
   test_sus_ignores_file_eighth_and_export_generates();
   test_official_csv_tempo_map_export();
   test_official_csv_flick_scratch_length_encodes_width();
