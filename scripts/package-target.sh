@@ -993,7 +993,8 @@ make_win_msi() {
     die "MSI missing SetReinstallAll in InstallExecuteSequence"
   grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
     die "MSI missing InitWdsInstallDir in InstallUISequence"
-  grep -Fq $'REINSTALL\tALL' <<<"${events}" || \
+  # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
+  grep -Fq $'UpdateDlg\tNext\t[REINSTALL]\tALL\tInstalled' <<<"${events}" || \
     die "UpdateDlg must set REINSTALL=ALL when Installed"
   local apply_dir_seq costinit_seq files_seq rep_seq init_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
