@@ -11,8 +11,31 @@
   dest rebuilds are the SAME product (fixed ProductCode, ProductVersion 1.0.0).
   A second MSI is a reinstall: REINSTALL=ALL REINSTALLMODE=amus. No new
   ProductCode, so costing keeps the existing INSTALLDIR and CreateShortcuts
-  runs against that folder. MajorUpgrade exists only to remove leftover
-  Id='*' packages from older dest builds.
+  runs against that folder, and ARP's repair/in-place reinstall keeps working.
+  MajorUpgrade exists only to remove leftover Id='*' packages from older dest
+  builds.
+
+  ProductCode and the component GUIDs are a MATCHED PAIR - never change one
+  without the other:
+    - This fixed ProductCode requires PATH-STABLE component GUIDs, so a later
+      build's components are the same components and refcounts keep the files.
+      win-msi-harvest.py derives them with UUID5 from the install-relative
+      path, and package-target.sh rejects Guid='*' on the payload component.
+    - A per-build ProductCode (Product Id='*') would instead need per-build
+      unique component GUIDs. Mixing a fresh ProductCode with these shared
+      GUIDs makes two different products claim the same component: costing
+      treats it as already installed and skips InstallFiles, then the old
+      product's uninstall deletes the files it skipped. That combination is
+      what 224cdbd and 67c5dd8 were fighting; do not recreate it.
+
+  RemoveExistingProducts sits immediately after InstallInitialize ("after
+  InstallInitialize and before any actions that generate execution script",
+  one of the four placements the action documents). It now only ever removes a
+  leftover Id='*' product, whose component GUIDs are NOT ours, so that
+  uninstall cannot delete files this build writes; the removal is also inside
+  the transaction, so a later failure can roll it back. Never sequence it next
+  to InstallFiles or InstallFinalize-after-file-actions: msiexec rejects the
+  mid-script placement with error 2613.
 
   Shortcuts are MSI Shortcut table entries (Advertise=no + Target=exe).
   wixl defaults Advertise=yes; the Target path keeps them non-advertised.
@@ -39,8 +62,9 @@
              Description="WDS Chart Editor (Windows x64)"
              Comments="Self-contained editor; preferences live under LocalAppData"/>
 
-    <!-- One-time cleanup of older dest MSIs that used Product Id='*'.
-         Same-product dest rebuilds are Installed=1 and do not hit this. -->
+    <!-- Retires older dest MSIs that used Product Id='*': a different
+         ProductCode at the same version 1.0.0, hence AllowSameVersionUpgrades.
+         Same-product dest rebuilds are Installed=1 and never reach this. -->
     <MajorUpgrade DowngradeErrorMessage="A newer version of WDS Editor is already installed."
                   AllowSameVersionUpgrades="yes"/>
     <MediaTemplate EmbedCab="yes"/>
@@ -125,8 +149,11 @@
       </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
-      <!-- Only runs when FindRelatedProducts sees an older ProductCode. -->
-      <RemoveExistingProducts After="InstallFiles"/>
+      <!-- Only ever runs for a leftover Product Id='*' product (different
+           ProductCode). FindRelatedProducts skips maintenance of this exact
+           ProductCode, so a same-product dest rebuild never removes itself.
+           Placement is window 2 - see the header; InstallFiles is 2613. -->
+      <RemoveExistingProducts After="InstallInitialize"/>
       <Custom Action="AdoptPreviousInstall32" After="AppSearch">
         WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
       </Custom>
