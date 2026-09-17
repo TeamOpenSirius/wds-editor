@@ -1127,10 +1127,10 @@ PY
   [[ -n "${update_mode_seq}" && -n "${costinit_seq}" && "${update_mode_seq}" -lt "${costinit_seq}" ]] || \
     die "SetReinstallModeUpdate (${update_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
   # The two paths must be told apart by the stamp, not by anything else.
-  grep -Eq $'SetReinstallModeRepair\t.*WDS_INSTALLED_BUILD = WDS_BUILD_ID' <<<"${exe_seq}" || \
-    die "SetReinstallModeRepair must be conditioned on WDS_INSTALLED_BUILD = WDS_BUILD_ID (same MSI -> repair)"
-  grep -Eq $'SetReinstallModeUpdate\t.*WDS_INSTALLED_BUILD <> WDS_BUILD_ID' <<<"${exe_seq}" || \
-    die "SetReinstallModeUpdate must be conditioned on WDS_INSTALLED_BUILD <> WDS_BUILD_ID (different build -> update)"
+  grep -Eq $'SetReinstallModeRepair\t.*WDS_INSTALLED_TS = WDS_BUILD_TS' <<<"${exe_seq}" || \
+    die "SetReinstallModeRepair must be conditioned on WDS_INSTALLED_TS = WDS_BUILD_TS (same MSI -> repair)"
+  grep -Eq $'SetReinstallModeUpdate\t.*WDS_INSTALLED_TS <> WDS_BUILD_TS' <<<"${exe_seq}" || \
+    die "SetReinstallModeUpdate must be conditioned on WDS_INSTALLED_TS <> WDS_BUILD_TS (different build -> update)"
   grep -q 'FindWdsInstallDir32' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir32 registry search"
   # Package-level REINSTALLMODE covers a normal install, where msiexec forbids
