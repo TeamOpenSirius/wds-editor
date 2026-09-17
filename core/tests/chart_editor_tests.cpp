@@ -2203,7 +2203,7 @@ void test_edit_grid_and_note_operations() {
   const NotationNote from_scratch = convert_note_type(scratch_body, NoteType::Flick, 480);
   CHECK_EQ(static_cast<int>(from_scratch.note_type), static_cast<int>(NoteType::Flick));
   CHECK_EQ(from_scratch.end_tick, from_scratch.start_tick);
-  CHECK_EQ(from_scratch.scratch_length, 1);
+  CHECK_EQ(from_scratch.scratch_length, 4);
   CHECK_EQ(static_cast<int>(from_scratch.gimmick_type), static_cast<int>(GimmickType::None));
   const NotationNote back_to_tap = convert_note_type(from_scratch, NoteType::Normal, 480);
   CHECK_EQ(static_cast<int>(back_to_tap.note_type), static_cast<int>(NoteType::Normal));
@@ -2603,6 +2603,118 @@ void test_official_csv_tempo_map_export() {
   // 480 ticks @120 BPM = 0.5s, then 480 ticks @240 BPM = 0.25s → 0.75s.
   const double start_sec = std::stod(text.substr(0, text.find(',')));
   CHECK(std::abs(start_sec - 0.75) < 1e-3);
+}
+
+// Official Flick scratchLength is a signed span (0 / ±width), not ternary direction.
+void test_official_csv_flick_scratch_length_encodes_width() {
+  CHECK_EQ(encode_flick_scratch_length(-1, 4), -4);
+  CHECK_EQ(encode_flick_scratch_length(1, 3), 3);
+  CHECK_EQ(encode_flick_scratch_length(0, 6), 0);
+  CHECK_EQ(official_flick_scratch_length(-1, 4), -4);
+  CHECK_EQ(official_flick_scratch_length(1, 3), 3);
+  CHECK_EQ(official_flick_scratch_length(0, 6), 0);
+  CHECK_EQ(official_flick_scratch_length(-12, 12), -12);
+  CHECK_EQ(official_flick_scratch_length(6, 5), 6);
+
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+
+  auto add_flick = [&](int32_t tick, int32_t lane, int32_t width, int32_t sl) {
+    NotationNote n = make_tap(tick, lane);
+    n.id = static_cast<int32_t>(chart.notes.size());
+    n.note_type = NoteType::Flick;
+    n.width = width;
+    n.scratch_length = sl;
+    chart.notes.push_back(n);
+  };
+  add_flick(0, 0, 4, -1);    // historic editor direction-only
+  add_flick(480, 2, 3, 1);
+  add_flick(960, 0, 6, 0);
+  add_flick(1440, 1, 5, -5);  // already official
+  {
+    NotationNote hold = make_tap(1920, 0);
+    hold.id = static_cast<int32_t>(chart.notes.size());
+    hold.note_type = NoteType::ScratchHold;
+    hold.width = 4;
+    hold.end_tick = 2400;
+    hold.scratch_length = -1;  // genuine 1-lane left cover, not direction-only
+    chart.notes.push_back(hold);
+  }
+
+  std::string csv;
+  OfficialChartSaveOptions save_opt;
+  save_opt.convert_lane_to_one_based = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, csv, save_opt).error),
+           static_cast<int>(SerializeError::Ok));
+
+  NotationChart parsed;
+  OfficialChartLoadOptions load_opt;
+  load_opt.convert_lane_to_zero_based = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, parsed, load_opt).error),
+           static_cast<int>(SerializeError::Ok));
+
+  const NotationNote* left = nullptr;
+  const NotationNote* right = nullptr;
+  const NotationNote* both = nullptr;
+  const NotationNote* authored = nullptr;
+  const NotationNote* hold = nullptr;
+  for (const auto& n : parsed.notes) {
+    if (n.note_type == NoteType::Flick && n.start_tick == 0) left = &n;
+    if (n.note_type == NoteType::Flick && n.start_tick == 480) right = &n;
+    if (n.note_type == NoteType::Flick && n.start_tick == 960) both = &n;
+    if (n.note_type == NoteType::Flick && n.start_tick == 1440) authored = &n;
+    if (n.note_type == NoteType::ScratchHold) hold = &n;
+  }
+  CHECK(left && right && both && authored && hold);
+  if (left) {
+    CHECK_EQ(left->width, 4);
+    CHECK_EQ(left->scratch_length, -4);
+  }
+  if (right) {
+    CHECK_EQ(right->width, 3);
+    CHECK_EQ(right->scratch_length, 3);
+  }
+  if (both) {
+    CHECK_EQ(both->width, 6);
+    CHECK_EQ(both->scratch_length, 0);
+  }
+  if (authored) {
+    CHECK_EQ(authored->width, 5);
+    CHECK_EQ(authored->scratch_length, -5);
+  }
+  if (hold) {
+    CHECK_EQ(hold->width, 4);
+    CHECK_EQ(hold->scratch_length, -1);
+  }
+
+  // File-authored ±1 must survive import (official vs old-editor CSV look alike).
+  {
+    const std::string raw = "1.0,-1.0,50,1,4,0,-1\n";
+    NotationChart raw_chart;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(raw, raw_chart, load_opt).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK_EQ(static_cast<int>(raw_chart.notes.size()), 1);
+    if (!raw_chart.notes.empty()) {
+      CHECK_EQ(static_cast<int>(raw_chart.notes[0].note_type), static_cast<int>(NoteType::Flick));
+      CHECK_EQ(raw_chart.notes[0].width, 4);
+      CHECK_EQ(raw_chart.notes[0].scratch_length, -1);
+    }
+  }
+
+  // Convert-bar direction intent expands to ±width.
+  {
+    ChartDocument doc;
+    CHECK(doc.set_timing(chart.timing));
+    NotationNote flick = make_tap(0, 1);
+    flick.id = 1;
+    flick.width = 3;
+    flick.note_type = NoteType::Normal;
+    CHECK(doc.add_note(flick) == 1);
+    const auto result =
+        convert_notes_in_selection(doc, std::unordered_set<int32_t>{1}, NoteType::Flick, 1);
+    CHECK_EQ(result.updates.at(1).scratch_length, 3);
+  }
 }
 
 // Sirius type 40 mid-scratch splits purple holds; HoldEighth/Split export match sus2txt.
@@ -7440,6 +7552,7 @@ int main() {
   test_official_ignores_file_eighth_and_export_generates();
   test_sus_ignores_file_eighth_and_export_generates();
   test_official_csv_tempo_map_export();
+  test_official_csv_flick_scratch_length_encodes_width();
   test_official_sound_purple_split_and_row_semantics();
   test_migrate_wdschart_scratch_to_flick_script();
   test_save_failure_preserves_note_ids();
