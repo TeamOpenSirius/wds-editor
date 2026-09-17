@@ -883,20 +883,19 @@ make_win_msi() {
 
   python3 "${ROOT}/scripts/win-msi-harvest.py" "$heat_wxs" "$build_ts" \
     || die "win-msi-harvest.py failed"
-  local guid_registry="" guid_prefs="" guid_stamp="" guid_desk="" guid_start=""
+  local guid_registry="" guid_stamp="" guid_desk="" guid_start=""
   local authored_guids="" authored_key="" authored_val=""
   authored_guids="$(python3 "${ROOT}/scripts/win-msi-harvest.py" --authored-guids "$build_ts")" \
     || die "win-msi-harvest.py --authored-guids failed"
   while IFS='=' read -r authored_key authored_val; do
     case "${authored_key}" in
       GUID_RegistryInstallDir) guid_registry="${authored_val}" ;;
-      GUID_ShortcutPrefs) guid_prefs="${authored_val}" ;;
       GUID_InstallStamp) guid_stamp="${authored_val}" ;;
       GUID_DesktopShortcut) guid_desk="${authored_val}" ;;
       GUID_StartMenuShortcut) guid_start="${authored_val}" ;;
     esac
   done <<<"${authored_guids}"
-  [[ -n "${guid_registry}" && -n "${guid_prefs}" && -n "${guid_stamp}" \
+  [[ -n "${guid_registry}" && -n "${guid_stamp}" \
      && -n "${guid_desk}" && -n "${guid_start}" ]] || \
     die "per-build authored component GUIDs were not generated"
 
@@ -928,7 +927,6 @@ PY
       -D "BuildId=${build_id}" \
       -D "BuildTs=${build_ts}" \
       -D "GuidRegistryInstallDir=${guid_registry}" \
-      -D "GuidShortcutPrefs=${guid_prefs}" \
       -D "GuidInstallStamp=${guid_stamp}" \
       -D "GuidDesktopShortcut=${guid_desk}" \
       -D "GuidStartMenuShortcut=${guid_start}" \
@@ -950,7 +948,7 @@ PY
   props="$(msiinfo_export "$msi_path" Property | tr -d '\r')" || die "msiinfo failed: Property"
   local scp="" extra p
   scp="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
-  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE;WDS_ALLOW_DOWNGRADE;WIX_UPGRADE_DETECTED;WDS_DESKTOP_PREF32;WDS_STARTMENU_PREF32;WDS_SAVED_DESKTOP;WDS_SAVED_STARTMENU;WDS_HAD_INSTALL;WDS_REG_DESKTOP;WDS_REG_STARTMENU"
+  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE;WDS_ALLOW_DOWNGRADE;WIX_UPGRADE_DETECTED"
   IFS=';'
   for p in $extra; do
     [[ -z "$p" ]] && continue
@@ -966,9 +964,9 @@ PY
   echo "Patched SecureCustomProperties (append CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL)"
 
   # Same workaround as SecureCustomProperties: author the WiX Condition
-  # column that wixl 0.103 cannot emit. CREATE_* other than yes omits the .lnk.
-  local desk_cond='CREATE_DESKTOP_SHORTCUT="yes"'
-  local start_cond='CREATE_STARTMENU_SHORTCUT="yes"'
+  # column that wixl 0.103 cannot emit. CREATE_* unset omits the .lnk.
+  local desk_cond='CREATE_DESKTOP_SHORTCUT'
+  local start_cond='CREATE_STARTMENU_SHORTCUT'
   msibuild "$msi_path" -q \
     "UPDATE Component SET Condition='${desk_cond}' WHERE Component='DesktopShortcut'" \
     || die "msibuild failed to condition DesktopShortcut"
@@ -983,7 +981,7 @@ PY
   local comps_for_attr="" _comp="" _attr="" _new=""
   comps_for_attr="$(msiinfo_export "$msi_path" Component | tr -d '\r')" || \
     die "msiinfo failed: Component (pre-Transitive)"
-  for _comp in DesktopShortcut StartMenuShortcut ShortcutPrefs; do
+  for _comp in DesktopShortcut StartMenuShortcut; do
     _attr="$(awk -F'\t' -v n="${_comp}" '$1==n{print $4; exit}' <<<"${comps_for_attr}")"
     [[ "${_attr}" =~ ^[0-9]+$ ]] || die "Component ${_comp} missing Attributes"
     if (( (_attr & 64) == 0 )); then
@@ -993,7 +991,7 @@ PY
         || die "msibuild failed to set Transitive on ${_comp}"
     fi
   done
-  echo "Patched Component.Attributes Transitive on DesktopShortcut / StartMenuShortcut / ShortcutPrefs"
+  echo "Patched Component.Attributes Transitive on DesktopShortcut / StartMenuShortcut"
 
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
@@ -1022,12 +1020,10 @@ PY
     die "MSI missing UpdateDlg in InstallUISequence"
   grep -q $'ProductLanguage\t1033' <<<"${props}" || \
     die "MSI ProductLanguage is not 1033 (UI language mismatch risk)"
-  grep -Fq $'[CREATE_DESKTOP_SHORTCUT]\tno\tNOT CREATE_DESKTOP_SHORTCUT="yes"' <<<"${events}" || \
-    die "MSI missing explicit CREATE_DESKTOP_SHORTCUT=no on uncheck (0 is treated as unset)"
-  grep -Fq $'[CREATE_STARTMENU_SHORTCUT]\tno\tNOT CREATE_STARTMENU_SHORTCUT="yes"' <<<"${events}" || \
-    die "MSI missing explicit CREATE_STARTMENU_SHORTCUT=no on uncheck"
-  grep -Fq $'[CREATE_DESKTOP_SHORTCUT]\t0\t' <<<"${events}" && \
-    die "ShortcutsDlg must not publish CREATE_*=0 (msiexec treats 0 as unset; Default=1 then re-checks the box)"
+  grep -Fq $'[CREATE_DESKTOP_SHORTCUT]\t' <<<"${events}" && \
+    die "ShortcutsDlg must not publish CREATE_* (unchecked is empty; any set value checks the box)"
+  grep -Fq $'[CREATE_STARTMENU_SHORTCUT]\t' <<<"${events}" && \
+    die "ShortcutsDlg must not publish CREATE_*"
   grep -Fq $'AddLocal\tDesktopFeature' <<<"${events}" && \
     die "MSI still uses AddLocal DesktopFeature (shortcuts are Condition-owned)"
   grep -q 'DesktopFeature' <<<"${features}" && \
@@ -1053,30 +1049,22 @@ PY
     die "MSI must not schedule ApplyUserShortcuts (Shortcut table owns .lnk files)"
   grep -Fq 'LoadShortcutPrefs' <<<"${customs}" && \
     die "MSI must not schedule LoadShortcutPrefs (AppSearch owns CREATE_* prefs)"
-  grep -Fq $'CREATE_DESKTOP_SHORTCUT\t1' <<<"${props}" && \
-    die "CREATE_DESKTOP_SHORTCUT must not have a Property-table default of 1 (AppSearch cannot overlay it; shortcuts would never remember an unchecked box)"
-  grep -Fq $'CREATE_STARTMENU_SHORTCUT\t1' <<<"${props}" && \
-    die "CREATE_STARTMENU_SHORTCUT must not have a Property-table default of 1 (AppSearch cannot overlay it)"
-  grep -Fq $'DefaultDesktopShortcut\t51\tCREATE_DESKTOP_SHORTCUT\tyes' <<<"${customs}" || \
-    die "MSI missing DefaultDesktopShortcut (fresh install default when no saved pref)"
-  grep -Fq $'DefaultStartMenuShortcut\t51\tCREATE_STARTMENU_SHORTCUT\tyes' <<<"${customs}" || \
-    die "MSI missing DefaultStartMenuShortcut (fresh install default when no saved pref)"
-  grep -Fq $'ApplyDesktopOn\t51\tCREATE_DESKTOP_SHORTCUT\tyes' <<<"${customs}" || \
-    die "MSI missing ApplyDesktopOn (restore a saved-on shortcut pref)"
-  grep -Fq $'ApplyDesktopOff\t51\tCREATE_DESKTOP_SHORTCUT\tno' <<<"${customs}" || \
-    die "MSI missing ApplyDesktopOff=no (0 is treated as unset and then defaulted back to 1)"
-  grep -Fq $'ApplyDesktopOff\t51\tCREATE_DESKTOP_SHORTCUT\t0' <<<"${customs}" && \
-    die "ApplyDesktopOff must not write 0"
-  grep -Fq $'SetWdsHadInstall\t51\tWDS_HAD_INSTALL\t1' <<<"${customs}" || \
-    die "MSI missing SetWdsHadInstall (prior install lets us infer a stored 0 that AppSearch dropped)"
-  grep -Fq $'SetRegDesktopYes\t51\tWDS_REG_DESKTOP\tyes' <<<"${customs}" || \
-    die "MSI missing SetRegDesktopYes (store yes/no, never 0)"
-  grep -Fq $'SetRegDesktopNo\t51\tWDS_REG_DESKTOP\tno' <<<"${customs}" || \
-    die "MSI missing SetRegDesktopNo"
-  grep -Fq $'SetRegStartYes\t51\tWDS_REG_STARTMENU\tyes' <<<"${customs}" || \
-    die "MSI missing SetRegStartYes"
-  grep -Fq $'SetRegStartNo\t51\tWDS_REG_STARTMENU\tno' <<<"${customs}" || \
-    die "MSI missing SetRegStartNo"
+  grep -Eq $'^CREATE_DESKTOP_SHORTCUT\t' <<<"${props}" && \
+    die "CREATE_DESKTOP_SHORTCUT must not have a Property-table value (AppSearch cannot overlay it)"
+  grep -Eq $'^CREATE_STARTMENU_SHORTCUT\t' <<<"${props}" && \
+    die "CREATE_STARTMENU_SHORTCUT must not have a Property-table value (AppSearch cannot overlay it)"
+  grep -Fq 'DefaultDesktopShortcut' <<<"${customs}" && \
+    die "MSI must not default CREATE_* on (first install is both off)"
+  grep -Fq 'DefaultStartMenuShortcut' <<<"${customs}" && \
+    die "MSI must not default CREATE_* on"
+  grep -Fq 'ApplyDesktopOn' <<<"${customs}" && \
+    die "MSI must not translate saved prefs onto CREATE_* (AppSearch owns presence)"
+  grep -Fq 'ApplyDesktopOff' <<<"${customs}" && \
+    die "MSI must not write CREATE_*=no (a set value checks the box)"
+  grep -Fq 'SetWdsHadInstall' <<<"${customs}" && \
+    die "MSI must not infer shortcut prefs from a prior install"
+  grep -Fq 'SetRegDesktop' <<<"${customs}" && \
+    die "MSI must not use WDS_REG_* (the shortcut component writes a constant marker)"
   grep -Fq 'AdoptDesktopPref32' <<<"${customs}" && \
     die "AdoptDesktopPref32 must not copy a 0/empty AppSearch value onto CREATE_*"
   grep -Fq $'WDS_INSTALLDIR' <<<"${props}" || \
@@ -1120,12 +1108,12 @@ PY
   scp_val="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
   grep -Fq 'CREATE_DESKTOP_SHORTCUT' <<<"${scp_val}" || \
     die "SecureCustomProperties must include CREATE_DESKTOP_SHORTCUT (UI→Execute)"
-  grep -Fq 'WDS_SAVED_DESKTOP' <<<"${scp_val}" || \
-    die "SecureCustomProperties must include WDS_SAVED_DESKTOP (UI→Execute)"
-  grep -Fq 'WDS_HAD_INSTALL' <<<"${scp_val}" || \
-    die "SecureCustomProperties must include WDS_HAD_INSTALL (UI→Execute)"
   grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"${scp_val}" || \
     die "SecureCustomProperties must include CREATE_STARTMENU_SHORTCUT (UI→Execute)"
+  grep -Fq 'WDS_SAVED_DESKTOP' <<<"${scp_val}" && \
+    die "SecureCustomProperties must not include WDS_SAVED_* (AppSearch writes CREATE_*)"
+  grep -Fq 'WDS_HAD_INSTALL' <<<"${scp_val}" && \
+    die "SecureCustomProperties must not include WDS_HAD_INSTALL"
   grep -Fq 'WDS_INSTALLDIR' <<<"${scp_val}" || \
     die "SecureCustomProperties must include WDS_INSTALLDIR (UI→Execute)"
   [[ ";${scp_val};" == *";INSTALLDIR;"* ]] || \
@@ -1153,18 +1141,16 @@ PY
     die "MSI missing SetRootDrive in InstallExecuteSequence"
   grep -Fq 'SetRootDrive' <<<"${ui_seq}" || \
     die "MSI missing SetRootDrive in InstallUISequence"
-  grep -Fq $'CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no"' <<<"${exe_seq}" || \
-    die "Execute shortcut prefs must test CREATE_*=yes/no (0 is unset and then defaulted to yes)"
-  grep -Fq $'CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no"' <<<"${ui_seq}" || \
-    die "UI shortcut prefs must test CREATE_*=yes/no (0 is unset and then defaulted to yes)"
-  grep -Eq $'ApplyDesktopOff\t.*WDS_HAD_INSTALL' <<<"${exe_seq}" || \
-    die "ApplyDesktopOff must infer off when a prior install exists and AppSearch dropped a 0"
-  grep -Eq $'ApplyDesktopOff\t.*WDS_HAD_INSTALL' <<<"${ui_seq}" || \
-    die "UI ApplyDesktopOff must infer off when a prior install exists and AppSearch dropped a 0"
-  grep -Fq 'SetRegDesktopYes' <<<"${exe_seq}" || \
-    die "Execute must set WDS_REG_DESKTOP before WriteRegistryValues"
-  grep -Fq 'SetRegDesktopNo' <<<"${exe_seq}" || \
-    die "Execute must set WDS_REG_DESKTOP=no when the box is off"
+  grep -Fq 'ApplyDesktop' <<<"${exe_seq}" && \
+    die "Execute must not translate shortcut prefs (AppSearch owns CREATE_*)"
+  grep -Fq 'ApplyDesktop' <<<"${ui_seq}" && \
+    die "UI must not translate shortcut prefs (AppSearch owns CREATE_*)"
+  grep -Fq 'DefaultDesktopShortcut' <<<"${exe_seq}" && \
+    die "Execute must not default CREATE_* on"
+  grep -Fq 'DefaultDesktopShortcut' <<<"${ui_seq}" && \
+    die "UI must not default CREATE_* on"
+  grep -Fq 'SetRegDesktop' <<<"${exe_seq}" && \
+    die "Execute must not set WDS_REG_*"
   grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
     die "MSI missing InitWdsInstallDir in InstallUISequence"
   # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
@@ -1197,7 +1183,7 @@ PY
   grep -Fq $'[REINSTALLMODE]' <<<"${events}" && \
     die "no dialog may publish the REINSTALLMODE property (SetReinstallModeRepair/Update own it)"
   local apply_dir_seq costinit_seq rep_seq init_seq inst_init_seq proccomp_seq
-  local repair_mode_seq update_mode_seq root_seq default_desk_seq default_start_seq
+  local repair_mode_seq update_mode_seq root_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
   costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${exe_seq}")"
   rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
@@ -1222,20 +1208,8 @@ PY
   root_seq="$(awk -F'\t' '$1=="SetRootDrive"{print $3; exit}' <<<"${exe_seq}")"
   [[ -n "${root_seq}" && -n "${costinit_seq}" && "${root_seq}" -lt "${costinit_seq}" ]] || \
     die "SetRootDrive (${root_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
-  default_desk_seq="$(awk -F'\t' '$1=="DefaultDesktopShortcut"{print $3; exit}' <<<"${exe_seq}")"
-  default_start_seq="$(awk -F'\t' '$1=="DefaultStartMenuShortcut"{print $3; exit}' <<<"${exe_seq}")"
-  [[ -n "${default_desk_seq}" && -n "${costinit_seq}" && "${default_desk_seq}" -lt "${costinit_seq}" ]] || \
-    die "DefaultDesktopShortcut (${default_desk_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
-  [[ -n "${default_start_seq}" && -n "${costinit_seq}" && "${default_start_seq}" -lt "${costinit_seq}" ]] || \
-    die "DefaultStartMenuShortcut (${default_start_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
-  local ui_costinit_seq="" ui_default_desk_seq="" ui_dir_dlg_seq=""
+  local ui_costinit_seq=""
   ui_costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${ui_seq}")"
-  ui_default_desk_seq="$(awk -F'\t' '$1=="DefaultDesktopShortcut"{print $3; exit}' <<<"${ui_seq}")"
-  ui_dir_dlg_seq="$(awk -F'\t' '$1=="InstallDirDlg"{print $3; exit}' <<<"${ui_seq}")"
-  [[ -n "${ui_default_desk_seq}" && -n "${ui_costinit_seq}" && "${ui_default_desk_seq}" -lt "${ui_costinit_seq}" ]] || \
-    die "UI DefaultDesktopShortcut (${ui_default_desk_seq:-unset}) must run before CostInitialize (${ui_costinit_seq:-unset}); after the dialogs an unset box is published as 0"
-  [[ -n "${ui_default_desk_seq}" && -n "${ui_dir_dlg_seq}" && "${ui_default_desk_seq}" -lt "${ui_dir_dlg_seq}" ]] || \
-    die "UI DefaultDesktopShortcut (${ui_default_desk_seq:-unset}) must run before InstallDirDlg (${ui_dir_dlg_seq:-unset})"
   local ui_prev_dir_seq="" ui_update_dlg_seq=""
   ui_prev_dir_seq="$(awk -F'\t' '$1=="SetInstallDirFromPrevious"{print $3; exit}' <<<"${ui_seq}")"
   ui_update_dlg_seq="$(awk -F'\t' '$1=="UpdateDlg"{print $3; exit}' <<<"${ui_seq}")"
@@ -1272,10 +1246,10 @@ PY
     die "MSI missing FindDesktopPref registry search"
   grep -q 'FindStartMenuPref' <<<"${regs}" || \
     die "MSI missing FindStartMenuPref registry search"
-  grep -q 'FindDesktopPref32' <<<"${regs}" || \
-    die "MSI missing FindDesktopPref32 registry search"
-  grep -q 'FindStartMenuPref32' <<<"${regs}" || \
-    die "MSI missing FindStartMenuPref32 registry search"
+  grep -q 'FindDesktopPref32' <<<"${regs}" && \
+    die "MSI must not search Wow6432Node for shortcut prefs (breaking: 64-bit marker only)"
+  grep -q 'FindStartMenuPref32' <<<"${regs}" && \
+    die "MSI must not search Wow6432Node for shortcut prefs"
   grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing Upgrade table entry for the WDS UpgradeCode"
   grep -Eq $'0\\.0\\.0\t.*WIX_UPGRADE_DETECTED' <<<"${upgrades}" || \
@@ -1311,8 +1285,8 @@ PY
     die "WdsEditorPayload still has the old path-stable GUID; pass a per-build guid-salt"
   grep -Fq $'{E0F1A2B3-4C5D-6E7F-8091-A2B3C4D5E6F7}' <<<"${comps_tbl}" && \
     die "RegistryInstallDir still has the old stable GUID; pass per-build Guid* variables"
-  grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" || \
-    die "MSI missing ShortcutPrefs component"
+  grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" && \
+    die "ShortcutPrefs was replaced by the DesktopShortcut / StartMenuShortcut markers"
   grep -Eq $'InstallStamp\t' <<<"${comps_tbl}" || \
     die "MSI missing InstallStamp component (writes the build stamp to HKLM)"
   grep -Fq 'BuildTs' <<<"${registry}" || \
@@ -1324,41 +1298,47 @@ PY
   grep -Eq $'StartMenuShortcut\t' <<<"${comps_tbl}" || \
     die "MSI missing StartMenuShortcut component"
   grep -Fq 'CreateDesktopShortcut' <<<"${registry}" || \
-    die "MSI Registry table missing CreateDesktopShortcut (prefs must be MSI-owned)"
-  grep -Fq '[WDS_REG_DESKTOP]' <<<"${registry}" || \
-    die "CreateDesktopShortcut must write [WDS_REG_DESKTOP] (yes/no), not CREATE_* 0/1"
+    die "MSI Registry table missing CreateDesktopShortcut (presence marker)"
+  grep -Fq '[WDS_REG_DESKTOP]' <<<"${registry}" && \
+    die "CreateDesktopShortcut must write a constant marker, not [WDS_REG_DESKTOP]"
   grep -Fq '[CREATE_DESKTOP_SHORTCUT]' <<<"${registry}" && \
-    die "Registry must not store [CREATE_DESKTOP_SHORTCUT]: AppSearch cannot read a 0"
+    die "Registry must not store [CREATE_DESKTOP_SHORTCUT]"
+  grep -Fq $'CreateDesktopShortcut\t1\t' <<<"${registry}" || \
+    die "CreateDesktopShortcut must write the constant marker 1"
   grep -Fq 'CreateStartMenuShortcut' <<<"${registry}" || \
     die "MSI Registry table missing CreateStartMenuShortcut"
-  grep -Fq $'CREATE_DESKTOP_SHORTCUT\tFind' <<<"${appsearch}" && \
-    die "AppSearch must not write CREATE_DESKTOP_SHORTCUT (a stored 0 is dropped and then defaulted back to 1)"
-  grep -Fq $'CREATE_STARTMENU_SHORTCUT\tFind' <<<"${appsearch}" && \
-    die "AppSearch must not write CREATE_STARTMENU_SHORTCUT"
-  grep -Fq 'WDS_SAVED_DESKTOP' <<<"${appsearch}" || \
-    die "MSI AppSearch missing WDS_SAVED_DESKTOP"
-  grep -Fq 'WDS_SAVED_STARTMENU' <<<"${appsearch}" || \
-    die "MSI AppSearch missing WDS_SAVED_STARTMENU"
-  grep -Fq 'WDS_DESKTOP_PREF32' <<<"${appsearch}" || \
-    die "MSI AppSearch missing WDS_DESKTOP_PREF32"
-  grep -Fq 'WDS_STARTMENU_PREF32' <<<"${appsearch}" || \
-    die "MSI AppSearch missing WDS_STARTMENU_PREF32"
-  local desk_cond_val="" start_cond_val="" desk_attr="" start_attr="" prefs_attr=""
+  grep -Fq $'CreateStartMenuShortcut\t1\t' <<<"${registry}" || \
+    die "CreateStartMenuShortcut must write the constant marker 1"
+  grep -Fq 'DesktopShortcutInstalled' <<<"${registry}" && \
+    die "DesktopShortcutInstalled was replaced by the CreateDesktopShortcut marker"
+  local checkboxes=""
+  checkboxes="$(msiinfo_export "$msi_path" CheckBox | tr -d '\r')" || \
+    die "msiinfo failed: CheckBox"
+  grep -Fq $'CREATE_DESKTOP_SHORTCUT\t1' <<<"${checkboxes}" || \
+    die "CheckBox CREATE_DESKTOP_SHORTCUT must assign 1 when checked (got ${checkboxes:-empty})"
+  grep -Fq $'CREATE_STARTMENU_SHORTCUT\t1' <<<"${checkboxes}" || \
+    die "CheckBox CREATE_STARTMENU_SHORTCUT must assign 1 when checked"
+  grep -Eq $'CREATE_DESKTOP_SHORTCUT\tFindDesktopPref' <<<"${appsearch}" || \
+    die "AppSearch must write CREATE_DESKTOP_SHORTCUT from FindDesktopPref (presence = on)"
+  grep -Eq $'CREATE_STARTMENU_SHORTCUT\tFindStartMenuPref' <<<"${appsearch}" || \
+    die "AppSearch must write CREATE_STARTMENU_SHORTCUT from FindStartMenuPref"
+  grep -Fq 'WDS_SAVED_DESKTOP' <<<"${appsearch}" && \
+    die "AppSearch must not use WDS_SAVED_* (CREATE_* is the presence property)"
+  grep -Fq 'WDS_DESKTOP_PREF32' <<<"${appsearch}" && \
+    die "AppSearch must not use WDS_DESKTOP_PREF32"
+  local desk_cond_val="" start_cond_val="" desk_attr="" start_attr=""
   desk_cond_val="$(awk -F'\t' '$1=="DesktopShortcut"{print $5; exit}' <<<"${comps_tbl}")"
   start_cond_val="$(awk -F'\t' '$1=="StartMenuShortcut"{print $5; exit}' <<<"${comps_tbl}")"
-  [[ "${desk_cond_val}" == 'CREATE_DESKTOP_SHORTCUT="yes"' ]] || \
-    die "DesktopShortcut component must be conditioned on CREATE_DESKTOP_SHORTCUT=\"yes\" (got ${desk_cond_val:-unset})"
-  [[ "${start_cond_val}" == 'CREATE_STARTMENU_SHORTCUT="yes"' ]] || \
-    die "StartMenuShortcut component must be conditioned on CREATE_STARTMENU_SHORTCUT=\"yes\" (got ${start_cond_val:-unset})"
+  [[ "${desk_cond_val}" == 'CREATE_DESKTOP_SHORTCUT' ]] || \
+    die "DesktopShortcut component must be conditioned on CREATE_DESKTOP_SHORTCUT (got ${desk_cond_val:-unset})"
+  [[ "${start_cond_val}" == 'CREATE_STARTMENU_SHORTCUT' ]] || \
+    die "StartMenuShortcut component must be conditioned on CREATE_STARTMENU_SHORTCUT (got ${start_cond_val:-unset})"
   desk_attr="$(awk -F'\t' '$1=="DesktopShortcut"{print $4; exit}' <<<"${comps_tbl}")"
   start_attr="$(awk -F'\t' '$1=="StartMenuShortcut"{print $4; exit}' <<<"${comps_tbl}")"
-  prefs_attr="$(awk -F'\t' '$1=="ShortcutPrefs"{print $4; exit}' <<<"${comps_tbl}")"
   [[ "${desk_attr}" =~ ^[0-9]+$ && $((desk_attr & 64)) -ne 0 ]] || \
     die "DesktopShortcut must be Transitive so CREATE_* is re-evaluated on every dest rebuild (Attributes=${desk_attr:-unset})"
   [[ "${start_attr}" =~ ^[0-9]+$ && $((start_attr & 64)) -ne 0 ]] || \
     die "StartMenuShortcut must be Transitive so CREATE_* is re-evaluated on every dest rebuild (Attributes=${start_attr:-unset})"
-  [[ "${prefs_attr}" =~ ^[0-9]+$ && $((prefs_attr & 64)) -ne 0 ]] || \
-    die "ShortcutPrefs must be Transitive so HKLM shortcut policy is rewritten on every dest rebuild (Attributes=${prefs_attr:-unset})"
   local folder_type=""
   folder_type="$(awk -F'\t' '$1=="InstallDirDlg" && $2=="Folder"{print $3; exit}' <<<"${controls}")"
   [[ "${folder_type}" == "Edit" ]] || \
