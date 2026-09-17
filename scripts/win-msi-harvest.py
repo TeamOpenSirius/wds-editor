@@ -10,10 +10,12 @@ This script:
   2) Forces Win64="yes" on every Component.
   3) Pulls wds_editor.exe + private runtime DLLs into one component
      directly under INSTALLDIR (exe is KeyPath).
-  4) Replaces Guid="*" with a UUID5 from the install-relative path. wixl's
-     Guid="*" hashes heat Component Ids, which change every package; late
-     RemoveExistingProducts then deletes the files the new product just
-     copied. Path-stable GUIDs keep refcounts correct across overlays.
+  4) Replaces Guid="*" with a UUID5 from guid-salt + install-relative path.
+
+guid-salt must change for every package (package-target.sh uses WDS_BUILD_TS).
+Each dest MSI is a new ProductCode (Product Id='*'). Shared component GUIDs
+across those ProductCodes make costing skip files the old product later
+deletes on RemoveExistingProducts. Salted GUIDs keep the pair matched.
 """
 
 from __future__ import annotations
@@ -38,7 +40,16 @@ REQUIRED = (
 OPTIONAL = ("libssp-0.dll",)
 # Same value as the MSI UpgradeCode; only used as a UUID5 namespace.
 GUID_NS = uuid.UUID("a7e3c2b1-9f4d-4e8a-9c6b-1d2e3f4a5b6c")
-AUTHORED_GUIDS = {"RegistryInstallDir", "ShortcutPrefs"}
+# win-msi-product.wxs components. Heat must not overwrite these; package-target
+# injects the same uuid5(GUID_NS, f"{salt}:{ComponentId}") via wixl -D.
+AUTHORED_COMPONENT_IDS = (
+    "RegistryInstallDir",
+    "ShortcutPrefs",
+    "InstallStamp",
+    "DesktopShortcut",
+    "StartMenuShortcut",
+)
+AUTHORED_GUIDS = set(AUTHORED_COMPONENT_IDS)
 
 
 def q(tag: str) -> str:
@@ -86,8 +97,20 @@ def relative_source(source: str | None) -> str:
     return s.lower()
 
 
-def stable_guid(relpath: str) -> str:
-    return str(uuid.uuid5(GUID_NS, relpath)).upper()
+def validate_guid_salt(salt: str) -> str:
+    if not salt or not salt.strip():
+        raise SystemExit("guid-salt must be non-empty")
+    if any(c.isspace() for c in salt):
+        raise SystemExit("guid-salt must not contain whitespace")
+    return salt
+
+
+def component_guid(salt: str, key: str) -> str:
+    return str(uuid.uuid5(GUID_NS, f"{salt}:{key}")).upper()
+
+
+def authored_guid_assignments(salt: str) -> list[tuple[str, str]]:
+    return [(name, component_guid(salt, name)) for name in AUTHORED_COMPONENT_IDS]
 
 
 def source_of(comp: ET.Element) -> str | None:
@@ -97,7 +120,8 @@ def source_of(comp: ET.Element) -> str | None:
     return None
 
 
-def rewrite(path: Path) -> None:
+def rewrite(path: Path, guid_salt: str) -> None:
+    guid_salt = validate_guid_salt(guid_salt)
     tree = ET.parse(path)
     root = tree.getroot()
     hoist_dot_directories(root)
@@ -144,7 +168,7 @@ def rewrite(path: Path) -> None:
         q("Component"),
         {
             "Id": "WdsEditorPayload",
-            "Guid": stable_guid("payload/wds_editor.exe"),
+            "Guid": component_guid(guid_salt, "payload/wds_editor.exe"),
             "Win64": "yes",
         },
     )
@@ -194,10 +218,10 @@ def rewrite(path: Path) -> None:
                 break
         rel = relative_source(src)
         if not rel:
-            raise SystemExit(f"cannot assign stable GUID to component {cid!r}")
-        guid = stable_guid(rel)
+            raise SystemExit(f"cannot assign salted GUID to component {cid!r}")
+        guid = component_guid(guid_salt, rel)
         if guid.startswith("{") or "*" in guid:
-            raise SystemExit(f"invalid stable GUID for {cid}: {guid}")
+            raise SystemExit(f"invalid salted GUID for {cid}: {guid}")
         comp.set("Guid", guid)
 
     star_guids = [c.get("Id") for c in root.iter(q("Component")) if c.get("Guid") == "*"]
@@ -214,14 +238,22 @@ def rewrite(path: Path) -> None:
             raise SystemExit(f"{name} missing from heat WXS after rewrite")
     print(
         "MSI harvest: hoisted Name='.'; Win64=yes; "
-        "pinned payload + path-stable component GUIDs under INSTALLDIR"
+        "pinned payload + per-build component GUIDs under INSTALLDIR"
     )
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {sys.argv[0]} <heat.wxs>")
-    rewrite(Path(sys.argv[1]))
+    if len(sys.argv) == 3 and sys.argv[1] == "--authored-guids":
+        salt = validate_guid_salt(sys.argv[2])
+        for name, guid in authored_guid_assignments(salt):
+            print(f"GUID_{name}={guid}")
+        return
+    if len(sys.argv) != 3:
+        raise SystemExit(
+            f"usage: {sys.argv[0]} <heat.wxs> <guid-salt>\n"
+            f"       {sys.argv[0]} --authored-guids <guid-salt>"
+        )
+    rewrite(Path(sys.argv[1]), sys.argv[2])
 
 
 if __name__ == "__main__":

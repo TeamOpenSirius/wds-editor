@@ -8,18 +8,24 @@
 
   Language must stay 1033 to match wixl Template summary (x64;1033).
 
-  dest rebuilds are the SAME product (fixed ProductCode, ProductVersion 1.0.0),
-  so a second MSI is a maintenance install, not a major upgrade: costing keeps
-  the existing INSTALLDIR and CreateShortcuts runs against that folder, and
-  ARP's repair/in-place reinstall keeps working.
+  dest rebuilds are a major upgrade: Product Id='*' (new ProductCode each
+  package), ProductVersion stays 1.0.0, UpgradeCode is fixed. Double-clicking
+  a newer MSI finds the previous ProductCode via Upgrade and
+  RemoveExistingProducts replaces it. INSTALLDIR is adopted from the
+  remembered HKLM path; ARP still shows one entry.
 
-  Leftover Id='*' packages (different ProductCode, same UpgradeCode, still
-  1.0.0) are removed by a single Upgrade row from 0.0.0 with no VersionMax.
-  FindRelatedProducts skips the ProductCode being installed, so a dest-to-dest
-  rebuild stays a reinstall. Do not use MajorUpgrade here: its downgrade
-  LaunchCondition (NOT WIX_DOWNGRADE_DETECTED) is what msiexec surfaces as
-  error 1638 / "another version of this product is already installed" when
-  another 1.0.0 WDS Editor is present, because ProductVersion never moves.
+  A fixed ProductCode cannot do that. Same ProductCode + a new PackageCode
+  (wixl always rewrites Revision Number) is a small update. msiexec rejects
+  that with 1638 / "another version of this product is already installed"
+  BEFORE any sequence runs, so SetReinstallAll / UpdateDlg / REINSTALL inside
+  the package never get a chance. Command-line REINSTALL=ALL is the only
+  in-package-identity workaround, and dest users double-click the MSI.
+
+  Do not use MajorUpgrade: its downgrade LaunchCondition
+  (NOT WIX_DOWNGRADE_DETECTED) also surfaces as 1638 when ProductVersion is
+  pinned at 1.0.0. A single Upgrade row from 0.0.0 with no VersionMax is
+  enough. FindRelatedProducts skips the ProductCode being installed, so the
+  same .msi file still opens as maintenance / repair.
 
   Because ProductVersion is pinned, ordering has to come from somewhere else:
   the numeric build stamp. InstallStamp writes WDS_BUILD_TS (seconds since
@@ -30,40 +36,36 @@
   BuildId string holds <sha>-<UTC time> for diagnostics; no condition reads it.
 
   Three outcomes, all decided before costing:
-    - WDS_INSTALLED_TS =  WDS_BUILD_TS -> the SAME MSI again: REPAIR
-      (REINSTALL=ALL + REINSTALLMODE=ecmus, the stock repair mode: missing,
-      corrupt or equal-version files, registry and shortcuts).
-    - WDS_INSTALLED_TS <> WDS_BUILD_TS -> a DIFFERENT build: UPDATE in place
-      (REINSTALL=ALL + REINSTALLMODE=vamus, forcing every file because a
-      same-version rebuild is invisible to version and checksum rules, and
-      re-caching the package).
+    - WDS_INSTALLED_TS =  WDS_BUILD_TS and Installed -> the SAME MSI again:
+      REPAIR (REINSTALL=ALL + REINSTALLMODE=ecmus, the stock repair mode).
+    - another ProductCode with this UpgradeCode, or a different stamp ->
+      UPDATE: FindRelatedProducts lists the old product; RemoveExistingProducts
+      uninstalls it; this package installs into the remembered folder.
     - WDS_INSTALLED_TS >  WDS_BUILD_TS -> that build is NEWER: the
-      LaunchCondition refuses the install. That is same-version downgrade
-      protection; WDS_ALLOW_DOWNGRADE=1 overrides it.
+      LaunchCondition refuses the install. WDS_ALLOW_DOWNGRADE=1 overrides it.
   msiexec exposes no property for the installed package code, which is why a
   stamp of our own is needed at all.
 
   ProductCode and the component GUIDs are a MATCHED PAIR - never change one
   without the other:
-    - This fixed ProductCode requires PATH-STABLE component GUIDs, so a later
-      build's components are the same components and refcounts keep the files.
-      win-msi-harvest.py derives them with UUID5 from the install-relative
-      path, and package-target.sh rejects Guid='*' on the payload component.
-    - A per-build ProductCode (Product Id='*') would instead need per-build
-      unique component GUIDs. Mixing a fresh ProductCode with these shared
-      GUIDs makes two different products claim the same component: costing
-      treats it as already installed and skips InstallFiles, then the old
-      product's uninstall deletes the files it skipped. That combination is
-      what 224cdbd and 67c5dd8 were fighting; do not recreate it.
+    - This per-build ProductCode requires per-build component GUIDs.
+      win-msi-harvest.py derives them with UUID5 from WDS_BUILD_TS plus the
+      install-relative path (authored components use the same salt + Id),
+      and package-target.sh rejects Guid='*' on the payload component.
+    - Mixing a fresh ProductCode with path-stable / shared GUIDs makes two
+      different products claim the same component: costing treats it as
+      already installed and skips InstallFiles, then the old product's
+      uninstall deletes the files it skipped. That combination is what
+      224cdbd and 67c5dd8 were fighting; do not recreate it.
 
   RemoveExistingProducts sits immediately after InstallInitialize ("after
   InstallInitialize and before any actions that generate execution script",
-  one of the four placements the action documents). It now only ever removes a
-  leftover Id='*' product, whose component GUIDs are NOT ours, so that
-  uninstall cannot delete files this build writes; the removal is also inside
-  the transaction, so a later failure can roll it back. Never sequence it next
-  to InstallFiles or InstallFinalize-after-file-actions: msiexec rejects the
-  mid-script placement with error 2613.
+  one of the four placements the action documents). It removes the previous
+  dest / leftover Id='*' / main product, whose component GUIDs are NOT this
+  package's, so that uninstall cannot delete files this build writes; the
+  removal is also inside the transaction, so a later failure can roll it
+  back. Never sequence it next to InstallFiles or InstallFinalize-after-
+  file-actions: msiexec rejects the mid-script placement with error 2613.
 
   Shortcuts are MSI Shortcut table entries (Advertise=no + Target=exe).
   wixl defaults Advertise=yes; the Target path keeps them non-advertised.
@@ -85,7 +87,7 @@
   WindowsVolume before CostInitialize so rollback stays on the OS volume.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907"
+  <Product Id="*"
            Name="WDS Editor"
            Language="1033"
            Version="$(var.ProductVersion)"
@@ -97,11 +99,11 @@
              Description="WDS Chart Editor (Windows x64)"
              Comments="Self-contained editor; preferences live under LocalAppData"/>
 
-    <!-- Any other ProductCode with this UpgradeCode (old Id='*' dest / main
-         builds at 1.0.0, or a stray newer version) is uninstalled. The current
-         ProductCode is skipped by FindRelatedProducts. wixl 0.103 cannot
-         author VersionMin and VersionMax both empty, so Minimum starts at
-         0.0.0. -->
+    <!-- Any other ProductCode with this UpgradeCode (previous dest rebuilds,
+         the old fixed 8BEDBB5B-... identity, leftover Id='*' / main builds)
+         is uninstalled. The current ProductCode is skipped by
+         FindRelatedProducts. wixl 0.103 cannot author VersionMin and
+         VersionMax both empty, so Minimum starts at 0.0.0. -->
     <Upgrade Id="A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C">
       <UpgradeVersion Property="WIX_UPGRADE_DETECTED"
                       Minimum="0.0.0"
@@ -251,9 +253,9 @@
     </InstallUISequence>
     <InstallExecuteSequence>
       <!-- Removes any other ProductCode that FindRelatedProducts listed
-           (leftover Id='*' dest / main). Skips this exact ProductCode, so a
-           dest rebuild is a reinstall. Placement is window 2; InstallFiles
-           is error 2613. -->
+           (previous dest, leftover Id='*' dest / main). Skips this exact
+           ProductCode, so the same .msi file is still a reinstall.
+           Placement is window 2; InstallFiles is error 2613. -->
       <RemoveExistingProducts After="InstallInitialize"/>
       <Custom Action="AdoptPreviousInstall32" After="AppSearch">
         WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
@@ -304,7 +306,7 @@
     </Directory>
 
     <DirectoryRef Id="INSTALLDIR">
-      <Component Id="RegistryInstallDir" Guid="E0F1A2B3-4C5D-6E7F-8091-A2B3C4D5E6F7" Win64="yes">
+      <Component Id="RegistryInstallDir" Guid="$(var.GuidRegistryInstallDir)" Win64="yes">
         <RegistryValue Root="HKLM"
                        Key="Software\WDS\Editor"
                        Name="InstallDir"
@@ -314,7 +316,7 @@
       </Component>
       <!-- MSI-owned prefs (WriteRegistryValues). AppSearch reads these back
            so ShortcutsDlg defaults match the last choice. -->
-      <Component Id="ShortcutPrefs" Guid="A91B2C3D-4E5F-6780-91A2-B3C4D5E6F708" Win64="yes">
+      <Component Id="ShortcutPrefs" Guid="$(var.GuidShortcutPrefs)" Win64="yes">
         <RegistryValue Root="HKLM"
                        Key="Software\WDS\Editor"
                        Name="CreateDesktopShortcut"
@@ -329,8 +331,8 @@
       </Component>
       <!-- Build identity of the installation: BuildTs decides repair / update /
            refuse, BuildId is there so a human can see which commit is
-           installed. Stable GUID on purpose, see the header. -->
-      <Component Id="InstallStamp" Guid="B1C2D3E4-5F60-4712-8394-A5B6C7D8E9F0" Win64="yes">
+           installed. Per-build GUID, see the header. -->
+      <Component Id="InstallStamp" Guid="$(var.GuidInstallStamp)" Win64="yes">
         <RegistryValue Root="HKLM"
                        Key="Software\WDS\Editor"
                        Name="BuildTs"
@@ -349,7 +351,7 @@
          ("unhandled child Component node Condition"). The Condition
          column is set after compile: CREATE_DESKTOP_SHORTCUT="1". -->
     <DirectoryRef Id="DesktopFolder">
-      <Component Id="DesktopShortcut" Guid="B20DDB70-DD5E-50A4-ABF8-F068021441F6" Win64="yes">
+      <Component Id="DesktopShortcut" Guid="$(var.GuidDesktopShortcut)" Win64="yes">
         <Shortcut Id="WdsEditorDesktop"
                   Directory="DesktopFolder"
                   Name="WDS Editor"
@@ -369,7 +371,7 @@
 
     <!-- Condition column patched after wixl: CREATE_STARTMENU_SHORTCUT="1". -->
     <DirectoryRef Id="WdsStartMenuFolder">
-      <Component Id="StartMenuShortcut" Guid="0E08832A-9A77-5EE6-9097-E9871258C748" Win64="yes">
+      <Component Id="StartMenuShortcut" Guid="$(var.GuidStartMenuShortcut)" Win64="yes">
         <Shortcut Id="WdsEditorStartMenu"
                   Directory="WdsStartMenuFolder"
                   Name="WDS Editor"

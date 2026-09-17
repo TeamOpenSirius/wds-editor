@@ -876,8 +876,24 @@ make_win_msi() {
           --win64
   ) >"$heat_wxs"
 
-  python3 "${ROOT}/scripts/win-msi-harvest.py" "$heat_wxs" \
+  python3 "${ROOT}/scripts/win-msi-harvest.py" "$heat_wxs" "$build_ts" \
     || die "win-msi-harvest.py failed"
+  local guid_registry="" guid_prefs="" guid_stamp="" guid_desk="" guid_start=""
+  local authored_guids="" authored_key="" authored_val=""
+  authored_guids="$(python3 "${ROOT}/scripts/win-msi-harvest.py" --authored-guids "$build_ts")" \
+    || die "win-msi-harvest.py --authored-guids failed"
+  while IFS='=' read -r authored_key authored_val; do
+    case "${authored_key}" in
+      GUID_RegistryInstallDir) guid_registry="${authored_val}" ;;
+      GUID_ShortcutPrefs) guid_prefs="${authored_val}" ;;
+      GUID_InstallStamp) guid_stamp="${authored_val}" ;;
+      GUID_DesktopShortcut) guid_desk="${authored_val}" ;;
+      GUID_StartMenuShortcut) guid_start="${authored_val}" ;;
+    esac
+  done <<<"${authored_guids}"
+  [[ -n "${guid_registry}" && -n "${guid_prefs}" && -n "${guid_stamp}" \
+     && -n "${guid_desk}" && -n "${guid_start}" ]] || \
+    die "per-build authored component GUIDs were not generated"
 
   mkdir -p "$(dirname "$msi_path")"
   rm -f "$msi_path"
@@ -906,6 +922,11 @@ PY
       -D "ProductVersion=${msi_version}" \
       -D "BuildId=${build_id}" \
       -D "BuildTs=${build_ts}" \
+      -D "GuidRegistryInstallDir=${guid_registry}" \
+      -D "GuidShortcutPrefs=${guid_prefs}" \
+      -D "GuidInstallStamp=${guid_stamp}" \
+      -D "GuidDesktopShortcut=${guid_desk}" \
+      -D "GuidStartMenuShortcut=${guid_start}" \
       --wxidir "${wixl_share}/include" \
       --extdir "${wixl_share}/ext" \
       --ext ui \
@@ -1011,12 +1032,13 @@ PY
     die "MSI missing CREATE_DESKTOP_SHORTCUT property"
   grep -Fq $'WDS_INSTALLDIR' <<<"${props}" || \
     die "MSI missing WDS_INSTALLDIR property"
-  # ProductCode must stay pinned: it is what makes a dest rebuild an in-place
-  # reinstall (and keeps ARP repair working). It is a matched pair with the
-  # path-stable component GUIDs asserted below - read the header of
-  # win-msi-product.wxs before changing either half.
-  grep -Fq $'8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907' <<<"${props}" || \
-    die "MSI ProductCode must stay 8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907 (same-product reinstall)"
+  # Same ProductCode + a new PackageCode is msiexec 1638 before any sequence
+  # runs (REINSTALL inside the package is too late). dest rebuilds are a
+  # major upgrade: wixl Product Id='*' plus per-build component GUIDs.
+  grep -Fq $'8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907' <<<"${props}" && \
+    die "MSI ProductCode must not stay 8BEDBB5B-... (same ProductCode + new PackageCode is 1638 on double-click)"
+  grep -Eq $'ProductCode\t\{[0-9A-Fa-f-]{36}\}' <<<"${props}" || \
+    die "MSI missing generated ProductCode from Product Id='*'"
   # Build stamp: the numeric build time that makes "the same MSI again" (repair),
   # "an older build" (update) and "a newer build" (refuse) distinguishable. The
   # property is injected at package time, InstallStamp writes it to HKLM, and
@@ -1186,7 +1208,11 @@ PY
   grep -Eq $'WdsEditorPayload\t.*INSTALLDIR' <<<"${comps_tbl}" || \
     die "WdsEditorPayload must live under INSTALLDIR"
   grep -Eq $'WdsEditorPayload\t\\*' <<<"${comps_tbl}" && \
-    die "WdsEditorPayload must have a path-stable GUID, not Guid=*"
+    die "WdsEditorPayload must have a per-build GUID, not Guid=*"
+  grep -Fq $'{26197EC3-E3DB-5B96-BFAE-B936933D5BC2}' <<<"${comps_tbl}" && \
+    die "WdsEditorPayload still has the old path-stable GUID; pass a per-build guid-salt"
+  grep -Fq $'{E0F1A2B3-4C5D-6E7F-8091-A2B3C4D5E6F7}' <<<"${comps_tbl}" && \
+    die "RegistryInstallDir still has the old stable GUID; pass per-build Guid* variables"
   grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" || \
     die "MSI missing ShortcutPrefs component"
   grep -Eq $'InstallStamp\t' <<<"${comps_tbl}" || \
