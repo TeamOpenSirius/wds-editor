@@ -126,22 +126,23 @@
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
-                 Text="{\WixUI_Font_Title}Update [ProductName]"/>
+                 Text="{\WixUI_Font_Title}Repair or update [ProductName]"/>
         <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes"
-                 Text="This setup will update your existing installation."/>
+                 Text="Setup will repair or update your existing installation."/>
         <Control Id="UpdateInfo" Type="Text" X="20" Y="70" Width="330" Height="100" NoPrefix="yes"
-                 Text="[ProductName] is already installed. Files will be updated in place; the install folder cannot be changed.&#xA;&#xA;Update folder:&#xA;[WDS_INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
+                 Text="[ProductName] is already installed. Running this installer again repairs the installation; a newer build updates it in place. The install folder cannot be changed.&#xA;&#xA;Install folder:&#xA;[WDS_INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
-          <!-- Same ProductCode: reinstall in place. Do not retarget INSTALLDIR.
-               'v' recaches the local package, so it may only appear here (the
-               Installed branch): msiexec forbids it on a first installation. -->
+          <!-- Already installed: reinstall in place, never retarget INSTALLDIR.
+               REINSTALLMODE is deliberately NOT published here: the execute
+               sequence picks it from the build stamp, omus (same MSI -> repair)
+               or vamus (different build -> update), and those actions become
+               the authority for silent installs too. -->
           <Publish Property="REINSTALL" Value="ALL" Order="1" Condition="Installed"/>
-          <Publish Property="REINSTALLMODE" Value="vamus" Order="2" Condition="Installed"/>
           <!-- Leftover Id='*' product: new ProductCode install over remembered path. -->
-          <Publish Event="DoAction" Value="ApplyWdsInstallDir" Order="3" Condition="NOT Installed"/>
-          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="4" Condition="NOT Installed"/>
-          <Publish Event="NewDialog" Value="ShortcutsDlg" Order="5">1</Publish>
+          <Publish Event="DoAction" Value="ApplyWdsInstallDir" Order="2" Condition="NOT Installed"/>
+          <Publish Event="SetTargetPath" Value="INSTALLDIR" Order="3" Condition="NOT Installed"/>
+          <Publish Event="NewDialog" Value="ShortcutsDlg" Order="4">1</Publish>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
