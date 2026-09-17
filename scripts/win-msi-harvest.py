@@ -44,7 +44,6 @@ GUID_NS = uuid.UUID("a7e3c2b1-9f4d-4e8a-9c6b-1d2e3f4a5b6c")
 # injects the same uuid5(GUID_NS, f"{salt}:{ComponentId}") via wixl -D.
 AUTHORED_COMPONENT_IDS = (
     "RegistryInstallDir",
-    "ShortcutPrefs",
     "InstallStamp",
     "DesktopShortcut",
     "StartMenuShortcut",

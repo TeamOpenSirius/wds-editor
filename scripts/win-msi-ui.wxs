@@ -35,19 +35,16 @@
     install then writes files nowhere useful; Repair skips this dialog.
   - wixl ignores Indirect, so we cannot bind PathEdit to the Directory property
   - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
-  - Unchecked boxes clear the property; Next writes explicit "no" so
-    SecureCustomProperties passes the off state into elevated Execute.
-    Never write "0": msiexec treats a property value of 0 as unset, and
-    a later Default=1 CA would check the box again.
-  - Shortcuts are Shortcut-table components gated by CREATE_*
-    (Component.Condition is patched after wixl; 0.103 cannot parse it)
-  - Defaults on update come from HKLM via AppSearch into WDS_SAVED_* (never
-    CREATE_*). msiexec drops a stored 0, so a leftover "0" plus a prior
-    install is treated as off; new writes are yes/no. CREATE_* must NOT have
-    a Property-table value. The default 1 is a Type 51 CA only when neither
-    0 nor 1 has been applied yet.
-  - CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL are appended to
-    SecureCustomProperties after wixl
+  - A CheckBox is on iff its property is set. AppSearch sets CREATE_*
+    when the HKLM marker exists; first install leaves both empty (off).
+    Unchecked boxes clear the property. Do not Publish no/0: any set
+    value would re-check the box and look like "on" to Execute.
+  - Shortcuts are Shortcut-table components gated by CREATE_* being
+    defined (Component.Condition is patched after wixl; 0.103 cannot
+    parse it). The same component writes/deletes the HKLM marker.
+  - CREATE_* must NOT have a Property-table value (AppSearch cannot
+    overlay one). CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL
+    are appended to SecureCustomProperties after wixl
   - ASCII UI strings only (MSI codepage 1252)
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -183,10 +180,10 @@
         <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes"
                  Text="Choose which shortcuts to create."/>
         <Control Id="DesktopCheck" Type="CheckBox" X="20" Y="80" Width="330" Height="20"
-                 Property="CREATE_DESKTOP_SHORTCUT" CheckBoxValue="yes"
+                 Property="CREATE_DESKTOP_SHORTCUT" CheckBoxValue="1"
                  Text="Create a desktop shortcut"/>
         <Control Id="StartMenuCheck" Type="CheckBox" X="20" Y="110" Width="330" Height="20"
-                 Property="CREATE_STARTMENU_SHORTCUT" CheckBoxValue="yes"
+                 Property="CREATE_STARTMENU_SHORTCUT" CheckBoxValue="1"
                  Text="Create a Start Menu shortcut"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
           <Publish Event="NewDialog" Value="InstallDirDlg" Order="1"
@@ -195,15 +192,7 @@
                    Condition="Installed OR WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED"/>
         </Control>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
-          <!-- CheckBox clears the property when unchecked; SecureCustomProperties only
-               forwards *set* values, so an empty CREATE_* would leave Execute at
-               default yes. Publish no here. Off is never 0 (msiexec treats 0 as unset).
-               wixl only honors Condition= attribute (not Publish element body). -->
-          <Publish Property="CREATE_DESKTOP_SHORTCUT" Value="no" Order="1"
-                   Condition="NOT CREATE_DESKTOP_SHORTCUT=&quot;yes&quot;"/>
-          <Publish Property="CREATE_STARTMENU_SHORTCUT" Value="no" Order="2"
-                   Condition="NOT CREATE_STARTMENU_SHORTCUT=&quot;yes&quot;"/>
-          <Publish Event="EndDialog" Value="Return" Order="3">1</Publish>
+          <Publish Event="EndDialog" Value="Return" Order="1">1</Publish>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
