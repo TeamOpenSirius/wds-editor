@@ -8,12 +8,33 @@
 
   Language must stay 1033 to match wixl Template summary (x64;1033).
 
-  dest rebuilds are the SAME product (fixed ProductCode, ProductVersion 1.0.0).
-  A second MSI is a reinstall: REINSTALL=ALL REINSTALLMODE=amus. No new
-  ProductCode, so costing keeps the existing INSTALLDIR and CreateShortcuts
-  runs against that folder, and ARP's repair/in-place reinstall keeps working.
-  MajorUpgrade exists only to remove leftover Id='*' packages from older dest
-  builds.
+  dest rebuilds are the SAME product (fixed ProductCode, ProductVersion 1.0.0),
+  so a second MSI is a maintenance install, not a major upgrade: costing keeps
+  the existing INSTALLDIR and CreateShortcuts runs against that folder, and
+  ARP's repair/in-place reinstall keeps working. MajorUpgrade exists only to
+  remove leftover Id='*' packages from older dest builds.
+
+  Because ProductVersion is pinned, ordering has to come from somewhere else:
+  the numeric build stamp. InstallStamp writes WDS_BUILD_TS (seconds since
+  2020-01-01Z, i.e. `date -u +%s - 1577836800`) to
+  HKLM\Software\WDS\Editor\BuildTs, and AppSearch reads it back into
+  WDS_INSTALLED_TS. It must stay inside the signed 32-bit range msiexec compares
+  in, which is the only reason it is not a raw Unix timestamp. A companion
+  BuildId string holds <sha>-<UTC time> for diagnostics; no condition reads it.
+
+  Three outcomes, all decided before costing:
+    - WDS_INSTALLED_TS =  WDS_BUILD_TS -> the SAME MSI again: REPAIR
+      (REINSTALL=ALL + REINSTALLMODE=omus, so only missing/corrupt/older files,
+      registry and shortcuts are rewritten).
+    - WDS_INSTALLED_TS <> WDS_BUILD_TS -> a DIFFERENT build: UPDATE in place
+      (REINSTALL=ALL + REINSTALLMODE=vamus, forcing every file because a
+      same-version rebuild is invisible to version and checksum rules, and
+      re-caching the package).
+    - WDS_INSTALLED_TS >  WDS_BUILD_TS -> that build is NEWER: the
+      LaunchCondition refuses the install. That is same-version downgrade
+      protection; WDS_ALLOW_DOWNGRADE=1 overrides it.
+  msiexec exposes no property for the installed package code, which is why a
+  stamp of our own is needed at all.
 
   ProductCode and the component GUIDs are a MATCHED PAIR - never change one
   without the other:
@@ -67,14 +88,20 @@
          Same-product dest rebuilds are Installed=1 and never reach this. -->
     <MajorUpgrade DowngradeErrorMessage="A newer version of WDS Editor is already installed."
                   AllowSameVersionUpgrades="yes"/>
+    <!-- ProductVersion is pinned, so the MajorUpgrade guard above (which
+         compares versions) can never fire between dest builds. Compare the
+         build time instead: refuse when the installed build is newer. "&lt;="
+         is escaped because this is XML text. -->
+    <Condition Message="A newer build of WDS Editor is already installed (build [WDS_INSTALLED_ID]). Uninstall it first, or pass WDS_ALLOW_DOWNGRADE=1 to install this older build anyway.">NOT Installed OR NOT WDS_INSTALLED_TS OR WDS_INSTALLED_TS &lt;= WDS_BUILD_TS OR WDS_ALLOW_DOWNGRADE</Condition>
     <MediaTemplate EmbedCab="yes"/>
 
     <Property Id="ARPPRODUCTICON" Value="WdsEditorIcon"/>
-    <!-- Overwrite mode for a normal install: force every file, rewrite machine
-         and user registry, reinstall shortcuts. The recache flag 'v' is
-         deliberately NOT here - msiexec forbids it on a first installation -
-         and is added only by the Installed-only reinstall paths (SetReinstallMode
-         and the UpdateDlg Next publish). -->
+    <!-- Overwrite mode for a normal install (no prior product, or a legacy
+         Id='*' product that RemoveExistingProducts already removed): force every
+         file, rewrite machine and user registry, reinstall shortcuts. The
+         recache flag 'v' is deliberately NOT here - msiexec forbids it on a
+         first installation - and the Installed-only actions below override this
+         value: repair for the same build, vamus for a different build. -->
     <Property Id="REINSTALLMODE" Value="amus"/>
     <!-- Fresh install defaults to both shortcuts on; AppSearch overlays HKLM prefs. -->
     <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes">
@@ -115,6 +142,34 @@
                       Type="raw"
                       Win64="no"/>
     </Property>
+    <!-- Build stamp, injected at package time (wixl -D BuildTs=... -D BuildId=...).
+         WDS_BUILD_TS is the one that decides: equal means the same MSI is being
+         run again, smaller means the installed build is older, larger means it
+         is newer. It counts seconds from 2020-01-01Z to stay inside the signed
+         32-bit range msiexec compares in. Every package produced gets a new
+         value, even from an unchanged commit, so only the very same .msi file
+         can reuse one. WDS_BUILD_ID is diagnostics only. -->
+    <Property Id="WDS_BUILD_TS" Value="$(var.BuildTs)" Secure="yes"/>
+    <Property Id="WDS_BUILD_ID" Value="$(var.BuildId)" Secure="yes"/>
+    <Property Id="WDS_INSTALLED_TS" Secure="yes">
+      <RegistrySearch Id="FindWdsBuildTs"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="BuildTs"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <Property Id="WDS_INSTALLED_ID" Secure="yes">
+      <RegistrySearch Id="FindWdsBuildId"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="BuildId"
+                      Type="raw"
+                      Win64="yes"/>
+    </Property>
+    <!-- Escape hatch for the downgrade guard, e.g. to go back to an older build
+         while bisecting: msiexec /i pkg.msi WDS_ALLOW_DOWNGRADE=1 -->
+    <Property Id="WDS_ALLOW_DOWNGRADE" Secure="yes"/>
     <CustomAction Id="SetInstallDirFromBrowse"
                   Property="INSTALLDIR"
                   Value="[WDSINSTALLPARENT]\WDS Editor"/>
@@ -136,10 +191,17 @@
     <CustomAction Id="SetReinstallAll"
                   Property="REINSTALL"
                   Value="ALL"/>
-    <!-- Silent reinstall path (no UI): add the recache flag so the package
-         cached in %WINDIR%\Installer is refreshed from the MSI being run.
-         Without it a later Repair can restore stale files from the old cache. -->
-    <CustomAction Id="SetReinstallMode"
+    <!-- Reinstalling over the SAME build: repair. Only missing, corrupt or
+         older files are rewritten and the package is not re-cached; this is the
+         standard Repair behaviour (msiexec's default REINSTALLMODE is omus). -->
+    <CustomAction Id="SetReinstallModeRepair"
+                  Property="REINSTALLMODE"
+                  Value="omus"/>
+    <!-- Reinstalling over a DIFFERENT build: update in place. Force every file
+         ('a') because a same-version rebuild is invisible to version/checksum
+         rules, and re-cache the package ('v') so a later Repair cannot restore
+         the previous build out of %WINDIR%\Installer. -->
+    <CustomAction Id="SetReinstallModeUpdate"
                   Property="REINSTALLMODE"
                   Value="vamus"/>
 
@@ -177,9 +239,19 @@
       <Custom Action="SetReinstallAll" After="AppSearch" Before="CostInitialize">
         Installed AND NOT REMOVE AND NOT REINSTALL AND NOT RESUME AND NOT PATCH
       </Custom>
-      <!-- Same condition as SetReinstallAll: only ever a maintenance install. -->
-      <Custom Action="SetReinstallMode" After="AppSearch" Before="CostInitialize">
-        Installed AND NOT REMOVE AND NOT REINSTALL AND NOT RESUME AND NOT PATCH
+      <!-- Same MSI already installed: WDS_INSTALLED_TS (read by AppSearch)
+           equals this package's stamp, so repair instead of overwriting. -->
+      <Custom Action="SetReinstallModeRepair" After="AppSearch" Before="CostInitialize">
+        Installed AND NOT REMOVE AND NOT RESUME AND NOT PATCH AND WDS_INSTALLED_TS = WDS_BUILD_TS
+      </Custom>
+      <!-- An older build, or one that predates the stamp (the property is empty
+           then): update in place. No NOT REINSTALL here on purpose - the UI may
+           have set REINSTALL already and the mode still has to be normalised
+           for this case. A NEWER installed build never reaches this: the
+           LaunchCondition above refuses the install first. "&lt;>" is
+           msiexec's not-equal operator, escaped because this is XML text. -->
+      <Custom Action="SetReinstallModeUpdate" After="AppSearch" Before="CostInitialize">
+        Installed AND NOT REMOVE AND NOT RESUME AND NOT PATCH AND (NOT WDS_INSTALLED_TS OR WDS_INSTALLED_TS &lt;> WDS_BUILD_TS)
       </Custom>
       <Custom Action="SetArpInstallLocation" After="InstallValidate">
         NOT REMOVE="ALL"
@@ -219,6 +291,22 @@
                        Name="CreateStartMenuShortcut"
                        Type="string"
                        Value="[CREATE_STARTMENU_SHORTCUT]"/>
+      </Component>
+      <!-- Build identity of the installation: BuildTs decides repair / update /
+           refuse, BuildId is there so a human can see which commit is
+           installed. Stable GUID on purpose, see the header. -->
+      <Component Id="InstallStamp" Guid="B1C2D3E4-5F60-4712-8394-A5B6C7D8E9F0" Win64="yes">
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="BuildTs"
+                       Type="string"
+                       Value="[WDS_BUILD_TS]"
+                       KeyPath="yes"/>
+        <RegistryValue Root="HKLM"
+                       Key="Software\WDS\Editor"
+                       Name="BuildId"
+                       Type="string"
+                       Value="[WDS_BUILD_ID]"/>
       </Component>
     </DirectoryRef>
 
@@ -272,6 +360,7 @@
       <ComponentGroupRef Id="ProductFiles"/>
       <ComponentRef Id="RegistryInstallDir"/>
       <ComponentRef Id="ShortcutPrefs"/>
+      <ComponentRef Id="InstallStamp"/>
       <ComponentRef Id="DesktopShortcut"/>
       <ComponentRef Id="StartMenuShortcut"/>
     </Feature>

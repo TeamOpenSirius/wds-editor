@@ -46,6 +46,8 @@ Environment (see scripts/env.example):
   WDS_MSITOOLS_PREFIX / WDS_MSITOOLS_LIB_DIR / WDS_WIXL_SHARE_DIRS / WDS_WIXL_VERSION
   WDS_MINGW_CXX / WDS_MINGW_OBJDUMP / WDS_MINGW_DLL_DIRS
   WDS_PRODUCT_VERSION
+  WDS_BUILD_TS           optional build stamp, seconds since 2020-01-01Z (drives repair/update/downgrade)
+  WDS_BUILD_ID           optional diagnostic build id; defaults to <git-sha>-<UTC time>
   WDS_PACKAGE_SYMBOLS   0 = skip dSYM/objcopy split (default 1)
 EOF
 }
@@ -826,6 +828,33 @@ make_win_msi() {
   local version="${WDS_PRODUCT_VERSION}"
   # WiX ProductVersion is numeric only (major.minor.patch).
   local msi_version="${version%%-*}"
+  # Identity of THIS package, written to HKLM by InstallStamp and read back at
+  # install time. One numeric value answers three questions:
+  #   = with the installed stamp -> the same MSI is being run again: REPAIR
+  #   < installed stamp          -> a different, newer build is installed: refuse
+  #   > installed stamp          -> a different, older build: UPDATE in place
+  # msiexec exposes no property for the installed package code, so a stamp of
+  # our own is the only way to tell those apart. It has to stay inside the
+  # signed 32-bit range msiexec compares in (Wine's cond.y uses INT), which is
+  # why it counts seconds from 2020-01-01Z instead of raw Unix time - the latter
+  # would overflow in 2038 and silently stop rejecting downgrades. It must also
+  # change for every package produced, including re-packaging the same commit,
+  # so it is the packaging time unless the environment pins one.
+  local build_ts="${WDS_BUILD_TS:-}"
+  if [[ -z "${build_ts}" ]]; then
+    build_ts="$(( $(date -u +%s) - 1577836800 ))"
+  fi
+  [[ "${build_ts}" =~ ^[0-9]+$ ]] || \
+    die "WDS_BUILD_TS=${build_ts} must be a non-negative integer (seconds since 2020-01-01Z)"
+  (( build_ts > 0 && build_ts < 2147483647 )) || \
+    die "WDS_BUILD_TS=${build_ts} is outside the signed 32-bit range msiexec compares in"
+  # Human-readable companion, stored for diagnostics only - no condition reads it.
+  local build_id="${WDS_BUILD_ID:-}"
+  if [[ -z "${build_id}" ]]; then
+    build_id="$(git -C "${ROOT}" rev-parse --short=12 HEAD 2>/dev/null || printf 'nogit')-$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
+  [[ "${build_id}" =~ ^[0-9A-Za-z._-]+$ ]] || \
+    die "WDS_BUILD_ID=${build_id} must be [0-9A-Za-z._-]+ (it is injected as an MSI property value)"
   rm -rf "$work"
   mkdir -p "$work"
 
@@ -852,19 +881,31 @@ make_win_msi() {
 
   mkdir -p "$(dirname "$msi_path")"
   rm -f "$msi_path"
-  # wixl 0.103 (Ubuntu 24.04) cannot parse <Component><Condition> and
-  # aborts with "unhandled child Component node Condition". Keep those
-  # elements out of the .wxs; the Condition column is patched below.
-  if grep -Eq '^[ \t]*<Condition>' "$product_wxs"; then
-    die "win-msi-product.wxs must not contain <Condition> (wixl 0.103 core dump); patch Component.Condition after wixl"
-  fi
-  echo "Building MSI with wixl (UI: InstallDir / Update + Shortcuts)…"
+  # wixl 0.103 (Ubuntu 24.04) cannot parse <Component><Condition> and aborts
+  # with "unhandled child Component node Condition". Keep those out of the .wxs
+  # and patch the Condition column below. A <Condition Message="..."> directly
+  # under <Product> is a launch condition and IS supported (used for the
+  # same-version downgrade guard), so only the Component case is rejected here.
+  # Comments are stripped first: the file explains this very pitfall in prose.
+  local component_condition=""
+  component_condition="$(python3 - "$product_wxs" <<'PY'
+import re, sys
+src = re.sub(r"<!--.*?-->", "", open(sys.argv[1], encoding="utf-8").read(), flags=re.S)
+print("yes" if any("<Condition" in m.group(0)
+                  for m in re.finditer(r"<Component\b.*?</Component>", src, flags=re.S)) else "no")
+PY
+)"
+  [[ "${component_condition}" == "no" ]] || \
+    die "win-msi-product.wxs must not nest <Condition> inside <Component> (wixl 0.103 core dump); patch Component.Condition after wixl"
+  echo "Building MSI with wixl (UI: InstallDir / Update + Shortcuts; build id ${build_id})…"
   (
     cd "$work"
     wixl -a x64 -o "$msi_path" \
       -D "SourceDir=${stage}" \
       -D "Win64=yes" \
       -D "ProductVersion=${msi_version}" \
+      -D "BuildId=${build_id}" \
+      -D "BuildTs=${build_ts}" \
       --wxidir "${wixl_share}/include" \
       --extdir "${wixl_share}/ext" \
       --ext ui \
@@ -883,7 +924,7 @@ make_win_msi() {
   props="$(msiinfo_export "$msi_path" Property | tr -d '\r')" || die "msiinfo failed: Property"
   local scp="" extra p
   scp="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
-  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE"
+  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE;WDS_ALLOW_DOWNGRADE"
   IFS=';'
   for p in $extra; do
     [[ -z "$p" ]] && continue
@@ -956,8 +997,10 @@ make_win_msi() {
     die "MSI missing ApplyWdsInstallDir custom action"
   grep -Fq 'SetReinstallAll' <<<"${customs}" || \
     die "MSI missing SetReinstallAll custom action"
-  grep -Fq $'SetReinstallMode\t51\tREINSTALLMODE\tvamus' <<<"${customs}" || \
-    die "MSI missing SetReinstallMode custom action (silent reinstall must set REINSTALLMODE=vamus)"
+  grep -Fq $'SetReinstallModeRepair\t51\tREINSTALLMODE\tomus' <<<"${customs}" || \
+    die "MSI missing SetReinstallModeRepair custom action (same build must repair with REINSTALLMODE=omus)"
+  grep -Fq $'SetReinstallModeUpdate\t51\tREINSTALLMODE\tvamus' <<<"${customs}" || \
+    die "MSI missing SetReinstallModeUpdate custom action (different build must update with REINSTALLMODE=vamus)"
   grep -Fq 'ApplyUserShortcuts' <<<"${customs}" && \
     die "MSI must not schedule ApplyUserShortcuts (Shortcut table owns .lnk files)"
   grep -Fq 'LoadShortcutPrefs' <<<"${customs}" && \
@@ -972,6 +1015,32 @@ make_win_msi() {
   # win-msi-product.wxs before changing either half.
   grep -Fq $'8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907' <<<"${props}" || \
     die "MSI ProductCode must stay 8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907 (same-product reinstall)"
+  # Build stamp: the numeric build time that makes "the same MSI again" (repair),
+  # "an older build" (update) and "a newer build" (refuse) distinguishable. The
+  # property is injected at package time, InstallStamp writes it to HKLM, and
+  # FindWdsBuildTs reads it back.
+  grep -Fq 'WDS_BUILD_TS' <<<"${props}" || \
+    die "MSI missing WDS_BUILD_TS property (build stamp; wixl needs -D BuildTs=...)"
+  local build_ts_val=""
+  build_ts_val="$(awk -F'\t' '$1=="WDS_BUILD_TS"{print $2; exit}' <<<"${props}")"
+  [[ "${build_ts_val}" =~ ^[0-9]+$ ]] || \
+    die "WDS_BUILD_TS='${build_ts_val}' must be a non-negative integer (msiexec compares it as an integer)"
+  (( build_ts_val > 0 && build_ts_val < 2147483647 )) || \
+    die "WDS_BUILD_TS=${build_ts_val} is outside the signed 32-bit range msiexec compares in"
+  grep -Fq 'WDS_BUILD_ID' <<<"${props}" || \
+    die "MSI missing WDS_BUILD_ID property (diagnostic build id; wixl needs -D BuildId=...)"
+  # Search-only properties get no Property row: wixl writes an AppSearch row
+  # mapping the property to its RegLocator signature instead. AppSearch is
+  # sequenced in the execute sequence too (50), which is where the
+  # SetReinstallMode* conditions and the LaunchCondition read these.
+  grep -Eq $'WDS_INSTALLED_TS\tFindWdsBuildTs' <<<"${appsearch}" || \
+    die "MSI must map WDS_INSTALLED_TS to the FindWdsBuildTs registry search"
+  grep -Eq $'WDS_INSTALLED_ID\tFindWdsBuildId' <<<"${appsearch}" || \
+    die "MSI must map WDS_INSTALLED_ID to the FindWdsBuildId registry search"
+  grep -q 'FindWdsBuildTs' <<<"${regs}" || \
+    die "MSI missing FindWdsBuildTs registry search for the installed build time"
+  grep -q 'FindWdsBuildId' <<<"${regs}" || \
+    die "MSI missing FindWdsBuildId registry search for the installed build id"
   grep -Fq $'SecureCustomProperties' <<<"${props}" || \
     die "MSI missing SecureCustomProperties"
   local scp_val=""
@@ -986,6 +1055,8 @@ make_win_msi() {
     die "SecureCustomProperties must include INSTALLDIR (UI→Execute)"
   [[ ";${scp_val};" == *";REINSTALL;"* ]] || \
     die "SecureCustomProperties must include REINSTALL (UI→Execute)"
+  [[ ";${scp_val};" == *";WDS_ALLOW_DOWNGRADE;"* ]] || \
+    die "SecureCustomProperties must include WDS_ALLOW_DOWNGRADE (downgrade escape hatch)"
   local exe_seq=""
   exe_seq="$(msiinfo_export "$msi_path" InstallExecuteSequence | tr -d '\r')" || \
     die "msiinfo failed: InstallExecuteSequence"
@@ -997,17 +1068,21 @@ make_win_msi() {
     die "MSI missing RemoveExistingProducts (needed to retire old Id='*' packages)"
   grep -Fq 'SetReinstallAll' <<<"${exe_seq}" || \
     die "MSI missing SetReinstallAll in InstallExecuteSequence"
-  grep -Fq 'SetReinstallMode' <<<"${exe_seq}" || \
-    die "MSI missing SetReinstallMode in InstallExecuteSequence"
+  grep -Fq 'SetReinstallModeRepair' <<<"${exe_seq}" || \
+    die "MSI missing SetReinstallModeRepair in InstallExecuteSequence"
+  grep -Fq 'SetReinstallModeUpdate' <<<"${exe_seq}" || \
+    die "MSI missing SetReinstallModeUpdate in InstallExecuteSequence"
   grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
     die "MSI missing InitWdsInstallDir in InstallUISequence"
   # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
   grep -Fq $'UpdateDlg\tNext\t[REINSTALL]\tALL\tInstalled' <<<"${events}" || \
     die "UpdateDlg must set REINSTALL=ALL when Installed"
-  grep -Fq $'UpdateDlg\tNext\t[REINSTALLMODE]\tvamus\tInstalled' <<<"${events}" || \
-    die "UpdateDlg must set REINSTALLMODE=vamus when Installed (recache the local package)"
+  # The UI must not pin REINSTALLMODE: the two SetReinstallMode* actions decide
+  # omus vs vamus from the build stamp, and a publish here would fight them.
+  grep -Fq $'[REINSTALLMODE]' <<<"${events}" && \
+    die "UpdateDlg must not publish REINSTALLMODE (SetReinstallModeRepair/Update own it)"
   local apply_dir_seq costinit_seq rep_seq init_seq inst_init_seq proccomp_seq
-  local reinstall_mode_seq
+  local repair_mode_seq update_mode_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
   costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${exe_seq}")"
   rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
@@ -1023,9 +1098,17 @@ make_win_msi() {
   [[ -n "${rep_seq}" && -n "${inst_init_seq}" && -n "${proccomp_seq}" \
      && "${rep_seq}" -gt "${inst_init_seq}" && "${rep_seq}" -lt "${proccomp_seq}" ]] || \
     die "RemoveExistingProducts (${rep_seq:-unset}) must sit between InstallInitialize (${inst_init_seq:-unset}) and ProcessComponents (${proccomp_seq:-unset}); elsewhere msiexec fails with error 2613"
-  reinstall_mode_seq="$(awk -F'\t' '$1=="SetReinstallMode"{print $3; exit}' <<<"${exe_seq}")"
-  [[ -n "${reinstall_mode_seq}" && -n "${costinit_seq}" && "${reinstall_mode_seq}" -lt "${costinit_seq}" ]] || \
-    die "SetReinstallMode (${reinstall_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset}) so the recache flag is set before costing"
+  repair_mode_seq="$(awk -F'\t' '$1=="SetReinstallModeRepair"{print $3; exit}' <<<"${exe_seq}")"
+  update_mode_seq="$(awk -F'\t' '$1=="SetReinstallModeUpdate"{print $3; exit}' <<<"${exe_seq}")"
+  [[ -n "${repair_mode_seq}" && -n "${costinit_seq}" && "${repair_mode_seq}" -lt "${costinit_seq}" ]] || \
+    die "SetReinstallModeRepair (${repair_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
+  [[ -n "${update_mode_seq}" && -n "${costinit_seq}" && "${update_mode_seq}" -lt "${costinit_seq}" ]] || \
+    die "SetReinstallModeUpdate (${update_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
+  # The two paths must be told apart by the stamp, not by anything else.
+  grep -Eq $'SetReinstallModeRepair\t.*WDS_INSTALLED_BUILD = WDS_BUILD_ID' <<<"${exe_seq}" || \
+    die "SetReinstallModeRepair must be conditioned on WDS_INSTALLED_BUILD = WDS_BUILD_ID (same MSI -> repair)"
+  grep -Eq $'SetReinstallModeUpdate\t.*WDS_INSTALLED_BUILD <> WDS_BUILD_ID' <<<"${exe_seq}" || \
+    die "SetReinstallModeUpdate must be conditioned on WDS_INSTALLED_BUILD <> WDS_BUILD_ID (different build -> update)"
   grep -q 'FindWdsInstallDir32' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir32 registry search"
   # Package-level REINSTALLMODE covers a normal install, where msiexec forbids
@@ -1044,6 +1127,14 @@ make_win_msi() {
     die "MSI missing FindStartMenuPref registry search"
   grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
     die "MSI missing MajorUpgrade Upgrade table entry"
+  # ProductVersion is pinned, so WIX_DOWNGRADE_DETECTED can never fire between
+  # dest builds; the build stamp carries the ordering instead.
+  local launch_conds=""
+  launch_conds="$(msiinfo_export "$msi_path" LaunchCondition | tr -d '\r')" || \
+    die "msiinfo failed: LaunchCondition"
+  awk -F'\t' '$1 ~ /WDS_INSTALLED_TS/ && $1 ~ /WDS_BUILD_TS/ && $1 ~ /<=/ && $1 ~ /WDS_ALLOW_DOWNGRADE/ { found = 1 } END { exit !found }' \
+    <<<"${launch_conds}" || \
+    die "LaunchCondition must refuse a newer installed build stamp (WDS_INSTALLED_TS <= WDS_BUILD_TS, with the WDS_ALLOW_DOWNGRADE escape hatch)"
   local files_tbl="" comps_tbl=""
   files_tbl="$(msiinfo_export "$msi_path" File | tr -d '\r')" || die "msiinfo failed: File"
   comps_tbl="$(msiinfo_export "$msi_path" Component | tr -d '\r')" || die "msiinfo failed: Component"
@@ -1060,6 +1151,12 @@ make_win_msi() {
     die "WdsEditorPayload must have a path-stable GUID, not Guid=*"
   grep -Eq $'ShortcutPrefs\t' <<<"${comps_tbl}" || \
     die "MSI missing ShortcutPrefs component"
+  grep -Eq $'InstallStamp\t' <<<"${comps_tbl}" || \
+    die "MSI missing InstallStamp component (writes the build stamp to HKLM)"
+  grep -Fq 'BuildTs' <<<"${registry}" || \
+    die "MSI Registry table missing BuildTs (the installed build time)"
+  grep -Fq 'BuildId' <<<"${registry}" || \
+    die "MSI Registry table missing BuildId (the installed build id)"
   grep -Eq $'DesktopShortcut\t' <<<"${comps_tbl}" || \
     die "MSI missing DesktopShortcut component"
   grep -Eq $'StartMenuShortcut\t' <<<"${comps_tbl}" || \
