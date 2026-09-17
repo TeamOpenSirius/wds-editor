@@ -128,13 +128,11 @@
          first installation - and the Installed-only actions below override this
          value: repair for the same build, vamus for a different build. -->
     <Property Id="REINSTALLMODE" Value="amus"/>
-    <!-- CREATE_* are 1/0 for the checkbox and Component.Condition. AppSearch
-         must NOT write them: a stored "0" is discarded (msiexec treats 0 as
-         unset), and NOT CREATE_* is true for both missing and "0", so a
-         Default=1 CA would clobber an unchecked box. Search into WDS_SAVED_*
-         instead. New writes use yes/no (never 0). A prior install whose
-         saved value is empty is treated as off — that is how we still honour
-         a leftover REG_SZ "0" that AppSearch cannot surface. -->
+    <!-- CREATE_* are yes/no. msiexec treats a property value of 0 as unset,
+         so never write 0. AppSearch must NOT write CREATE_*. Search into
+         WDS_SAVED_* instead. Registry writes are yes/no. A leftover "1" is
+         still treated as on; a leftover "0" or empty plus a prior install
+         is treated as off. -->
     <Property Id="CREATE_DESKTOP_SHORTCUT" Secure="yes"/>
     <Property Id="CREATE_STARTMENU_SHORTCUT" Secure="yes"/>
     <Property Id="WDS_SAVED_DESKTOP" Secure="yes">
@@ -266,22 +264,22 @@
                   Value="1"/>
     <CustomAction Id="ApplyDesktopOn"
                   Property="CREATE_DESKTOP_SHORTCUT"
-                  Value="1"/>
+                  Value="yes"/>
     <CustomAction Id="ApplyDesktopOff"
                   Property="CREATE_DESKTOP_SHORTCUT"
-                  Value="0"/>
+                  Value="no"/>
     <CustomAction Id="ApplyStartMenuOn"
                   Property="CREATE_STARTMENU_SHORTCUT"
-                  Value="1"/>
+                  Value="yes"/>
     <CustomAction Id="ApplyStartMenuOff"
                   Property="CREATE_STARTMENU_SHORTCUT"
-                  Value="0"/>
+                  Value="no"/>
     <CustomAction Id="DefaultDesktopShortcut"
                   Property="CREATE_DESKTOP_SHORTCUT"
-                  Value="1"/>
+                  Value="yes"/>
     <CustomAction Id="DefaultStartMenuShortcut"
                   Property="CREATE_STARTMENU_SHORTCUT"
-                  Value="1"/>
+                  Value="yes"/>
     <CustomAction Id="SetRegDesktopYes"
                   Property="WDS_REG_DESKTOP"
                   Value="yes"/>
@@ -298,12 +296,6 @@
     <UIRef Id="WdsUI"/>
 
     <InstallUISequence>
-      <Custom Action="AdoptPreviousInstall32" After="AppSearch">
-        WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
-      </Custom>
-      <Custom Action="SetInstallDirFromPrevious" After="AdoptPreviousInstall32">
-        WDS_PREVIOUS_INSTALL AND NOT Installed
-      </Custom>
       <!-- After costing so INSTALLDIR is the resolved path (existing product
            or remembered / default). Dialogs are After this action. -->
       <Custom Action="InitWdsInstallDir" After="CostFinalize">
@@ -312,30 +304,39 @@
       <Custom Action="SetRootDrive" After="AppSearch" Before="CostInitialize">
         NOT ROOTDRIVE
       </Custom>
+      <!-- After=AppSearch without Before=CostInitialize is parked after the
+           dialogs (wixl 0.103). UpdateDlg then shows the default Program
+           Files path, and Execute ApplyWdsInstallDir writes that stale
+           WDS_INSTALLDIR over the registry folder. -->
+      <Custom Action="AdoptPreviousInstall32" After="SetRootDrive" Before="CostInitialize">
+        WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
+      <Custom Action="SetInstallDirFromPrevious" After="AdoptPreviousInstall32" Before="CostInitialize">
+        WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
       <!-- Must sit before CostInitialize: wixl otherwise parks After=AppSearch
-           extras after the dialogs, and ShortcutsDlg would publish 0 for an
-           unset box before the default 1 is applied. CREATE="0" is a set
-           value — do not use NOT CREATE_*, which is also true for 0. -->
-      <Custom Action="SetWdsHadInstall" After="SetRootDrive" Before="CostInitialize">
+           extras after the dialogs, and ShortcutsDlg would publish no for an
+           unset box before the default yes is applied. Off is "no", never 0. -->
+      <Custom Action="SetWdsHadInstall" After="SetInstallDirFromPrevious" Before="CostInitialize">
         WDS_INSTALLED_TS OR WDS_PREVIOUS_INSTALL
       </Custom>
       <Custom Action="ApplyDesktopOn" After="SetWdsHadInstall" Before="CostInitialize">
-        NOT (CREATE_DESKTOP_SHORTCUT="0" OR CREATE_DESKTOP_SHORTCUT="1") AND (WDS_SAVED_DESKTOP="1" OR WDS_SAVED_DESKTOP="yes" OR WDS_DESKTOP_PREF32="1" OR WDS_DESKTOP_PREF32="yes")
+        NOT (CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no") AND (WDS_SAVED_DESKTOP="1" OR WDS_SAVED_DESKTOP="yes" OR WDS_DESKTOP_PREF32="1" OR WDS_DESKTOP_PREF32="yes")
       </Custom>
       <Custom Action="ApplyDesktopOff" After="ApplyDesktopOn" Before="CostInitialize">
-        NOT (CREATE_DESKTOP_SHORTCUT="0" OR CREATE_DESKTOP_SHORTCUT="1") AND (WDS_SAVED_DESKTOP="0" OR WDS_SAVED_DESKTOP="no" OR WDS_DESKTOP_PREF32="0" OR WDS_DESKTOP_PREF32="no" OR WDS_HAD_INSTALL)
+        NOT (CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no") AND (WDS_SAVED_DESKTOP="0" OR WDS_SAVED_DESKTOP="no" OR WDS_DESKTOP_PREF32="0" OR WDS_DESKTOP_PREF32="no" OR WDS_HAD_INSTALL)
       </Custom>
       <Custom Action="ApplyStartMenuOn" After="ApplyDesktopOff" Before="CostInitialize">
-        NOT (CREATE_STARTMENU_SHORTCUT="0" OR CREATE_STARTMENU_SHORTCUT="1") AND (WDS_SAVED_STARTMENU="1" OR WDS_SAVED_STARTMENU="yes" OR WDS_STARTMENU_PREF32="1" OR WDS_STARTMENU_PREF32="yes")
+        NOT (CREATE_STARTMENU_SHORTCUT="yes" OR CREATE_STARTMENU_SHORTCUT="no") AND (WDS_SAVED_STARTMENU="1" OR WDS_SAVED_STARTMENU="yes" OR WDS_STARTMENU_PREF32="1" OR WDS_STARTMENU_PREF32="yes")
       </Custom>
       <Custom Action="ApplyStartMenuOff" After="ApplyStartMenuOn" Before="CostInitialize">
-        NOT (CREATE_STARTMENU_SHORTCUT="0" OR CREATE_STARTMENU_SHORTCUT="1") AND (WDS_SAVED_STARTMENU="0" OR WDS_SAVED_STARTMENU="no" OR WDS_STARTMENU_PREF32="0" OR WDS_STARTMENU_PREF32="no" OR WDS_HAD_INSTALL)
+        NOT (CREATE_STARTMENU_SHORTCUT="yes" OR CREATE_STARTMENU_SHORTCUT="no") AND (WDS_SAVED_STARTMENU="0" OR WDS_SAVED_STARTMENU="no" OR WDS_STARTMENU_PREF32="0" OR WDS_STARTMENU_PREF32="no" OR WDS_HAD_INSTALL)
       </Custom>
       <Custom Action="DefaultDesktopShortcut" After="ApplyStartMenuOff" Before="CostInitialize">
-        NOT (CREATE_DESKTOP_SHORTCUT="0" OR CREATE_DESKTOP_SHORTCUT="1")
+        NOT (CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no")
       </Custom>
       <Custom Action="DefaultStartMenuShortcut" After="DefaultDesktopShortcut" Before="CostInitialize">
-        NOT (CREATE_STARTMENU_SHORTCUT="0" OR CREATE_STARTMENU_SHORTCUT="1")
+        NOT (CREATE_STARTMENU_SHORTCUT="yes" OR CREATE_STARTMENU_SHORTCUT="no")
       </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
@@ -344,48 +345,48 @@
            ProductCode, so the same .msi file is still a reinstall.
            Placement is window 2; InstallFiles is error 2613. -->
       <RemoveExistingProducts After="InstallInitialize"/>
-      <Custom Action="AdoptPreviousInstall32" After="AppSearch">
-        WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
-      </Custom>
-      <Custom Action="SetInstallDirFromPrevious" After="AdoptPreviousInstall32">
-        WDS_PREVIOUS_INSTALL AND NOT Installed
-      </Custom>
       <!-- User-typed / UI path must be applied before costing, not after. -->
       <Custom Action="SetRootDrive" After="AppSearch" Before="CostInitialize">
         NOT ROOTDRIVE
       </Custom>
-      <Custom Action="SetWdsHadInstall" After="SetRootDrive" Before="CostInitialize">
+      <Custom Action="AdoptPreviousInstall32" After="SetRootDrive" Before="CostInitialize">
+        WDS_PREVIOUS_INSTALL32 AND NOT WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
+      <Custom Action="SetInstallDirFromPrevious" After="AdoptPreviousInstall32" Before="CostInitialize">
+        WDS_PREVIOUS_INSTALL AND NOT Installed
+      </Custom>
+      <Custom Action="SetWdsHadInstall" After="SetInstallDirFromPrevious" Before="CostInitialize">
         WDS_INSTALLED_TS OR WDS_PREVIOUS_INSTALL
       </Custom>
       <Custom Action="ApplyDesktopOn" After="SetWdsHadInstall" Before="CostInitialize">
-        NOT (CREATE_DESKTOP_SHORTCUT="0" OR CREATE_DESKTOP_SHORTCUT="1") AND (WDS_SAVED_DESKTOP="1" OR WDS_SAVED_DESKTOP="yes" OR WDS_DESKTOP_PREF32="1" OR WDS_DESKTOP_PREF32="yes")
+        NOT (CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no") AND (WDS_SAVED_DESKTOP="1" OR WDS_SAVED_DESKTOP="yes" OR WDS_DESKTOP_PREF32="1" OR WDS_DESKTOP_PREF32="yes")
       </Custom>
       <Custom Action="ApplyDesktopOff" After="ApplyDesktopOn" Before="CostInitialize">
-        NOT (CREATE_DESKTOP_SHORTCUT="0" OR CREATE_DESKTOP_SHORTCUT="1") AND (WDS_SAVED_DESKTOP="0" OR WDS_SAVED_DESKTOP="no" OR WDS_DESKTOP_PREF32="0" OR WDS_DESKTOP_PREF32="no" OR WDS_HAD_INSTALL)
+        NOT (CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no") AND (WDS_SAVED_DESKTOP="0" OR WDS_SAVED_DESKTOP="no" OR WDS_DESKTOP_PREF32="0" OR WDS_DESKTOP_PREF32="no" OR WDS_HAD_INSTALL)
       </Custom>
       <Custom Action="ApplyStartMenuOn" After="ApplyDesktopOff" Before="CostInitialize">
-        NOT (CREATE_STARTMENU_SHORTCUT="0" OR CREATE_STARTMENU_SHORTCUT="1") AND (WDS_SAVED_STARTMENU="1" OR WDS_SAVED_STARTMENU="yes" OR WDS_STARTMENU_PREF32="1" OR WDS_STARTMENU_PREF32="yes")
+        NOT (CREATE_STARTMENU_SHORTCUT="yes" OR CREATE_STARTMENU_SHORTCUT="no") AND (WDS_SAVED_STARTMENU="1" OR WDS_SAVED_STARTMENU="yes" OR WDS_STARTMENU_PREF32="1" OR WDS_STARTMENU_PREF32="yes")
       </Custom>
       <Custom Action="ApplyStartMenuOff" After="ApplyStartMenuOn" Before="CostInitialize">
-        NOT (CREATE_STARTMENU_SHORTCUT="0" OR CREATE_STARTMENU_SHORTCUT="1") AND (WDS_SAVED_STARTMENU="0" OR WDS_SAVED_STARTMENU="no" OR WDS_STARTMENU_PREF32="0" OR WDS_STARTMENU_PREF32="no" OR WDS_HAD_INSTALL)
+        NOT (CREATE_STARTMENU_SHORTCUT="yes" OR CREATE_STARTMENU_SHORTCUT="no") AND (WDS_SAVED_STARTMENU="0" OR WDS_SAVED_STARTMENU="no" OR WDS_STARTMENU_PREF32="0" OR WDS_STARTMENU_PREF32="no" OR WDS_HAD_INSTALL)
       </Custom>
       <Custom Action="DefaultDesktopShortcut" After="ApplyStartMenuOff" Before="CostInitialize">
-        NOT (CREATE_DESKTOP_SHORTCUT="0" OR CREATE_DESKTOP_SHORTCUT="1")
+        NOT (CREATE_DESKTOP_SHORTCUT="yes" OR CREATE_DESKTOP_SHORTCUT="no")
       </Custom>
       <Custom Action="DefaultStartMenuShortcut" After="DefaultDesktopShortcut" Before="CostInitialize">
-        NOT (CREATE_STARTMENU_SHORTCUT="0" OR CREATE_STARTMENU_SHORTCUT="1")
+        NOT (CREATE_STARTMENU_SHORTCUT="yes" OR CREATE_STARTMENU_SHORTCUT="no")
       </Custom>
       <Custom Action="SetRegDesktopYes" After="DefaultStartMenuShortcut" Before="CostInitialize">
-        CREATE_DESKTOP_SHORTCUT="1"
+        CREATE_DESKTOP_SHORTCUT="yes"
       </Custom>
       <Custom Action="SetRegDesktopNo" After="SetRegDesktopYes" Before="CostInitialize">
-        NOT CREATE_DESKTOP_SHORTCUT="1"
+        NOT CREATE_DESKTOP_SHORTCUT="yes"
       </Custom>
       <Custom Action="SetRegStartYes" After="SetRegDesktopNo" Before="CostInitialize">
-        CREATE_STARTMENU_SHORTCUT="1"
+        CREATE_STARTMENU_SHORTCUT="yes"
       </Custom>
       <Custom Action="SetRegStartNo" After="SetRegStartYes" Before="CostInitialize">
-        NOT CREATE_STARTMENU_SHORTCUT="1"
+        NOT CREATE_STARTMENU_SHORTCUT="yes"
       </Custom>
       <Custom Action="ApplyWdsInstallDir" After="SetInstallDirFromPrevious" Before="CostInitialize">
         WDS_INSTALLDIR AND NOT Installed
@@ -470,7 +471,7 @@
 
     <!-- Do not author <Condition> here: wixl 0.103 dumps core
          ("unhandled child Component node Condition"). The Condition
-         column is set after compile: CREATE_DESKTOP_SHORTCUT="1". -->
+         column is set after compile: CREATE_DESKTOP_SHORTCUT="yes". -->
     <DirectoryRef Id="DesktopFolder">
       <Component Id="DesktopShortcut" Guid="$(var.GuidDesktopShortcut)" Win64="yes">
         <Shortcut Id="WdsEditorDesktop"
@@ -490,7 +491,7 @@
       </Component>
     </DirectoryRef>
 
-    <!-- Condition column patched after wixl: CREATE_STARTMENU_SHORTCUT="1". -->
+    <!-- Condition column patched after wixl: CREATE_STARTMENU_SHORTCUT="yes". -->
     <DirectoryRef Id="WdsStartMenuFolder">
       <Component Id="StartMenuShortcut" Guid="$(var.GuidStartMenuShortcut)" Win64="yes">
         <Shortcut Id="WdsEditorStartMenu"
