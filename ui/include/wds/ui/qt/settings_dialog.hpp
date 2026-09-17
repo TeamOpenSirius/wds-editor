@@ -13,6 +13,7 @@
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QEvent;
 class QKeySequenceEdit;
 class QResizeEvent;
 class QScrollArea;
@@ -41,6 +42,7 @@ class SettingsPanel final : public QWidget {
 
  protected:
   void resizeEvent(QResizeEvent* event) override;
+  void changeEvent(QEvent* event) override;
 
  private:
   UiManager* manager_ = nullptr;

@@ -218,6 +218,11 @@ copy_icons() {
   else
     die "toolbar icons missing (expected repo icons/ or build ui/icons)"
   fi
+  if [[ -f "${ROOT}/icons/Fluent-UI-System-Icons-LICENSE.txt" ]]; then
+    mkdir -p "${stage}/licenses"
+    cp -a "${ROOT}/icons/Fluent-UI-System-Icons-LICENSE.txt" \
+      "${stage}/licenses/Fluent-UI-System-Icons-LICENSE.txt"
+  fi
 }
 
 # App icon derived from logo.png (see scripts/generate-app-icons.sh).

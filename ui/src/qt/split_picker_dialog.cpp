@@ -41,9 +41,13 @@ QPixmap split_preview_pixmap(int32_t split_count, int32_t color_id, const QSize&
   split_boundaries_12(split_count, mids);
   const float line_w =
       std::clamp(static_cast<float>(size.width()) / static_cast<float>(kLanes) * 0.14f, 1.5f, 2.5f);
+  // Lane 0 / 12 sit on the field edges. Inset so the black ground is a few
+  // pixels wider than those centers and the full stroke stays visible.
+  const float pad = line_w * 0.5f + 2.0f;
+  const float inner_w = std::max(1.0f, static_cast<float>(size.width()) - pad * 2.0f);
   auto draw_edge = [&](int32_t edge_lane, int32_t slot) {
-    const float x = std::floor(static_cast<float>(edge_lane) * static_cast<float>(size.width()) /
-                                   static_cast<float>(kLanes) +
+    const float x = std::floor(pad + static_cast<float>(edge_lane) * inner_w /
+                                         static_cast<float>(kLanes) +
                                0.5f);
     auto c = split_slot_color(color_id, slot, split_count, nullptr);
     if (c.a < 0.02f) return;

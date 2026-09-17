@@ -10,6 +10,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QEvent;
 class QPushButton;
 class QSlider;
 class QSpinBox;
@@ -75,8 +76,12 @@ class EditorToolbarWidget final : public QWidget {
   void refresh_enabled_states();
   void refresh_flags();
 
+ protected:
+  void changeEvent(QEvent* event) override;
+
  private:
   void build_ui();
+  void apply_add_chart_icon();
   void apply_delay();
   void apply_grid();
 
