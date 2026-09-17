@@ -138,6 +138,28 @@ bool apply_note_map(wds::chart_editor::ChartDocument& doc,
   return doc.apply_note_updates(to_note_updates(notes));
 }
 
+// Restore drag-start geometry on a copy so finish_move can tell "chart already
+// had stacked stars" from "this gesture created a new pair".
+std::vector<NotationNote> notes_with_drag_originals(
+    const std::vector<NotationNote>& current,
+    const std::unordered_map<int32_t, NotationNote>& originals) {
+  std::vector<NotationNote> restored = current;
+  for (auto& note : restored) {
+    if (auto it = originals.find(note.id); it != originals.end()) {
+      note = it->second;
+    }
+  }
+  return restored;
+}
+
+bool move_introduced_star_tick_conflicts(
+    const std::vector<NotationNote>& current,
+    const std::unordered_map<int32_t, NotationNote>& originals) {
+  if (!wds::chart_editor::visible_star_tick_conflicts(current)) return false;
+  return !wds::chart_editor::visible_star_tick_conflicts(
+      notes_with_drag_originals(current, originals));
+}
+
 }  // namespace
 
 ChartEditPanel::ChartEditPanel(wds::chart_editor::ChartEditorEngine& engine) : engine_(engine) {
@@ -2349,7 +2371,7 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
 }
 
 void ChartEditPanel::finish_move(bool refresh_eighths) {
-  if (wds::chart_editor::visible_star_tick_conflicts(engine_.document().notes())) {
+  if (move_introduced_star_tick_conflicts(engine_.document().notes(), drag_originals_)) {
     std::vector<wds::chart_editor::NoteUpdate> revert;
     revert.reserve(drag_originals_.size());
     for (const auto& [id, before] : drag_originals_) {

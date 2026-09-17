@@ -4769,6 +4769,57 @@ void test_sus_hold_mid_star_roundtrip() {
   }
 }
 
+// Overlapping full-width slides with mids on the same tick (2338_03-style).
+// Dense late taps push pre-sort hold ids into the tap range after 0..n-1 rewrite;
+// parent_hold_id must be remapped or infer_legacy_star_hold_binds stacks both
+// stars on the first matching hold and every drag snaps back.
+void test_sus_overlapping_full_width_mids_keep_distinct_parents() {
+  const char* sus =
+      "#TITLE \"overlap-mids\"\n"
+      "#REQUEST \"ticks_per_beat 480\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#000320: 1c\n"
+      "#000321: 1c\n"
+      "#001320: 3c\n"
+      "#001321: 3c\n"
+      "#002320: 2c\n"
+      "#002321: 2c\n"
+      "#00312: 13131313131313131313131313131313\n"
+      "#00315: 13131313131313131313131313131313\n";
+
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(!visible_star_tick_conflicts(loaded.chart.notes));
+
+  std::vector<const NotationNote*> stars;
+  std::unordered_map<int32_t, const NotationNote*> by_id;
+  for (const auto& n : loaded.chart.notes) {
+    by_id[n.id] = &n;
+    if (n.note_type == NoteType::Sound) stars.push_back(&n);
+  }
+  CHECK_EQ(static_cast<int>(stars.size()), 2);
+  if (stars.size() == 2) {
+    CHECK_EQ(stars[0]->start_tick, stars[1]->start_tick);
+    CHECK(stars[0]->parent_hold_id != stars[1]->parent_hold_id);
+    for (const auto* star : stars) {
+      const auto it = by_id.find(star->parent_hold_id);
+      CHECK(it != by_id.end());
+      if (it == by_id.end()) continue;
+      CHECK(is_bindable_hold_body(it->second->note_type));
+      CHECK_EQ(it->second->lane, star->lane);
+      CHECK_EQ(it->second->width, star->width);
+      CHECK(it->second->start_tick < star->start_tick);
+      CHECK(star->start_tick < it->second->end_tick);
+    }
+  }
+
+  ChartEditorEngine engine;
+  engine.load_chart(loaded.chart, ChartEditMode::Editable);
+  CHECK(!visible_star_tick_conflicts(engine.document().notes()));
+}
+
 // Slide with different end lane → ScratchHold; no extra plain Hold.
 void test_sus_slide_export_not_orphan_hold_start() {
   NotationChart chart;
@@ -7678,6 +7729,7 @@ int main() {
   test_sus_export_covered_hold_skips_damage();
   test_sus_export_partial_hold_head_pairs_body();
   test_sus_hold_mid_star_roundtrip();
+  test_sus_overlapping_full_width_mids_keep_distinct_parents();
   test_sus_slide_export_not_orphan_hold_start();
   test_sus_standalone_directional_keeps_width();
   test_sus_leftover_air_becomes_flick();
