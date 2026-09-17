@@ -924,7 +924,7 @@ PY
   props="$(msiinfo_export "$msi_path" Property | tr -d '\r')" || die "msiinfo failed: Property"
   local scp="" extra p
   scp="$(awk -F'\t' '$1=="SecureCustomProperties"{print $2; exit}' <<<"${props}")"
-  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE;WDS_ALLOW_DOWNGRADE"
+  extra="CREATE_DESKTOP_SHORTCUT;CREATE_STARTMENU_SHORTCUT;WDS_INSTALLDIR;WDSINSTALLPARENT;WDS_PREVIOUS_INSTALL;WDS_PREVIOUS_INSTALL32;INSTALLDIR;REINSTALL;REINSTALLMODE;WDS_ALLOW_DOWNGRADE;WIX_UPGRADE_DETECTED"
   IFS=';'
   for p in $extra; do
     [[ -z "$p" ]] && continue
@@ -1157,15 +1157,22 @@ PY
   grep -q 'FindStartMenuPref' <<<"${regs}" || \
     die "MSI missing FindStartMenuPref registry search"
   grep -q 'A7E3C2B1-9F4D-4E8A-9C6B-1D2E3F4A5B6C' <<<"${upgrades}" || \
-    die "MSI missing MajorUpgrade Upgrade table entry"
-  # ProductVersion is pinned, so WIX_DOWNGRADE_DETECTED can never fire between
-  # dest builds; the build stamp carries the ordering instead.
+    die "MSI missing Upgrade table entry for the WDS UpgradeCode"
+  grep -Eq $'0\\.0\\.0\t.*WIX_UPGRADE_DETECTED' <<<"${upgrades}" || \
+    die "Upgrade table must detect every related product from 0.0.0 (leftover Id='*' / other ProductCode)"
+  grep -Fq 'WIX_DOWNGRADE_DETECTED' <<<"${upgrades}" && \
+    die "Upgrade table must not OnlyDetect downgrades: that LaunchCondition is msiexec 1638 on a pinned 1.0.0"
+  [[ ";${scp_val};" == *";WIX_UPGRADE_DETECTED;"* ]] || \
+    die "SecureCustomProperties must include WIX_UPGRADE_DETECTED (FindRelatedProducts → Execute)"
+  # ProductVersion is pinned; dest-to-dest ordering is the build stamp.
   local launch_conds=""
   launch_conds="$(msiinfo_export "$msi_path" LaunchCondition | tr -d '\r')" || \
     die "msiinfo failed: LaunchCondition"
   awk -F'\t' '$1 ~ /WDS_INSTALLED_TS/ && $1 ~ /WDS_BUILD_TS/ && $1 ~ /<=/ && $1 ~ /WDS_ALLOW_DOWNGRADE/ { found = 1 } END { exit !found }' \
     <<<"${launch_conds}" || \
     die "LaunchCondition must refuse a newer installed build stamp (WDS_INSTALLED_TS <= WDS_BUILD_TS, with the WDS_ALLOW_DOWNGRADE escape hatch)"
+  grep -Fq 'WIX_DOWNGRADE_DETECTED' <<<"${launch_conds}" && \
+    die "LaunchCondition must not refuse on WIX_DOWNGRADE_DETECTED (blocks dest rebuilds at ProductVersion 1.0.0)"
   local files_tbl="" comps_tbl=""
   files_tbl="$(msiinfo_export "$msi_path" File | tr -d '\r')" || die "msiinfo failed: File"
   comps_tbl="$(msiinfo_export "$msi_path" Component | tr -d '\r')" || die "msiinfo failed: Component"
