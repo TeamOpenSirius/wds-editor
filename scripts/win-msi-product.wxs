@@ -69,6 +69,13 @@
   INSTALLDIR can clear the property; Edit plus InitWdsInstallDir keeps it.
   First-install WDS_INSTALLDIR is applied BEFORE CostInitialize. Updates
   never retarget the directory.
+
+  Repair/update rewrite files (REINSTALLMODE ecmus/vamus) and msiexec stages
+  rollback copies as <volume>\Config.Msi\*.rbf. The default ROOTDRIVE is the
+  local volume with the most free space, often a data drive such as D:\ whose
+  root ACL does not let SYSTEM set file security. Error 1926 / Error 5 on
+  D:\Config.Msi\*.rbf is that failure. SetRootDrive pins ROOTDRIVE to
+  WindowsVolume before CostInitialize so rollback stays on the OS volume.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907"
@@ -188,6 +195,11 @@
     <CustomAction Id="SetArpInstallLocation"
                   Property="ARPINSTALLLOCATION"
                   Value="[INSTALLDIR]"/>
+    <!-- Must end with '\'. WindowsVolume is the OS volume (typically C:\).
+         Command-line ROOTDRIVE= still wins (NOT ROOTDRIVE). -->
+    <CustomAction Id="SetRootDrive"
+                  Property="ROOTDRIVE"
+                  Value="[WindowsVolume]"/>
     <CustomAction Id="SetReinstallAll"
                   Property="REINSTALL"
                   Value="ALL"/>
@@ -222,6 +234,9 @@
       <Custom Action="InitWdsInstallDir" After="CostFinalize">
         NOT WDS_INSTALLDIR
       </Custom>
+      <Custom Action="SetRootDrive" After="AppSearch" Before="CostInitialize">
+        NOT ROOTDRIVE
+      </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
       <!-- Only ever runs for a leftover Product Id='*' product (different
@@ -236,6 +251,9 @@
         WDS_PREVIOUS_INSTALL AND NOT Installed
       </Custom>
       <!-- User-typed / UI path must be applied before costing, not after. -->
+      <Custom Action="SetRootDrive" After="AppSearch" Before="CostInitialize">
+        NOT ROOTDRIVE
+      </Custom>
       <Custom Action="ApplyWdsInstallDir" After="SetInstallDirFromPrevious" Before="CostInitialize">
         WDS_INSTALLDIR AND NOT Installed
       </Custom>
