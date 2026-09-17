@@ -956,8 +956,8 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   // Official FlickNoteEntity / NotesArrowsObject. [L,R] is the visible note
   // (width - margin); world positions use full GetNoteWidth. JumpScratch is
   // the gimmick flag — hold-end cover lanes are not the jump arrow table.
-  const int32_t lanes = end_lane - lane + 1;
-  const float note_world = wds::chart_editor::official_note_width(lanes);
+  const int32_t body_lanes = end_lane - lane + 1;
+  const float note_world = wds::chart_editor::official_note_width(body_lanes);
   const float visual_world = wds::chart_editor::official_tap_visual_width(note_world);
   const float world_to_dest = (R - L) / visual_world;
   const float W = wds::chart_editor::kOfficialArrowSpriteWidth *
@@ -967,8 +967,13 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   }
 
   const bool jump = wds::chart_editor::is_jump_scratch(note.gimmick_type);
-  const int count = wds::chart_editor::official_scratch_arrow_count(lanes, jump);
-  const float interval = wds::chart_editor::official_scratch_arrow_interval(lanes);
+  // Hold-chain preview already placed cover lanes. Standalone JumpScratch
+  // (official Flick) uses abs(GimmickValue), not body Width.
+  const int32_t arrow_lanes =
+      (!note.uses_jump_scratch_position && jump) ? std::max(1, std::abs(note.scratch_length))
+                                                : body_lanes;
+  const int count = wds::chart_editor::official_scratch_arrow_count(arrow_lanes, jump);
+  const float interval = wds::chart_editor::official_scratch_arrow_interval(arrow_lanes);
   const float step_world = interval * wds::chart_editor::kOfficialArrowGroupScale;
   const float offset_world =
       jump ? (step_world * static_cast<float>(count) * 0.5f)
@@ -983,6 +988,9 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   params.arrow_count = count;
   params.fill_to_far_edge = !jump && note.scratch_length != 0;
   params.scratch_length = note.scratch_length;
+  params.official_one_direction =
+      note.note_type == wds::chart_editor::NoteType::Flick &&
+      wds::chart_editor::is_one_direction(note.gimmick_type);
   params.sonolus_num = static_cast<float>(count);
   params.anim_time_sec = static_cast<float>(anim_time_sec);
   params.arrow_speed = config_.arrow_speed;

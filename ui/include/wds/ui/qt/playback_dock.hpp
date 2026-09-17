@@ -3,7 +3,9 @@
 #include <QWidget>
 #include <QIcon>
 #include <array>
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "wds/ui/toolbar_curve_selection.hpp"
@@ -29,6 +31,8 @@ class PlaybackBar final : public QWidget {
 
  private:
   void build_ui();
+  // User-driven scrub only. Do not call from sync_position() / setValue —
+  // that feedback loop was the pause-to-start forward-creep bug.
   void seek_to_slider(int value);
   void apply_play_icon(bool playing);
 
@@ -45,6 +49,7 @@ class PlaybackBar final : public QWidget {
   QCheckBox* sfx_mute_ = nullptr;
   QComboBox* rate_ = nullptr;
   bool syncing_ = false;
+  std::optional<int64_t> last_scrub_ms_;
 };
 
 // Convert dock: eight note-type buttons in a single row.

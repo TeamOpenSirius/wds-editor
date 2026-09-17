@@ -35,14 +35,19 @@ bool split_fade_grows_from_tip(int32_t scratch_length) noexcept;
 int32_t split_color_slot(int32_t scratch_length, int32_t split_count,
                          int32_t world_index) noexcept;
 
-// Official Flick scratchLength is a signed span (0 / ±width), not a ternary
-// direction. `direction` uses only its sign: <0 left, >0 right, 0 both.
+// Official FlickNoteObject / CSV rules (game memory, not editor notes):
+//   None            → both arrows (GimmickValue ignored)
+//   OneDirection    → 0 = left, 1 = right
+//   JumpScratch     → signed span; sign selects the side; laneCount = abs(GV)
+// Editor-authored Flick stays None + 0/±width. official_chart maps official
+// OneDirection 0/1 ↔ that encoding on import/export; old None+nonzero is kept.
+bool official_scratch_is_directional(GimmickType gimmick) noexcept;
+int32_t official_scratch_arrow_side_sign(GimmickType gimmick, int32_t gimmick_value) noexcept;
+int32_t official_scratch_arrow_lane_count(const NotationNote& note) noexcept;
+
+// Editor-internal Flick direction: 0 both, <0 left, >0 right, stored as ±width.
 int32_t encode_flick_scratch_length(int32_t direction, int32_t width) noexcept;
-
-// Export-only: expand historic editor ±1 direction to ±width. Keep 0 and |sl|>1.
 int32_t official_flick_scratch_length(int32_t scratch_length, int32_t width) noexcept;
-
-// Same-track directional flick (±1 or ±previous_width) tracks a width change.
 void sync_flick_scratch_length_for_width(NotationNote& note, int32_t previous_width) noexcept;
 
 // Sirius ScratchHoldEnd / JumpScratch end span from scratchLength (signed):

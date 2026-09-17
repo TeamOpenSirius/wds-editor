@@ -72,8 +72,9 @@ std::vector<ArrowInstance> layout_static_scratch_arrows(const StaticArrowLayoutP
   if (aw <= 1e-5f || span <= 1e-5f) {
     return out;
   }
-  const auto sides = scratch_arrow_sides(p.scratch_length);
-  const float step = (p.scratch_length == 0) ? aw * 0.9f : aw * 0.55f;
+  const auto sides = scratch_arrow_sides_compat(p.official_one_direction, p.scratch_length);
+  const bool bidirectional = sides.draw_left && sides.draw_right;
+  const float step = bidirectional ? aw * 0.9f : aw * 0.55f;
   const int max_n = std::max(1, static_cast<int>(span / std::max(step, 1e-5f)) + 1);
   const float mid = p.span_left + span * 0.5f;
 
@@ -82,7 +83,7 @@ std::vector<ArrowInstance> layout_static_scratch_arrows(const StaticArrowLayoutP
     for (int i = 0; i < max_n; ++i) {
       const float ax = p.span_left + static_cast<float>(i) * step;
       if (ax + aw > p.span_right + 0.5f) break;
-      if (p.scratch_length == 0 && ax + aw > mid + 0.5f) break;
+      if (bidirectional && ax + aw > mid + 0.5f) break;
       out.push_back(ArrowInstance{ax, ax + aw, false, 1.0f});
       ++drawn;
     }
@@ -95,7 +96,7 @@ std::vector<ArrowInstance> layout_static_scratch_arrows(const StaticArrowLayoutP
     for (int i = 0; i < max_n; ++i) {
       const float ax = p.span_right - aw - static_cast<float>(i) * step;
       if (ax < p.span_left - 0.5f) break;
-      if (p.scratch_length == 0 && ax < mid - 0.5f) break;
+      if (bidirectional && ax < mid - 0.5f) break;
       out.push_back(ArrowInstance{ax, ax + aw, true, 1.0f});
       ++drawn;
     }
@@ -115,7 +116,7 @@ std::vector<ArrowInstance> layout_animated_scratch_arrows(const AnimatedArrowLay
   if (W <= 1e-5f || R <= L) {
     return out;
   }
-  const auto sides = scratch_arrow_sides(p.scratch_length);
+  const auto sides = scratch_arrow_sides_compat(p.official_one_direction, p.scratch_length);
   // Official NotesArrowsObject: pivot-center sprites, local x = i * interval,
   // parent scale 0.7, NotesRight Y-180. Flick parent at ±(GetNoteWidth/2 - 0.145).
   // ActivateArrowSpriteRenderer enables the same count on both arrays; OneDirection

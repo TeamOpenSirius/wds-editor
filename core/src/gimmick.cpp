@@ -36,6 +36,22 @@ bool is_jump_scratch(GimmickType gimmick) noexcept {
   return gimmick == GimmickType::JumpScratch;
 }
 
+bool official_scratch_is_directional(GimmickType gimmick) noexcept {
+  return is_jump_scratch(gimmick) || is_one_direction(gimmick);
+}
+
+int32_t official_scratch_arrow_side_sign(GimmickType gimmick, int32_t gimmick_value) noexcept {
+  if (!official_scratch_is_directional(gimmick)) return 0;
+  return gimmick_value <= 0 ? -1 : 1;
+}
+
+int32_t official_scratch_arrow_lane_count(const NotationNote& note) noexcept {
+  if (is_jump_scratch(note.gimmick_type)) {
+    return std::max(1, std::abs(note.scratch_length));
+  }
+  return std::max(1, note.width);
+}
+
 int32_t encode_flick_scratch_length(int32_t direction, int32_t width) noexcept {
   if (direction == 0) return 0;
   const int32_t span = std::max(1, width);

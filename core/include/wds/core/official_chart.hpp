@@ -15,20 +15,25 @@ namespace wds::chart_editor {
 //   startTime     — note/gimmick start in music seconds (beat≡second at BPM 60)
 //   endTime       — hold/split end in seconds; -1 = instantaneous (no duration)
 //   type          — AppConst.NoteType (10/20/80/100/900/…); 0 = gimmick-only (split);
-//                   900 (HoldEighth) is ignored on import and generated on export;
+//                   900 (HoldEighth) is kept on import (preview-only, not recomputed)
+//                   and generated on export from editable charts;
 //                   -1 = HiSpeed (endTime holds speed value; not stored in NotationNote);
 //                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
 //                   editor imports as JumpScratch split / orphan Flick — never stored as 40)
 //   leftLane      — leftmost lane, official 1..12; split rows use -1
 //   laneLength    — width in lanes; split rows use 0
 //   gimmickType   — numeric GimmickType, or "JumpScratch" / "OneDirection"
-//   scratchLength — flick/scratch signed span (0 / ±laneLength); JumpScratch
-//                   target span; split Addressable SplitEffects/{id} (also
-//                   fadeIn growth: LineHight z=180 = tip-anchored)
+//                   Official Flick: None = both arrows; OneDirection / JumpScratch
+//                   = one side from GimmickValue. Editor memory still uses
+//                   None + 0/±width for Flick direction.
+//   scratchLength — official GimmickValue: OneDirection 0/1 (left/right);
+//                   JumpScratch signed lane span (may differ from Width);
+//                   split Addressable SplitEffects/{id} (fadeIn follows
+//                   LineHight rotation). Flick Width is laneLength, not this.
+//                   Import maps official OneDirection 0/1 → None + ±width;
+//                   old editor None + nonzero is kept as left/right.
+//                   Export writes official None,0 / OneDirection,0/1.
 //                   → stored as NotationNote::scratch_length
-//   Official CSV and old editor CSV share this 7-column text. Import never
-//   rewrites ±1 (cannot tell them apart). Export of editor-authored Flick
-//   may expand historic ±1 to ±width (see OfficialChartSaveOptions).
 //
 // Times are converted to ticks (BPM 60 + TPQ 480 by default) for editor precision;
 // wdschart never stores absolute seconds.
@@ -66,9 +71,8 @@ struct OfficialChartSaveOptions {
   bool convert_lane_to_one_based = true;
   // Write JumpScratch / OneDirection as names (official) instead of 1 / 2.
   bool use_gimmick_names = true;
-  // Editor historically stored Flick direction as ±1. Expand those to ±width
-  // on export only. Import never does this — the file value is authoritative.
-  bool expand_legacy_flick_direction = true;
+  // Unused: Flick export always writes official None,0 / OneDirection 0/1.
+  bool expand_legacy_flick_direction = false;
 };
 
 class OfficialChartFormat {

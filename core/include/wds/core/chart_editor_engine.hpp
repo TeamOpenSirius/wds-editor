@@ -80,7 +80,8 @@ class ChartEditorEngine {
   SerializeResult save_project_to_file(const std::string& project_path, WdsProject project);
 
   // Import official Sirius/WDS CSV for preview (+ optional music_config DelaySeconds).
-  // Document becomes OfficialPreviewOnly — editing disabled.
+  // Document becomes OfficialPreviewOnly — editing disabled. File HoldEighth
+  // (type 900) rows are kept; eighths are not recomputed.
   SerializeResult load_official_from_file(const std::string& chart_path,
                                           const std::string& music_config_path = {});
 

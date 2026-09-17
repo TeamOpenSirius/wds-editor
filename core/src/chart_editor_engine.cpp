@@ -1,10 +1,13 @@
 #include <wds/core/chart_editor_engine.hpp>
 
 #include <wds/core/edit_grid.hpp>
+#include <wds/core/file_io.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
 #include <wds/core/timing_map.hpp>
+
+#include <algorithm>
 
 namespace wds::chart_editor {
 namespace {
@@ -14,6 +17,19 @@ NotationChart with_derived_eighths(NotationChart chart) {
   chart.notes =
       with_all_hold_eighths_recomputed(std::move(chart.notes), chart.timing.ticks_per_quarter);
   return chart;
+}
+
+bool looks_like_sus_import(const std::string& path) {
+  if (SusChartFormat::looks_like_sus_path(path)) {
+    return true;
+  }
+  SerializeResult peek;
+  const std::string bytes = read_text_file(path, peek);
+  if (peek.error != SerializeError::Ok || bytes.empty()) {
+    return false;
+  }
+  const std::string sample = bytes.substr(0, std::min<std::size_t>(bytes.size(), 512));
+  return SusChartFormat::looks_like_sus_text(sample);
 }
 
 }  // namespace
@@ -36,8 +52,14 @@ void ChartEditorEngine::set_preview_lead_in_visible_ms(int64_t visible_ms) noexc
 }
 
 void ChartEditorEngine::load_chart(const NotationChart& chart, ChartEditMode mode) {
-  document_.load_from_chart(with_derived_eighths(chart), mode);
-  if (!document_.is_read_only()) {
+  // Official preview cannot be edited — keep file eighths (CSV type 900) as-is.
+  // Editable loads still derive eighths from holds (wdschart never stores them).
+  if (mode == ChartEditMode::OfficialPreviewOnly) {
+    NotationChart prepared = chart;
+    normalize_timing_points(prepared.timing);
+    document_.load_from_chart(prepared, mode);
+  } else {
+    document_.load_from_chart(with_derived_eighths(chart), mode);
     repair_legacy_hold_heads(document_);
   }
   history_.clear();
@@ -155,7 +177,8 @@ SerializeResult ChartEditorEngine::load_sus_from_file(const std::string& path,
   if (result.error != SerializeError::Ok) {
     return result;
   }
-  load_chart(loaded.chart, ChartEditMode::OfficialPreviewOnly);
+  // SUS has no type-900 notes; derive eighths for preview from hold spans.
+  load_chart(with_derived_eighths(loaded.chart), ChartEditMode::OfficialPreviewOnly);
   if (out_meta != nullptr) {
     *out_meta = std::move(loaded.meta);
   }
@@ -174,7 +197,11 @@ SerializeResult ChartEditorEngine::load_auto_from_file(const std::string& path,
     return result;
   }
 
-  load_chart(chart, mode);
+  if (mode == ChartEditMode::OfficialPreviewOnly && looks_like_sus_import(path)) {
+    load_chart(with_derived_eighths(chart), mode);
+  } else {
+    load_chart(chart, mode);
+  }
   return result;
 }
 

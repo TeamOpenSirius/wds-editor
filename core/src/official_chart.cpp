@@ -327,11 +327,6 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
               "official chart: HiSpeed rows are not supported (line " +
                   std::to_string(line_no) + ")"};
     }
-    // HoldEighth is always recomputed from holds — never take type 900 from the file.
-    if (type_raw == static_cast<int32_t>(NoteType::HoldEighth)) {
-      continue;
-    }
-
     NotationNote note;
     note.id = next_id++;
     note.start_tick = seconds_to_tick(start_sec, chart.timing);
@@ -370,6 +365,15 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     }
 
     note.note_type = static_cast<NoteType>(type_raw);
+    if (note.note_type == NoteType::Flick && !is_split_lane_gimmick(note.gimmick_type) &&
+        !is_jump_scratch(note.gimmick_type) && is_one_direction(note.gimmick_type)) {
+      // Official OneDirection 0/1 → editor-internal None + ±width so place /
+      // convert / mirror / arrows stay on the ±width path. None + nonzero is
+      // an old editor chart and must keep its signed direction.
+      const int32_t dir = note.scratch_length <= 0 ? -1 : 1;
+      note.scratch_length = encode_flick_scratch_length(dir, note.width);
+      note.gimmick_type = GimmickType::None;
+    }
     chart.notes.push_back(note);
   }
 
@@ -446,16 +450,25 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     }
 
     GimmickType gimmick = note.gimmick_type;
-    // Official: hold-chain body with non-zero scratchLength uses JumpScratch name.
-    if (is_hold_chain_body(note.note_type) && note.scratch_length != 0 &&
-        gimmick == GimmickType::None) {
+    int32_t scratch_length = note.scratch_length;
+    if (note.note_type == NoteType::Flick && !is_split_lane_gimmick(gimmick)) {
+      if (is_jump_scratch(gimmick)) {
+        scratch_length = note.scratch_length;
+      } else if (is_one_direction(gimmick)) {
+        scratch_length = note.scratch_length <= 0 ? 0 : 1;
+      } else if (note.scratch_length == 0) {
+        gimmick = GimmickType::None;
+        scratch_length = 0;
+      } else {
+        // Editor-internal / old-chart ±1 or ±width → official OneDirection 0/1.
+        gimmick = GimmickType::OneDirection;
+        scratch_length = note.scratch_length < 0 ? 0 : 1;
+      }
+    } else if (is_hold_chain_body(note.note_type) && note.scratch_length != 0 &&
+               gimmick == GimmickType::None) {
+      // Official: hold-chain body with non-zero GimmickValue uses JumpScratch.
       gimmick = GimmickType::JumpScratch;
     }
-
-    const int32_t scratch_length =
-        (options.expand_legacy_flick_direction && note.note_type == NoteType::Flick)
-            ? official_flick_scratch_length(note.scratch_length, note.width)
-            : note.scratch_length;
 
     ss << start_sec << ',';
     if (end_sec < 0.0) {

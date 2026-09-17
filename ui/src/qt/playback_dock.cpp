@@ -252,7 +252,13 @@ void PlaybackBar::seek_to_slider(int value) {
   int64_t end = 1;
   settings->seek_window_ms(start, end);
   (void)end;
-  manager_->chart_preview().transport().request_seek_ms(start + value);
+  const int64_t target = start + static_cast<int64_t>(value);
+  if (seek_->isSliderDown() && last_scrub_ms_ && *last_scrub_ms_ == target) return;
+  last_scrub_ms_ = target;
+  // Queue only — poll() commits on the next preview tick, same as the
+  // legacy Slider::on_change path. Do not latch audio.position() or
+  // rewrite play_anchor_ms_ here; that was the pause-to-start creep.
+  manager_->chart_preview().transport().request_seek_ms(target);
 }
 
 void PlaybackBar::build_ui() {
@@ -339,14 +345,18 @@ void PlaybackBar::build_ui() {
   outer->setContentsMargins(0, 0, 0, 0);
   outer->addWidget(scroll);
 
-  connect(seek_, &QSlider::sliderReleased, this, [this] {
+  // Live scrub like the legacy interaction Slider (on_change while dragging).
+  // valueChanged covers drag, groove click, and key/page steps. sync_position()
+  // must keep QSignalBlocker around setValue — an unblocked sync seek was the
+  // pause-to-start forward-creep (each pause latched a slightly later ms).
+  connect(seek_, &QSlider::sliderPressed, this, [this] {
     journal_menu_action("playback.seek");
-    seek_to_slider(seek_->value());
+    last_scrub_ms_.reset();
   });
+  connect(seek_, &QSlider::valueChanged, this, [this](int value) { seek_to_slider(value); });
   connect(seek_, &QSlider::actionTriggered, this, [this](int action) {
     if (action == QAbstractSlider::SliderMove || seek_->isSliderDown()) return;
     journal_menu_action("playback.seek");
-    seek_to_slider(seek_->sliderPosition());
   });
   connect(play_, &QPushButton::clicked, this, [this] {
     journal_menu_action("playback.play");
@@ -417,6 +427,7 @@ void PlaybackBar::sync_position() {
   auto& transport = manager_->chart_preview().transport();
   apply_play_icon(transport.intends_playing());
   if (!seek_->isSliderDown()) {
+    last_scrub_ms_.reset();
     if (auto* settings = manager_->settings_panel()) {
       int64_t start = 0;
       int64_t end = 1;

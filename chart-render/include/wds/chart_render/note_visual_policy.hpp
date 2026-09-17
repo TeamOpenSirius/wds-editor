@@ -80,7 +80,7 @@ inline constexpr float kHoldBodyAlpha = 0.8f;
 
 std::vector<unsigned char> bake_hold_long_rgba(bool scratch);
 
-// scratch_length: - left only, + right only, 0 both (Sirius / utils.cpp).
+// Editor-internal / old-chart sl: - left only, + right only, 0 both.
 struct ScratchArrowSides {
   bool draw_left = false;
   bool draw_right = false;
@@ -88,6 +88,16 @@ struct ScratchArrowSides {
 
 inline ScratchArrowSides scratch_arrow_sides(int32_t scratch_length) noexcept {
   return ScratchArrowSides{scratch_length <= 0, scratch_length >= 0};
+}
+
+// Leftover official Flick OneDirection 0/1 (editor notes use sl sign instead).
+inline ScratchArrowSides scratch_arrow_sides_compat(bool official_one_direction,
+                                                    int32_t scratch_length) noexcept {
+  if (official_one_direction) {
+    return scratch_length <= 0 ? ScratchArrowSides{true, false}
+                               : ScratchArrowSides{false, true};
+  }
+  return scratch_arrow_sides(scratch_length);
 }
 
 enum class ArrowStyle : uint8_t {
@@ -112,6 +122,7 @@ struct StaticArrowLayoutParams {
   float span_right = 0.0f;
   float arrow_w = 0.0f;
   int32_t scratch_length = 0;
+  bool official_one_direction = false;
 };
 
 struct AnimatedArrowLayoutParams {
@@ -130,6 +141,7 @@ struct AnimatedArrowLayoutParams {
   // the near edge. Bidirectional must stay false (same flick count per side).
   bool fill_to_far_edge = false;
   int32_t scratch_length = 0;
+  bool official_one_direction = false;
   float sonolus_num = 1.0f;
   float anim_time_sec = 0.0f;
   float arrow_speed = 1.0f;
