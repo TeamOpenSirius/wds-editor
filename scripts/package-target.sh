@@ -997,8 +997,8 @@ PY
     die "MSI missing ApplyWdsInstallDir custom action"
   grep -Fq 'SetReinstallAll' <<<"${customs}" || \
     die "MSI missing SetReinstallAll custom action"
-  grep -Fq $'SetReinstallModeRepair\t51\tREINSTALLMODE\tomus' <<<"${customs}" || \
-    die "MSI missing SetReinstallModeRepair custom action (same build must repair with REINSTALLMODE=omus)"
+  grep -Fq $'SetReinstallModeRepair\t51\tREINSTALLMODE\tecmus' <<<"${customs}" || \
+    die "MSI missing SetReinstallModeRepair custom action (same build must repair with REINSTALLMODE=ecmus)"
   grep -Fq $'SetReinstallModeUpdate\t51\tREINSTALLMODE\tvamus' <<<"${customs}" || \
     die "MSI missing SetReinstallModeUpdate custom action (different build must update with REINSTALLMODE=vamus)"
   grep -Fq 'ApplyUserShortcuts' <<<"${customs}" && \
@@ -1077,10 +1077,32 @@ PY
   # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
   grep -Fq $'UpdateDlg\tNext\t[REINSTALL]\tALL\tInstalled' <<<"${events}" || \
     die "UpdateDlg must set REINSTALL=ALL when Installed"
-  # The UI must not pin REINSTALLMODE: the two SetReinstallMode* actions decide
-  # omus vs vamus from the build stamp, and a publish here would fight them.
+  # Repair is an explicit choice on the stock three-button maintenance screen.
+  grep -q 'MaintenanceTypeDlg' <<<"${dialogs}" || die "MSI missing MaintenanceTypeDlg"
+  grep -q 'MaintenanceTypeDlg' <<<"${ui_seq}" || die "MSI missing MaintenanceTypeDlg in InstallUISequence"
+  grep -Eq $'MaintenanceTypeDlg\t.*WDS_INSTALLED_TS = WDS_BUILD_TS' <<<"${ui_seq}" || \
+    die "MaintenanceTypeDlg must be shown only when WDS_INSTALLED_TS = WDS_BUILD_TS (the same MSI)"
+  grep -q 'RepairDlg' <<<"${dialogs}" && \
+    die "RepairDlg was replaced by the stock MaintenanceTypeDlg; remove the leftover dialog"
+  grep -Eq $'UpdateDlg\t.*WDS_INSTALLED_TS' <<<"${ui_seq}" || \
+    die "UpdateDlg must exclude the same-build case (its Show condition has to test WDS_INSTALLED_TS)"
+  # The stock screen's buttons only set WixUI_InstallMode; VerifyReadyDlg is what
+  # turns Repair and Remove into the properties the execute sequence acts on.
+  grep -Fq $'MaintenanceTypeDlg\tRepairButton\tNewDialog\tVerifyReadyDlg' <<<"${events}" || \
+    die "MaintenanceTypeDlg Repair must open VerifyReadyDlg"
+  grep -Fq $'MaintenanceTypeDlg\tRemoveButton\tNewDialog\tVerifyReadyDlg' <<<"${events}" || \
+    die "MaintenanceTypeDlg Remove must open VerifyReadyDlg"
+  grep -Fq $'VerifyReadyDlg\tRepair\tReinstallMode\tecmus' <<<"${events}" || \
+    die "VerifyReadyDlg Repair must publish ReinstallMode=ecmus (must match SetReinstallModeRepair)"
+  grep -Fq $'VerifyReadyDlg\tRepair\tReinstall\tAll' <<<"${events}" || \
+    die "VerifyReadyDlg Repair must publish Reinstall=All"
+  grep -Fq $'VerifyReadyDlg\tRemove\tRemove\tAll' <<<"${events}" || \
+    die "VerifyReadyDlg Remove must publish Remove=All"
+  # No dialog may publish the REINSTALLMODE *property*: the build stamp decides
+  # via SetReinstallModeRepair/Update, and the stock Repair button's ReinstallMode
+  # event publishes the same ecmus value.
   grep -Fq $'[REINSTALLMODE]' <<<"${events}" && \
-    die "UpdateDlg must not publish REINSTALLMODE (SetReinstallModeRepair/Update own it)"
+    die "no dialog may publish the REINSTALLMODE property (SetReinstallModeRepair/Update own it)"
   local apply_dir_seq costinit_seq rep_seq init_seq inst_init_seq proccomp_seq
   local repair_mode_seq update_mode_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
