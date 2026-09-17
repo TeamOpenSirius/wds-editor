@@ -24,8 +24,8 @@
 
   Three outcomes, all decided before costing:
     - WDS_INSTALLED_TS =  WDS_BUILD_TS -> the SAME MSI again: REPAIR
-      (REINSTALL=ALL + REINSTALLMODE=omus, so only missing/corrupt/older files,
-      registry and shortcuts are rewritten).
+      (REINSTALL=ALL + REINSTALLMODE=ecmus, the stock repair mode: missing,
+      corrupt or equal-version files, registry and shortcuts).
     - WDS_INSTALLED_TS <> WDS_BUILD_TS -> a DIFFERENT build: UPDATE in place
       (REINSTALL=ALL + REINSTALLMODE=vamus, forcing every file because a
       same-version rebuild is invisible to version and checksum rules, and
@@ -191,12 +191,15 @@
     <CustomAction Id="SetReinstallAll"
                   Property="REINSTALL"
                   Value="ALL"/>
-    <!-- Reinstalling over the SAME build: repair. Only missing, corrupt or
-         older files are rewritten and the package is not re-cached; this is the
-         standard Repair behaviour (msiexec's default REINSTALLMODE is omus). -->
+    <!-- Reinstalling over the SAME build: repair. ecmus is exactly what the
+         stock maintenance screen's Repair button publishes (VerifyReadyDlg:
+         ReinstallMode=ecmus), so the interactive and silent paths agree:
+         missing, corrupt or equal-version files are rewritten plus registry and
+         shortcuts, and the package is not re-cached. 'a' is deliberately absent
+         - forcing every file is the update path's job. -->
     <CustomAction Id="SetReinstallModeRepair"
                   Property="REINSTALLMODE"
-                  Value="omus"/>
+                  Value="ecmus"/>
     <!-- Reinstalling over a DIFFERENT build: update in place. Force every file
          ('a') because a same-version rebuild is invisible to version/checksum
          rules, and re-cache the package ('v') so a later Repair cannot restore
@@ -240,9 +243,12 @@
         Installed AND NOT REMOVE AND NOT REINSTALL AND NOT RESUME AND NOT PATCH
       </Custom>
       <!-- Same MSI already installed: WDS_INSTALLED_TS (read by AppSearch)
-           equals this package's stamp, so repair instead of overwriting. -->
+           equals this package's stamp, so repair instead of overwriting. A
+           leftover Id='*' product outranks repair and falls through to update,
+           matching the MaintenanceTypeDlg / UpdateDlg split in win-msi-ui.wxs.
+           NOT REMOVE keeps this out of the maintenance screen's Remove path. -->
       <Custom Action="SetReinstallModeRepair" After="AppSearch" Before="CostInitialize">
-        Installed AND NOT REMOVE AND NOT RESUME AND NOT PATCH AND WDS_INSTALLED_TS = WDS_BUILD_TS
+        Installed AND NOT REMOVE AND NOT RESUME AND NOT PATCH AND WDS_INSTALLED_TS = WDS_BUILD_TS AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED
       </Custom>
       <!-- An older build, or one that predates the stamp (the property is empty
            then): update in place. No NOT REINSTALL here on purpose - the UI may

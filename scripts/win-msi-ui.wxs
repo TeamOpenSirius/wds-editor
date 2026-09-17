@@ -3,12 +3,31 @@
   First-run / reinstall UI for WDS Editor MSI (wixl ext ui).
 
   Sequence:
-    InstallDirDlg  - choose install path (fresh install only)
-    UpdateDlg      - Installed (same ProductCode reinstall) or leftover
-                     Id='*' product (WIX_*_UPGRADE_DETECTED); no path picker
-    ShortcutsDlg   - desktop / Start Menu shortcut checkboxes
-    ProgressDlg    - from UI extension
-    ExitDialog     - completion
+    InstallDirDlg      - choose install path (fresh install, and the one-time
+                         migration off a leftover Id='*' product)
+    MaintenanceTypeDlg - the stock three-button maintenance screen (Change /
+                         Repair / Remove), shown only when this exact build is
+                         already installed, so repairing is an explicit click.
+                         Change is greyed out by ARPNOMODIFY=1. The stock
+                         VerifyReadyDlg wires the other two:
+                           Repair -> ReinstallMode=ecmus + Reinstall=All
+                           Remove -> Remove=All
+    UpdateDlg          - a different build is installed, or a leftover Id='*'
+                         product was detected; no path picker
+    ShortcutsDlg       - desktop / Start Menu shortcut checkboxes
+    ProgressDlg        - from UI extension
+    ExitDialog         - completion
+
+  Repair and update need separate entry points because msiexec cannot tell them
+  apart by itself: the same ProductCode is installed in both cases. The build
+  stamp decides - WDS_INSTALLED_TS equal to this package's WDS_BUILD_TS shows
+  the maintenance screen, anything else (including an older installation with no
+  stamp at all) goes straight to UpdateDlg.
+
+  MaintenanceWelcomeDlg stays out of the sequence (Condition="0") so the three
+  buttons are the first thing a repairer sees; MaintenanceTypeDlg's Back still
+  opens it, and its Next comes back here. Add a Show row for it if the classic
+  Welcome -> three buttons pair is wanted instead.
 
   Notes for wixl 0.103:
   - Folder is Edit (not PathEdit). PathEdit validates the path and clears the
@@ -126,11 +145,11 @@
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
-                 Text="{\WixUI_Font_Title}Repair or update [ProductName]"/>
+                 Text="{\WixUI_Font_Title}Update [ProductName]"/>
         <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes"
-                 Text="Setup will repair or update your existing installation."/>
+                 Text="This setup will update your existing installation."/>
         <Control Id="UpdateInfo" Type="Text" X="20" Y="70" Width="330" Height="100" NoPrefix="yes"
-                 Text="[ProductName] is already installed. Running this installer again repairs the installation; a newer build updates it in place. The install folder cannot be changed.&#xA;&#xA;Install folder:&#xA;[WDS_INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
+                 Text="A different build of [ProductName] is installed, or an older installation is being replaced. Files will be updated in place; the install folder cannot be changed.&#xA;&#xA;Install folder:&#xA;[WDS_INSTALLDIR]&#xA;&#xA;User settings under %LOCALAPPDATA%\WDS are kept. Apps &amp; Features keeps a single entry."/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
           <!-- Already installed: reinstall in place, never retarget INSTALLDIR.
@@ -196,9 +215,20 @@
         <!-- After InitWdsInstallDir so the path text is the resolved folder. -->
         <Show Dialog="InstallDirDlg" After="InitWdsInstallDir" Overridable="yes"
               Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED"/>
+        <!-- This exact build is already installed: show the stock three-button
+             maintenance screen so repairing is a deliberate click. Change is
+             disabled by ARPNOMODIFY, and Repair/Remove are wired by the stock
+             VerifyReadyDlg. A leftover Id='*' product takes precedence over
+             repair, hence the WIX_* exclusions - there really is something to
+             update in that case. "&lt;>" is msiexec's not-equal operator,
+             escaped because this is XML. -->
+        <Show Dialog="MaintenanceTypeDlg" After="InitWdsInstallDir" Overridable="yes"
+              Condition="Installed AND WDS_INSTALLED_TS = WDS_BUILD_TS AND NOT WIX_UPGRADE_DETECTED AND NOT WIX_SAME_VERSION_UPGRADE_DETECTED"/>
+        <!-- A different build, a leftover Id='*' product, or an older install
+             that predates the stamp: straight to the update flow, no choice. -->
         <Show Dialog="UpdateDlg" After="InitWdsInstallDir" Overridable="yes"
-              Condition="Installed OR WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED"/>
-        <!-- Same-product dest rebuilds use UpdateDlg, not Repair/Remove. -->
+              Condition="(Installed AND (NOT WDS_INSTALLED_TS OR WDS_INSTALLED_TS &lt;> WDS_BUILD_TS)) OR WIX_UPGRADE_DETECTED OR WIX_SAME_VERSION_UPGRADE_DETECTED"/>
+        <!-- Repair/Remove are offered by RepairDlg, not by the stock wizard. -->
         <Show Dialog="MaintenanceWelcomeDlg" Before="ProgressDlg" Overridable="yes"
               Condition="0"/>
         <Show Dialog="ExitDialog" OnExit="success" Overridable="yes"/>
