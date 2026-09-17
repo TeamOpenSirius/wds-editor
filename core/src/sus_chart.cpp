@@ -11,6 +11,7 @@
 #include <map>
 #include <numeric>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -212,6 +213,26 @@ int air_type_from_scratch_length(int32_t scratch_length) {
 void push_unique_warning(std::vector<std::string>& warnings, std::string msg) {
   if (std::find(warnings.begin(), warnings.end(), msg) == warnings.end()) {
     warnings.push_back(std::move(msg));
+  }
+}
+
+// Sort-order dense ids must keep star → hold binds. Leaving parent_hold_id on the
+// pre-sort id makes infer_legacy_star_hold_binds treat the star as unbound and
+// reattach it to the first same-span hold (overlapping full-width slides collide).
+void reassign_dense_ids_preserving_parent_binds(std::vector<NotationNote>& notes) {
+  std::unordered_map<int32_t, int32_t> old_to_new;
+  old_to_new.reserve(notes.size());
+  int32_t next = 0;
+  for (auto& note : notes) {
+    if (note.id >= 0) {
+      old_to_new[note.id] = next;
+    }
+    note.id = next++;
+  }
+  for (auto& note : notes) {
+    if (note.parent_hold_id == kNoBoundHoldId) continue;
+    const auto it = old_to_new.find(note.parent_hold_id);
+    note.parent_hold_id = it != old_to_new.end() ? it->second : kNoBoundHoldId;
   }
 }
 
@@ -1042,7 +1063,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     if (a.lane != b.lane) return a.lane < b.lane;
     return a.id < b.id;
   });
-  for (size_t i = 0; i < notes.size(); ++i) notes[i].id = static_cast<int32_t>(i);
+  reassign_dense_ids_preserving_parent_binds(notes);
 
   chart.notes = std::move(notes);
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
