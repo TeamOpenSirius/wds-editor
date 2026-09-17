@@ -964,6 +964,10 @@ make_win_msi() {
     die "MSI missing CREATE_DESKTOP_SHORTCUT property"
   grep -Fq $'WDS_INSTALLDIR' <<<"${props}" || \
     die "MSI missing WDS_INSTALLDIR property"
+  # ProductCode must stay pinned: it is what makes a dest rebuild an in-place
+  # reinstall (and keeps ARP repair working). It is a matched pair with the
+  # path-stable component GUIDs asserted below - read the header of
+  # win-msi-product.wxs before changing either half.
   grep -Fq $'8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907' <<<"${props}" || \
     die "MSI ProductCode must stay 8BEDBB5B-25A7-5B4A-81EB-8FE35C6B0907 (same-product reinstall)"
   grep -Fq $'SecureCustomProperties' <<<"${props}" || \
@@ -996,16 +1000,22 @@ make_win_msi() {
   # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
   grep -Fq $'UpdateDlg\tNext\t[REINSTALL]\tALL\tInstalled' <<<"${events}" || \
     die "UpdateDlg must set REINSTALL=ALL when Installed"
-  local apply_dir_seq costinit_seq files_seq rep_seq init_seq
+  local apply_dir_seq costinit_seq rep_seq init_seq inst_init_seq proccomp_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
   costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${exe_seq}")"
-  files_seq="$(awk -F'\t' '$1=="InstallFiles"{print $3; exit}' <<<"${exe_seq}")"
   rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
   init_seq="$(awk -F'\t' '$1=="InitWdsInstallDir"{print $3; exit}' <<<"${ui_seq}")"
+  inst_init_seq="$(awk -F'\t' '$1=="InstallInitialize"{print $3; exit}' <<<"${exe_seq}")"
+  proccomp_seq="$(awk -F'\t' '$1=="ProcessComponents"{print $3; exit}' <<<"${exe_seq}")"
   [[ -n "${apply_dir_seq}" && -n "${costinit_seq}" && "${apply_dir_seq}" -lt "${costinit_seq}" ]] || \
     die "ApplyWdsInstallDir (${apply_dir_seq:-unset}) must be before CostInitialize (${costinit_seq:-unset})"
-  [[ -n "${rep_seq}" && -n "${files_seq}" && "${rep_seq}" -gt "${files_seq}" ]] || \
-    die "RemoveExistingProducts (${rep_seq:-unset}) must be after InstallFiles (${files_seq:-unset}) so leftover Id='*' uninstalls keep the new copy"
+  # RemoveExistingProducts must use window 2 of the four placements msiexec
+  # accepts: after InstallInitialize, before the first action that generates
+  # execution script (ProcessComponents). Mid-script placements such as
+  # InstallFiles abort the install with error 2613.
+  [[ -n "${rep_seq}" && -n "${inst_init_seq}" && -n "${proccomp_seq}" \
+     && "${rep_seq}" -gt "${inst_init_seq}" && "${rep_seq}" -lt "${proccomp_seq}" ]] || \
+    die "RemoveExistingProducts (${rep_seq:-unset}) must sit between InstallInitialize (${inst_init_seq:-unset}) and ProcessComponents (${proccomp_seq:-unset}); elsewhere msiexec fails with error 2613"
   grep -q 'FindWdsInstallDir32' <<<"${regs}" || \
     die "MSI missing FindWdsInstallDir32 registry search"
   grep -Fq $'REINSTALLMODE\tamus' <<<"${props}" || \
