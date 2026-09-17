@@ -221,25 +221,18 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   convert_toolbar_->setFloatable(true);
   convert_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
   convert_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-  // About/Preferences roles only take effect when the action lives in a QMenu.
+  // AboutRole only takes effect when the action lives in a QMenu.
   // menuBar()->addAction() makes a top-level title and macOS ignores the role.
-  settings_action_ = new QAction(tr("设置"), this);
-  settings_action_->setToolTip(tr("编辑器设置"));
-  settings_action_->setIcon(fluent_icon(fluent::Settings));
   about_action_ = new QAction(tr("关于"), this);
   about_action_->setIcon(fluent_icon(fluent::Info));
   auto* help_menu = menuBar()->addMenu(tr("帮助"));
 #ifdef Q_OS_MACOS
   about_action_->setText(tr("关于 WDS Editor"));
   about_action_->setMenuRole(QAction::AboutRole);
-  settings_action_->setMenuRole(QAction::PreferencesRole);
-  help_menu->addAction(about_action_);
-  help_menu->addAction(settings_action_);
 #else
   about_action_->setMenuRole(QAction::NoRole);
-  settings_action_->setMenuRole(QAction::NoRole);
-  help_menu->addAction(about_action_);
 #endif
+  help_menu->addAction(about_action_);
   connect(about_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.about");
     AboutDialog(this).exec();
@@ -537,10 +530,6 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
     journal_menu_action("menu.check_chart");
     check_chart();
   });
-  connect(settings_action_, &QAction::triggered, this, [this] {
-    journal_menu_action("menu.settings");
-    show_settings();
-  });
 
   create_control_docks();
   restore_or_reset_layout();
@@ -710,6 +699,14 @@ bool EditorMainWindow::show_startup_splash() {
                                       "WDS", "WDS Editor")
                                 .value(QStringLiteral("recent/projects"))
                                 .toStringList();
+  const QColor path_fg = splash.palette().color(QPalette::WindowText);
+  const QColor path_muted =
+      path_fg.lightness() >= 128 ? path_fg.darker(140) : path_fg.lighter(180);
+  // Cocoa 16pt ≈ 16px. Stylesheet `pt` is 96-DPI, so 12pt looks the same as
+  // the name; pin the path in px.
+  recent->setStyleSheet(
+      QStringLiteral("QLabel#recentPath { font-size: 11px; color: %1; }")
+          .arg(path_muted.name()));
   int shown_recent = 0;
   for (const auto& path : recent_paths) {
     if (shown_recent >= 8) break;
@@ -723,16 +720,10 @@ bool EditorMainWindow::show_startup_splash() {
     row_layout->setSpacing(8);
     auto* name_label = new QLabel(QFileInfo(path).completeBaseName(), row);
     auto* path_label = new QLabel(path, row);
-    name_label->ensurePolished();
-    const QColor fg = name_label->palette().color(QPalette::WindowText);
-    // palette(mid) is Yami grey7 (#1D1F26), same as the list chrome — unreadable.
-    // Dim the label color itself so the path stays on the same side of the
-    // contrast as the name (white→gray on dark, black→gray on light).
-    const QColor muted = fg.lightness() >= 128 ? fg.darker(140) : fg.lighter(180);
-    QFont path_font = path_label->font();
-    path_font.setPointSizeF(std::max(10.0, path_font.pointSizeF() - 1.5));
+    path_label->setObjectName(QStringLiteral("recentPath"));
+    QFont path_font = name_label->font();
+    path_font.setPixelSize(11);
     path_label->setFont(path_font);
-    path_label->setStyleSheet(QStringLiteral("color: %1;").arg(muted.name()));
     path_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     row_layout->addWidget(name_label, 0, Qt::AlignVCenter);
     row_layout->addWidget(path_label, 1, Qt::AlignVCenter);
@@ -1220,13 +1211,6 @@ void EditorMainWindow::export_chart() {
   const bool ok = sus ? session.export_sus(path.toStdString())
                       : session.export_official(path.toStdString());
   if (!ok) QMessageBox::warning(this, tr("导出失败"), tr("无法导出谱面。"));
-}
-
-void EditorMainWindow::show_settings() {
-  if (settings_dock_ == nullptr) return;
-  settings_dock_->show();
-  settings_dock_->raise();
-  sync_toolbox_place_checks();
 }
 
 void EditorMainWindow::closeEvent(QCloseEvent* event) {

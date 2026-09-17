@@ -60,7 +60,6 @@ class EditorMainWindow final : public QMainWindow {
   void export_chart();
   void add_chart();
   void check_chart();
-  void show_settings();
   void remember_recent_project(const QString& path);
  private:
   void create_control_docks();
@@ -101,7 +100,6 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* export_action_ = nullptr;
   ::QAction* music_action_ = nullptr;
   ::QAction* check_action_ = nullptr;
-  ::QAction* settings_action_ = nullptr;
   ::QAction* about_action_ = nullptr;
   ::QAction* fullscreen_action_ = nullptr;
   ::QToolBar* command_toolbar_ = nullptr;
