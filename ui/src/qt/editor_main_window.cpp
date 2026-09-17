@@ -218,13 +218,25 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   convert_toolbar_->setFloatable(true);
   convert_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
   convert_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-  // 设置 lives in the top menu bar, not the toolbar.
+  // Settings: Mac application menu (PreferencesRole). Windows has no 设置
+  // menu item; the settings dock is still in 视图.
   settings_action_ = new QAction(tr("设置"), this);
   settings_action_->setToolTip(tr("编辑器设置"));
   settings_action_->setIcon(fluent_icon(fluent::Settings));
+#ifdef Q_OS_MACOS
+  settings_action_->setMenuRole(QAction::PreferencesRole);
   menuBar()->addAction(settings_action_);
+#else
+  settings_action_->setMenuRole(QAction::NoRole);
+#endif
   about_action_ = new QAction(tr("关于"), this);
   about_action_->setIcon(fluent_icon(fluent::Info));
+#ifdef Q_OS_MACOS
+  about_action_->setText(tr("关于 WDS Editor"));
+  about_action_->setMenuRole(QAction::AboutRole);
+#else
+  about_action_->setMenuRole(QAction::NoRole);
+#endif
   menuBar()->addAction(about_action_);
   connect(about_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.about");
@@ -670,14 +682,14 @@ bool EditorMainWindow::show_startup_splash() {
   auto* title = new QLabel(tr("<h1>WDS Editor</h1><p>开始编辑你的音游谱面</p>"), &splash);
   title->setTextFormat(Qt::RichText);
   root->addWidget(title);
-  root->addWidget(new QLabel(tr("打开最近工程，或创建一个空白工程。"), &splash));
+  root->addWidget(new QLabel(tr("从下方列表里选择一个现有工程，或创建一个新工程"), &splash));
   auto* recent_label = new QLabel(tr("最近编辑"), &splash);
   recent_label->setStyleSheet(QStringLiteral("font-weight:bold;"));
   root->addWidget(recent_label);
   auto* recent = new QListWidget(&splash);
   recent->setMinimumHeight(96);
   recent->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  recent->setUniformItemSizes(true);
+  recent->setUniformItemSizes(false);
   recent->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
   const auto recent_paths = QSettings(QSettings::defaultFormat(), QSettings::UserScope,
                                       "WDS", "WDS Editor")
@@ -686,12 +698,23 @@ bool EditorMainWindow::show_startup_splash() {
   int shown_recent = 0;
   for (const auto& path : recent_paths) {
     if (shown_recent >= 8) break;
-    if (QFileInfo::exists(path)) {
-      auto* item = new QListWidgetItem(QFileInfo(path).fileName(), recent);
-      item->setToolTip(path);
-      item->setData(Qt::UserRole, path);
-      ++shown_recent;
-    }
+    if (!QFileInfo::exists(path)) continue;
+    auto* item = new QListWidgetItem(recent);
+    item->setToolTip(path);
+    item->setData(Qt::UserRole, path);
+    auto* row = new QWidget(recent);
+    auto* row_layout = new QHBoxLayout(row);
+    row_layout->setContentsMargins(8, 6, 8, 6);
+    row_layout->setSpacing(8);
+    auto* name_label = new QLabel(QFileInfo(path).completeBaseName(), row);
+    auto* path_label = new QLabel(path, row);
+    path_label->setStyleSheet(QStringLiteral("color: palette(mid); font-size: 11px;"));
+    path_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    row_layout->addWidget(name_label, 0, Qt::AlignVCenter);
+    row_layout->addWidget(path_label, 1, Qt::AlignVCenter);
+    item->setSizeHint(row->sizeHint());
+    recent->setItemWidget(item, row);
+    ++shown_recent;
   }
   if (recent->count() == 0) {
     auto* item = new QListWidgetItem(tr("暂无最近工程"), recent);
@@ -713,10 +736,6 @@ bool EditorMainWindow::show_startup_splash() {
   open->setIcon(fluent_icon(fluent::OpenFolder));
   auto* create = new QPushButton(tr("新建工程"), &splash);
   create->setIcon(fluent_icon(fluent::Add));
-  auto* later = new QPushButton(tr("直接打开主窗口"), &splash);
-  later->setIcon(fluent_icon(fluent::Clear));
-  auto* settings = new QPushButton(tr("设置"), &splash);
-  settings->setIcon(fluent_icon(fluent::Settings));
   auto* about = new QPushButton(tr("关于"), &splash);
   about->setIcon(fluent_icon(fluent::Info));
   auto* version = new QLabel(tr("版本 %1").arg(QStringLiteral(WDS_APP_VERSION)), &splash);
@@ -724,18 +743,16 @@ bool EditorMainWindow::show_startup_splash() {
   actions->addWidget(open);
   actions->addWidget(create);
   actions->addStretch(1);
-  actions->addWidget(settings);
   actions->addWidget(about);
-  actions->addWidget(later);
   root->addLayout(actions);
   root->addWidget(version);
 
   std::function<void(const QString&)> start_load;
-  start_load = [this, &splash, recent, open, create, later, settings, about, loading,
+  start_load = [this, &splash, recent, open, create, about, loading,
                 progress](const QString& path) {
     if (path.isEmpty()) return;
     splash.setEnabled(false);
-    for (auto* button : {open, create, later, settings, about}) button->setEnabled(false);
+    for (auto* button : {open, create, about}) button->setEnabled(false);
     recent->setEnabled(false);
     loading->setText(tr("正在加载工程…"));
     loading->setVisible(true);
@@ -744,7 +761,7 @@ bool EditorMainWindow::show_startup_splash() {
     auto* watcher = new QFutureWatcher<PreparedWdsProject>(&splash);
     track_open_watcher(watcher);
     connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, &splash,
-            [this, &splash, path, recent, open, create, later, settings, about,
+            [this, &splash, path, recent, open, create, about,
              loading, progress, watcher, gen] {
               if (gen != open_generation_ || ui_manager_ == nullptr) {
                 untrack_open_watcher(watcher);
@@ -756,7 +773,7 @@ bool EditorMainWindow::show_startup_splash() {
                   future.takeResult());
               untrack_open_watcher(watcher);
               watcher->deleteLater();
-              for (auto* button : {open, create, later, settings, about})
+              for (auto* button : {open, create, about})
                 button->setEnabled(true);
               recent->setEnabled(true);
               splash.setEnabled(true);
@@ -791,16 +808,6 @@ bool EditorMainWindow::show_startup_splash() {
     journal_menu_action("splash.new");
     ui_manager_->session().new_project();
     splash.accept();
-  });
-  connect(later, &QPushButton::clicked, &splash, [&splash] {
-    journal_menu_action("splash.skip");
-    splash.accept();
-  });
-  connect(settings, &QPushButton::clicked, &splash, [this, &splash] {
-    journal_menu_action("splash.settings");
-    SettingsDialog dialog(ui_manager_, theme_dir_, &splash);
-    dialog.exec();
-    sync_toolbox_place_checks();
   });
   connect(about, &QPushButton::clicked, &splash, [this, &splash] {
     journal_menu_action("splash.about");
