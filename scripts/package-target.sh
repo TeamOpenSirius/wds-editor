@@ -1001,6 +1001,8 @@ PY
     die "MSI missing SetReinstallModeRepair custom action (same build must repair with REINSTALLMODE=ecmus)"
   grep -Fq $'SetReinstallModeUpdate\t51\tREINSTALLMODE\tvamus' <<<"${customs}" || \
     die "MSI missing SetReinstallModeUpdate custom action (different build must update with REINSTALLMODE=vamus)"
+  grep -Fq $'SetRootDrive\t51\tROOTDRIVE\t[WindowsVolume]' <<<"${customs}" || \
+    die "MSI missing SetRootDrive (rollback Config.Msi must stay on the Windows volume)"
   grep -Fq 'ApplyUserShortcuts' <<<"${customs}" && \
     die "MSI must not schedule ApplyUserShortcuts (Shortcut table owns .lnk files)"
   grep -Fq 'LoadShortcutPrefs' <<<"${customs}" && \
@@ -1072,6 +1074,10 @@ PY
     die "MSI missing SetReinstallModeRepair in InstallExecuteSequence"
   grep -Fq 'SetReinstallModeUpdate' <<<"${exe_seq}" || \
     die "MSI missing SetReinstallModeUpdate in InstallExecuteSequence"
+  grep -Fq 'SetRootDrive' <<<"${exe_seq}" || \
+    die "MSI missing SetRootDrive in InstallExecuteSequence"
+  grep -Fq 'SetRootDrive' <<<"${ui_seq}" || \
+    die "MSI missing SetRootDrive in InstallUISequence"
   grep -Fq 'InitWdsInstallDir' <<<"${ui_seq}" || \
     die "MSI missing InitWdsInstallDir in InstallUISequence"
   # wixl encodes <Publish Property="X"> as ControlEvent "[X]", same as CREATE_*.
@@ -1104,7 +1110,7 @@ PY
   grep -Fq $'[REINSTALLMODE]' <<<"${events}" && \
     die "no dialog may publish the REINSTALLMODE property (SetReinstallModeRepair/Update own it)"
   local apply_dir_seq costinit_seq rep_seq init_seq inst_init_seq proccomp_seq
-  local repair_mode_seq update_mode_seq
+  local repair_mode_seq update_mode_seq root_seq
   apply_dir_seq="$(awk -F'\t' '$1=="ApplyWdsInstallDir"{print $3; exit}' <<<"${exe_seq}")"
   costinit_seq="$(awk -F'\t' '$1=="CostInitialize"{print $3; exit}' <<<"${exe_seq}")"
   rep_seq="$(awk -F'\t' '$1=="RemoveExistingProducts"{print $3; exit}' <<<"${exe_seq}")"
@@ -1126,6 +1132,9 @@ PY
     die "SetReinstallModeRepair (${repair_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
   [[ -n "${update_mode_seq}" && -n "${costinit_seq}" && "${update_mode_seq}" -lt "${costinit_seq}" ]] || \
     die "SetReinstallModeUpdate (${update_mode_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
+  root_seq="$(awk -F'\t' '$1=="SetRootDrive"{print $3; exit}' <<<"${exe_seq}")"
+  [[ -n "${root_seq}" && -n "${costinit_seq}" && "${root_seq}" -lt "${costinit_seq}" ]] || \
+    die "SetRootDrive (${root_seq:-unset}) must run before CostInitialize (${costinit_seq:-unset})"
   # The two paths must be told apart by the stamp, not by anything else.
   grep -Eq $'SetReinstallModeRepair\t.*WDS_INSTALLED_TS = WDS_BUILD_TS' <<<"${exe_seq}" || \
     die "SetReinstallModeRepair must be conditioned on WDS_INSTALLED_TS = WDS_BUILD_TS (same MSI -> repair)"
