@@ -852,6 +852,12 @@ make_win_msi() {
 
   mkdir -p "$(dirname "$msi_path")"
   rm -f "$msi_path"
+  # wixl 0.103 (Ubuntu 24.04) cannot parse <Component><Condition> and
+  # aborts with "unhandled child Component node Condition". Keep those
+  # elements out of the .wxs; the Condition column is patched below.
+  if grep -Eq '^[ \t]*<Condition>' "$product_wxs"; then
+    die "win-msi-product.wxs must not contain <Condition> (wixl 0.103 core dump); patch Component.Condition after wixl"
+  fi
   echo "Building MSI with wixl (UI: InstallDir / Update + Shortcuts)…"
   (
     cd "$work"
@@ -891,6 +897,18 @@ make_win_msi() {
     "UPDATE Property SET Value='${scp}' WHERE Property='SecureCustomProperties'" \
     || die "msibuild failed to patch SecureCustomProperties"
   echo "Patched SecureCustomProperties (append CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL)"
+
+  # Same workaround as SecureCustomProperties: author the WiX Condition
+  # column that wixl 0.103 cannot emit. CREATE_*=0 then omits the .lnk.
+  local desk_cond='CREATE_DESKTOP_SHORTCUT="1"'
+  local start_cond='CREATE_STARTMENU_SHORTCUT="1"'
+  msibuild "$msi_path" -q \
+    "UPDATE Component SET Condition='${desk_cond}' WHERE Component='DesktopShortcut'" \
+    || die "msibuild failed to condition DesktopShortcut"
+  msibuild "$msi_path" -q \
+    "UPDATE Component SET Condition='${start_cond}' WHERE Component='StartMenuShortcut'" \
+    || die "msibuild failed to condition StartMenuShortcut"
+  echo "Patched Component.Condition for DesktopShortcut / StartMenuShortcut"
 
   # Sanity checks for a usable first-run / upgrade UI.
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
@@ -1027,8 +1045,13 @@ make_win_msi() {
     die "MSI AppSearch missing CREATE_DESKTOP_SHORTCUT (overlay cannot remember prefs)"
   grep -Fq 'CREATE_STARTMENU_SHORTCUT' <<<"${appsearch}" || \
     die "MSI AppSearch missing CREATE_STARTMENU_SHORTCUT"
-  grep -Fq 'CREATE_DESKTOP_SHORTCUT="1"' <<<"${comps_tbl}" || \
-    die "DesktopShortcut component must be conditioned on CREATE_DESKTOP_SHORTCUT"
+  local desk_cond_val="" start_cond_val=""
+  desk_cond_val="$(awk -F'\t' '$1=="DesktopShortcut"{print $5; exit}' <<<"${comps_tbl}")"
+  start_cond_val="$(awk -F'\t' '$1=="StartMenuShortcut"{print $5; exit}' <<<"${comps_tbl}")"
+  [[ "${desk_cond_val}" == 'CREATE_DESKTOP_SHORTCUT="1"' ]] || \
+    die "DesktopShortcut component must be conditioned on CREATE_DESKTOP_SHORTCUT (got ${desk_cond_val:-unset})"
+  [[ "${start_cond_val}" == 'CREATE_STARTMENU_SHORTCUT="1"' ]] || \
+    die "StartMenuShortcut component must be conditioned on CREATE_STARTMENU_SHORTCUT (got ${start_cond_val:-unset})"
   local folder_type=""
   folder_type="$(awk -F'\t' '$1=="InstallDirDlg" && $2=="Folder"{print $3; exit}' <<<"${controls}")"
   [[ "${folder_type}" == "Edit" ]] || \

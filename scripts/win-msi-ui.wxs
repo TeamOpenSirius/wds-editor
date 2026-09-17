@@ -19,6 +19,7 @@
   - Unchecked boxes clear the property; Next writes explicit "0" so
     SecureCustomProperties passes the off state into elevated Execute
   - Shortcuts are Shortcut-table components gated by CREATE_*
+    (Component.Condition is patched after wixl; 0.103 cannot parse it)
   - Defaults on update come from HKLM via AppSearch (RegistrySearch)
   - CREATE_* / WDS_INSTALLDIR / INSTALLDIR / REINSTALL are appended to
     SecureCustomProperties after wixl
