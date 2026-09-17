@@ -71,8 +71,13 @@
   wixl defaults Advertise=yes; the Target path keeps them non-advertised.
   CREATE_* + Component.Condition chooses which .lnk files exist. wixl 0.103
   crashes on <Component><Condition> (added in 0.106); package-target.sh
-  writes those Condition columns after wixl. AppSearch + ShortcutPrefs
-  remember the last checkbox state.
+  writes those Condition columns after wixl. ShortcutPrefs writes the
+  checkbox state to HKLM on every install (first run and every dest
+  upgrade). AppSearch reads it back into CREATE_* only if those
+  properties are empty: a Property-table default of 1 would block the
+  overlay, so the default is a Type 51 CA that runs only when the
+  search found nothing. Desktop/Start Menu components are Transitive so
+  CREATE_* is re-evaluated on a later rebuild, not only the first.
 
   InstallDirDlg uses Edit (not PathEdit). PathEdit on a not-yet-created
   INSTALLDIR can clear the property; Edit plus InitWdsInstallDir keeps it.
@@ -123,8 +128,11 @@
          first installation - and the Installed-only actions below override this
          value: repair for the same build, vamus for a different build. -->
     <Property Id="REINSTALLMODE" Value="amus"/>
-    <!-- Fresh install defaults to both shortcuts on; AppSearch overlays HKLM prefs. -->
-    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes">
+    <!-- No Property/@Value: AppSearch will not overlay a table default, so a
+         baked-in 1 made every rebuild forget an unchecked box. The Type 51
+         defaults below run only when both the 64-bit search and the 32-bit
+         fallback found nothing. -->
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Secure="yes">
       <RegistrySearch Id="FindDesktopPref"
                       Root="HKLM"
                       Key="Software\WDS\Editor"
@@ -132,13 +140,29 @@
                       Type="raw"
                       Win64="yes"/>
     </Property>
-    <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes">
+    <Property Id="CREATE_STARTMENU_SHORTCUT" Secure="yes">
       <RegistrySearch Id="FindStartMenuPref"
                       Root="HKLM"
                       Key="Software\WDS\Editor"
                       Name="CreateStartMenuShortcut"
                       Type="raw"
                       Win64="yes"/>
+    </Property>
+    <Property Id="WDS_DESKTOP_PREF32" Secure="yes">
+      <RegistrySearch Id="FindDesktopPref32"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="CreateDesktopShortcut"
+                      Type="raw"
+                      Win64="no"/>
+    </Property>
+    <Property Id="WDS_STARTMENU_PREF32" Secure="yes">
+      <RegistrySearch Id="FindStartMenuPref32"
+                      Root="HKLM"
+                      Key="Software\WDS\Editor"
+                      Name="CreateStartMenuShortcut"
+                      Type="raw"
+                      Win64="no"/>
     </Property>
     <!-- Parent folder chosen in BrowseDlg; CustomAction appends "\WDS Editor". -->
     <Property Id="WDSINSTALLPARENT" Secure="yes"/>
@@ -232,6 +256,18 @@
     <CustomAction Id="SetReinstallModeUpdate"
                   Property="REINSTALLMODE"
                   Value="vamus"/>
+    <CustomAction Id="AdoptDesktopPref32"
+                  Property="CREATE_DESKTOP_SHORTCUT"
+                  Value="[WDS_DESKTOP_PREF32]"/>
+    <CustomAction Id="AdoptStartMenuPref32"
+                  Property="CREATE_STARTMENU_SHORTCUT"
+                  Value="[WDS_STARTMENU_PREF32]"/>
+    <CustomAction Id="DefaultDesktopShortcut"
+                  Property="CREATE_DESKTOP_SHORTCUT"
+                  Value="1"/>
+    <CustomAction Id="DefaultStartMenuShortcut"
+                  Property="CREATE_STARTMENU_SHORTCUT"
+                  Value="1"/>
 
     <UIRef Id="WdsUI"/>
 
@@ -250,6 +286,21 @@
       <Custom Action="SetRootDrive" After="AppSearch" Before="CostInitialize">
         NOT ROOTDRIVE
       </Custom>
+      <!-- Must sit before CostInitialize: wixl otherwise parks After=AppSearch
+           extras after the dialogs, and ShortcutsDlg would publish 0 for an
+           unset box before the default 1 is applied. -->
+      <Custom Action="AdoptDesktopPref32" After="SetRootDrive" Before="CostInitialize">
+        WDS_DESKTOP_PREF32 AND NOT CREATE_DESKTOP_SHORTCUT
+      </Custom>
+      <Custom Action="AdoptStartMenuPref32" After="AdoptDesktopPref32" Before="CostInitialize">
+        WDS_STARTMENU_PREF32 AND NOT CREATE_STARTMENU_SHORTCUT
+      </Custom>
+      <Custom Action="DefaultDesktopShortcut" After="AdoptStartMenuPref32" Before="CostInitialize">
+        NOT CREATE_DESKTOP_SHORTCUT
+      </Custom>
+      <Custom Action="DefaultStartMenuShortcut" After="DefaultDesktopShortcut" Before="CostInitialize">
+        NOT CREATE_STARTMENU_SHORTCUT
+      </Custom>
     </InstallUISequence>
     <InstallExecuteSequence>
       <!-- Removes any other ProductCode that FindRelatedProducts listed
@@ -266,6 +317,18 @@
       <!-- User-typed / UI path must be applied before costing, not after. -->
       <Custom Action="SetRootDrive" After="AppSearch" Before="CostInitialize">
         NOT ROOTDRIVE
+      </Custom>
+      <Custom Action="AdoptDesktopPref32" After="SetRootDrive" Before="CostInitialize">
+        WDS_DESKTOP_PREF32 AND NOT CREATE_DESKTOP_SHORTCUT
+      </Custom>
+      <Custom Action="AdoptStartMenuPref32" After="AdoptDesktopPref32" Before="CostInitialize">
+        WDS_STARTMENU_PREF32 AND NOT CREATE_STARTMENU_SHORTCUT
+      </Custom>
+      <Custom Action="DefaultDesktopShortcut" After="AdoptStartMenuPref32" Before="CostInitialize">
+        NOT CREATE_DESKTOP_SHORTCUT
+      </Custom>
+      <Custom Action="DefaultStartMenuShortcut" After="DefaultDesktopShortcut" Before="CostInitialize">
+        NOT CREATE_STARTMENU_SHORTCUT
       </Custom>
       <Custom Action="ApplyWdsInstallDir" After="SetInstallDirFromPrevious" Before="CostInitialize">
         WDS_INSTALLDIR AND NOT Installed
@@ -314,8 +377,9 @@
                        Value="[INSTALLDIR]"
                        KeyPath="yes"/>
       </Component>
-      <!-- MSI-owned prefs (WriteRegistryValues). AppSearch reads these back
-           so ShortcutsDlg defaults match the last choice. -->
+      <!-- MSI-owned prefs (WriteRegistryValues). Written on first install and
+           again on every dest upgrade so the last checkbox state is what the
+           next package reads. AppSearch + the Default* CAs restore CREATE_*. -->
       <Component Id="ShortcutPrefs" Guid="$(var.GuidShortcutPrefs)" Win64="yes">
         <RegistryValue Root="HKLM"
                        Key="Software\WDS\Editor"
