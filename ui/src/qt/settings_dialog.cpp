@@ -42,7 +42,6 @@
 #include <QScrollBar>
 #include <QSizePolicy>
 #include <QSpinBox>
-#include <QStyle>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -451,6 +450,17 @@ void SettingsPanel::layout_nav_rail() {
   rail->raise();
 }
 
+void SettingsPanel::changeEvent(QEvent* event) {
+  QWidget::changeEvent(event);
+  if (event != nullptr && (event->type() == QEvent::PaletteChange ||
+                           event->type() == QEvent::ApplicationPaletteChange)) {
+    const QIcon icon = themed_named_icon("clear", {}, 18);
+    for (auto* button : findChildren<QPushButton*>(QStringLiteral("shortcutClear"))) {
+      button->setIcon(icon);
+    }
+  }
+}
+
 void SettingsPanel::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
   layout_nav_rail();
@@ -661,9 +671,8 @@ void SettingsPanel::build_pages() {
     shortcut_edits_[i] = edit;
     shortcutsLayout->addWidget(edit, row, 1, Qt::AlignVCenter);
     auto* clear = new QPushButton(shortcuts_host);
-    auto clear_icon = fluent_icon(fluent::Clear);
-    if (clear_icon.isNull()) clear_icon = style()->standardIcon(QStyle::SP_DialogCloseButton);
-    clear->setIcon(clear_icon);
+    clear->setObjectName(QStringLiteral("shortcutClear"));
+    clear->setIcon(themed_named_icon("clear", {}, 18));
     clear->setIconSize(QSize(18, 18));
     clear->setFixedSize(32, 32);
     const QString clear_label = tr("清除快捷键：%1").arg(QString::fromUtf8(

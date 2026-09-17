@@ -18,6 +18,7 @@
 #include <QAbstractSlider>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QEvent>
 #include <QFont>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -148,6 +149,18 @@ int toolbar_field_height(const QWidget* field) {
   return std::max(1, field->sizeHint().height());
 }
 
+void apply_square_icon_button(QPushButton* button, int side, int icon_px) {
+  button->setFixedSize(side, side);
+  button->setIconSize(QSize(icon_px, icon_px));
+  // Yami's QPushButton rule uses wide padding + input_height, which keeps
+  // icon-only transport buttons as 36x32 pills. Pin a square box here only.
+  button->setStyleSheet(QStringLiteral(
+      "QPushButton { min-width:%1px; max-width:%1px; width:%1px;"
+      " min-height:%1px; max-height:%1px; height:%1px;"
+      " padding:0px; margin:0px; }")
+                            .arg(side));
+}
+
 QLabel* make_form_label(QWidget* host, const QString& title) {
   auto* label = new QLabel(title, host);
   label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -268,8 +281,7 @@ void PlaybackBar::build_ui() {
     button->setToolTip(button->text());
     button->setAccessibleName(button->text());
     button->setText({});
-    button->setIconSize(QSize(20, 20));
-    button->setFixedSize(36, 32);
+    apply_square_icon_button(button, 32, 20);
   }
   auto* transport = new QWidget(block);
   auto* transport_row = new QHBoxLayout(transport);
@@ -562,12 +574,8 @@ void EditorToolbarWidget::build_ui() {
   chart_select_ = new QComboBox(content);
   apply_toolbar_field(chart_select_, kToolbarFieldW - kChartInnerGap - field_h);
   chart_add_ = new QPushButton(content);
-  auto add_icon = fluent_icon(fluent::Add);
-  if (add_icon.isNull()) add_icon = style()->standardIcon(QStyle::SP_FileDialogNewFolder);
-  chart_add_->setIcon(add_icon);
-  const int add_icon_px = std::max(12, field_h - 8);
-  chart_add_->setIconSize(QSize(add_icon_px, add_icon_px));
   chart_add_->setFixedSize(field_h, field_h);
+  apply_add_chart_icon();
   chart_add_->setToolTip(tr("增加谱面"));
   chart_add_->setAccessibleName(tr("增加谱面"));
   auto* chart_field = new QWidget(content);
@@ -667,6 +675,22 @@ void EditorToolbarWidget::build_ui() {
       manager_->request_save_ui_config(true);
     }
   });
+}
+
+void EditorToolbarWidget::apply_add_chart_icon() {
+  if (chart_add_ == nullptr) return;
+  const int side = std::max(1, chart_add_->width());
+  const int icon_px = std::max(12, side - 8);
+  chart_add_->setIcon(themed_named_icon("add", {}, icon_px));
+  chart_add_->setIconSize(QSize(icon_px, icon_px));
+}
+
+void EditorToolbarWidget::changeEvent(QEvent* event) {
+  QWidget::changeEvent(event);
+  if (event != nullptr && (event->type() == QEvent::PaletteChange ||
+                           event->type() == QEvent::ApplicationPaletteChange)) {
+    apply_add_chart_icon();
+  }
 }
 
 void EditorToolbarWidget::apply_delay() {

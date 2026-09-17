@@ -1,6 +1,10 @@
 #include "wds/ui/qt/fluent_icons.hpp"
 
+#include "wds/ui/resource_paths.hpp"
+
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
 #include <QFontDatabase>
 #include <QPainter>
 #include <QPainterPath>
@@ -103,6 +107,14 @@ QIcon themed_svg_icon(const QString& path, const QColor& color, int px) {
   }
   icon.addPixmap(disabled, QIcon::Disabled);
   return icon;
+}
+
+QIcon themed_named_icon(const char* stem, const QColor& color, int px) {
+  if (stem == nullptr || stem[0] == '\0') return {};
+  const auto argv0 = QCoreApplication::applicationFilePath();
+  const QDir dir(QString::fromStdString(resolve_icons_dir(argv0.toUtf8().constData())));
+  return themed_svg_icon(dir.filePath(QString::fromLatin1(stem) + QStringLiteral(".svg")), color,
+                         px);
 }
 
 }  // namespace wds::ui
