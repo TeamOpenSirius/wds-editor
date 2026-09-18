@@ -2537,6 +2537,88 @@ void test_official_keeps_file_eighth_and_export_generates() {
   CHECK_EQ(generated, 3);
 }
 
+void test_official_export_sanitizes_eighths_and_sorts_by_time() {
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+
+  NotationNote late = make_tap(960, 1);
+  late.id = 0;
+  late.note_type = NoteType::Normal;
+
+  NotationNote hold = make_tap(0, 0);
+  hold.id = 1;
+  hold.width = 3;
+  hold.end_tick = 480;
+  hold.note_type = NoteType::ScratchHold;
+  hold.gimmick_type = GimmickType::JumpScratch;
+  hold.scratch_length = 0;
+  chart.notes = {late, hold};
+
+  std::string out;
+  OfficialChartSaveOptions opt;
+  opt.convert_lane_to_one_based = true;
+  opt.use_gimmick_names = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, out, opt).error),
+           static_cast<int>(SerializeError::Ok));
+
+  CHECK(out.find("JumpScratch") == std::string::npos);
+  CHECK(out.find(",110,1,3,0,0") != std::string::npos);
+  CHECK(out.find(",900,") != std::string::npos);
+
+  double prev = -1.0;
+  bool saw_hold = false;
+  bool saw_late = false;
+  bool saw_eighth = false;
+  std::string line;
+  std::istringstream ss(out);
+  while (std::getline(ss, line)) {
+    if (line.empty()) continue;
+    const double t = std::stod(line.substr(0, line.find(',')));
+    CHECK(t + 1e-9 >= prev);
+    prev = t;
+    if (line.find(",110,") != std::string::npos) saw_hold = true;
+    if (line.find(",10,") != std::string::npos) saw_late = true;
+    if (line.find(",900,") != std::string::npos) {
+      saw_eighth = true;
+      CHECK(line.find("JumpScratch") == std::string::npos);
+      CHECK(line.find(",0,0") != std::string::npos);
+    }
+  }
+  CHECK(saw_hold);
+  CHECK(saw_late);
+  CHECK(saw_eighth);
+  CHECK(saw_hold && out.find(",110,") < out.find(",10,"));
+}
+
+void test_official_export_jump_scratch_eighths_stay_plain() {
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  NotationNote hold = make_tap(0, 0);
+  hold.id = 0;
+  hold.width = 3;
+  hold.end_tick = 960;
+  hold.note_type = NoteType::ScratchHold;
+  hold.gimmick_type = GimmickType::JumpScratch;
+  hold.scratch_length = 2;
+  chart.notes.push_back(hold);
+
+  std::string out;
+  OfficialChartSaveOptions opt;
+  opt.use_gimmick_names = true;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, out, opt).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(out.find("JumpScratch,2") != std::string::npos);
+  std::string line;
+  std::istringstream ss(out);
+  while (std::getline(ss, line)) {
+    if (line.find(",900,") == std::string::npos) continue;
+    CHECK(line.find("JumpScratch") == std::string::npos);
+    CHECK(line.find(",0,0") != std::string::npos);
+  }
+}
+
 void test_sus_ignores_file_eighth_and_export_generates() {
   NotationChart chart;
   chart.timing.bpm = 120.0;
@@ -5020,7 +5102,8 @@ void test_sus_ched_mid_flick_splits_jump_scratch() {
     }
   }
   CHECK_EQ(scratch_bodies, 2);
-  CHECK(jump >= 1);
+  // Mid/end Air type 1 on the exact body span encodes sl=0, which is not JumpScratch.
+  CHECK_EQ(jump, 0);
 }
 
 // Start #5 on a purple slide (end also has #5) suppresses ScratchHoldStart (addStart=false).
@@ -5124,6 +5207,32 @@ void test_sus_mid_air_only_splits_jump_scratch() {
     if (n.note_type == NoteType::ScratchHold) {
       ++scratch_bodies;
       if (n.gimmick_type == GimmickType::JumpScratch) ++jump;
+    }
+  }
+  CHECK_EQ(scratch_bodies, 2);
+  // Type-1 Air on the exact span is a purple cut, not JumpScratch (sl=0).
+  CHECK_EQ(jump, 0);
+}
+
+void test_sus_mid_air_right_span_is_jump_scratch() {
+  const char* sus =
+      "#TITLE \"midair-js\"\n"
+      "#BPM01: 120.0\n"
+      "#00008: 01\n"
+      "#00030a: 12002200\n"
+      "#00050: 00420042\n";  // Air type 4 at mid and end → sl = +width
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int scratch_bodies = 0;
+  int jump = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::ScratchHold) {
+      ++scratch_bodies;
+      if (n.gimmick_type == GimmickType::JumpScratch) {
+        ++jump;
+        CHECK(n.scratch_length != 0);
+      }
     }
   }
   CHECK_EQ(scratch_bodies, 2);
@@ -5297,6 +5406,28 @@ void test_sus_slide_invisible_mid_not_sound() {
   }
   CHECK_EQ(bodies, 1);
   CHECK_EQ(sounds, 0);
+}
+
+void test_sus_type3_does_not_copy_to_sibling_hold() {
+  const char* sus =
+      "#TITLE \"sib\"\n"
+      "#REQUEST \"ticks_per_beat 480\"\n"
+      "#BPM01: 230.0\n"
+      "#00008: 01\n"
+      "#000320: 1200320022000000\n"
+      "#0003c0: 0000320000000000\n";
+  SusChartLoadResult loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int sounds = 0;
+  int sounds_on_right = 0;
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type != NoteType::Sound) continue;
+    ++sounds;
+    if (n.lane >= 8) ++sounds_on_right;
+  }
+  CHECK_EQ(sounds, 1);
+  CHECK_EQ(sounds_on_right, 0);
 }
 
 // Fractional #mmm02 measure length must preserve tick span (e.g. 3.5 beats).
@@ -7694,6 +7825,8 @@ int main() {
   test_truncated_wdschart_rejected();
   test_wdschart_omits_and_ignores_eighths();
   test_official_keeps_file_eighth_and_export_generates();
+  test_official_export_sanitizes_eighths_and_sorts_by_time();
+  test_official_export_jump_scratch_eighths_stay_plain();
   test_sus_ignores_file_eighth_and_export_generates();
   test_official_csv_tempo_map_export();
   test_official_csv_flick_scratch_length_encodes_width();
@@ -7741,10 +7874,12 @@ int main() {
   test_sus_left_jump_air_binds_scratch_hold();
   test_sus_jump_scratch_chain_joint_no_pink_head();
   test_sus_mid_air_only_splits_jump_scratch();
+  test_sus_mid_air_right_span_is_jump_scratch();
   test_sus_start_air_only_unscratches_to_blue_hold();
   test_sus_til01_split_roundtrip();
   test_wdschart_export_import_preserves_chart();
   test_sus_slide_invisible_mid_not_sound();
+  test_sus_type3_does_not_copy_to_sibling_hold();
   test_sus_fractional_measure_length();
   test_sus_measurebs_offset();
   test_sus_waveoffset_roundtrip();

@@ -888,12 +888,19 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
 
       for (const RawEvent* mid : mids_in_range) {
         if (mid->tick <= t0 || mid->tick >= t1) continue;
+        const int mid_lane = map_lane(mid->lane);
+        const int mid_width = map_width(mid->lane, mid->width);
+        const int mid_right = mid_lane + mid_width - 1;
+        const int body_right = body_lane + body_width - 1;
+        // Same-channel leftover type 3 on another lane must not become a star
+        // on this body (or a cloned mid on a simultaneous sibling hold).
+        if (mid_lane > body_right || body_lane > mid_right) continue;
         NotationNote star;
         star.id = next_id++;
         star.start_tick = static_cast<int32_t>(mid->tick);
         star.end_tick = star.start_tick;
-        star.lane = map_lane(mid->lane);
-        star.width = map_width(mid->lane, mid->width);
+        star.lane = mid_lane;
+        star.width = mid_width;
         star.note_type = scratch ? NoteType::ScratchSound : NoteType::Sound;
         star.gimmick_type = GimmickType::None;
         star.scratch_length = 0;
@@ -949,7 +956,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
             if (mid->tick > seg_t0 && mid->tick < mid_air->tick) seg_mids.push_back(mid);
           }
           emit_hold_segment(seg_t0, mid_air->tick, body_lane, body_width, /*scratch=*/true,
-                            /*jump=*/true, sl, seg_mids, first, first && add_start);
+                            /*jump=*/sl != 0, sl, seg_mids, first, first && add_start);
           first = false;
           seg_t0 = mid_air->tick;
         }

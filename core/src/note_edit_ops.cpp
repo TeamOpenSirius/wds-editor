@@ -70,6 +70,9 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
       eighth.start_tick = tick;
       eighth.end_tick = tick;
       eighth.note_type = NoteType::HoldEighth;
+      // Official HoldEighth is gimmick 0 / scratch 0. Copying the parent hold
+      // would leak JumpScratch onto type 900 and kill sequential judge.
+      eighth.gimmick_type = GimmickType::None;
       eighth.scratch_length = 0;
       eighth.parent_hold_id = hold.id >= 0 ? hold.id : kNoBoundHoldId;
       notes.push_back(eighth);
