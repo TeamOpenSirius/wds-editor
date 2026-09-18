@@ -21,8 +21,8 @@ namespace wds::chart_editor {
 // - Damage (#1 type 4) at start → intentional headless; at end → Nontail (import
 //   may degrade to a tailed Hold and record a warning).
 // - Slide mid (#3 type 3) → Sound / ScratchSound by parent hold family.
-// - Mid #5 on the exact body span → JumpScratch split (SoundPurple).
-// - scratch_length != 0 → GimmickType::JumpScratch.
+// - Mid #5 on the exact body span → purple split (SoundPurple). JumpScratch
+//   only when the Air encodes a nonzero scratch span; sl=0 stays gimmick 0.
 // - #TIL01 export must be `#TIL01: "` (colon-space) so sus2txt can parse it.
 //   #TIL00 HiSpeed is ignored (editor cannot author).
 // - Legacy #2 Hold channels from older WDS exports import as blue Hold.

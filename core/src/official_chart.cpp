@@ -424,8 +424,18 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
   ss.setf(std::ios::fixed);
   ss.precision(4);
 
-  const std::vector<NotationNote> notes = with_all_hold_eighths_recomputed(
+  std::vector<NotationNote> notes = with_all_hold_eighths_recomputed(
       chart.notes, chart.timing.ticks_per_quarter);
+  // txt2data sorts by startTime then type. Appending 900s unsorted makes time
+  // jump backward; a sequential judge pointer dies from that row onward.
+  std::sort(notes.begin(), notes.end(), [](const NotationNote& a, const NotationNote& b) {
+    if (a.start_tick != b.start_tick) return a.start_tick < b.start_tick;
+    if (a.note_type != b.note_type) {
+      return static_cast<int32_t>(a.note_type) < static_cast<int32_t>(b.note_type);
+    }
+    if (a.lane != b.lane) return a.lane < b.lane;
+    return a.id < b.id;
+  });
 
   for (const auto& note : notes) {
     const double start_sec = tick_to_seconds(note.start_tick, chart.timing);
@@ -451,7 +461,10 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
 
     GimmickType gimmick = note.gimmick_type;
     int32_t scratch_length = note.scratch_length;
-    if (note.note_type == NoteType::Flick && !is_split_lane_gimmick(gimmick)) {
+    if (note.note_type == NoteType::HoldEighth) {
+      gimmick = GimmickType::None;
+      scratch_length = 0;
+    } else if (note.note_type == NoteType::Flick && !is_split_lane_gimmick(gimmick)) {
       if (is_jump_scratch(gimmick)) {
         scratch_length = note.scratch_length;
       } else if (is_one_direction(gimmick)) {
@@ -464,10 +477,14 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
         gimmick = GimmickType::OneDirection;
         scratch_length = note.scratch_length < 0 ? 0 : 1;
       }
-    } else if (is_hold_chain_body(note.note_type) && note.scratch_length != 0 &&
-               gimmick == GimmickType::None) {
-      // Official: hold-chain body with non-zero GimmickValue uses JumpScratch.
-      gimmick = GimmickType::JumpScratch;
+    } else if (is_hold_chain_body(note.note_type)) {
+      if (scratch_length == 0 && is_jump_scratch(gimmick)) {
+        // JumpScratch requires a nonzero span. sl=0 is a plain scratch tail.
+        gimmick = GimmickType::None;
+      } else if (scratch_length != 0 && gimmick == GimmickType::None) {
+        // Official: hold-chain body with non-zero GimmickValue uses JumpScratch.
+        gimmick = GimmickType::JumpScratch;
+      }
     }
 
     ss << start_sec << ',';

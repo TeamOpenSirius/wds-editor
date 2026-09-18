@@ -16,7 +16,8 @@ namespace wds::chart_editor {
 //   endTime       — hold/split end in seconds; -1 = instantaneous (no duration)
 //   type          — AppConst.NoteType (10/20/80/100/900/…); 0 = gimmick-only (split);
 //                   900 (HoldEighth) is kept on import (preview-only, not recomputed)
-//                   and generated on export from editable charts;
+//                   and generated on export from editable charts (always gimmick 0 /
+//                   scratch 0). Export rows are sorted by startTime then type;
 //                   -1 = HiSpeed (endTime holds speed value; not stored in NotationNote);
 //                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
 //                   editor imports as JumpScratch split / orphan Flick — never stored as 40)
@@ -28,6 +29,8 @@ namespace wds::chart_editor {
 //                   None + 0/±width for Flick direction.
 //   scratchLength — official GimmickValue: OneDirection 0/1 (left/right);
 //                   JumpScratch signed lane span (may differ from Width);
+//                   hold-chain JumpScratch requires nonzero scratchLength
+//                   (sl=0 is written as gimmick 0);
 //                   split Addressable SplitEffects/{id} (fadeIn follows
 //                   LineHight rotation). Flick Width is laneLength, not this.
 //                   Import maps official OneDirection 0/1 → None + ±width;
