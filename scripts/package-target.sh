@@ -1031,8 +1031,10 @@ PY
   grep -q 'StartMenuFeature' <<<"${features}" && \
     die "MSI still has StartMenuFeature (shortcuts are Condition-owned)"
   grep -q 'BrowseDlg' <<<"${dialogs}" || die "MSI missing BrowseDlg"
-  grep -Fq 'SetInstallDirFromBrowse' <<<"${customs}" || \
-    die "MSI missing SetInstallDirFromBrowse custom action"
+  grep -Fq $'SetInstallDirFromBrowse\t51\tINSTALLDIR\t[WDSINSTALLPARENT]WDS Editor' <<<"${customs}" || \
+    die "SetInstallDirFromBrowse must join as [WDSINSTALLPARENT]WDS Editor (parent already ends with \\)"
+  grep -Fq $'[WDSINSTALLPARENT]\\WDS Editor' <<<"${customs}" && \
+    die "SetInstallDirFromBrowse must not insert an extra \\ before WDS Editor"
   grep -Fq 'SetInstallDirFromPrevious' <<<"${customs}" || \
     die "MSI missing SetInstallDirFromPrevious custom action"
   grep -Fq 'ApplyWdsInstallDir' <<<"${customs}" || \
