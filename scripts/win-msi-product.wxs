@@ -145,7 +145,9 @@
                       Type="raw"
                       Win64="yes"/>
     </Property>
-    <!-- Parent folder chosen in BrowseDlg; CustomAction appends "\WDS Editor". -->
+    <!-- Parent folder chosen in BrowseDlg. DirectoryCombo / DirectoryList /
+         PathEdit values already end with '\'; SetInstallDirFromBrowse only
+         appends the product folder name. -->
     <Property Id="WDSINSTALLPARENT" Secure="yes"/>
     <!-- Edit (not PathEdit) binds here. Copied to INSTALLDIR on first-install Next. -->
     <Property Id="WDS_INSTALLDIR" Secure="yes"/>
@@ -197,7 +199,7 @@
     <Property Id="WDS_ALLOW_DOWNGRADE" Secure="yes"/>
     <CustomAction Id="SetInstallDirFromBrowse"
                   Property="INSTALLDIR"
-                  Value="[WDSINSTALLPARENT]\WDS Editor"/>
+                  Value="[WDSINSTALLPARENT]WDS Editor"/>
     <CustomAction Id="AdoptPreviousInstall32"
                   Property="WDS_PREVIOUS_INSTALL"
                   Value="[WDS_PREVIOUS_INSTALL32]"/>

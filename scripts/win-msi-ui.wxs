@@ -34,7 +34,8 @@
     property when C:\Program Files\WDS Editor does not exist yet — first
     install then writes files nowhere useful; Repair skips this dialog.
   - wixl ignores Indirect, so we cannot bind PathEdit to the Directory property
-  - BrowseDlg is custom; OK runs SetInstallDirFromBrowse to append \WDS Editor
+  - BrowseDlg is custom; OK runs SetInstallDirFromBrowse. The parent already
+    ends with '\', so the CA value is [WDSINSTALLPARENT]WDS Editor (no extra \).
   - A CheckBox is on iff its property is set. AppSearch sets CREATE_*
     when the HKLM marker exists; first install leaves both empty (off).
     Unchecked boxes clear the property. Do not Publish no/0: any set
@@ -85,7 +86,7 @@
         <Control Id="Folder" Type="Edit" X="20" Y="100" Width="245" Height="18"
                  Property="WDS_INSTALLDIR"/>
         <Control Id="Browse" Type="PushButton" X="275" Y="99" Width="75" Height="20" Text="Browse...">
-          <!-- Start the folder picker under Program Files; OK appends \WDS Editor. -->
+          <!-- Start the folder picker under Program Files; OK appends WDS Editor. -->
           <Publish Property="WDSINSTALLPARENT" Value="[ProgramFiles64Folder]" Order="1">1</Publish>
           <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2">1</Publish>
         </Control>
@@ -104,8 +105,8 @@
 
       <!--
         Folder browser popup. wixl has no stock BrowseDlg and ignores Indirect,
-        so we browse WDSINSTALLPARENT (a plain path property) then append the
-        product folder name via SetInstallDirFromBrowse.
+        so we browse WDSINSTALLPARENT (a plain path property that already ends
+        with '\') then append the product folder name via SetInstallDirFromBrowse.
 
         Control_First must participate in a closed Control_Next loop (error 2834
         otherwise). Mirror InstallDirDlg: lead with BannerBitmap, then buttons.
