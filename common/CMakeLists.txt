@@ -1,6 +1,7 @@
 # Shared primitives: timeline, logging, crash interception.
 
 add_library(wds_common STATIC
+  src/app_version.cpp
   src/crash_handler.cpp
   src/crash_input_journal.cpp
   src/log.cpp

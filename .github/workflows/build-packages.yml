@@ -217,6 +217,9 @@ jobs:
     needs: [win-x86_64, macos-arm]
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Download build artifacts
         uses: actions/download-artifact@v7
         with:
@@ -230,8 +233,10 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           short_sha="$(printf '%s' '${{ github.sha }}' | cut -c1-7)"
+          version="$(sed -nE 's/^set\(WDS_APP_VERSION "([^"]+)"\).*/\1/p' CMakeLists.txt)"
+          test -n "${version}"
           echo "tag=main-${short_sha}" >> "$GITHUB_OUTPUT"
-          echo "name=WDS Editor ${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "name=${version}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$COMMIT_MSG" > release_notes.md
           echo "---- release_notes.md ----"
           cat release_notes.md

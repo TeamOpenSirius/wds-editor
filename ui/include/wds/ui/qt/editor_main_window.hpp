@@ -5,6 +5,7 @@
 #include <QString>
 #include <QTimer>
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
+#include "wds/ui/qt/update_checker.hpp"
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -39,6 +40,7 @@ class EditorMainWindow final : public QMainWindow {
   // Shows the startup chooser. Returns true when the editor should continue,
   // false when the user closed the splash and the application should exit.
   bool show_startup_splash();
+  void maybe_auto_check_updates();
   void set_viewport_windows(QWindow* preview, QWindow* editor);
   void set_editor_widget(QWidget* editor);
   // App-wide Space → transport toggle (except while typing / edit viewport focus).
@@ -101,6 +103,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* music_action_ = nullptr;
   ::QAction* check_action_ = nullptr;
   ::QAction* about_action_ = nullptr;
+  ::QAction* check_updates_action_ = nullptr;
   ::QAction* fullscreen_action_ = nullptr;
   ::QToolBar* command_toolbar_ = nullptr;
   ::QToolBar* convert_toolbar_ = nullptr;
@@ -119,6 +122,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QWindow* editor_window_ = nullptr;
   ::QWidget* editor_widget_ = nullptr;
   QTimer resize_settle_timer_;
+  UpdateChecker update_checker_;
   bool native_resizing_ = false;
 };
 }

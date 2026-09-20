@@ -4,6 +4,7 @@
 #include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
 #include "wds/ui/qt/caption_check.hpp"
+#include "wds/ui/qt/update_checker.hpp"
 #include "wds/common/crash_handler.hpp"
 
 #include <QApplication>
@@ -217,7 +218,7 @@ QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* par
 constexpr int kNavCollapsedW = 16;
 constexpr int kNavExpandedW = 104;
 constexpr int kNavItemH = 26;
-constexpr int kSettingsSectionCount = 8;
+constexpr int kSettingsSectionCount = 9;
 
 std::array<QString, kSettingsSectionCount> settings_section_titles() {
   return {
@@ -229,6 +230,7 @@ std::array<QString, kSettingsSectionCount> settings_section_titles() {
       QCoreApplication::translate("wds::ui", "宽度"),
       QCoreApplication::translate("wds::ui", "快捷键"),
       QCoreApplication::translate("wds::ui", "隐私"),
+      QCoreApplication::translate("wds::ui", "更新"),
   };
 }
 
@@ -241,6 +243,7 @@ constexpr std::array<const char*, kSettingsSectionCount> kSettingsTabJournalIds 
     "settings.tab_width",
     "settings.tab_shortcuts",
     "settings.tab_privacy",
+    "settings.tab_updates",
 }};
 
 QColor nav_rail_fill(const QPalette& palette) {
@@ -699,6 +702,10 @@ void SettingsPanel::build_pages() {
   });
   privacy->addWidget(open_logs);
 
+  auto* updates = section_at(8);
+  auto_check_updates_ =
+      add_wrapping_check(updates, tr("启动时自动检查更新"), updates->parentWidget());
+
   scroll_pad_ = new QWidget(content);
   scroll_pad_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
   scroll_pad_->setFixedHeight(0);
@@ -749,6 +756,11 @@ void SettingsPanel::build_pages() {
     if (!applying_) journal_menu_action("settings.privacy_toggle");
     live();
   });
+  connect(auto_check_updates_, &QCheckBox::toggled, this, [this](bool on) {
+    if (applying_) return;
+    journal_menu_action("settings.auto_check_updates");
+    set_auto_check_updates_enabled(on);
+  });
 }
 
 void SettingsPanel::load_from_config() {
@@ -782,6 +794,7 @@ void SettingsPanel::load_from_config() {
     shortcut_edits_[i]->setKeySequence(chord_to_sequence(chord));
   }
   allow_crash_log_sensitive_->setChecked(cfg_.allow_crash_log_sensitive);
+  auto_check_updates_->setChecked(auto_check_updates_enabled());
   applying_ = false;
 }
 
