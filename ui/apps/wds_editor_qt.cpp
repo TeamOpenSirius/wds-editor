@@ -681,6 +681,9 @@ int main(int argc, char** argv) {
   window.show();
   window.raise();
   window.activateWindow();
+  if (!args.contains("--smoke-test")) {
+    QTimer::singleShot(0, &window, [&window] { window.maybe_auto_check_updates(); });
+  }
   for (const auto& [screenshot_path, screenshot_ms] : screenshots) {
     QTimer::singleShot(screenshot_ms, &window, [&window, screenshot_path] {
       QScreen* screen = nullptr;

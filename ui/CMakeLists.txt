@@ -1,5 +1,5 @@
 # UI library and Qt editor shell (realtime preview/edit remain Vulkan-rendered).
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
 # Homebrew ships qtsvg in its own keg; Qt6Config only looks beside qtbase.
 if(NOT Qt6Svg_DIR)
   foreach(_wds_qt_prefix IN LISTS CMAKE_PREFIX_PATH)
@@ -30,12 +30,13 @@ add_executable(wds_editor WIN32
   src/qt/caption_check.cpp
   src/qt/fluent_icons.cpp
   src/qt/about_dialog.cpp
+  src/qt/update_checker.cpp
   src/qt/busy_dialog.cpp
   src/qt/split_picker_dialog.cpp
   src/qt/timing_edit_dialog.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
-target_link_libraries(wds_editor PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Svg wds::ui)
+target_link_libraries(wds_editor PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Svg Qt6::Network wds::ui)
 get_filename_component(_wds_qtsvg_prefix "${Qt6Svg_DIR}/../../.." ABSOLUTE)
 if(EXISTS "${_wds_qtsvg_prefix}/share/qt/plugins")
   target_compile_definitions(wds_editor PRIVATE

@@ -1,3 +1,4 @@
+#include "wds/common/app_version.hpp"
 #include "wds/common/common.hpp"
 #include "wds/common/crash_input_journal.hpp"
 #include "wds/common/utf8_path.hpp"
@@ -289,6 +290,35 @@ void test_crash_input_journal() {
   CHECK(std::strcmp(path_buf, "/Users/me/charts/song.wds") == 0);
 }
 
+void test_app_version_parse_and_compare() {
+  using wds::common::compare_app_version;
+  using wds::common::format_app_version;
+  using wds::common::parse_app_version;
+
+  const auto newer = parse_app_version("1.0.1-beta.0");
+  const auto older_stable = parse_app_version("1.0.0-stable");
+  const auto high_beta = parse_app_version("1.0.0-beta.99");
+  const auto beta10 = parse_app_version("1.0.0-beta.10");
+  const auto beta2 = parse_app_version("1.0.0-beta.2");
+  CHECK(newer.has_value());
+  CHECK(older_stable.has_value());
+  CHECK(high_beta.has_value());
+  CHECK(beta10.has_value());
+  CHECK(beta2.has_value());
+  CHECK(compare_app_version(*newer, *older_stable) > 0);
+  CHECK(compare_app_version(*older_stable, *high_beta) > 0);
+  CHECK(compare_app_version(*beta10, *beta2) > 0);
+  CHECK(compare_app_version(*older_stable, *older_stable) == 0);
+  CHECK(format_app_version(*newer) == "1.0.1-beta.0");
+  CHECK(format_app_version(*older_stable) == "1.0.0-stable");
+
+  CHECK(!parse_app_version("1.0.0-beta1"));
+  CHECK(!parse_app_version("1.0.0"));
+  CHECK(!parse_app_version("1.0.0-stable.1"));
+  CHECK(!parse_app_version("1.0.0-beta"));
+  CHECK(!parse_app_version(""));
+}
+
 }  // namespace
 
 int main() {
@@ -297,6 +327,7 @@ int main() {
   test_microsecond_helpers();
   test_utf8_install_path_io();
   test_crash_input_journal();
+  test_app_version_parse_and_compare();
   if (failures != 0) {
     std::fprintf(stderr, "%d common test failure(s)\n", failures);
     return 1;

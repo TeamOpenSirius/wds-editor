@@ -237,6 +237,17 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
     journal_menu_action("menu.about");
     AboutDialog(this).exec();
   });
+  check_updates_action_ = new QAction(tr("检查更新"), this);
+#ifdef Q_OS_MACOS
+  check_updates_action_->setMenuRole(QAction::ApplicationSpecificRole);
+#else
+  check_updates_action_->setMenuRole(QAction::NoRole);
+#endif
+  help_menu->addAction(check_updates_action_);
+  connect(check_updates_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.check_updates");
+    update_checker_.check(this, true);
+  });
 
   statusBar()->showMessage(tr("就绪"));
 
@@ -679,6 +690,12 @@ bool EditorMainWindow::show_startup_splash() {
     journal_menu_action("splash.about");
     AboutDialog(&splash).exec();
   });
+  auto* splash_updates = splash_help->addAction(tr("检查更新"));
+  splash_updates->setMenuRole(QAction::ApplicationSpecificRole);
+  connect(splash_updates, &QAction::triggered, &splash, [this, &splash] {
+    journal_menu_action("splash.check_updates");
+    update_checker_.check(&splash, true);
+  });
 #endif
   auto* root = new QVBoxLayout(&splash);
   root->setContentsMargins(24, 20, 24, 18);
@@ -836,6 +853,11 @@ bool EditorMainWindow::show_startup_splash() {
   // Closing the startup page means the user chose to exit, since the main
   // window has not been shown yet. The caller owns showing the editor.
   return result == QDialog::Accepted;
+}
+
+void EditorMainWindow::maybe_auto_check_updates() {
+  if (!auto_check_updates_enabled()) return;
+  update_checker_.check(this, false);
 }
 
 void EditorMainWindow::remember_recent_project(const QString& path) {

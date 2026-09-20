@@ -54,7 +54,7 @@ class SettingsPanel final : public QWidget {
 
   QWidget* sidebar_ = nullptr;
   QScrollArea* scroll_ = nullptr;
-  std::array<QWidget*, 8> sections_{};
+  std::array<QWidget*, 9> sections_{};
   QWidget* scroll_pad_ = nullptr;
   QComboBox* theme_combo_ = nullptr;
 
@@ -74,6 +74,7 @@ class SettingsPanel final : public QWidget {
   std::array<QSpinBox*, 6> width_slots_{};
   std::array<QKeySequenceEdit*, wds::interaction::kEditorShortcutCount> shortcut_edits_{};
   QCheckBox* allow_crash_log_sensitive_ = nullptr;
+  QCheckBox* auto_check_updates_ = nullptr;
 };
 
 // Thin Close wrapper around SettingsPanel (startup splash).
