@@ -5,6 +5,7 @@
 #include "wds/common/crash_handler.hpp"
 #include "wds/common/crash_input_journal.hpp"
 #include "wds/common/log.hpp"
+#include "wds/common/runtime_env.hpp"
 
 #include <atomic>
 #include <cstdarg>
@@ -266,47 +267,7 @@ void sentinel_path(char* out, std::size_t cap) {
   join_log_path(out, cap, "running.sentinel");
 }
 
-void capture_os_version() {
-  g_os_version[0] = '\0';
-#if defined(_WIN32)
-  OSVERSIONINFOW vi{};
-  vi.dwOSVersionInfoSize = sizeof(vi);
-  bool ok = false;
-  using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
-  const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
-  if (ntdll != nullptr) {
-    auto rtl = reinterpret_cast<RtlGetVersionFn>(::GetProcAddress(ntdll, "RtlGetVersion"));
-    if (rtl != nullptr) {
-      ok = (rtl(&vi) == 0);
-    }
-  }
-  if (!ok) {
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-    ok = ::GetVersionExW(&vi) != 0;
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
-  }
-  if (ok) {
-    std::snprintf(g_os_version, sizeof(g_os_version), "Windows %lu.%lu.%lu",
-                  static_cast<unsigned long>(vi.dwMajorVersion),
-                  static_cast<unsigned long>(vi.dwMinorVersion),
-                  static_cast<unsigned long>(vi.dwBuildNumber));
-  } else {
-    copy_trunc(g_os_version, sizeof(g_os_version), "Windows");
-  }
-#else
-  utsname u{};
-  if (::uname(&u) == 0) {
-    std::snprintf(g_os_version, sizeof(g_os_version), "%s %s %s", u.sysname, u.release, u.machine);
-  } else {
-    copy_trunc(g_os_version, sizeof(g_os_version), "POSIX");
-  }
-#endif
-}
+void capture_os_version() { format_os_version(g_os_version, sizeof(g_os_version)); }
 
 void capture_main_slide() {
   g_main_slide = 0;

@@ -2,6 +2,7 @@
 
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/chart_render/split_soft_profile.hpp>
+#include <wds/common/log.hpp>
 #include <wds/common/utf8_path.hpp>
 #include <wds/core/official_playfield.hpp>
 
@@ -26,7 +27,7 @@ std::string queue_required(TextureCache& cache, const fs::path& dir, const char*
   const fs::path path = dir / name;
   const std::string utf8 = path_to_utf8(path);
   if (!is_regular_file_utf8(utf8) || !cache.queue_png(utf8)) {
-    std::fprintf(stderr, "SkinCatalog: missing required skin '%s'\n", name);
+    WDS_LOG("SkinCatalog: missing required skin '%s'\n", name);
     return {};
   }
   return utf8;

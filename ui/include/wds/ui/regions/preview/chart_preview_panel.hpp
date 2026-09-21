@@ -94,9 +94,6 @@ class ChartPreviewPanel {
   void collect_ready_waveforms();
   void destroy_spectrogram_texture();
   void bake_spectrogram_texture();
-  bool bake_ui_font(float body_px, float tip_px, bool mild_sharpen);
-  void warm_ui_font_glyphs();
-  bool ensure_ui_font_scale();
 
   std::string last_init_error_;
   PlaybackPreviewView preview_;
@@ -115,10 +112,7 @@ class ChartPreviewPanel {
   wds::renderer::TextureInfo ui_font_texture_{};
   // Atlases replaced mid-frame; destroyed in flush_retired_font_textures().
   std::vector<wds::renderer::TextureInfo> retired_font_textures_;
-  std::string ui_font_path_;
   int display_refresh_hz_ = 60;
-  float font_bake_tier_ = 0.0f;
-  float font_bake_tip_bucket_ = 0.0f;
   int panel_fb_w_ = 0;
   int content_x_ = 0;
   int content_y_ = 0;

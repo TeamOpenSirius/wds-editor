@@ -13,6 +13,8 @@
 #include "wds/renderer/preview_visual_config.hpp"
 #include "wds/common/crash_handler.hpp"
 #include "wds/common/log.hpp"
+#include "wds/common/runtime_env.hpp"
+#include "wds/renderer/vulkan_renderer.hpp"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -25,6 +27,9 @@
 #include <QGuiApplication>
 #include <QIcon>
 #include <QScreen>
+#include <QSysInfo>
+#include <QVersionNumber>
+#include <QVulkanInstance>
 #include <QWindow>
 #include <QSettings>
 #include <QStandardPaths>
@@ -77,6 +82,7 @@ void add_qt_plugin_path(const QString& plugins, bool prepend) {
 }
 
 void prepare_bundled_qt_plugins(const char* argv0) {
+  QString bundled;
 #if defined(Q_OS_MACOS)
   // Qt 6.6+ backs Vulkan/Metal QWindows with QMetalLayer, whose per-frame
   // displayLayer: cycle (display lock + presentsWithTransaction toggling around a
@@ -89,29 +95,33 @@ void prepare_bundled_qt_plugins(const char* argv0) {
   char path[PATH_MAX];
   uint32_t size = sizeof(path);
   if (_NSGetExecutablePath(path, &size) == 0) {
-    add_qt_plugin_path(QFileInfo(QString::fromUtf8(path)).absoluteDir().filePath(
-                          QStringLiteral("lib/plugins")),
-                      true);
+    bundled = QFileInfo(QString::fromUtf8(path)).absoluteDir().filePath(
+        QStringLiteral("lib/plugins"));
+    add_qt_plugin_path(bundled, true);
   }
 #endif
 #if defined(Q_OS_WIN)
   wchar_t exe[MAX_PATH];
   if (GetModuleFileNameW(nullptr, exe, MAX_PATH) != 0) {
-    add_qt_plugin_path(QFileInfo(QString::fromWCharArray(exe)).absoluteDir().filePath(
-                          QStringLiteral("plugins")),
-                      true);
+    bundled = QFileInfo(QString::fromWCharArray(exe)).absoluteDir().filePath(
+        QStringLiteral("plugins"));
+    add_qt_plugin_path(bundled, true);
   } else if (argv0 != nullptr) {
-    add_qt_plugin_path(QFileInfo(QString::fromLocal8Bit(argv0)).absoluteDir().filePath(
-                          QStringLiteral("plugins")),
-                      true);
+    bundled = QFileInfo(QString::fromLocal8Bit(argv0)).absoluteDir().filePath(
+        QStringLiteral("plugins"));
+    add_qt_plugin_path(bundled, true);
   }
 #else
   (void)argv0;
 #endif
 #if defined(WDS_QT_SVG_PLUGIN_DIR)
   // Homebrew / MinGW splits qtsvg into its own prefix; qtbase's plugin root
-  // has no qsvg. Packaged builds already have it under the paths above.
-  add_qt_plugin_path(QString::fromUtf8(WDS_QT_SVG_PLUGIN_DIR), false);
+  // has no qsvg. A packaged .app already ships qsvg under the bundled path.
+  // Appending the host prefix on the build machine loads a second Qt
+  // (moveToThread warnings, blank first preview / pixmap ghosts).
+  if (bundled.isEmpty() || !QDir(bundled).exists()) {
+    add_qt_plugin_path(QString::fromUtf8(WDS_QT_SVG_PLUGIN_DIR), false);
+  }
 #endif
 }
 
@@ -393,7 +403,11 @@ void wds_qt_message_handler(QtMsgType type, const QMessageLogContext& context, c
   }
   if (type == QtCriticalMsg || type == QtWarningMsg) {
     const QByteArray utf8 = msg.toUtf8();
-    WDS_LOG("qt: %s\n", utf8.constData());
+    const char* kind = type == QtCriticalMsg ? "critical" : "warning";
+    WDS_LOG("qt %s %s\n", kind, utf8.constData());
+    if (context.file != nullptr && context.file[0] != '\0') {
+      WDS_LOG("qt at %s:%d\n", context.file, context.line);
+    }
     return;
   }
 #if !defined(NDEBUG)
@@ -425,15 +439,55 @@ void maybe_notify_previous_crash(QWidget* parent) {
     wds::ui::journal_menu_action("crash_notice.close");
   }
 }
+
+void log_qt_environment(const QString& theme_id) {
+  WDS_LOG("qt version=%s app=%s\n", qVersion(),
+          qUtf8Printable(QCoreApplication::applicationVersion()));
+  WDS_LOG("qt os=%s kernel=%s %s arch=%s\n",
+          qUtf8Printable(QSysInfo::prettyProductName()),
+          qUtf8Printable(QSysInfo::kernelType()), qUtf8Printable(QSysInfo::kernelVersion()),
+          qUtf8Printable(QSysInfo::currentCpuArchitecture()));
+  WDS_LOG("qt theme=%s plugin_path=%s\n", qUtf8Printable(theme_id),
+          qgetenv("QT_PLUGIN_PATH").constData());
+  const auto screens = QGuiApplication::screens();
+  QScreen* primary = QGuiApplication::primaryScreen();
+  WDS_LOG("qt screens=%d\n", static_cast<int>(screens.size()));
+  for (int i = 0; i < screens.size(); ++i) {
+    QScreen* screen = screens[i];
+    if (screen == nullptr) {
+      continue;
+    }
+    const QSize sz = screen->size();
+    WDS_LOG("screen[%d] '%s' %dx%d dpr=%.2f hz=%.1f primary=%d\n", i,
+            qUtf8Printable(screen->name()), sz.width(), sz.height(),
+            screen->devicePixelRatio(), screen->refreshRate(), screen == primary ? 1 : 0);
+  }
+}
+
+void log_qt_vulkan_instance(const QVulkanInstance& vk_instance) {
+  const QVersionNumber api = vk_instance.apiVersion();
+  const QVersionNumber supported = vk_instance.supportedApiVersion();
+  WDS_LOG("QVulkanInstance api=%d.%d.%d supported=%d.%d.%d ok=1\n", api.majorVersion(),
+          api.minorVersion(), api.microVersion(), supported.majorVersion(),
+          supported.minorVersion(), supported.microVersion());
+  const auto exts = vk_instance.extensions();
+  WDS_LOG("QVulkanInstance extensions=%d\n", static_cast<int>(exts.size()));
+  for (const QByteArray& ext : exts) {
+    WDS_LOG("QVulkanInstance ext %s\n", ext.constData());
+  }
+  wds::renderer::log_physical_devices(vk_instance.vkInstance());
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
+  wds::common::log_open_debug_session();
   g_prev_qt_handler = qInstallMessageHandler(&wds_qt_message_handler);
   prepare_bundled_qt_plugins(argv[0]);
   // Pin the bundled MoltenVK ICD before Qt or the loader enumerates Homebrew
   // drivers. Two MoltenVK copies make vkGetDeviceQueue jump to NULL.
   wds::ui::prepare_macos_vulkan_environment(argv[0]);
+  wds::common::log_runtime_environment(argv[0]);
   wds::ui::WdsApplication app(argc, argv);
   QCoreApplication::setOrganizationName(QStringLiteral("WDS"));
   QCoreApplication::setApplicationName(QStringLiteral("WDS Editor"));
@@ -458,6 +512,7 @@ int main(int argc, char** argv) {
   const QString theme_id =
       QSettings("WDS", "WDS Editor").value("appearance/theme").toString();
   wds::ui::apply_wds_theme(app, theme_dir, theme_id);
+  log_qt_environment(theme_id);
 
   auto deps = wds::ui::check_startup_dependencies(argv[0]);
   if (!deps.ok()) {
@@ -467,10 +522,13 @@ int main(int argc, char** argv) {
 
   QVulkanInstance vk_instance;
   if (!vk_instance.create()) {
+    WDS_LOG("QVulkanInstance create failed: errorCode=%d\n",
+            static_cast<int>(vk_instance.errorCode()));
     wds::ui::add_vulkan_unavailable(deps);
     wds::common::mark_clean_exit();
     return wds::ui::fail_startup_dependencies(deps);
   }
+  log_qt_vulkan_instance(vk_instance);
   wds::ui::EditorMainWindow window;
   auto* preview_window = new wds::ui::RealtimeVulkanWindow(&vk_instance);
   window.set_viewport_windows(preview_window, nullptr);
@@ -541,9 +599,9 @@ int main(int argc, char** argv) {
     *last_editor_tick = std::chrono::steady_clock::now();
   };
 
-  preview_window->set_frame_callback([&editor, &window, preview_window, visual, ui_font,
-                                      overlay_loaded_display, &frame_diag, editor_widget, ui_alive,
-                                      &finish_editor_frame](
+  preview_window->set_frame_callback([&editor, preview_window, visual, ui_font,
+                                      overlay_loaded_display, &frame_diag, editor_widget,
+                                      ui_alive, &finish_editor_frame, &window](
                                          float delta, int logical_w, int logical_h, int fb_w,
                                          int fb_h,
                                          const std::vector<wds::interaction::InputEvent>& events) mutable {
@@ -551,21 +609,24 @@ int main(int argc, char** argv) {
     int64_t wall_us = -1;
     if (diag) wall_us = frame_diag.begin_callback(std::chrono::steady_clock::now());
     if (!editor.chart_preview().ready()) {
+      finish_editor_frame(delta);
+      if (editor_widget->isVisible()) editor_widget->repaint();
       auto host = preview_window->host_surface();
-      if (host.external_instance == VK_NULL_HANDLE || host.external_surface == VK_NULL_HANDLE ||
-          !editor.chart_preview().initialize_empty(host, overlay_loaded_display(visual), ui_font)) {
+      if (host.external_instance == VK_NULL_HANDLE || host.external_surface == VK_NULL_HANDLE) {
+        WDS_LOG("preview init wait: instance=%p surface=%p\n",
+                static_cast<void*>(host.external_instance),
+                static_cast<void*>(host.external_surface));
         return;
       }
+      if (!editor.chart_preview().initialize_empty(host, overlay_loaded_display(visual), ui_font)) {
+        WDS_LOG("preview initialize_empty failed\n");
+        return;
+      }
+      WDS_LOG("preview initialize_empty ok\n");
       if (editor.session().chart_count() == 0) {
-        // No project was chosen on the splash (or smoke/direct launch): seed
-        // the normal blank document only after the preview backend is live.
         (void)editor.session().new_project();
       }
-      // Startup project selection can happen before the Vulkan surface exists;
-      // attach its BGM once the live transport has been initialized.
       if (!editor.session().music_path().empty()) {
-        // Do not decode the project audio inside the first exposed frame. Let
-        // Qt paint the shell and schedule the decode on the next event turn.
         const std::string music = editor.session().music_path();
         QTimer::singleShot(0, &window, [ui_alive, &editor, music] {
           if (!ui_alive->load()) return;
@@ -586,6 +647,12 @@ int main(int argc, char** argv) {
       phase_t0 = tick_t1;
     }
     editor.chart_preview().render();
+    preview_window->mark_presented();
+    static bool logged_present = false;
+    if (!logged_present) {
+      logged_present = true;
+      WDS_LOG("preview first present fb=%dx%d\n", fb_w, fb_h);
+    }
     int64_t render_us = 0;
     if (diag) {
       render_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -666,7 +733,7 @@ int main(int argc, char** argv) {
     const QByteArray utf8 = open_path.toUtf8();
     const std::string path(utf8.constData(), static_cast<std::size_t>(utf8.size()));
     if (!editor.session().open_wdsproject(path)) {
-      std::fprintf(stderr, "failed to open project: %s\n", path.c_str());
+      WDS_LOG("failed to open project: %s\n", path.c_str());
     }
   }
 
@@ -681,6 +748,8 @@ int main(int argc, char** argv) {
   window.show();
   window.raise();
   window.activateWindow();
+  WDS_LOG("main window shown\n");
+  QTimer::singleShot(0, &window, [preview_window] { preview_window->request_frame(); });
   if (!args.contains("--smoke-test")) {
     QTimer::singleShot(0, &window, [&window] { window.maybe_auto_check_updates(); });
   }
@@ -694,7 +763,7 @@ int main(int argc, char** argv) {
       if (shot.isNull()) shot = window.grab();
       if (shot.isNull() || !shot.save(screenshot_path, "PNG")) {
         const QByteArray utf8 = screenshot_path.toUtf8();
-        std::fprintf(stderr, "failed to save screenshot: %s\n", utf8.constData());
+        WDS_LOG("failed to save screenshot: %s\n", utf8.constData());
       }
     });
   }

@@ -131,7 +131,9 @@ class FontAtlas {
   bool pixels_dirty_ = false;
   bool dual_ = false;
   bool mild_sharpen_ = false;
+  bool fallback_tried_ = false;
   float line_nudge_at_body_ = 0.0f;
+  std::string primary_font_path_;
 };
 
 }  // namespace wds::interaction

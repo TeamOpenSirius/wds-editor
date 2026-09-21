@@ -1,13 +1,11 @@
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 
 #include "wds/renderer/log.hpp"
-#include "wds/ui/layout/editor_layout.hpp"
 
 #include <wds/common/crash_handler.hpp>
 #include <wds/core/official_playfield.hpp>
 
 #include <wds/interaction/font_atlas.hpp>
-#include <wds/interaction/theme.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -20,29 +18,6 @@
 
 namespace wds::ui {
 namespace {
-
-// Body (Md/Gutter) and tip sizes are baked separately so each draw stays near 1:1.
-float ui_font_body_bake_px(float tier) {
-  namespace th = wds::interaction::theme;
-  const float logical = std::max(th::kFontSizeMd, th::kFontSizeGutter);
-  return std::max(logical * std::max(tier, 1.0f), 16.0f);
-}
-
-float ui_font_tip_bake_px(float tier, float logical_tip_px = 0.0f) {
-  namespace th = wds::interaction::theme;
-  const float logical =
-      logical_tip_px > 0.0f ? th::tooltip_bake_bucket(logical_tip_px) : th::kFontSizeTooltip;
-  return std::max(logical * std::max(tier, 1.0f), 12.0f);
-}
-
-float toolbar_tip_logical_px(float left_w_logical) {
-  namespace th = wds::interaction::theme;
-  const float icon = estimate_toolbar_icon_px(left_w_logical);
-  return th::tooltip_px_for_host(std::max(1.0f, icon - th::px(4.0f)));
-}
-
-// Mild coverage sharpen (≈a^1.2) for tiers ≤1.5; full a² above that.
-bool ui_font_mild_sharpen(float tier) { return tier <= 1.5f + 0.001f; }
 
 void publish_vulkan_device_context(const wds::renderer::VulkanRenderer& vk) {
   const std::uint32_t drv = vk.device_driver_version();
@@ -58,101 +33,24 @@ void publish_vulkan_device_context(const wds::renderer::VulkanRenderer& vk) {
 
 ChartPreviewPanel::~ChartPreviewPanel() { shutdown(); }
 
-void ChartPreviewPanel::warm_ui_font_glyphs() {
-  auto& font = wds::interaction::FontAtlas::instance();
-  // Optional startup warm only — paint/measure already ensure_glyphs on demand
-  // from the full bundled face (no subset sync required for new UI text).
-  font.ensure_glyphs(
-      "功能区转换音符音乐延迟谱面选择可见范围拍内分割"
-      "流速音乐音效静音谱面播放速度"
-      "打开工程保存导入谱面（只读）导出编辑器设置导入音乐撤销重做"
-      "停止播放后停在当前时间音符默认对齐分割线轨道"
-      "分割轨道数分割线外观分割线编号节奏信息编辑拍号取消确认"
-      "深色材质设置"
-      "打开WDS工程保存为导入官方谱面导出官方谱面"
-      "WDS Editor"
-      "转换为"
-      "导出整个项目仅导出当前谱面"
-      "选择导出目录"
-      "导出冲突目标目录存在同名文件是否覆盖将跳过冲突文件"
-      "文件音频输入快捷键宽快捷键设置"
-      "频谱显示无包络图频率抗锯齿"
-      "一档二档三档四档五档六档"
-      "播放暂停打开保存撤销重做复制粘贴镜像中心上移下移左移右移删除选中切换全屏宽度播放速度"
-      "在当前位置暂停在开始播放位置暂停"
-      "按下快捷键"
-      "导入谱面时自动转换"
-      "关闭体音效播放"
-      "反转时间轴滚轮方向时间轴滚轮速度"
-      "反转滚轮调节可见范围大小方向"
-      "创建新谱面添加已有谱面添加谱面"
-      "未保存的更改当前项目有未保存的更改是否保存"
-      "不保存"
-      "格式官方"
-      "就绪已新建工程已打开工程已保存工程已取消保存失败打开失败导入失败导出失败"
-      "只读预览无法保存无法导出无法添加谱面音乐未加载可重新导入"
-      "已导入音乐已导入官方谱面已导入官方曲包已导入SUS并转换为可编辑工程内存未绑定文件"
-      "需要为未绑定谱面指定路径没有可写入的工程或谱面目录不可用存在冲突且未覆盖"
-      "开启SUS自动转换后导入SUS可编辑官方预览"
-      "：；（）、，。！？“”‘’—…·％");
-}
-
-bool ChartPreviewPanel::bake_ui_font(float body_px, float tip_px, bool mild_sharpen) {
-  auto& font = wds::interaction::FontAtlas::instance();
-  bool font_ok = false;
-  if (!ui_font_path_.empty()) {
-    font_ok = font.bake_font_file(ui_font_path_, body_px, tip_px, mild_sharpen);
-  }
-  if (!font_ok) {
-    font_ok = font.bake_system_font(body_px, tip_px, mild_sharpen);
-  }
-  if (!font_ok || font.pixels() == nullptr) {
-    return false;
-  }
-  warm_ui_font_glyphs();
-  if (ui_font_texture_) {
-    preview_.vulkan().destroy_texture(ui_font_texture_.id);
-    ui_font_texture_ = {};
-  }
-  ui_font_texture_ = preview_.vulkan().create_texture_rgba(
-      font.pixels(), font.atlas_width(), font.atlas_height(), /*nearest=*/true);
-  font.set_gpu_texture(ui_font_texture_);
-  font.clear_pixels_dirty();
-  return static_cast<bool>(ui_font_texture_);
-}
-
-bool ChartPreviewPanel::ensure_ui_font_scale() {
-  if (!ready_) return false;
-  namespace th = wds::interaction::theme;
-  const float tier = th::content_scale_tier();
-  const float scale = std::max(th::ui_content_scale(), 0.01f);
-  const float left_w = static_cast<float>(std::max(panel_fb_w_, 0)) / scale;
-  const float tip_logical = toolbar_tip_logical_px(left_w);
-  const float tip_bucket = th::tooltip_bake_bucket(tip_logical);
-  if (std::abs(tier - font_bake_tier_) < 0.001f &&
-      std::abs(tip_bucket - font_bake_tip_bucket_) < 0.001f) {
-    return false;
-  }
-  if (!bake_ui_font(ui_font_body_bake_px(tier), ui_font_tip_bake_px(tier, tip_logical),
-                    ui_font_mild_sharpen(tier))) {
-    return false;
-  }
-  font_bake_tier_ = tier;
-  font_bake_tip_bucket_ = tip_bucket;
-  return true;
-}
-
 bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface& host,
                                           const wds::renderer::PreviewVisualConfig& visual,
                                           const std::string& ui_font_path, bool initialize_audio) {
   last_init_error_.clear();
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto ms_since = [t0]() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+  };
   display_refresh_hz_ = host.display_refresh_hz ? std::max(1, host.display_refresh_hz()) : 60;
   if (initialize_audio && !transport_.initialize(visual.effects_directory, visual.bgm_path)) {
     last_init_error_ =
         "音频初始化失败（BASS / effects：" + visual.effects_directory + "）";
-    std::fprintf(stderr, "ChartPreviewPanel: audio init failed\n");
+    WDS_LOG("ChartPreviewPanel: audio init failed\n");
     return false;
   }
+  WDS_LOG("init phase audio_ms=%lld\n", static_cast<long long>(ms_since()));
 
   if (!preview_.initialize(host, visual)) {
     // Distinguish the common CI libpng header/dylib skew (skins) from Vulkan.
@@ -160,10 +58,11 @@ bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface
         "预览初始化失败（Vulkan 或 skins PNG）。skins=" + visual.skins_directory +
         " — 若 stderr 出现 libpng version mismatch / png_create_read_struct "
         "failed，说明程序链到了错误的 libpng，请重装完整程序包";
-    std::fprintf(stderr, "ChartPreviewPanel: preview init failed\n");
+    WDS_LOG("ChartPreviewPanel: preview init failed\n");
     transport_.shutdown();
     return false;
   }
+  WDS_LOG("init phase vulkan_skins_ms=%lld\n", static_cast<long long>(ms_since()));
   publish_vulkan_device_context(preview_.vulkan());
   if (initialize_audio) preview_.attach_audio(&transport_.audio());
 
@@ -182,20 +81,10 @@ bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface
   const unsigned char white[4] = {255, 255, 255, 255};
   solid_texture_ = preview_.vulkan().create_texture_rgba(white, 1, 1);
 
-  ui_font_path_ = ui_font_path;
-  namespace th = wds::interaction::theme;
-  font_bake_tier_ = th::content_scale_tier();
-  font_bake_tip_bucket_ = 0.0f;
-  // Dual body+tip bake at logical×tier so Md and Tooltip each stay near 1:1.
-  // Tip slot follows the current toolbar cell so fullscreen tips stay sharp.
-  const float init_tip = toolbar_tip_logical_px(0.0f);
-  font_bake_tip_bucket_ = th::tooltip_bake_bucket(init_tip);
-  const bool font_ok = bake_ui_font(ui_font_body_bake_px(font_bake_tier_),
-                                    ui_font_tip_bake_px(font_bake_tier_, init_tip),
-                                    ui_font_mild_sharpen(font_bake_tier_));
-  if (!font_ok) {
-    std::fprintf(stderr, "ChartPreviewPanel: UI font bake failed\n");
-  }
+  // Qt chrome owns all UI text (QFont / QPainter). FontAtlas is leftover for
+  // the unused Vulkan UiPainter flush path and is not baked at startup.
+  (void)ui_font_path;
+  WDS_LOG("init phase ready_ms=%lld (no FontAtlas bake)\n", static_cast<long long>(ms_since()));
 
   transport_.request_seek_ms(transport_.chart_start_ms());
   rebuild_waveform(visual.bgm_path);
@@ -241,8 +130,6 @@ void ChartPreviewPanel::shutdown() {
   transport_.shutdown();
   waveform_.clear();
   ready_ = false;
-  font_bake_tier_ = 0.0f;
-  font_bake_tip_bucket_ = 0.0f;
   panel_fb_w_ = 0;
 }
 
@@ -273,20 +160,8 @@ void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) no
 }
 
 void ChartPreviewPanel::sync_ui_font_texture() {
-  if (!ready_) return;
-  ensure_ui_font_scale();
-  auto& font = wds::interaction::FontAtlas::instance();
-  if (!font.pixels_dirty() || font.pixels() == nullptr) return;
-  // Retire the previous atlas instead of destroying it immediately. Earlier
-  // DrawBatches in this frame may still reference that TextureId through submit.
-  if (ui_font_texture_) {
-    retired_font_textures_.push_back(ui_font_texture_);
-    ui_font_texture_ = {};
-  }
-  ui_font_texture_ = preview_.vulkan().create_texture_rgba(
-      font.pixels(), font.atlas_width(), font.atlas_height(), /*nearest=*/true);
-  font.set_gpu_texture(ui_font_texture_);
-  font.clear_pixels_dirty();
+  // No-op: product UI text is Qt. Leftover UiManager Vulkan flush callers
+  // still invoke this; baking here would hitch the first preview frames.
 }
 
 void ChartPreviewPanel::flush_retired_font_textures() {
@@ -533,8 +408,8 @@ bool ChartPreviewPanel::load_chart(const std::string& chart_path,
                                    const std::string& music_config_path) {
   const auto result = engine_.load_official_from_file(chart_path, music_config_path);
   if (result.error != wds::chart_editor::SerializeError::Ok) {
-    std::fprintf(stderr, "load official chart failed: %s (%s)\n", chart_path.c_str(),
-                 result.message.c_str());
+    WDS_LOG("load official chart failed: %s (%s)\n", chart_path.c_str(),
+            result.message.c_str());
     return false;
   }
   return true;

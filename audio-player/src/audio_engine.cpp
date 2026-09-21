@@ -205,12 +205,19 @@ void publish_audio_backend_ok() {
   char buf[512];
   const unsigned ver = static_cast<unsigned>(BASS_GetVersion());
   const int dev = static_cast<int>(BASS_GetDevice());
+  BASS_DEVICEINFO devinfo{};
+  const char* dev_name = "-";
+  if (BASS_GetDeviceInfo(static_cast<DWORD>(dev), &devinfo) && devinfo.name != nullptr &&
+      devinfo.name[0] != '\0') {
+    dev_name = devinfo.name;
+  }
   BASS_INFO info{};
   if (BASS_GetInfo(&info)) {
-    std::snprintf(buf, sizeof(buf), "BASS 0x%08X dev=%d freq=%u latency=%u", ver, dev,
-                  static_cast<unsigned>(info.freq), static_cast<unsigned>(info.latency));
+    std::snprintf(buf, sizeof(buf), "BASS 0x%08X dev=%d '%s' freq=%u latency=%u", ver, dev,
+                  dev_name, static_cast<unsigned>(info.freq),
+                  static_cast<unsigned>(info.latency));
   } else {
-    std::snprintf(buf, sizeof(buf), "BASS 0x%08X dev=%d", ver, dev);
+    std::snprintf(buf, sizeof(buf), "BASS 0x%08X dev=%d '%s'", ver, dev, dev_name);
   }
   wds::common::crash_set_context(wds::common::CrashContextField::AudioBackend, buf);
 }
@@ -606,7 +613,25 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
   apply_music_volume();
   apply_sfx_volume();
   warmup_sfx();
-  WDS_LOG("AudioEngine: ready music=%d sfx_clips=%d\n", has_music() ? 1 : 0, loaded);
+  {
+    const int dev = static_cast<int>(BASS_GetDevice());
+    BASS_DEVICEINFO devinfo{};
+    const char* dev_name = "-";
+    if (BASS_GetDeviceInfo(static_cast<DWORD>(dev), &devinfo) && devinfo.name != nullptr &&
+        devinfo.name[0] != '\0') {
+      dev_name = devinfo.name;
+    }
+    BASS_INFO info{};
+    if (BASS_GetInfo(&info)) {
+      WDS_LOG("AudioEngine: ready music=%d sfx_clips=%d dev=%d freq=%u latency=%u\n",
+              has_music() ? 1 : 0, loaded, dev, static_cast<unsigned>(info.freq),
+              static_cast<unsigned>(info.latency));
+      WDS_LOG("AudioEngine: device '%s'\n", dev_name);
+    } else {
+      WDS_LOG("AudioEngine: ready music=%d sfx_clips=%d dev=%d '%s'\n", has_music() ? 1 : 0,
+              loaded, dev, dev_name);
+    }
+  }
   return true;
 }
 
