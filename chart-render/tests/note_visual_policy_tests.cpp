@@ -25,6 +25,7 @@ using wds::chart_render::hold_tail_layers;
 using wds::chart_render::layout_animated_scratch_arrows;
 using wds::chart_render::layout_static_scratch_arrows;
 using wds::chart_render::scratch_arrow_sides;
+using wds::chart_render::scratch_arrow_sides_compat;
 using wds::renderer::SkinCatalog;
 using wds::renderer::TextureId;
 
