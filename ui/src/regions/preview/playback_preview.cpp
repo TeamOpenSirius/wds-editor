@@ -16,6 +16,7 @@
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -191,11 +192,19 @@ bool PlaybackPreviewView::initialize(const wds::renderer::VulkanHostSurface& hos
   config_ = config;
   geometry_.configure(config_);
   vulkan_.set_preferred_msaa(config_.msaa_samples);
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto ms_since = [t0]() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+  };
   const bool vk_ok = vulkan_.create(host);
   if (!vk_ok) {
-    WDS_LOG("vulkan_.create failed\n");
+    WDS_LOG("vulkan_.create failed host_instance=%p\n",
+            static_cast<void*>(host.external_instance));
     return false;
   }
+  WDS_LOG("preview vulkan_create_ms=%lld\n", static_cast<long long>(ms_since()));
   textures_.set_renderer(&vulkan_);
   const bool skin_ok = skin_.load(textures_, config_.skins_directory);
   if (!skin_ok) {
@@ -203,6 +212,7 @@ bool PlaybackPreviewView::initialize(const wds::renderer::VulkanHostSurface& hos
     shutdown();
     return false;
   }
+  WDS_LOG("preview skins_load_ms=%lld\n", static_cast<long long>(ms_since()));
   // SFX comes from Transport::audio via attach_audio().
   sfx_mono_us_ = -1;
   sfx_position_generation_ = std::numeric_limits<uint64_t>::max();
@@ -211,8 +221,15 @@ bool PlaybackPreviewView::initialize(const wds::renderer::VulkanHostSurface& hos
 
   geometry_.resize(vulkan_.framebuffer_width(), vulkan_.framebuffer_height());
   ready_ = true;
-  WDS_LOG("PlaybackPreviewView ready fb=%dx%d\n", vulkan_.framebuffer_width(),
-          vulkan_.framebuffer_height());
+  {
+    const std::uint32_t api = vulkan_.device_api_version();
+    const std::uint32_t drv = vulkan_.device_driver_version();
+    WDS_LOG("PlaybackPreviewView ready fb=%dx%d gpu='%s' api=%u.%u.%u drv=%u.%u.%u msaa=%d\n",
+            vulkan_.framebuffer_width(), vulkan_.framebuffer_height(), vulkan_.device_name(),
+            VK_VERSION_MAJOR(api), VK_VERSION_MINOR(api), VK_VERSION_PATCH(api),
+            VK_VERSION_MAJOR(drv), VK_VERSION_MINOR(drv), VK_VERSION_PATCH(drv),
+            vulkan_.active_msaa());
+  }
   return true;
 }
 

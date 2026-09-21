@@ -1,6 +1,8 @@
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
 #include "wds/ui/qt/qt_input_adapter.hpp"
 
+#include <wds/common/log.hpp>
+
 #include <QEvent>
 #include <QGuiApplication>
 #include <QResizeEvent>
@@ -56,6 +58,13 @@ void RealtimeVulkanWindow::set_resize_suspended(bool suspended) noexcept {
   schedule_frame();
 }
 
+void RealtimeVulkanWindow::request_frame() {
+  force_frame_ = true;
+  if (frame_callback_) requestUpdate();
+}
+
+void RealtimeVulkanWindow::mark_presented() noexcept { presented_ = true; }
+
 wds::interaction::Vec2 RealtimeVulkanWindow::pointer_logical() const noexcept {
   return input_adapter_ ? input_adapter_->pointer_logical() : wds::interaction::Vec2{};
 }
@@ -88,10 +97,14 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     }
     // A request already queued before the resize must not reach the renderer,
     // even if input is pending. Resume with one frame at the final dimensions.
-    if (resizing_ || host_resize_suspended_) {
+    // The first-open frame is the exception: drop+no-reschedule leaves the
+    // preview blank until dock layout stops restarting the settle timers.
+    const bool startup = !presented_;
+    if ((resizing_ || host_resize_suspended_) && !startup && !force_frame_) {
       pending_elapsed_us_ = 0;
       return true;
     }
+    force_frame_ = false;
     initialized_ = isExposed();
     if (initialized_) {
       const auto now = std::chrono::steady_clock::now();
@@ -103,10 +116,14 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
           static_cast<bool>(idle_throttle_bypass_) && idle_throttle_bypass_();
       // 2 ms slack: at exactly one vsync per interval the accumulator lands a
       // hair under the cap and every other frame gets skipped (60→30 fps).
-      if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap &&
+      if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap && !startup &&
           pending_elapsed_us_ + 2000 < idle_frame_interval_us_) {
         schedule_frame();
         return true;
+      }
+      if (startup) {
+        WDS_LOG("preview first frame resize=%d suspend=%d fb_pending\n",
+                resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0);
       }
       int fb_w = 1, fb_h = 1;
       const auto host = host_surface();
@@ -142,7 +159,8 @@ void RealtimeVulkanWindow::resizeEvent(QResizeEvent*) {
 }
 
 void RealtimeVulkanWindow::schedule_frame() {
-  if (!frame_callback_) return;
-  if (!resizing_ && !host_resize_suspended_ && isExposed()) requestUpdate();
+  if (!frame_callback_ || !isExposed()) return;
+  if (presented_ && (resizing_ || host_resize_suspended_)) return;
+  requestUpdate();
 }
 }

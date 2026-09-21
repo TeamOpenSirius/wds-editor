@@ -576,4 +576,9 @@ class VulkanRenderer {
   uint32_t device_api_version_ = 0;
 };
 
+// Enumerate physical devices on `instance`. When `surface` is non-null, also
+// reports graphics+present queue families. `selected` is marked selected=1.
+void log_physical_devices(VkInstance instance, VkSurfaceKHR surface = VK_NULL_HANDLE,
+                          VkPhysicalDevice selected = VK_NULL_HANDLE);
+
 }  // namespace wds::renderer

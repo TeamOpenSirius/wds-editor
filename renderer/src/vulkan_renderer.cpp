@@ -82,6 +82,38 @@ const char* vk_result_name(VkResult result) noexcept {
   }
 }
 
+const char* physical_device_type_name(VkPhysicalDeviceType type) noexcept {
+  switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+      return "other";
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+      return "integrated";
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+      return "discrete";
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+      return "virtual";
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+      return "cpu";
+    default:
+      return "unknown";
+  }
+}
+
+const char* present_mode_name(VkPresentModeKHR mode) noexcept {
+  switch (mode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+      return "IMMEDIATE";
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+      return "MAILBOX";
+    case VK_PRESENT_MODE_FIFO_KHR:
+      return "FIFO";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+      return "FIFO_RELAXED";
+    default:
+      return "OTHER";
+  }
+}
+
 struct GpuTexture {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -1178,6 +1210,10 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
   if (std::find(presents.begin(), presents.end(), VK_PRESENT_MODE_MAILBOX_KHR) != presents.end())
     present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+  WDS_LOG("swapchain present=%s format=%u colorspace=%u extent=%ux%u modes=%u\n",
+          present_mode_name(present_mode), static_cast<unsigned>(chosen.format),
+          static_cast<unsigned>(chosen.colorSpace), new_extent.width, new_extent.height,
+          present_count);
 
   // FIF+2 when the surface allows it (scan-out + queued + in-flight). Clamped
   // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.
@@ -1272,10 +1308,13 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 #endif
 
   VkSwapchainKHR new_swapchain = VK_NULL_HANDLE;
-  if (!note_wsi(vkCreateSwapchainKHR(device, &info, nullptr, &new_swapchain))) {
-    // Keep the previous swapchain if recreation failed.
-    WDS_LOG("create_swapchain: vkCreateSwapchainKHR failed\n");
-    return false;
+  {
+    const VkResult cr = vkCreateSwapchainKHR(device, &info, nullptr, &new_swapchain);
+    if (!note_wsi(cr)) {
+      WDS_LOG("create_swapchain: vkCreateSwapchainKHR failed result=%d (%s)\n",
+              static_cast<int>(cr), vk_result_name(cr));
+      return false;
+    }
   }
 
   // Keep previous swapchain resources alive until the new chain is fully wired.
@@ -1980,7 +2019,7 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   const auto vert_code = read_file(shader_dir + "/textured_quad.vert.spv");
   const auto frag_code = read_file(shader_dir + "/textured_quad.frag.spv");
   if (vert_code.empty() || frag_code.empty()) {
-    std::fprintf(stderr, "Failed to load SPIR-V from %s\n", shader_dir.c_str());
+    WDS_LOG("Failed to load SPIR-V from %s\n", shader_dir.c_str());
     last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
@@ -2122,6 +2161,71 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   return true;
 }
 
+void log_physical_devices(VkInstance instance, VkSurfaceKHR surface, VkPhysicalDevice selected) {
+  if (instance == VK_NULL_HANDLE) {
+    WDS_LOG("vulkan: no instance to enumerate devices\n");
+    return;
+  }
+  uint32_t device_count = 0;
+  vkEnumeratePhysicalDevices(instance, &device_count, nullptr);
+  WDS_LOG("vulkan physical devices=%u\n", device_count);
+  if (device_count == 0) {
+    return;
+  }
+  std::vector<VkPhysicalDevice> devices(device_count);
+  vkEnumeratePhysicalDevices(instance, &device_count, devices.data());
+  for (uint32_t i = 0; i < device_count; ++i) {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(devices[i], &props);
+    char name[48];
+    std::snprintf(name, sizeof(name), "%s", props.deviceName);
+    WDS_LOG("gpu[%u] '%s' type=%s vendor=0x%x id=0x%x api=%u.%u.%u drv=%u.%u.%u\n", i, name,
+            physical_device_type_name(props.deviceType), props.vendorID, props.deviceID,
+            VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
+            VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
+            VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion));
+
+    VkPhysicalDeviceMemoryProperties mem{};
+    vkGetPhysicalDeviceMemoryProperties(devices[i], &mem);
+    char heaps[120] = {};
+    std::size_t used = 0;
+    for (uint32_t h = 0; h < mem.memoryHeapCount && h < 4; ++h) {
+      const unsigned long long mib = mem.memoryHeaps[h].size / (1024ull * 1024ull);
+      const int n = std::snprintf(heaps + used, sizeof(heaps) - used, "%s%lluMiB", h ? "," : "",
+                                  mib);
+      if (n <= 0) {
+        break;
+      }
+      used += static_cast<std::size_t>(n);
+      if (used >= sizeof(heaps)) {
+        break;
+      }
+    }
+    WDS_LOG("gpu[%u] heaps=%u %s\n", i, mem.memoryHeapCount, heaps);
+
+    if (surface == VK_NULL_HANDLE) {
+      continue;
+    }
+    uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(family_count);
+    if (family_count > 0) {
+      vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &family_count, families.data());
+    }
+    int gfx_present = -1;
+    for (uint32_t q = 0; q < family_count; ++q) {
+      VkBool32 present = VK_FALSE;
+      vkGetPhysicalDeviceSurfaceSupportKHR(devices[i], q, surface, &present);
+      if ((families[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
+        gfx_present = static_cast<int>(q);
+        break;
+      }
+    }
+    const int is_sel = (selected != VK_NULL_HANDLE && devices[i] == selected) ? 1 : 0;
+    WDS_LOG("gpu[%u] gfx_present_family=%d selected=%d\n", i, gfx_present, is_sel);
+  }
+}
+
 void VulkanRenderer::Impl::destroy_render_pass_and_pipelines() {
   if (device == VK_NULL_HANDLE) {
     return;
@@ -2144,7 +2248,7 @@ void VulkanRenderer::Impl::destroy_render_pass_and_pipelines() {
 bool VulkanRenderer::create(const VulkanHostSurface& host) {
   destroy();
   if ((!host.create_surface && host.external_surface == VK_NULL_HANDLE) || !host.framebuffer_size) {
-    std::fprintf(stderr, "VulkanHostSurface missing create_surface / framebuffer_size\n");
+    WDS_LOG("VulkanHostSurface missing create_surface / framebuffer_size\n");
     return false;
   }
   bool committed = false;
@@ -2202,6 +2306,24 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   }
 #endif
   WDS_LOG("instance extensions=%zu (incl. portability_enumeration)\n", extensions.size());
+  for (const char* ext : extensions) {
+    if (ext != nullptr) {
+      WDS_LOG("instance extension %s\n", ext);
+    }
+  }
+
+  {
+    uint32_t loader_ver = VK_API_VERSION_1_0;
+    const auto enumerate_ver = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+        vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"));
+    if (enumerate_ver != nullptr) {
+      enumerate_ver(&loader_ver);
+    }
+    WDS_LOG("vulkan loader api=%u.%u.%u request=%u.%u.%u\n", VK_VERSION_MAJOR(loader_ver),
+            VK_VERSION_MINOR(loader_ver), VK_VERSION_PATCH(loader_ver),
+            VK_VERSION_MAJOR(app.apiVersion), VK_VERSION_MINOR(app.apiVersion),
+            VK_VERSION_PATCH(app.apiVersion));
+  }
 
   if (host.external_instance == VK_NULL_HANDLE) {
     VkInstanceCreateInfo inst_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -2211,11 +2333,13 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     inst_info.ppEnabledExtensionNames = extensions.data();
     const VkResult ir = vkCreateInstance(&inst_info, nullptr, &impl_->instance);
     if (ir != VK_SUCCESS) {
-      WDS_LOG("vkCreateInstance failed result=%d\n", static_cast<int>(ir));
+      WDS_LOG("vkCreateInstance failed result=%d (%s)\n", static_cast<int>(ir),
+              vk_result_name(ir));
       return false;
     }
   } else {
-    WDS_LOG("using host-owned Vulkan instance\n");
+    WDS_LOG("using host-owned Vulkan instance api=%u.%u.%u\n", VK_VERSION_MAJOR(app.apiVersion),
+            VK_VERSION_MINOR(app.apiVersion), VK_VERSION_PATCH(app.apiVersion));
   }
 #if defined(_WIN32)
   if (impl_->surface_caps2_extension) {
@@ -2232,7 +2356,8 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
                        ? host.external_surface
                        : host.create_surface(impl_->instance);
   if (impl_->surface == VK_NULL_HANDLE) {
-    WDS_LOG("host.create_surface failed\n");
+    WDS_LOG("host.create_surface failed instance=%p\n",
+            static_cast<void*>(impl_->instance));
     return false;
   }
 
@@ -2244,7 +2369,6 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   }
   std::vector<VkPhysicalDevice> devices(device_count);
   vkEnumeratePhysicalDevices(impl_->instance, &device_count, devices.data());
-  WDS_LOG("physical devices=%u\n", device_count);
   for (auto candidate : devices) {
     uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(candidate, &family_count, nullptr);
@@ -2268,6 +2392,7 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     return false;
   }
   impl_->msaa_samples = impl_->pick_msaa_samples();
+  log_physical_devices(impl_->instance, impl_->surface, impl_->physical);
   {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(impl_->physical, &props);
@@ -2275,10 +2400,13 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     device_name_[sizeof(device_name_) - 1] = '\0';
     device_driver_version_ = props.driverVersion;
     device_api_version_ = props.apiVersion;
-    WDS_LOG("selected GPU='%s' api=%u.%u.%u queue_family=%u msaa=%u\n", props.deviceName,
+    WDS_LOG("selected GPU='%s' type=%s vendor=0x%x api=%u.%u.%u drv=%u.%u.%u "
+            "queue_family=%u msaa=%u\n",
+            props.deviceName, physical_device_type_name(props.deviceType), props.vendorID,
             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
-            VK_VERSION_PATCH(props.apiVersion), impl_->graphics_family,
-            static_cast<unsigned>(impl_->msaa_samples));
+            VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
+            VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion),
+            impl_->graphics_family, static_cast<unsigned>(impl_->msaa_samples));
   }
 
   float priority = 1.0f;
@@ -2321,9 +2449,12 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   device_info.pQueueCreateInfos = &queue_info;
   device_info.enabledExtensionCount = static_cast<uint32_t>(device_exts.size());
   device_info.ppEnabledExtensionNames = device_exts.data();
-  if (vkCreateDevice(impl_->physical, &device_info, nullptr, &impl_->device) != VK_SUCCESS) {
-    WDS_LOG("vkCreateDevice failed\n");
-    return false;
+  {
+    const VkResult dr = vkCreateDevice(impl_->physical, &device_info, nullptr, &impl_->device);
+    if (dr != VK_SUCCESS) {
+      WDS_LOG("vkCreateDevice failed result=%d (%s)\n", static_cast<int>(dr), vk_result_name(dr));
+      return false;
+    }
   }
   vkGetDeviceQueue(impl_->device, impl_->graphics_family, 0, &impl_->graphics_queue);
 #if defined(_WIN32)
@@ -2858,8 +2989,9 @@ TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int
     } else {
       impl_->destroy_gpu_texture_resources(tex);
     }
-    WDS_LOG("create_texture_rgba failed stage=%s result=%d\n", upload_stage_name(uploaded.stage),
-            static_cast<int>(uploaded.result));
+    WDS_LOG("create_texture_rgba failed stage=%s result=%d (%s)\n",
+            upload_stage_name(uploaded.stage), static_cast<int>(uploaded.result),
+            vk_result_name(uploaded.result));
     return {};
   }
   info.id = id;

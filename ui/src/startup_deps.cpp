@@ -4,10 +4,10 @@
 #include "wds/ui/resource_paths.hpp"
 
 #include <wds/audio/audio_engine.hpp>
+#include <wds/common/log.hpp>
 #include <wds/common/utf8_path.hpp>
 
 #include <cstdlib>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -174,10 +174,12 @@ void prepare_macos_vulkan_environment(const char* argv0) {
 #if defined(__APPLE__)
   const fs::path exe_dir = executable_dir(argv0);
   if (!looks_like_macos_app(exe_dir)) {
+    WDS_LOG("vulkan icd: not a .app bundle, leaving loader discovery\n");
     return;
   }
   const fs::path icd = bundled_moltenvk_icd(exe_dir);
   if (icd.empty()) {
+    WDS_LOG("vulkan icd: bundled MoltenVK_icd.json missing\n");
     return;
   }
   // Always prefer the bundled ICD inside a shipped .app. Stale host
@@ -189,8 +191,10 @@ void prepare_macos_vulkan_environment(const char* argv0) {
       path_to_utf8(!ec && !abs_icd.empty() ? abs_icd : icd);
   ::setenv("VK_ICD_FILENAMES", icd_utf8.c_str(), 1);
   ::setenv("VK_DRIVER_FILES", icd_utf8.c_str(), 1);
+  WDS_LOG("vulkan icd: pinned %s\n", icd_utf8.c_str());
 #else
   (void)argv0;
+  WDS_LOG("vulkan icd: non-macOS, using system loader\n");
 #endif
 }
 
@@ -227,7 +231,10 @@ void add_vulkan_unavailable(StartupDependencyReport& report) {
 int fail_startup_dependencies(const StartupDependencyReport& report) {
   const std::string title = "WDS Editor — 依赖缺失";
   const std::string message = report.format_message();
-  std::fprintf(stderr, "%s\n%s\n", title.c_str(), message.c_str());
+  WDS_LOG("startup deps failed count=%zu\n", report.missing.size());
+  for (const auto& line : report.missing) {
+    WDS_LOG("startup missing: %s\n", line.c_str());
+  }
   native_file_dialog::alert_error(title, message);
   return 1;
 }

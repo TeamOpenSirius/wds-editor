@@ -5,6 +5,7 @@ add_library(wds_common STATIC
   src/crash_handler.cpp
   src/crash_input_journal.cpp
   src/log.cpp
+  src/runtime_env.cpp
   src/utf8_path.cpp
 )
 add_library(wds::common ALIAS wds_common)

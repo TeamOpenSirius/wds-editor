@@ -1,5 +1,6 @@
 #include "wds/renderer/texture.hpp"
 
+#include <wds/common/log.hpp>
 #include <wds/common/utf8_path.hpp>
 
 #include <png.h>
@@ -64,11 +65,9 @@ bool load_png_rgba8(const std::string& path, std::vector<unsigned char>& out, in
   if (png == nullptr) {
     // Typical CI failure mode: compiled against libpng 1.4 headers but linked /
     // bundled 1.6 — create_read_struct rejects the version string.
-    std::fprintf(stderr,
-                 "load_png_rgba8: png_create_read_struct failed for %s "
-                 "(headers=" PNG_LIBPNG_VER_STRING ", runtime=%lu)\n",
-                 path.c_str(),
-                 static_cast<unsigned long>(png_access_version_number()));
+    WDS_LOG("load_png_rgba8: png_create_read_struct failed for %s "
+            "(headers=" PNG_LIBPNG_VER_STRING ", runtime=%lu)\n",
+            path.c_str(), static_cast<unsigned long>(png_access_version_number()));
     std::fclose(fp);
     return false;
   }
@@ -458,9 +457,8 @@ bool TextureCache::bake_atlas() {
     }
   }
   if (!packed) {
-    std::fprintf(stderr,
-                 "TextureCache::bake_atlas: shelf pack failed after growing to %dx%d (%zu sprites)\n",
-                 atlas_w, atlas_h, rects.size());
+    WDS_LOG("TextureCache::bake_atlas: shelf pack failed after growing to %dx%d (%zu sprites)\n",
+            atlas_w, atlas_h, rects.size());
     return false;
   }
 

@@ -1,6 +1,7 @@
 #include "wds/interaction/font_atlas.hpp"
 #include "wds/interaction/theme.hpp"
 
+#include <wds/common/log.hpp>
 #include <wds/common/utf8_path.hpp>
 
 #include <algorithm>
@@ -154,7 +155,9 @@ void FontAtlas::clear() {
   pixels_dirty_ = false;
   dual_ = false;
   mild_sharpen_ = false;
+  fallback_tried_ = false;
   line_nudge_at_body_ = 0.0f;
+  primary_font_path_.clear();
 }
 
 FontAtlas::Slot FontAtlas::pick_slot(float pixel_size) const noexcept {
@@ -201,7 +204,7 @@ bool FontAtlas::pack_codepoint_from(const FontInfo& face, float face_scale, int 
     pack_row_h_ = 0;
   }
   if (pack_y_ + cell_h > atlas_h_) {
-    std::fprintf(stderr, "FontAtlas: atlas full, dropping U+%04X\n", codepoint);
+    WDS_LOG("FontAtlas: atlas full, dropping U+%04X\n", codepoint);
     return false;
   }
 
@@ -252,6 +255,10 @@ bool FontAtlas::pack_codepoint_into(Slot slot, int codepoint) {
   const bool mild = mild_sharpen_ || (dual_ && slot == Slot::Tip);
 
   if (pack_codepoint_from(*info_, face_scale, codepoint, map, mild)) return true;
+  if (!fallback_tried_) {
+    fallback_tried_ = true;
+    try_load_fallback_font(primary_font_path_);
+  }
   if (fallback_info_ != nullptr &&
       pack_codepoint_from(*fallback_info_, fallback_scale, codepoint, map, mild)) {
     return true;
@@ -290,7 +297,7 @@ void FontAtlas::try_load_fallback_font(const std::string& primary_path) {
     fallback_scale_tip_ =
         dual_ ? stbtt_ScaleForPixelHeight(&face->stb, baked_tip_) : fallback_scale_body_;
     fallback_info_ = std::move(face);
-    std::fprintf(stderr, "FontAtlas: fallback face %s\n", path.c_str());
+    WDS_LOG("FontAtlas: fallback face %s\n", path.c_str());
     return;
   }
 }
@@ -307,7 +314,7 @@ bool FontAtlas::bake_font_file(const std::string& path, float body_px, float tip
   int offset = stbtt_GetFontOffsetForIndex(font_file_.data(), 0);
   if (offset < 0) offset = 0;
   if (!stbtt_InitFont(&info_->stb, font_file_.data(), offset)) {
-    std::fprintf(stderr, "FontAtlas: stbtt_InitFont failed for %s\n", path.c_str());
+    WDS_LOG("FontAtlas: stbtt_InitFont failed for %s\n", path.c_str());
     clear();
     return false;
   }
@@ -326,7 +333,8 @@ bool FontAtlas::bake_font_file(const std::string& path, float body_px, float tip
   alpha_.assign(static_cast<std::size_t>(atlas_w_ * atlas_h_), 0);
   scale_body_ = stbtt_ScaleForPixelHeight(&info_->stb, baked_body_);
   scale_tip_ = dual_ ? stbtt_ScaleForPixelHeight(&info_->stb, baked_tip_) : scale_body_;
-  try_load_fallback_font(path);
+  primary_font_path_ = path;
+  fallback_tried_ = false;
 
   int ascent = 0, descent = 0, line_gap = 0;
   stbtt_GetFontVMetrics(&info_->stb, &ascent, &descent, &line_gap);
@@ -339,7 +347,7 @@ bool FontAtlas::bake_font_file(const std::string& path, float body_px, float tip
 
   for (int cp = 32; cp <= 126; ++cp) {
     if (!pack_codepoint(cp)) {
-      std::fprintf(stderr, "FontAtlas: failed packing ASCII\n");
+      WDS_LOG("FontAtlas: failed packing ASCII\n");
       clear();
       return false;
     }
@@ -349,11 +357,11 @@ bool FontAtlas::bake_font_file(const std::string& path, float body_px, float tip
   rebuild_rgba_from_alpha();
   pixels_dirty_ = true;
   if (dual_) {
-    std::fprintf(stderr, "FontAtlas: loaded %s (body %.0fpx + tip %.0fpx%s)\n", path.c_str(),
-                 baked_body_, baked_tip_, mild_sharpen_ ? ", mild sharpen" : "");
+    WDS_LOG("FontAtlas: loaded %s (body %.0fpx + tip %.0fpx%s)\n", path.c_str(), baked_body_,
+            baked_tip_, mild_sharpen_ ? ", mild sharpen" : "");
   } else {
-    std::fprintf(stderr, "FontAtlas: loaded %s (%.0fpx%s)\n", path.c_str(), baked_body_,
-                 mild_sharpen_ ? ", mild sharpen" : "");
+    WDS_LOG("FontAtlas: loaded %s (%.0fpx%s)\n", path.c_str(), baked_body_,
+            mild_sharpen_ ? ", mild sharpen" : "");
   }
   return true;
 }
@@ -364,7 +372,7 @@ bool FontAtlas::bake_system_font(float body_px, float tip_px, bool mild_sharpen)
       return true;
     }
   }
-  std::fprintf(stderr, "FontAtlas: no system UI font found\n");
+  WDS_LOG("FontAtlas: no system UI font found\n");
   return false;
 }
 

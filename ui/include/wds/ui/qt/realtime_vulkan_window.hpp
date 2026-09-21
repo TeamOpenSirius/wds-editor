@@ -40,6 +40,10 @@ class RealtimeVulkanWindow final : public QWindow {
   void inject_key_tap(wds::interaction::KeyCode key, wds::interaction::Modifiers mods);
   wds::renderer::VulkanHostSurface host_surface() const;
   wds::interaction::Vec2 pointer_logical() const noexcept;
+  // Queue a frame even while resize-settle is holding idle presents. Used for
+  // the first-open init path so the preview is not stuck waiting on dock layout.
+  void request_frame();
+  void mark_presented() noexcept;
 
  protected:
   void exposeEvent(QExposeEvent*) override;
@@ -60,5 +64,7 @@ class RealtimeVulkanWindow final : public QWindow {
   bool resizing_ = false;
   bool host_resize_suspended_ = false;
   bool was_exposed_ = false;
+  bool presented_ = false;
+  bool force_frame_ = false;
 };
 }
