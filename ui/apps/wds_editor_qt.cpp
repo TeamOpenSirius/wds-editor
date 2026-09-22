@@ -521,6 +521,12 @@ int main(int argc, char** argv) {
   }
 
   QVulkanInstance vk_instance;
+  // Qt leaves apiVersion at 0, and the spec treats that as Vulkan 1.0. The
+  // preview flips Y with a negative viewport height, which is legal only on
+  // 1.1+ (or with VK_KHR_maintenance1). AMD discards those draws, so the
+  // preview stays at the near-black clear color. NVIDIA and MoltenVK still
+  // rasterize, which is why this shows up only on some Windows GPUs.
+  vk_instance.setApiVersion(QVersionNumber(1, 1));
   if (!vk_instance.create()) {
     WDS_LOG("QVulkanInstance create failed: errorCode=%d\n",
             static_cast<int>(vk_instance.errorCode()));
@@ -651,7 +657,8 @@ int main(int argc, char** argv) {
     static bool logged_present = false;
     if (!logged_present) {
       logged_present = true;
-      WDS_LOG("preview first present fb=%dx%d\n", fb_w, fb_h);
+      WDS_LOG("preview first frame callback fb=%dx%d logical=%dx%d\n", fb_w, fb_h, logical_w,
+              logical_h);
     }
     int64_t render_us = 0;
     if (diag) {

@@ -51,6 +51,8 @@ class RealtimeVulkanWindow final : public QWindow {
 
  private:
   void schedule_frame();
+  void note_frame_hold(const char* why);
+  void note_frame_resume();
   bool initialized_ = false;
   QVulkanInstance* instance_ = nullptr;
   wds::interaction::InputQueue input_queue_;
@@ -66,5 +68,6 @@ class RealtimeVulkanWindow final : public QWindow {
   bool was_exposed_ = false;
   bool presented_ = false;
   bool force_frame_ = false;
+  bool frame_hold_logged_ = false;
 };
 }

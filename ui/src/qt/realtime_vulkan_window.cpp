@@ -101,41 +101,48 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     // preview blank until dock layout stops restarting the settle timers.
     const bool startup = !presented_;
     if ((resizing_ || host_resize_suspended_) && !startup && !force_frame_) {
+      note_frame_hold("resize-suspend");
       pending_elapsed_us_ = 0;
       return true;
     }
     force_frame_ = false;
     initialized_ = isExposed();
-    if (initialized_) {
-      const auto now = std::chrono::steady_clock::now();
-      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_frame_).count();
-      last_frame_ = now;
-      pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
-      const bool has_input = !input_queue_.events().empty();
-      const bool bypass_idle_cap =
-          static_cast<bool>(idle_throttle_bypass_) && idle_throttle_bypass_();
-      // 2 ms slack: at exactly one vsync per interval the accumulator lands a
-      // hair under the cap and every other frame gets skipped (60→30 fps).
-      if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap && !startup &&
-          pending_elapsed_us_ + 2000 < idle_frame_interval_us_) {
-        schedule_frame();
-        return true;
-      }
-      if (startup) {
-        WDS_LOG("preview first frame resize=%d suspend=%d fb_pending\n",
-                resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0);
-      }
-      int fb_w = 1, fb_h = 1;
-      const auto host = host_surface();
-      host.framebuffer_size(&fb_w, &fb_h);
-      if (frame_callback_) {
-        frame_callback_(std::clamp(static_cast<float>(pending_elapsed_us_) / 1000000.0f, 0.0f, 0.08f),
-                                  width(), height(), fb_w, fb_h, input_queue_.events());
-      }
-      pending_elapsed_us_ = 0;
-      input_queue_.clear();
-      schedule_frame();
+    if (!initialized_) {
+      note_frame_hold("unexposed");
+      return true;
     }
+    if (!resizing_ && !host_resize_suspended_) {
+      note_frame_resume();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_frame_).count();
+    last_frame_ = now;
+    pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
+    const bool has_input = !input_queue_.events().empty();
+    const bool bypass_idle_cap =
+        static_cast<bool>(idle_throttle_bypass_) && idle_throttle_bypass_();
+    // 2 ms slack: at exactly one vsync per interval the accumulator lands a
+    // hair under the cap and every other frame gets skipped (60→30 fps).
+    if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap && !startup &&
+        pending_elapsed_us_ + 2000 < idle_frame_interval_us_) {
+      schedule_frame();
+      return true;
+    }
+    int fb_w = 1, fb_h = 1;
+    const auto host = host_surface();
+    host.framebuffer_size(&fb_w, &fb_h);
+    if (startup) {
+      WDS_LOG("preview first frame resize=%d suspend=%d exposed=%d logical=%dx%d fb=%dx%d\n",
+              resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0, isExposed() ? 1 : 0, width(),
+              height(), fb_w, fb_h);
+    }
+    if (frame_callback_) {
+      frame_callback_(std::clamp(static_cast<float>(pending_elapsed_us_) / 1000000.0f, 0.0f, 0.08f),
+                                width(), height(), fb_w, fb_h, input_queue_.events());
+    }
+    pending_elapsed_us_ = 0;
+    input_queue_.clear();
+    schedule_frame();
     return true;
   }
   return QWindow::event(event);
@@ -158,9 +165,42 @@ void RealtimeVulkanWindow::resizeEvent(QResizeEvent*) {
   resize_settle_timer_.start();
 }
 
+void RealtimeVulkanWindow::note_frame_hold(const char* why) {
+#if WDS_ENABLE_LOGGING
+  if (frame_hold_logged_) {
+    return;
+  }
+  frame_hold_logged_ = true;
+  WDS_LOG("preview frames held why=%s exposed=%d resize=%d suspend=%d presented=%d logical=%dx%d\n",
+          why != nullptr ? why : "?", isExposed() ? 1 : 0, resizing_ ? 1 : 0,
+          host_resize_suspended_ ? 1 : 0, presented_ ? 1 : 0, width(), height());
+#else
+  (void)why;
+#endif
+}
+
+void RealtimeVulkanWindow::note_frame_resume() {
+#if WDS_ENABLE_LOGGING
+  if (!frame_hold_logged_) {
+    return;
+  }
+  frame_hold_logged_ = false;
+  WDS_LOG("preview frames resumed exposed=%d resize=%d suspend=%d logical=%dx%d\n",
+          isExposed() ? 1 : 0, resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0, width(),
+          height());
+#endif
+}
+
 void RealtimeVulkanWindow::schedule_frame() {
-  if (!frame_callback_ || !isExposed()) return;
-  if (presented_ && (resizing_ || host_resize_suspended_)) return;
+  if (!frame_callback_) return;
+  if (!isExposed()) {
+    note_frame_hold("unexposed");
+    return;
+  }
+  if (presented_ && (resizing_ || host_resize_suspended_)) {
+    note_frame_hold("resize-suspend");
+    return;
+  }
   requestUpdate();
 }
 }

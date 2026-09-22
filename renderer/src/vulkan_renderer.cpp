@@ -114,6 +114,121 @@ const char* present_mode_name(VkPresentModeKHR mode) noexcept {
   }
 }
 
+const char* vk_format_name(VkFormat format) noexcept {
+  switch (format) {
+    case VK_FORMAT_UNDEFINED:
+      return "UNDEFINED";
+    case VK_FORMAT_B8G8R8A8_UNORM:
+      return "B8G8R8A8_UNORM";
+    case VK_FORMAT_B8G8R8A8_SRGB:
+      return "B8G8R8A8_SRGB";
+    case VK_FORMAT_R8G8B8A8_UNORM:
+      return "R8G8B8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_SRGB:
+      return "R8G8B8A8_SRGB";
+    default:
+      return "OTHER";
+  }
+}
+
+const char* vk_colorspace_name(VkColorSpaceKHR space) noexcept {
+  switch (space) {
+    case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
+      return "SRGB_NONLINEAR";
+    default:
+      return "OTHER";
+  }
+}
+
+const char* composite_alpha_name(VkCompositeAlphaFlagBitsKHR bit) noexcept {
+  switch (bit) {
+    case VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR:
+      return "OPAQUE";
+    case VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR:
+      return "PRE_MULTIPLIED";
+    case VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR:
+      return "POST_MULTIPLIED";
+    case VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR:
+      return "INHERIT";
+    default:
+      return "OTHER";
+  }
+}
+
+const char* surface_transform_name(VkSurfaceTransformFlagBitsKHR transform) noexcept {
+  switch (transform) {
+    case VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR:
+      return "IDENTITY";
+    case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
+      return "ROTATE_90";
+    case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
+      return "ROTATE_180";
+    case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
+      return "ROTATE_270";
+    case VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_BIT_KHR:
+      return "H_MIRROR";
+    case VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_90_BIT_KHR:
+      return "H_MIRROR_90";
+    case VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_180_BIT_KHR:
+      return "H_MIRROR_180";
+    case VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_270_BIT_KHR:
+      return "H_MIRROR_270";
+    case VK_SURFACE_TRANSFORM_INHERIT_BIT_KHR:
+      return "INHERIT";
+    default:
+      return "OTHER";
+  }
+}
+
+void append_token(char* buf, size_t cap, const char* token, bool* first) noexcept {
+  if (buf == nullptr || cap == 0 || token == nullptr || first == nullptr) {
+    return;
+  }
+  const size_t len = std::strlen(buf);
+  if (len + 1 >= cap) {
+    return;
+  }
+  if (!*first) {
+    buf[len] = ',';
+    buf[len + 1] = '\0';
+  }
+  *first = false;
+  std::strncat(buf, token, cap - std::strlen(buf) - 1);
+}
+
+void format_present_modes(char* buf, size_t cap, const std::vector<VkPresentModeKHR>& modes) noexcept {
+  if (buf == nullptr || cap == 0) {
+    return;
+  }
+  buf[0] = '\0';
+  bool first = true;
+  for (const VkPresentModeKHR mode : modes) {
+    append_token(buf, cap, present_mode_name(mode), &first);
+  }
+  if (first) {
+    std::strncat(buf, "none", cap - 1);
+  }
+}
+
+void format_alpha_mask(char* buf, size_t cap, VkCompositeAlphaFlagsKHR flags) noexcept {
+  if (buf == nullptr || cap == 0) {
+    return;
+  }
+  buf[0] = '\0';
+  bool first = true;
+  const VkCompositeAlphaFlagBitsKHR bits[] = {
+      VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+      VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR};
+  for (const VkCompositeAlphaFlagBitsKHR bit : bits) {
+    if ((flags & bit) != 0) {
+      append_token(buf, cap, composite_alpha_name(bit), &first);
+    }
+  }
+  if (first) {
+    std::strncat(buf, "none", cap - 1);
+  }
+}
+
 struct GpuTexture {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -433,8 +548,18 @@ struct VulkanRenderer::Impl {
   int64_t last_acquire_wait_us = 0;
   int64_t last_present_us = 0;
   int64_t last_gpu_submit_us = 0;
+  // Debug-session diagnostics for a black preview. Edge-triggered so a stuck
+  // acquire/present result or a repeated early-out does not fill the log.
+  const char* draw_stop_reason = nullptr;
+  bool logged_first_present = false;
+  bool have_logged_acquire = false;
+  bool have_logged_present = false;
+  VkResult logged_acquire = VK_SUCCESS;
+  VkResult logged_present = VK_SUCCESS;
   void release_fullscreen_exclusive_internal();
   void note_fullscreen_exclusive_lost(const char* where, VkResult result);
+  void note_wsi_result(const char* where, VkResult result, bool* have, VkResult* previous);
+  void note_draw_stopped(const char* why);
 
   VkImage depth_image = VK_NULL_HANDLE;
   VkDeviceMemory depth_memory = VK_NULL_HANDLE;
@@ -743,6 +868,47 @@ void VulkanRenderer::Impl::note_fullscreen_exclusive_lost(const char* where, VkR
 #else
   (void)where;
   (void)result;
+#endif
+}
+
+void VulkanRenderer::Impl::note_wsi_result(const char* where, VkResult result, bool* have,
+                                           VkResult* previous) {
+#if WDS_ENABLE_LOGGING
+  if (have == nullptr || previous == nullptr) {
+    return;
+  }
+  if (!*have) {
+    *have = true;
+    *previous = result;
+    if (result != VK_SUCCESS) {
+      WDS_LOG("wsi %s %s (%d)\n", where != nullptr ? where : "?", vk_result_name(result),
+              static_cast<int>(result));
+    }
+    return;
+  }
+  if (*previous == result) {
+    return;
+  }
+  WDS_LOG("wsi %s %s -> %s (%d)\n", where != nullptr ? where : "?", vk_result_name(*previous),
+          vk_result_name(result), static_cast<int>(result));
+  *previous = result;
+#else
+  (void)where;
+  (void)result;
+  (void)have;
+  (void)previous;
+#endif
+}
+
+void VulkanRenderer::Impl::note_draw_stopped(const char* why) {
+#if WDS_ENABLE_LOGGING
+  if (why == nullptr || draw_stop_reason == why) {
+    return;
+  }
+  draw_stop_reason = why;
+  WDS_LOG("draw_frame stopped: %s\n", why);
+#else
+  (void)why;
 #endif
 }
 
@@ -1210,10 +1376,28 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
   if (std::find(presents.begin(), presents.end(), VK_PRESENT_MODE_MAILBOX_KHR) != presents.end())
     present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
-  WDS_LOG("swapchain present=%s format=%u colorspace=%u extent=%ux%u modes=%u\n",
-          present_mode_name(present_mode), static_cast<unsigned>(chosen.format),
+  char mode_list[96];
+  format_present_modes(mode_list, sizeof(mode_list), presents);
+  char alpha_list[64];
+  format_alpha_mask(alpha_list, sizeof(alpha_list), caps.supportedCompositeAlpha);
+  char current_extent[32];
+  if (caps.currentExtent.width == UINT32_MAX) {
+    std::snprintf(current_extent, sizeof(current_extent), "unspecified");
+  } else {
+    std::snprintf(current_extent, sizeof(current_extent), "%ux%u", caps.currentExtent.width,
+                  caps.currentExtent.height);
+  }
+  // Opaque alpha on a child HWND, a non-identity transform, or an unexpected
+  // format can present successfully and still show black. Log the contract
+  // the driver actually offered, not only the values we picked.
+  WDS_LOG("swapchain present=%s modes=%s format=%s/%u colorspace=%s/%u extent=%ux%u "
+          "source=%s current=%s requested=%dx%d transform=%s alpha=%s supported=%s\n",
+          present_mode_name(present_mode), mode_list, vk_format_name(chosen.format),
+          static_cast<unsigned>(chosen.format), vk_colorspace_name(chosen.colorSpace),
           static_cast<unsigned>(chosen.colorSpace), new_extent.width, new_extent.height,
-          present_count);
+          caps.currentExtent.width != UINT32_MAX ? "surface" : "clamped", current_extent, width,
+          height, surface_transform_name(caps.currentTransform),
+          composite_alpha_name(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR), alpha_list);
 
   // FIF+2 when the surface allows it (scan-out + queued + in-flight). Clamped
   // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.
@@ -2012,6 +2196,10 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
     rp_info.pAttachments = attachments_msaa.data();
   }
   if (vkCreateRenderPass(device, &rp_info, nullptr, &render_pass) != VK_SUCCESS) {
+#if WDS_ENABLE_LOGGING
+    WDS_LOG("vkCreateRenderPass failed format=%s/%u samples=%u\n", vk_format_name(swapchain_format),
+            static_cast<unsigned>(swapchain_format), static_cast<unsigned>(msaa_samples));
+#endif
     last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
@@ -2026,6 +2214,9 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   VkShaderModule vert = create_shader_module(device, vert_code);
   VkShaderModule frag = create_shader_module(device, frag_code);
   if (!vert || !frag) {
+#if WDS_ENABLE_LOGGING
+    WDS_LOG("create_shader_module failed vert=%d frag=%d\n", vert ? 1 : 0, frag ? 1 : 0);
+#endif
     last_wsi_action = WsiRecoverAction::Fatal;
     return false;
   }
@@ -2131,6 +2322,11 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   pipeline_info.subpass = 0;
   if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
                                 &pipeline) != VK_SUCCESS) {
+#if WDS_ENABLE_LOGGING
+    WDS_LOG("vkCreateGraphicsPipelines failed pipeline=textured format=%s/%u samples=%u\n",
+            vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
+            static_cast<unsigned>(msaa_samples));
+#endif
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
     last_wsi_action = WsiRecoverAction::Fatal;
@@ -2149,6 +2345,11 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
   pipeline_info.pColorBlendState = &blend_add;
   if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
                                 &pipeline_additive) != VK_SUCCESS) {
+#if WDS_ENABLE_LOGGING
+    WDS_LOG("vkCreateGraphicsPipelines failed pipeline=additive format=%s/%u samples=%u\n",
+            vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
+            static_cast<unsigned>(msaa_samples));
+#endif
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
     last_wsi_action = WsiRecoverAction::Fatal;
@@ -2337,9 +2538,16 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
               vk_result_name(ir));
       return false;
     }
-  } else {
-    WDS_LOG("using host-owned Vulkan instance api=%u.%u.%u\n", VK_VERSION_MAJOR(app.apiVersion),
-            VK_VERSION_MINOR(app.apiVersion), VK_VERSION_PATCH(app.apiVersion));
+  }
+  // vkEnumeratePhysicalDeviceGroups is 1.1 core and is not enabled here as an
+  // extension. A null pointer means the adopted instance is Vulkan 1.0, where
+  // a negative viewport is illegal unless VK_KHR_maintenance1 is enabled.
+  // Do not log app.apiVersion for a host instance: that value is only a local
+  // request and previously reported 1.1 while Qt had created a 1.0 instance.
+  const bool instance_core_11 =
+      vkGetInstanceProcAddr(impl_->instance, "vkEnumeratePhysicalDeviceGroups") != nullptr;
+  if (host.external_instance != VK_NULL_HANDLE) {
+    WDS_LOG("using host-owned Vulkan instance core=%s\n", instance_core_11 ? "1.1+" : "1.0");
   }
 #if defined(_WIN32)
   if (impl_->surface_caps2_extension) {
@@ -2429,10 +2637,16 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
       vkEnumerateDeviceExtensionProperties(impl_->physical, nullptr, &ext_count, avail.data());
     }
     const char* portability_subset = "VK_KHR_portability_subset";
+    bool maintenance1 = false;
     for (const auto& e : avail) {
       if (std::strcmp(e.extensionName, portability_subset) == 0) {
         device_exts.push_back(portability_subset);
         WDS_LOG("enabling device extension %s\n", portability_subset);
+      }
+      if (std::strcmp(e.extensionName, VK_KHR_MAINTENANCE1_EXTENSION_NAME) == 0) {
+        device_exts.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+        maintenance1 = true;
+        WDS_LOG("enabling device extension %s\n", VK_KHR_MAINTENANCE1_EXTENSION_NAME);
       }
 #if defined(_WIN32)
       if (std::strcmp(e.extensionName, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME) == 0) {
@@ -2441,6 +2655,16 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
         WDS_LOG("enabling device extension %s\n", VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
       }
 #endif
+    }
+#if WDS_ENABLE_LOGGING
+    WDS_LOG("viewport flip legal=%d instance_core_11=%d maintenance1=%d\n",
+            (instance_core_11 || maintenance1) ? 1 : 0, instance_core_11 ? 1 : 0,
+            maintenance1 ? 1 : 0);
+#endif
+    if (!instance_core_11 && !maintenance1) {
+      WDS_LOG("negative viewport unavailable: instance is Vulkan 1.0 and %s is missing\n",
+              VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+      return false;
     }
   }
 
@@ -3028,6 +3252,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                 const DrawBatch* post_overlay, const DrawBatch* post_overlay2,
                                 const ScissorRect* additive_scissor, const DrawBatch* mid_overlay) {
   if (impl_ == nullptr || renderer_health_unrecoverable(health_)) {
+    if (impl_ != nullptr) {
+      impl_->note_draw_stopped("unrecoverable");
+    }
     return false;
   }
   auto reap_completed_keep_health = [&]() {
@@ -3041,6 +3268,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   };
   if (health_ == RendererHealth::SurfaceLost) {
     if (!recover_surface_and_swapchain()) {
+      impl_->note_draw_stopped("surface-recover-failed");
       return false;
     }
     if (health_ != RendererHealth::Ready) {
@@ -3050,6 +3278,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   }
   const bool live_swapchain = impl_->swapchain != VK_NULL_HANDLE;
   if (draw_frame_blocks_before_recovery(health_, ready_, live_swapchain)) {
+    impl_->note_draw_stopped("not-ready");
     return false;
   }
 
@@ -3061,10 +3290,12 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       impl_->framebuffer_size(&w, &h);
     }
     if (w <= 0 || h <= 0) {
+      impl_->note_draw_stopped("zero-extent");
       reap_completed_keep_health();
       return apply_zero_extent_now();
     }
     if (!resize(w, h) || impl_->swapchain_occluded || impl_->swapchain == VK_NULL_HANDLE) {
+      impl_->note_draw_stopped("swapchain-recover-failed");
       reap_completed_keep_health();
       return health_ == RendererHealth::Occluded;
     }
@@ -3103,11 +3334,13 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->last_acquire_wait_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - acquire_t0).count();
   impl_->note_fullscreen_exclusive_lost("vkAcquireNextImageKHR", acquire);
+  impl_->note_wsi_result("acquire", acquire, &impl_->have_logged_acquire, &impl_->logged_acquire);
   const WsiRecoverAction acquire_action = classify_wsi_result(acquire);
   bool recreate_swapchain_after_present = false;
   if (acquire_action == WsiRecoverAction::RecreateSwapchain && acquire == VK_SUBOPTIMAL_KHR) {
     recreate_swapchain_after_present = true;
   } else if (acquire_action != WsiRecoverAction::None) {
+    impl_->note_draw_stopped("acquire");
     return apply_wsi_action(acquire_action);
   }
 
@@ -3128,9 +3361,11 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       batch.vertex_count() + mid_verts + additive_verts + post_verts + post2_verts;
   const size_t bytes = total_verts * sizeof(DrawVertex);
   if (!impl_->remap_frame_vertices()) {
+    impl_->note_draw_stopped("vertex-remap-failed");
     return false;
   }
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
+    impl_->note_draw_stopped("vertex-capacity-failed");
     // Fence still signaled (not reset yet). Drain the acquire semaphore only.
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -3237,6 +3472,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   ortho_rh(screen.l, screen.r, screen.b, screen.t, -1.0f, 1.0f, mvp);
   vkCmdPushConstants(cmd, impl_->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mvp), mvp);
 
+  uint32_t drawn_verts = 0;
+  uint32_t skipped_buckets = 0;
+  uint32_t skipped_verts = 0;
   auto draw_buckets = [&](VkPipeline pipeline, const DrawBatch& src,
                           const std::vector<uint32_t>& first_vertex) {
     if (src.vertex_count() == 0) {
@@ -3249,8 +3487,13 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       const auto& bucket = src.buckets[bi];
       if (bucket.vertices.empty() || bucket.texture == kInvalidTextureId ||
           bucket.texture >= impl_->textures.size() || !impl_->textures[bucket.texture].alive) {
+        if (!bucket.vertices.empty()) {
+          ++skipped_buckets;
+          skipped_verts += static_cast<uint32_t>(bucket.vertices.size());
+        }
         continue;
       }
+      drawn_verts += static_cast<uint32_t>(bucket.vertices.size());
       impl_->textures[bucket.texture].sampled_seq = impl_->frame_seq;
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl_->pipeline_layout, 0, 1,
                               &impl_->textures[bucket.texture].descriptor, 0, nullptr);
@@ -3341,6 +3584,30 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->last_present_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - present_t0).count();
   impl_->note_fullscreen_exclusive_lost("vkQueuePresentKHR", present_result);
+  impl_->note_wsi_result("present", present_result, &impl_->have_logged_present,
+                         &impl_->logged_present);
+#if WDS_ENABLE_LOGGING
+  // One line that separates "nothing was submitted", "submitted but the driver
+  // showed only the clear", and "present itself failed".
+  if (!impl_->logged_first_present) {
+    impl_->logged_first_present = true;
+    WDS_LOG("first present drawn_verts=%u skipped_buckets=%u skipped_verts=%u queued_verts=%zu "
+            "clear=%.3f,%.3f,%.3f viewport_h=%.0f extent=%ux%u screen=%.3f,%.3f,%.3f,%.3f "
+            "acquire=%s present=%s\n",
+            drawn_verts, skipped_buckets, skipped_verts, total_verts, clear_r, clear_g, clear_b,
+            viewport.height, impl_->swapchain_extent.width, impl_->swapchain_extent.height,
+            screen.l, screen.r, screen.b, screen.t, vk_result_name(acquire),
+            vk_result_name(present_result));
+  }
+#endif
+  if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR) {
+    impl_->draw_stop_reason = nullptr;
+  } else {
+    impl_->note_draw_stopped("present");
+  }
+  (void)drawn_verts;
+  (void)skipped_buckets;
+  (void)skipped_verts;
   const uint32_t fif = static_cast<uint32_t>(std::max(1, impl_->frames_in_flight));
   impl_->frame_index = (frame + 1) % fif;
   const WsiRecoverAction present_action = classify_wsi_result(present_result);
