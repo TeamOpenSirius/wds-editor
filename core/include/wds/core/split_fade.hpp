@@ -59,11 +59,12 @@ inline float official_split_z180_origin_y() noexcept {
 // SplitLine plate is 256px / 100 ppu. VFX SplitEffect_all SplitLine Height=45
 // (OffSet=5) is the bright-head length in those texels; the output shader is
 // solid (1,1,1,1) × expr-68 alpha (peak at t=0.05, long tail). After ×27 that
-// is 12.15 world units. A 40–56% percent span still looked like ~15% solid
-// white when we used smoothstep + pale LineColor + glow only at t>0.55.
-// Intensity must follow expr 68. Identity: 45/256 of the visible ribbon at p0
-// (far-end 12.15 wu is only ~2% of the screen). z=180: 12.15 wu from the mesh
-// tip (rotZ=180 texture TOP = judge end, origin 58.6 − 69.12 = −10.52).
+// is 12.15 world units. Intensity must follow expr 68.
+// Identity: max(12.15 wu at p0, 45/256 of the ribbon). The 45/256 floor was
+// authored for the official / old-editor 720p stage. Scale it by
+// content_h / 720 so a smaller Dock does not go unreadably short and a larger
+// stage does not keep a 17% screen cap. z=180: 12.15 wu from the mesh tip
+// (rotZ=180 texture TOP = judge end, origin 58.6 − 69.12 = −10.52).
 inline constexpr float kOfficialSplitLineSpritePixels = 256.0f;
 inline constexpr float kOfficialSplitLineVfxHeight = 45.0f;
 inline constexpr float kOfficialSplitLineVfxOffset = 5.0f;
@@ -79,16 +80,33 @@ inline float official_split_line_texture_tip_world() noexcept {
   return official_split_line_world_length() * kOfficialSplitLineTextureTipFrac;
 }
 
-inline float official_split_visible_tip_span(float percent_start, float percent_end,
-                                            bool judge_anchored = false) noexcept {
+// Project a Main-Y length at `percent` toward the judgeline into stage percent.
+inline float official_split_world_span_at_percent(float percent, float world_len) noexcept {
+  const float p = std::clamp(percent, 0.0f, 1.0f);
+  const float y = official_percent_to_main_y(p);
+  return std::max(official_main_y_to_percent(y - world_len) - p, 1e-4f);
+}
+
+// Official PlayerSettings defaultScreen is 1280×720. The 45/256 ribbon floor
+// was a constant on that canvas (and on the old editor's fixed pane). Scale
+// it by content_h / 720 so a smaller 16:9 stage does not keep a 17% cap.
+inline float official_split_tip_floor_scale(float content_height_px) noexcept {
+  return std::max(content_height_px, 1.0f) / kOfficialDefaultScreenHeight;
+}
+
+inline float official_split_tip_percent_floor(float ribbon, float content_height_px) noexcept {
+  return std::max(ribbon, 0.0f) * kOfficialSplitLineSpriteTipFrac *
+         official_split_tip_floor_scale(content_height_px);
+}
+
+inline float official_split_visible_tip_span(
+    float percent_start, float percent_end, bool judge_anchored = false,
+    float content_height_px = kOfficialDefaultScreenHeight) noexcept {
   if (!judge_anchored) {
-    // Far tip: 12.15 wu is only ~2% of the screen after perspective. Keep the
-    // VFX Height/256 visible-ribbon floor so the upward particle head stays
-    // readable (≈45 wu at the frustum top).
-    const float y0 = official_percent_to_main_y(percent_start);
-    const float world_span = official_main_y_to_percent(y0 - official_split_line_tip_world()) -
-                             percent_start;
-    const float frac_span = (percent_end - percent_start) * kOfficialSplitLineSpriteTipFrac;
+    const float world_span =
+        official_split_world_span_at_percent(percent_start, official_split_line_tip_world());
+    const float frac_span =
+        official_split_tip_percent_floor(percent_end - percent_start, content_height_px);
     return std::max(std::max(world_span, frac_span), 1e-4f);
   }
   const float mesh_tip_y = (percent_end >= 1.0f - 1e-3f)

@@ -537,9 +537,8 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, const PreviewSnapsh
       return wds::chart_render::split_line_whiten_t(percent, p0, p1, tip_span, judge_whiten);
     };
     auto tint_at = [&](float lr, float lg, float lb, float tip_t, float& cr, float& cg, float& cb) {
-      cr = lr + (1.0f - lr) * tip_t;
-      cg = lg + (1.0f - lg) * tip_t;
-      cb = lb + (1.0f - lb) * tip_t;
+      wds::chart_render::split_line_tinted_rgb(lr, lg, lb, tip_t, config_.split_line_opacity, cr,
+                                               cg, cb);
     };
 
     std::vector<float> knots;
@@ -570,12 +569,11 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, const PreviewSnapsh
       if (slot_c.a < 0.02f) {
         return;
       }
-      float lr = slot_c.r;
-      float lg = slot_c.g;
-      float lb = slot_c.b;
-      float la = slot_c.a;
-      wds::chart_render::apply_split_line_opacity(lr, lg, lb, la, config_.split_line_opacity,
-                                                  split.split_line_alpha);
+      const float lr = slot_c.r;
+      const float lg = slot_c.g;
+      const float lb = slot_c.b;
+      const float la = slot_c.a * std::clamp(split.split_line_alpha, 0.0f, 1.0f);
+      const float k = std::clamp(config_.split_line_opacity, 0.0f, 1.0f);
       for (size_t i = 0; i + 1 < knots.size(); ++i) {
         const float sa = knots[i];
         const float sb = knots[i + 1];
@@ -600,11 +598,11 @@ void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, const PreviewSnapsh
                                r0, g0, b0);
         // Glow stays in this batch (under notes). Official SplitEffect is behind
         // flats; the additive pass is reserved for hit VFX after mid_overlay.
-        const float glow_a = tip_glow * tip_a;
-        const float glow_b = tip_glow * tip_b;
+        const float glow_a = tip_glow * tip_a * la;
+        const float glow_b = tip_glow * tip_b * la;
         if (tip_glow > 0.01f && (glow_a > 0.01f || glow_b > 0.01f)) {
           batch.add_quad_corners(plate->id, q, -0.55f, glow_b, glow_b, glow_a, glow_a, plate->u0,
-                                 plate->v0, plate->u1, plate->v1, 1.0f, 1.0f, 1.0f);
+                                 plate->v0, plate->u1, plate->v1, k, k, k);
         }
         const float body_glow = std::clamp(config_.split_line_body_glow, 0.0f, 1.0f);
         if (body_glow > 0.01f) {

@@ -59,6 +59,8 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QStyle>
+#include <QStyleOptionDockWidget>
 #include <QProgressBar>
 #include <QMetaObject>
 #include <QTimer>
@@ -138,6 +140,27 @@ bool focus_is_typing_field(QWidget* focus) {
   }
   if (auto* edit = dynamic_cast<wds::ui::ChartEditWidget*>(focus)) return edit->captures_keys();
   return false;
+}
+
+int dock_title_bar_height(const QDockWidget* dock) {
+  if (dock == nullptr) return 0;
+  if (const QWidget* bar = dock->titleBarWidget()) {
+    const int h = bar->height() > 0 ? bar->height() : bar->sizeHint().height();
+    return std::max(0, h);
+  }
+  if (const QWidget* inner = dock->widget()) {
+    const int gap = dock->height() - inner->height();
+    if (gap > 0 && dock->height() > 0) return gap;
+  }
+  QStyleOptionDockWidget opt;
+  opt.initFrom(dock);
+  opt.title = dock->windowTitle();
+  opt.closable = dock->features().testFlag(QDockWidget::DockWidgetClosable);
+  opt.movable = dock->features().testFlag(QDockWidget::DockWidgetMovable);
+  opt.floatable = dock->features().testFlag(QDockWidget::DockWidgetFloatable);
+  int h = dock->style()->pixelMetric(QStyle::PM_TitleBarHeight, &opt, dock);
+  if (h <= 0) h = dock->fontMetrics().height() + 8;
+  return std::max(0, h);
 }
 
 }  // namespace
@@ -335,7 +358,7 @@ void EditorMainWindow::apply_default_dock_sizes() {
   const int play_min = std::max(72, playback_panel_->sizeHint().height() + 16);
   const int tool_min = std::max(96, toolbar_widget_->sizeHint().height() + 16);
   const int preview_h =
-      std::max(180, preview_content_height_for_width(left_w) + 28);
+      std::max(180, preview_content_height_for_width(left_w) + dock_title_bar_height(preview_dock_));
   const int chrome = 96;
   const int leftover =
       std::max(0, height() - chrome - preview_h - play_min - tool_min);

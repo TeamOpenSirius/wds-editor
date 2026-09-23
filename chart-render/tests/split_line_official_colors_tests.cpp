@@ -105,6 +105,25 @@ void test_apply_split_line_opacity_keeps_alpha() {
   CHECK(std::fabs(a - 0.0f) < 1e-5f);
 }
 
+void test_split_line_tip_follows_opacity() {
+  // Body RGB *= k; tip whitening must land on (k,k,k), not leftover (1,1,1).
+  float r = 0, g = 0, b = 0;
+  wds::chart_render::split_line_tinted_rgb(1.0f, 0.25f, 0.25f, 0.0f, 0.40f, r, g, b);
+  CHECK(std::fabs(r - 0.40f) < 1e-5f);
+  CHECK(std::fabs(g - 0.10f) < 1e-5f);
+  CHECK(std::fabs(b - 0.10f) < 1e-5f);
+
+  wds::chart_render::split_line_tinted_rgb(1.0f, 0.25f, 0.25f, 1.0f, 0.40f, r, g, b);
+  CHECK(std::fabs(r - 0.40f) < 1e-5f);
+  CHECK(std::fabs(g - 0.40f) < 1e-5f);
+  CHECK(std::fabs(b - 0.40f) < 1e-5f);
+
+  wds::chart_render::split_line_tinted_rgb(1.0f, 0.25f, 0.25f, 1.0f, 1.0f, r, g, b);
+  CHECK(std::fabs(r - 1.0f) < 1e-5f);
+  CHECK(std::fabs(g - 1.0f) < 1e-5f);
+  CHECK(std::fabs(b - 1.0f) < 1e-5f);
+}
+
 void test_write_white_soft_texel() {
   unsigned char px[4] = {12, 34, 56, 78};
   wds::renderer::write_white_soft_texel(px, 0.5f);
@@ -121,7 +140,7 @@ void test_whiten_and_pulse_anchor() {
   const float p1 = 1.0f;
   const float span = official_split_visible_tip_span(p0, p1, false);
   CHECK(std::fabs(span - (45.0f / 256.0f)) < 1e-5f);
-  // Identity: VFX Height/256 cap at the far/upward tip (p0).
+  // Identity at official 720p: 45/256 ribbon floor. Scales with stage height.
   CHECK(split_line_whiten_t(p0, p0, p1, span, false) > 0.85f);
   CHECK(split_line_whiten_t(p0 + span * 0.5f, p0, p1, span, false) > 0.70f);
   CHECK(split_line_whiten_t(p0 + span, p0, p1, span, false) < 0.15f);
@@ -453,6 +472,7 @@ int main() {
   test_official_default_split_line_opacity_is_100();
   test_official_split_fade_out_window_is_300ms();
   test_apply_split_line_opacity_keeps_alpha();
+  test_split_line_tip_follows_opacity();
   test_write_white_soft_texel();
   test_whiten_and_pulse_anchor();
   test_split_line_quad_follows_official_projection();

@@ -772,6 +772,8 @@ void UiManager::resize_preview_viewport(int logical_width, int logical_height,
   const int fb_w = std::max(1, framebuffer_width);
   const int fb_h = std::max(1, framebuffer_height);
   chart_preview_->resize_framebuffer(fb_w, fb_h);
+  // Dock / Vulkan surface may be any aspect. The preview (bg + stage) is a
+  // centered 16:9 contain: as large as possible, never cropped.
   const auto stage = preview_contain_rect(fb_w, fb_h);
   chart_preview_->set_panel_bounds(stage.x, stage.y, stage.width, stage.height);
   chart_preview_->set_content_bounds(stage.x, stage.y, stage.width, stage.height);
