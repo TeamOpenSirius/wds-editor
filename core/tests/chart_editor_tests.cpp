@@ -1661,7 +1661,15 @@ void test_official_split_tip_span_matches_sprite_cap() {
   CHECK(std::fabs(kOfficialSplitLineSpriteTipFrac - (45.0f / 256.0f)) < 1e-6f);
   CHECK(std::fabs(official_split_line_tip_world() - 12.15f) < 1e-3f);
   CHECK(std::fabs(official_split_line_texture_tip_world() - 3.456f) < 1e-3f);
-  CHECK(std::fabs(official_split_visible_tip_span(0.0f, 1.0f, false) - (45.0f / 256.0f)) < 1e-5f);
+  // Default 720p: identity tip is the 45/256 ribbon floor (world span at p0 is smaller).
+  const float far_span = official_split_visible_tip_span(0.0f, 1.0f, false);
+  CHECK(std::fabs(far_span - (45.0f / 256.0f)) < 1e-5f);
+  const float world_far =
+      official_split_world_span_at_percent(0.0f, official_split_line_tip_world());
+  CHECK(world_far > 0.01f);
+  CHECK(world_far < far_span);
+  const float near_span = official_split_visible_tip_span(0.85f, 1.0f, false);
+  CHECK(near_span > world_far);
   const float z180 = official_split_visible_tip_span(0.0f, 1.0f, true);
   CHECK(z180 > 0.40f);
   CHECK(z180 < 0.70f);

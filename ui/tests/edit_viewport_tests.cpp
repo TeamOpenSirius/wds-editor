@@ -11,6 +11,7 @@
 
 #include "wds/interaction/widget_root.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -218,6 +219,12 @@ int main() {
       assert(tall.width == 800);
       assert(tall.x == 0);
       assert(tall.y > 0);
+      const float aspect = wds::ui::EditorLayouter::kPreviewAspect;
+      assert(tall.height == static_cast<int>(std::lround(800.0f / aspect)));
+      assert(std::fabs(static_cast<float>(tall.width) / static_cast<float>(tall.height) -
+                       aspect) < 0.03f);
+      assert(std::fabs(static_cast<float>(wide.width) / static_cast<float>(wide.height) -
+                       aspect) < 0.03f);
     }
     assert(std::fabs(static_cast<float>(official.preview_content.width) /
                          std::max(1, official.preview_content.height) -

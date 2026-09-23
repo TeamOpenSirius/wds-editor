@@ -18,7 +18,7 @@ endif()
 project(wds VERSION 1.0.0 LANGUAGES CXX)
 # CMake project() VERSION is numeric only. About, crash reports, and packages
 # use this marketing string (may include a prerelease suffix).
-set(WDS_APP_VERSION "1.0.0-beta.2")
+set(WDS_APP_VERSION "1.0.0-stable")
 
 include("${CMAKE_SOURCE_DIR}/cmake/WdsPlatform.cmake")
 

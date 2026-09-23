@@ -48,6 +48,10 @@ class StageGeometry {
   const JudgelineQuad& judgeline() const noexcept { return judgeline_; }
   // Scale for constants authored against full-screen half-height (=1).
   float content_unit() const noexcept { return std::max(content_.h * 0.5f, 1e-6f); }
+  // 16:9 stage height in framebuffer pixels. Official / old-editor floor uses 720.
+  int content_height_px() const noexcept {
+    return has_content_rect_ ? std::max(1, content_h_) : std::max(1, static_cast<int>(fb_h_));
+  }
 
   // Lane index is 0-based (core convention). Internally matches Sonolus lines[lane+1].
   Vec2 lane_position(int32_t lane, float percent) const;
