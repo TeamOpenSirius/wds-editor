@@ -72,6 +72,9 @@ class EditorMainWindow final : public QMainWindow {
   void sync_toolbox_place_checks();
   void apply_command_icons();
   void refresh_history_actions();
+  void refresh_clear_marks_action();
+  void clear_click_marks();
+  double timeline_now_ms() const;
   void refresh_window_title();
   void handle_ui_change(UiChange change);
   void save_project_then(std::function<void()> done);
@@ -102,6 +105,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* export_action_ = nullptr;
   ::QAction* music_action_ = nullptr;
   ::QAction* check_action_ = nullptr;
+  ::QAction* clear_marks_action_ = nullptr;
   ::QAction* about_action_ = nullptr;
   ::QAction* check_updates_action_ = nullptr;
   ::QAction* fullscreen_action_ = nullptr;
@@ -124,5 +128,6 @@ class EditorMainWindow final : public QMainWindow {
   QTimer resize_settle_timer_;
   UpdateChecker update_checker_;
   bool native_resizing_ = false;
+  std::uint8_t click_record_held_ = 0;
 };
 }

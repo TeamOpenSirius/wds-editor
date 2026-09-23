@@ -25,6 +25,7 @@ constexpr char32_t Pause = 0xE769;
 constexpr char32_t Previous = 0xE892;   // "回到开头"
 constexpr char32_t Add = 0xE710;
 constexpr char32_t Clear = 0xE711;
+constexpr char32_t Eraser = 0xE75C;     // "Clean" / eraser
 constexpr char32_t Accept = 0xE73E;
 constexpr char32_t Info = 0xE946;       // about
 constexpr char32_t Volume = 0xE767;

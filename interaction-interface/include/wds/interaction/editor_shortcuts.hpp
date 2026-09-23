@@ -47,8 +47,20 @@ enum class EditorShortcut : int {
   PlaceType5,
   PlaceType6,
   PlaceType7,
+  ClickRecord0,
+  ClickRecord1,
+  ClickRecord2,
+  ClickRecord3,
   Count
 };
+
+inline constexpr int kClickRecordKeyCount = 4;
+
+inline bool is_click_record_shortcut(EditorShortcut id) noexcept {
+  const int v = static_cast<int>(id);
+  return v >= static_cast<int>(EditorShortcut::ClickRecord0) &&
+         v <= static_cast<int>(EditorShortcut::ClickRecord3);
+}
 
 inline constexpr std::size_t kEditorShortcutCount =
     static_cast<std::size_t>(EditorShortcut::Count);
@@ -80,5 +92,10 @@ std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text);
 
 // True when `chord` matches another binding (excluding `self`).
 bool editor_shortcut_conflicts(EditorShortcut self, const ShortcutChord& chord) noexcept;
+
+// Slot 0..3 when `key` is one of the four click-record bindings; otherwise -1.
+int click_record_slot_for_key(KeyCode key) noexcept;
+// True when `event` matches a configured click-record chord (modifiers included).
+bool click_record_matches(const KeyDownEvent& event) noexcept;
 
 }  // namespace wds::interaction

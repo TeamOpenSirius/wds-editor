@@ -393,6 +393,14 @@ int main() {
          "PlaceType0 id");
   expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType7)) == "place_type_7",
          "PlaceType7 id");
+  expect(default_editor_shortcut(EditorShortcut::ClickRecord0).key == static_cast<KeyCode>('F'),
+         "ClickRecord0 default is F");
+  expect(default_editor_shortcut(EditorShortcut::ClickRecord3).key == static_cast<KeyCode>('J'),
+         "ClickRecord3 default is J");
+  expect(std::string(editor_shortcut_id(EditorShortcut::ClickRecord0)) == "click_record_0",
+         "ClickRecord0 id");
+  expect(is_click_record_shortcut(EditorShortcut::ClickRecord2), "ClickRecord2 is click-record");
+  expect(!is_click_record_shortcut(EditorShortcut::PlaceType0), "PlaceType0 is not click-record");
   {
     const auto parsed = parse_shortcut_chord("Shift+Ctrl+C");
     expect(parsed.has_value(), "parse Shift+Ctrl+C");

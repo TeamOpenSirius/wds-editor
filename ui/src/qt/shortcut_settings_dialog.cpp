@@ -7,7 +7,6 @@
 #include <wds/interaction/platform.hpp>
 #include <wds/interaction/shortcuts.hpp>
 
-#include <QDialogButtonBox>
 #include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
@@ -160,12 +159,18 @@ constexpr EditorShortcut kViewShortcuts[] = {
     EditorShortcut::ToggleFullscreen,
 };
 
+constexpr EditorShortcut kClickRecordShortcuts[] = {
+    EditorShortcut::ClickRecord0, EditorShortcut::ClickRecord1,
+    EditorShortcut::ClickRecord2, EditorShortcut::ClickRecord3,
+};
+
 constexpr ShortcutCategory kCategories[] = {
     {"文件", kFileShortcuts, std::size(kFileShortcuts)},
     {"编辑", kEditShortcuts, std::size(kEditShortcuts)},
     {"播放", kPlaybackShortcuts, std::size(kPlaybackShortcuts)},
     {"音符", kNoteShortcuts, std::size(kNoteShortcuts)},
     {"宽度", kWidthShortcuts, std::size(kWidthShortcuts)},
+    {"点击记录", kClickRecordShortcuts, std::size(kClickRecordShortcuts)},
     {"视图", kViewShortcuts, std::size(kViewShortcuts)},
 };
 
@@ -243,27 +248,19 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
     layout->addSpacing(10);
     layout->addWidget(heading);
 
-    auto* columns = new QHBoxLayout;
-    columns->setContentsMargins(8, 4, 0, 0);
-    columns->setSpacing(24);
-    auto* left_grid = new QGridLayout;
-    auto* right_grid = new QGridLayout;
-    for (QGridLayout* grid : {left_grid, right_grid}) {
-      grid->setContentsMargins(0, 0, 0, 0);
-      grid->setHorizontalSpacing(8);
-      grid->setVerticalSpacing(6);
-      grid->setColumnStretch(0, 1);
-    }
-    // Ignored + equal stretch keeps the empty right half the same width, so a
-    // lone shortcut (切换全屏) stays on the left column instead of sliding right.
-    auto* left_host = new QWidget(content);
-    auto* right_host = new QWidget(content);
-    left_host->setLayout(left_grid);
-    right_host->setLayout(right_grid);
-    left_host->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    right_host->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    columns->addWidget(left_host, 1);
-    columns->addWidget(right_host, 1);
+    // One grid so paired rows share height. An odd last item stays in the left
+    // half (columns 0–2); the empty right half still occupies its stretch.
+    auto* grid = new QGridLayout;
+    grid->setContentsMargins(8, 4, 0, 0);
+    grid->setHorizontalSpacing(8);
+    grid->setVerticalSpacing(6);
+    grid->setColumnStretch(0, 1);
+    grid->setColumnStretch(4, 1);
+    grid->setColumnMinimumWidth(1, field_w);
+    grid->setColumnMinimumWidth(2, 32);
+    grid->setColumnMinimumWidth(3, 8);
+    grid->setColumnMinimumWidth(5, field_w);
+    grid->setColumnMinimumWidth(6, 32);
 
     for (std::size_t i = 0; i < category.count; ++i) {
       const EditorShortcut id = category.ids[i];
@@ -272,15 +269,15 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
       assert(seen[index] == 0);
       seen[index] += 1;
 
-      QGridLayout* grid = (i % 2 == 0) ? left_grid : right_grid;
       const int row = static_cast<int>(i / 2);
+      const int col = (i % 2 == 0) ? 0 : 4;
       const QString label_text =
           QString::fromUtf8(wds::interaction::editor_shortcut_label(id, pause_at_current));
       auto* shortcut_label = new QLabel(label_text, content);
       shortcut_label->setWordWrap(true);
       shortcut_label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
       shortcut_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-      grid->addWidget(shortcut_label, row, 0, Qt::AlignVCenter);
+      grid->addWidget(shortcut_label, row, col, Qt::AlignVCenter);
 
       auto* edit = new QKeySequenceEdit(content);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
@@ -290,7 +287,7 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
       edit->setStyleSheet(QString::fromLatin1(kFieldStyle));
       edit->setFixedWidth(field_w);
       edits_[index] = edit;
-      grid->addWidget(edit, row, 1, Qt::AlignVCenter);
+      grid->addWidget(edit, row, col + 1, Qt::AlignVCenter);
 
       auto* clear = new QPushButton(content);
       clear->setObjectName(QStringLiteral("shortcutClear"));
@@ -304,9 +301,28 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
         journal_menu_action("settings.shortcut_clear");
         edit->clear();
       });
-      grid->addWidget(clear, row, 2, Qt::AlignVCenter);
+      grid->addWidget(clear, row, col + 2, Qt::AlignVCenter);
     }
-    layout->addLayout(columns);
+    if (category.count % 2 == 1) {
+      const int row = static_cast<int>(category.count / 2);
+      auto add_pad = [&](int col, int width, bool stretch) {
+        auto* pad = new QWidget(content);
+        pad->setFixedHeight(0);
+        if (stretch) {
+          pad->setMinimumWidth(0);
+          pad->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        } else {
+          pad->setFixedWidth(width);
+          pad->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        }
+        pad->setAttribute(Qt::WA_TransparentForMouseEvents);
+        grid->addWidget(pad, row, col);
+      };
+      add_pad(4, 0, true);
+      add_pad(5, field_w, false);
+      add_pad(6, 32, false);
+    }
+    layout->addLayout(grid);
   }
   for (int hit : seen) assert(hit == 1);
   layout->addStretch(1);
@@ -320,17 +336,21 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
   status_->hide();
   root->addWidget(status_);
 
-  auto* buttons = new QDialogButtonBox(this);
-  auto add_action = [&](const QString& text) {
-    auto* button = buttons->addButton(text, QDialogButtonBox::ActionRole);
+  auto make_button = [this](const QString& text) {
+    auto* button = new QPushButton(text, this);
     button->setAutoDefault(false);
     button->setDefault(false);
     return button;
   };
-  exit_button_ = add_action(tr("退出"));
-  auto* apply_button = add_action(tr("应用"));
-  auto* ok_button = add_action(tr("确定"));
-  root->addWidget(buttons);
+  exit_button_ = make_button(tr("退出"));
+  auto* apply_button = make_button(tr("应用"));
+  auto* ok_button = make_button(tr("确定"));
+  auto* buttons = new QHBoxLayout();
+  buttons->addWidget(exit_button_);
+  buttons->addStretch(1);
+  buttons->addWidget(apply_button);
+  buttons->addWidget(ok_button);
+  root->addLayout(buttons);
   connect(exit_button_, &QPushButton::clicked, this, [this] {
     journal_menu_action("settings.shortcuts_exit");
     reject();

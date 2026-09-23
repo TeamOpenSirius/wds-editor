@@ -131,6 +131,27 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Same placement / curve / hold-star ghosts as append_skinned_ghosts.
   std::vector<EditGhost> skinned_ghosts() const;
 
+  // Playback tap / hold marks (session overlay; not part of the chart).
+  // Taps are independent (every key-down leaves a red head). The pink trail is
+  // shared: it lives while any record key is down.
+  static constexpr float kClickRecordHoldThresholdMs = 120.0f;
+  struct ClickTapMark {
+    double ms = 0.0;
+  };
+  struct ClickHoldMark {
+    double start_ms = 0.0;
+    double end_ms = 0.0;
+  };
+  void click_record_tap(double now_ms);
+  void click_record_hold_begin(double now_ms);
+  void click_record_hold_end(double now_ms);
+  void click_record_sync_playing(bool playing, double now_ms);
+  void clear_click_marks();
+  bool has_click_marks() const noexcept;
+  const std::vector<ClickTapMark>& click_taps() const noexcept { return click_taps_; }
+  const std::vector<ClickHoldMark>& click_holds() const noexcept { return click_holds_; }
+  std::optional<ClickHoldMark> pending_click_hold(double now_ms) const;
+
   // Persistent overlap markers. Replaces the previous set; empty ticks clear.
   // Cleared when document content_generation differs from `content_generation`.
   void set_error_ticks(std::vector<int32_t> ticks, uint64_t content_generation);
@@ -565,6 +586,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void refresh_curve_ghosts();
   void cancel_curve_fill();
   bool commit_curve_fill();
+
+  std::vector<ClickTapMark> click_taps_{};
+  std::vector<ClickHoldMark> click_holds_{};
+  bool click_record_hold_active_ = false;
+  double click_record_hold_start_ms_ = 0.0;
+  uint64_t click_marks_revision_ = 0;
 
   CurveFillSelection curve_fill_selection_{};
   bool curve_mode_active_ = false;

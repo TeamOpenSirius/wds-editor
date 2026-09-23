@@ -161,6 +161,75 @@ void flush_ui_painter(QPainter& p, const wds::interaction::UiPainter& ui) {
   for (const auto& r : front) fill_ui_rect(p, r);
 }
 
+void paint_click_marks(QPainter& p, const EditViewport& v, const ChartEditPanel& panel) {
+  const auto& b = v.bounds();
+  const float cx = b.x + b.w * 0.5f;
+  const double now_ms = static_cast<double>(panel.engine().timeline_us()) / 1000.0;
+  const bool light = wds::interaction::theme::color_scheme_is_light();
+  const QColor tap_fill = light ? QColor(198, 40, 40, 230) : QColor(226, 58, 58, 220);
+  const QColor tap_stroke = light ? QColor(110, 18, 22, 235) : QColor(255, 232, 232, 235);
+  const QColor tap_halo = light ? QColor(226, 58, 58, 38) : QColor(255, 90, 90, 58);
+  const QColor trail_glow = light ? QColor(232, 90, 168, 40) : QColor(255, 122, 195, 50);
+  const QColor trail_core = light ? QColor(210, 64, 148, 185) : QColor(255, 150, 214, 205);
+  constexpr qreal kDotR = 4.5;
+  constexpr qreal kHaloR = 7.0;
+  constexpr qreal kCoreW = 2.0;
+  constexpr qreal kGlowW = 7.5;
+
+  auto in_view = [&](float y0, float y1) {
+    const float top = std::min(y0, y1);
+    const float bot = std::max(y0, y1);
+    return bot >= b.y - 14.0f && top <= b.bottom() + 14.0f;
+  };
+
+  ScopedAA aa(p);
+  auto draw_band = [&](qreal top, qreal bot, qreal width, const QColor& color) {
+    if (bot <= top) return;
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawRoundedRect(QRectF(cx - width * 0.5, top, width, bot - top), width * 0.5, width * 0.5);
+  };
+  auto draw_trail = [&](double t0, double t1, bool pending) {
+    const float y0 = v.y_at_ms(static_cast<float>(t0));
+    const float y1 = v.y_at_ms(static_cast<float>(t1));
+    if (!in_view(y0, y1)) return;
+    qreal top = static_cast<qreal>(std::min(y0, y1));
+    qreal bot = static_cast<qreal>(std::max(y0, y1));
+    // Keep the red head clear; do not inflate short holds into pills.
+    const qreal inset = kDotR * 0.85;
+    if (bot - top <= inset * 2.0 + 1.0) return;
+    top += inset;
+    bot -= inset;
+    QColor glow = trail_glow;
+    QColor core = trail_core;
+    if (pending) {
+      glow.setAlpha(std::max(18, glow.alpha() * 3 / 4));
+      core.setAlpha(std::max(90, core.alpha() * 3 / 4));
+    }
+    draw_band(top, bot, kGlowW, glow);
+    draw_band(top, bot, kCoreW, core);
+  };
+  auto draw_dot = [&](double t) {
+    const float y = v.y_at_ms(static_cast<float>(t));
+    if (!in_view(y, y)) return;
+    const QPointF c(cx, y);
+    p.setPen(Qt::NoPen);
+    p.setBrush(tap_halo);
+    p.drawEllipse(c, kHaloR, kHaloR);
+    p.setBrush(tap_fill);
+    p.drawEllipse(c, kDotR, kDotR);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(tap_stroke, 1.15));
+    p.drawEllipse(c, kDotR, kDotR);
+  };
+
+  for (const auto& mark : panel.click_holds()) draw_trail(mark.start_ms, mark.end_ms, false);
+  if (const auto pending = panel.pending_click_hold(now_ms)) {
+    draw_trail(pending->start_ms, pending->end_ms, true);
+  }
+  for (const auto& mark : panel.click_taps()) draw_dot(mark.ms);
+}
+
 void paint_lane_guides(QPainter& p, const EditViewport& v, const wds::interaction::Rect& b,
                        const std::vector<wds::chart_editor::NotationNote>& notes,
                        const wds::chart_editor::MusicTiming& timing,
@@ -426,6 +495,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   }
 
   paint_notes(p, notes, 1.0f, true, cull_lo, cull_hi);
+  paint_click_marks(p, v, *panel_);
   for (const auto& ghost : panel_->skinned_ghosts()) {
     if (!ghost.visible) continue;
     ghost_scratch_.clear();
