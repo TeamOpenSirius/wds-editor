@@ -7,6 +7,9 @@
 #include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/qt/about_dialog.hpp"
 #include "wds/ui/qt/busy_dialog.hpp"
+#include <wds/interaction/editor_shortcuts.hpp>
+#include <wds/interaction/platform.hpp>
+#include <wds/common/time.hpp>
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/resource_paths.hpp"
@@ -205,6 +208,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   import_action_ = addCommand(fileMenu, tr("导入谱面"), {});
   export_action_ = addCommand(fileMenu, tr("导出谱面"), {});
   check_action_ = addCommand(fileMenu, tr("检查谱面"), {});
+  clear_marks_action_ = addCommand(editMenu, tr("清除记号"), {});
   undo_action_ = addCommand(editMenu, tr("撤销"), QKeySequence::Undo);
   redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
   if (auto* layout = command_toolbar_->layout()) layout->setSpacing(0);
@@ -468,6 +472,8 @@ void EditorMainWindow::apply_command_icons() {
   if (export_action_ != nullptr) export_action_->setIcon(icon_for("export", fluent::Export));
   if (music_action_ != nullptr) music_action_->setIcon(icon_for("import-audio", fluent::Music));
   if (check_action_ != nullptr) check_action_->setIcon(icon_for("check", fluent::Checklist));
+  if (clear_marks_action_ != nullptr)
+    clear_marks_action_->setIcon(icon_for("clear-marks", fluent::Eraser));
 }
 
 void EditorMainWindow::refresh_history_actions() {
@@ -475,6 +481,29 @@ void EditorMainWindow::refresh_history_actions() {
   const auto& history = ui_manager_->session().engine().history();
   undo_action_->setEnabled(history.can_undo());
   redo_action_->setEnabled(history.can_redo());
+}
+
+double EditorMainWindow::timeline_now_ms() const {
+  if (ui_manager_ == nullptr) return 0.0;
+  return static_cast<double>(ui_manager_->session().engine().timeline_us()) / 1000.0;
+}
+
+void EditorMainWindow::refresh_clear_marks_action() {
+  if (clear_marks_action_ == nullptr) return;
+  bool has_marks = false;
+  if (ui_manager_ != nullptr) {
+    if (auto* panel = ui_manager_->edit_panel()) has_marks = panel->has_click_marks();
+  }
+  clear_marks_action_->setEnabled(has_marks);
+}
+
+void EditorMainWindow::clear_click_marks() {
+  click_record_held_ = 0;
+  if (ui_manager_ != nullptr) {
+    if (auto* panel = ui_manager_->edit_panel()) panel->clear_click_marks();
+  }
+  if (editor_widget_ != nullptr) editor_widget_->update();
+  refresh_clear_marks_action();
 }
 
 void EditorMainWindow::changeEvent(QEvent* event) {
@@ -488,6 +517,13 @@ void EditorMainWindow::changeEvent(QEvent* event) {
 void EditorMainWindow::on_preview_frame() {
   if (ui_manager_ == nullptr) return;
   if (playback_panel_ != nullptr) playback_panel_->sync_position();
+  if (auto* panel = ui_manager_->edit_panel()) {
+    const bool playing =
+        ui_manager_->session().engine().playback_state() == wds::common::PlaybackState::Playing;
+    panel->click_record_sync_playing(playing, timeline_now_ms());
+    if (!playing) click_record_held_ = 0;
+  }
+  refresh_clear_marks_action();
 }
 
 void EditorMainWindow::bind_ui_manager(UiManager* manager) {
@@ -541,6 +577,11 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
     journal_menu_action("menu.check_chart");
     check_chart();
   });
+  connect(clear_marks_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.clear_click_marks");
+    clear_click_marks();
+  });
+  refresh_clear_marks_action();
 
   create_control_docks();
   restore_or_reset_layout();
@@ -902,6 +943,46 @@ bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
       if (type == QEvent::KeyPress) return false;
     }
     if (typing && matches_standard_edit_chord(key_event)) return false;
+
+    const bool playing =
+        ui_manager_->session().engine().playback_state() == wds::common::PlaybackState::Playing;
+    const auto record_key = qt_key_code(key_event->key());
+    const int record_slot = wds::interaction::click_record_slot_for_key(record_key);
+    const wds::interaction::KeyDownEvent record_event{
+        record_key,
+        qt_modifiers(key_event->modifiers() | QGuiApplication::queryKeyboardModifiers()),
+        key_event->isAutoRepeat()};
+    if (record_slot >= 0 && QApplication::activeModalWidget() == nullptr) {
+      const std::uint8_t bit = static_cast<std::uint8_t>(1u << record_slot);
+      if (type == QEvent::ShortcutOverride && playing &&
+          wds::interaction::click_record_matches(record_event)) {
+        key_event->accept();
+        return true;
+      }
+      if (type == QEvent::KeyPress && playing && !key_event->isAutoRepeat() &&
+          wds::interaction::click_record_matches(record_event)) {
+        if (auto* panel = ui_manager_->edit_panel()) {
+          const double now_ms = timeline_now_ms();
+          panel->click_record_tap(now_ms);
+          if (click_record_held_ == 0) panel->click_record_hold_begin(now_ms);
+          click_record_held_ = static_cast<std::uint8_t>(click_record_held_ | bit);
+        }
+        if (editor_widget_ != nullptr) editor_widget_->update();
+        refresh_clear_marks_action();
+        return true;
+      }
+      if (type == QEvent::KeyRelease && !key_event->isAutoRepeat() &&
+          (click_record_held_ & bit) != 0) {
+        click_record_held_ = static_cast<std::uint8_t>(click_record_held_ & ~bit);
+        if (auto* panel = ui_manager_->edit_panel()) {
+          if (click_record_held_ == 0) panel->click_record_hold_end(timeline_now_ms());
+        }
+        if (editor_widget_ != nullptr) editor_widget_->update();
+        refresh_clear_marks_action();
+        return true;
+      }
+    }
+
     if (!key_event->isAutoRepeat()) {
       const wds::interaction::KeyDownEvent command{
           qt_key_code(key_event->key()),
@@ -1094,6 +1175,7 @@ void EditorMainWindow::open_project() {
                 QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
               } else {
                 remember_recent_project(path);
+                clear_click_marks();
               }
             });
     const std::string native_path = path.toStdString();

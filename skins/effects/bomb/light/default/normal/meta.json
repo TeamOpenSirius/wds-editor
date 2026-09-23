@@ -1,8 +1,0 @@
-{
-  "duration_sec": 0.7,
-  "critical_scale": 1.5,
-  "root_scale": 1.0,
-  "square_slice": 3,
-  "flare_slice": 10,
-  "source": "BombEffectDefault atlas: slice 3 hollow frame (BomSquare), slice 10 soft ring (BomFlare)"
-}

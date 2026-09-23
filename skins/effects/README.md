@@ -12,36 +12,25 @@ Official Default Bomb at `GameTapEffectType.Light` (BomSquare + BomFlare only).
   plate geometric center (engine draws UV mid = bomb anchor). Do **not** use alpha-centroid
   recentering — that left the visual ring ~1% right of the judgeline. Do **not** map
   `ParticleSystemRenderer.pivot` `{x:-0.015,y:0.267}` into stage Y (wrong space for 2D).
-- `meta.json` — duration / slice hints
 
 Source: `wds-resources/.../Texture2D/BombEffectDefault_7.png` + `Sprite/BombEffectDefault_10.asset`.
 
-## split/lines/
+## Split lines
 
-Preferred over root `Sirius Split Line _*` placeholders when present:
-
-```text
-split/lines/
-  base/{colorId}.png
-```
-
-Light mode draws lines + fade only (no SplitEffect particles / no Sonolus Transform wipe).
-`transform1/` / `transform2/` trees are unused and should not be shipped. Appear/disappear
-windows match official fadeIn 1000ms / fadeOut 300ms via `PreviewVisualConfig`.
-
-Preview/edit soft ribbons are **not** the stock 8-tap hard-core plate as-is: the engine
-rebakes a wide gaussian glow (`split_soft_profile.hpp` → `soft_split_line` / `##soft48g`)
-so edges blur and the judgeline shows through. Draw path: white soft plate × `split_slot_color`
-tint; tip RGB lerp to white; optional mild additive body glow.
+Light mode draws a procedural soft beam (`soft_split_line` × official LineColor). Do **not**
+ship `Sirius Split Line _*.png`, `effects/split/`, or Transform 1/2 wipe plates — they are
+not loaded. Appear/disappear windows match official fadeIn 1000ms / fadeOut 300ms via
+`PreviewVisualConfig`.
 
 ## Root `skins/` keep-list (Light preview)
 
 Required / used: note Top/Bottom/ticks, arrow, sync, official judgment
-(`img_ingame_judgment_area3.png`), official start-line plates
-(`img_game_common_start_line_*.png`), official lane border
+(`img_ingame_judgment_area3.png`), official start-line plate
+(`img_game_common_start_line_500.png`), official lane border
 (`img_ingame_lane_border2.png`), Auto judgment + Combo AP digits, `ingame_bg.png`,
-base split-line color plates (`Sirius Split Line _*.png`), and this `effects/` tree.
+and this `effects/bomb/` tree.
 
 Do **not** keep: Combo FC/Normal, unused Judgment grades, Linear/Flick legacy Sonolus FX,
-Transform 1/2 split plates, grid helpers (`_GRID_*`), `_STAGE_*` covers,
-`Sirius Hidden Line.png`, `_JUDGMENT_LINE.png`.
+split-line PNG plates (root or `effects/split/`), Transform 1/2, unused start-line
+heights (`img_game_common_start_line_{72..400}.png`), grid helpers (`_GRID_*`),
+`_STAGE_*` covers, `Sirius Hidden Line.png`, `_JUDGMENT_LINE.png`.

@@ -175,6 +175,14 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "place_type_6";
     case EditorShortcut::PlaceType7:
       return "place_type_7";
+    case EditorShortcut::ClickRecord0:
+      return "click_record_0";
+    case EditorShortcut::ClickRecord1:
+      return "click_record_1";
+    case EditorShortcut::ClickRecord2:
+      return "click_record_2";
+    case EditorShortcut::ClickRecord3:
+      return "click_record_3";
     case EditorShortcut::Count:
       break;
   }
@@ -254,6 +262,14 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "Right Flick";
     case EditorShortcut::PlaceType7:
       return "Scratch Hold";
+    case EditorShortcut::ClickRecord0:
+      return "点击记录 1";
+    case EditorShortcut::ClickRecord1:
+      return "点击记录 2";
+    case EditorShortcut::ClickRecord2:
+      return "点击记录 3";
+    case EditorShortcut::ClickRecord3:
+      return "点击记录 4";
     case EditorShortcut::Count:
       break;
   }
@@ -335,6 +351,14 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return {KeyCode::Num7, {}};
     case EditorShortcut::PlaceType7:
       return {KeyCode::Num8, {}};
+    case EditorShortcut::ClickRecord0:
+      return {static_cast<KeyCode>('F'), {}};
+    case EditorShortcut::ClickRecord1:
+      return {static_cast<KeyCode>('G'), {}};
+    case EditorShortcut::ClickRecord2:
+      return {static_cast<KeyCode>('H'), {}};
+    case EditorShortcut::ClickRecord3:
+      return {static_cast<KeyCode>('J'), {}};
     case EditorShortcut::Count:
       break;
   }
@@ -527,6 +551,28 @@ std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text) {
   ShortcutChord chord{*key, mods};
   chord.mods = normalize_primary(chord.mods);
   return chord;
+}
+
+int click_record_slot_for_key(KeyCode key) noexcept {
+  if (key == KeyCode::Unknown) return -1;
+  for (int i = 0; i < kClickRecordKeyCount; ++i) {
+    const auto id = static_cast<EditorShortcut>(static_cast<int>(EditorShortcut::ClickRecord0) + i);
+    if (editor_shortcut(id).key == key) return i;
+  }
+  return -1;
+}
+
+bool click_record_matches(const KeyDownEvent& event) noexcept {
+  const ShortcutChord needle{event.key, normalize_primary(event.mods)};
+  if (needle.key == KeyCode::Unknown) return false;
+  for (int i = 0; i < kClickRecordKeyCount; ++i) {
+    const auto id = static_cast<EditorShortcut>(static_cast<int>(EditorShortcut::ClickRecord0) + i);
+    ShortcutChord chord = editor_shortcut(id);
+    if (chord.key == KeyCode::Unknown) continue;
+    chord.mods = normalize_primary(chord.mods);
+    if (chord == needle) return true;
+  }
+  return false;
 }
 
 bool editor_shortcut_conflicts(EditorShortcut self, const ShortcutChord& chord) noexcept {

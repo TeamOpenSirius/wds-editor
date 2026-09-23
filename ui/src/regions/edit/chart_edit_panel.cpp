@@ -206,6 +206,10 @@ uint64_t ChartEditPanel::visual_revision() const {
   h = mix(h, hovered_split_is_end_ ? 1ull : 0ull);
   h = mix(h, pointer_over_edit_ ? 1ull : 0ull);
   h = mix(h, static_cast<uint64_t>(spectrum_mode_));
+  h = mix(h, click_marks_revision_);
+  h = mix(h, static_cast<uint64_t>(click_taps_.size()));
+  h = mix(h, static_cast<uint64_t>(click_holds_.size()));
+  h = mix(h, click_record_hold_active_ ? 1ull : 0ull);
   h = mix(h, curve_mode_active_ ? 1ull : 0ull);
   h = mix(h, static_cast<uint64_t>(curve_ghosts_.size()));
   h = mix(h, static_cast<uint64_t>(gutter_ghosts_.size()));
@@ -2786,6 +2790,55 @@ bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {
   for (const auto& n : notes) selected_.erase(n.id);
   sync_hold_sel_focus_to_selection();
   return true;
+}
+
+void ChartEditPanel::click_record_tap(double now_ms) {
+  click_taps_.push_back({now_ms});
+  ++click_marks_revision_;
+}
+
+void ChartEditPanel::click_record_hold_begin(double now_ms) {
+  if (click_record_hold_active_) return;
+  click_record_hold_active_ = true;
+  click_record_hold_start_ms_ = now_ms;
+  ++click_marks_revision_;
+}
+
+void ChartEditPanel::click_record_hold_end(double now_ms) {
+  if (!click_record_hold_active_) return;
+  const double start = click_record_hold_start_ms_;
+  const double end = std::max(now_ms, start);
+  click_record_hold_active_ = false;
+  if (end - start >= static_cast<double>(kClickRecordHoldThresholdMs)) {
+    click_holds_.push_back({start, end});
+  }
+  ++click_marks_revision_;
+}
+
+void ChartEditPanel::click_record_sync_playing(bool playing, double now_ms) {
+  if (!playing) click_record_hold_end(now_ms);
+}
+
+void ChartEditPanel::clear_click_marks() {
+  const bool had = has_click_marks();
+  click_taps_.clear();
+  click_holds_.clear();
+  click_record_hold_active_ = false;
+  if (had) ++click_marks_revision_;
+}
+
+bool ChartEditPanel::has_click_marks() const noexcept {
+  return click_record_hold_active_ || !click_taps_.empty() || !click_holds_.empty();
+}
+
+std::optional<ChartEditPanel::ClickHoldMark> ChartEditPanel::pending_click_hold(
+    double now_ms) const {
+  if (!click_record_hold_active_) return std::nullopt;
+  if (now_ms - click_record_hold_start_ms_ < static_cast<double>(kClickRecordHoldThresholdMs)) {
+    return std::nullopt;
+  }
+  return ClickHoldMark{click_record_hold_start_ms_,
+                       std::max(now_ms, click_record_hold_start_ms_)};
 }
 
 void ChartEditPanel::set_error_ticks(std::vector<int32_t> ticks, uint64_t content_generation) {
