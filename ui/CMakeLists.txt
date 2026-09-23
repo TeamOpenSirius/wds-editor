@@ -23,6 +23,7 @@ add_executable(wds_editor WIN32
   src/qt/note_icons.cpp
   src/qt/playback_dock.cpp
   src/qt/settings_dialog.cpp
+  src/qt/shortcut_settings_dialog.cpp
   src/qt/curve_templates_panel.cpp
   src/qt/flow_layout.cpp
   src/qt/spread_layout.cpp
