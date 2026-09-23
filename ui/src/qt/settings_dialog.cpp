@@ -1,7 +1,7 @@
 #include "wds/ui/qt/settings_dialog.hpp"
 
 #include "wds/ui/ui_manager.hpp"
-#include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/qt/shortcut_settings_dialog.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
 #include "wds/ui/qt/caption_check.hpp"
 #include "wds/ui/qt/update_checker.hpp"
@@ -11,8 +11,7 @@
 #include <QCoreApplication>
 #include <QSettings>
 
-#include <wds/interaction/platform.hpp>
-#include <wds/interaction/shortcuts.hpp>
+#include <wds/interaction/editor_shortcuts.hpp>
 
 #include <QAbstractButton>
 #include <QButtonGroup>
@@ -28,7 +27,6 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
-#include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLayout>
 #include <QMargins>
@@ -49,94 +47,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
 
 namespace wds::ui {
 namespace {
-
-using wds::interaction::KeyCode;
-using wds::interaction::ShortcutChord;
-
-int chord_to_qt_key(const ShortcutChord& chord) {
-  const int v = static_cast<int>(chord.key);
-  if (v >= '0' && v <= '9') return Qt::Key_0 + (v - '0');
-  if (v >= 'A' && v <= 'Z') return Qt::Key_A + (v - 'A');
-  switch (chord.key) {
-    case KeyCode::Space: return Qt::Key_Space;
-    case KeyCode::Escape: return Qt::Key_Escape;
-    case KeyCode::Enter: return Qt::Key_Return;
-    case KeyCode::Tab: return Qt::Key_Tab;
-    case KeyCode::Backspace: return Qt::Key_Backspace;
-    case KeyCode::Delete: return Qt::Key_Delete;
-    case KeyCode::Left: return Qt::Key_Left;
-    case KeyCode::Right: return Qt::Key_Right;
-    case KeyCode::Up: return Qt::Key_Up;
-    case KeyCode::Down: return Qt::Key_Down;
-    case KeyCode::F1: return Qt::Key_F1;
-    case KeyCode::F2: return Qt::Key_F2;
-    case KeyCode::F3: return Qt::Key_F3;
-    case KeyCode::F4: return Qt::Key_F4;
-    case KeyCode::F11: return Qt::Key_F11;
-    default: break;
-  }
-  if (v == '.') return Qt::Key_Period;
-  return 0;
-}
-
-KeyCode qt_key_to_chord_key(int key) {
-  if (key >= Qt::Key_0 && key <= Qt::Key_9)
-    return static_cast<KeyCode>('0' + key - Qt::Key_0);
-  if (key >= Qt::Key_A && key <= Qt::Key_Z)
-    return static_cast<KeyCode>('A' + key - Qt::Key_A);
-  switch (key) {
-    case Qt::Key_Space: return KeyCode::Space;
-    case Qt::Key_Escape: return KeyCode::Escape;
-    case Qt::Key_Return:
-    case Qt::Key_Enter: return KeyCode::Enter;
-    case Qt::Key_Tab: return KeyCode::Tab;
-    case Qt::Key_Backspace: return KeyCode::Backspace;
-    case Qt::Key_Delete: return KeyCode::Delete;
-    case Qt::Key_Left: return KeyCode::Left;
-    case Qt::Key_Right: return KeyCode::Right;
-    case Qt::Key_Up: return KeyCode::Up;
-    case Qt::Key_Down: return KeyCode::Down;
-    case Qt::Key_F1: return KeyCode::F1;
-    case Qt::Key_F2: return KeyCode::F2;
-    case Qt::Key_F3: return KeyCode::F3;
-    case Qt::Key_F4: return KeyCode::F4;
-    case Qt::Key_F11: return KeyCode::F11;
-    case Qt::Key_Period: return static_cast<KeyCode>('.');
-    default: return KeyCode::Unknown;
-  }
-}
-
-QKeySequence chord_to_sequence(const ShortcutChord& chord) {
-  const int key = chord_to_qt_key(chord);
-  if (key == 0) return {};
-  Qt::KeyboardModifiers mods;
-  if (chord.mods.shift) mods |= Qt::ShiftModifier;
-  if (chord.mods.control) mods |= Qt::ControlModifier;
-  if (chord.mods.alt) mods |= Qt::AltModifier;
-  if (chord.mods.super) mods |= Qt::MetaModifier;
-  return QKeySequence(QKeyCombination(mods, static_cast<Qt::Key>(key)));
-}
-
-ShortcutChord sequence_to_chord(const QKeySequence& sequence) {
-  ShortcutChord chord;
-  if (sequence.isEmpty()) return chord;
-  const QKeyCombination combo = sequence[0];
-  chord.key = qt_key_to_chord_key(combo.key());
-  if (chord.key == KeyCode::Unknown ||
-      wds::interaction::is_forbidden_shortcut_key(chord.key)) {
-    return {};
-  }
-  const auto mods = combo.keyboardModifiers();
-  chord.mods.shift = mods.testFlag(Qt::ShiftModifier);
-  chord.mods.control = mods.testFlag(Qt::ControlModifier);
-  chord.mods.alt = mods.testFlag(Qt::AltModifier);
-  chord.mods.super = mods.testFlag(Qt::MetaModifier);
-  return chord;
-}
 
 QComboBox* make_combo(const QStringList& items, QWidget* parent) {
   auto* combo = new QComboBox(parent);
@@ -208,6 +121,15 @@ class RelayoutOnResizeFilter final : public QObject {
     return false;
   }
 };
+
+// A section that is only a heading and a button has no height-for-width
+// child, so the scroll layout gives it the same short height as an empty
+// heading and squashes the button. Pin the panel to the layout's own hint.
+void fit_panel_to_layout(QWidget* panel) {
+  if (panel == nullptr || panel->layout() == nullptr) return;
+  const int need = panel->layout()->totalSizeHint().height();
+  if (need > 0 && panel->minimumHeight() != need) panel->setMinimumHeight(need);
+}
 
 QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* parent) {
   auto* row = new CaptionCheckRow(text, parent);
@@ -453,17 +375,6 @@ void SettingsPanel::layout_nav_rail() {
   rail->raise();
 }
 
-void SettingsPanel::changeEvent(QEvent* event) {
-  QWidget::changeEvent(event);
-  if (event != nullptr && (event->type() == QEvent::PaletteChange ||
-                           event->type() == QEvent::ApplicationPaletteChange)) {
-    const QIcon icon = themed_named_icon("clear", {}, 18);
-    for (auto* button : findChildren<QPushButton*>(QStringLiteral("shortcutClear"))) {
-      button->setIcon(icon);
-    }
-  }
-}
-
 void SettingsPanel::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
   layout_nav_rail();
@@ -481,6 +392,7 @@ void SettingsPanel::resizeEvent(QResizeEvent* event) {
       lay->activate();
     }
     content->updateGeometry();
+    fit_panel_to_layout(sections_[6]);
     update_section_scroll_pad();
     sync_nav_from_scroll();
   });
@@ -638,69 +550,30 @@ void SettingsPanel::build_pages() {
   wrap_form(widthLayout);
   width->addLayout(widthLayout);
 
-  auto* shortcuts_box = section_at(6);
-  auto* shortcuts_host = shortcuts_box->parentWidget();
-  auto* shortcutsLayout = new QGridLayout;
-  shortcutsLayout->setContentsMargins(0, 0, 0, 0);
-  shortcutsLayout->setColumnStretch(0, 1);
-  shortcutsLayout->setColumnStretch(1, 0);
-  shortcutsLayout->setColumnStretch(2, 0);
-  const QFontMetrics shortcut_fm(font());
-  const int hanzi = std::max(1, shortcut_fm.horizontalAdvance(QStringLiteral("字")));
-  // Original box tracked this sample string. Subtract one hanzi so the label
-  // gains that space; do not add slack (that made the field wider than start).
-  const int compact_shortcut_w = std::max(
-      hanzi * 4, shortcut_fm.horizontalAdvance(QStringLiteral("Ctrl+Shift+F11")) - hanzi);
-  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
-    const auto id = static_cast<wds::interaction::EditorShortcut>(i);
-    const int row = static_cast<int>(i);
-    auto* shortcut_label = new WrappingLabel(
-        QString::fromUtf8(wds::interaction::editor_shortcut_label(id, cfg_.pause_at_current)),
-        shortcuts_host);
-    shortcut_label->setWordWrap(true);
-    shortcut_label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    shortcut_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    shortcutsLayout->addWidget(shortcut_label, row, 0, Qt::AlignVCenter);
-    auto* edit = new QKeySequenceEdit(shortcuts_host);
-    // QKeySequenceEdit already paints NativeText (⌘ on macOS, Ctrl on Windows).
-#if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
-    edit->setMaximumSequenceLength(1);
-#endif
-    // Ignore QKeySequenceEdit's wide sizeHint so leftover width goes to the label.
-    edit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    edit->setStyleSheet(QStringLiteral(
-        "QKeySequenceEdit, QKeySequenceEdit QLineEdit { min-width: 0; }"));
-    edit->setFixedWidth(compact_shortcut_w);
-    shortcut_edits_[i] = edit;
-    shortcutsLayout->addWidget(edit, row, 1, Qt::AlignVCenter);
-    auto* clear = new QPushButton(shortcuts_host);
-    clear->setObjectName(QStringLiteral("shortcutClear"));
-    clear->setIcon(themed_named_icon("clear", {}, 18));
-    clear->setIconSize(QSize(18, 18));
-    clear->setFixedSize(32, 32);
-    const QString clear_label = tr("清除快捷键：%1").arg(QString::fromUtf8(
-        wds::interaction::editor_shortcut_label(id, cfg_.pause_at_current)));
-    clear->setToolTip(clear_label);
-    clear->setAccessibleName(clear_label);
-    connect(clear, &QPushButton::clicked, this, [edit] {
-      journal_menu_action("settings.shortcut_clear");
-      edit->clear();
-    });
-    shortcutsLayout->addWidget(clear, row, 2, Qt::AlignVCenter);
-  }
-  shortcuts_box->addLayout(shortcutsLayout);
+  auto* shortcuts = section_at(6);
+  auto* open_shortcuts = new QPushButton(tr("设置快捷键"), shortcuts->parentWidget());
+  open_shortcuts->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+  connect(open_shortcuts, &QPushButton::clicked, this, [this] {
+    journal_menu_action("settings.open_shortcuts");
+    QWidget* host = window();
+    ShortcutSettingsDialog dialog(manager_, host != nullptr ? host : this);
+    dialog.exec();
+  });
+  shortcuts->addWidget(open_shortcuts, 0, Qt::AlignLeft);
+  fit_panel_to_layout(shortcuts->parentWidget());
 
   auto* privacy = section_at(7);
   auto* privacy_host = privacy->parentWidget();
   allow_crash_log_sensitive_ = add_wrapping_check(
       privacy, tr("允许崩溃日志记录真实文本与文件路径"), privacy_host);
   auto* open_logs = new QPushButton(tr("打开崩溃日志文件夹"), privacy_host);
+  open_logs->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
   connect(open_logs, &QPushButton::clicked, this, [] {
     journal_menu_action("settings.open_logs");
     QDesktopServices::openUrl(
         QUrl::fromLocalFile(QString::fromUtf8(wds::common::crash_log_directory())));
   });
-  privacy->addWidget(open_logs);
+  privacy->addWidget(open_logs, 0, Qt::AlignLeft);
 
   auto* updates = section_at(8);
   auto_check_updates_ =
@@ -744,14 +617,6 @@ void SettingsPanel::build_pages() {
   for (auto* box : width_slots_) {
     connect(box, qOverload<int>(&QSpinBox::valueChanged), this, [live](int) { live(); });
   }
-  for (auto* edit : shortcut_edits_) {
-    connect(edit, &QKeySequenceEdit::keySequenceChanged, this, [live](const QKeySequence&) {
-      live();
-    });
-    connect(edit, &QKeySequenceEdit::editingFinished, this, [] {
-      journal_menu_action("settings.shortcut_edit");
-    });
-  }
   connect(allow_crash_log_sensitive_, &QCheckBox::toggled, this, [this, live](bool) {
     if (!applying_) journal_menu_action("settings.privacy_toggle");
     live();
@@ -787,37 +652,9 @@ void SettingsPanel::load_from_config() {
     width_slots_[static_cast<std::size_t>(i)]->setValue(
         cfg_.width_slots[static_cast<std::size_t>(i)]);
   }
-  for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
-    const auto id = static_cast<wds::interaction::EditorShortcut>(i);
-    const ShortcutChord chord =
-        cfg_.shortcuts_initialized ? cfg_.shortcuts[i] : wds::interaction::editor_shortcut(id);
-    shortcut_edits_[i]->setKeySequence(chord_to_sequence(chord));
-  }
   allow_crash_log_sensitive_->setChecked(cfg_.allow_crash_log_sensitive);
   auto_check_updates_->setChecked(auto_check_updates_enabled());
   applying_ = false;
-}
-
-int SettingsPanel::refresh_shortcut_conflicts() {
-  std::unordered_map<ShortcutChord, int, wds::interaction::ShortcutChordHash> counts;
-  std::array<ShortcutChord, wds::interaction::kEditorShortcutCount> chords{};
-  for (std::size_t i = 0; i < chords.size(); ++i) {
-    chords[i] = sequence_to_chord(shortcut_edits_[i]->keySequence());
-    chords[i].mods = wds::interaction::normalize_primary(chords[i].mods);
-    if (chords[i].key != KeyCode::Unknown) ++counts[chords[i]];
-  }
-  int first = -1;
-  for (std::size_t i = 0; i < chords.size(); ++i) {
-    const bool conflict = chords[i].key != KeyCode::Unknown && counts[chords[i]] > 1;
-    shortcut_edits_[i]->setStyleSheet(
-        conflict ? QStringLiteral(
-                       "QKeySequenceEdit, QKeySequenceEdit QLineEdit { min-width: 0; }"
-                       "QKeySequenceEdit { border: 1px solid #d64545; }")
-                 : QStringLiteral(
-                       "QKeySequenceEdit, QKeySequenceEdit QLineEdit { min-width: 0; }"));
-    if (conflict && first < 0) first = static_cast<int>(i);
-  }
-  return first;
 }
 
 bool SettingsPanel::capture_into_config() {
@@ -846,14 +683,11 @@ bool SettingsPanel::capture_into_config() {
     cfg_.width_slots[static_cast<std::size_t>(i)] =
         width_slots_[static_cast<std::size_t>(i)]->value();
   }
-  const int conflict = refresh_shortcut_conflicts();
-  if (conflict < 0) {
-    for (std::size_t i = 0; i < wds::interaction::kEditorShortcutCount; ++i) {
-      cfg_.shortcuts[i] = sequence_to_chord(shortcut_edits_[i]->keySequence());
-    }
-    cfg_.shortcuts_initialized = true;
-  }
   cfg_.allow_crash_log_sensitive = allow_crash_log_sensitive_->isChecked();
+  // Shortcuts are edited in ShortcutSettingsDialog. Re-read the live chords so
+  // a later settings apply does not write the snapshot taken when this panel opened.
+  cfg_.shortcuts = wds::interaction::editor_shortcuts_snapshot();
+  cfg_.shortcuts_initialized = true;
   return true;
 }
 

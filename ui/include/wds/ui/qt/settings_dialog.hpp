@@ -8,13 +8,9 @@
 
 #include "wds/ui/editor_ui_config.hpp"
 
-#include <wds/interaction/editor_shortcuts.hpp>
-
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
-class QEvent;
-class QKeySequenceEdit;
 class QResizeEvent;
 class QScrollArea;
 class QSpinBox;
@@ -33,7 +29,6 @@ class SettingsPanel final : public QWidget {
   void build_pages();
   void load_from_config();
   bool capture_into_config();
-  int refresh_shortcut_conflicts();
   void apply_live();
   void layout_nav_rail();
   void jump_to_section(int row);
@@ -42,7 +37,6 @@ class SettingsPanel final : public QWidget {
 
  protected:
   void resizeEvent(QResizeEvent* event) override;
-  void changeEvent(QEvent* event) override;
 
  private:
   UiManager* manager_ = nullptr;
@@ -72,7 +66,6 @@ class SettingsPanel final : public QWidget {
   QComboBox* spectrum_display_ = nullptr;
   QComboBox* msaa_samples_ = nullptr;
   std::array<QSpinBox*, 6> width_slots_{};
-  std::array<QKeySequenceEdit*, wds::interaction::kEditorShortcutCount> shortcut_edits_{};
   QCheckBox* allow_crash_log_sensitive_ = nullptr;
   QCheckBox* auto_check_updates_ = nullptr;
 };
