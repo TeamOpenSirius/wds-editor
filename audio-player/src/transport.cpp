@@ -29,6 +29,7 @@ bool Transport::initialize(const std::string& effects_directory, const std::stri
   music_seek_pending_ = false;
   sought_this_poll_ = false;
   music_seek_target_ = wds::common::Microseconds{0};
+  skip_stalled_recovery_once_ = false;
   recovery_.reset();
   return true;
 }
@@ -46,6 +47,7 @@ void Transport::shutdown() {
   pending_play_ = false;
   pending_pause_ = false;
   pending_seek_ = false;
+  skip_stalled_recovery_once_ = false;
   recovery_.reset();
 }
 
@@ -69,8 +71,17 @@ void Transport::set_chart_offset_ms(int64_t offset_ms) noexcept {
 }
 
 void Transport::set_playback_rate(float rate) {
-  playback_rate_ = std::clamp(rate, 0.25f, 2.0f);
+  const float next = std::clamp(rate, 0.25f, 2.0f);
+  const bool changed = std::fabs(next - playback_rate_) > 1.0e-4f;
+  playback_rate_ = next;
   audio_.set_playback_rate(playback_rate_);
+  if (!changed) {
+    return;
+  }
+  // Mixer flush discards audio mixed at the old rate. Re-latch on the next poll
+  // so the preview clock does not ease across that discarded buffer.
+  audio_filter_valid_ = false;
+  skip_stalled_recovery_once_ = true;
 }
 
 wds::common::Microseconds Transport::clamp_time(wds::common::Microseconds time) const {
@@ -233,6 +244,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
             dur.count() > 0 && committed_position_.count() + kEndSlopUs >= dur.count();
         const auto kind = classify_stream_recovery(health, near_end);
         if (kind == StreamRecoveryKind::NaturalEnd) {
+          skip_stalled_recovery_once_ = false;
           committed_position_ = dur;
           audio_.stop_all_sfx();
           playing_ = false;
@@ -241,16 +253,22 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
           music_start_pending_ = false;
           music_seek_pending_ = false;
         } else if (kind == StreamRecoveryKind::Recover) {
-          recovery_.add_elapsed(wall_delta_us);
-          if (recovery_.try_acquire()) {
-            if (apply_music_seek(committed_position_)) {
-              music_start_pending_ = true;
-            } else {
-              recovery_.on_failure();
-              music_start_pending_ = true;
+          if (skip_stalled_recovery_once_ && health == StreamHealth::Stalled) {
+            skip_stalled_recovery_once_ = false;
+          } else {
+            skip_stalled_recovery_once_ = false;
+            recovery_.add_elapsed(wall_delta_us);
+            if (recovery_.try_acquire()) {
+              if (apply_music_seek(committed_position_)) {
+                music_start_pending_ = true;
+              } else {
+                recovery_.on_failure();
+                music_start_pending_ = true;
+              }
             }
           }
         } else if (health == StreamHealth::Playing) {
+          skip_stalled_recovery_once_ = false;
           recovery_.reset();
         }
       }
@@ -277,6 +295,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
       }
       audio_.pause_music();
       audio_.begin_timeline_control();
+      skip_stalled_recovery_once_ = false;
       playing_ = false;
       music_start_pending_ = false;
       if (!(want_seek && music_seek_pending_)) {

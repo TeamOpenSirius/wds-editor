@@ -84,6 +84,8 @@ class AudioEngine {
   void set_sfx_gain(float gain);
 
   // Playback rate for BGM only (pitch scales with rate via BASS_ATTRIB_FREQ). SFX stay at 1x.
+  // A real change flushes already-mixed output and bumps position_generation_ so
+  // the preview re-arms POS hits (same as seek) instead of re-firing the decode window.
   void set_playback_rate(float rate);
 
   // BASS MIXTIME POS SYNCPROC entry. `payload` is a stable SfxSyncSlot* from the
@@ -103,7 +105,8 @@ class AudioEngine {
   friend struct AudioEngineTestAccess;
   struct TestDouble;
   void apply_music_volume();
-  void apply_music_rate();
+  // flush_output drops mixer samples already mixed at the previous rate.
+  void apply_music_rate(bool flush_output = false);
   void apply_sfx_volume();
   float effective_music_volume() const noexcept;
   float effective_sfx_volume() const noexcept;
