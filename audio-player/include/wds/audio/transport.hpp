@@ -90,6 +90,9 @@ class Transport {
   // EMA of BASS music position used as the smooth audio master (µs).
   int64_t filtered_audio_us_ = 0;
   bool audio_filter_valid_ = false;
+  // Mixer flush after a rate change can report Stalled for one poll. Skip that
+  // Recover so we do not immediately seek (which would hitch like a scrub).
+  bool skip_stalled_recovery_once_ = false;
 
   bool pending_play_ = false;
   bool pending_pause_ = false;

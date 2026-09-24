@@ -935,11 +935,25 @@ void AudioEngine::apply_music_volume() {
   BASS_ChannelSetAttribute(impl_->music, BASS_ATTRIB_VOL, effective_music_volume());
 }
 
-void AudioEngine::apply_music_rate() {
+void AudioEngine::apply_music_rate(bool flush_output) {
   if (impl_ == nullptr || impl_->music == 0 || music_base_freq_ <= 0.0f) {
     return;
   }
   BASS_ChannelSetAttribute(impl_->music, BASS_ATTRIB_FREQ, music_base_freq_ * playback_rate_);
+  if (!flush_output || impl_->mixer == 0) {
+    return;
+  }
+  // FREQ only resamples data that has not been mixed yet. The device buffer
+  // (BASS_CONFIG_BUFFER, default 500 ms) keeps playing the old rate, and the
+  // preview clock follows that heard position — so the highway visibly coasts
+  // before the new speed appears. Seek the source back to the heard byte and
+  // drop the mixer output so both speakers and the preview switch immediately.
+  const QWORD heard = BASS_Mixer_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
+  if (heard == static_cast<QWORD>(-1)) {
+    return;
+  }
+  BASS_Mixer_ChannelSetPosition(impl_->music, heard, BASS_POS_BYTE | BASS_POS_MIXER_RESET);
+  BASS_ChannelSetPosition(impl_->mixer, 0, BASS_POS_BYTE);
 }
 
 void AudioEngine::apply_sfx_volume() {
@@ -973,8 +987,15 @@ void AudioEngine::set_sfx_gain(float gain) {
 }
 
 void AudioEngine::set_playback_rate(float rate) {
-  playback_rate_ = std::clamp(rate, 0.25f, 2.0f);
-  apply_music_rate();
+  const float next = std::clamp(rate, 0.25f, 2.0f);
+  const bool changed = std::fabs(next - playback_rate_) > 1.0e-4f;
+  playback_rate_ = next;
+  if (changed) {
+    // Drop armed POS syncs before the decode cursor is pulled back to the
+    // heard byte; otherwise the rewind window can fire them a second time.
+    begin_timeline_control();
+  }
+  apply_music_rate(changed);
 }
 
 bool AudioEngine::play_sfx(HitSfxClip clip) { return play_sfx_internal(clip); }

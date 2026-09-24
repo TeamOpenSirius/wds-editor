@@ -410,6 +410,32 @@ void test_persistent_stopped(Transport& transport, TestDouble& fake) {
          "persistent Stopped keeps recovery pending");
 }
 
+void test_rate_change_rearms_sfx_and_skips_one_stalled(Transport& transport, TestDouble& fake) {
+  fake.play_music_ok = true;
+  play_and_start(transport);
+  transport.poll(16000);
+  expect(fake.health == StreamHealth::Playing, "rate-change fixture is playing");
+
+  const uint64_t gen0 = transport.audio().position_generation();
+  transport.set_playback_rate(1.0f);
+  expect(transport.audio().position_generation() == gen0, "unchanged rate does not bump generation");
+
+  transport.set_playback_rate(0.5f);
+  expect(transport.audio().position_generation() > gen0, "rate change bumps generation for SFX re-arm");
+
+  fake.health = StreamHealth::Stalled;
+  fake.play_music_ok = false;
+  const int seeks0 = fake.set_position_calls;
+  transport.poll(16000);
+  expect(fake.set_position_calls == seeks0, "first Stalled after rate change does not recover-seek");
+  expect(!transport.music_start_pending(), "skipped Stalled does not arm a play retry");
+
+  transport.poll(16000);
+  expect(fake.set_position_calls > seeks0, "second Stalled recovers immediately");
+  expect(transport.music_start_pending() || transport.recovery_pending(),
+         "persistent Stalled after the grace frame still recovers");
+}
+
 void test_persistent_stalled(Transport& transport, TestDouble& fake) {
   fake.play_music_ok = true;
   play_and_start(transport);
@@ -1244,6 +1270,13 @@ int main() {
     bind_fake_music(stalled_t, stalled_fake);
     test_persistent_stalled(stalled_t, stalled_fake);
     stalled_t.shutdown();
+  }
+  {
+    Transport rate_t;
+    TestDouble rate_fake;
+    bind_fake_music(rate_t, rate_fake);
+    test_rate_change_rearms_sfx_and_skips_one_stalled(rate_t, rate_fake);
+    rate_t.shutdown();
   }
   {
     Transport fail_t;

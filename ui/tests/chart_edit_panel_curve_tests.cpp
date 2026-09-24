@@ -1039,8 +1039,12 @@ void test_selected_regular_terminal_tail_shows_resize_cursor() {
 
   h.panel.on_pointer_move(PointerMoveEvent{empty, {}});
   h.panel.on_pointer_move(PointerMoveEvent{tail_edge, {}});
-  CHECK(cursor == CursorKind::Default);
+  CHECK(cursor == CursorKind::ResizeHorizontal);
   h.panel.on_pointer_move(PointerMoveEvent{tail_mid, {}});
+  CHECK(cursor == CursorKind::ResizeVertical);
+  h.panel.on_pointer_move(PointerMoveEvent{body_left, {}});
+  CHECK(cursor == CursorKind::ResizeHorizontal);
+  h.panel.on_pointer_move(PointerMoveEvent{body_mid, {}});
   CHECK(cursor == CursorKind::Default);
 
   h.panel.set_selected({id});
@@ -1431,6 +1435,74 @@ void test_selected_width_resize_affects_only_grabbed_note() {
   CHECK(h.panel.selected().count(b_id));
 }
 
+void test_unselected_edge_edits_keep_selection() {
+  {
+    Harness h;
+    NotationNote keep;
+    keep.note_type = NoteType::Normal;
+    keep.start_tick = 1920;
+    keep.end_tick = 1920;
+    keep.lane = 8;
+    keep.width = 1;
+    const int32_t keep_id = h.engine.add_note(keep);
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 480;
+    tap.end_tick = 480;
+    tap.lane = 2;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    CHECK(keep_id >= 0);
+    CHECK(tap_id >= 0);
+    h.panel.set_selected({keep_id});
+
+    const auto* before = find_note_id(h.engine.document().notes(), tap_id);
+    CHECK(before != nullptr);
+    const auto grab = body_right_edge_on_note(h, *before);
+    const auto wider = h.at_tick_lane(480, before->end_lane() + 2);
+    h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{wider, {}});
+    h.panel.on_pointer_up(PointerUpEvent{wider, PointerButton::Left, {}});
+
+    const auto* after = find_note_id(h.engine.document().notes(), tap_id);
+    CHECK(after != nullptr);
+    CHECK(after->width > 2);
+    CHECK_EQ(h.panel.selected().size(), 1u);
+    CHECK(h.panel.selected().count(keep_id));
+    CHECK(!h.panel.selected().count(tap_id));
+  }
+  {
+    Harness h;
+    NotationNote keep;
+    keep.note_type = NoteType::Normal;
+    keep.start_tick = 1920;
+    keep.end_tick = 1920;
+    keep.lane = 8;
+    keep.width = 1;
+    const int32_t keep_id = h.engine.add_note(keep);
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+    CHECK(keep_id >= 0);
+    h.panel.set_selected({keep_id});
+
+    const auto* before = find_note_id(h.engine.document().notes(), hold_id);
+    CHECK(before != nullptr);
+    CHECK_EQ(before->end_tick, 960);
+    const auto grab = h.at_tick_lane(before->end_tick, before->lane + 1);
+    const auto longer = h.at_tick_lane(1440, before->lane + 1);
+    h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{longer, {}});
+    h.panel.on_pointer_up(PointerUpEvent{longer, PointerButton::Left, {}});
+
+    const auto* after = find_note_id(h.engine.document().notes(), hold_id);
+    CHECK(after != nullptr);
+    CHECK(after->end_tick != 960);
+    CHECK_EQ(after->start_tick, 0);
+    CHECK_EQ(h.panel.selected().size(), 1u);
+    CHECK(h.panel.selected().count(keep_id));
+    CHECK(!h.panel.selected().count(hold_id));
+  }
+}
+
 void test_paste_hold_does_not_select_eighths() {
   Harness h;
   h.enter_hold(false, 0, 960, 3);
@@ -1815,6 +1887,7 @@ int main() {
   test_split_track_between_overlapping_lines();
   test_split_width_follow_unions_overlapping_effects();
   test_selected_width_resize_affects_only_grabbed_note();
+  test_unselected_edge_edits_keep_selection();
   test_paste_hold_does_not_select_eighths();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
