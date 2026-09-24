@@ -114,35 +114,24 @@ jobs:
           test -n "${mingw_cfg}"
           mingw_root="$(cd "$(dirname "${mingw_cfg}")/../../.." && pwd)"
           echo "WDS_QT_MINGW_ROOT=${mingw_root}" >> "${GITHUB_ENV}"
-          # Qt Tools bin, Ubuntu posix-runtime, and winpthread live in different directories.
-          dll_dirs=()
-          qt_runtime_bin="$(find "${{ github.workspace }}/qt-mingw" -type f -name 'libgcc_s_seh-1.dll' -printf '%h\n' -quit || true)"
-          [[ -n "${qt_runtime_bin}" ]] && dll_dirs+=("${qt_runtime_bin}")
-          gcc_dll="$(x86_64-w64-mingw32-g++ -print-file-name=libgcc_s_seh-1.dll 2>/dev/null || true)"
-          if [[ -n "${gcc_dll}" && "${gcc_dll}" != "libgcc_s_seh-1.dll" && -f "${gcc_dll}" ]]; then
-            dll_dirs+=("$(dirname "${gcc_dll}")")
-          fi
-          dll_dirs+=("/usr/x86_64-w64-mingw32/lib" "/usr/x86_64-w64-mingw32/bin")
-          local_ifs="$IFS"
-          IFS=':'
-          echo "WDS_MINGW_DLL_DIRS=${dll_dirs[*]}" >> "${GITHUB_ENV}"
-          IFS="$local_ifs"
-          echo "MinGW DLL search: ${dll_dirs[*]}"
-          missing=()
-          for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-            found=""
-            for d in "${dll_dirs[@]}"; do
-              if [[ -f "${d}/${dll}" ]]; then found="${d}/${dll}"; break; fi
+          # One toolchain only. Mixing Ubuntu's win32 libstdc++ with Qt's
+          # libgcc drops __gthr_win32_create and the exe will not start.
+          mingw_tool="$(find "${{ github.workspace }}/qt-mingw" -type d -name 'mingw1310_64' -print -quit || true)"
+          if [[ -n "${mingw_tool}" ]]; then
+            echo "WDS_MINGW_DLL_DIRS=${mingw_tool}" >> "${GITHUB_ENV}"
+            echo "MinGW toolchain: ${mingw_tool}"
+            missing=()
+            for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+              found="$(find "${mingw_tool}" -type f -name "${dll}" -print -quit || true)"
+              if [[ -z "${found}" ]]; then
+                missing+=("${dll}")
+              else
+                echo "found ${dll} -> ${found}"
+              fi
             done
-            if [[ -z "${found}" ]]; then
-              missing+=("${dll}")
-            else
-              echo "found ${dll} -> ${found}"
+            if ((${#missing[@]})); then
+              echo "Qt MinGW tree is missing ${missing[*]}; packaging will use one posix gcc runtime set instead of mixing DLLs" >&2
             fi
-          done
-          if ((${#missing[@]})); then
-            echo "missing MinGW runtime(s): ${missing[*]}" >&2
-            exit 1
           fi
           echo "Host Qt: ${QT_ROOT_DIR}"
           echo "MinGW Qt: ${mingw_root}"

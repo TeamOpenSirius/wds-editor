@@ -443,6 +443,197 @@ mingw_dll() {
   return 1
 }
 
+# Qt's libgcc and Ubuntu's win32-thread libstdc++ do not export the same
+# gthread symbols. Shipping one from each toolchain makes Windows fail with
+# "无法定位程序输入点 __gthr_win32_create". The three runtime DLLs have to
+# come from one thread model, and each import between them must resolve.
+mingw_qt_tool_roots() {
+  local p d i
+  if [[ -n "${WDS_QT_MINGW_ROOT:-}" && -d "${WDS_QT_MINGW_ROOT}" ]]; then
+    p="${WDS_QT_MINGW_ROOT}"
+    for i in 1 2 3 4 5 6; do
+      if [[ -d "${p}/Tools" ]]; then
+        for d in "${p}/Tools"/mingw*; do
+          [[ -d "$d" ]] && printf '%s\n' "$d"
+        done
+        break
+      fi
+      p="$(dirname "$p")"
+      [[ "$p" == "/" ]] && break
+    done
+  fi
+  if [[ -n "${WDS_MINGW_DLL_DIRS:-}" ]]; then
+    local IFS=':'
+    for d in ${WDS_MINGW_DLL_DIRS}; do
+      p="$d"
+      while [[ -n "$p" && "$p" != "/" ]]; do
+        case "$(basename "$p")" in
+          mingw*|mingw*_64)
+            printf '%s\n' "$p"
+            break
+            ;;
+        esac
+        p="$(dirname "$p")"
+      done
+    done
+  fi
+}
+
+pick_dll_under() {
+  local root="$1" name="$2" hit=""
+  [[ -d "$root" ]] || return 1
+  hit="$(find "$root" -type f -path "*/bin/${name}" -print -quit 2>/dev/null || true)"
+  if [[ -z "$hit" ]]; then
+    hit="$(find "$root" -type f -name "$name" -print -quit 2>/dev/null || true)"
+  fi
+  [[ -n "$hit" && -f "$hit" ]] || return 1
+  printf '%s\n' "$hit"
+}
+
+# Print three paths (libstdc++, libgcc, libwinpthread) for one consistent set.
+mingw_runtime_candidates() {
+  local root dll_dir stdc gcc thread
+  while IFS= read -r root; do
+    [[ -n "$root" && -d "$root" ]] || continue
+    stdc="$(pick_dll_under "$root" libstdc++-6.dll || true)"
+    gcc="$(pick_dll_under "$root" libgcc_s_seh-1.dll || true)"
+    thread="$(pick_dll_under "$root" libwinpthread-1.dll || true)"
+    if [[ -n "$stdc" && -n "$gcc" && -n "$thread" ]]; then
+      printf '%s\n%s\n%s\n' "$stdc" "$gcc" "$thread"
+      return 0
+    fi
+  done < <(mingw_qt_tool_roots | awk '!seen[$0]++')
+
+  # Host cross-compiler. Prefer the posix thread model Qt was built with.
+  # The default Ubuntu triplet is win32 and its libstdc++ imports
+  # __gthr_win32_create from libgcc; that must be the libgcc beside it,
+  # never Qt's posix libgcc.
+  local -a gcc_dirs=()
+  for dll_dir in "/usr/lib/gcc/${WDS_MINGW_TRIPLE}"/*-posix \
+                 "/usr/lib/gcc/${WDS_MINGW_TRIPLE}"/*-win32; do
+    [[ -d "$dll_dir" ]] && gcc_dirs+=("$dll_dir")
+  done
+  local print_std
+  print_std="$("${WDS_MINGW_CXX}" -print-file-name=libstdc++-6.dll 2>/dev/null || true)"
+  if [[ -n "$print_std" && "$print_std" != "libstdc++-6.dll" && -f "$print_std" ]]; then
+    gcc_dirs+=("$(dirname "$print_std")")
+  fi
+  local thread_fallback=""
+  for thread_fallback in \
+      "/usr/${WDS_MINGW_TRIPLE}/bin/libwinpthread-1.dll" \
+      "/usr/${WDS_MINGW_TRIPLE}/lib/libwinpthread-1.dll"; do
+    [[ -f "$thread_fallback" ]] && break
+    thread_fallback=""
+  done
+  for dll_dir in "${gcc_dirs[@]}"; do
+    [[ -f "${dll_dir}/libstdc++-6.dll" && -f "${dll_dir}/libgcc_s_seh-1.dll" ]] || continue
+    thread="$(pick_dll_under "$dll_dir" libwinpthread-1.dll || true)"
+    [[ -n "$thread" ]] || thread="$thread_fallback"
+    [[ -n "$thread" && -f "$thread" ]] || continue
+    printf '%s\n%s\n%s\n' \
+      "${dll_dir}/libstdc++-6.dll" \
+      "${dll_dir}/libgcc_s_seh-1.dll" \
+      "$thread"
+  done
+}
+
+# Fail when one of the three imports a symbol the sibling DLL does not export.
+verify_mingw_runtime_set() {
+  local stage="$1"
+  python3 - "$stage" <<'PY'
+import struct, sys
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+names = ("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")
+
+def pe_parts(path):
+    data = path.read_bytes()
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    coff = e_lfanew + 4
+    num_sections = struct.unpack_from("<H", data, coff + 2)[0]
+    opt_size = struct.unpack_from("<H", data, coff + 16)[0]
+    magic = struct.unpack_from("<H", data, coff + 20)[0]
+    dd_off = coff + 20 + (112 if magic == 0x20B else 96)
+    sec_off = coff + 20 + opt_size
+    sections = []
+    for i in range(num_sections):
+        o = sec_off + i * 40
+        vsize, va, rawsize, raw = struct.unpack_from("<IIII", data, o + 8)
+        sections.append((va, raw, max(vsize, rawsize)))
+
+    def rva_to_off(rva):
+        for va, raw, size in sections:
+            if va <= rva < va + size:
+                return raw + (rva - va)
+        return None
+
+    return data, magic, dd_off, rva_to_off
+
+def imports_of(path):
+    data, magic, dd_off, rva_to_off = pe_parts(path)
+    import_rva = struct.unpack_from("<I", data, dd_off + 8)[0]
+    off = rva_to_off(import_rva)
+    if off is None:
+        return []
+    step = 8 if magic == 0x20B else 4
+    out = []
+    while True:
+        ilt, _timed, _fwd, name_rva, iat = struct.unpack_from("<IIIII", data, off)
+        if name_rva == 0:
+            break
+        no = rva_to_off(name_rva)
+        dll = data[no:data.index(b"\0", no)].decode("ascii", "replace")
+        to = rva_to_off(ilt or iat)
+        syms = []
+        if to is not None:
+            while True:
+                val = struct.unpack_from("<Q" if magic == 0x20B else "<I", data, to)[0]
+                if val == 0:
+                    break
+                flag = 1 << 63 if magic == 0x20B else 1 << 31
+                if not (val & flag):
+                    so = rva_to_off(val & 0x7FFFFFFF)
+                    if so is not None:
+                        syms.append(data[so + 2:data.index(b"\0", so + 2)].decode("ascii", "replace"))
+                to += step
+        out.append((dll, syms))
+        off += 20
+    return out
+
+def exports_of(path):
+    data, _magic, dd_off, rva_to_off = pe_parts(path)
+    exp_rva = struct.unpack_from("<I", data, dd_off)[0]
+    off = rva_to_off(exp_rva)
+    if off is None:
+        return set()
+    num_names = struct.unpack_from("<I", data, off + 24)[0]
+    names_rva = struct.unpack_from("<I", data, off + 32)[0]
+    no = rva_to_off(names_rva)
+    names = set()
+    for i in range(num_names):
+        nrva = struct.unpack_from("<I", data, no + i * 4)[0]
+        n = rva_to_off(nrva)
+        names.add(data[n:data.index(b"\0", n)].decode("ascii", "replace"))
+    return names
+
+by_name = {name.lower(): stage / name for name in names}
+exports = {name.lower(): exports_of(stage / name) for name in names}
+missing = []
+for name in names:
+    for dll, syms in imports_of(stage / name):
+        key = dll.lower()
+        if key not in by_name:
+            continue
+        for sym in syms:
+            if sym not in exports[key]:
+                missing.append(f"{name} imports {sym} from {dll}, which does not export it")
+if missing:
+    print("\n".join(missing), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Qt MinGW DLLs always need these next to the exe, even when the exe is
 # -static-libstdc++. libssp is only copied when a staged PE actually imports it.
 ensure_mingw_runtime_dlls() {
@@ -452,6 +643,8 @@ ensure_mingw_runtime_dlls() {
   local -a required=(libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
   local -A needed=()
   local pe dll name src d
+  local -a candidate=()
+  local chosen=0
 
   for name in "${required[@]}"; do
     needed["$name"]=1
@@ -466,27 +659,49 @@ ensure_mingw_runtime_dlls() {
   done < <(find "$stage" -type f \( -iname '*.exe' -o -iname '*.dll' \) \
             ! -name 'wds_msi_ca.dll' -print0 2>/dev/null)
 
-  for name in "${required[@]}" libssp-0.dll; do
-    [[ -n "${needed[$name]:-}" ]] || continue
-    [[ -f "${stage}/${name}" ]] && continue
+  while IFS= read -r src; do
+    candidate+=("$src")
+    if ((${#candidate[@]} == 3)); then
+      local i=0
+      for name in "${required[@]}"; do
+        echo "Bundling MinGW runtime ${name} from ${candidate[$i]}"
+        cp -a "${candidate[$i]}" "${stage}/${name}"
+        chmod u+w "${stage}/${name}" 2>/dev/null || true
+        i=$((i + 1))
+      done
+      if verify_mingw_runtime_set "$stage"; then
+        chosen=1
+        break
+      fi
+      echo "Rejecting MinGW runtime set (import/export mismatch):" >&2
+      printf '  %s\n' "${candidate[@]}" >&2
+      candidate=()
+    fi
+  done < <(mingw_runtime_candidates)
+
+  if [[ "$chosen" -ne 1 ]]; then
+    die "no matched MinGW runtime set (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll). Refusing to mix Ubuntu's win32 libstdc++ with Qt's libgcc (__gthr_win32_create)."
+  fi
+
+  if [[ -n "${needed[libssp-0.dll]:-}" && ! -f "${stage}/libssp-0.dll" ]]; then
     src=""
     for d in "${prefer_dirs[@]}"; do
-      if [[ -n "$d" && -f "${d}/${name}" ]]; then
-        src="${d}/${name}"
+      if [[ -n "$d" && -f "${d}/libssp-0.dll" ]]; then
+        src="${d}/libssp-0.dll"
         break
       fi
     done
     if [[ -z "$src" ]]; then
-      src="$(mingw_dll "$name" || true)"
+      src="$(mingw_dll libssp-0.dll || true)"
     fi
     if [[ -n "$src" && -f "$src" ]]; then
-      echo "Bundling MinGW runtime ${name} from ${src}"
-      cp -a "$src" "${stage}/${name}"
-      chmod u+w "${stage}/${name}" 2>/dev/null || true
+      echo "Bundling MinGW runtime libssp-0.dll from ${src}"
+      cp -a "$src" "${stage}/libssp-0.dll"
+      chmod u+w "${stage}/libssp-0.dll" 2>/dev/null || true
     else
-      die "missing MinGW runtime ${name} (needed by Qt). Set WDS_MINGW_DLL_DIRS to the matching MinGW bin, e.g. Qt/Tools/mingw1310_64/bin"
+      die "missing MinGW runtime libssp-0.dll (imported by a staged binary)"
     fi
-  done
+  fi
 }
 
 qt_mingw_root_from_build() {
