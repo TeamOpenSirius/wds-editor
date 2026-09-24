@@ -2,6 +2,7 @@
 
 #include "hit_sfx.hpp"
 #include "recovery_backoff.hpp"
+#include "sfx_sync_policy.hpp"
 
 #include <wds/common/time.hpp>
 
@@ -73,7 +74,11 @@ class AudioEngine {
   // Armed MIXTIME POS syncs still waiting to fire. Thread-safe (same lock as push).
   size_t pending_sfx_sync_count() const noexcept;
   void clear_scheduled_sfx();
+  // Drop only HoldOn/HoldOff POS gates. One-shots stay armed.
+  void clear_hold_gates();
+  bool schedule_hold_gate(bool enabled, wds::common::Microseconds at);
   void set_hold_looping(bool enabled);
+  bool hold_looping() const noexcept;
   // Stop currently audible sample voices (one-shots / Hold). Pending music
   // syncs are cleared via clear_scheduled_sfx.
   void stop_playing_sfx();
@@ -92,6 +97,7 @@ class AudioEngine {
   // fixed Impl pool (never a heap object that can be freed while BASS is alive).
   // Not for UI callers.
   void handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip);
+  void handle_hold_region_sync();
 
   // Pending-slot snapshot for lifetime tests. Pointers stay valid until
   // shutdown() releases Impl; after clear they are stale SYNCPROC user pointers.
@@ -115,6 +121,13 @@ class AudioEngine {
   bool play_sfx_internal(HitSfxClip clip);
   bool mix_sfx_on_mixer(HitSfxClip clip);
   void remove_mixer_sfx_sources();
+  bool schedule_music_sync(SfxSyncKind kind, HitSfxClip clip, wds::common::Microseconds at);
+  void fire_sync_action(SfxSyncKind kind, HitSfxClip clip);
+  void warmup_hold_channel();
+  void arm_hold_region_loop();
+  void detach_hold_region_loop();
+  void load_hold_loop_sidecar(const std::string& effects_directory);
+  bool resolve_hold_loop_bytes();
   void cache_music_format();
   std::uint64_t align_music_bytes(std::uint64_t bytes) const noexcept;
   std::uint64_t music_heard_bytes() const;

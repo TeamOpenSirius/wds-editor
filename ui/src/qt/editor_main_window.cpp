@@ -829,11 +829,8 @@ bool EditorMainWindow::show_startup_splash() {
   auto* actions = new QHBoxLayout;
   actions->setSpacing(8);
   auto* open = new QPushButton(tr("打开工程"), &splash);
-  open->setIcon(fluent_icon(fluent::OpenFolder));
   auto* create = new QPushButton(tr("新建工程"), &splash);
-  create->setIcon(fluent_icon(fluent::Add));
   auto* about = new QPushButton(tr("关于"), &splash);
-  about->setIcon(fluent_icon(fluent::Info));
   auto* version = new QLabel(tr("版本 %1").arg(QStringLiteral(WDS_APP_VERSION)), &splash);
   version->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   actions->addWidget(open);

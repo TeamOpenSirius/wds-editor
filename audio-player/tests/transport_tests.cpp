@@ -1054,9 +1054,11 @@ void test_bass_sfx_sync_fixture() {
   const fs::path fx_dir = root / "effects";
   const fs::path music_path = root / "music.wav";
   const fs::path perfect_ogg = fx_dir / "_PERFECT.ogg";
+  const fs::path hold_ogg = fx_dir / "_HOLD.ogg";
   std::error_code ec;
   fs::create_directories(fx_dir, ec);
-  if (ec || !write_pcm16_wav(music_path, 12) || !write_pcm16_wav(perfect_ogg, 1)) {
+  if (ec || !write_pcm16_wav(music_path, 12) || !write_pcm16_wav(perfect_ogg, 1) ||
+      !write_pcm16_wav(hold_ogg, 2)) {
     std::fprintf(stderr, "skip: could not write SFX sync WAV fixture\n");
     fs::remove_all(root, ec);
     return;
@@ -1165,6 +1167,27 @@ void test_bass_sfx_sync_fixture() {
   } else {
     std::fprintf(stderr, "skip: could not play music for immediate-callback probe\n");
   }
+
+  engine.clear_scheduled_sfx();
+  expect(engine.schedule_hold_gate(true, Microseconds{3'000'000}), "future HoldOn arms");
+  expect(engine.pending_sfx_sync_count() >= 1, "HoldOn increases pending");
+  expect(engine.schedule_sfx_at(HitSfxClip::Perfect, Microseconds{4'000'000}),
+         "one-shot still arms beside Hold gate");
+  const size_t pending_with_hold = engine.pending_sfx_sync_count();
+  engine.clear_hold_gates();
+  expect(engine.pending_sfx_sync_count() == pending_with_hold - 1,
+         "clear_hold_gates drops only the Hold gate");
+  engine.set_hold_looping(true);
+  expect(engine.hold_looping(), "set_hold_looping starts the loop");
+  engine.stop_all_sfx();
+  expect(!engine.hold_looping(), "stop_all_sfx stops Hold");
+  engine.set_hold_looping(true);
+  expect(engine.hold_looping(), "Hold restarts after mixer sources were removed");
+  engine.set_playback_rate(0.5f);
+  expect(!engine.hold_looping(), "rate change stop_all clears Hold");
+  expect(engine.pending_sfx_sync_count() == 0, "rate change clears pending including Hold gates");
+  engine.set_hold_looping(true);
+  expect(engine.hold_looping(), "Hold can be re-armed after rate-change teardown");
 
   engine.shutdown();
   expect(engine.pending_sfx_sync_count() == 0, "shutdown pending is 0");

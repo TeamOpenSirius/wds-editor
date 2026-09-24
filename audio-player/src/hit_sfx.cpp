@@ -63,4 +63,22 @@ void HitSfxPlayer::set_hold_looping(bool enabled) {
   audio_->set_hold_looping(enabled);
 }
 
+bool HitSfxPlayer::hold_looping() const noexcept {
+  return audio_ != nullptr && audio_->hold_looping();
+}
+
+bool HitSfxPlayer::schedule_hold_gate(bool enabled, wds::common::Microseconds music_time) {
+  if (audio_ == nullptr) {
+    return false;
+  }
+  return audio_->schedule_hold_gate(enabled, music_time);
+}
+
+void HitSfxPlayer::clear_hold_gates() {
+  if (audio_ == nullptr) {
+    return;
+  }
+  audio_->clear_hold_gates();
+}
+
 }  // namespace wds::audio

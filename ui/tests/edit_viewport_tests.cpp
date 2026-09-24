@@ -86,7 +86,7 @@ int main() {
             "4-lane inset fraction smaller");
 
     using wds::chart_editor::official_preview_note_height_px;
-    using wds::chart_editor::official_preview_sound_note_height_px;
+    using wds::chart_editor::official_preview_sound_note_to_lane_width_ratio;
     const float ref_h = wds::ui::EditViewport::kPreviewRefContentHeight;
     const float h_default = viewport.note_height_px();
     require(std::fabs(h_default - official_preview_note_height_px(8, ref_h)) < 1e-3f,
@@ -112,15 +112,22 @@ int main() {
     star.lane = 2;
     star.width = 1;
     star.start_tick = 0;
+    const float ratio = official_preview_sound_note_to_lane_width_ratio();
+    require(ratio > 1.20f && ratio < 1.26f, "star wider than one lane, near 1.12/0.915");
     const auto a = viewport.mid_star_screen_rect(star);
-    require(std::fabs(a.w - official_preview_sound_note_height_px(ref_h)) < 1e-3f,
-            "star = official 1.12 at Rx=0");
+    const float lane_narrow = viewport.lane_width(1);
+    require(std::fabs(a.w - lane_narrow * ratio) < 1e-3f, "star/lane = preview ratio");
     require(std::fabs(a.h - a.w) < 1e-4f, "star square");
-    viewport.set_bounds({0, 0, 800, 800});
+    viewport.set_bounds({0, 0, 800, 240});
+    const auto wide = viewport.mid_star_screen_rect(star);
+    require(std::fabs(wide.w - viewport.lane_width(1) * ratio) < 1e-3f, "star follows pane width");
+    require(wide.w > a.w * 6.0f, "wider pane → larger star");
+    require(std::fabs(wide.h - wide.w) < 1e-4f, "wide star still square");
+    viewport.set_bounds({0, 0, 120, 800});
     viewport.set_note_height_level(1);
-    const auto b = viewport.mid_star_screen_rect(star);
-    require(std::fabs(b.w - a.w) < 1e-4f && std::fabs(b.h - a.h) < 1e-4f,
-            "star size ignores pane and 厚度");
+    const auto tall = viewport.mid_star_screen_rect(star);
+    require(std::fabs(tall.w - a.w) < 1e-4f && std::fabs(tall.h - a.h) < 1e-4f,
+            "star size ignores pane height and 厚度");
     viewport.set_bounds({0, 0, 120, 240});
     viewport.set_note_height_level(8);
   }

@@ -1521,7 +1521,8 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
         chart_hit_ms, preview_lead_in_visible_ms_);
   };
 
-  auto emit = [&](int32_t note_id, uint32_t kind, wds::audio::HitSfxClip clip, int64_t hit_ms) {
+  auto emit = [&](int32_t note_id, uint32_t kind, wds::audio::HitSfxClip clip, int64_t hit_ms,
+                  bool bypass_history) {
     if (clip == wds::audio::HitSfxClip::Count) {
       return;
     }
@@ -1539,10 +1540,19 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
       return;
     }
 
+    auto reject_permanently = [&]() {
+      mark_hit_sfx_event(key);
+    };
+
     if (music_clock) {
       if (when_us <= clock_us) {
         // Already behind the music playhead — skip (marked on seek/pause).
         mark_hit_sfx_event(key);
+        return;
+      }
+      if (!sfx_history_.can_admit(when_ms, clip, bypass_history) ||
+          !sfx_budget_.can_admit(when_ms)) {
+        reject_permanently();
         return;
       }
       // Music byte sync (not display-frame quantized). Engine plays immediately if
@@ -1550,9 +1560,13 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
       // TooFar / AtCapacity / SetSyncFailure return false — drop the mark so a
       // later tick retries instead of permanently skipping the hit. Pass a factory
       // so already-marked keys do not re-evaluate schedule_at every frame.
-      (void)commit_hit_sfx_schedule(hit_sfx_played_, key, [&] {
+      const bool accepted = commit_hit_sfx_schedule(hit_sfx_played_, key, [&] {
         return hit_sfx_.schedule_at(clip, wds::common::ms_to_us(std::max<int64_t>(0, when_ms)));
       });
+      if (accepted) {
+        sfx_history_.record(when_ms, clip, bypass_history);
+        sfx_budget_.record(when_ms);
+      }
       return;
     }
 
@@ -1562,12 +1576,20 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     if (when_us > clock_us) {
       return;
     }
+    if (!sfx_history_.can_admit(when_ms, clip, bypass_history) ||
+        !sfx_budget_.can_admit(when_ms)) {
+      reject_permanently();
+      return;
+    }
     if (!mark_hit_sfx_event(key)) {
       return;
     }
     if (!hit_sfx_.play(clip)) {
       hit_sfx_played_.erase(key);
+      return;
     }
+    sfx_history_.record(when_ms, clip, bypass_history);
+    sfx_budget_.record(when_ms);
   };
 
   constexpr uint32_t kHead = 0;
@@ -1590,24 +1612,92 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
                             lookup.duration_hold_heads.count(note_span_key(
                                 note.start_ms, note.lane, note.width)) != 0;
         if (!paired) {
-          emit(note.note_id, kHead, hit_sfx_clip_for_head(note.note_type), note.start_ms);
+          emit(note.note_id, kHead, hit_sfx_clip_for_head(note.note_type), note.start_ms,
+               hit_sfx_bypasses_history(note.note_type));
         }
       }
     }
 
     // Hold body start — Perfect/Critical one-shot; Hold loop is handled separately.
     if (duration_hold) {
-      emit(note.note_id, kHead, hit_sfx_clip_for_hold_body_start(note.note_type), note.start_ms);
+      emit(note.note_id, kHead, hit_sfx_clip_for_hold_body_start(note.note_type), note.start_ms,
+           false);
     }
 
     if (with_tail && note.end_ms > note.start_ms) {
-      emit(note.note_id, kTail, hit_sfx_clip_for_hold_tail(note.note_type), note.end_ms);
+      emit(note.note_id, kTail, hit_sfx_clip_for_hold_tail(note.note_type), note.end_ms, false);
     }
 
     if (mid_star) {
-      emit(note.note_id, kStar, hit_sfx_clip_for_mid_star(note.note_type), note.start_ms);
+      emit(note.note_id, kStar, hit_sfx_clip_for_mid_star(note.note_type), note.start_ms,
+           hit_sfx_bypasses_history(note.note_type));
     }
   }
+}
+
+void PlaybackPreviewView::collect_hold_intervals(const PreviewSnapshot& snapshot,
+                                                 std::vector<wds::audio::HoldInterval>& out) const {
+  out.clear();
+  const bool music_clock = hit_sfx_.has_music();
+  auto transport_hit_ms = [&](int64_t chart_hit_ms) -> int64_t {
+    return wds::chart_editor::EditLeadIn::transport_ms_for_chart_ms(chart_hit_ms,
+                                                                   preview_lead_in_visible_ms_);
+  };
+  for (const auto& note : snapshot.notes) {
+    if (!is_hold_body(note.note_type) || is_hold_mid_star(note.note_type) ||
+        note.end_ms <= note.start_ms) {
+      continue;
+    }
+    const int64_t start_ms = music_clock ? transport_hit_ms(note.start_ms) : note.start_ms;
+    const int64_t end_ms = music_clock ? transport_hit_ms(note.end_ms) : note.end_ms;
+    if (end_ms <= start_ms) {
+      continue;
+    }
+    out.push_back(wds::audio::HoldInterval{start_ms, end_ms});
+  }
+  wds::audio::merge_hold_intervals(out);
+}
+
+void PlaybackPreviewView::sync_hold_loop(const PreviewSnapshot& snapshot, int64_t clock_us,
+                                         bool arm) {
+  if (mute_hold_body_sfx_) {
+    hit_sfx_.set_hold_looping(false);
+    hit_sfx_.clear_hold_gates();
+    hold_gates_generation_ = hit_sfx_.position_generation();
+    hold_gates_revision_ = snapshot.revision;
+    return;
+  }
+
+  std::vector<wds::audio::HoldInterval> intervals;
+  collect_hold_intervals(snapshot, intervals);
+  const int64_t clock_ms = clock_us / 1000;
+  hit_sfx_.set_hold_looping(wds::audio::hold_covers_ms(intervals, clock_ms));
+
+  if (!arm || !hit_sfx_.has_music()) {
+    if (!arm) {
+      hit_sfx_.clear_hold_gates();
+      hold_gates_generation_ = std::numeric_limits<uint64_t>::max();
+    }
+    return;
+  }
+
+  const uint64_t pos_gen = hit_sfx_.position_generation();
+  if (hold_gates_generation_ == pos_gen && hold_gates_revision_ == snapshot.revision) {
+    return;
+  }
+  hit_sfx_.clear_hold_gates();
+  for (const auto& interval : intervals) {
+    const auto start_us = wds::common::ms_to_us(std::max<int64_t>(0, interval.start_ms));
+    const auto end_us = wds::common::ms_to_us(std::max<int64_t>(0, interval.end_ms));
+    if (start_us.count() > clock_us) {
+      (void)hit_sfx_.schedule_hold_gate(true, start_us);
+    }
+    if (end_us.count() > clock_us) {
+      (void)hit_sfx_.schedule_hold_gate(false, end_us);
+    }
+  }
+  hold_gates_generation_ = pos_gen;
+  hold_gates_revision_ = snapshot.revision;
 }
 
 void PlaybackPreviewView::release_sfx_clock_control(const PreviewSnapshot& snapshot,
@@ -1616,6 +1706,9 @@ void PlaybackPreviewView::release_sfx_clock_control(const PreviewSnapshot& snaps
   // armed keys, and release the monotonic filter so it re-latches at raw_us.
   hit_sfx_.stop_all();
   hit_sfx_played_.clear();
+  sfx_history_.clear();
+  sfx_budget_.clear();
+  hold_gates_generation_ = std::numeric_limits<uint64_t>::max();
   sfx_mono_us_ = std::max<int64_t>(0, raw_us);
   sfx_position_generation_ = hit_sfx_.position_generation();
   collect_due_hit_sfx(snapshot, /*arm=*/false, sfx_mono_us_);
@@ -1623,7 +1716,7 @@ void PlaybackPreviewView::release_sfx_clock_control(const PreviewSnapshot& snaps
     collect_due_hit_sfx(snapshot, /*arm=*/true, sfx_mono_us_);
   }
   sfx_was_playing_ = playing;
-  hit_sfx_.set_hold_looping(false);
+  sync_hold_loop(snapshot, sfx_mono_us_, playing);
 }
 
 void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
@@ -1648,6 +1741,9 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
   const bool revision_changed = snapshot.revision != sfx_document_revision_;
   if (revision_changed) {
     hit_sfx_played_.clear();
+    sfx_history_.clear();
+    sfx_budget_.clear();
+    hold_gates_generation_ = std::numeric_limits<uint64_t>::max();
     sfx_document_revision_ = snapshot.revision;
   }
 
@@ -1661,6 +1757,8 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
     collect_due_hit_sfx(snapshot, /*arm=*/false, sfx_mono_us_);
     sfx_was_playing_ = false;
     hit_sfx_.set_hold_looping(false);
+    hit_sfx_.clear_hold_gates();
+    hold_gates_generation_ = std::numeric_limits<uint64_t>::max();
   } else {
     // Playing: advance mono clock; filter occasional BASS/Timeline regressions so
     // they cannot un-mark hits and cause duplicate one-shots.
@@ -1677,19 +1775,7 @@ void PlaybackPreviewView::update_hit_sfx(const PreviewSnapshot& snapshot) {
 
     collect_due_hit_sfx(snapshot, /*arm=*/true, sfx_mono_us_);
     sfx_was_playing_ = true;
-
-    const int64_t clock_ms = sfx_mono_us_ / 1000;
-    bool hold_active = false;
-    for (const auto& note : snapshot.notes) {
-      if (!is_hold_body(note.note_type) || is_hold_mid_star(note.note_type)) {
-        continue;
-      }
-      if (clock_ms >= note.start_ms && clock_ms <= note.end_ms) {
-        hold_active = true;
-        break;
-      }
-    }
-    hit_sfx_.set_hold_looping(hold_active && !mute_hold_body_sfx_);
+    sync_hold_loop(snapshot, sfx_mono_us_, /*arm=*/true);
   }
 }
 

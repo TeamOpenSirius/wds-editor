@@ -15,8 +15,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -167,6 +170,7 @@ struct SfxSyncSlot {
   std::atomic<unsigned long long> handle{0};
   std::atomic<unsigned long long> last_handle{0};
   HitSfxClip clip = HitSfxClip::Count;
+  SfxSyncKind kind = SfxSyncKind::OneShot;
   std::atomic<uint32_t> generation{0};
   std::atomic<bool> in_use{false};
   std::atomic<int> in_callback{0};
@@ -241,6 +245,16 @@ struct AudioEngine::Impl {
   std::array<bool, static_cast<size_t>(HitSfxClip::Count)> sample_ok{};
   HCHANNEL hold_ch = 0;
   bool hold_playing = false;
+  bool hold_custom_loop = false;
+  bool hold_loop_has_samples = false;
+  double hold_loop_start_ms = 0.0;
+  double hold_loop_end_ms = 0.0;
+  double hold_loop_sample_rate = 0.0;
+  double hold_loop_start_samples = 0.0;
+  double hold_loop_end_samples = 0.0;
+  QWORD hold_loop_start_bytes = 0;
+  QWORD hold_loop_end_bytes = 0;
+  HSYNC hold_loop_sync = 0;
   char music_basename[128]{};
 
   std::mutex sfx_mu;
@@ -326,6 +340,7 @@ void AudioEngine::Impl::try_recycle_locked(SfxSyncSlot* slot) {
   }
   slot->handle.store(0, std::memory_order_release);
   slot->clip = HitSfxClip::Count;
+  slot->kind = SfxSyncKind::OneShot;
   slot->claim.store(SfxSyncClaim::Pending, std::memory_order_release);
   slot->sync_detached.store(false, std::memory_order_release);
   slot->generation.fetch_add(1, std::memory_order_acq_rel);
@@ -445,6 +460,7 @@ void try_recycle_slot(SfxSyncSlot* slot) {
   }
   slot->handle.store(0, std::memory_order_release);
   slot->clip = HitSfxClip::Count;
+  slot->kind = SfxSyncKind::OneShot;
   slot->claim.store(SfxSyncClaim::Pending, std::memory_order_release);
   slot->sync_detached.store(false, std::memory_order_release);
   slot->generation.fetch_add(1, std::memory_order_acq_rel);
@@ -579,6 +595,7 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
     const fs::path dir = path_from_utf8(effects_directory);
     std::error_code ec;
     if (fs::is_directory(dir, ec) && !ec) {
+      load_hold_loop_sidecar(effects_directory);
       for (uint8_t i = 0; i < static_cast<uint8_t>(HitSfxClip::Count); ++i) {
         const auto clip = static_cast<HitSfxClip>(i);
         const fs::path path = dir / filename_for(clip);
@@ -589,10 +606,14 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
         // One-shots play on their own voices (never mixed into FREQ-scaled BGM).
         // OVER_POS: when NEW voices are exhausted, play_sfx_internal falls back to a
         // recycled channel and steals the oldest rather than dropping the hit.
-        const DWORD flags =
-            (clip == HitSfxClip::Hold) ? BASS_SAMPLE_LOOP : BASS_SAMPLE_OVER_POS;
+        // Official Basic1_hold loops a CRI region after the attack — whole-file
+        // SAMPLE_LOOP is only the fallback when hold_loop.json is missing.
+        const bool hold_custom = (clip == HitSfxClip::Hold) && impl->hold_custom_loop;
+        const DWORD flags = hold_custom ? 0
+                                        : (clip == HitSfxClip::Hold) ? BASS_SAMPLE_LOOP
+                                                                     : BASS_SAMPLE_OVER_POS;
         const DWORD max_ch = (clip == HitSfxClip::Hold) ? 1 : 128;
-        const HSAMPLE sample = sample_from_path(path, max_ch, flags);
+        HSAMPLE sample = sample_from_path(path, max_ch, flags);
         if (sample == 0) {
           WDS_LOG("AudioEngine: SampleLoad failed %s code=%d\n", path.string().c_str(),
                   BASS_ErrorGetCode());
@@ -601,6 +622,19 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
         impl->samples[i] = sample;
         impl->sample_ok[i] = true;
         ++loaded;
+        if (clip == HitSfxClip::Hold && impl->hold_custom_loop && !resolve_hold_loop_bytes()) {
+          WDS_LOG("AudioEngine: hold_loop.json region invalid, using whole-file loop\n");
+          BASS_SampleFree(sample);
+          sample = sample_from_path(path, max_ch, BASS_SAMPLE_LOOP);
+          if (sample == 0) {
+            impl->samples[i] = 0;
+            impl->sample_ok[i] = false;
+            --loaded;
+            WDS_LOG("AudioEngine: Hold fallback SampleLoad failed code=%d\n", BASS_ErrorGetCode());
+            continue;
+          }
+          impl->samples[i] = sample;
+        }
       }
     } else {
       WDS_LOG("AudioEngine: effects dir missing: %s\n", effects_directory.c_str());
@@ -1126,6 +1160,7 @@ void AudioEngine::remove_mixer_sfx_sources() {
   if (impl_ == nullptr || impl_->mixer == 0) {
     return;
   }
+  detach_hold_region_loop();
   const DWORD count = BASS_Mixer_StreamGetChannels(impl_->mixer, nullptr, 0);
   if (count == 0 || count == static_cast<DWORD>(-1)) {
     return;
@@ -1177,10 +1212,9 @@ void AudioEngine::handle_sfx_sync(unsigned long long sync_handle, void* payload,
       (void)claim_sfx_sync_callback_play(slot->claim, false);
     }
   }
-  if (won_play && clip != HitSfxClip::Count &&
-      !shutting_down_.load(std::memory_order_seq_cst) &&
+  if (won_play && !shutting_down_.load(std::memory_order_seq_cst) &&
       std::atomic_load(&impl_).get() == impl.get()) {
-    play_sfx_internal(clip);
+    fire_sync_action(slot->kind, clip);
   }
 }
 
@@ -1189,22 +1223,7 @@ void AudioEngine::warmup_sfx() {
     return;
   }
   ensure_keep_alive();
-  // Mixer path: Hold is plugged in on demand. Device path primes the loop channel.
-  if (impl_->mixer != 0) {
-    return;
-  }
-  const size_t hold_idx = static_cast<size_t>(HitSfxClip::Hold);
-  if (!impl_->sample_ok[hold_idx] || impl_->hold_ch != 0) {
-    return;
-  }
-  impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
-  if (impl_->hold_ch == 0) {
-    return;
-  }
-  BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, 0.0f);
-  BASS_ChannelPlay(impl_->hold_ch, TRUE);
-  BASS_ChannelPause(impl_->hold_ch);
-  BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+  warmup_hold_channel();
 }
 
 size_t AudioEngine::pending_sfx_sync_count() const noexcept {
@@ -1259,11 +1278,40 @@ bool AudioEngine::inspect_sfx_sync_slot(const void* slot, unsigned long long* ha
 }
 
 bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at) {
+  return schedule_music_sync(SfxSyncKind::OneShot, clip, at);
+}
+
+bool AudioEngine::schedule_hold_gate(bool enabled, wds::common::Microseconds at) {
+  return schedule_music_sync(enabled ? SfxSyncKind::HoldOn : SfxSyncKind::HoldOff, HitSfxClip::Hold,
+                             at);
+}
+
+void AudioEngine::fire_sync_action(SfxSyncKind kind, HitSfxClip clip) {
+  if (kind == SfxSyncKind::HoldOn) {
+    set_hold_looping(true);
+    return;
+  }
+  if (kind == SfxSyncKind::HoldOff) {
+    set_hold_looping(false);
+    return;
+  }
+  if (clip != HitSfxClip::Hold && clip != HitSfxClip::Count) {
+    play_sfx_internal(clip);
+  }
+}
+
+bool AudioEngine::hold_looping() const noexcept {
+  return impl_ != nullptr && impl_->hold_playing;
+}
+
+bool AudioEngine::schedule_music_sync(SfxSyncKind kind, HitSfxClip clip,
+                                      wds::common::Microseconds at) {
   // Single-writer with clear_scheduled_sfx (audio control / main thread).
   // The MIXTIME SYNCPROC is the only concurrent mutator.
+  const bool hold_gate = kind == SfxSyncKind::HoldOn || kind == SfxSyncKind::HoldOff;
   if (shutting_down_.load(std::memory_order_seq_cst) ||
-      !sfx_ready_.load(std::memory_order_acquire) || clip == HitSfxClip::Hold ||
-      clip == HitSfxClip::Count) {
+      !sfx_ready_.load(std::memory_order_acquire) || clip == HitSfxClip::Count ||
+      (!hold_gate && clip == HitSfxClip::Hold)) {
     return false;
   }
   const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
@@ -1274,7 +1322,8 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
     return false;
   }
   if (impl->music == 0) {
-    return play_sfx_internal(clip);
+    fire_sync_action(kind, clip);
+    return true;
   }
 
   // Heard playtime (mixer source), not decode frontier. MIXTIME sync then plugs
@@ -1283,7 +1332,8 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
   const QWORD play_pos = music_heard_bytes();
   if (target <= play_pos) {
     // Past/due one-shots ignore the future pending cap.
-    return play_sfx_internal(clip);
+    fire_sync_action(kind, clip);
+    return true;
   }
 
   // Horizon uses aligned target bytes vs heard bytes (same BASS conversion).
@@ -1307,6 +1357,7 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
         slot->claim.store(SfxSyncClaim::Pending, std::memory_order_release);
         slot->handle.store(0, std::memory_order_release);
         slot->clip = clip;
+        slot->kind = kind;
         slot->sync_detached.store(false, std::memory_order_release);
         slot->engine.store(this, std::memory_order_release);
         slot->in_use.store(true, std::memory_order_release);
@@ -1319,7 +1370,8 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
     return false;
   }
   if (admit == SfxSyncAdmit::PastOrDue || slot == nullptr) {
-    return play_sfx_internal(clip);
+    fire_sync_action(kind, clip);
+    return true;
   }
 
   auto same_generation = [&]() noexcept {
@@ -1399,7 +1451,8 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
       return false;
     }
     detach_and_recycle(sync != 0, sync);
-    return play_sfx_internal(clip);
+    fire_sync_action(kind, clip);
+    return true;
   }
 
   return true;
@@ -1450,6 +1503,223 @@ void AudioEngine::clear_scheduled_sfx() {
   }
 }
 
+void AudioEngine::clear_hold_gates() {
+  const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
+  if (!impl) {
+    return;
+  }
+  std::vector<SfxSyncSlot*> doomed;
+  {
+    std::lock_guard<std::mutex> lock(impl->sfx_mu);
+    auto& syncs = impl->pending_syncs;
+    for (size_t i = 0; i < syncs.size();) {
+      SfxSyncSlot* slot = syncs[i];
+      if (slot != nullptr &&
+          (slot->kind == SfxSyncKind::HoldOn || slot->kind == SfxSyncKind::HoldOff)) {
+        (void)claim_sfx_sync_cancel(slot->claim);
+        doomed.push_back(slot);
+        syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+      } else {
+        ++i;
+      }
+    }
+  }
+  if (impl->music != 0) {
+    for (SfxSyncSlot* slot : doomed) {
+      if (slot == nullptr) {
+        continue;
+      }
+      const unsigned long long handle = slot->handle.load(std::memory_order_acquire);
+      if (handle != 0) {
+        BASS_ChannelRemoveSync(impl->music, static_cast<HSYNC>(handle));
+        slot->sync_detached.store(true, std::memory_order_release);
+      }
+    }
+  } else {
+    for (SfxSyncSlot* slot : doomed) {
+      if (slot != nullptr) {
+        slot->sync_detached.store(true, std::memory_order_release);
+      }
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl->sfx_mu);
+    for (SfxSyncSlot* slot : doomed) {
+      impl->try_recycle_locked(slot);
+    }
+  }
+}
+
+void AudioEngine::load_hold_loop_sidecar(const std::string& effects_directory) {
+  if (impl_ == nullptr) {
+    return;
+  }
+  impl_->hold_custom_loop = false;
+  impl_->hold_loop_has_samples = false;
+  const fs::path path = path_from_utf8(effects_directory) / "hold_loop.json";
+  std::ifstream in(path);
+  if (!in) {
+    return;
+  }
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  auto read_number = [&](const char* key, double* out) -> bool {
+    const auto pos = text.find(key);
+    if (pos == std::string::npos) {
+      return false;
+    }
+    const auto colon = text.find(':', pos);
+    if (colon == std::string::npos) {
+      return false;
+    }
+    char* end = nullptr;
+    const double value = std::strtod(text.c_str() + colon + 1, &end);
+    if (end == text.c_str() + colon + 1) {
+      return false;
+    }
+    *out = value;
+    return true;
+  };
+  double start_ms = 0.0;
+  double end_ms = 0.0;
+  if (!read_number("start_ms", &start_ms) || !read_number("end_ms", &end_ms) || end_ms <= start_ms) {
+    WDS_LOG("AudioEngine: hold_loop.json ignored (need start_ms < end_ms)\n");
+    return;
+  }
+  impl_->hold_loop_start_ms = start_ms;
+  impl_->hold_loop_end_ms = end_ms;
+  double sample_rate = 0.0;
+  double start_sample = 0.0;
+  double end_sample = 0.0;
+  if (read_number("sample_rate", &sample_rate) && read_number("start_sample", &start_sample) &&
+      read_number("end_sample", &end_sample) && sample_rate > 0.0 && end_sample > start_sample) {
+    impl_->hold_loop_sample_rate = sample_rate;
+    impl_->hold_loop_start_samples = start_sample;
+    impl_->hold_loop_end_samples = end_sample;
+    impl_->hold_loop_has_samples = true;
+  }
+  impl_->hold_custom_loop = true;
+}
+
+bool AudioEngine::resolve_hold_loop_bytes() {
+  if (impl_ == nullptr || !impl_->hold_custom_loop) {
+    return false;
+  }
+  const size_t hold_idx = static_cast<size_t>(HitSfxClip::Hold);
+  const HSAMPLE sample = impl_->samples[hold_idx];
+  BASS_SAMPLE info{};
+  if (sample == 0 || !BASS_SampleGetInfo(sample, &info) || info.freq == 0 || info.chans == 0) {
+    impl_->hold_custom_loop = false;
+    return false;
+  }
+  DWORD bytes_per_sample = 2;
+  if ((info.flags & BASS_SAMPLE_FLOAT) != 0) {
+    bytes_per_sample = sizeof(float);
+  } else if ((info.flags & BASS_SAMPLE_8BITS) != 0) {
+    bytes_per_sample = 1;
+  }
+  const double bpf = static_cast<double>(bytes_per_sample) * static_cast<double>(info.chans);
+  QWORD start_bytes = 0;
+  QWORD end_bytes = 0;
+  if (impl_->hold_loop_has_samples && impl_->hold_loop_sample_rate > 0.0) {
+    const double scale = static_cast<double>(info.freq) / impl_->hold_loop_sample_rate;
+    start_bytes = static_cast<QWORD>(
+        std::llround(std::max(0.0, impl_->hold_loop_start_samples) * scale * bpf));
+    end_bytes = static_cast<QWORD>(
+        std::llround(std::max(0.0, impl_->hold_loop_end_samples) * scale * bpf));
+  } else {
+    start_bytes = static_cast<QWORD>(
+        std::llround(std::max(0.0, impl_->hold_loop_start_ms) * 0.001 * info.freq * bpf));
+    end_bytes = static_cast<QWORD>(
+        std::llround(std::max(0.0, impl_->hold_loop_end_ms) * 0.001 * info.freq * bpf));
+  }
+  if (info.length > 0 && end_bytes > info.length) {
+    end_bytes = info.length;
+  }
+  if (end_bytes <= start_bytes) {
+    impl_->hold_custom_loop = false;
+    return false;
+  }
+  impl_->hold_loop_start_bytes = start_bytes;
+  impl_->hold_loop_end_bytes = end_bytes;
+  WDS_LOG("AudioEngine: Hold custom loop %llu-%llu bytes (len=%llu)\n",
+          static_cast<unsigned long long>(start_bytes),
+          static_cast<unsigned long long>(end_bytes),
+          static_cast<unsigned long long>(info.length));
+  return true;
+}
+
+void CALLBACK hold_region_sync_proc(HSYNC /*handle*/, DWORD /*channel*/, DWORD /*data*/,
+                                    void* user) {
+  auto* engine = static_cast<AudioEngine*>(user);
+  if (engine != nullptr) {
+    engine->handle_hold_region_sync();
+  }
+}
+
+void AudioEngine::handle_hold_region_sync() {
+  if (impl_ == nullptr || impl_->hold_ch == 0 || !impl_->hold_custom_loop) {
+    return;
+  }
+  impl_->hold_loop_sync = 0;
+  BASS_ChannelSetPosition(impl_->hold_ch, impl_->hold_loop_start_bytes, BASS_POS_BYTE);
+  arm_hold_region_loop();
+}
+
+void AudioEngine::detach_hold_region_loop() {
+  if (impl_ == nullptr) {
+    return;
+  }
+  if (impl_->hold_loop_sync != 0 && impl_->hold_ch != 0) {
+    BASS_ChannelRemoveSync(impl_->hold_ch, impl_->hold_loop_sync);
+  }
+  impl_->hold_loop_sync = 0;
+}
+
+void AudioEngine::arm_hold_region_loop() {
+  detach_hold_region_loop();
+  if (impl_ == nullptr || impl_->hold_ch == 0 || !impl_->hold_custom_loop) {
+    return;
+  }
+  impl_->hold_loop_sync =
+      BASS_ChannelSetSync(impl_->hold_ch, BASS_SYNC_POS | BASS_SYNC_MIXTIME | BASS_SYNC_ONETIME,
+                          impl_->hold_loop_end_bytes, hold_region_sync_proc, this);
+}
+
+void AudioEngine::warmup_hold_channel() {
+  if (!sfx_ready_ || impl_ == nullptr) {
+    return;
+  }
+  const size_t hold_idx = static_cast<size_t>(HitSfxClip::Hold);
+  if (!impl_->sample_ok[hold_idx] || impl_->hold_ch != 0) {
+    return;
+  }
+  if (impl_->mixer != 0) {
+    impl_->hold_ch =
+        BASS_SampleGetChannel(impl_->samples[hold_idx], BASS_SAMCHAN_STREAM | BASS_STREAM_DECODE);
+    if (impl_->hold_ch == 0) {
+      WDS_LOG("AudioEngine: Hold decode warmup failed code=%d\n", BASS_ErrorGetCode());
+      return;
+    }
+    BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+    if (!BASS_Mixer_StreamAddChannel(impl_->mixer, impl_->hold_ch,
+                                     BASS_MIXER_CHAN_PAUSE | BASS_MIXER_CHAN_NORAMPIN)) {
+      WDS_LOG("AudioEngine: Mixer warmup Hold failed code=%d\n", BASS_ErrorGetCode());
+      BASS_StreamFree(impl_->hold_ch);
+      impl_->hold_ch = 0;
+      return;
+    }
+    return;
+  }
+  impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
+  if (impl_->hold_ch == 0) {
+    return;
+  }
+  BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, 0.0f);
+  BASS_ChannelPlay(impl_->hold_ch, TRUE);
+  BASS_ChannelPause(impl_->hold_ch);
+  BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+}
+
 void AudioEngine::set_hold_looping(bool enabled) {
   if (!sfx_ready_ || impl_ == nullptr) {
     return;
@@ -1461,63 +1731,37 @@ void AudioEngine::set_hold_looping(bool enabled) {
   if (enabled == impl_->hold_playing) {
     return;
   }
-  if (impl_->mixer != 0) {
-    if (enabled) {
-      if (impl_->hold_ch == 0) {
-        impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx],
-                                               BASS_SAMCHAN_STREAM | BASS_STREAM_DECODE);
-        if (impl_->hold_ch == 0) {
-          WDS_LOG("AudioEngine: Hold decode stream failed code=%d\n", BASS_ErrorGetCode());
-          return;
-        }
-        BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
-        if (!BASS_Mixer_StreamAddChannel(impl_->mixer, impl_->hold_ch, BASS_MIXER_CHAN_NORAMPIN)) {
-          WDS_LOG("AudioEngine: Mixer add Hold failed code=%d\n", BASS_ErrorGetCode());
-          BASS_StreamFree(impl_->hold_ch);
-          impl_->hold_ch = 0;
-          return;
-        }
-      } else {
-        BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
-        BASS_ChannelSetPosition(impl_->hold_ch, 0, BASS_POS_BYTE);
-        BASS_Mixer_ChannelFlags(impl_->hold_ch, 0, BASS_MIXER_CHAN_PAUSE);
-      }
-      impl_->hold_playing = true;
-    } else {
-      if (impl_->hold_ch != 0) {
-        BASS_Mixer_ChannelFlags(impl_->hold_ch, BASS_MIXER_CHAN_PAUSE, BASS_MIXER_CHAN_PAUSE);
-      }
-      impl_->hold_playing = false;
-    }
-    return;
-  }
   if (enabled) {
-    // BASS_ChannelStop frees sample channel handles. After pause/EOS, stop_all_sfx
-    // nulls hold_ch; acquire a fresh channel before playing again.
+    warmup_hold_channel();
     if (impl_->hold_ch == 0) {
-      impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
-      if (impl_->hold_ch == 0) {
-        WDS_LOG("AudioEngine: Hold channel acquire failed code=%d\n", BASS_ErrorGetCode());
-        return;
-      }
+      return;
     }
     BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
     BASS_ChannelSetPosition(impl_->hold_ch, 0, BASS_POS_BYTE);
-    if (!BASS_ChannelPlay(impl_->hold_ch, TRUE)) {
+    arm_hold_region_loop();
+    if (impl_->mixer != 0) {
+      BASS_Mixer_ChannelFlags(impl_->hold_ch, 0, BASS_MIXER_CHAN_PAUSE);
+    } else if (!BASS_ChannelPlay(impl_->hold_ch, TRUE)) {
       impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
       if (impl_->hold_ch == 0 || !BASS_ChannelPlay(impl_->hold_ch, TRUE)) {
         WDS_LOG("AudioEngine: Hold ChannelPlay failed code=%d\n", BASS_ErrorGetCode());
         impl_->hold_ch = 0;
         return;
       }
+      arm_hold_region_loop();
     }
     impl_->hold_playing = true;
-  } else {
-    if (impl_->hold_ch != 0) {
+    return;
+  }
+  detach_hold_region_loop();
+  if (impl_->hold_ch != 0) {
+    if (impl_->mixer != 0) {
+      BASS_Mixer_ChannelFlags(impl_->hold_ch, BASS_MIXER_CHAN_PAUSE, BASS_MIXER_CHAN_PAUSE);
+    } else {
       BASS_ChannelPause(impl_->hold_ch);
     }
-    impl_->hold_playing = false;
   }
+  impl_->hold_playing = false;
 }
 
 void AudioEngine::stop_playing_sfx() {
