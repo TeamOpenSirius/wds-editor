@@ -40,7 +40,8 @@ class PlaybackBar final : public QWidget {
 
   QSlider* seek_ = nullptr;
   QPushButton* play_ = nullptr;
-  QPushButton* stop_ = nullptr;
+  QPushButton* pause_here_ = nullptr;
+  QPushButton* play_from_start_ = nullptr;
   QIcon play_icon_;
   QIcon pause_icon_;
   QComboBox* music_volume_ = nullptr;

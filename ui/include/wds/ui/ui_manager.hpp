@@ -62,6 +62,12 @@ class UiManager {
   // Space / dock play: queue play or pause from logical transport state.
   // shift_pause_variant is Shift+Space (swapped when pause_at_current is on).
   void toggle_playback(bool shift_pause_variant);
+  // Pause without seeking back to the play start. No-op when already stopped.
+  void pause_playback_at_current();
+  // Start at chart start. Does not replace the pause-return time: if stopped,
+  // the current timeline is stored first; if already playing, the existing
+  // anchor is left alone.
+  void play_from_chart_start();
   bool playback_intends_playing() const;
 
   wds::interaction::WidgetRoot& root() noexcept { return root_; }

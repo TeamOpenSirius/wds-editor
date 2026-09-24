@@ -26,6 +26,7 @@ bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
 #ifndef WDS_UI_PLAYBACK_PREVIEW_HELPERS_ONLY
 
 #include "wds/ui/regions/preview/hit_sfx_mapping.hpp"
+#include <wds/audio/hit_sfx_policy.hpp>
 
 #include "wds/renderer/draw_batch.hpp"
 #include "wds/renderer/preview_visual_config.hpp"
@@ -175,6 +176,10 @@ class PlaybackPreviewView {
   // clock_us: filtered monotonic audible clock (µs).
   void collect_due_hit_sfx(const wds::chart_editor::PreviewSnapshot& snapshot, bool arm,
                            int64_t clock_us);
+  void collect_hold_intervals(const wds::chart_editor::PreviewSnapshot& snapshot,
+                              std::vector<wds::audio::HoldInterval>& out) const;
+  void sync_hold_loop(const wds::chart_editor::PreviewSnapshot& snapshot, int64_t clock_us,
+                      bool arm);
   // Mute SFX, clear played keys, latch mono clock to raw_us (pause / seek / scrub).
   void release_sfx_clock_control(const wds::chart_editor::PreviewSnapshot& snapshot,
                                  int64_t raw_us, bool playing);
@@ -208,6 +213,10 @@ class PlaybackPreviewView {
   uint64_t sfx_document_revision_ = std::numeric_limits<uint64_t>::max();
   bool sfx_was_playing_ = false;
   std::unordered_set<uint64_t> hit_sfx_played_;
+  wds::audio::SfxPlayHistory sfx_history_;
+  wds::audio::SfxInstantBudget sfx_budget_;
+  uint64_t hold_gates_generation_ = std::numeric_limits<uint64_t>::max();
+  uint64_t hold_gates_revision_ = std::numeric_limits<uint64_t>::max();
 };
 
 }  // namespace wds::ui

@@ -372,6 +372,21 @@ void UiManager::toggle_playback(bool shift_pause_variant) {
   transport.request_pause();
 }
 
+void UiManager::pause_playback_at_current() {
+  auto& transport = chart_preview_->transport();
+  if (!transport.intends_playing()) return;
+  transport.request_pause();
+}
+
+void UiManager::play_from_chart_start() {
+  auto& transport = chart_preview_->transport();
+  if (!transport.intends_playing()) {
+    play_anchor_ms_ = transport.committed_ms();
+  }
+  transport.request_seek_ms(transport.chart_start_ms());
+  transport.request_play();
+}
+
 bool UiManager::playback_intends_playing() const {
   return chart_preview_->transport().intends_playing();
 }

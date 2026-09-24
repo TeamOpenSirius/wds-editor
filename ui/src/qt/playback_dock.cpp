@@ -25,12 +25,14 @@
 #include <QLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
+#include <QStyleOption>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -227,6 +229,64 @@ QWidget* make_pair_row(QWidget* parent, QWidget* left, QWidget* right, int col_w
   return row;
 }
 
+// Groove is 4px and the handle is 20×10, so QSlider only starts a drag on the
+// handle. Any press on this control jumps to that x and keeps tracking.
+class ClickSeekSlider final : public QSlider {
+ public:
+  using QSlider::QSlider;
+
+ protected:
+  void mousePressEvent(QMouseEvent* event) override {
+    if (event->button() != Qt::LeftButton) {
+      QSlider::mousePressEvent(event);
+      return;
+    }
+    seek_drag_ = true;
+    setSliderDown(true);
+    setValue(value_from_pos(event->position().toPoint()));
+    event->accept();
+  }
+
+  void mouseMoveEvent(QMouseEvent* event) override {
+    if (!seek_drag_) {
+      QSlider::mouseMoveEvent(event);
+      return;
+    }
+    setValue(value_from_pos(event->position().toPoint()));
+    event->accept();
+  }
+
+  void mouseReleaseEvent(QMouseEvent* event) override {
+    if (!seek_drag_) {
+      QSlider::mouseReleaseEvent(event);
+      return;
+    }
+    setValue(value_from_pos(event->position().toPoint()));
+    seek_drag_ = false;
+    setSliderDown(false);
+    event->accept();
+  }
+
+ private:
+  int value_from_pos(const QPoint& pos) const {
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    const QRect groove =
+        style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
+    const QRect handle =
+        style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+    const int slider_length = std::max(1, handle.width());
+    const int slider_min = groove.isValid() ? groove.x() : 0;
+    const int slider_max = groove.isValid() ? groove.right() - slider_length + 1
+                                            : std::max(0, width() - slider_length);
+    const int span = std::max(1, slider_max - slider_min);
+    return QStyle::sliderValueFromPosition(minimum(), maximum(), pos.x() - slider_min, span,
+                                           opt.upsideDown);
+  }
+
+  bool seek_drag_ = false;
+};
+
 QComboBox* make_volume_combo(QWidget* parent) {
   auto* combo = new QComboBox(parent);
   combo->addItems({QStringLiteral("0%"), QStringLiteral("25%"), QStringLiteral("50%"),
@@ -270,20 +330,25 @@ void PlaybackBar::build_ui() {
   box->setContentsMargins(0, 0, 0, 0);
   box->setSpacing(0);
 
-  seek_ = new QSlider(Qt::Horizontal, block);
+  seek_ = new ClickSeekSlider(Qt::Horizontal, block);
   seek_->setRange(0, 1);
   seek_->setMinimumWidth(120);
+  seek_->setFixedHeight(32);
   play_ = new QPushButton(tr("播放"), block);
-  stop_ = new QPushButton(tr("回到开头"), block);
+  pause_here_ = new QPushButton(tr("暂停在当前位置"), block);
+  play_from_start_ = new QPushButton(tr("从开头开始播放"), block);
   play_icon_ = fluent_icon(fluent::Play);
   pause_icon_ = fluent_icon(fluent::Pause);
   if (play_icon_.isNull()) play_icon_ = style()->standardIcon(QStyle::SP_MediaPlay);
   if (pause_icon_.isNull()) pause_icon_ = style()->standardIcon(QStyle::SP_MediaPause);
   auto previous = fluent_icon(fluent::Previous);
   if (previous.isNull()) previous = style()->standardIcon(QStyle::SP_MediaSkipBackward);
+  auto pause_here = fluent_icon(fluent::Next);  // outline triangle + bar
+  if (pause_here.isNull()) pause_here = style()->standardIcon(QStyle::SP_MediaSkipForward);
   play_->setIcon(play_icon_);
-  stop_->setIcon(previous);
-  for (auto* button : {play_, stop_}) {
+  pause_here_->setIcon(pause_here);
+  play_from_start_->setIcon(previous);
+  for (auto* button : {play_, pause_here_, play_from_start_}) {
     button->setToolTip(button->text());
     button->setAccessibleName(button->text());
     button->setText({});
@@ -294,7 +359,8 @@ void PlaybackBar::build_ui() {
   transport_row->setContentsMargins(0, 0, 0, 0);
   transport_row->setSpacing(6);
   transport_row->addWidget(play_);
-  transport_row->addWidget(stop_);
+  transport_row->addWidget(pause_here_);
+  transport_row->addWidget(play_from_start_);
   auto* seek_row = new QWidget(block);
   auto* seek_layout = new QHBoxLayout(seek_row);
   seek_layout->setContentsMargins(0, 0, 0, 0);
@@ -363,9 +429,14 @@ void PlaybackBar::build_ui() {
     manager_->toggle_playback(false);
     apply_play_icon(manager_->playback_intends_playing());
   });
-  connect(stop_, &QPushButton::clicked, this, [this] {
-    journal_menu_action("playback.stop");
-    manager_->chart_preview().reset_playback();
+  connect(pause_here_, &QPushButton::clicked, this, [this] {
+    journal_menu_action("playback.pause_here");
+    manager_->pause_playback_at_current();
+    apply_play_icon(manager_->playback_intends_playing());
+  });
+  connect(play_from_start_, &QPushButton::clicked, this, [this] {
+    journal_menu_action("playback.play_from_start");
+    manager_->play_from_chart_start();
     apply_play_icon(manager_->playback_intends_playing());
   });
   const auto apply_music = [this] {

@@ -41,6 +41,12 @@ enum class SfxSyncClaim : uint8_t {
   Cancelled = 2,
 };
 
+enum class SfxSyncKind : uint8_t {
+  OneShot = 0,
+  HoldOn,
+  HoldOff,
+};
+
 enum class SfxSyncPlayClaim : uint8_t {
   PlayNow,
   AlreadyFired,

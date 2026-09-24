@@ -443,6 +443,24 @@ inline float official_preview_sound_note_height_px(float content_h) noexcept {
   return official_preview_sound_note_ndc_height() * 0.5f * std::max(content_h, 1.0f);
 }
 
+// Judgeline screen-width ratio: SoundNote sprite vs one logical lane.
+// Same projection as preview star_quad / lane_width. Aspect cancels; the
+// sprite's local Z (-0.05) makes it slightly wider than 1.12 / 0.915.
+inline float official_preview_sound_note_to_lane_width_ratio() noexcept {
+  constexpr float kAspect = kOfficialPreviewAspect;
+  const float half = kOfficialSoundNoteSpriteSize * 0.5f;
+  const OfficialNdc star_l =
+      project_note_layer(0.0f, 0.0f, -half, 0.0f, kOfficialSoundNoteLocalZ, 0.0f, kAspect);
+  const OfficialNdc star_r =
+      project_note_layer(0.0f, 0.0f, half, 0.0f, kOfficialSoundNoteLocalZ, 0.0f, kAspect);
+  const float lane = official_note_width(1);
+  const OfficialNdc lane_l = project_judge_xyz(-lane * 0.5f, 0.0f, 0.0f, kAspect);
+  const OfficialNdc lane_r = project_judge_xyz(lane * 0.5f, 0.0f, 0.0f, kAspect);
+  const float star_w = std::fabs(star_r.x - star_l.x);
+  const float lane_w = std::fabs(lane_r.x - lane_l.x);
+  return star_w / std::max(lane_w, 1e-6f);
+}
+
 inline float official_hidden_line_center_y(
     int note_start_offset = kOfficialDefaultNoteStartOffset) noexcept {
   // LaneGroup.InitializeLaneStart writes NoteStartLine.localY =

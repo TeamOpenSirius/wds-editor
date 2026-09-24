@@ -26,7 +26,7 @@ class EditViewport {
   // dest_h matches official preview notes at the judgeline on the default
   // editor preview (1280×800 → stage 584.7552×328.9248). Pane size does not
   // scale dest_h; 「note厚度」 is GetNoteHeight Rx (Tap only). Mid-stars stay
-  // official 1.12 at Rx=0.
+  // square; their side follows edit width at the preview's star/lane ratio.
   static constexpr float kPreviewRefContentHeight = 328.9248f;
   static constexpr int32_t kMsPerHectom = wds::chart_editor::EditLeadIn::kMsPerHectom;
 
@@ -111,7 +111,8 @@ class EditViewport {
                                                              kPreviewRefContentHeight);
   }
   float mid_star_size_px() const {
-    return wds::chart_editor::official_preview_sound_note_height_px(kPreviewRefContentHeight);
+    return lane_width(1) *
+           wds::chart_editor::official_preview_sound_note_to_lane_width_ratio();
   }
   float judgeline_y() const {
     return bounds_.y + bounds_.h * (1.0f - kJudgelineMarginBottom);
@@ -133,8 +134,9 @@ class EditViewport {
     return visual_inset_px(width, hold_visual_world_width(width));
   }
 
-  // Screen rect of a Sound / ScratchSound mid-star. Side is official 1.12 at
-  // Rx=0 (not 厚度); center follows the hold span / tick.
+  // Screen rect of a Sound / ScratchSound mid-star. Side scales with one lane
+  // (edit width / lane count) at the preview judgeline ratio, and stays square.
+  // 厚度 does not apply; center follows the hold span / tick.
   wds::interaction::Rect mid_star_screen_rect(const wds::chart_editor::NotationNote& note) const {
     const float inset = note_inset_px(note.width);
     const float x = x_at(note.lane) + inset;

@@ -73,4 +73,10 @@ inline wds::audio::HitSfxClip hit_sfx_clip_for_mid_star(
   }
 }
 
+// GameSePlayer.OnPlaySE: types 30/31 skip TrySetCue and Start the Sound player.
+inline bool hit_sfx_bypasses_history(wds::chart_editor::NoteType type) noexcept {
+  return type == wds::chart_editor::NoteType::Sound ||
+         type == wds::chart_editor::NoteType::ScratchSound;
+}
+
 }  // namespace wds::ui

@@ -158,6 +158,12 @@ jobs:
           WDS_VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
         run: ./scripts/build-target.sh win-x86_64
 
+      - name: Verify packaged fonts
+        run: |
+          font_dir="dist/staging/wds-win-x86_64/fonts"
+          test -f "${font_dir}/NotoSansSC-Regular.ttf"
+          test -f "${font_dir}/SegoeFluentIcons.ttf"
+
       - name: Upload MSI
         uses: actions/upload-artifact@v6
         with:
@@ -202,6 +208,12 @@ jobs:
         run: |
           export PATH="${{ github.workspace }}/.venv/bin:$PATH"
           ./scripts/build-target.sh --package-only macos-arm
+
+      - name: Verify packaged fonts
+        run: |
+          font_dir="dist/staging/wds-macos-arm/WDS Editor.app/Contents/Resources/fonts"
+          test -f "${font_dir}/NotoSansSC-Regular.ttf"
+          test -f "${font_dir}/SegoeFluentIcons.ttf"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v6

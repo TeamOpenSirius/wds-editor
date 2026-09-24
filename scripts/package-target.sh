@@ -198,6 +198,12 @@ copy_fonts() {
   else
     die "UI font missing (expected build ui/fonts or ui/assets/fonts/NotoSansSC-Regular.ttf)"
   fi
+  # Icon font is not produced by the compiler. A build tree configured before
+  # the file existed never installs it, and then every Fluent button falls
+  # back to the platform media icon (the pause-here button stays "skip").
+  local fluent="${ROOT}/ui/assets/fonts/SegoeFluentIcons.ttf"
+  [[ -f "${fluent}" ]] || die "icon font missing: ${fluent}"
+  cp -a "${fluent}" "${stage}/fonts/"
   # Ship font license next to the font when available.
   if [[ -f "${ROOT}/ui/assets/fonts/OFL.txt" ]]; then
     mkdir -p "${stage}/licenses"

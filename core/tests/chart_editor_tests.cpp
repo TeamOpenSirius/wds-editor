@@ -1636,6 +1636,10 @@ void test_official_hidden_line_and_note_height_defaults() {
   CHECK(official_preview_sound_note_ndc_height() > official_preview_note_ndc_height(8));
   CHECK(std::fabs(official_preview_note_height_px(8, 328.9248f) - 22.7127f) < 0.05f);
   CHECK(std::fabs(official_preview_sound_note_height_px(328.9248f) - 31.8984f) < 0.05f);
+  const float star_lane_ratio = official_preview_sound_note_to_lane_width_ratio();
+  CHECK(star_lane_ratio > 1.20f && star_lane_ratio < 1.26f);
+  CHECK(std::fabs(star_lane_ratio - (kOfficialSoundNoteSpriteSize / kOfficialNoteWidthPerLane)) <
+        0.02f);
   CHECK(std::fabs(official_hidden_line_center_y() -
                   (official_note_visible_position_y(0) + kOfficialStartLineSpriteLocalY)) < 1e-5f);
   CHECK(std::fabs(official_hidden_line_center_y(35) -

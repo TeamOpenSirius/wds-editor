@@ -51,6 +51,9 @@ class HitSfxPlayer {
   // Drop pending syncs and cut audible one-shots / Hold (pause, seek, scrub).
   void stop_all();
   void set_hold_looping(bool enabled);
+  bool hold_looping() const noexcept;
+  bool schedule_hold_gate(bool enabled, wds::common::Microseconds music_time);
+  void clear_hold_gates();
 
  private:
   AudioEngine* audio_ = nullptr;
