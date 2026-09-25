@@ -169,6 +169,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint_overlays(wds::interaction::UiPainter& painter) const;
   // Qt canvas: split / BPM / meter / measure columns and chips (no form chrome).
   void paint_side_columns(wds::interaction::UiPainter& painter) const;
+  // Hovered or dragged split-label pair; -1 if none. Qt canvas glows those lines.
+  int32_t active_split_highlight_id() const noexcept;
   // Live Cmd/Ctrl drag-select rectangle in screen space; empty when idle.
   std::optional<wds::interaction::Rect> active_marquee_rect() const;
 
@@ -209,6 +211,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void on_pointer_down(const wds::interaction::PointerDownEvent& event) override;
   void on_pointer_move(const wds::interaction::PointerMoveEvent& event) override;
   void on_pointer_up(const wds::interaction::PointerUpEvent& event) override;
+  void on_hover_leave() override;
   void on_double_click(const wds::interaction::DoubleClickEvent& event) override;
   void on_scroll(const wds::interaction::ScrollEvent& event) override;
   // Shared timeline scrub / visible-range zoom. PreviewHitWidget calls this
@@ -265,7 +268,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   void hide_placement_ghost();
   void update_ghost(wds::interaction::Vec2 point);
-  void on_hover_leave() override;
   // True while placing a note (press-drag gesture or hold-body draft).
   bool is_note_drawing() const noexcept;
   // Edit pane plus a small leave slop — beyond this Idle ghosts must hide.
@@ -373,7 +375,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void hide_gutter_ghost();
   void update_split_label_hover(wds::interaction::Vec2 point);
   void clear_split_label_hover();
-  int32_t active_split_highlight_id() const noexcept;
   bool active_split_highlight_is_end() const noexcept;
   void layout_popup_rects() const;
   wds::interaction::Rect overlay_host_bounds() const;
