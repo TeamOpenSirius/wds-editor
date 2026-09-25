@@ -261,12 +261,14 @@ void paint_lane_guides(QPainter& p, const EditViewport& v, const wds::interactio
 void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interaction::Rect& b,
                        const std::vector<wds::chart_editor::NotationNote>& notes,
                        const wds::chart_editor::MusicTiming& timing,
-                       const wds::chart_editor::PreviewConfig& preview) {
+                       const wds::chart_editor::PreviewConfig& preview,
+                       int32_t highlighted_split_note_id) {
+  constexpr float kSplitLineW = 2.0f;
+  constexpr float kSplitLineHighlightW = 4.0f;
   const int lanes = std::max(1, v.grid().lane_count);
   const float view_ms_lo = v.scroll_ms();
   const float view_ms_hi = view_ms_lo + static_cast<float>(v.visible_ms());
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+  auto paint_one = [&](const wds::chart_editor::NotationNote& note, bool highlight) {
     const int64_t start_ms = note.start_ms(timing);
     const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
     const int64_t appear = std::max<int64_t>(
@@ -277,9 +279,10 @@ void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interactio
                std::llround(static_cast<double>(preview.split_line_animation_end_sec) * 1000.0)));
     const float fade0 = static_cast<float>(start_ms - appear);
     const float fade1 = static_cast<float>(end_ms + disappear);
-    if (fade1 < view_ms_lo || fade0 > view_ms_hi) continue;
+    if (fade1 < view_ms_lo || fade0 > view_ms_hi) return;
     const int32_t color_id = note.scratch_length;
     const int32_t split_count = wds::chart_editor::get_split_count(note.gimmick_type);
+    const float line_w = highlight ? kSplitLineHighlightW : kSplitLineW;
     std::vector<int32_t> mids;
     split_boundaries_12(split_count, mids);
     auto draw_edges = [&](float ms0, float ms1) {
@@ -296,9 +299,13 @@ void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interactio
         auto c = split_slot_color(color_id, slot, split_count, nullptr);
         if (c.a < 0.02f) return;
         apply_official_split_rgb_opacity(c);
+        if (highlight) {
+          c = c.lerp({1.0f, 1.0f, 1.0f, c.a}, 0.28f);
+        }
         c.a *= op;
         const float x = std::floor(v.x_at(edge) + 0.5f);
-        p.fillRect(QRectF(x - 1.0, top, 2.0, bot - top), qcolor(c));
+        p.fillRect(QRectF(x - static_cast<qreal>(line_w) * 0.5, top, line_w, bot - top),
+                   qcolor(c));
       };
       draw_v(0, 0);
       int32_t slot = 1;
@@ -309,6 +316,16 @@ void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interactio
     draw_edges(std::max(static_cast<float>(start_ms), view_ms_lo),
                std::min(static_cast<float>(end_ms), view_ms_hi));
     draw_edges(std::max(static_cast<float>(end_ms), view_ms_lo), std::min(fade1, view_ms_hi));
+  };
+  for (const auto& note : notes) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    if (note.id == highlighted_split_note_id) continue;
+    paint_one(note, false);
+  }
+  for (const auto& note : notes) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    if (note.id != highlighted_split_note_id) continue;
+    paint_one(note, true);
   }
 }
 
@@ -391,6 +408,7 @@ void ChartEditWidget::enterEvent(QEnterEvent* e) {
   update();
 }
 void ChartEditWidget::leaveEvent(QEvent* e) {
+  if (panel_) panel_->on_hover_leave();
   mark_dirty();
   QWidget::leaveEvent(e);
   update();
@@ -487,7 +505,8 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     }
     paint_lane_guides(p, v, b, split_notes_scratch_, timing, preview);
   }
-  paint_split_lines(p, v, b, split_notes_scratch_, timing, preview);
+  paint_split_lines(p, v, b, split_notes_scratch_, timing, preview,
+                   panel_->active_split_highlight_id());
   // Judgment-area skin sits below notes and spans the authored playfield.
   if (!judgment_.isNull()) {
     const float h = v.judgeline_height_px();
