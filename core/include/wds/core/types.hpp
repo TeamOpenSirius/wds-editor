@@ -9,7 +9,7 @@ namespace wds::chart_editor {
 // AppConst.NoteType (official CSV column "type" / dump.cs).
 // Instantaneous rows use end_tick == 0 in wdschart (official endTime == -1).
 enum class NoteType : int32_t {
-  // Official HiSpeed row: type=-1, endTime carries speed (not authored in editor).
+  // Official HiSpeed row: type=-1, endTime carries speed; stored separately.
   HiSpeed = -1,
   None = 0,
   Normal = 10,
@@ -93,6 +93,14 @@ enum class ChartEditMode {
   Editable,
   // Imported official CSV — preview / export only; mutations rejected.
   OfficialPreviewOnly,
+};
+
+// Lane geometry compatibility used by CSV and native chart boundaries.
+// Official keeps the game's 1..12 lane contract; SiriusExtended permits notes
+// to overhang the playfield as long as they still overlap a playable lane.
+enum class ChartCompatibilityProfile : uint8_t {
+  Official,
+  SiriusExtended,
 };
 
 // Sentinel for ChartDocument::add_note / set_notes when id should be auto-assigned.

@@ -5793,6 +5793,7 @@ NotationNote make_head(NoteType type, int32_t id, int32_t tick, int32_t lane, in
 // (legacy Scratch no longer exists; Nontail→tailed Hold, partial head→full auto head).
 void test_sus_comprehensive_roundtrip_all_cases() {
   NotationChart chart;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
   chart.timing.bpm = 185.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {
@@ -5973,9 +5974,10 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   }
   CHECK(count_type(loaded.chart, NoteType::Sound) >= 1);
   CHECK_EQ(count_type(loaded.chart, NoteType::HoldEighth), 0);
-  // ScratchSound on a blue Hold has no Ched encoding → imports as Sound; Nontail → tailed.
+  // ScratchSound on a blue Hold has no Ched encoding → imports as Sound;
+  // endpoint Damage preserves Nontail.
   CHECK_EQ(count_type(loaded.chart, NoteType::ScratchSound), 0);
-  CHECK_EQ(count_type(loaded.chart, NoteType::NontailHold), 0);
+  CHECK_EQ(count_type(loaded.chart, NoteType::NontailHold), 1);
 
   // High lanes stay in WDS space under ched padding
   {
@@ -7724,7 +7726,352 @@ void test_public_mutation_generation_semantics_unchanged() {
   CHECK_EQ(doc.content_generation(), g4 + 1);
 }
 
+void test_sirius_extended_csv_native_and_sus_scroll() {
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationNote body = make_tap(0, -2);
+  body.id = 0;
+  body.width = 5;
+  body.end_tick = 960;
+  body.note_type = NoteType::NontailHold;
+  chart.notes.push_back(body);
+  chart.scroll_speed_points = {{0, 1.0}, {480, 2.0}, {960, 0.5}, {1440, 1.0}};
+  const auto features = required_chart_features(chart);
+  CHECK_EQ(static_cast<int>(features.size()), 3);
+  CHECK(features[0] == "nontail-hold-v1");
+  CHECK(features[1] == "positive-sv-v1");
+  CHECK(features[2] == "lane-overhang-v1");
+
+  const auto generated = with_all_hold_eighths_recomputed(chart.notes, 480);
+  CHECK_EQ(count_chart_note_type(NotationChart{chart.timing, generated}, NoteType::HoldEighth), 0);
+  for (const NoteType type : {NoteType::NontailHold, NoteType::NontailCriticalHold,
+                              NoteType::NontailScratchHold,
+                              NoteType::NontailScratchCriticalHold}) {
+    NotationNote variant = body;
+    variant.note_type = type;
+    const auto ticks = with_all_hold_eighths_recomputed({variant}, 480);
+    CHECK_EQ(count_chart_note_type(NotationChart{chart.timing, ticks}, NoteType::HoldEighth), 0);
+    CHECK(!is_hold_with_tail(type));
+  }
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::Ok);
+  CHECK(csv.find(",1100,") != std::string::npos);
+  CHECK(csv.find(",900,") == std::string::npos);
+  CHECK(csv.find(",-1,0,0,0,0") != std::string::npos);
+
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationChart parsed;
+  CHECK(OfficialChartFormat::parse_chart(csv, parsed, extended).error == SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(parsed.scroll_speed_points.size()), 4);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::HiSpeed), 0);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::NontailHold), 1);
+  CHECK_EQ(parsed.notes.front().lane, -2);
+  const std::string overhang_csv =
+      "1.0,-1.0,10,-1,5,0,0\n"
+      "2.0,-1.0,10,11,6,0,0\n"
+      "3.0,-1.0,10,-2,19,0,0\n";
+  NotationChart overhang;
+  CHECK(OfficialChartFormat::parse_chart(overhang_csv, overhang, extended).error ==
+        SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(overhang.notes.size()), 3);
+  CHECK_EQ(overhang.notes[1].end_lane(), 15);
+  CHECK_EQ(overhang.notes[2].width, 19);
+  CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,14,3,0,0\n", overhang, extended).error ==
+        SerializeError::ParseError);
+  for (const char* invalid : {"1.0,0,-1,0,0,0,0\n",
+                              "1.0,-2,-1,0,0,0,0\n",
+                              "1.0,nan,-1,0,0,0,0\n"}) {
+    NotationChart rejected_speed;
+    CHECK(OfficialChartFormat::parse_chart(invalid, rejected_speed).error ==
+          SerializeError::ParseError);
+  }
+  NotationChart strict;
+  CHECK(OfficialChartFormat::parse_chart(csv, strict).error == SerializeError::ParseError);
+  const fs::path csv_file = temp_chart_path("sirius_extended.csv");
+  {
+    std::ofstream output(csv_file);
+    output << csv;
+  }
+  NotationChart auto_loaded;
+  ChartEditMode auto_mode = ChartEditMode::Editable;
+  CHECK(ChartSerializer::load_auto(csv_file.string(), auto_loaded, {}, &auto_mode).error ==
+        SerializeError::Ok);
+  CHECK(auto_loaded.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+  CHECK(auto_mode == ChartEditMode::OfficialPreviewOnly);
+
+  const fs::path native = temp_chart_path("sirius_extended_v6.wdschart");
+  CHECK(ChartSerializer::save_to_file(chart, native.string()).error == SerializeError::Ok);
+  NotationChart loaded;
+  CHECK(ChartSerializer::load_from_file(native.string(), loaded).error == SerializeError::Ok);
+  CHECK(loaded.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+  CHECK_EQ(static_cast<int>(loaded.scroll_speed_points.size()), 4);
+  CHECK_EQ(loaded.notes.front().lane, -2);
+  {
+    ChartEditorEngine editable;
+    editable.load_chart(chart);
+    CHECK(!editable.document().set_compatibility_profile(ChartCompatibilityProfile::Official));
+    const auto before = editable.document().scroll_speed_points();
+    auto after = before;
+    after.push_back({1920, 1.25});
+    CHECK(editable.execute_command(std::make_unique<SetScrollSpeedPointsCommand>(before, after)));
+    CHECK_EQ(static_cast<int>(editable.document().scroll_speed_points().size()), 5);
+    CHECK(editable.undo());
+    CHECK_EQ(static_cast<int>(editable.document().scroll_speed_points().size()), 4);
+  }
+
+  std::string sus_extended_text;
+  CHECK(SusChartFormat::serialize(chart, SusChartSaveOptions{}, sus_extended_text).error ==
+        SerializeError::Ok);
+  CHECK(sus_extended_text.find("#WDS_PROFILE SiriusExtended") != std::string::npos);
+  CHECK(sus_extended_text.find("#TIL00:") != std::string::npos);
+  SusChartLoadResult sus_extended_loaded;
+  CHECK(SusChartFormat::parse(sus_extended_text, sus_extended_loaded).error ==
+        SerializeError::Ok);
+  CHECK(sus_extended_loaded.chart.compatibility_profile ==
+        ChartCompatibilityProfile::SiriusExtended);
+  CHECK_EQ(count_chart_note_type(sus_extended_loaded.chart, NoteType::NontailHold), 1);
+  CHECK_EQ(sus_extended_loaded.chart.notes.front().lane, -2);
+  CHECK_EQ(static_cast<int>(sus_extended_loaded.chart.scroll_speed_points.size()), 4);
+  {
+    NotationChart scratch_chart;
+    scratch_chart.timing = chart.timing;
+    scratch_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+    NotationNote scratch = make_tap(0, 2);
+    scratch.id = 0;
+    scratch.width = 2;
+    scratch.end_tick = 960;
+    scratch.note_type = NoteType::NontailScratchHold;
+    scratch_chart.notes.push_back(scratch);
+    std::string scratch_sus;
+    CHECK(SusChartFormat::serialize(scratch_chart, SusChartSaveOptions{}, scratch_sus).error ==
+          SerializeError::Ok);
+    SusChartLoadResult scratch_loaded;
+    CHECK(SusChartFormat::parse(scratch_sus, scratch_loaded).error == SerializeError::Ok);
+    CHECK_EQ(count_chart_note_type(scratch_loaded.chart, NoteType::NontailScratchHold), 1);
+  }
+
+  NotePositionCalculator positions;
+  positions.set_scroll_speed_points(chart.scroll_speed_points, chart.timing);
+  CHECK(std::fabs(positions.scroll_distance_ms(1500, 500) - 1500.0) < 1e-6);
+  CHECK(std::fabs(positions.calculate_position_y(1500, 999) -
+                  positions.calculate_position_y(1500, 1000)) < 0.1f);
+  positions.clear_scroll_speed_points();
+  CHECK(std::fabs(positions.calculate_position_y(1500, 500) -
+                  official_note_local_y(1500, 500, 5.0)) < 1e-5f);
+
+  const std::string sus =
+      "#REQUEST \"ticks_per_beat 480\"\n"
+      "#BASEBPM 120\n"
+      "#TIL00: \"0'0:1.0, 0'960:2.0, 1'0:0.5\"\n";
+  SusChartLoadResult sus_loaded;
+  CHECK(SusChartFormat::parse(sus, sus_loaded).error == SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(sus_loaded.chart.scroll_speed_points.size()), 3);
+  CHECK_EQ(sus_loaded.chart.scroll_speed_points[1].tick, 960);
+  CHECK(std::fabs(sus_loaded.chart.scroll_speed_points[2].multiplier - 0.5) < 1e-9);
+  CHECK(SusChartFormat::parse("#TIL00: \"0'0:0\"\n", sus_loaded).error ==
+        SerializeError::Ok);
+  CHECK(sus_loaded.chart.scroll_speed_points.empty());
+  CHECK(!sus_loaded.warnings.empty());
+}
+
+void test_sus_skips_nonpositive_scroll_speed_with_warning() {
+  const std::string sus =
+      "#REQUEST \"ticks_per_beat 480\"\n"
+      "#BASEBPM 120\n"
+      "#TIL00: \"0'0:1.5, 0'120:-2.0, 0'240:0, 0'360:2.0\"\n"
+      "#00012: 14\n";
+  SusChartLoadResult loaded;
+  const auto result = SusChartFormat::parse(sus, loaded);
+  CHECK(result.error == SerializeError::Ok);
+  if (result.error != SerializeError::Ok) return;
+  CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
+  CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 2);
+  if (loaded.chart.scroll_speed_points.size() == 2) {
+    CHECK_EQ(loaded.chart.scroll_speed_points[0].tick, 0);
+    CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 360);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[0].multiplier - 1.5) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier - 2.0) < 1e-9);
+  }
+  CHECK_EQ(static_cast<int>(loaded.warnings.size()), 1);
+  if (!loaded.warnings.empty()) {
+    CHECK(loaded.warnings[0].find("2") != std::string::npos);
+    CHECK(loaded.warnings[0].find("SV") != std::string::npos);
+  }
+}
+
+void test_deleted_hold_eighth_stays_suppressed() {
+  NotationNote body = make_tap(0, 2);
+  body.id = 7;
+  body.width = 3;
+  body.end_tick = 480;
+  body.note_type = NoteType::NontailScratchHold;
+  NotationNote deleted = body;
+  deleted.id = 8;
+  deleted.start_tick = 240;
+  deleted.end_tick = 240;
+  deleted.note_type = NoteType::HoldEighth;
+  deleted.parent_hold_id = body.id;
+  deleted.scratch_length = kSuppressedHoldEighthScratchLength;
+
+  const auto notes = with_all_hold_eighths_recomputed({body, deleted}, 480);
+  CHECK_EQ(count_chart_note_type(NotationChart{{}, notes}, NoteType::HoldEighth), 1);
+  CHECK(is_suppressed_hold_eighth(deleted));
+  CHECK_EQ(static_cast<int>(notes.size()), 2);
+
+  std::vector<int64_t> combo_hits;
+  collect_preview_combo_hits(notes, MusicTiming{}, combo_hits);
+  CHECK(combo_hits.empty());
+
+  NotationChart chart;
+  chart.notes = notes;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::Ok);
+  CHECK(csv.find(",1110,") != std::string::npos);
+  CHECK(csv.find(",900,") == std::string::npos);
+  const fs::path path = temp_chart_path("suppressed_hold_eighth.wdschart");
+  CHECK(ChartSerializer::save_to_file(chart, path.string()).error == SerializeError::Ok);
+  NotationChart loaded;
+  CHECK(ChartSerializer::load_from_file(path.string(), loaded).error == SerializeError::Ok);
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::HoldEighth), 1);
+  if (loaded.notes.size() > 1) CHECK(is_suppressed_hold_eighth(loaded.notes.back()));
+  const auto reloaded = with_all_hold_eighths_recomputed(loaded.notes, 480);
+  CHECK_EQ(static_cast<int>(reloaded.size()), 2);
+}
+
+void test_authored_nontail_eighth_roundtrips() {
+  NotationChart chart;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  NotationNote body = make_tap(0, 2);
+  body.id = 0;
+  body.width = 3;
+  body.end_tick = 960;
+  body.note_type = NoteType::NontailScratchHold;
+  chart.notes = {body};
+  CHECK_EQ(count_chart_note_type(
+      NotationChart{chart.timing, with_all_hold_eighths_recomputed(chart.notes, 480)},
+      NoteType::HoldEighth), 0);
+
+  NotationNote authored = body;
+  authored.id = 1;
+  authored.start_tick = 240;
+  authored.end_tick = 240;
+  authored.note_type = NoteType::HoldEighth;
+  authored.parent_hold_id = body.id;
+  authored.scratch_length = kAuthoredHoldEighthScratchLength;
+  chart.notes.push_back(authored);
+  const auto recomputed = with_all_hold_eighths_recomputed(chart.notes, 480);
+  CHECK_EQ(count_chart_note_type(NotationChart{chart.timing, recomputed}, NoteType::HoldEighth), 1);
+
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::Ok);
+  CHECK(csv.find(",900,") != std::string::npos);
+  CHECK_EQ(static_cast<int>(std::count(csv.begin(), csv.end(), '\n')), 2);
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationChart imported;
+  CHECK(OfficialChartFormat::parse_chart(csv, imported, extended).error == SerializeError::Ok);
+  CHECK_EQ(count_chart_note_type(imported, NoteType::HoldEighth), 1);
+  if (imported.notes.size() == 2) {
+    const auto& point = imported.notes[1];
+    CHECK(is_authored_hold_eighth(point));
+    CHECK_EQ(point.parent_hold_id, imported.notes[0].id);
+  }
+
+  const fs::path native = temp_chart_path("authored_nontail_eighth.wdschart");
+  CHECK(ChartSerializer::save_to_file(chart, native.string()).error == SerializeError::Ok);
+  NotationChart loaded;
+  CHECK(ChartSerializer::load_from_file(native.string(), loaded).error == SerializeError::Ok);
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::HoldEighth), 1);
+  if (loaded.notes.size() == 2) CHECK(is_authored_hold_eighth(loaded.notes[1]));
+  ChartEditorEngine engine;
+  engine.load_chart(loaded);
+  CHECK_EQ(count_chart_note_type(engine.document().to_notation_chart(), NoteType::HoldEighth), 1);
+
+  chart.notes.pop_back();
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::Ok);
+  CHECK(csv.find(",900,") == std::string::npos);
+}
+
+void test_sirius_features_require_extended_profile() {
+  ChartDocument doc;
+  NotationNote normal = make_tap(0, 2);
+  normal.id = 1;
+  CHECK_EQ(doc.add_note(normal), 1);
+
+  NotationNote nontail = make_tap(480, 2);
+  nontail.id = 2;
+  nontail.end_tick = 960;
+  nontail.note_type = NoteType::NontailScratchHold;
+  CHECK_EQ(doc.add_note(nontail), -1);
+  CHECK(!doc.set_notes({normal, nontail}));
+  CHECK(!doc.update_note(1, nontail));
+  CHECK(!doc.set_scroll_speed_points({{0, 1.5}}));
+
+  NotationNote overhang = make_tap(480, -1);
+  overhang.id = 3;
+  overhang.width = 2;
+  CHECK_EQ(doc.add_note(overhang), -1);
+
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  CHECK_EQ(doc.add_note(nontail), 2);
+  CHECK_EQ(doc.add_note(overhang), 3);
+  CHECK(doc.set_scroll_speed_points({{0, 1.5}}));
+  CHECK(!doc.set_compatibility_profile(ChartCompatibilityProfile::Official));
+
+  NotationChart chart = doc.to_notation_chart();
+  chart.compatibility_profile = ChartCompatibilityProfile::Official;
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::ParseError);
+  CHECK(SusChartFormat::serialize(chart, SusChartSaveOptions{}, csv).error == SerializeError::ParseError);
+  CHECK(ChartSerializer::save_to_file(chart,
+      temp_chart_path("invalid_official_features.wdschart").string()).error ==
+      SerializeError::ParseError);
+
+  const std::string speed_only_csv = "0.0,1.5,-1,0,0,0,0\n";
+  NotationChart parsed;
+  CHECK(OfficialChartFormat::parse_chart(speed_only_csv, parsed).error == SerializeError::ParseError);
+  const fs::path speed_path = temp_chart_path("extended_speed_only.csv");
+  {
+    std::ofstream output(speed_path);
+    output << speed_only_csv;
+  }
+  CHECK(OfficialChartFormat::load_chart_auto_profile(speed_path.string(), {}, parsed).error ==
+        SerializeError::Ok);
+  CHECK(parsed.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+
+  CHECK(doc.set_notes({normal}));
+  CHECK(doc.set_scroll_speed_points({}));
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::Official));
+}
+
+void test_supplied_sus_repro_if_available() {
+  const char* path = std::getenv("WDS_SUS_REPRO_PATH");
+  if (path == nullptr || *path == '\0') return;
+  SusChartLoadResult loaded;
+  const auto result = SusChartFormat::load_file(path, loaded);
+  if (result.error != SerializeError::Ok) {
+    std::printf("SUS repro import error: %s\n", result.message.c_str());
+  }
+  CHECK(result.error == SerializeError::Ok);
+  if (result.error != SerializeError::Ok) return;
+  CHECK(!loaded.chart.notes.empty());
+  CHECK(!loaded.chart.scroll_speed_points.empty());
+  CHECK(!loaded.warnings.empty());
+}
+
 int main() {
+  test_authored_nontail_eighth_roundtrips();
+  test_sirius_features_require_extended_profile();
+  test_sirius_extended_csv_native_and_sus_scroll();
+  test_sus_skips_nonpositive_scroll_speed_with_warning();
+  test_deleted_hold_eighth_stays_suppressed();
+  test_supplied_sus_repro_if_available();
   test_auto_note_id_starts_at_zero();
   test_concurrent_lines_multi_press_only();
   test_hold_head_pairs_but_attached_excludes_head();

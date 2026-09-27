@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -89,11 +90,40 @@ struct ConcurrentLineNote {
   int32_t width = 1;
 };
 
+// A deleted generated HoldEighth remains as a non-rendered tombstone so the
+// next derived-point rebuild does not recreate it.
+inline constexpr int32_t kSuppressedHoldEighthScratchLength =
+    std::numeric_limits<int32_t>::min();
+// Author-placed type 900. The private marker is written as scratchLength=0 in
+// official CSV, but retained in .wdschart so derived-point rebuilds keep it.
+inline constexpr int32_t kAuthoredHoldEighthScratchLength =
+    std::numeric_limits<int32_t>::min() + 1;
+inline bool is_suppressed_hold_eighth(const NotationNote& note) noexcept {
+  return note.note_type == NoteType::HoldEighth &&
+         note.scratch_length == kSuppressedHoldEighthScratchLength;
+}
+inline bool is_authored_hold_eighth(const NotationNote& note) noexcept {
+  return note.note_type == NoteType::HoldEighth &&
+         note.scratch_length == kAuthoredHoldEighthScratchLength;
+}
+
+// Positive visual scroll-speed event. The event starts at tick and remains in
+// effect until the next point. A chart with no points has multiplier 1.0.
+struct ScrollSpeedPoint {
+  int32_t tick = 0;
+  double multiplier = 1.0;
+};
+
 struct NotationChart {
   MusicTiming timing;
   std::vector<NotationNote> notes;
   std::vector<ConcurrentLineNote> concurrent_lines;
+  std::vector<ScrollSpeedPoint> scroll_speed_points;
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 };
+
+// Feature IDs for a packer to copy into custom-song requiredFeatures metadata.
+std::vector<std::string> required_chart_features(const NotationChart& chart);
 
 // Mutable chart document used by the editor UI.
 // All edits are in-memory only; no disk I/O (see ChartSerializer for save/load).
@@ -112,6 +142,14 @@ class ChartDocument {
   const std::vector<ConcurrentLineNote>& concurrent_lines() const noexcept {
     return concurrent_lines_;
   }
+  const std::vector<ScrollSpeedPoint>& scroll_speed_points() const noexcept {
+    return scroll_speed_points_;
+  }
+  bool set_scroll_speed_points(std::vector<ScrollSpeedPoint> points);
+  ChartCompatibilityProfile compatibility_profile() const noexcept {
+    return compatibility_profile_;
+  }
+  bool set_compatibility_profile(ChartCompatibilityProfile profile);
   const ChartNoteIndex& index() const noexcept { return index_; }
 
   ChartEditMode edit_mode() const noexcept { return edit_mode_; }
@@ -174,6 +212,8 @@ class ChartDocument {
   MusicTiming timing_;
   std::vector<NotationNote> notes_;
   std::vector<ConcurrentLineNote> concurrent_lines_;
+  std::vector<ScrollSpeedPoint> scroll_speed_points_;
+  ChartCompatibilityProfile compatibility_profile_ = ChartCompatibilityProfile::Official;
   std::unordered_map<int32_t, size_t> id_to_index_;
   ChartNoteIndex index_;
   int32_t next_id_ = 0;

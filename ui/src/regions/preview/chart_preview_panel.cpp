@@ -205,6 +205,12 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   if (!ready_) {
     return;
   }
+  const uint64_t chart_revision = engine_.document().content_generation();
+  if (scroll_geometry_revision_ != chart_revision) {
+    preview_.geometry().set_scroll_speed_points(engine_.document().scroll_speed_points(),
+                                                engine_.document().timing());
+    scroll_geometry_revision_ = chart_revision;
+  }
   // One scan-out frame of visual lead while playing (does not scale with rate).
   // Added to the draw clock only — do not apply+rollback the engine snapshot
   // (that rebuilt combo / notes three times per frame).

@@ -2,10 +2,12 @@
 
 #include <wds/chart_render/preview_visual_config.hpp>
 #include <wds/core/official_playfield.hpp>
+#include <wds/core/note_position_calculator.hpp>
 #include <wds/renderer/draw_types.hpp>
 
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace wds::renderer {
 
@@ -61,6 +63,8 @@ class StageGeometry {
 
   // Screen percent (0=top, 1=bottom) from official Y → LaneGroup+FOV50.
   float note_percent(double note_time_sec, double now_sec) const;
+  void set_scroll_speed_points(std::vector<wds::chart_editor::ScrollSpeedPoint> points,
+                               const wds::chart_editor::MusicTiming& timing);
   float judgeline_percent() const noexcept;
 
   // Half of the judgment-line band height, in note-percent units.
@@ -130,6 +134,7 @@ class StageGeometry {
   float judge_y_to_percent(float judge_y) const noexcept;
 
   PreviewVisualConfig config_;
+  wds::chart_editor::NotePositionCalculator position_calculator_;
   ScreenBounds screen_;
   ScreenBounds content_;
   ScreenBounds panel_;

@@ -9,6 +9,7 @@
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/chart_serializer.hpp>
 #include <wds/core/file_io.hpp>
+#include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/project.hpp>
 #include <wds/core/sus_chart.hpp>
@@ -346,6 +347,16 @@ std::string ascii_token_or(const std::string& value, const std::string& fallback
 }  // namespace
 
 EditorSession::EditorSession(ChartPreviewPanel& preview) : preview_(preview) {}
+
+bool EditorSession::allows_refresh_import(const wds::chart_editor::NotationChart& chart) {
+  if (engine().document().compatibility_profile() ==
+          wds::chart_editor::ChartCompatibilityProfile::SiriusExtended ||
+      (chart.compatibility_profile == wds::chart_editor::ChartCompatibilityProfile::Official &&
+       wds::chart_editor::required_chart_features(chart).empty())) return true;
+  last_import_error_ = "请先将功能等级切换为 Refresh，再导入含 SV、无尾或超界内容的谱面";
+  status(last_import_error_, StatusLevel::Error);
+  return false;
+}
 
 void EditorSession::status(std::string text, StatusLevel level) {
   if (status_handler_) status_handler_(std::move(text), level);
@@ -696,10 +707,13 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
   loaded.reserve(chart_paths.size());
   for (const auto& chart_path : chart_paths) {
     wds::chart_editor::NotationChart chart;
-    if (!ok(wds::chart_editor::OfficialChartFormat::load_chart_with_music_config(
-            chart_path, music_config_path, chart))) {
+    const auto result = wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
+        chart_path, music_config_path, chart);
+    if (!ok(result)) {
+      last_import_error_ = result.message;
       return false;
     }
+    if (!allows_refresh_import(chart)) return false;
     chart.timing.offset_ms = 0;
     // Keep charts in memory only — do not bind official CSV paths (avoids overwriting
     // them when the user later saves a .wdsproject / .wdschart).
@@ -742,6 +756,7 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
 
 bool EditorSession::import_official(const std::string& chart_path,
                                     const std::string& music_config_path) {
+  last_import_error_.clear();
   if (chart_path.empty()) return false;
   if (is_music_config_path(chart_path)) {
     return import_official_pack(chart_path);
@@ -768,8 +783,17 @@ bool EditorSession::import_official(const std::string& chart_path,
   }
   const bool found_config = !config_path.empty();
 
-  // Empty config_path → load chart only (DelaySeconds stays unset / 0).
-  if (!ok(engine().load_official_from_file(chart_path, config_path))) return false;
+  // Parse before replacing the active chart so a feature-level rejection
+  // leaves the current project and undo history intact.
+  wds::chart_editor::NotationChart incoming;
+  const auto import_result = wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
+      chart_path, config_path, incoming);
+  if (!ok(import_result)) {
+    last_import_error_ = import_result.message;
+    return false;
+  }
+  if (!allows_refresh_import(incoming)) return false;
+  engine().load_chart(incoming, wds::chart_editor::ChartEditMode::OfficialPreviewOnly);
 
   project_path_.clear();
   music_path_.clear();
@@ -812,9 +836,19 @@ bool EditorSession::import_official(const std::string& chart_path,
 }
 
 bool EditorSession::import_sus(const std::string& path) {
-  wds::chart_editor::SusChartMetadata meta;
-  std::vector<std::string> warnings;
-  if (!ok(engine().load_sus_from_file(path, &meta, &warnings))) return false;
+  wds::chart_editor::SusChartLoadResult loaded;
+  const auto import_result = wds::chart_editor::SusChartFormat::load_file(path, loaded);
+  if (!ok(import_result)) {
+    last_import_error_ = import_result.message;
+    return false;
+  }
+  if (!allows_refresh_import(loaded.chart)) return false;
+  auto prepared = loaded.chart;
+  prepared.notes = wds::chart_editor::with_all_hold_eighths_recomputed(
+      std::move(prepared.notes), prepared.timing.ticks_per_quarter);
+  engine().load_chart(prepared, wds::chart_editor::ChartEditMode::OfficialPreviewOnly);
+  auto meta = std::move(loaded.meta);
+  auto warnings = std::move(loaded.warnings);
 
   project_path_.clear();
   offset_ms_ = engine().document().timing().offset_ms;
@@ -1143,8 +1177,14 @@ bool EditorSession::add_chart() {
 
 bool EditorSession::add_chart_from_file(const std::string& path) {
   if (read_only_ || path.empty()) return false;
+  last_import_error_.clear();
   wds::chart_editor::NotationChart chart;
-  if (!ok(wds::chart_editor::ChartSerializer::load_from_file(path, chart))) return false;
+  const auto load_result = wds::chart_editor::ChartSerializer::load_from_file(path, chart);
+  if (!ok(load_result)) {
+    last_import_error_ = load_result.message;
+    return false;
+  }
+  if (!allows_refresh_import(chart)) return false;
   chart.timing.offset_ms = 0;
   stash_active();
   {

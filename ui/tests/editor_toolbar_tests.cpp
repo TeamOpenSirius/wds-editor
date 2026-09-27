@@ -14,11 +14,13 @@
 #include <wds/interaction/widgets/checkbox.hpp>
 #include <wds/interaction/widgets/dropdown.hpp>
 #include <wds/interaction/widgets/icon_button.hpp>
+#include <wds/core/chart_serializer.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -713,9 +715,109 @@ void test_two_column_settings_and_aligned_curve_row() {
   assert_curve_row_readable(kToolbarTypicalWidth);
 }
 
+void test_refresh_import_requires_selected_feature_level() {
+  namespace fs = std::filesystem;
+  namespace ce = wds::chart_editor;
+  const fs::path base = fs::temp_directory_path() / "wds_refresh_import_gate";
+  fs::create_directories(base);
+  const fs::path csv = base / "extended.csv";
+  const fs::path nontail_csv = base / "nontail.csv";
+  const fs::path overhang_csv = base / "overhang.csv";
+  const fs::path original_csv = base / "original.csv";
+  const fs::path sus = base / "extended.sus";
+  const fs::path native = base / "extended.wdschart";
+  const fs::path pack_chart = base / "1.csv";
+  const fs::path music_config = base / "music_config.csv";
+
+  ce::NotationChart chart;
+  chart.compatibility_profile = ce::ChartCompatibilityProfile::SiriusExtended;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  ce::NotationNote body;
+  body.id = 0;
+  body.start_tick = 0;
+  body.end_tick = 480;
+  body.note_type = ce::NoteType::NontailHold;
+  body.lane = 2;
+  body.width = 3;
+  chart.notes.push_back(body);
+  chart.scroll_speed_points = {{0, 1.5}};
+  CHECK(ce::OfficialChartFormat::save_chart_file(chart, csv.string()).error ==
+        ce::SerializeError::Ok);
+  auto nontail_only = chart;
+  nontail_only.scroll_speed_points.clear();
+  CHECK(ce::OfficialChartFormat::save_chart_file(nontail_only, nontail_csv.string()).error ==
+        ce::SerializeError::Ok);
+  auto overhang_only = nontail_only;
+  overhang_only.notes[0].note_type = ce::NoteType::Normal;
+  overhang_only.notes[0].end_tick = 0;
+  overhang_only.notes[0].lane = -1;
+  CHECK(ce::OfficialChartFormat::save_chart_file(overhang_only, overhang_csv.string()).error ==
+        ce::SerializeError::Ok);
+  auto original = overhang_only;
+  original.compatibility_profile = ce::ChartCompatibilityProfile::Official;
+  original.notes[0].lane = 2;
+  CHECK(ce::OfficialChartFormat::save_chart_file(original, original_csv.string()).error ==
+        ce::SerializeError::Ok);
+  CHECK(ce::SusChartFormat::save_file(chart, sus.string(), ce::SusChartSaveOptions{}).error ==
+        ce::SerializeError::Ok);
+  CHECK(ce::ChartSerializer::save_to_file(chart, native.string()).error ==
+        ce::SerializeError::Ok);
+  fs::copy_file(csv, pack_chart, fs::copy_options::overwrite_existing);
+  ce::OfficialMusicConfig music;
+  music.cue_sheet_name = "Music";
+  music.cue_name = "1";
+  CHECK(ce::OfficialChartFormat::save_music_config_file(music, music_config.string()).error ==
+        ce::SerializeError::Ok);
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  CHECK(session.new_project());
+  CHECK(!session.import_official(csv.string()));
+  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
+  CHECK(session.engine().document().is_editable());
+  CHECK(!session.import_official(nontail_csv.string()));
+  CHECK(!session.import_official(overhang_csv.string()));
+  CHECK(!session.import_official(sus.string()));
+  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
+  CHECK(!session.add_chart_from_file(native.string()));
+  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
+  CHECK(!session.import_official(music_config.string()));
+  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
+  CHECK(session.import_official(original_csv.string()));
+
+  CHECK(session.new_project());
+  CHECK(session.engine().document().set_compatibility_profile(
+      ce::ChartCompatibilityProfile::SiriusExtended));
+  CHECK(session.import_official(music_config.string()));
+  CHECK(session.new_project());
+  CHECK(session.engine().document().set_compatibility_profile(
+      ce::ChartCompatibilityProfile::SiriusExtended));
+  CHECK(session.import_official(csv.string()));
+  CHECK(session.engine().document().compatibility_profile() ==
+        ce::ChartCompatibilityProfile::SiriusExtended);
+
+  CHECK(session.new_project());
+  CHECK(session.engine().document().set_compatibility_profile(
+      ce::ChartCompatibilityProfile::SiriusExtended));
+  CHECK(session.import_official(sus.string()));
+
+  std::error_code ignored;
+  fs::remove(csv, ignored);
+  fs::remove(nontail_csv, ignored);
+  fs::remove(overhang_csv, ignored);
+  fs::remove(original_csv, ignored);
+  fs::remove(sus, ignored);
+  fs::remove(native, ignored);
+  fs::remove(pack_chart, ignored);
+  fs::remove(music_config, ignored);
+  fs::remove(base, ignored);
+}
+
 }  // namespace
 
 int main() {
+  test_refresh_import_requires_selected_feature_level();
   test_toolbar_action_order_has_no_undo_redo();
   test_curve_and_check_actions_dispatch_from_toolbar_hits();
   test_dropdown_empty_item_and_stable_id_with_duplicates();
