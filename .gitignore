@@ -23,6 +23,7 @@ Desktop.ini
 /build-*/
 /dist/
 /.cache/
+/.codegraph/
 .cache/
 CMakeCache.txt
 CMakeFiles/

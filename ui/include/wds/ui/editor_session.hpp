@@ -79,6 +79,7 @@ class EditorSession {
   // Auto-detect: music_config.csv pack / .sus / official CSV. All imports are read-only
   // unless SUS auto-convert is enabled (in-memory → editable .wdschart, unbound path).
   bool import_official(const std::string& chart_path, const std::string& music_config_path = {});
+  const std::string& last_import_error() const noexcept { return last_import_error_; }
   bool export_official(const std::string& path);
   // Export audio + music_config.csv + 1.csv..N.csv into `directory` using official names.
   // Conflicting files prompt for overwrite; declined conflicts are skipped.
@@ -137,6 +138,7 @@ class EditorSession {
   bool write_all_charts_and_project(const std::string& project_path);
   bool import_official_pack(const std::string& music_config_path);
   bool import_sus(const std::string& path);
+  bool allows_refresh_import(const wds::chart_editor::NotationChart& chart);
   void reset_music_config_meta();
   wds::chart_editor::OfficialMusicConfig make_music_config() const;
   wds::chart_editor::SusChartSaveOptions make_sus_save_options() const;
@@ -155,6 +157,7 @@ class EditorSession {
   bool read_only_ = false;
   bool allow_delay_when_read_only_ = false;
   bool sus_auto_convert_ = false;
+  std::string last_import_error_;
   // Fields mirrored into music_config.csv on official project export.
   std::string cue_sheet_name_ = "Music";
   std::string cue_name_ = "1";

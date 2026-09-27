@@ -23,7 +23,6 @@ using wds::chart_editor::official_lane_edge_x;
 using wds::chart_editor::official_lane_left_x;
 using wds::chart_editor::official_lane_right_x;
 using wds::chart_editor::official_note_height_rotation_x;
-using wds::chart_editor::official_note_local_y;
 using wds::chart_editor::official_note_visible_position_y;
 using wds::chart_editor::official_percent_to_judge_y;
 using wds::chart_editor::official_percent_to_main_y;
@@ -42,7 +41,16 @@ using wds::chart_editor::project_note_layer;
 
 void StageGeometry::configure(const PreviewVisualConfig& config) {
   config_ = config;
+  auto position_config = wds::chart_editor::PreviewConfig{};
+  position_config.note_speed = config.note_speed;
+  position_calculator_.set_config(position_config);
   rebuild_stage();
+}
+
+void StageGeometry::set_scroll_speed_points(
+    std::vector<wds::chart_editor::ScrollSpeedPoint> points,
+    const wds::chart_editor::MusicTiming& timing) {
+  position_calculator_.set_scroll_speed_points(std::move(points), timing);
 }
 
 void StageGeometry::resize(int framebuffer_width, int framebuffer_height) {
@@ -225,7 +233,7 @@ float StageGeometry::lane_full_width(int32_t lane, float percent) const {
 float StageGeometry::note_percent(double note_time_sec, double now_sec) const {
   const int64_t target_ms = static_cast<int64_t>(std::llround(note_time_sec * 1000.0));
   const int64_t passed_ms = static_cast<int64_t>(std::llround(now_sec * 1000.0));
-  const float y = official_note_local_y(target_ms, passed_ms, static_cast<double>(config_.note_speed));
+  const float y = position_calculator_.calculate_position_y(target_ms, passed_ms);
   return judge_y_to_percent(y);
 }
 

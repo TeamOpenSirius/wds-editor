@@ -199,7 +199,8 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("导入官方谱面", {"csv", "sus"})) {
         if (!session_->import_official(*path)) {
-          set_status("导入失败：" + *path, StatusLevel::Error);
+          const auto& reason = session_->last_import_error();
+          set_status(reason.empty() ? "导入失败：" + *path : reason, StatusLevel::Error);
         }
       } else {
         set_status("导入已取消", StatusLevel::Info);
@@ -231,7 +232,8 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       if (session_->add_chart_from_file(*path)) {
         set_status("已添加谱面：" + *path, StatusLevel::Info);
       } else {
-        set_status("添加谱面失败：" + *path, StatusLevel::Error);
+        const auto& reason = session_->last_import_error();
+        set_status(reason.empty() ? "添加谱面失败：" + *path : reason, StatusLevel::Error);
       }
     } else {
       set_status("添加谱面已取消", StatusLevel::Info);

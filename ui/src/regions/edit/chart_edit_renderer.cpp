@@ -48,7 +48,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
   const bool hold_body =
-      note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
+      note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
 
   if (pass == NoteVisualPass::HoldBody) {
     if (!hold_body || !sprites.connection) return;
@@ -150,6 +150,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   NoteSprites head = sprites;
   NoteSprites tail = sprites;
   const bool scratch_hold = hold_body && wds::chart_editor::is_scratch_hold_body(note.note_type);
+  const bool with_tail = wds::chart_editor::is_hold_with_tail(note.note_type);
   if (hold_body) {
     // Hold body never draws a start head — paired head notes own that art.
     apply_hold_tail_sprites(tail, skin, scratch_hold);
@@ -160,12 +161,12 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   }
 
   if (hold_body) {
-    if (note.end_tick > note.start_tick) {
+    if (with_tail && note.end_tick > note.start_tick) {
       draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   } else {
     draw_flat(head, y0, note.lane, note.width, head.is_scratch_family);
-    if (note.end_tick > note.start_tick) {
+    if (with_tail && note.end_tick > note.start_tick) {
       draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   }
@@ -503,13 +504,16 @@ void ChartEditRenderer::paint_overlays(
 
   for (const auto& note : notes) {
     if (!selected.count(note.id)) continue;
-    // HoldEighth is derived and never selectable — skip any leaked selection ids.
-    if (note.note_type == NoteType::HoldEighth) continue;
+    if (note.note_type == NoteType::HoldEighth &&
+        !wds::chart_editor::is_authored_hold_eighth(note)) continue;
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
 
     // Mid-stars: selection box matches the tight square hit / draw size.
-    if (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) {
-      auto star = viewport.mid_star_screen_rect(note);
+    if (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound ||
+        wds::chart_editor::is_authored_hold_eighth(note)) {
+      auto star = wds::chart_editor::is_authored_hold_eighth(note)
+                      ? viewport.authored_eighth_star_screen_rect(note)
+                      : viewport.mid_star_screen_rect(note);
       star = {star.x - kPad, star.y - kPad, star.w + kPad * 2.0f, star.h + kPad * 2.0f};
       if (star.bottom() < b.y || star.y > b.bottom()) continue;
       paint_box(star, false);
@@ -517,7 +521,7 @@ void ChartEditRenderer::paint_overlays(
     }
 
     const bool hold_body =
-        note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
+        note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
     bool paired = false;
     bool clear_head_zone = false;
     if (hold_body) {
@@ -566,7 +570,7 @@ void ChartEditRenderer::paint_overlays(
     const float x1 = std::max(viewport.x_at(note.lane) + viewport.lane_width(note.width),
                               viewport.x_at(end_lane) + viewport.lane_width(end_width));
     const float inset =
-        (note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type))
+        (note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type))
             ? viewport.hold_inset_px(std::max(note.width, end_width))
             : viewport.note_inset_px(std::max(note.width, end_width));
     const wds::interaction::Rect box{x0 + inset - kPad, top, (x1 - x0) - inset * 2.0f + kPad * 2.0f,
@@ -626,6 +630,12 @@ void ChartEditRenderer::append_skinned_notes(
 
   // Draw order keyed by ms (parity with preview); z bias stays tick-scaled.
   const std::vector<size_t> order = make_edit_draw_order(notes, viewport.timing());
+  std::unordered_set<int32_t> scratch_hold_ids;
+  for (const auto& note : notes) {
+    if (wds::chart_editor::is_scratch_hold_body(note.note_type)) {
+      scratch_hold_ids.insert(note.id);
+    }
+  }
 
   // Edit is a flat 2D view: skip FlatBottom (preview keeps the pseudo-3D sandwich).
   // See docs/edit-preview-render-parity.md.
@@ -642,6 +652,19 @@ void ChartEditRenderer::append_skinned_notes(
     for (size_t idx : order) {
       const auto& note = notes[idx];
       if (!in_window(note)) continue;
+      if (note.note_type == NoteType::HoldEighth) {
+        if (layer.pass == NoteVisualPass::MidStar &&
+            wds::chart_editor::is_authored_hold_eighth(note)) {
+          const auto& sprite = scratch_hold_ids.count(note.parent_hold_id) != 0
+                                   ? skin.tick_purple : skin.tick_blue;
+          const auto star = viewport.authored_eighth_star_screen_rect(note);
+          const auto q = wds::interaction::rect_to_quad(
+              {star.x, star.y, star.w, star.h}, fb_w, fb_h, screen);
+          batch.add_sprite(sprite, q, layer_z(layer.base_z, static_cast<float>(note.start_tick)),
+                           selected.count(note.id) != 0 ? 1.0f : 0.92f);
+        }
+        continue;
+      }
       const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
       const float z = layer_z(layer.base_z, static_cast<float>(note.start_tick));
       wds::interaction::Color tint{1.0f, 1.0f, 1.0f, 1.0f};

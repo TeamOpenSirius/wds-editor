@@ -540,6 +540,7 @@ void EditorMainWindow::changeEvent(QEvent* event) {
 void EditorMainWindow::on_preview_frame() {
   if (ui_manager_ == nullptr) return;
   if (playback_panel_ != nullptr) playback_panel_->sync_position();
+  if (convert_bar_ != nullptr) convert_bar_->sync_place_checks();
   if (auto* panel = ui_manager_->edit_panel()) {
     const bool playing =
         ui_manager_->session().engine().playback_state() == wds::common::PlaybackState::Playing;
@@ -663,6 +664,11 @@ void EditorMainWindow::handle_ui_change(UiChange change) {
       break;
     case UiChange::Document:
       refresh_window_title();
+      if (toolbar_widget_ != nullptr) {
+        toolbar_widget_->refresh_flags();
+        toolbar_widget_->refresh_enabled_states();
+      }
+      sync_toolbox_place_checks();
       break;
     case UiChange::PlaceTool:
       sync_toolbox_place_checks();
@@ -1254,7 +1260,12 @@ void EditorMainWindow::import_chart() {
           *ok = ui_manager_->session().import_official(path.toStdString());
         },
         [this, ok] {
-          if (!*ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选谱面。"));
+          if (!*ok) {
+            const auto& reason = ui_manager_->session().last_import_error();
+            QMessageBox::warning(this, tr("导入失败"),
+                                 reason.empty() ? tr("无法导入所选谱面。")
+                                                : QString::fromStdString(reason));
+          }
         });
   });
 }
@@ -1285,7 +1296,12 @@ void EditorMainWindow::add_chart() {
   if (box.clickedButton() == create) { ui_manager_->session().add_chart(); return; }
   if (box.clickedButton() == existing) {
     const auto path = QFileDialog::getOpenFileName(this, tr("添加谱面"), {}, tr("WDS 谱面 (*.wdschart)"));
-    if (!path.isEmpty()) ui_manager_->session().add_chart_from_file(path.toStdString());
+    if (!path.isEmpty() && !ui_manager_->session().add_chart_from_file(path.toStdString())) {
+      const auto& reason = ui_manager_->session().last_import_error();
+      QMessageBox::warning(this, tr("添加谱面失败"),
+                           reason.empty() ? tr("无法添加所选谱面。")
+                                          : QString::fromStdString(reason));
+    }
   }
 }
 

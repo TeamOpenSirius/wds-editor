@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <wds/core/types.hpp>
 
 namespace wds::chart_editor {
 
@@ -57,6 +58,8 @@ struct PreviewConfig {
   int64_t incremental_max_time_delta_ms = 500;
   // Prefer FullRebuild when estimated_churn / max(prev, candidates) exceeds this.
   float incremental_churn_ratio_threshold = 0.35f;
+
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 };
 
 }  // namespace wds::chart_editor

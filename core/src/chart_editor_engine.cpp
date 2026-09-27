@@ -160,7 +160,7 @@ SerializeResult ChartEditorEngine::load_official_from_file(const std::string& ch
                                                            const std::string& music_config_path) {
   NotationChart chart;
   const auto result =
-      OfficialChartFormat::load_chart_with_music_config(chart_path, music_config_path, chart);
+      OfficialChartFormat::load_chart_auto_profile(chart_path, music_config_path, chart);
   if (result.error != SerializeError::Ok) {
     return result;
   }
@@ -314,6 +314,11 @@ const PreviewSnapshot& ChartEditorEngine::publish_snapshot() {
       EditLeadIn::preview_chart_us(clock_us, preview_lead_in_visible_ms_);
   const int64_t preview_ms = visual_us / 1000;
   const uint64_t snapshot_rev = document_.content_generation();
+  snapshot_builder_.set_compatibility_profile(document_.compatibility_profile());
+  if (scroll_points_revision_ != snapshot_rev) {
+    snapshot_builder_.set_scroll_speed_points(document_.scroll_speed_points(), document_.timing());
+    scroll_points_revision_ = snapshot_rev;
+  }
   snapshot_builder_.rebuild_or_update(snapshot_, document_.notes(), document_.timing(),
                                       document_.concurrent_lines(), document_.index(),
                                       preview_ms, clock_.playback_state(), snapshot_rev);

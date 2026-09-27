@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <wds/core/types.hpp>
+
 namespace wds::chart_editor {
 
 struct EditGridConfig {
@@ -13,6 +15,7 @@ struct EditGridConfig {
   int32_t visible_hectoms = 20;
   int32_t subdivisions_per_beat = 4;
   int32_t lane_count = 12;
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 };
 
 // Edit/preview time geometry. The playhead is always on the judgeline at 1:1
@@ -60,7 +63,11 @@ int32_t snap_lane(float lane_center, const EditGridConfig& cfg);
 int32_t selection_drag_tick_delta(int32_t anchor_start_tick, int32_t pointer_delta_tick,
                                   const EditGridConfig& cfg) noexcept;
 int32_t clamp_lane_for_width(int32_t lane, int32_t width, int32_t lane_count);
+int32_t clamp_lane_for_width(int32_t lane, int32_t width, int32_t lane_count,
+                             ChartCompatibilityProfile profile);
 bool lane_in_bounds(int32_t lane, int32_t width, int32_t lane_count);
+bool lane_span_overlaps_playfield(int32_t lane, int32_t width, int32_t lane_count,
+                                  ChartCompatibilityProfile profile);
 std::vector<int32_t> beat_ticks_in_range(int32_t start_tick, int32_t end_tick,
                                          const EditGridConfig& cfg);
 std::vector<int32_t> subdivision_ticks_in_range(int32_t start_tick, int32_t end_tick,

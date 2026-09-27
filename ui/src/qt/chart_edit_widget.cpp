@@ -23,6 +23,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRegion>
 #include <QShowEvent>
 #include <QWheelEvent>
 #include <QDir>
@@ -447,6 +448,14 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     paint_horizontal_grid(grid, v, b);
     flush_ui_painter(p, grid);
   }
+  for (const auto& point : panel_->engine().document().scroll_speed_points()) {
+    const float y = v.y_at(point.tick);
+    if (y < b.y || y > b.bottom()) continue;
+    p.fillRect(QRectF(b.x, y - 0.5f, b.w, 1.0f), QColor(242, 174, 51, 150));
+    p.setPen(QColor(242, 184, 72));
+    p.drawText(QRectF(b.x + 4.0f, y - 19.0f, 100.0f, 18.0f),
+               QStringLiteral("SV %1x").arg(QString::number(point.multiplier, 'g', 6)));
+  }
 
   // Note art hangs half a note-height (plus selection pad) past its tick.
   // Convert that pixel pad to ticks; long holds still pass the span test.
@@ -514,6 +523,15 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   }
   p.restore();
   flush_ui_painter(p, chrome);
+  if (panel_->engine().document().compatibility_profile() ==
+      wds::chart_editor::ChartCompatibilityProfile::SiriusExtended) {
+    // The legacy Qt canvas paints gutter chrome last. Repaint only the pieces
+    // beyond the 12-lane playfield so extended note art stays visible there.
+    p.save();
+    p.setClipRegion(QRegion(rect()).subtracted(QRegion(playfield.toAlignedRect())));
+    paint_notes(p, notes, 1.0f, true, cull_lo, cull_hi);
+    p.restore();
+  }
 }
 
 void ChartEditWidget::paint_waveform(QPainter& p, const EditViewport& v,
@@ -634,7 +652,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth ||
         wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) ||
         n.end_tick <= n.start_tick ||
-        !wds::chart_editor::is_hold_with_tail(n.note_type)) {
+        !wds::chart_editor::is_bindable_hold_body(n.note_type)) {
       continue;
     }
     const bool scratch = wds::chart_editor::is_scratch_hold_body(n.note_type);
@@ -657,7 +675,26 @@ void ChartEditWidget::paint_notes(QPainter& p,
   }
   for (const std::size_t vis : note_draw_order_) {
     const auto& n = notes[visible_note_indices_[vis]];
-    if (n.note_type == wds::chart_editor::NoteType::HoldEighth) continue;
+    if (n.note_type == wds::chart_editor::NoteType::HoldEighth) {
+      if (!wds::chart_editor::is_authored_hold_eighth(n)) continue;
+      const auto parent = panel_->engine().document().find_note(n.parent_hold_id);
+      const bool scratch = parent && wds::chart_editor::is_scratch_hold_body(parent->note_type);
+      const QPixmap& star_skin = scratch ? tick_purple_ : tick_blue_;
+      const auto star_bounds = v.authored_eighth_star_screen_rect(n);
+      const QRectF star(star_bounds.x, star_bounds.y, star_bounds.w, star_bounds.h);
+      if (star_skin.isNull()) {
+        p.fillRect(star, scratch ? QColor(175, 80, 235) : QColor(65, 190, 245));
+      } else {
+        p.drawPixmap(star, star_skin, star_skin.rect());
+      }
+      if (show_selection && panel_->selected().count(n.id)) {
+        ScopedAA aa(p);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.5));
+        p.drawRoundedRect(star.adjusted(-3, -3, 3, 3), 4, 4);
+      }
+      continue;
+    }
     if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
     const float y0 = v.y_at(n.start_tick), y1 = v.y_at(n.end_tick > n.start_tick ? n.end_tick : n.start_tick);
     const float inset = v.note_inset_px(n.width);
@@ -670,7 +707,8 @@ void ChartEditWidget::paint_notes(QPainter& p,
     const bool critical = n.note_type == NT::Critical || n.note_type == NT::CriticalHold ||
                           n.note_type == NT::CriticalHoldStart || n.note_type == NT::NontailCriticalHold ||
                           n.note_type == NT::ScratchCriticalHold || n.note_type == NT::ScratchCriticalHoldStart;
-    const bool hold_body = n.end_tick > n.start_tick && wds::chart_editor::is_hold_with_tail(n.note_type);
+    const bool hold_body = n.end_tick > n.start_tick && wds::chart_editor::is_bindable_hold_body(n.note_type);
+    const bool with_tail = wds::chart_editor::is_hold_with_tail(n.note_type);
     int end_lane = n.lane, end_width = n.width;
     if (hold_body && wds::chart_editor::is_hold_chain_body(n.note_type)) {
       const auto span = wds::chart_editor::resolve_end_lane_span(n);
@@ -702,7 +740,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
         draw_skin(*skin, head, v.tap_visual_world_width(n.width));
       }
     }
-    if (hold_body) {
+    if (hold_body && with_tail) {
       // Tail caps are real note sprites, not just the ribbon endpoint.  Draw
       // them independently so a terminal ScratchHold still exposes its flick.
       // Gold-head bodies stay blue/purple at the tail — only the paired

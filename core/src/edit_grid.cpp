@@ -58,6 +58,26 @@ int32_t clamp_lane_for_width(int32_t lane, int32_t width, int32_t lane_count) {
   return std::clamp(lane, 0, lane_count - width);
 }
 
+int32_t clamp_lane_for_width(int32_t lane, int32_t width, int32_t lane_count,
+                             ChartCompatibilityProfile profile) {
+  if (profile == ChartCompatibilityProfile::Official) {
+    return clamp_lane_for_width(lane, width, lane_count);
+  }
+  if (width <= 0 || lane_count <= 0) return 0;
+  // Every authored note must still cover at least one playable lane.
+  return std::clamp(lane, 1 - width, lane_count - 1);
+}
+
+bool lane_span_overlaps_playfield(int32_t lane, int32_t width, int32_t lane_count,
+                                  ChartCompatibilityProfile profile) {
+  if (width < 1 || lane_count < 1) return false;
+  if (profile == ChartCompatibilityProfile::Official) {
+    return lane_in_bounds(lane, width, lane_count);
+  }
+  const int64_t end = static_cast<int64_t>(lane) + width;
+  return lane < lane_count && end > 0;
+}
+
 std::vector<int32_t> beat_ticks_in_range(int32_t start_tick, int32_t end_tick,
                                          const EditGridConfig& cfg) {
   std::vector<int32_t> ticks;

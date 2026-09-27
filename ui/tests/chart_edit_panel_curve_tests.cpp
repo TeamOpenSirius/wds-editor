@@ -1847,6 +1847,84 @@ void test_toolbox_scratch_hold_uses_regular_hold_buttons() {
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Flick), 0);
 }
 
+void test_multiple_authored_hold_eighth_stars() {
+  Harness h;
+  CHECK(h.engine.document().set_compatibility_profile(
+      wds::chart_editor::ChartCompatibilityProfile::SiriusExtended));
+  NotationNote body;
+  body.id = 0;
+  body.start_tick = 0;
+  body.end_tick = 480;
+  body.lane = 2;
+  body.width = 3;
+  body.note_type = NoteType::NontailScratchHold;
+  CHECK(h.engine.document().set_notes({body}));
+
+  const auto star_count = [&]() {
+    wds::renderer::SkinCatalog skin;
+    skin.tick_purple.id = 123;
+    skin.tick_blue.id = 124;
+    wds::renderer::DrawBatch batch;
+    h.panel.append_skin_batch(batch, skin, 1280, 800, {});
+    for (const auto& bucket : batch.buckets) {
+      if (bucket.texture == skin.tick_purple.id) return bucket.vertices.size() / 6;
+    }
+    return std::size_t{0};
+  };
+  CHECK_EQ(star_count(), 0);
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(120, 2), PointerButton::Middle, shift_mods()});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 1);
+  CHECK_EQ(star_count(), 1);
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(360, 2), PointerButton::Middle, shift_mods()});
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 2);
+  CHECK_EQ(star_count(), 2);
+  const auto first = h.engine.document().find_note(1);
+  const auto second = h.engine.document().find_note(2);
+  CHECK(first && wds::chart_editor::is_authored_hold_eighth(*first));
+  CHECK(second && wds::chart_editor::is_authored_hold_eighth(*second));
+
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(120, 3), PointerButton::Left, {}});
+  h.panel.on_pointer_up(
+      PointerUpEvent{h.at_tick_lane(120, 3), PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(1) == 1);
+  CHECK(h.panel.delete_selected());
+  CHECK_EQ(star_count(), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 1);
+  CHECK(h.engine.document().find_note(2).has_value());
+  CHECK(h.engine.undo());
+  CHECK_EQ(star_count(), 2);
+
+  h.panel.on_pointer_down(
+      PointerDownEvent{h.at_tick_lane(360, 3), PointerButton::Middle, {}});
+  CHECK_EQ(star_count(), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 1);
+  CHECK(h.engine.document().find_note(1).has_value());
+  CHECK(h.engine.undo());
+  CHECK_EQ(star_count(), 2);
+  h.panel.set_selected({body.id});
+  CHECK(h.panel.toggle_selected_hold_tail());
+  CHECK_EQ(star_count(), 0);
+  CHECK(h.engine.document().find_note(body.id)->note_type == NoteType::ScratchHold);
+  CHECK(std::none_of(h.engine.document().notes().begin(), h.engine.document().notes().end(),
+                     [](const NotationNote& note) {
+                       return wds::chart_editor::is_authored_hold_eighth(note);
+                     }));
+  CHECK(h.engine.undo());
+  CHECK(h.engine.document().find_note(body.id)->note_type == NoteType::NontailScratchHold);
+  CHECK_EQ(star_count(), 2);
+
+  h.panel.set_selected({body.id});
+  CHECK(h.panel.toggle_selected_hold_tail());
+  h.panel.set_selected({body.id});
+  CHECK(h.panel.toggle_selected_hold_tail());
+  CHECK(h.engine.document().find_note(body.id)->note_type == NoteType::NontailScratchHold);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 0);
+  CHECK_EQ(star_count(), 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1896,6 +1974,7 @@ int main() {
   test_toolbox_hold_click_min_length_equal_tail_and_gold();
   test_toolbox_hold_ghost_follows_shift();
   test_toolbox_scratch_hold_uses_regular_hold_buttons();
+  test_multiple_authored_hold_eighth_stars();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -108,6 +109,7 @@ class ChartPreviewPanel {
   std::uint64_t waveform_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;
+  uint64_t scroll_geometry_revision_ = std::numeric_limits<uint64_t>::max();
   wds::renderer::TextureInfo solid_texture_{};
   wds::renderer::TextureInfo ui_font_texture_{};
   // Atlases replaced mid-frame; destroyed in flush_retired_font_textures().

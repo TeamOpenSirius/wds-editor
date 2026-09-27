@@ -13,6 +13,7 @@
 class QCheckBox;
 class QComboBox;
 class QEvent;
+class QLineEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
@@ -65,6 +66,7 @@ class ConvertBar final : public QWidget {
 
   UiManager* manager_ = nullptr;
   std::array<QToolButton*, 8> convert_buttons_{};
+  QCheckBox* hold_tail_ = nullptr;
 };
 
 // Toolbar dock: chart/grid/curve/behavior controls.
@@ -81,6 +83,7 @@ class EditorToolbarWidget final : public QWidget {
   void refresh_chart_selector();
   void refresh_enabled_states();
   void refresh_flags();
+  void refresh_sv_controls();
 
  protected:
   void changeEvent(QEvent* event) override;
@@ -102,6 +105,15 @@ class EditorToolbarWidget final : public QWidget {
   QPushButton* chart_add_ = nullptr;
   QCheckBox* pause_at_current_ = nullptr;
   QCheckBox* split_width_follow_ = nullptr;
+  QComboBox* compatibility_profile_ = nullptr;
+  QSpinBox* note_width_ = nullptr;
+  QComboBox* sv_select_ = nullptr;
+  QSpinBox* sv_tick_ = nullptr;
+  QLineEdit* sv_multiplier_ = nullptr;
+  QPushButton* sv_apply_ = nullptr;
+  QPushButton* sv_delete_ = nullptr;
+  QWidget* sv_points_row_ = nullptr;
+  QWidget* sv_edit_row_ = nullptr;
   bool syncing_ = false;
 };
 

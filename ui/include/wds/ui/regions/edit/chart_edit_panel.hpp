@@ -116,6 +116,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // ±width for equal-width tails. Pass nullopt for convert_note_type defaults.
   bool convert_selected(wds::chart_editor::NoteType target,
                         std::optional<int32_t> scratch_length = std::nullopt);
+  // Toggle the judged tail on selected hold bodies while preserving duration,
+  // geometry, heads, and in-body HoldEighth points.
+  bool toggle_selected_hold_tail();
   bool mirror_selected(bool about_center);
   bool nudge_selected(int32_t delta_tick, int32_t delta_lane);
   bool copy_selected();
@@ -249,6 +252,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void apply_placement_lane_width(wds::interaction::Vec2 point, int32_t& lane,
                                   int32_t& width) const;
   std::optional<wds::chart_editor::NotationNote> hit_test_note(wds::interaction::Vec2 point) const;
+  bool is_visible_authored_hold_eighth(const wds::chart_editor::NotationNote& note) const;
+  bool add_manual_hold_eighth_at(wds::interaction::Vec2 point);
+  bool suppress_hold_eighth(const wds::chart_editor::NotationNote& note);
+  std::optional<wds::chart_editor::NotationNote> hit_test_hold_eighth(
+      wds::interaction::Vec2 point) const;
   float width_edge_px(const wds::chart_editor::NotationNote& note) const;
   float time_edge_px(const wds::chart_editor::NotationNote& note) const;
   bool near_left_edge(const wds::chart_editor::NotationNote& note, float x) const;

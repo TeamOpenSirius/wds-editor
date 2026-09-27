@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <utility>
 
 namespace wds::chart_editor {
 namespace {
@@ -55,6 +56,21 @@ void PreviewSnapshotBuilder::set_config(PreviewConfig config) {
   position_calculator_.set_config(config);
   auto_judge_.set_config(config);
   split_lane_simulator_.set_config(config);
+}
+
+void PreviewSnapshotBuilder::set_scroll_speed_points(std::vector<ScrollSpeedPoint> points,
+                                                     const MusicTiming& timing) {
+  minimum_scroll_multiplier_ = 1.0;
+  for (const auto& point : points) {
+    if (std::isfinite(point.multiplier) && point.multiplier > 0.0) {
+      minimum_scroll_multiplier_ = std::min(minimum_scroll_multiplier_, point.multiplier);
+    }
+  }
+  position_calculator_.set_scroll_speed_points(std::move(points), timing);
+}
+
+void PreviewSnapshotBuilder::set_compatibility_profile(ChartCompatibilityProfile profile) {
+  position_calculator_.set_compatibility_profile(profile);
 }
 
 bool PreviewSnapshotBuilder::is_spawn_visible(const NotationNote& note, int64_t preview_time_ms,
@@ -120,7 +136,9 @@ int32_t PreviewSnapshotBuilder::resolve_active_lane_count(
 }
 
 int64_t PreviewSnapshotBuilder::spawn_lead_ms() const {
-  return static_cast<int64_t>(position_calculator_.move_seconds() * 1000.0f);
+  const double lead = static_cast<double>(position_calculator_.move_seconds()) * 1000.0 /
+                      minimum_scroll_multiplier_;
+  return static_cast<int64_t>(std::min(lead, static_cast<double>(INT64_MAX / 4)));
 }
 
 int64_t PreviewSnapshotBuilder::tail_ms(const ChartNoteIndex& index) const {
@@ -351,7 +369,7 @@ void PreviewSnapshotBuilder::rebuild_notes(PreviewSnapshot& out, int64_t preview
 
   for (int32_t note_id : candidate_buffer_) {
     const NotationNote* note = lookup_note(note_id);
-    if (note == nullptr) {
+    if (note == nullptr || is_suppressed_hold_eighth(*note)) {
       continue;
     }
     // Split gimmicks only drive split_lanes / STAGE_COVER — never a playable tap sprite.
@@ -383,7 +401,7 @@ void PreviewSnapshotBuilder::update_notes_incremental(PreviewSnapshot& inout,
 
   for (int32_t note_id : candidate_buffer_) {
     const NotationNote* note = lookup_note(note_id);
-    if (note == nullptr) {
+    if (note == nullptr || is_suppressed_hold_eighth(*note)) {
       continue;
     }
     if (is_split_lane_gimmick(note->gimmick_type)) {

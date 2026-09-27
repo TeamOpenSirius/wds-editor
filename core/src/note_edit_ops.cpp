@@ -47,6 +47,8 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
   notes.erase(std::remove_if(notes.begin(), notes.end(),
                              [&](const NotationNote& note) {
                                if (note.note_type != NoteType::HoldEighth) return false;
+                               if (is_suppressed_hold_eighth(note) ||
+                                   is_authored_hold_eighth(note)) return false;
                                if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
                                if (note.parent_hold_id >= 0) return false;
                                return note.start_tick > hold.start_tick &&
@@ -57,8 +59,15 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
   for (int64_t tick64 = static_cast<int64_t>(hold.start_tick) + step; tick64 < hold.end_tick;
        tick64 += step) {
     const int32_t tick = static_cast<int32_t>(tick64);
+    const bool suppressed = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
+      return is_suppressed_hold_eighth(note) && note.start_tick == tick &&
+             ((hold.id >= 0 && note.parent_hold_id == hold.id) ||
+              (hold.id < 0 && note.parent_hold_id < 0 && overlaps(note, hold)));
+    });
+    if (suppressed) continue;
     const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
-      if (!is_visible_hold_mid_star(note.note_type) || !same_tick(note.start_tick, tick)) {
+      if (!(is_visible_hold_mid_star(note.note_type) || is_authored_hold_eighth(note)) ||
+          !same_tick(note.start_tick, tick)) {
         return false;
       }
       if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
@@ -92,9 +101,35 @@ std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote>
 void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept {
   notes.erase(std::remove_if(notes.begin(), notes.end(),
                              [](const NotationNote& note) {
-                               return note.note_type == NoteType::HoldEighth;
+                               return note.note_type == NoteType::HoldEighth &&
+                                      !is_suppressed_hold_eighth(note) &&
+                                      !is_authored_hold_eighth(note);
                              }),
               notes.end());
+}
+
+void mark_nontail_hold_eighths_authored(std::vector<NotationNote>& notes) {
+  std::vector<const NotationNote*> bodies;
+  for (const auto& note : notes) {
+    if (is_nontail_hold_body(note.note_type)) bodies.push_back(&note);
+  }
+  for (auto& point : notes) {
+    if (point.note_type != NoteType::HoldEighth || is_suppressed_hold_eighth(point) ||
+        is_authored_hold_eighth(point)) continue;
+    const NotationNote* best = nullptr;
+    for (const auto* body : bodies) {
+      if (point.start_tick <= body->start_tick || point.start_tick >= body->end_tick) continue;
+      if (!overlaps(point, *body)) continue;
+      if (best == nullptr ||
+          (point.lane == body->lane && point.width == body->width &&
+           (point.lane != best->lane || point.width != best->width))) {
+        best = body;
+      }
+    }
+    if (best == nullptr) continue;
+    point.parent_hold_id = best->id;
+    point.scratch_length = kAuthoredHoldEighthScratchLength;
+  }
 }
 
 std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationNote> notes,
@@ -160,7 +195,7 @@ namespace {
 // scratch_length. Horizontal mirror flips left↔right, so the sign must flip.
 // Split-lane gimmicks reuse scratch_length as a color id — leave those alone.
 void mirror_scratch_direction(NotationNote& note) noexcept {
-  if (is_split_lane_gimmick(note.gimmick_type)) return;
+  if (note.note_type == NoteType::HoldEighth || is_split_lane_gimmick(note.gimmick_type)) return;
   note.scratch_length = -note.scratch_length;
 }
 
@@ -324,8 +359,8 @@ std::optional<NotationNote> legacy_scratch_head_for(const ChartDocument& doc,
 }  // namespace
 
 std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
-                                                const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type) || hold.width < 1) return std::nullopt;
+                                                 const NotationNote& hold) {
+  if (!is_bindable_hold_body(hold.note_type) || hold.width < 1) return std::nullopt;
 
   const auto mark_range = [&](std::vector<char>& occupied, int32_t lo, int32_t hi) {
     lo = std::max(lo, hold.lane);
@@ -409,7 +444,7 @@ std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
 }
 
 bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type)) return false;
+  if (!is_bindable_hold_body(hold.note_type)) return false;
   if (paired_hold_head_for(doc, hold)) return true;
   if (auto legacy = legacy_scratch_head_for(doc, hold)) {
     NotationNote fixed = *legacy;
@@ -508,10 +543,8 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
       const NoteType star_t = visible_star_type_for_hold(after.note_type);
       for (const auto& dep : hold_attached_notes_for(doc, *body)) {
         if (dep.note_type == NoteType::HoldEighth) {
-          if (is_nontail_hold_body(after.note_type)) {
-            queue_remove(dep);
-            handled.insert(dep.id);
-          }
+          // HoldEighth is an in-body judgment point and remains valid for both
+          // tailed and nontail bodies. Only a non-hold conversion removes it.
           continue;
         }
         if (!is_visible_hold_mid_star(dep.note_type)) continue;
@@ -579,7 +612,7 @@ bool recompute_hold_eighths(ChartDocument& doc) {
 
 std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const NotationNote& hold) {
   std::vector<NotationNote> out;
-  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
   for (const auto& note : doc.notes()) {
     if (note.note_type != NoteType::HoldEighth) continue;
     if (hold.id >= 0 && note.parent_hold_id == hold.id) {
