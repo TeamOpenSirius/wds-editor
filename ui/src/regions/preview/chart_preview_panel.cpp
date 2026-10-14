@@ -255,6 +255,7 @@ void ChartPreviewPanel::apply_display_settings(double note_speed, int note_start
 }
 
 bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_playback) {
+  ++music_generation_;
   if (!ready_) {
     return false;
   }
@@ -296,6 +297,16 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
     // load_chart / publish_snapshot may still use the previous SeekableClock time
     // until the next Transport poll — snap the engine immediately.
     engine_.seek(transport_.chart_start_ms());
+  }
+  rebuild_waveform(music_path);
+  return true;
+}
+
+bool ChartPreviewPanel::audition_music(const std::string& music_path) {
+  if (!ready_ || !transport_.audio().replace_music_source(music_path)) return false;
+  // Cancel old waveform work without joining or destroying the process-global BASS device.
+  for (auto& pending : pending_waveforms_) {
+    if (pending.cancel) pending.cancel->store(true, std::memory_order_relaxed);
   }
   rebuild_waveform(music_path);
   return true;

@@ -1,0 +1,7 @@
+torch>=2.6,<3
+torchaudio>=2.6,<3
+demucs==4.0.1
+soundfile>=0.13,<1
+julius>=0.2.7,<0.3
+filelock>=3,<4
+imageio-ffmpeg>=0.6,<0.7

@@ -1,4 +1,5 @@
 #include "wds/ui/qt/editor_main_window.hpp"
+#include "wds/ui/qt/stem_panel.hpp"
 #include "wds/ui/qt/chart_edit_widget.hpp"
 #include "wds/ui/qt/playback_dock.hpp"
 #include "wds/ui/qt/qt_input_adapter.hpp"
@@ -228,6 +229,9 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   open_action_ = addCommand(fileMenu, tr("打开工程"), QKeySequence::Open);
   save_action_ = addCommand(fileMenu, tr("保存工程"), QKeySequence::Save);
   music_action_ = addCommand(fileMenu, tr("导入音乐"), {});
+  auto* stems_action = fileMenu->addAction(tr("本地分轨…"));
+  stems_action->setObjectName(QStringLiteral("localStemsAction"));
+  connect(stems_action, &QAction::triggered, this, [this] { show_stem_panel(); });
   import_action_ = addCommand(fileMenu, tr("导入谱面"), {});
   export_action_ = addCommand(fileMenu, tr("导出谱面"), {});
   check_action_ = addCommand(fileMenu, tr("检查谱面"), {});
@@ -409,6 +413,20 @@ void EditorMainWindow::restore_or_reset_layout() {
   if (state.isEmpty() || !restoreState(state)) reset_default_layout();
 }
 
+void EditorMainWindow::show_stem_panel() {
+  if (!ui_manager_) return;
+  if (!stem_panel_) {
+    stem_panel_ = new StemPanel(ui_manager_, this);
+    stem_panel_->set_tracks_changed_handler([this] {
+      if (playback_panel_)
+        playback_panel_->set_stem_tracks(stem_panel_->track_names(), stem_panel_->selected_track());
+    });
+  }
+  stem_panel_->show();
+  stem_panel_->raise();
+  stem_panel_->activateWindow();
+}
+
 void EditorMainWindow::create_control_docks() {
   playback_dock_ = new QDockWidget(tr("播放"), this);
   playback_dock_->setObjectName(QStringLiteral("playbackAudioDock"));
@@ -417,6 +435,10 @@ void EditorMainWindow::create_control_docks() {
                               QDockWidget::DockWidgetFloatable |
                               QDockWidget::DockWidgetClosable);
   playback_panel_ = new PlaybackBar(ui_manager_, playback_dock_);
+  playback_panel_->set_stem_handlers([this](int index) {
+    if (stem_panel_ && !stem_panel_->select_track(index))
+      statusBar()->showMessage(tr("无法切换音轨，请检查音源或重新生成分轨。"), 5000);
+  }, [this] { show_stem_panel(); });
   playback_dock_->setWidget(playback_panel_);
   playback_dock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   playback_dock_->setMinimumHeight(0);
@@ -628,6 +650,10 @@ EditorMainWindow::~EditorMainWindow() {
 }
 
 void EditorMainWindow::detach_ui_manager() {
+  if (stem_panel_) {
+    delete stem_panel_;
+    stem_panel_ = nullptr;
+  }
   if (ui_manager_ != nullptr) {
     ui_manager_->set_ui_change_handler({});
   }
