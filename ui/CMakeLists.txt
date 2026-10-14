@@ -22,6 +22,7 @@ add_executable(wds_editor WIN32
   src/qt/qt_input_adapter.cpp
   src/qt/note_icons.cpp
   src/qt/playback_dock.cpp
+  src/qt/stem_panel.cpp
   src/qt/settings_dialog.cpp
   src/qt/shortcut_settings_dialog.cpp
   src/qt/curve_templates_panel.cpp
@@ -207,6 +208,19 @@ endif()
 
 # Host ctest cannot execute foreign PE binaries; still build the test targets.
 if(NOT CMAKE_CROSSCOMPILING)
+  add_executable(wds_stem_panel_tests tests/stem_panel_tests.cpp src/qt/stem_panel.cpp wds_resources.qrc)
+  target_link_libraries(wds_stem_panel_tests PRIVATE wds::ui Qt6::Widgets)
+  target_compile_definitions(wds_stem_panel_tests PRIVATE QT_NO_KEYWORDS)
+  set_target_properties(wds_stem_panel_tests PROPERTIES AUTORCC ON)
+  if(MSVC)
+    target_compile_options(wds_stem_panel_tests PRIVATE /utf-8)
+  endif()
+  add_test(NAME wds_stem_panel_tests COMMAND wds_stem_panel_tests -platform offscreen)
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME wds_stem_worker_tests COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+      -s "${CMAKE_SOURCE_DIR}/stem-worker" -p "test_*.py")
+  endif()
   add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
   add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
   add_test(NAME wds_ui_config_tests COMMAND wds_ui_config_tests)
@@ -218,7 +232,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     get_filename_component(_wds_qt_root "${Qt6_DIR}/../../.." ABSOLUTE)
     set(_wds_test_path
       "${_wds_qt_root}/bin\\;${WDS_BASS_LIBRARY_DIR}\\;$ENV{PATH}")
-    set_tests_properties(wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
+    set_tests_properties(wds_stem_panel_tests wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
       wds_chart_validation_ui_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
   endif()
 else()
