@@ -143,6 +143,7 @@ struct PreviewSnapshot {
   // Auto-preview combo (seek-safe); updated each snapshot rebuild.
   int32_t combo_count = 0;
   int64_t last_judge_ms = -1;
+  int64_t last_combo_fire_ms = -1;
 
   SnapshotUpdateStrategy last_update_strategy = SnapshotUpdateStrategy::FullRebuild;
 

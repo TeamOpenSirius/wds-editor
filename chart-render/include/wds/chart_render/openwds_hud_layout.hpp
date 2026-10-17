@@ -28,6 +28,129 @@ inline constexpr float kOpenWdsComboDigitXs2[] = {-92.0f, -184.0f};
 inline constexpr float kOpenWdsComboDigitXs3[] = {-46.0f, -138.0f, -230.0f};
 inline constexpr float kOpenWdsComboDigitXs4[] = {0.0f, -92.0f, -184.0f, -276.0f};
 
+// ComboCount / ComboCountPer100 stretch-fill Combo root; scale about this pivot.
+// Combo.prefab ComboCount m_Pivot (0.5, 0.5). ComboLabel is a sibling — do not scale it.
+inline constexpr float kOpenWdsComboCountPivotX = 0.5f;
+inline constexpr float kOpenWdsComboCountPivotY = 0.5f;
+
+// Combo_animator Count Layer: Any State → Combo_anim on OnCount
+// (transition duration 0, CanTransitionToSelf 1). Clip LoopTime 0, StopTime 10/60.
+// Keys: Assets/Resources/Animation/Game/Combo_anim.anim Scale ComboCount.
+inline constexpr float kOpenWdsComboCountAnimDuration = 0.16666667f;
+
+// Combo_animator Base Layer: Any State → Combo_countper100_anim on OnFire
+// when combo/100 changes. Clip LoopTime 0, StopTime 0.25.
+// Keys: Assets/Resources/Animation/Game/Combo_countper100_anim.anim.
+inline constexpr float kOpenWdsComboFireAnimDuration = 0.25f;
+
+struct OpenWdsAnimKey {
+  float t = 0.0f;
+  float v = 0.0f;
+  float in_s = 0.0f;
+  float out_s = 0.0f;
+};
+
+struct OpenWdsComboScale {
+  float x = 1.0f;
+  float y = 1.0f;
+};
+
+// Unity 2022.3 AnimationCurve cubic Hermite (slopes are dValue/dTime).
+// https://docs.unity3d.com/2022.3/Documentation/Manual/animeditor-AnimationCurves.html
+// Clip LoopTime 0: sample min(max(time, first), last) — hold the last key.
+inline float openwds_eval_clip_curve(const OpenWdsAnimKey* keys, int count, float time) noexcept {
+  if (keys == nullptr || count <= 0) {
+    return 0.0f;
+  }
+  if (time <= keys[0].t) {
+    return keys[0].v;
+  }
+  if (time >= keys[count - 1].t) {
+    return keys[count - 1].v;
+  }
+  for (int i = 1; i < count; ++i) {
+    if (time > keys[i].t) {
+      continue;
+    }
+    const OpenWdsAnimKey& a = keys[i - 1];
+    const OpenWdsAnimKey& b = keys[i];
+    const float dt = b.t - a.t;
+    if (dt <= 1e-8f) {
+      return b.v;
+    }
+    if (!std::isfinite(a.out_s) || !std::isfinite(b.in_s)) {
+      return a.v;
+    }
+    const float u = (time - a.t) / dt;
+    const float u2 = u * u;
+    const float u3 = u2 * u;
+    const float h00 = 2.0f * u3 - 3.0f * u2 + 1.0f;
+    const float h10 = u3 - 2.0f * u2 + u;
+    const float h01 = -2.0f * u3 + 3.0f * u2;
+    const float h11 = u3 - u2;
+    const float y = h00 * a.v + h10 * (a.out_s * dt) + h01 * b.v + h11 * (b.in_s * dt);
+    return std::isfinite(y) ? y : a.v + (b.v - a.v) * u;
+  }
+  return keys[count - 1].v;
+}
+
+inline OpenWdsComboScale openwds_combo_count_scale(float age_sec) noexcept {
+  // Combo_anim.anim m_ScaleCurves path ComboCount (11 keys @ 60 fps).
+  constexpr OpenWdsAnimKey kX[] = {
+      {0.0f, 0.8f, 0.0f, 5.3884397f},
+      {0.016666668f, 0.88980734f, 5.3884397f, 2.991936f},
+      {0.033333335f, 0.93967295f, 2.991936f, 2.276223f},
+      {0.05f, 0.97761f, 2.276223f, 1.8559166f},
+      {0.06666667f, 1.008542f, 1.8559166f, 1.5492083f},
+      {0.083333336f, 1.0343621f, 1.5492083f, 1.2938548f},
+      {0.1f, 1.0559263f, 1.2938548f, 1.0584213f},
+      {0.11666667f, 1.0735667f, 1.0584215f, 0.81984013f},
+      {0.13333334f, 1.0872307f, 0.81984013f, 0.55260664f},
+      {0.15f, 1.0964408f, 0.55260664f, 0.21355392f},
+      {0.16666667f, 1.1f, 0.21355392f, 0.0f},
+  };
+  constexpr OpenWdsAnimKey kY[] = {
+      {0.0f, 0.8f, 0.0f, 5.3237376f},
+      {0.016666668f, 0.888729f, 5.3237376f, 2.9964242f},
+      {0.033333335f, 0.9386694f, 2.9964242f, 2.2858074f},
+      {0.05f, 0.97676617f, 2.2858074f, 1.8665203f},
+      {0.06666667f, 1.0078748f, 1.8665203f, 1.5595866f},
+      {0.083333336f, 1.033868f, 1.5595866f, 1.303382f},
+      {0.1f, 1.055591f, 1.303382f, 1.0665895f},
+      {0.11666667f, 1.0733675f, 1.0665895f, 0.8262417f},
+      {0.13333334f, 1.0871382f, 0.8262417f, 0.5567551f},
+      {0.15f, 1.0964174f, 0.5567551f, 0.21495582f},
+      {0.16666667f, 1.1f, 0.21495582f, 0.0f},
+  };
+  OpenWdsComboScale s;
+  s.x = openwds_eval_clip_curve(kX, 11, age_sec);
+  s.y = openwds_eval_clip_curve(kY, 11, age_sec);
+  return s;
+}
+
+inline OpenWdsComboScale openwds_combo_fire_scale(float age_sec) noexcept {
+  constexpr OpenWdsAnimKey kS[] = {
+      {0.0f, 1.0f, 0.0f, 4.0f},
+      {0.25f, 2.0f, 0.0f, 0.0f},
+  };
+  const float v = openwds_eval_clip_curve(kS, 2, age_sec);
+  return {v, v};
+}
+
+inline float openwds_combo_fire_alpha(float age_sec) noexcept {
+  constexpr OpenWdsAnimKey kA[] = {
+      {0.0f, 0.0f, 0.0f, 56.0703f},
+      {0.05f, 1.0f, -4.236987e-6f, -11.88784f},
+      {0.25f, 0.0f, -1.0913026e-6f, 0.0f},
+  };
+  return openwds_eval_clip_curve(kA, 3, age_sec);
+}
+
+inline void openwds_scale_about(float px, float py, float sx, float sy, float& x, float& y) noexcept {
+  x = px + (x - px) * sx;
+  y = py + (y - py) * sy;
+}
+
 // CreateOfflineRhythmPreviewScene Game/Effects: (0, −0.46, 10), then
 // GameHudRuntime overwrites Y with CalculatePositionY(offset).
 inline constexpr float kOpenWdsEffectsWorldX = 0.0f;

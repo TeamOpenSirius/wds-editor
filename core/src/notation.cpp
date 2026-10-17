@@ -654,6 +654,11 @@ PreviewComboState combo_from_sorted_hits(const std::vector<int64_t>& sorted_hits
   state.combo = static_cast<int32_t>(it - sorted_hits.begin());
   if (state.combo > 0) {
     state.last_judge_ms = *(it - 1);
+    const int32_t hundreds = state.combo / 100;
+    if (hundreds > 0) {
+      const size_t fire_i = static_cast<size_t>(hundreds * 100 - 1);
+      state.last_combo_fire_ms = sorted_hits[fire_i];
+    }
   }
   return state;
 }

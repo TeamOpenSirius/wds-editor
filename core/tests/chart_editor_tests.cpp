@@ -1379,6 +1379,31 @@ void test_split_gimmick_range_and_combo_includes_heads() {
   const PreviewComboState combo = compute_preview_combo(notes, timing, at);
   // 2 taps + HoldStart + HoldEighth + Hold tail
   CHECK_EQ(combo.combo, 5);
+  CHECK_EQ(combo.last_combo_fire_ms, static_cast<int64_t>(-1));
+}
+
+void test_combo_hundreds_fire_ms_is_crossing_hit() {
+  std::vector<int64_t> hits;
+  hits.reserve(250);
+  for (int i = 0; i < 250; ++i) {
+    hits.push_back(static_cast<int64_t>(i) * 10);
+  }
+  const PreviewComboState at99 = combo_from_sorted_hits(hits, 980);
+  CHECK_EQ(at99.combo, 99);
+  CHECK_EQ(at99.last_combo_fire_ms, static_cast<int64_t>(-1));
+
+  const PreviewComboState at100 = combo_from_sorted_hits(hits, 990);
+  CHECK_EQ(at100.combo, 100);
+  CHECK_EQ(at100.last_judge_ms, static_cast<int64_t>(990));
+  CHECK_EQ(at100.last_combo_fire_ms, static_cast<int64_t>(990));
+
+  const PreviewComboState at150 = combo_from_sorted_hits(hits, 1490);
+  CHECK_EQ(at150.combo, 150);
+  CHECK_EQ(at150.last_combo_fire_ms, static_cast<int64_t>(990));
+
+  const PreviewComboState at200 = combo_from_sorted_hits(hits, 1990);
+  CHECK_EQ(at200.combo, 200);
+  CHECK_EQ(at200.last_combo_fire_ms, static_cast<int64_t>(1990));
 }
 
 void test_split_appear_phase_before_start_ms() {
@@ -10091,6 +10116,7 @@ int main() {
   test_snapshot_large_seek_full_rebuild();
   test_snapshot_sub_ms_timeline_us_survives_rebuild_and_patch();
   test_split_gimmick_range_and_combo_includes_heads();
+  test_combo_hundreds_fire_ms_is_crossing_hit();
   test_hold_combo_reference_fixed_cases();
   test_hold_combo_sabotage_detects_wrong_oracle();
   test_hold_combo_production_matches_reference_random();
