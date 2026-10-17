@@ -78,6 +78,8 @@ class ChartPreviewPanel {
   // Reload BGM path (empty clears to wall-clock).
   // When preserve_playback is false, seek to 0 and do not resume play (open/import).
   bool load_music(const std::string& music_path, bool preserve_playback = true);
+  bool audition_music(const std::string& music_path);
+  std::uint64_t music_generation() const noexcept { return music_generation_; }
   const wds::audio::WaveformOverview& waveform() const noexcept { return waveform_; }
   wds::renderer::TextureInfo spectrogram_texture() const noexcept { return spectrogram_texture_; }
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
@@ -146,6 +148,7 @@ class ChartPreviewPanel {
   };
   std::vector<PendingWaveform> pending_waveforms_;
   std::uint64_t waveform_generation_ = 0;
+  std::uint64_t music_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;
   wds::renderer::TextureInfo solid_texture_{};
