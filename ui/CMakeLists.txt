@@ -34,6 +34,8 @@ add_executable(wds_editor WIN32
   src/qt/update_checker.cpp
   src/qt/busy_dialog.cpp
   src/qt/split_picker_dialog.cpp
+  src/qt/split_effect_snapshot.cpp
+  src/qt/split_effect_snapshot_table.cpp
   src/qt/timing_edit_dialog.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
@@ -49,6 +51,7 @@ endif()
 target_compile_features(wds_editor PRIVATE cxx_std_17)
 target_compile_definitions(wds_editor PRIVATE WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 target_compile_definitions(wds_editor PRIVATE QT_NO_KEYWORDS WDS_APP_VERSION="${WDS_APP_VERSION}")
+
 if(WIN32)
   enable_language(RC)
   configure_file(wds_version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/wds_version.rc" @ONLY)
@@ -68,6 +71,7 @@ else()
 endif()
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/skins" DESTINATION .)
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/effects" DESTINATION .)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/resources" DESTINATION .)
 install(DIRECTORY "${CMAKE_BINARY_DIR}/renderer/shaders/" DESTINATION shaders)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf" DESTINATION fonts)
@@ -103,6 +107,7 @@ add_library(wds_ui STATIC
   src/regions/edit/chart_edit_renderer.cpp
   src/regions/edit/chart_edit_panel.cpp
   src/regions/edit/edit_gutters.cpp
+  src/regions/edit/split_effect_tags.cpp
   src/regions/settings/preview_settings_panel.cpp
   src/regions/settings/width_slots_dialog.cpp
   src/regions/settings/curve_templates_dialog.cpp
@@ -196,6 +201,15 @@ if(MSVC)
   target_compile_options(wds_chart_edit_panel_curve_tests PRIVATE /utf-8)
 endif()
 
+add_executable(wds_split_effect_tags_tests
+  tests/split_effect_tags_tests.cpp
+)
+target_link_libraries(wds_split_effect_tags_tests PRIVATE wds::ui)
+target_include_directories(wds_split_effect_tags_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(MSVC)
+  target_compile_options(wds_split_effect_tags_tests PRIVATE /utf-8)
+endif()
+
 add_executable(wds_chart_validation_ui_tests
   tests/chart_validation_ui_tests.cpp
 )
@@ -203,6 +217,34 @@ target_link_libraries(wds_chart_validation_ui_tests PRIVATE wds::ui)
 target_include_directories(wds_chart_validation_ui_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(MSVC)
   target_compile_options(wds_chart_validation_ui_tests PRIVATE /utf-8)
+endif()
+
+# Split indicator benchmark: the snapshot sources live in wds_editor, so compile them into the test directly.
+add_executable(wds_split_indicator_perf_tests
+  tests/split_indicator_perf_tests.cpp
+  src/qt/split_effect_snapshot.cpp
+  src/qt/split_effect_snapshot_table.cpp
+)
+target_link_libraries(wds_split_indicator_perf_tests PRIVATE wds::ui)
+target_include_directories(wds_split_indicator_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(wds_split_indicator_perf_tests PRIVATE QT_NO_KEYWORDS WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+if(MSVC)
+  target_compile_options(wds_split_indicator_perf_tests PRIVATE /utf-8)
+endif()
+
+# Diagnostic: renders the real strip indicators to PNG contact sheets under ${CMAKE_BINARY_DIR}/split_indicator_dump.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/split_indicator_dump")
+add_executable(wds_split_indicator_dump_tests
+  tests/split_indicator_dump_tests.cpp
+  src/qt/split_effect_snapshot.cpp
+  src/qt/split_effect_snapshot_table.cpp
+)
+target_link_libraries(wds_split_indicator_dump_tests PRIVATE wds::ui)
+target_include_directories(wds_split_indicator_dump_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(wds_split_indicator_dump_tests PRIVATE QT_NO_KEYWORDS
+  WDS_REPO_ROOT="${CMAKE_SOURCE_DIR}" WDS_DUMP_DIR="${CMAKE_BINARY_DIR}/split_indicator_dump")
+if(MSVC)
+  target_compile_options(wds_split_indicator_dump_tests PRIVATE /utf-8)
 endif()
 
 # Host ctest cannot execute foreign PE binaries; still build the test targets.
@@ -213,13 +255,18 @@ if(NOT CMAKE_CROSSCOMPILING)
   add_test(NAME wds_curve_templates_dialog_tests COMMAND wds_curve_templates_dialog_tests)
   add_test(NAME wds_editor_toolbar_tests COMMAND wds_editor_toolbar_tests)
   add_test(NAME wds_chart_edit_panel_curve_tests COMMAND wds_chart_edit_panel_curve_tests)
+  add_test(NAME wds_split_effect_tags_tests COMMAND wds_split_effect_tags_tests)
   add_test(NAME wds_chart_validation_ui_tests COMMAND wds_chart_validation_ui_tests)
+  add_test(NAME wds_split_indicator_perf_tests COMMAND wds_split_indicator_perf_tests)
+  set_tests_properties(wds_split_indicator_perf_tests PROPERTIES LABELS "perf" TIMEOUT 300)
+  add_test(NAME wds_split_indicator_dump_tests COMMAND wds_split_indicator_dump_tests)
+  set_tests_properties(wds_split_indicator_dump_tests PROPERTIES LABELS "dump" TIMEOUT 300)
   if(WIN32)
     get_filename_component(_wds_qt_root "${Qt6_DIR}/../../.." ABSOLUTE)
     set(_wds_test_path
       "${_wds_qt_root}/bin\\;${WDS_BASS_LIBRARY_DIR}\\;$ENV{PATH}")
     set_tests_properties(wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
-      wds_chart_validation_ui_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
+      wds_split_effect_tags_tests wds_chart_validation_ui_tests wds_split_indicator_perf_tests wds_split_indicator_dump_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
   endif()
 else()
   message(STATUS "Skipping ctest registration for ui tests (cross build)")
