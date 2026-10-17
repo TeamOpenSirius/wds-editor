@@ -74,6 +74,14 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(output.getvalue().splitlines()), 1)
         self.assertEqual(json.loads(output.getvalue())["protocol"], 1)
 
+    def test_ffmpeg_command_restricts_protocols_before_input(self):
+        cmd = worker.ffmpeg_command("ffmpeg", "/a/b.mp3", "/j/decoded.wav")
+        i = cmd.index("-i")
+        self.assertEqual(cmd[cmd.index("-protocol_whitelist") + 1], "file")
+        self.assertLess(cmd.index("-protocol_whitelist"), i)
+        self.assertEqual(cmd[i + 1], "/a/b.mp3")
+        self.assertEqual(cmd[-1], "/j/decoded.wav")
+
 
 if __name__ == "__main__":
     unittest.main()

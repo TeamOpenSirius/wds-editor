@@ -4,15 +4,18 @@
 #include <wds/core/preview_snapshot.hpp>
 #include <wds/core/split_fade.hpp>
 
+#include <shuriken/split_eval_persist.hpp>
 #include <split_collect_pool.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -224,9 +227,79 @@ void test_identity_no_collision_across_instances() {
   CHECK(stats.particle_entries > 0);
 }
 
+// Budget pressure + concurrent claim/finish so eviction (trim_budget under the
+// shard lock) interleaves with commits. Global counters must not drift to
+// absurd values and must read zero after a clear.
+void test_persist_budget_pressure_counters() {
+  namespace sh = wds::chart_render::shuriken;
+  sh::split_eval_persist_set_enabled_for_tests(1);
+  sh::split_eval_persist_clear();
+  const auto base = sh::split_eval_persist_stats();
+  CHECK(base.bytes_used == 0 && base.systems == 0 && base.particles == 0);
+
+  constexpr int kThreads = 4;
+  constexpr int kKeys = 48;
+  constexpr int kRounds = 6;
+  constexpr int kJobs = 96;
+  std::vector<std::thread> pool;
+  for (int t = 0; t < kThreads; ++t) {
+    pool.emplace_back([t] {
+      std::vector<sh::PrimaryEvalJob> jobs(static_cast<std::size_t>(kJobs));
+      for (int round = 0; round < kRounds; ++round) {
+        const float now = 1.0f + 0.01f * static_cast<float>(round);
+        for (int k = 0; k < kKeys; ++k) {
+          sh::SystemCarryKey key;
+          key.line_index = t * kKeys + k;
+          key.catalog_index = static_cast<uint32_t>(k);
+          key.kind = sh::kPersistKindPrimary;
+          const int n = 8 + ((k * 7 + round * 13) % (kJobs - 8));
+          for (int j = 0; j < kJobs; ++j) {
+            sh::PrimaryEvalJob& job = jobs[static_cast<std::size_t>(j)];
+            job.b.index = j;
+            job.b.time = 0.5f;
+            job.seed = static_cast<uint32_t>(j);
+            job.has_state = j < n ? 1 : 0;
+            job.alive = j < n ? 1 : 0;
+          }
+          sh::PersistClaim claim;
+          sh::split_eval_persist_claim(key, now, claim);
+          sh::persist_finish(claim, key, now, jobs);
+        }
+      }
+    });
+  }
+  for (std::thread& th : pool) {
+    th.join();
+  }
+
+  const auto s = sh::split_eval_persist_stats();
+  const std::size_t max_systems = static_cast<std::size_t>(kThreads) * kKeys;
+  const std::size_t max_particles = max_systems * static_cast<std::size_t>(kJobs);
+  CHECK(s.commits > 0);
+  CHECK(s.systems <= max_systems);
+  CHECK(s.particles <= max_particles);
+  // Eviction keeps at most one over-budget store per shard; anything near
+  // size_t wrap-around means an underflow.
+  CHECK(s.bytes_used <= s.budget_bytes * 2);
+  CHECK(s.systems > 0 || s.bytes_used == 0);
+
+  sh::split_eval_persist_clear();
+  const auto z = sh::split_eval_persist_stats();
+  CHECK(z.bytes_used == 0 && z.systems == 0 && z.particles == 0);
+  sh::split_eval_persist_set_enabled_for_tests(-1);
+}
+
 }  // namespace
 
 int main() {
+  // Small persist budget so the pressure test evicts; read when the registry
+  // is first created, so set it before anything touches the persist store.
+#ifdef _WIN32
+  _putenv_s("WDS_SPLIT_PERSIST_MB", "1");
+#else
+  setenv("WDS_SPLIT_PERSIST_MB", "1", 1);
+#endif
+  test_persist_budget_pressure_counters();
   test_effect_seeks(11621, 4, 0.2);
   test_effect_seeks(10660, 1, 0.0);
   test_effect_seeks(10380, 1, 0.0);

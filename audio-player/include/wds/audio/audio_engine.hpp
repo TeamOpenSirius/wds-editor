@@ -20,6 +20,15 @@ struct AudioEngineTestAccess;
 // symbol is unavailable. UI/startup must use this instead of including bass.h.
 uint32_t linked_bass_version() noexcept;
 
+// Diagnostic snapshot of the fixed SFX sync slot pool (see inspect_sfx_sync_slot).
+struct SfxSlotPoolStats {
+  size_t capacity = 0;       // total slots
+  size_t free_count = 0;     // on the free list
+  size_t pending_count = 0;  // armed, waiting for their POS
+  size_t in_use_count = 0;   // not free: pending + fired/cancelled awaiting recycle
+  uint64_t full_sweeps = 0;  // whole-pool recovery scans since initialize (hot path: 0)
+};
+
 // BASS-backed audio engine: one device, optional music stream, predecoded SFX samples.
 class AudioEngine {
  public:
@@ -35,6 +44,19 @@ class AudioEngine {
 
   bool ready() const noexcept { return ready_; }
   bool has_music() const noexcept;
+  // Song switch without tearing the engine down: keeps the BASS device, the
+  // decoded SFX samples, the keep-alive stream, the mixer, the Hold stream and the
+  // sync slot pool, and replaces only the music stream. GUI thread only.
+  // Succeeds only when the engine is ready, already has music (and so a mixer),
+  // `effects_directory` is the one the samples were loaded from, `music_path` is
+  // non-empty and opens, and the system default output device is still the one
+  // BASS was initialised on (a changed default is how a device switch used to be
+  // picked up, by the full initialize()). On success the engine is paused at
+  // t=0 with gains and playback rate re-applied, scheduled SFX cleared and
+  // position_generation() bumped. On false the engine still works with its old
+  // music (SFX/syncs may have been cleared); the caller should fall back to
+  // initialize().
+  bool reload_music(const std::string& effects_directory, const std::string& music_path);
   // Swap an equal-duration audition source without recreating BASS/Transport.
   // GUI thread only; keeps heard position, gain, rate and playback intent.
   bool replace_music_source(const std::string& path);
@@ -80,8 +102,15 @@ class AudioEngine {
   // Drop only HoldOn/HoldOff POS gates. One-shots stay armed.
   void clear_hold_gates();
   bool schedule_hold_gate(bool enabled, wds::common::Microseconds at);
+  // Control (GUI) thread only. Explicit on/off; overrides any gate that fired.
   void set_hold_looping(bool enabled);
+  // Control thread, per tick: apply the heard-clock verdict unless a MIXTIME Hold
+  // gate already set the state ahead of the heard clock (gates fire at mix time,
+  // earlier than audible). Defers to the gate until the two agree.
+  void reconcile_hold_looping(bool desired_by_clock);
   bool hold_looping() const noexcept;
+  // Diagnostics/tests: current Hold stream handle (0 when none).
+  unsigned long long hold_channel_handle() const noexcept;
   // Stop currently audible sample voices (one-shots / Hold). Pending music
   // syncs are cleared via clear_scheduled_sfx.
   void stop_playing_sfx();
@@ -100,12 +129,14 @@ class AudioEngine {
   // fixed Impl pool (never a heap object that can be freed while BASS is alive).
   // Not for UI callers.
   void handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip);
-  void handle_hold_region_sync();
 
   // Pending-slot snapshot for lifetime tests. Pointers stay valid until
   // shutdown() releases Impl; after clear they are stale SYNCPROC user pointers.
   size_t snapshot_pending_sfx_syncs(void** out_slots, unsigned long long* out_handles,
                                     size_t max_count) const noexcept;
+  // Pool accounting for tests/diagnostics. Takes sfx_mu and walks the pool: not
+  // for per-frame use. False when there is no Impl.
+  bool sfx_slot_pool_stats(SfxSlotPoolStats* out) const noexcept;
   // Read one pool slot. False if `slot` is not in this engine's pool (or no Impl).
   bool inspect_sfx_sync_slot(const void* slot, unsigned long long* handle, int* claim,
                              bool* in_use) const noexcept;
@@ -125,15 +156,22 @@ class AudioEngine {
   bool mix_sfx_on_mixer(HitSfxClip clip);
   void remove_mixer_sfx_sources();
   bool schedule_music_sync(SfxSyncKind kind, HitSfxClip clip, wds::common::Microseconds at);
-  void fire_sync_action(SfxSyncKind kind, HitSfxClip clip);
-  void warmup_hold_channel();
-  void arm_hold_region_loop();
-  void detach_hold_region_loop();
+  void fire_sync_action(SfxSyncKind kind, HitSfxClip clip, bool on_mixer_thread = false);
+  // Hold voice. See "Hold threading" in audio_engine.cpp for who may call what.
+  void warmup_hold_channel();              // control thread
+  void install_hold_loop_sync(std::uint32_t channel);  // control thread
+  void retire_hold_channel();              // control thread: free stream + sync
+  void park_hold_channel();                // control thread: silence, keep stream
+  void apply_hold_gate(bool on);           // BASS mixer thread (MIXTIME gate)
+  void apply_hold_pause_state();           // either thread
   void load_hold_loop_sidecar(const std::string& effects_directory);
   bool resolve_hold_loop_bytes();
   void cache_music_format();
   std::uint64_t align_music_bytes(std::uint64_t bytes) const noexcept;
   std::uint64_t music_heard_bytes() const;
+  // Source byte the mixer has already mixed up to (heard + the mixer's playback
+  // buffer). A POS sync set at or below this can never fire. Always >= heard.
+  std::uint64_t music_mixed_bytes() const;
 
   struct Impl;
   // Published via std::atomic_load / std::atomic_store (C++17 shared_ptr

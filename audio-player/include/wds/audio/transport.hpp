@@ -20,6 +20,11 @@ class Transport {
   Transport& operator=(const Transport&) = delete;
 
   bool initialize(const std::string& effects_directory, const std::string& music_path);
+  // Song switch that keeps the BASS device and SFX samples (AudioEngine::reload_music)
+  // and resets the transport to a fresh, paused t=0 like initialize(). False when
+  // an in-place reload is not possible; nothing is reset then and the caller
+  // should shutdown()/initialize().
+  bool reload_music(const std::string& effects_directory, const std::string& music_path);
   void shutdown();
 
   AudioEngine& audio() noexcept { return audio_; }
@@ -85,6 +90,7 @@ class Transport {
   bool sought_this_poll() const noexcept { return sought_this_poll_; }
 
  private:
+  void reset_runtime_state();
   wds::common::Microseconds clamp_time(wds::common::Microseconds time) const;
 
   AudioEngine audio_;

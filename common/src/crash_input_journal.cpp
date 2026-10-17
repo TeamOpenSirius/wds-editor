@@ -72,16 +72,35 @@ void emit_uint(JournalEmitFn emit, void* ctx, std::uint64_t v) {
 void emit_int(JournalEmitFn emit, void* ctx, std::int64_t v) {
   if (v < 0) {
     emit_str(emit, ctx, "-");
-    emit_uint(emit, ctx, static_cast<std::uint64_t>(-v));
+    // Unsigned negate: -INT64_MIN is signed overflow (UB).
+    emit_uint(emit, ctx, std::uint64_t{0} - static_cast<std::uint64_t>(v));
     return;
   }
   emit_uint(emit, ctx, static_cast<std::uint64_t>(v));
 }
 
 void emit_float(JournalEmitFn emit, void* ctx, float v) {
+  // Classify via the bit pattern (not isnan/isfinite) so it stays correct under
+  // -ffast-math, and so no float->integer cast ever sees NaN / inf / out of range.
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &v, sizeof(bits));
+  const bool negative = (bits & 0x80000000u) != 0;
+  if ((bits & 0x7f800000u) == 0x7f800000u) {
+    if ((bits & 0x007fffffu) != 0) {
+      emit_str(emit, ctx, "nan");
+    } else {
+      emit_str(emit, ctx, negative ? "-inf" : "inf");
+    }
+    return;
+  }
   if (v < 0.0f) {
     emit_str(emit, ctx, "-");
     v = -v;
+  }
+  constexpr float kMaxExact = 1.0e18f;  // comfortably inside uint64_t
+  if (v >= kMaxExact) {
+    emit_str(emit, ctx, "1e18+");
+    return;
   }
   const auto whole = static_cast<std::uint64_t>(v);
   emit_uint(emit, ctx, whole);

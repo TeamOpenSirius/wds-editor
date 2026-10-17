@@ -138,9 +138,25 @@ void normalize_timing_points(MusicTiming& timing) {
   rebuild_timing_prefix_ms(timing);
 }
 
+bool timing_points_structurally_normalized(const MusicTiming& timing) noexcept {
+  const auto& pts = timing.points;
+  if (pts.empty() || pts.front().tick != 0) {
+    return false;
+  }
+  for (size_t i = 1; i < pts.size(); ++i) {
+    if (pts[i].tick <= pts[i - 1].tick) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void rebuild_timing_prefix_ms(const MusicTiming& timing) {
   const auto& pts = timing.points;
   timing.prefix_ms.resize(pts.size());
+  timing.points_state = timing_points_structurally_normalized(timing)
+                            ? TimingPointsState::Normalized
+                            : TimingPointsState::NotNormalized;
   if (pts.empty()) {
     return;
   }

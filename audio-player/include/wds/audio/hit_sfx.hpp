@@ -51,6 +51,9 @@ class HitSfxPlayer {
   // Drop pending syncs and cut audible one-shots / Hold (pause, seek, scrub).
   void stop_all();
   void set_hold_looping(bool enabled);
+  // Per-tick heard-clock verdict; defers to a MIXTIME Hold gate that already fired
+  // ahead of the heard clock (see AudioEngine::reconcile_hold_looping).
+  void reconcile_hold_looping(bool desired_by_clock);
   bool hold_looping() const noexcept;
   bool schedule_hold_gate(bool enabled, wds::common::Microseconds music_time);
   void clear_hold_gates();

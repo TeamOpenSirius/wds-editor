@@ -93,7 +93,9 @@ std::vector<SplitCoverageMs> collect_split_coverage_ms(
 std::vector<std::pair<float, float>> merged_split_hide_ranges_ms(
     const std::vector<wds::chart_editor::NotationNote>& notes,
     const wds::chart_editor::MusicTiming& timing,
-    const wds::chart_editor::PreviewConfig& preview, float view_ms_lo, float view_ms_hi);
+    const wds::chart_editor::PreviewConfig& preview, float view_ms_lo, float view_ms_hi,
+    // Optional: document whose notes() is `notes`; enables split-tree windowing.
+    const wds::chart_editor::ChartDocument* doc = nullptr);
 
 // Opacity along a split effect: 0 at outer fade edge → 1 at steady → 0 at outer fade edge.
 // Prefer ms sampling in the edit view (time-linear Y); tick helper converts via timing.
@@ -105,12 +107,6 @@ float split_line_opacity_at_tick(const wds::chart_editor::NotationNote& note,
                                  const wds::chart_editor::MusicTiming& timing,
                                  const wds::chart_editor::PreviewConfig& preview,
                                  int32_t tick) noexcept;
-
-// True when wall-clock time at `tick` falls inside any split fade/steady window.
-const wds::chart_editor::NotationNote* split_note_covering_tick(
-    const std::vector<wds::chart_editor::NotationNote>& notes,
-    const wds::chart_editor::MusicTiming& timing,
-    const wds::chart_editor::PreviewConfig& preview, int32_t tick);
 
 struct GutterLabelHit {
   int32_t note_id = -1;
@@ -165,7 +161,9 @@ void paint_split_lane_preview(wds::interaction::UiPainter& painter,
 
 std::vector<GutterLabelHit> build_split_label_hits(
     const EditViewport& viewport, const wds::interaction::Rect& gutter,
-    const std::vector<wds::chart_editor::NotationNote>& notes);
+    const std::vector<wds::chart_editor::NotationNote>& notes,
+    // Optional: document whose notes() is `notes`; enables split-tree windowing.
+    const wds::chart_editor::ChartDocument* doc = nullptr);
 
 // Format BPM for gutter / timing popup (keeps decimals, strips trailing zeros).
 std::string format_bpm_label(double bpm);

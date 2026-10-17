@@ -18,12 +18,17 @@ int main() {
 #else
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <atomic>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -166,6 +171,9 @@ void assert_common_report(const std::string& text, const char* signal_or_exc) {
   CHECK(text.find("kind:") != std::string::npos);
   CHECK(text.find(signal_or_exc) != std::string::npos);
   CHECK(text.find("--- stack ---") != std::string::npos);
+  // Symbolization runs after the raw frames, journal and log ring are on disk.
+  CHECK(text.find("--- stack (symbolized) ---") != std::string::npos);
+  CHECK(text.find("symbolization timed out") == std::string::npos);
   CHECK(text.find("main_slide=") != std::string::npos);
   CHECK(text.find("ctx.project_path: /tmp/x.wdsproject") != std::string::npos);
   CHECK(text.find("--- input journal ---") != std::string::npos);
@@ -252,9 +260,312 @@ void run_crash_case(CrashCase c, const char* name, const char* token, bool want_
   (void)::rmdir(dir);
 }
 
+std::atomic<bool> g_in_hook{false};
+std::atomic<bool> g_release_hook{false};
+
+void hold_lock_hook() {
+  g_in_hook.store(true);
+  while (!g_release_hook.load()) {
+    ::usleep(1000);
+  }
+}
+
+// Child: thread A runs report_fatal() and is held inside it (crash lock owned).
+// Thread B then segfaults. B must wait, and once A releases it must report its
+// own crash and terminate the process (previously B parked forever).
+void child_crash_during_report_fatal(const char* dir) {
+  child_prepare(dir);
+  ::alarm(20);  // a regression hangs; SIGALRM turns that into a test failure
+  wds::common::testing::set_report_fatal_hook(hold_lock_hook);
+  std::thread a([] { wds::common::report_fatal("test-fatal", "first-report"); });
+  while (!g_in_hook.load()) ::usleep(1000);
+  std::thread b([] {
+    volatile int* p = nullptr;
+    *p = 1;
+  });
+  ::usleep(200 * 1000);  // B is now faulting and parked on the lock
+  g_release_hook.store(true);
+  a.join();  // report_fatal returned: app "keeps running"
+  b.join();  // never reached if B's crash is reported correctly
+  ::_exit(125);
+}
+
+void run_crash_during_report_fatal() {
+  char tmpl[] = "/tmp/wds-crash-XXXXXX";
+  char* dir = ::mkdtemp(tmpl);
+  CHECK(dir != nullptr);
+  if (dir == nullptr) return;
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    child_crash_during_report_fatal(dir);
+  }
+  const int st = wait_child(pid);
+  CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+  const auto files = list_crash_txt(dir);
+  CHECK(files.size() == 1);
+  if (files.size() == 1) {
+    const std::string text = read_file(files[0].c_str());
+    CHECK(text.find("first-report") != std::string::npos);
+    CHECK(text.find("SIGSEGV") != std::string::npos);
+    CHECK(text.find("--- stack ---") != std::string::npos);
+    CHECK(text.find("(re-raised from terminate)") == std::string::npos);
+  }
+  for (const auto& f : files) (void)::unlink(f.c_str());
+  (void)::unlink((std::string(dir) + "/running.sentinel").c_str());
+  (void)::rmdir(dir);
+}
+
+// Waits up to timeout_ms; on timeout SIGKILLs the child and sets *timed_out.
+int wait_child_timeout(pid_t pid, int timeout_ms, bool* timed_out) {
+  int st = 0;
+  *timed_out = false;
+  for (int waited = 0; waited < timeout_ms; waited += 10) {
+    const pid_t r = ::waitpid(pid, &st, WNOHANG);
+    if (r == pid) return st;
+    if (r < 0) return -1;
+    ::usleep(10 * 1000);
+  }
+  ::kill(pid, SIGKILL);
+  (void)::waitpid(pid, &st, 0);
+  *timed_out = true;
+  return st;
+}
+
+void remove_dir_contents(const char* dir) {
+  DIR* d = ::opendir(dir);
+  if (d != nullptr) {
+    while (const dirent* ent = ::readdir(d)) {
+      if (std::strcmp(ent->d_name, ".") == 0 || std::strcmp(ent->d_name, "..") == 0) continue;
+      (void)::unlink((std::string(dir) + "/" + ent->d_name).c_str());
+    }
+    ::closedir(d);
+  }
+  (void)::rmdir(dir);
+}
+
+[[noreturn]] void hang_forever_hook_impl() {
+  for (;;) ::pause();
+}
+void hang_forever_hook() { hang_forever_hook_impl(); }
+
+// Simulates a loader-lock deadlock inside the (non async-signal-safe)
+// symbolization step. The watchdog must end the process, with the raw report
+// (frames, journal, log ring) already on disk and the original signal re-raised.
+void child_symbolize_hang(const char* dir) {
+  child_prepare(dir);
+  wds::common::testing::set_symbolize_timeout_seconds(1);
+  wds::common::testing::set_symbolize_hook(hang_forever_hook);
+  volatile int* p = nullptr;
+  *p = 1;
+  ::_exit(125);
+}
+
+void run_symbolize_watchdog() {
+  char tmpl[] = "/tmp/wds-crash-XXXXXX";
+  char* dir = ::mkdtemp(tmpl);
+  CHECK(dir != nullptr);
+  if (dir == nullptr) return;
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    child_symbolize_hang(dir);
+  }
+  bool timed_out = false;
+  const int st = wait_child_timeout(pid, 20 * 1000, &timed_out);
+  CHECK(!timed_out);
+  CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+  const auto files = list_crash_txt(dir);
+  CHECK(files.size() == 1);
+  if (files.size() == 1) {
+    const std::string text = read_file(files[0].c_str());
+    CHECK(text.find("--- stack ---") != std::string::npos);
+    CHECK(text.find("  #0 0x") != std::string::npos);  // raw PCs
+    CHECK(text.find("--- input journal ---") != std::string::npos);
+    CHECK(text.find("--- recent log ---") != std::string::npos);
+    CHECK(text.find("symbolization timed out") != std::string::npos);
+    CHECK(text.find("--- stack (symbolized) ---") == std::string::npos);
+    CHECK(text.find("--- images ---") == std::string::npos);
+  }
+  remove_dir_contents(dir);
+}
+
+void custom_alrm_handler(int) {}
+
+// report_fatal() returns to a live app: the symbolization watchdog must be
+// fully disarmed afterwards (no stray SIGALRM), the previous SIGALRM
+// disposition restored and a pre-existing alarm() handed back.
+void child_watchdog_restore(const char* dir) {
+  child_prepare(dir);
+  struct sigaction sa {};
+  sa.sa_handler = custom_alrm_handler;
+  sigemptyset(&sa.sa_mask);
+  (void)::sigaction(SIGALRM, &sa, nullptr);
+  (void)::alarm(50);
+  wds::common::report_fatal("test-fatal", "restore");
+  struct sigaction cur {};
+  (void)::sigaction(SIGALRM, nullptr, &cur);
+  const unsigned remaining = ::alarm(0);
+  int code = 0;
+  if (cur.sa_handler != custom_alrm_handler) code |= 1;
+  if (remaining < 40 || remaining > 50) code |= 2;
+  ::_exit(code);
+}
+
+void run_watchdog_restore() {
+  char tmpl[] = "/tmp/wds-crash-XXXXXX";
+  char* dir = ::mkdtemp(tmpl);
+  CHECK(dir != nullptr);
+  if (dir == nullptr) return;
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    child_watchdog_restore(dir);
+  }
+  bool timed_out = false;
+  const int st = wait_child_timeout(pid, 20 * 1000, &timed_out);
+  CHECK(!timed_out);
+  CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+  remove_dir_contents(dir);
+}
+
+// After mark_clean_exit() the shared crash fd must be detached before it is
+// closed. Reopen something (which reuses the lowest free descriptor, i.e. the
+// number just released) and crash: the handler must not write into it.
+void child_fd_reuse(const char* dir, const char* victim) {
+  child_prepare(dir);
+  wds::common::mark_clean_exit();
+  const int vfd = ::open(victim, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  (void)vfd;
+  volatile int* p = nullptr;
+  *p = 1;
+  ::_exit(125);
+}
+
+void run_fd_reuse() {
+  char tmpl[] = "/tmp/wds-crash-XXXXXX";
+  char* dir = ::mkdtemp(tmpl);
+  CHECK(dir != nullptr);
+  if (dir == nullptr) return;
+  const std::string victim = std::string(dir) + "/victim.bin";
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    child_fd_reuse(dir, victim.c_str());
+  }
+  bool timed_out = false;
+  const int st = wait_child_timeout(pid, 20 * 1000, &timed_out);
+  CHECK(!timed_out);
+  CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+  struct stat vst {};
+  CHECK(::stat(victim.c_str(), &vst) == 0);
+  CHECK(vst.st_size == 0);  // the crash report went elsewhere
+  const auto files = list_crash_txt(dir);
+  CHECK(files.size() == 1);  // re-created by path, not through the stale fd
+  if (files.size() == 1) {
+    CHECK(read_file(files[0].c_str()).find("SIGSEGV") != std::string::npos);
+  }
+  remove_dir_contents(dir);
+}
+
+// >64 crash files, oldest one is the previous session's report. Rotation must
+// keep the 20 newest by name (timestamp) and the stale session's report (plus
+// its .dmp companion), and delete everything else, not whatever readdir
+// happens to list last.
+void run_rotation() {
+  char tmpl[] = "/tmp/wds-crash-XXXXXX";
+  char* dir = ::mkdtemp(tmpl);
+  CHECK(dir != nullptr);
+  if (dir == nullptr) return;
+  constexpr int kFiles = 70;
+  auto txt_path = [&](int i) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "/crash-20260101-%06d-4242.txt", i);
+    return std::string(dir) + name;
+  };
+  const std::string stale_dmp = std::string(dir) + "/crash-20260101-000000-4242.dmp";
+  for (int i = 0; i < kFiles; ++i) {
+    FILE* fp = std::fopen(txt_path(i).c_str(), "wb");
+    CHECK(fp != nullptr);
+    if (fp != nullptr) {
+      const std::string body(200, 'x');  // larger than the header-only marker
+      std::fwrite(body.data(), 1, body.size(), fp);
+      std::fclose(fp);
+    }
+  }
+  {
+    FILE* fp = std::fopen(stale_dmp.c_str(), "wb");
+    if (fp != nullptr) {
+      std::fputs("dmp", fp);
+      std::fclose(fp);
+    }
+  }
+  // A pid that is certainly dead: a reaped child.
+  const pid_t dead = ::fork();
+  if (dead == 0) ::_exit(0);
+  (void)::waitpid(dead, nullptr, 0);
+  {
+    const std::string sentinel = std::string(dir) + "/running.sentinel";
+    FILE* fp = std::fopen(sentinel.c_str(), "wb");
+    CHECK(fp != nullptr);
+    if (fp != nullptr) {
+      std::fprintf(fp, "pid=%ld\ncrash=%s\n", static_cast<long>(dead), txt_path(0).c_str());
+      std::fclose(fp);
+    }
+  }
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    (void)::setenv("WDS_CRASH_NO_DIALOG", "1", 1);
+    (void)::setenv("WDS_CRASH_LOG_DIR", dir, 1);
+    wds::common::install_crash_handlers();
+    char prev[1024] = {};
+    const bool crashed = wds::common::previous_session_crashed(prev, sizeof(prev));
+    ::_exit(crashed && std::strcmp(prev, txt_path(0).c_str()) == 0 ? 0 : 7);
+  }
+  bool timed_out = false;
+  const int st = wait_child_timeout(pid, 20 * 1000, &timed_out);
+  CHECK(!timed_out);
+  CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+  CHECK(path_exists(txt_path(0).c_str()));  // stale session report survives
+  CHECK(path_exists(stale_dmp.c_str()));    // ... with its companion dump
+  for (int i = 1; i < kFiles - 20; ++i) {
+    CHECK(!path_exists(txt_path(i).c_str()));  // old ones are gone
+  }
+  for (int i = kFiles - 20; i < kFiles; ++i) {
+    CHECK(path_exists(txt_path(i).c_str()));  // 20 newest are kept
+  }
+  CHECK(list_crash_txt(dir).size() == 20 + 1 + 1);  // + stale + this session's file
+  remove_dir_contents(dir);
+}
+
+void emit_to_string(void* ctx, const char* data, std::size_t n) {
+  static_cast<std::string*>(ctx)->append(data, n);
+}
+
+// NaN / inf / huge floats and INT64_MIN must format without UB (float->uint64
+// casts, signed negation) and without garbage.
+void run_journal_extremes() {
+  using namespace wds::common;
+  journal_reset_for_test();
+  const float nan_v = std::numeric_limits<float>::quiet_NaN();
+  const float inf_v = std::numeric_limits<float>::infinity();
+  journal_begin_event(CrashInputKind::KeyDown, 0.0f, 0.0f, 0.0f, 0.0f,
+                      std::numeric_limits<std::int32_t>::min(), 0, 0, 0);
+  journal_end_event();
+  journal_begin_event(CrashInputKind::Scroll, nan_v, inf_v, -inf_v, 1.0e30f, 0, 0, 0, 0);
+  journal_add_effect(CrashEffectId::TimelineMs, std::numeric_limits<std::int64_t>::min(),
+                     std::numeric_limits<std::int64_t>::max(), -1.0e30f, 3.5f);
+  journal_end_event();
+  std::string out;
+  journal_write_text(emit_to_string, &out);
+  CHECK(out.find("pos=nan,inf") != std::string::npos);
+  CHECK(out.find("d=-inf,1e18+") != std::string::npos);
+  CHECK(out.find("key=-2147483648") != std::string::npos);
+  CHECK(out.find("-9223372036854775808->9223372036854775807") != std::string::npos);
+  CHECK(out.find("-1e18+->3.50") != std::string::npos);
+  journal_reset_for_test();
+}
+
 }  // namespace
 
 int main() {
+  run_journal_extremes();
   run_crash_case(CrashCase::Segv, "segv", "SIGSEGV", true, false);
   run_crash_case(CrashCase::Abort, "abort", "SIGABRT", false, false);
   run_crash_case(CrashCase::Terminate, "terminate", "terminate", false, true);
@@ -262,6 +573,11 @@ int main() {
   run_crash_case(CrashCase::Clean, "clean", "", false, false);
   run_crash_case(CrashCase::Term, "term", "", false, false);
   run_crash_case(CrashCase::Killed, "killed", "", false, false);
+  run_crash_during_report_fatal();
+  run_symbolize_watchdog();
+  run_watchdog_restore();
+  run_fd_reuse();
+  run_rotation();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d crash handler test failure(s)\n", failures);

@@ -3,6 +3,7 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/notation.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
@@ -18,7 +19,10 @@ bool is_playfield_selectable(const NotationNote& note) noexcept;
 
 // Convert one note to any target type. Extra fields are dropped; missing fields
 // get defaults (non-hold → hold body duration is one beat). Split-lane
-// gimmicks and HoldEighth are left unchanged.
+// gimmicks and HoldEighth are left unchanged. Single-note function: it does not
+// touch other notes, so after a conversion that yields (or changes) a hold body the
+// caller must run with_recomputed_hold_eighths on the converted body (tailed and
+// nontail holds derive identical eighths).
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter);
 // Mirror lanes horizontally. Also negates scratch_length (flick / ScratchHold /
 // JumpScratch direction·span) so arrows and end covers flip with the body.
@@ -49,19 +53,35 @@ ConvertNotesResult convert_notes_in_selection(
     const ChartDocument& doc, const std::unordered_set<int32_t>& selected, NoteType target,
     std::optional<int32_t> scratch_length = std::nullopt);
 
-// Replaces HoldEighth notes bound to this hold (unbound open-span fallback).
+// HoldEighth is purely derived from its hold (tailed or nontail): there are no
+// authored or suppressed eighths. Replaces HoldEighth notes bound to this hold
+// (unbound open-span fallback) with the regenerated tpq/2 grid.
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold);
+// Strips every HoldEighth and regenerates them for all bindable holds.
 bool recompute_hold_eighths(ChartDocument& doc);
 
-// Drop generated HoldEighth rows while preserving authored points and tombstones.
+// Drop every HoldEighth row.
 void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept;
 
-// CSV has no parent id or authored marker. Bind type-900 rows inside nontail
-// holds and mark them as explicit judgments before derived-point rebuilding.
-void mark_nontail_hold_eighths_authored(std::vector<NotationNote>& notes);
+// Hard cap on auto-generated HoldEighth rows (total for with_all_hold_eighths_recomputed,
+// per call for with_recomputed_hold_eighths / recompute_hold_eighths). Loaders reject
+// charts above it via hold_eighths_within_limit; the generators additionally clamp
+// (truncate the tail of the hold) so paths without an error channel stay bounded.
+inline constexpr std::size_t kMaxAutoHoldEighths = std::size_t{1} << 20;
 
-// Strip stale generated eighths, then regenerate only tailed holds (tpq/2 grid;
-// ticks occupied by Sound / ScratchSound stay empty).
+// Number of tpq/2-grid eighth slots a hold body spans (tailed or nontail; 0 for
+// non-hold / empty holds). Upper bound of what the generator emits (ticks occupied
+// by visible stars skip).
+std::size_t hold_eighth_slot_count(const NotationNote& hold, int32_t ticks_per_quarter) noexcept;
+
+// True when the summed hold_eighth_slot_count of every hold body (tailed and
+// nontail) is within kMaxAutoHoldEighths. Importers call this to reject hostile
+// hold spans.
+bool hold_eighths_within_limit(const std::vector<NotationNote>& notes,
+                               int32_t ticks_per_quarter) noexcept;
+
+// Strip every HoldEighth, then regenerate them for all hold bodies (tailed and
+// nontail; tpq/2 grid; ticks occupied by Sound / ScratchSound stay empty).
 std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationNote> notes,
                                                            int32_t ticks_per_quarter);
 
@@ -76,6 +96,18 @@ std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote>
 // runs → nullopt (no head). Hold bodies, HoldEighth, and mid-stars never block.
 std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
                                                 const NotationNote& hold);
+// Indexed variant for bulk importers: identical result to the ChartDocument overload,
+// but only looks at `candidates` (indices into `notes`) instead of every note. The
+// caller must include every note that STARTS at hold.start_tick (non-tailed notes) or
+// whose end_tick == hold.start_tick (tailed holds); extra candidates are harmless
+// because the same per-note filters are applied. Cost is O(candidates + hold.width).
+std::optional<NotationNote> make_auto_hold_head(const NotationNote& hold,
+                                                const std::vector<NotationNote>& notes,
+                                                const std::vector<std::size_t>& candidates);
+// Full-scan variant over a plain note list (no ChartDocument, so no profile validation).
+// A hold with a negative (unassigned) id never matches any note in `notes`.
+std::optional<NotationNote> make_auto_hold_head(const NotationNote& hold,
+                                                const std::vector<NotationNote>& notes);
 bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold);
 
 // Official hold heads: HoldStart / CriticalHoldStart / ScratchHoldStart /

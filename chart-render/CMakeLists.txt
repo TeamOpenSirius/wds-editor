@@ -122,6 +122,11 @@ add_executable(wds_split_effect_seek_cache_tests
   ${CMAKE_SOURCE_DIR}/tests/system/split_effect_seek_cache_tests.cpp)
 target_link_libraries(wds_split_effect_seek_cache_tests PRIVATE wds::chart_render)
 
+add_executable(wds_split_eval_cache_scale_tests
+  ${CMAKE_SOURCE_DIR}/tests/system/split_eval_cache_scale_tests.cpp)
+target_include_directories(wds_split_eval_cache_scale_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(wds_split_eval_cache_scale_tests PRIVATE wds::chart_render)
+
 # Developer benchmark. It forks worker processes and uses poll / waitpid / getrusage, so it is POSIX-only
 # (macOS, Linux) and is skipped for Windows targets (MinGW cross build and MSVC).
 if(NOT WIN32)
@@ -162,6 +167,7 @@ if(NOT CMAKE_CROSSCOMPILING)
   add_test(NAME wds_split_line_official_colors_tests COMMAND wds_split_line_official_colors_tests)
   add_test(NAME wds_split_effect_playback_tests COMMAND wds_split_effect_playback_tests)
   add_test(NAME wds_split_effect_seek_cache_tests COMMAND wds_split_effect_seek_cache_tests)
+  add_test(NAME wds_split_eval_cache_scale_tests COMMAND wds_split_eval_cache_scale_tests)
   add_test(NAME wds_openwds_shuriken_bind_tests COMMAND wds_openwds_shuriken_bind_tests)
 else()
   message(STATUS "Skipping ctest registration for chart-render tests (cross build)")

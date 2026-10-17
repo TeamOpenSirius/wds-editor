@@ -7,6 +7,7 @@
 #include "wds/common/log.hpp"
 #include "wds/common/runtime_env.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cerrno>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <typeinfo>
+#include <vector>
 
 #ifndef WDS_APP_VERSION
 #define WDS_APP_VERSION "dev"
@@ -105,6 +107,7 @@ char g_install_stamp[32] = {};
 std::atomic<std::uint64_t> g_handling_tid{0};
 std::atomic<bool> g_reported_by_terminate{false};
 std::atomic<bool> g_reported_full{false};
+std::atomic<CrashTestHook> g_report_fatal_hook{nullptr};
 std::atomic<bool> g_installed{false};
 std::atomic<bool> g_prev_crashed{false};
 bool g_checked_prev = false;
@@ -135,8 +138,18 @@ SymFnTableFn g_fn_table = nullptr;
 SymBaseFn g_mod_base = nullptr;
 LONG g_header_only_size = 0;
 #else
-int g_crash_fd = -1;
+// Shared between mark_clean_exit() and fatal-signal handlers on other threads.
+// Lock-free int atomics are async-signal-safe. Handlers load it once.
+std::atomic<int> g_crash_fd{-1};
 off_t g_header_only_size = 0;
+// Symbolization watchdog (see SymbolizeWatchdog). Timeout is whole seconds
+// because it is implemented with alarm(); 0 disables the watchdog.
+constexpr unsigned kSymbolizeTimeoutSec = 3;
+constexpr int kWatchdogExitCode = 113;
+std::atomic<unsigned> g_symbolize_timeout_sec{kSymbolizeTimeoutSec};
+std::atomic<CrashTestHook> g_symbolize_hook{nullptr};
+std::atomic<int> g_watchdog_fd{-1};
+std::atomic<int> g_watchdog_sig{0};
 timespec g_install_mono{};
 alignas(16) char g_main_altstack[128 * 1024];
 #endif
@@ -198,31 +211,51 @@ std::uint64_t current_tid() {
 #endif
 }
 
-[[noreturn]] void wait_other_crash_writer() {
-  for (;;) {
+// Short async-signal-safe pause between polls of the crash lock.
+void crash_lock_backoff() {
 #if defined(_WIN32)
-    ::Sleep(1000);
+  ::Sleep(5);
 #else
-    ::pause();
+  timespec ts{};
+  ts.tv_sec = 0;
+  ts.tv_nsec = 5 * 1000 * 1000;
+  (void)::nanosleep(&ts, nullptr);
 #endif
-  }
 }
 
+// A losing thread polls until the holder releases, then retries the CAS. If the
+// holder ends in raise()/abort() (real crash) it never releases and the process
+// dies under us. If the holder is report_fatal(), which releases and returns so
+// the app keeps running, the waiter then takes the lock and reports its own
+// crash. The wait is unbounded on purpose: the holder may be showing a modal
+// crash dialog for as long as the user likes, and _exit-ing underneath it
+// would lose the report. Only a same-thread re-entry (nested fault) is fatal.
 void acquire_crash_lock() {
   const std::uint64_t self = current_tid();
-  std::uint64_t expected = 0;
-  if (g_handling_tid.compare_exchange_strong(expected, self, std::memory_order_acq_rel,
-                                             std::memory_order_acquire)) {
-    return;
+  for (;;) {
+    std::uint64_t expected = 0;
+    if (g_handling_tid.compare_exchange_strong(expected, self, std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+      return;
+    }
+    if (expected == self) {
+      die_hard();
+    }
+    crash_lock_backoff();
   }
-  if (expected == self) {
-    die_hard();
-  }
-  wait_other_crash_writer();
 }
 
 void release_crash_lock() {
   g_handling_tid.store(0, std::memory_order_release);
+}
+
+// Non-blocking variant for normal-context code (mark_clean_exit) that must
+// not race a crash handler but must never wait on one: if a crash is being
+// reported the process is about to die, so the caller simply skips its work.
+bool try_acquire_crash_lock() {
+  std::uint64_t expected = 0;
+  return g_handling_tid.compare_exchange_strong(expected, current_tid(), std::memory_order_acq_rel,
+                                                std::memory_order_acquire);
 }
 
 bool dialogs_suppressed() {
@@ -446,18 +479,28 @@ std::int64_t file_size_utf8(const char* path) {
 #endif
 }
 
-struct CrashName {
-  char name[256];
-};
-
-int crash_name_cmp_desc(const void* a, const void* b) {
-  return std::strcmp(static_cast<const CrashName*>(b)->name, static_cast<const CrashName*>(a)->name);
+// "dir/crash-20260101-120000-42.txt" -> "crash-20260101-120000-42" (basename
+// without the extension), so a crash's .txt and .dmp are treated as a pair.
+std::string crash_stem(const char* path) {
+  if (path == nullptr) return std::string();
+  const char* base = path;
+  for (const char* p = path; *p != '\0'; ++p) {
+    if (*p == '/' || *p == '\\') base = p + 1;
+  }
+  std::string s(base);
+  const auto dot = s.find_last_of('.');
+  if (dot != std::string::npos) s.resize(dot);
+  return s;
 }
 
-void rotate_old_crashes() {
+// Keeps the kRotateKeep newest crash artifacts. Names embed the session start
+// time (crash-YYYYMMDD-HHMMSS-pid.ext), so a descending lexicographic sort is
+// newest-first. `protect_path` (the previous session's report that the UI is
+// about to show) is never deleted, even when it is old. Runs once at startup,
+// outside any handler, so ordinary allocation is fine.
+void rotate_old_crashes(const char* protect_path) {
   if (g_log_dir[0] == '\0') return;
-  CrashName names[64] = {};
-  int count = 0;
+  std::vector<std::string> names;
 #if defined(_WIN32)
   const std::wstring dirw = utf8_to_wide(std::string(g_log_dir));
   if (dirw.empty()) return;
@@ -469,14 +512,7 @@ void rotate_old_crashes() {
     if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
     const std::string name = wide_to_utf8(fd.cFileName);
     if (!is_crash_artifact_name(name.c_str())) continue;
-    if (count < 64) {
-      copy_trunc(names[count].name, sizeof(names[count].name), name.c_str());
-      ++count;
-    } else {
-      char path[kPathCap];
-      join_log_path(path, sizeof(path), name.c_str());
-      delete_path_utf8(path);
-    }
+    names.push_back(name);
   } while (::FindNextFileW(find, &fd));
   ::FindClose(find);
 #else
@@ -484,27 +520,20 @@ void rotate_old_crashes() {
   if (dir == nullptr) return;
   while (const dirent* ent = ::readdir(dir)) {
     if (!is_crash_artifact_name(ent->d_name)) continue;
-    if (count < 64) {
-      copy_trunc(names[count].name, sizeof(names[count].name), ent->d_name);
-      ++count;
-    } else {
-      char path[kPathCap];
-      join_log_path(path, sizeof(path), ent->d_name);
-      ::unlink(path);
-    }
+    names.emplace_back(ent->d_name);
   }
   ::closedir(dir);
 #endif
-  if (count <= kRotateKeep) return;
-  std::qsort(names, static_cast<std::size_t>(count), sizeof(CrashName), crash_name_cmp_desc);
-  for (int i = kRotateKeep; i < count; ++i) {
+  if (names.size() <= static_cast<std::size_t>(kRotateKeep)) return;
+  std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
+    return a > b;
+  });
+  const std::string protect_stem = crash_stem(protect_path);
+  for (std::size_t i = static_cast<std::size_t>(kRotateKeep); i < names.size(); ++i) {
+    if (!protect_stem.empty() && crash_stem(names[i].c_str()) == protect_stem) continue;
     char path[kPathCap];
-    join_log_path(path, sizeof(path), names[i].name);
-#if defined(_WIN32)
+    join_log_path(path, sizeof(path), names[i].c_str());
     delete_path_utf8(path);
-#else
-    ::unlink(path);
-#endif
   }
 }
 
@@ -835,6 +864,30 @@ void write_win_report(HANDLE file, const char* kind, const char* detail, const c
   append_modules_win(file);
 }
 
+// Reserve extra stack for exception handling on the calling thread. Without it
+// the unhandled-exception filter runs on whatever is left after
+// EXCEPTION_STACK_OVERFLOW (a page or two) and faults again before anything is
+// written. SetThreadStackGuarantee is XP SP1+ but is missing from older MinGW-w64
+// headers, so resolve it at runtime; if unavailable this is a no-op. The value
+// only ever grows, so repeated calls are harmless. Address space is reserved,
+// pages are committed on demand.
+void ensure_stack_guarantee() {
+  using SetThreadStackGuaranteeFn = BOOL(WINAPI*)(PULONG);
+  static const SetThreadStackGuaranteeFn set_guarantee = []() -> SetThreadStackGuaranteeFn {
+    const HMODULE kernel = ::GetModuleHandleW(L"kernel32.dll");
+    if (kernel == nullptr) {
+      return nullptr;
+    }
+    return reinterpret_cast<SetThreadStackGuaranteeFn>(
+        reinterpret_cast<void*>(::GetProcAddress(kernel, "SetThreadStackGuarantee")));
+  }();
+  if (set_guarantee == nullptr) {
+    return;
+  }
+  ULONG size = 128 * 1024;
+  (void)set_guarantee(&size);
+}
+
 void preload_dbghelp() {
   g_dbghelp = ::LoadLibraryW(L"dbghelp.dll");
   if (g_dbghelp == nullptr) return;
@@ -901,7 +954,8 @@ void asafe_write_uint_fd(int fd, std::uint64_t v) {
 void asafe_write_int_fd(int fd, std::int64_t v) {
   if (v < 0) {
     asafe_write_cstr_fd(fd, "-");
-    asafe_write_uint_fd(fd, static_cast<std::uint64_t>(-v));
+    // Negate in unsigned arithmetic: -INT64_MIN is signed overflow (UB).
+    asafe_write_uint_fd(fd, std::uint64_t{0} - static_cast<std::uint64_t>(v));
     return;
   }
   asafe_write_uint_fd(fd, static_cast<std::uint64_t>(v));
@@ -976,12 +1030,111 @@ void write_dladdr_block(int fd, void* const* frames, int n) {
   }
 }
 
-void write_report_tail(int fd, void* const* frames, int nframes) {
+// Raw return addresses: pure arithmetic + write(), async-signal-safe. This is
+// the part of the stack that is guaranteed to be on disk even if symbolization
+// below hangs. (main_slide= in the header turns these into file offsets.)
+void write_raw_frames_fd(int fd, void* const* frames, int n) {
+  asafe_write_cstr_fd(fd, "--- stack ---\n");
+  if (frames == nullptr || n <= 0) {
+    asafe_write_cstr_fd(fd, "  (backtrace unavailable)\n");
+    return;
+  }
+  for (int i = 0; i < n; ++i) {
+    asafe_write_cstr_fd(fd, "  #");
+    asafe_write_int_fd(fd, i);
+    asafe_write_cstr_fd(fd, " ");
+    asafe_write_hex_fd(fd, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(frames[i])));
+    asafe_write_cstr_fd(fd, "\n");
+  }
+}
+
+// dladdr, _dyld_* and (on macOS) backtrace_symbols_fd take loader / image-list
+// locks and are NOT async-signal-safe: a fault while the faulting thread (or
+// another one) holds such a lock (dlopen of a Vulkan ICD or Qt plugin, ...)
+// would deadlock the handler and, through the crash lock, every other crashing
+// thread. Everything before this point is already on disk; arm an alarm() so a
+// hang ends the process instead of wedging it.
+//
+// The SIGALRM handler only uses write() / signal() / raise() / _exit(). In the
+// fatal-signal path (sig > 0) it re-raises the original signal with the default
+// action so the OS crash reporter / core dump still happens; otherwise (e.g.
+// report_fatal) it _exit()s with kWatchdogExitCode.
+void symbolize_watchdog_handler(int) {
+  const int fd = g_watchdog_fd.load(std::memory_order_relaxed);
+  asafe_write_cstr_fd(fd, "\n(symbolization timed out; raw frames above are complete)\n");
+  const int sig = g_watchdog_sig.load(std::memory_order_relaxed);
+  if (sig > 0) {
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
+  }
+  ::_exit(kWatchdogExitCode);
+}
+
+struct SymbolizeWatchdog {
+  struct sigaction old_sa {};
+  sigset_t old_mask{};
+  unsigned old_alarm = 0;
+  bool mask_saved = false;
+  bool armed = false;
+};
+
+void watchdog_arm(SymbolizeWatchdog& w, int fd, int sig) {
+  w.armed = false;
+  const unsigned secs = g_symbolize_timeout_sec.load(std::memory_order_relaxed);
+  if (secs == 0) return;
+  g_watchdog_fd.store(fd, std::memory_order_relaxed);
+  g_watchdog_sig.store(sig, std::memory_order_relaxed);
+  struct sigaction sa {};
+  sa.sa_handler = symbolize_watchdog_handler;
+  sa.sa_flags = SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  if (::sigaction(SIGALRM, &sa, &w.old_sa) != 0) return;
+  // The alarm is process-directed; make sure at least this thread can take it.
+  sigset_t unblock;
+  sigemptyset(&unblock);
+  sigaddset(&unblock, SIGALRM);
+  w.mask_saved = ::pthread_sigmask(SIG_UNBLOCK, &unblock, &w.old_mask) == 0;
+  w.old_alarm = ::alarm(secs);
+  w.armed = true;
+}
+
+// Must run before any modal dialog / fork+waitpid so the alarm cannot kill a
+// process that is legitimately waiting on the user.
+void watchdog_disarm(SymbolizeWatchdog& w) {
+  if (!w.armed) return;
+  (void)::alarm(0);
+  (void)::sigaction(SIGALRM, &w.old_sa, nullptr);
+  if (w.mask_saved) {
+    (void)::pthread_sigmask(SIG_SETMASK, &w.old_mask, nullptr);
+  }
+  if (w.old_alarm > 0) {
+    (void)::alarm(w.old_alarm);  // give back whoever had an alarm pending
+  }
+  w.armed = false;
+}
+
+void write_symbolized_tail(int fd, int sig, void* const* frames, int n) {
+  SymbolizeWatchdog wd;
+  watchdog_arm(wd, fd, sig);
+  if (const CrashTestHook hook = g_symbolize_hook.load(std::memory_order_acquire)) {
+    hook();
+  }
+  asafe_write_cstr_fd(fd, "--- stack (symbolized) ---\n");
+  if (n > 0) {
+    ::backtrace_symbols_fd(frames, n, fd);
+  } else {
+    asafe_write_cstr_fd(fd, "  (backtrace unavailable)\n");
+  }
+  if (g_symbolize_in_handler) {
+    write_dladdr_block(fd, frames, n);
+  }
+  watchdog_disarm(wd);
+}
+
+void write_report_tail(int fd, int sig, void* const* frames, int nframes) {
   journal_write_text(emit_journal_fd, reinterpret_cast<void*>(static_cast<std::intptr_t>(fd)));
   log_ring_write_text(emit_journal_fd, reinterpret_cast<void*>(static_cast<std::intptr_t>(fd)));
-  if (g_symbolize_in_handler) {
-    write_dladdr_block(fd, frames, nframes);
-  }
+  write_symbolized_tail(fd, sig, frames, nframes);
 }
 
 void read_pc_sp(const void* uctx, std::uint64_t* pc, std::uint64_t* sp) {
@@ -1023,7 +1176,9 @@ void read_pc_sp(const void* uctx, std::uint64_t* pc, std::uint64_t* sp) {
 
 int open_crash_fd_for_write(bool* opened_here) {
   if (opened_here != nullptr) *opened_here = false;
-  if (g_crash_fd >= 0) return g_crash_fd;
+  // Load once: mark_clean_exit() may swap it to -1 concurrently.
+  const int shared_fd = g_crash_fd.load(std::memory_order_acquire);
+  if (shared_fd >= 0) return shared_fd;
   if (g_crash_path[0] == '\0') return -1;
   const int fd = ::open(g_crash_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (fd >= 0 && opened_here != nullptr) *opened_here = true;
@@ -1057,15 +1212,10 @@ void write_posix_signal_report(int fd, int sig, const siginfo_t* info, void* uct
   asafe_write_cstr_fd(fd, "\n");
   write_privacy_and_uptime_fd(fd);
   write_ctx_fd(fd);
-  asafe_write_cstr_fd(fd, "--- stack ---\n");
   void* frames[64] = {};
   const int n = ::backtrace(frames, 64);
-  if (n > 0) {
-    ::backtrace_symbols_fd(frames, n, fd);
-  } else {
-    asafe_write_cstr_fd(fd, "  (backtrace unavailable)\n");
-  }
-  write_report_tail(fd, frames, n);
+  write_raw_frames_fd(fd, frames, n);
+  write_report_tail(fd, sig, frames, n);
 }
 
 void write_posix_text_report(int fd, const char* kind, const char* detail,
@@ -1083,26 +1233,22 @@ void write_posix_text_report(int fd, const char* kind, const char* detail,
   }
   write_privacy_and_uptime_fd(fd);
   write_ctx_fd(fd);
-  asafe_write_cstr_fd(fd, "--- stack ---\n");
   void* frames[64] = {};
   const int n = ::backtrace(frames, 64);
-  if (n > 0) {
-    ::backtrace_symbols_fd(frames, n, fd);
-  } else {
-    asafe_write_cstr_fd(fd, "  (backtrace unavailable)\n");
-  }
-  write_report_tail(fd, frames, n);
+  write_raw_frames_fd(fd, frames, n);
+  write_report_tail(fd, 0, frames, n);
 }
 
 void open_session_crash_file() {
   format_timestamp(g_install_stamp, sizeof(g_install_stamp));
   std::snprintf(g_crash_path, sizeof(g_crash_path), "%s/crash-%s-%ld.txt", g_log_dir, g_install_stamp,
                 static_cast<long>(::getpid()));
-  g_crash_fd = ::open(g_crash_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-  if (g_crash_fd < 0) return;
-  asafe_write_bytes(g_crash_fd, kSessionStartLine, sizeof(kSessionStartLine) - 1);
-  const off_t pos = ::lseek(g_crash_fd, 0, SEEK_CUR);
+  const int fd = ::open(g_crash_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  if (fd < 0) return;
+  asafe_write_bytes(fd, kSessionStartLine, sizeof(kSessionStartLine) - 1);
+  const off_t pos = ::lseek(fd, 0, SEEK_CUR);
   g_header_only_size = pos >= 0 ? pos : static_cast<off_t>(sizeof(kSessionStartLine) - 1);
+  g_crash_fd.store(fd, std::memory_order_release);
 }
 
 void install_main_altstack() {
@@ -1175,9 +1321,10 @@ void termination_signal_handler(int sig) {
   if (g_sentinel_path_asafe[0] != '\0') {
     ::unlink(g_sentinel_path_asafe);
   }
-  if (g_crash_fd >= 0 && g_crash_path[0] != '\0') {
+  const int crash_fd = g_crash_fd.load(std::memory_order_acquire);
+  if (crash_fd >= 0 && g_crash_path[0] != '\0') {
     struct stat st {};
-    if (::fstat(g_crash_fd, &st) == 0 && st.st_size <= g_header_only_size) {
+    if (::fstat(crash_fd, &st) == 0 && st.st_size <= g_header_only_size) {
       ::unlink(g_crash_path);
     }
   }
@@ -1375,17 +1522,38 @@ LONG CALLBACK vectored_exception_handler(EXCEPTION_POINTERS* info) {
   if (info == nullptr || info->ExceptionRecord == nullptr) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
+  // Only EXCEPTION_STACK_OVERFLOW: the one case where the unhandled-exception
+  // filter may fault again, so a breadcrumb written here is the only record.
+  // Access violations are NOT handled here: drivers and runtimes probe memory
+  // and catch first-chance AVs routinely, and any "veh:" line makes the session
+  // file larger than its header, i.e. a false "previous session crashed".
   const DWORD code = info->ExceptionRecord->ExceptionCode;
-  if (code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_ACCESS_VIOLATION) {
+  if (code != EXCEPTION_STACK_OVERFLOW) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   if (g_reported_full.load(std::memory_order_acquire)) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
+  // Write once; the stack is nearly exhausted, so no vsnprintf / allocation:
+  // format the line by hand into a small buffer.
+  static std::atomic<bool> wrote_once{false};
+  if (wrote_once.exchange(true, std::memory_order_acq_rel)) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
   HANDLE file = crash_file_handle();
   if (file != INVALID_HANDLE_VALUE) {
-    write_win_fmt(file, "veh: code=0x%08lX address=%p\n", static_cast<unsigned long>(code),
-                  info->ExceptionRecord->ExceptionAddress);
+    constexpr char kHex[] = "0123456789abcdef";
+    char line[64];
+    std::size_t o = 0;
+    const char prefix[] = "veh: stack_overflow address=0x";
+    for (std::size_t i = 0; i + 1 < sizeof(prefix); ++i) line[o++] = prefix[i];
+    const auto addr = static_cast<unsigned long long>(
+        reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress));
+    for (int shift = 60; shift >= 0; shift -= 4) {
+      line[o++] = kHex[(addr >> shift) & 0xf];
+    }
+    line[o++] = '\n';
+    write_win_bytes(file, line, o);
     if (file != g_crash_file) {
       ::CloseHandle(file);
     }
@@ -1510,7 +1678,9 @@ void do_install() {
                        std::memory_order_release);
   g_checked_prev = true;
 
-  rotate_old_crashes();
+  // The stale session's report (if any) was just recorded in g_prev_crash_path;
+  // it is the file the next-launch UI shows and must survive rotation.
+  rotate_old_crashes(g_prev_crash_path);
   open_session_crash_file();
   build_install_header();
   write_sentinel_file();
@@ -1518,6 +1688,7 @@ void do_install() {
   std::set_terminate(terminate_handler);
 
 #if defined(_WIN32)
+  ensure_stack_guarantee();  // main (installing) thread; workers: install_thread_crash_stack()
   preload_dbghelp();
   ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
   ::SetUnhandledExceptionFilter(unhandled_exception_filter);
@@ -1560,7 +1731,14 @@ void install_crash_handlers() {
 }
 
 void install_thread_crash_stack() {
-#if !defined(_WIN32)
+#if defined(_WIN32)
+  // Windows has no alternate signal stack; instead reserve stack for the
+  // unhandled-exception filter on this thread (see ensure_stack_guarantee).
+  thread_local bool done = false;
+  if (done) return;
+  ensure_stack_guarantee();
+  done = true;
+#else
   alignas(16) thread_local char buf[64 * 1024];
   thread_local bool done = false;
   if (done) return;
@@ -1582,13 +1760,41 @@ void report_fatal(const char* kind, const char* detail) {
 #else
   handle_crash(kind != nullptr ? kind : "fatal", detail != nullptr ? detail : "", nullptr, true);
 #endif
-  release_crash_lock();
+  if (CrashTestHook hook = g_report_fatal_hook.load(std::memory_order_acquire)) {
+    hook();
+  }
   // report_fatal returns to the caller (e.g. Vulkan device lost keeps the app
   // alive). A later real crash is a new event and must get a full report, so
-  // do not leave the "already reported" marker set. Callers that abort() right
-  // after may produce a second (signal) report in the same file; acceptable.
+  // do not leave the "already reported" marker set. Clear it BEFORE releasing
+  // the lock: a thread that crashed while we held the lock acquires it the
+  // instant we release and must not see a stale "already reported" flag.
+  // Callers that abort() right after may produce a second (signal) report in
+  // the same file; acceptable.
   g_reported_full.store(false, std::memory_order_release);
+  release_crash_lock();
 }
+
+namespace testing {
+void set_report_fatal_hook(CrashTestHook hook) {
+  g_report_fatal_hook.store(hook, std::memory_order_release);
+}
+
+void set_symbolize_hook(CrashTestHook hook) {
+#if !defined(_WIN32)
+  g_symbolize_hook.store(hook, std::memory_order_release);
+#else
+  (void)hook;
+#endif
+}
+
+void set_symbolize_timeout_seconds(unsigned seconds) {
+#if !defined(_WIN32)
+  g_symbolize_timeout_sec.store(seconds, std::memory_order_release);
+#else
+  (void)seconds;
+#endif
+}
+}  // namespace testing
 
 void crash_set_context(CrashContextField field, const char* utf8) {
   const int i = static_cast<int>(field);
@@ -1604,15 +1810,28 @@ void mark_clean_exit() {
   sentinel_path(sent, sizeof(sent));
 #if defined(_WIN32)
   delete_path_utf8(sent);
-  if (g_crash_file != INVALID_HANDLE_VALUE) {
-    ::CloseHandle(g_crash_file);
-    g_crash_file = INVALID_HANDLE_VALUE;
+  // Same rule as POSIX: never close the shared handle under a crash handler.
+  if (try_acquire_crash_lock()) {
+    if (g_crash_file != INVALID_HANDLE_VALUE) {
+      const HANDLE h = g_crash_file;
+      g_crash_file = INVALID_HANDLE_VALUE;
+      ::CloseHandle(h);
+    }
+    release_crash_lock();
   }
 #else
   ::unlink(sent);
-  if (g_crash_fd >= 0) {
-    ::close(g_crash_fd);
-    g_crash_fd = -1;
+  // Detach the descriptor from the shared slot BEFORE closing it so a handler
+  // that loads it afterwards sees -1 and cannot write into a reused fd. A
+  // handler that already loaded it holds the crash lock; in that case a crash
+  // is being reported and the process is about to die, so just leave the fd
+  // open rather than close it under the handler.
+  if (try_acquire_crash_lock()) {
+    const int fd = g_crash_fd.exchange(-1, std::memory_order_acq_rel);
+    if (fd >= 0) {
+      ::close(fd);
+    }
+    release_crash_lock();
   }
 #endif
   delete_header_only_crash_file();

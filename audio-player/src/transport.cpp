@@ -17,6 +17,19 @@ bool Transport::initialize(const std::string& effects_directory, const std::stri
   if (!audio_.initialize(effects_directory, music_path)) {
     return false;
   }
+  reset_runtime_state();
+  return true;
+}
+
+bool Transport::reload_music(const std::string& effects_directory, const std::string& music_path) {
+  if (!audio_.reload_music(effects_directory, music_path)) {
+    return false;
+  }
+  reset_runtime_state();
+  return true;
+}
+
+void Transport::reset_runtime_state() {
   playing_ = false;
   committed_position_ = wds::common::Microseconds{0};
   filtered_audio_us_ = 0;
@@ -31,7 +44,6 @@ bool Transport::initialize(const std::string& effects_directory, const std::stri
   music_seek_target_ = wds::common::Microseconds{0};
   skip_stalled_recovery_once_ = false;
   recovery_.reset();
-  return true;
 }
 
 void Transport::shutdown() {

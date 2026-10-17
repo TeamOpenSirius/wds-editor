@@ -351,8 +351,6 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     chart.notes.push_back(note);
   }
 
-  mark_nontail_hold_eighths_authored(chart.notes);
-
   std::sort(chart.scroll_speed_points.begin(), chart.scroll_speed_points.end(),
             [](const auto& a, const auto& b) { return a.tick < b.tick; });
   for (size_t i = 1; i < chart.scroll_speed_points.size(); ++i) {
@@ -366,6 +364,10 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
   }
 
   normalize_timing_points(chart.timing);
+  // Official CSV has no BPM. Type 900 rows are the eighth positions; a tpq/2
+  // grid from the default BPM-60 clock would not match the file. Editable
+  // export still generates eighths in serialize_chart.
+  chart.keep_file_eighths = true;
   // Sync lines are derived the same way as editor charts.
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
   out_chart = std::move(chart);
@@ -446,7 +448,6 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
   std::vector<CsvRow> rows;
   rows.reserve(notes.size() + chart.scroll_speed_points.size());
   for (const auto& note : notes) {
-    if (is_suppressed_hold_eighth(note)) continue;
     rows.push_back(CsvRow{note.start_tick, false, &note, 1.0});
   }
   for (const auto& point : chart.scroll_speed_points) {

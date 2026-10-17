@@ -211,7 +211,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
               float violation_strength,
               const wds::audio::WaveformOverview* waveform,
               const wds::renderer::TextureInfo* spectrogram,
-              EditSpectrumMode spectrum_mode) const {
+              EditSpectrumMode spectrum_mode,
+              const wds::chart_editor::ChartDocument* doc) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, wds::interaction::theme::kEditCanvas, 0.0f, 0.86f);
   const bool drew_spectrogram = spectrum_mode == EditSpectrumMode::Spectrogram &&
@@ -319,7 +320,7 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const float view_ms_lo = viewport.scroll_ms();
     const float view_ms_hi = view_ms_lo + static_cast<float>(viewport.visible_ms());
     const auto merged =
-        merged_split_hide_ranges_ms(notes, timing, preview, view_ms_lo, view_ms_hi);
+        merged_split_hide_ranges_ms(notes, timing, preview, view_ms_lo, view_ms_hi, doc);
     float cursor = view_ms_lo;
     for (const auto& seg : merged) {
       if (seg.first > cursor) {
@@ -466,7 +467,8 @@ void ChartEditRenderer::paint_overlays(
     wds::interaction::UiPainter& painter, const EditViewport& viewport,
     const std::vector<wds::chart_editor::NotationNote>& notes,
     const std::unordered_set<int32_t>& selected,
-    const std::optional<wds::interaction::Rect>& marquee) const {
+    const std::optional<wds::interaction::Rect>& marquee,
+    const wds::chart_editor::ChartDocument* doc) const {
   using wds::chart_editor::NotationNote;
   const auto& b = viewport.bounds();
   const float note_h = viewport.note_height_px();
@@ -481,17 +483,35 @@ void ChartEditRenderer::paint_overlays(
   const wds::interaction::Color solo_outline = th::kEditSelection;
   const wds::interaction::Color solo_inner = th::kEditSelectionInner;
 
-  auto paired_head = [&](const NotationNote& hold) -> const NotationNote* {
-    for (const auto& n : notes) {
-      if (n.id != hold.id && wds::chart_editor::hold_head_pairs_with_body(n, hold)) return &n;
+  // Pairing only holds at the same start_tick, so both lookups examine just the equal
+  // start_tick range (first match in notes() order, identical to a full scan).
+  // `doc` (when given) must be the document whose notes() is `notes`.
+  thread_local std::vector<std::size_t> pair_scratch;
+  auto for_each_starting_at = [&](int32_t tick, auto&& fn) -> const NotationNote* {
+    if (doc != nullptr) {
+      doc->note_indices_starting_at(tick, pair_scratch);
+      for (const std::size_t i : pair_scratch) {
+        if (fn(notes[i])) return &notes[i];
+      }
+      return nullptr;
+    }
+    auto it = std::partition_point(notes.begin(), notes.end(), [tick](const NotationNote& n) {
+      return n.start_tick < tick;
+    });
+    for (; it != notes.end() && it->start_tick == tick; ++it) {
+      if (fn(*it)) return &*it;
     }
     return nullptr;
   };
+  auto paired_head = [&](const NotationNote& hold) -> const NotationNote* {
+    return for_each_starting_at(hold.start_tick, [&](const NotationNote& n) {
+      return n.id != hold.id && wds::chart_editor::hold_head_pairs_with_body(n, hold);
+    });
+  };
   auto paired_body = [&](const NotationNote& head) -> const NotationNote* {
-    for (const auto& n : notes) {
-      if (wds::chart_editor::hold_head_pairs_with_body(head, n)) return &n;
-    }
-    return nullptr;
+    return for_each_starting_at(head.start_tick, [&](const NotationNote& n) {
+      return wds::chart_editor::hold_head_pairs_with_body(head, n);
+    });
   };
 
   auto stroke_rect = [&](const wds::interaction::Rect& r, float thickness,
@@ -509,19 +529,18 @@ void ChartEditRenderer::paint_overlays(
     stroke_rect(box.inset(kBorder, kBorder), 1.0f, solo_inner);
   };
 
-  for (const auto& note : notes) {
-    if (!selected.count(note.id)) continue;
+  auto paint_selected = [&](const NotationNote& note) {
     // HoldEighth is derived and never selectable — skip any leaked selection ids.
-    if (note.note_type == NoteType::HoldEighth) continue;
-    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    if (note.note_type == NoteType::HoldEighth) return;
+    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
 
     // Mid-stars: selection box matches the tight square hit / draw size.
     if (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) {
       auto star = viewport.mid_star_screen_rect(note);
       star = {star.x - kPad, star.y - kPad, star.w + kPad * 2.0f, star.h + kPad * 2.0f};
-      if (star.bottom() < b.y || star.y > b.bottom()) continue;
+      if (star.bottom() < b.y || star.y > b.bottom()) return;
       paint_box(star, false);
-      continue;
+      return;
     }
 
     // Include nontail ribbons so selection spans the body, not a tap-sized head.
@@ -539,7 +558,7 @@ void ChartEditRenderer::paint_overlays(
         paired = selected.count(body->id) != 0;
         // When both are selected the body draws the full chain box; skip the
         // head-only box so outlines don't stack into one muddy frame.
-        if (paired) continue;
+        if (paired) return;
       }
     }
 
@@ -560,7 +579,7 @@ void ChartEditRenderer::paint_overlays(
         top = std::max(top, head_hi + kPad);
       }
     }
-    if (bottom < b.y || top > b.bottom() || bottom - top < 2.0f) continue;
+    if (bottom < b.y || top > b.bottom() || bottom - top < 2.0f) return;
 
     // Cover body span and (possibly wider) hold-tail lanes.
     int32_t end_lane = note.lane;
@@ -588,6 +607,33 @@ void ChartEditRenderer::paint_overlays(
       painter.fill_rect({box.x - 2.0f, jy - 1.5f, tick, 3.0f}, solo_outline, 0.0f, kZ + 0.002f);
       painter.fill_rect({box.right() - tick + 2.0f, jy - 1.5f, tick, 3.0f}, solo_outline, 0.0f,
                         kZ + 0.002f);
+    }
+  };
+
+  // Selected notes in notes() order. With a document and a small selection, resolve
+  // each id through the start-tick index instead of scanning every note.
+  if (doc != nullptr && !selected.empty() && selected.size() * 4 < notes.size()) {
+    thread_local std::vector<std::size_t> sel_idx;
+    thread_local std::vector<std::size_t> at_tick;
+    sel_idx.clear();
+    for (const int32_t id : selected) {
+      const auto found = doc->find_note(id);
+      if (!found) continue;
+      doc->note_indices_starting_at(found->start_tick, at_tick);
+      for (const std::size_t i : at_tick) {
+        if (notes[i].id == id) {
+          sel_idx.push_back(i);
+          break;
+        }
+      }
+    }
+    std::sort(sel_idx.begin(), sel_idx.end());
+    sel_idx.erase(std::unique(sel_idx.begin(), sel_idx.end()), sel_idx.end());
+    // paint_selected only touches pair_scratch, never sel_idx/at_tick.
+    for (const std::size_t i : sel_idx) paint_selected(notes[i]);
+  } else {
+    for (const auto& note : notes) {
+      if (selected.count(note.id)) paint_selected(note);
     }
   }
   if (marquee) {

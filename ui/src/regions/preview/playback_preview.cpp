@@ -4685,7 +4685,9 @@ void PlaybackPreviewView::sync_hold_loop(const PreviewSnapshot& snapshot, int64_
   std::vector<wds::audio::HoldInterval> intervals;
   collect_hold_intervals(snapshot, intervals);
   const int64_t clock_ms = clock_us / 1000;
-  hit_sfx_.set_hold_looping(wds::audio::hold_covers_ms(intervals, clock_ms));
+  // Not an unconditional set: a MIXTIME hold gate fires at mix time, ahead of this
+  // heard clock, and reconcile defers to it until the clock agrees.
+  hit_sfx_.reconcile_hold_looping(wds::audio::hold_covers_ms(intervals, clock_ms));
 
   if (!arm || !hit_sfx_.has_music()) {
     if (!arm) {

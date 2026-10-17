@@ -47,7 +47,12 @@ bool clamps_to_nonnegative_music(const NotationNote& note) noexcept {
   return true;
 }
 
-bool is_selectable_chart_note(const NotationNote& note) noexcept {
+// Single gate for every path that can put a note id into selected_ (click, toggle,
+// marquee, place/paste auto-select, set_selected, hold/chain selection). HoldEighth is
+// auto-generated from its hold: it is never selectable, deletable or copyable by the
+// user. Split-lane gimmicks stay selectable (gutter labels).
+bool is_user_selectable(const NotationNote& note) noexcept {
+  if (note.note_type == NoteType::HoldEighth) return false;
   return wds::chart_editor::is_playfield_selectable(note) ||
          wds::chart_editor::is_split_lane_gimmick(note.gimmick_type);
 }
@@ -177,6 +182,9 @@ std::vector<NotationNote> notes_with_hold_dependents(
     const wds::chart_editor::ChartDocument& doc, const std::vector<NotationNote>& roots) {
   std::vector<NotationNote> notes;
   for (const auto& note : roots) {
+    // A HoldEighth is never an edit root (it cannot be selected or hit); it only ever
+    // leaves with its hold, via the dependents below.
+    if (note.note_type == NoteType::HoldEighth) continue;
     append_unique_notes(notes, note);
     if (!wds::chart_editor::is_bindable_hold_body(note.note_type)) continue;
     for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, note)) {
@@ -205,6 +213,33 @@ std::vector<NotationNote> selected_with_hold_dependents(
   return notes_with_hold_dependents(doc, roots);
 }
 
+// Clipboard rule: a mid-star is only copyable together with its hold. Drops every
+// Sound / ScratchSound whose parent_hold_id is not the id of a hold body in `notes`
+// (unbound stars with parent_hold_id < 0 included), so a lone star copies nothing.
+void drop_orphan_mid_stars(std::vector<NotationNote>& notes) {
+  std::unordered_set<int32_t> hold_ids;
+  for (const auto& n : notes) {
+    if (wds::chart_editor::is_bindable_hold_body(n.note_type)) hold_ids.insert(n.id);
+  }
+  notes.erase(std::remove_if(notes.begin(), notes.end(),
+                             [&hold_ids](const NotationNote& n) {
+                               return is_visible_mid_star(n.note_type) &&
+                                      (n.parent_hold_id < 0 ||
+                                       hold_ids.count(n.parent_hold_id) == 0);
+                             }),
+              notes.end());
+}
+
+// Copy set: selected notes + stars of selected hold bodies. Never HoldEighth (derived,
+// regenerated on paste) and never a mid-star without its hold.
+std::vector<NotationNote> clipboard_notes_for_selection(
+    const wds::chart_editor::ChartDocument& doc, const std::unordered_set<int32_t>& selected) {
+  auto notes = selected_with_hold_dependents(doc, selected);
+  strip_clipboard_hold_eighths(notes);
+  drop_orphan_mid_stars(notes);
+  return notes;
+}
+
 bool apply_note_map(wds::chart_editor::ChartDocument& doc,
                     const std::unordered_map<int32_t, NotationNote>& notes) {
   return doc.apply_note_updates(to_note_updates(notes));
@@ -230,6 +265,131 @@ bool move_introduced_star_tick_conflicts(
   if (!wds::chart_editor::visible_star_tick_conflicts(current)) return false;
   return !wds::chart_editor::visible_star_tick_conflicts(
       notes_with_drag_originals(current, originals));
+}
+
+// ---- Derived HoldEighth maintenance shared by every edit path ----------------------
+// HoldEighth rows are purely derived from their hold. Any edit that changes a hold's
+// span/lanes/type, or adds / removes / moves a visible mid-star (which occupies its
+// tick, so no eighth is generated there), must refresh the affected holds' eighths in
+// the SAME undo step as the edit itself.
+
+// Hold ids affected by one note changing from `before` to `after` (either may be a
+// removed/added placeholder): the hold body itself, or the parent hold of a mid-star.
+// Both old and new parent ids are collected.
+void collect_affected_hold_ids(const NotationNote& before, const NotationNote& after,
+                               std::unordered_set<int32_t>& out) {
+  for (const NotationNote* n : {&before, &after}) {
+    if (wds::chart_editor::is_bindable_hold_body(n->note_type)) {
+      if (n->id >= 0) out.insert(n->id);
+    } else if (is_visible_mid_star(n->note_type) && n->parent_hold_id >= 0) {
+      out.insert(n->parent_hold_id);
+    }
+  }
+}
+
+// Drops mid-stars bound to one of `hold_ids` that no longer sit strictly inside the
+// hold's open tick range or on its lane span (vector mirror of prune_hold_mid_stars).
+void prune_stars_of_holds(std::vector<NotationNote>& notes,
+                          const std::unordered_set<int32_t>& hold_ids) {
+  std::unordered_map<int32_t, NotationNote> holds;
+  for (const auto& n : notes) {
+    if (hold_ids.count(n.id) != 0 && wds::chart_editor::is_bindable_hold_body(n.note_type)) {
+      holds.emplace(n.id, n);
+    }
+  }
+  if (holds.empty()) return;
+  notes.erase(std::remove_if(notes.begin(), notes.end(),
+                             [&](const NotationNote& n) {
+                               if (!is_visible_mid_star(n.note_type)) return false;
+                               const auto it = holds.find(n.parent_hold_id);
+                               if (it == holds.end()) return false;
+                               const NotationNote& h = it->second;
+                               if (n.lane != h.lane || n.width != h.width) return true;
+                               return n.start_tick <= h.start_tick || n.start_tick >= h.end_tick;
+                             }),
+              notes.end());
+}
+
+// Regenerates the eighths of every hold in `hold_ids` that still exists (as a bindable
+// body) in `notes`. Holds are resolved in one pass over the list; each recompute is
+// with_recomputed_hold_eighths, so the result equals the derived-state rule exactly.
+std::vector<NotationNote> with_refreshed_hold_eighths(std::vector<NotationNote> notes,
+                                                      const std::unordered_set<int32_t>& hold_ids,
+                                                      int32_t tpq) {
+  if (hold_ids.empty()) return notes;
+  std::vector<NotationNote> holds;
+  for (const auto& n : notes) {
+    if (hold_ids.count(n.id) != 0 && wds::chart_editor::is_bindable_hold_body(n.note_type)) {
+      holds.push_back(n);
+    }
+  }
+  for (const auto& hold : holds) {
+    notes = wds::chart_editor::with_recomputed_hold_eighths(std::move(notes), hold, tpq);
+  }
+  return notes;
+}
+
+// Appends the eighth refresh as the last step of `composite`. `state_before` must be the
+// exact note list the document holds after the composite's earlier steps ran. With
+// `prune_stars`, stars that fell outside their hold are dropped in the same step.
+void append_eighth_refresh(wds::chart_editor::CompositeCommand& composite,
+                           std::vector<NotationNote> state_before,
+                           const std::unordered_set<int32_t>& hold_ids, int32_t tpq,
+                           bool prune_stars = false) {
+  auto state_after = state_before;
+  if (prune_stars) prune_stars_of_holds(state_after, hold_ids);
+  state_after = with_refreshed_hold_eighths(std::move(state_after), hold_ids, tpq);
+  composite.add(std::make_unique<wds::chart_editor::SetNotesCommand>(
+      std::move(state_before), std::move(state_after), "Refresh hold eighths"));
+}
+
+// Adds a RemoveNotesCommand for `notes` to `composite`, followed (same undo step) by an
+// eighth refresh for every surviving hold that lost a mid-star.
+void append_remove_with_eighth_refresh(wds::chart_editor::CompositeCommand& composite,
+                                       const wds::chart_editor::ChartDocument& doc,
+                                       const std::vector<NotationNote>& notes,
+                                       const std::string& label) {
+  std::unordered_set<int32_t> removed_ids;
+  for (const auto& n : notes) removed_ids.insert(n.id);
+  std::unordered_set<int32_t> hold_ids;
+  for (const auto& n : notes) {
+    if (!is_visible_mid_star(n.note_type) || n.parent_hold_id < 0) continue;
+    if (removed_ids.count(n.parent_hold_id) != 0) continue;  // hold leaves too
+    hold_ids.insert(n.parent_hold_id);
+  }
+  composite.add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(notes, label));
+  if (hold_ids.empty()) return;
+  auto state = doc.notes();
+  state.erase(std::remove_if(state.begin(), state.end(),
+                             [&](const NotationNote& n) { return removed_ids.count(n.id) != 0; }),
+              state.end());
+  append_eighth_refresh(composite, std::move(state), hold_ids, doc.timing().ticks_per_quarter);
+}
+
+// Copy of `notes` with the `after` side of every change applied.
+std::vector<NotationNote> notes_with_changes(
+    const std::vector<NotationNote>& notes,
+    const std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair>& changes) {
+  auto out = notes;
+  for (auto& n : out) {
+    if (const auto it = changes.find(n.id); it != changes.end()) n = it->second.second;
+  }
+  return out;
+}
+
+// Visits every note that exists in `doc` and was created by an edit that started
+// when doc.next_note_id() was `old_next_id`. Every id allocator (add_note, add_notes,
+// plan_note_ids in set_notes) hands out ids >= next_note_id() and keeps all existing
+// ids below it, so "id not present before the edit" == "id in [old_next_id, next)".
+// Ids skipped by an explicit-id jump or by a rejected add simply do not resolve.
+// (Only valid for edits whose new notes are id-allocated, not re-added under an old id.)
+template <typename Fn>
+void for_each_note_allocated_since(const wds::chart_editor::ChartDocument& doc,
+                                   int32_t old_next_id, Fn&& fn) {
+  const int32_t new_next_id = doc.next_note_id();
+  for (int32_t id = std::max<int32_t>(old_next_id, 0); id < new_next_id; ++id) {
+    if (const auto note = doc.find_note(id)) fn(*note);
+  }
 }
 
 }  // namespace
@@ -263,16 +423,12 @@ uint64_t ChartEditPanel::visual_revision() const {
   h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().h * 4.0f)));
   h = mix_i32(h, viewport_.note_height_level());
 
-  uint64_t sel = static_cast<uint64_t>(selected_.size());
-  for (int32_t id : selected_) {
-    sel ^= static_cast<uint64_t>(static_cast<uint32_t>(id)) * 0x9e3779b97f4a7c15ull;
-  }
-  h = mix(h, sel);
-  uint64_t speed_sel = static_cast<uint64_t>(selected_speed_ticks_.size());
-  for (int32_t tick : selected_speed_ticks_) {
-    speed_sel ^= static_cast<uint64_t>(static_cast<uint32_t>(tick)) * 0x9e3779b97f4a7c15ull;
-  }
-  h = mix(h, speed_sel);
+  // O(1): TrackedIdSet bumps its generation on every mutation (insert / erase /
+  // clear / assignment), so selection edits can never leave the revision stale.
+  h = mix(h, selected_.generation());
+  h = mix(h, static_cast<uint64_t>(selected_.size()));
+  h = mix(h, selected_speed_ticks_.generation());
+  h = mix(h, static_cast<uint64_t>(selected_speed_ticks_.size()));
 
   h = mix(h, static_cast<uint64_t>(hover_cursor_));
   h = mix(h, ghost_.visible ? 1ull : 0ull);
@@ -374,7 +530,7 @@ void ChartEditPanel::set_selected(std::unordered_set<int32_t> ids) {
   selected_speed_ticks_.clear();
   for (const int32_t id : ids) {
     const auto note = engine_.document().find_note(id);
-    if (!note || !is_selectable_chart_note(*note)) continue;
+    if (!note || !is_user_selectable(*note)) continue;
     selected_.insert(id);
   }
   sync_hold_sel_focus_to_selection();
@@ -651,10 +807,25 @@ void ChartEditPanel::apply_placement_lane_width(wds::interaction::Vec2 point, in
   sync_viewport();
   if (split_width_follow_) {
     const int32_t tick = viewport_.tick_at(point.y);
-    std::vector<int32_t> mids;
-    std::vector<int32_t> one;
+    auto& mids = split_mids_scratch_;
+    auto& one = split_one_scratch_;
+    mids.clear();
     bool any = false;
-    for (const auto& note : engine_.document().notes()) {
+    // notes() is sorted by start_tick: only splits with start <= tick can cover it,
+    // and none starting more than split_span before it can reach it. Iteration
+    // order inside the window matches the old full scan.
+    const auto& all_notes = engine_.document().notes();
+    const NotationNote* const first = all_notes.data();
+    const NotationNote* const last = first + all_notes.size();
+    const int64_t split_span = note_spans().split_span;
+    const NotationNote* const hi = std::partition_point(
+        first, last, [tick](const NotationNote& n) { return n.start_tick <= tick; });
+    const NotationNote* const lo =
+        std::partition_point(first, hi, [tick, split_span](const NotationNote& n) {
+          return static_cast<int64_t>(n.start_tick) + split_span < tick;
+        });
+    for (const NotationNote* it = lo; it != hi; ++it) {
+      const NotationNote& note = *it;
       if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
       const int32_t start = note.start_tick;
       const int32_t end = std::max(start, note.end_tick);
@@ -712,9 +883,60 @@ wds::interaction::SwipeDirection ChartEditPanel::update_place_swipe(
                              wds::interaction::kEditorSwipeMinDistancePx);
 }
 
+const ChartEditPanel::NoteSpanCache& ChartEditPanel::note_spans() const {
+  const auto& doc = engine_.document();
+  const auto& notes = doc.notes();
+  NoteSpanCache& cache = note_span_cache_;
+  if (cache.valid && cache.doc == &doc && cache.generation == doc.content_generation() &&
+      cache.note_count == notes.size()) {
+    return cache;
+  }
+  cache = NoteSpanCache{};
+  cache.doc = &doc;
+  cache.generation = doc.content_generation();
+  cache.note_count = notes.size();
+  for (const auto& note : notes) {
+    const int64_t span = std::max<int64_t>(
+        0, static_cast<int64_t>(note.end_tick) - static_cast<int64_t>(note.start_tick));
+    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) {
+      cache.split_span = std::max(cache.split_span, span);
+    } else if (note.note_type != NoteType::HoldEighth && !is_visible_mid_star(note.note_type)) {
+      cache.hit_span = std::max(cache.hit_span, span);
+    }
+    if (wds::chart_editor::is_hold_chain_body(note.note_type)) {
+      cache.chain_span = std::max(cache.chain_span, span);
+    }
+  }
+  cache.valid = true;
+  return cache;
+}
+
+std::pair<const NotationNote*, const NotationNote*> ChartEditPanel::notes_near_y(
+    float y, float reach, int64_t max_span_ticks) const {
+  const auto& notes = engine_.document().notes();
+  const NotationNote* const first = notes.data();
+  const NotationNote* const last = first + notes.size();
+  // y_at() never increases with the tick and notes() is sorted by start_tick, so
+  // both predicates below are monotone (true prefix, then false).
+  // Past `hi`: even the note's start sits more than `reach` above the pointer.
+  const NotationNote* const hi =
+      std::partition_point(first, last, [this, y, reach](const NotationNote& n) {
+        return viewport_.y_at(n.start_tick) + reach >= y;
+      });
+  // Before `lo`: even the longest hold starting there ends more than `reach` below it.
+  const NotationNote* const lo =
+      std::partition_point(first, hi, [this, y, reach, max_span_ticks](const NotationNote& n) {
+        const int64_t far_tick = std::min<int64_t>(
+            static_cast<int64_t>(n.start_tick) + max_span_ticks,
+            std::numeric_limits<int32_t>::max());
+        return viewport_.y_at(static_cast<int32_t>(far_tick)) - reach > y;
+      });
+  return {lo, hi};
+}
+
 std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2 point) const {
   sync_viewport();
-  std::optional<NotationNote> best;
+  const NotationNote* best = nullptr;
   float best_dist = 1e9f;
   int best_priority = 0;  // higher wins ties (prefer JumpScratch end / head over body)
   int64_t best_start = 0;
@@ -730,7 +952,7 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     if (!better && std::abs(dist - best_dist) <= 0.5f) {
       if (priority > best_priority) {
         better = true;
-      } else if (priority == best_priority && best.has_value()) {
+      } else if (priority == best_priority && best != nullptr) {
         // Same geometry priority: prefer the note that draws visually on top.
         better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
       }
@@ -740,10 +962,18 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     best_priority = priority;
     best_start = start;
     best_type = type;
-    best = note;
+    best = &note;
   };
 
-  for (const auto& note : engine_.document().notes()) {
+  // Only notes whose time span can reach the pointer's y (±hit padding / star
+  // half-size) are scanned, in the same notes() order as the old full scan so
+  // distance / priority / visual-order tie-breaks resolve identically. The +1px
+  // covers float rounding in the star rect.
+  const float pad = viewport_.note_height_px() * 0.55f;
+  const float reach = std::max(pad, viewport_.mid_star_size_px() * 0.5f) + 1.0f;
+  const auto window = notes_near_y(point.y, reach, note_spans().hit_span);
+  for (const NotationNote* it = window.first; it != window.second; ++it) {
+    const NotationNote& note = *it;
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     if (note.note_type == NoteType::HoldEighth) continue;
     if (!viewport_.lane_span_visible(note.lane, note.width)) {
@@ -766,7 +996,6 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     const float y0 = viewport_.y_at(note.start_tick);
     const float y1 =
         note.end_tick > note.start_tick ? viewport_.y_at(note.end_tick) : y0;
-    const float pad = viewport_.note_height_px() * 0.55f;
     const float top = std::min(y0, y1) - pad;
     const float bottom = std::max(y0, y1) + pad;
     if (point.y < top || point.y > bottom) continue;
@@ -825,7 +1054,8 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     }
     consider(dist, priority, note);
   }
-  return best;
+  if (best == nullptr) return std::nullopt;
+  return *best;
 }
 
 float ChartEditPanel::width_edge_px(const NotationNote& note) const {
@@ -924,7 +1154,11 @@ void ChartEditPanel::update_hover_cursor(wds::interaction::Vec2 point) {
     set_hover_cursor(CursorKind::ResizeHorizontal);
     return;
   }
-  for (const auto& note : engine_.document().notes()) {
+  // Chain-body end caps only matter within the cap padding of the pointer's y.
+  const float cap_pad = viewport_.note_height_px() * 0.55f;
+  const auto cap_window = notes_near_y(point.y, cap_pad + 1.0f, note_spans().chain_span);
+  for (const NotationNote* it = cap_window.first; it != cap_window.second; ++it) {
+    const NotationNote& note = *it;
     if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
     if (!near_scratch_end_cap(note, point.y)) continue;
     if (near_scratch_end_left(note, point.x) || near_scratch_end_right(note, point.x)) {
@@ -978,7 +1212,8 @@ void ChartEditPanel::update_split_label_hover(wds::interaction::Vec2 point) {
   if (mode_ == Mode::DragSplitEdge) return;
   if (has_modal_popup()) return;
   if (!left_gutter_.contains(point)) return;
-  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes(),
+                         &engine_.document());
   for (const auto& hit : hits) {
     if (!split_label_hot_bounds(hit).contains(point)) continue;
     hovered_split_note_id_ = hit.note_id;
@@ -1000,7 +1235,8 @@ bool ChartEditPanel::active_split_highlight_is_end() const noexcept {
 std::optional<ChartEditPanel::SplitHoverHint> ChartEditPanel::active_split_hover() const {
   const int32_t note_id = active_split_highlight_id();
   if (note_id < 0) return std::nullopt;
-  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes(),
+                         &engine_.document());
   const bool highlight_is_end = active_split_highlight_is_end();
   const GutterLabelHit* active_hit = nullptr;
   for (const auto& hit : hits) {
@@ -1029,7 +1265,8 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
 
   if (left_gutter_.contains(point)) {
     if (hovered_split_note_id_ >= 0) return;  // hovered label owns the gutter
-    const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+    const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes(),
+                         &engine_.document());
     for (const auto& hit : hits) {
       if (split_label_hot_bounds(hit).contains(point)) return;  // existing label → edit, no add ghost
     }
@@ -1301,20 +1538,16 @@ void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
   if (wds::chart_editor::note_intersects_negative_music_time(note, engine_.document().timing())) {
     return;
   }
-  const auto before_ids = [&] {
-    std::unordered_set<int32_t> ids;
-    for (const auto& n : engine_.document().notes()) ids.insert(n.id);
-    return ids;
-  }();
+  const int32_t first_new_id = engine_.document().next_note_id();
   if (!engine_.execute_command(
           std::make_unique<wds::chart_editor::AddNotesCommand>(std::vector<NotationNote>{note},
                                                               "Place note"))) {
     return;
   }
   selected_.clear();
-  for (const auto& n : engine_.document().notes()) {
-    if (!before_ids.count(n.id)) selected_.insert(n.id);
-  }
+  for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
+    if (is_user_selectable(n)) selected_.insert(n.id);
+  });
   clear_hold_sel_focus();
 }
 
@@ -1559,11 +1792,17 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
   sync_viewport();
   std::optional<NotationNote> best;
   float best_dist = 1e9f;
-  for (const auto& note : engine_.document().notes()) {
+  // Only selected notes can qualify, so visit the selection (hash lookups) instead of
+  // every note. The selection set iterates in arbitrary order; the old scan took the
+  // first minimum in notes() order (start_tick, id), so ties on distance are broken
+  // by that same order explicitly.
+  for (const int32_t selected_id : selected_) {
+    const auto found = engine_.document().find_note(selected_id);
+    if (!found) continue;
+    const NotationNote& note = *found;
     if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
     if (wds::chart_editor::is_scratch_hold_body(note.note_type) != scratch_family) continue;
     if (note.end_tick <= note.start_tick) continue;
-    if (!selected_.count(note.id)) continue;
     // Only the chain terminal (last JumpScratch) can be extended.
     if (wds::chart_editor::chained_next_scratch_hold(engine_.document(), note)) continue;
     if (!near_scratch_end_cap(note, point.y)) continue;
@@ -1578,7 +1817,10 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
     const float x1 = x0 + viewport_.lane_width(span.width);
     if (point.x < x0 - slop || point.x > x1 + slop) continue;
     const float dist = std::abs(point.y - viewport_.y_at(note.end_tick));
-    if (dist < best_dist) {
+    const bool earlier_in_notes_order =
+        best && (note.start_tick < best->start_tick ||
+                 (note.start_tick == best->start_tick && note.id < best->id));
+    if (dist < best_dist || (best && dist == best_dist && earlier_in_notes_order)) {
       best_dist = dist;
       best = note;
     }
@@ -1781,7 +2023,7 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
         if (body && !wds::chart_editor::is_scratch_hold_body(body->note_type)) body.reset();
       }
     } else {
-      if (wds::chart_editor::is_hold_with_tail(note->note_type) &&
+      if (wds::chart_editor::is_bindable_hold_body(note->note_type) &&
           !wds::chart_editor::is_scratch_hold_body(note->note_type)) {
         body = *note;
       } else if (wds::chart_editor::is_hold_head_note(*note)) {
@@ -1862,9 +2104,11 @@ void ChartEditPanel::commit_hold_chain_prev_cover() {
     n.gimmick_type = hold_chain_prev_body_.gimmick_type;
     break;
   }
-  auto after = engine_.document().notes();
-  engine_.execute_command(
-      std::make_unique<wds::chart_editor::SetNotesCommand>(before, after, "Adjust hold end"));
+  // The cover change can alter the body's lanes: refresh its eighths in the same step.
+  auto after = with_refreshed_hold_eighths(engine_.document().notes(), {hold_chain_prev_id_},
+                                           engine_.document().timing().ticks_per_quarter);
+  engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+      before, std::move(after), "Adjust hold end"));
 }
 
 void ChartEditPanel::cancel_placement() {
@@ -1933,17 +2177,13 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
       update_ghost(pointer_);
       return;
     }
-    const auto before_ids = [&] {
-      std::unordered_set<int32_t> ids;
-      for (const auto& n : engine_.document().notes()) ids.insert(n.id);
-      return ids;
-    }();
+    const int32_t first_new_id = engine_.document().next_note_id();
     engine_.execute_command(std::make_unique<wds::chart_editor::AddNotesCommand>(
         std::vector<NotationNote>{flat}, hold_scratch_ ? "Place flick" : "Place note"));
     selected_.clear();
-    for (const auto& n : engine_.document().notes()) {
-      if (!before_ids.count(n.id)) selected_.insert(n.id);
-    }
+    for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
+      if (is_user_selectable(n)) selected_.insert(n.id);
+    });
     mode_ = Mode::Idle;
     hold_stars_.clear();
     clear_hold_chain_state();
@@ -1973,6 +2213,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // Auto head: first segment of a chain, or a hold that disconnects on place.
   std::vector<NotationNote> to_add;
   int32_t next_id = engine_.document().next_note_id();
+  const int32_t first_new_id = next_id;
   if (!chain_link) {
     if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), hold_draft_)) {
       head->id = next_id++;
@@ -2021,7 +2262,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   {
     std::optional<NotationNote> new_hold;
     for (const auto& n : after) {
-      if (n.id == hold_draft_.id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
+      if (n.id == hold_draft_.id && wds::chart_editor::is_bindable_hold_body(n.note_type)) {
         new_hold = n;
         break;
       }
@@ -2052,13 +2293,19 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
 
   // Identify the hold just added by start tick + type (ids assigned on insert).
   std::optional<NotationNote> placed;
-  for (auto it = engine_.document().notes().rbegin(); it != engine_.document().notes().rend();
-       ++it) {
-    if (!wds::chart_editor::is_hold_with_tail(it->note_type)) continue;
-    if (it->start_tick != hold_draft_.start_tick) continue;
-    if (it->lane != hold_draft_.lane || it->width != hold_draft_.width) continue;
-    placed = *it;
-    break;
+  {
+    // Last match in notes() order among the notes starting at the draft's tick
+    // (ascending indices, so walk them backwards).
+    const auto& doc_notes = engine_.document().notes();
+    auto& starting = note_index_scratch_;
+    engine_.document().note_indices_starting_at(hold_draft_.start_tick, starting);
+    for (auto it = starting.rbegin(); it != starting.rend(); ++it) {
+      const NotationNote& n = doc_notes[*it];
+      if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
+      if (n.lane != hold_draft_.lane || n.width != hold_draft_.width) continue;
+      placed = n;
+      break;
+    }
   }
   if (chain_link) {
     if (placed) hold_chain_ids_.insert(placed->id);
@@ -2070,18 +2317,17 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   engine_.rebuild_snapshot();
   // Select the new body and auto head as separate notes. Pairing is exact-span
   // only and must not hide a shortened auto head.
-  std::unordered_set<int32_t> before_ids;
-  for (const auto& n : before) before_ids.insert(n.id);
   clear_hold_sel_focus();
   selected_.clear();
   for (const int32_t id : hold_chain_ids_) selected_.insert(id);
-  for (const auto& n : engine_.document().notes()) {
-    if (before_ids.count(n.id)) continue;
+  // New head / body / mid-stars / eighths all carry ids >= first_new_id (ids taken
+  // from the document's allocator before the edit); `before` holds only older ids.
+  for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
     if (wds::chart_editor::is_hold_head_note(n) ||
         wds::chart_editor::is_hold_with_tail(n.note_type)) {
       selected_.insert(n.id);
     }
-  }
+  });
 
   if (chain_next && placed) {
     hold_chain_prev_id_ = placed->id;
@@ -2186,6 +2432,25 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
   update_ghost(event.position);
 }
 
+std::pair<float, float> ChartEditPanel::marquee_track_x_span(float x) const {
+  sync_viewport();
+  // Same horizontal band as the marquee: split column → playfield lanes →
+  // optional speed column (BPM / measure gutters stay outside).
+  const float x_min = left_gutter_.x;
+  const float x_max = speed_gutter_.w > 0.5f ? speed_gutter_.right() : playfield_.right();
+  x = std::clamp(x, x_min, x_max);
+
+  if (x < left_gutter_.right()) {
+    return {left_gutter_.x, left_gutter_.right()};
+  }
+  if (speed_gutter_.w > 0.5f && x >= speed_gutter_.x) {
+    return {speed_gutter_.x, speed_gutter_.right()};
+  }
+  const int32_t lane = viewport_.lane_at(x, 1);
+  const float left = viewport_.x_at(lane);
+  return {left, left + viewport_.lane_width(1)};
+}
+
 wds::interaction::Rect ChartEditPanel::marquee_screen_rect(wds::interaction::Vec2 end) const {
   const int32_t t0 = marquee_start_tick_;
   const int32_t t1 = viewport_.tick_at(end.y);
@@ -2195,10 +2460,13 @@ wds::interaction::Rect ChartEditPanel::marquee_screen_rect(wds::interaction::Vec
   // when the anchor tick was scrolled out of view.
   const float y_top = viewport_.y_at(t_hi);
   const float y_bot = viewport_.y_at(t_lo);
-  const float x_left = left_gutter_.x;
-  const float x_right = speed_gutter_.w > 0.5f ? speed_gutter_.right() : playfield_.right();
-  const float x0 = std::clamp(std::min(marquee_start_x_, end.x), x_left, x_right);
-  const float x1 = std::clamp(std::max(marquee_start_x_, end.x), x_left, x_right);
+  // Horizontal: expand each end to the full track under the pointer (same idea
+  // as snapping Y to subdivision lines), then take the union so every crossed
+  // track — split gutter, playfield lanes, speed gutter — is covered.
+  const auto a = marquee_track_x_span(marquee_start_x_);
+  const auto b = marquee_track_x_span(end.x);
+  const float x0 = std::min(a.first, b.first);
+  const float x1 = std::max(a.second, b.second);
   return {x0, y_top, std::max(0.0f, x1 - x0), std::max(0.0f, y_bot - y_top)};
 }
 
@@ -2225,29 +2493,54 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
   if (play_x1 > play_x0 + 0.5f) {
     const int32_t l0 = viewport_.lane_at(play_x0, 1);
     const int32_t l1 = viewport_.lane_at(std::max(play_x0, play_x1 - 0.01f), 1);
-    for (const auto& note : engine_.document().notes()) {
+    // Selection is by START tick only (a hold that starts before the box is not
+    // picked even if its body overlaps), so the start tree answers it exactly.
+    const auto& doc_notes = engine_.document().notes();
+    auto& starting = note_index_scratch_;
+    engine_.document().note_indices_starting_in(std::min(t0, t1), std::max(t0, t1), starting);
+    for (const std::size_t index : starting) {
+      const NotationNote& note = doc_notes[index];
       if (!wds::chart_editor::is_playfield_selectable(note)) continue;
-      if (note.start_tick >= std::min(t0, t1) && note.start_tick <= std::max(t0, t1) &&
-          note.lane <= std::max(l0, l1) && note.end_lane() >= std::min(l0, l1)) {
+      if (note.lane <= std::max(l0, l1) && note.end_lane() >= std::min(l0, l1)) {
         selected_.insert(note.id);
       }
     }
   }
 
   const auto split_hits =
-      build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+      build_split_label_hits(viewport_, left_gutter_, engine_.document().notes(),
+                         &engine_.document());
   const bool box_over_split_gutter =
       box.x < left_gutter_.right() && box.right() > left_gutter_.x;
   for (const auto& hit : split_hits) {
     if (rects_overlap(hit.bounds, box)) selected_.insert(hit.note_id);
   }
   if (box_over_split_gutter) {
-    for (const auto& note : engine_.document().notes()) {
-      if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-      const int32_t end_tick = std::max(note.start_tick, note.end_tick);
-      if ((note.start_tick >= std::min(t0, t1) && note.start_tick <= std::max(t0, t1)) ||
-          (end_tick >= std::min(t0, t1) && end_tick <= std::max(t0, t1))) {
-        selected_.insert(note.id);
+    const auto& doc = engine_.document();
+    const int32_t lo_tick = std::min(t0, t1);
+    const int32_t hi_tick = std::max(t0, t1);
+    // A split is picked when its start OR its end (max(start, end_tick)) is inside
+    // [lo_tick, hi_tick]. Its start is at most max_split_span_ms before its end, and
+    // ms is monotone in ticks, so every candidate starts in
+    // [ms(lo) - max_split_span, ms(hi)]; 1 ms of slack on both sides, then an exact
+    // tick test below. If the cached span is stale (not expected: mutators refresh
+    // it), cover the whole timeline from the left so the result stays exact.
+    const auto& index = doc.index();
+    const int64_t window_hi = wds::chart_editor::tick_to_milliseconds(hi_tick, doc.timing()) + 1;
+    const int64_t window_lo =
+        index.hold_span_stale()
+            ? std::numeric_limits<int64_t>::min()
+            : wds::chart_editor::tick_to_milliseconds(lo_tick, doc.timing()) -
+                  index.max_split_span_ms() - 1;
+    auto& split_ids = note_id_scratch_;
+    index.query_split_lanes_in_range(window_lo, window_hi, split_ids);
+    for (const int32_t id : split_ids) {
+      const auto note = doc.find_note(id);
+      if (!note || !wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) continue;
+      const int32_t end_tick = std::max(note->start_tick, note->end_tick);
+      if ((note->start_tick >= lo_tick && note->start_tick <= hi_tick) ||
+          (end_tick >= lo_tick && end_tick <= hi_tick)) {
+        selected_.insert(note->id);
       }
     }
   }
@@ -2605,7 +2898,7 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   int32_t new_start = -1;
   for (const auto& [id, orig] : drag_originals_) {
     NotationNote n = orig;
-    if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
+    if (!wds::chart_editor::is_bindable_hold_body(n.note_type)) continue;
     // Only the anchor body changes for non-JumpScratch time edges (avoid collapsing a
     // multi-selected ScratchHold chain to one shared tick).
     if (wds::chart_editor::is_hold_chain_body(n.note_type) && id != anchor_note_id_) {
@@ -2640,7 +2933,7 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   engine_.rebuild_snapshot();
 }
 
-void ChartEditPanel::finish_move(bool refresh_eighths) {
+void ChartEditPanel::finish_move(bool refresh_eighths, bool prune_stars) {
   if (move_introduced_star_tick_conflicts(engine_.document().notes(), drag_originals_)) {
     std::vector<wds::chart_editor::NoteUpdate> revert;
     revert.reserve(drag_originals_.size());
@@ -2669,7 +2962,10 @@ void ChartEditPanel::finish_move(bool refresh_eighths) {
     return;
   }
   std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
-  std::vector<int32_t> eighth_hold_ids;
+  // Holds whose eighths must be regenerated: moved/resized hold bodies and the parent
+  // holds of moved mid-stars (a star occupies its tick, so moving it makes the eighth
+  // reappear at the old tick and vanish at the new one).
+  std::unordered_set<int32_t> eighth_hold_ids;
   for (const auto& [id, before] : drag_originals_) {
     auto cur = engine_.document().find_note(id);
     if (!cur) continue;
@@ -2678,14 +2974,21 @@ void ChartEditPanel::finish_move(bool refresh_eighths) {
         cur->scratch_length != before.scratch_length ||
         cur->gimmick_type != before.gimmick_type) {
       changes[id] = {before, *cur};
-      if ((wds::chart_editor::is_hold_with_tail(before.note_type) ||
-           wds::chart_editor::is_hold_with_tail(cur->note_type)) &&
-          (cur->start_tick != before.start_tick || cur->lane != before.lane ||
-           cur->end_tick != before.end_tick || cur->width != before.width)) {
-        eighth_hold_ids.push_back(id);
+      if (refresh_eighths && (cur->start_tick != before.start_tick || cur->lane != before.lane ||
+                              cur->end_tick != before.end_tick || cur->width != before.width)) {
+        collect_affected_hold_ids(before, *cur, eighth_hold_ids);
       }
     }
   }
+  if (prune_stars) {
+    for (const auto& [id, before] : drag_originals_) {
+      if (wds::chart_editor::is_bindable_hold_body(before.note_type)) eighth_hold_ids.insert(id);
+    }
+  }
+  // Document state right now (post-drag). The eighth refresh runs on top of it, as the
+  // last step of the same composite that re-applies the drag.
+  std::vector<NotationNote> moved_state;
+  if (!eighth_hold_ids.empty()) moved_state = engine_.document().notes();
   auto speed_current = engine_.document().scroll_speed_points();
   const bool speed_changed =
       !drag_speed_selected_ticks_.empty() && speed_current != drag_speed_original_points_;
@@ -2715,18 +3018,29 @@ void ChartEditPanel::finish_move(bool refresh_eighths) {
   if (speed_changed) {
     engine_.document().set_scroll_speed_points(drag_speed_original_points_);
   }
-  if (!changes.empty() && speed_changed) {
-    auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Move notes");
+  const bool refresh = !eighth_hold_ids.empty();
+  if ((!changes.empty() && speed_changed) || refresh) {
+    const bool has_notes = !changes.empty() || refresh;
+    auto composite = std::make_unique<wds::chart_editor::CompositeCommand>(
+        has_notes ? "Move notes" : "Move scroll speed");
     bool introduces_extended = false;
     for (const auto& [id, pair] : changes) {
       introduces_extended =
           introduces_extended || wds::chart_editor::note_requires_sirius_extended(pair.second);
     }
-    introduces_extended = introduces_extended || !speed_current.empty();
-    composite->add(
-        std::make_unique<wds::chart_editor::UpdateNotesCommand>(changes, "Move notes"));
-    composite->add(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
-        drag_speed_original_points_, std::move(speed_current), "Move scroll speed"));
+    if (speed_changed) introduces_extended = introduces_extended || !speed_current.empty();
+    if (!changes.empty()) {
+      composite->add(
+          std::make_unique<wds::chart_editor::UpdateNotesCommand>(changes, "Move notes"));
+    }
+    if (speed_changed) {
+      composite->add(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
+          drag_speed_original_points_, std::move(speed_current), "Move scroll speed"));
+    }
+    if (refresh) {
+      append_eighth_refresh(*composite, std::move(moved_state), eighth_hold_ids,
+                            engine_.document().timing().ticks_per_quarter, prune_stars);
+    }
     execute_maybe_extended(std::move(composite), introduces_extended, "Move notes");
   } else if (!changes.empty()) {
     commit_updates(changes, "Move notes");
@@ -2735,24 +3049,6 @@ void ChartEditPanel::finish_move(bool refresh_eighths) {
         std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
             drag_speed_original_points_, std::move(speed_current), "Move scroll speed"),
         true, "Move scroll speed");
-  }
-  if (refresh_eighths && !eighth_hold_ids.empty()) {
-    const auto before = engine_.document().notes();
-    auto after = before;
-    const int32_t tpq = engine_.document().timing().ticks_per_quarter;
-    for (const int32_t id : eighth_hold_ids) {
-      std::optional<NotationNote> body;
-      for (const auto& n : after) {
-        if (n.id == id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
-          body = n;
-          break;
-        }
-      }
-      if (!body) continue;
-      after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), *body, tpq);
-    }
-    engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-        before, std::move(after), "Refresh hold eighths"));
   }
   drag_originals_.clear();
   drag_speed_original_points_.clear();
@@ -2781,38 +3077,11 @@ void ChartEditPanel::finish_resize() {
 }
 
 void ChartEditPanel::finish_hold_adjust() {
-  // Include chain neighbors that may have been hinged but were not selected.
-  std::vector<int32_t> hold_ids;
-  for (const auto& [id, before] : drag_originals_) {
-    if (wds::chart_editor::is_hold_with_tail(before.note_type)) hold_ids.push_back(id);
-  }
   resize_chain_peer_id_ = -1;
   resize_chain_next_id_ = -1;
-  finish_move(false);
-  if (!hold_ids.empty()) {
-    const auto before = engine_.document().notes();
-    for (const int32_t id : hold_ids) {
-      auto body = engine_.document().find_note(id);
-      if (!body || !wds::chart_editor::is_hold_with_tail(body->note_type)) continue;
-      wds::chart_editor::prune_hold_mid_stars(engine_.document(), *body);
-    }
-    auto after = engine_.document().notes();
-    const int32_t tpq = engine_.document().timing().ticks_per_quarter;
-    for (const int32_t id : hold_ids) {
-      std::optional<NotationNote> body;
-      for (const auto& n : after) {
-        if (n.id == id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
-          body = n;
-          break;
-        }
-      }
-      if (!body) continue;
-      after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), *body, tpq);
-    }
-    // prune_hold_mid_stars mutated outside history — fold its result + eighths together.
-    engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-        before, std::move(after), "Adjust hold eighths"));
-  }
+  // Move + star prune + eighth regeneration for every hold in drag_originals_ (chain
+  // neighbours included) commit as ONE history step.
+  finish_move(true, true);
   engine_.rebuild_snapshot();
 }
 
@@ -2835,6 +3104,32 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
   }
   if (changes.empty() && planned.removals.empty()) return false;
 
+  // Simulate the state after the update + removal steps, then regenerate eighths for
+  // every converted body that is (or becomes) a hold, tailed or nontail. The result is
+  // appended as a final SetNotesCommand of the same composite, so convert + eighth
+  // refresh undo as one step.
+  const int32_t tpq = engine_.document().timing().ticks_per_quarter;
+  const auto sim_before = [&] {
+    auto sim = engine_.document().notes();
+    std::unordered_set<int32_t> removed_ids;
+    for (const auto& removed : planned.removals) removed_ids.insert(removed.id);
+    sim.erase(std::remove_if(sim.begin(), sim.end(),
+                             [&](const NotationNote& n) { return removed_ids.count(n.id) != 0; }),
+              sim.end());
+    for (auto& n : sim) {
+      if (auto it = changes.find(n.id); it != changes.end()) n = it->second.second;
+    }
+    return sim;
+  }();
+  auto sim_after = sim_before;
+  bool refresh_eighths = false;
+  for (const auto& [id, pair] : changes) {
+    if (!wds::chart_editor::is_bindable_hold_body(pair.second.note_type)) continue;
+    sim_after = wds::chart_editor::with_recomputed_hold_eighths(std::move(sim_after), pair.second,
+                                                                tpq);
+    refresh_eighths = true;
+  }
+
   auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Convert notes");
   if (!changes.empty()) {
     composite->add(
@@ -2844,35 +3139,13 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
     composite->add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(
         planned.removals, "Convert cleanup"));
   }
+  if (refresh_eighths) {
+    composite->add(std::make_unique<wds::chart_editor::SetNotesCommand>(
+        sim_before, std::move(sim_after), "Refresh hold eighths"));
+  }
   if (!engine_.execute_command(std::move(composite))) return false;
 
   for (const auto& removed : planned.removals) selected_.erase(removed.id);
-
-  // Converted hold bodies stay headless by default (unlike place-hold). Still refresh
-  // eighths for any body that remains / becomes a hold — inside one undoable command.
-  {
-    const auto before = engine_.document().notes();
-    auto after = before;
-    bool touched = false;
-    for (const auto& [id, converted] : planned.updates) {
-      if (!wds::chart_editor::is_hold_with_tail(converted.note_type)) continue;
-      std::optional<NotationNote> body;
-      for (const auto& n : after) {
-        if (n.id == id) {
-          body = n;
-          break;
-        }
-      }
-      if (!body) continue;
-      after = wds::chart_editor::with_recomputed_hold_eighths(
-          std::move(after), *body, engine_.document().timing().ticks_per_quarter);
-      touched = true;
-    }
-    if (touched) {
-      engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-          before, std::move(after), "Refresh hold eighths"));
-    }
-  }
   engine_.rebuild_snapshot();
   sync_hold_sel_focus_to_selection();
   return true;
@@ -2903,9 +3176,39 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
       (selected_.empty() && selected_speed_ticks_.empty())) {
     return false;
   }
+  const auto& nudge_doc = engine_.document();
   std::vector<NotationNote> notes;
+  std::unordered_set<int32_t> in_set;
+  const auto add_note = [&](const NotationNote& n) {
+    if (in_set.insert(n.id).second) notes.push_back(n);
+  };
   for (const int32_t id : selected_) {
-    if (auto n = engine_.document().find_note(id)) notes.push_back(*n);
+    auto n = nudge_doc.find_note(id);
+    if (n && n->note_type != NoteType::HoldEighth) add_note(*n);
+  }
+  // A nudged hold carries its bound mid-stars (same delta). Its eighths are derived and
+  // are regenerated below, never moved.
+  const size_t selected_count = notes.size();
+  for (size_t i = 0; i < selected_count; ++i) {
+    if (!wds::chart_editor::is_bindable_hold_body(notes[i].note_type)) continue;
+    const NotationNote hold = notes[i];
+    for (const auto& dep : wds::chart_editor::hold_attached_notes_for(nudge_doc, hold)) {
+      if (dep.note_type == NoteType::HoldEighth || wds::chart_editor::is_hold_head_note(dep)) {
+        continue;
+      }
+      add_note(dep);
+    }
+  }
+  // A star nudged on its own must stay strictly inside its (unmoved) hold, on the
+  // hold's lanes. Otherwise the whole nudge is refused (not clamped).
+  for (const auto& n : notes) {
+    if (!is_visible_mid_star(n.note_type) || n.parent_hold_id < 0) continue;
+    if (in_set.count(n.parent_hold_id) != 0) continue;  // hold moves too; star follows
+    const auto parent = nudge_doc.find_note(n.parent_hold_id);
+    if (!parent || !wds::chart_editor::is_bindable_hold_body(parent->note_type)) continue;
+    if (delta_lane != 0) return false;
+    const int64_t next_tick = static_cast<int64_t>(n.start_tick) + delta_tick;
+    if (next_tick <= parent->start_tick || next_tick >= parent->end_tick) return false;
   }
   auto before = notes;
   if (delta_tick != 0 && !notes.empty() &&
@@ -2952,6 +3255,21 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
   const bool speed_changed = speed_after != speed_before;
   if (changes.empty() && !speed_changed) return false;
 
+  // Holds whose eighths change: nudged holds and parents of nudged stars.
+  std::unordered_set<int32_t> eighth_hold_ids;
+  for (const auto& [id, pair] : changes) {
+    collect_affected_hold_ids(pair.first, pair.second, eighth_hold_ids);
+  }
+  std::vector<NotationNote> sim_before;
+  if (!eighth_hold_ids.empty()) {
+    sim_before = notes_with_changes(nudge_doc.notes(), changes);
+    // Refuse a nudge that stacks two visible stars of one hold on the same tick.
+    if (wds::chart_editor::visible_star_tick_conflicts(sim_before) &&
+        !wds::chart_editor::visible_star_tick_conflicts(nudge_doc.notes())) {
+      return false;
+    }
+  }
+
   std::unordered_set<int32_t> shifted_speed_ticks;
   if (speed_changed) {
     for (const int32_t tick : selected_speed_ticks_) {
@@ -2959,7 +3277,23 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
     }
   }
   bool ok = false;
-  if (!changes.empty() && speed_changed) {
+  if (!eighth_hold_ids.empty() && !changes.empty()) {
+    // Nudge + eighth refresh (+ scroll speed) = one history step.
+    auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Nudge");
+    bool introduces_extended = speed_changed;
+    for (const auto& [id, pair] : changes) {
+      introduces_extended =
+          introduces_extended || wds::chart_editor::note_requires_sirius_extended(pair.second);
+    }
+    composite->add(std::make_unique<wds::chart_editor::UpdateNotesCommand>(changes, "Nudge"));
+    if (speed_changed) {
+      composite->add(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
+          std::move(speed_before), std::move(speed_after), "Nudge scroll speed"));
+    }
+    append_eighth_refresh(*composite, std::move(sim_before), eighth_hold_ids,
+                          nudge_doc.timing().ticks_per_quarter);
+    ok = execute_maybe_extended(std::move(composite), introduces_extended, "Nudge");
+  } else if (!changes.empty() && speed_changed) {
     auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Nudge");
     composite->add(
         std::make_unique<wds::chart_editor::UpdateNotesCommand>(changes, "Nudge"));
@@ -2979,9 +3313,9 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
 }
 
 bool ChartEditPanel::copy_selected() {
-  clipboard_ = selected_with_hold_dependents(engine_.document(), selected_);
-  // HoldEighth is derived from holds — clipboard must not carry authoritative copies.
-  strip_clipboard_hold_eighths(clipboard_);
+  // No HoldEighth (always regenerated on paste) and no mid-star whose hold is not also
+  // in the clipboard (a lone star is not copyable).
+  clipboard_ = clipboard_notes_for_selection(engine_.document(), selected_);
   clipboard_speed_.clear();
   for (const auto& point : engine_.document().scroll_speed_points()) {
     if (selected_speed_ticks_.count(point.tick)) clipboard_speed_.push_back(point);
@@ -3004,6 +3338,8 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
 
   auto pasted = clipboard_;
   strip_clipboard_hold_eighths(pasted);
+  drop_orphan_mid_stars(pasted);
+  if (pasted.empty() && clipboard_speed_.empty()) return false;
   for (auto& n : pasted) {
     n.start_tick += base_delta;
     if (n.end_tick > 0) n.end_tick += base_delta;
@@ -3017,6 +3353,7 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
     }
   }
   int32_t next_id = engine_.document().next_note_id();
+  const int32_t first_new_id = next_id;
   std::unordered_map<int32_t, int32_t> old_to_new;
   for (auto& n : pasted) {
     if (shift > 0) {
@@ -3032,15 +3369,9 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
       n.parent_hold_id = it->second;
     }
   }
+  // Every pasted star is bound to a pasted hold (new id), so conflicts can only occur
+  // among the pasted notes themselves; the document holds no star for those new ids.
   if (wds::chart_editor::visible_star_tick_conflicts(pasted)) return false;
-  for (const auto& n : pasted) {
-    if (!is_visible_mid_star(n.note_type) || n.parent_hold_id < 0) continue;
-    if (wds::chart_editor::hold_has_visible_star_at(engine_.document(), n.parent_hold_id,
-                                                    n.start_tick,
-                                                    wds::chart_editor::kNoBoundHoldId)) {
-      return false;
-    }
-  }
 
   if (mirror) {
     std::vector<NotationNote> playfield;
@@ -3081,7 +3412,7 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
     after.insert(after.end(), pasted.begin(), pasted.end());
     const int32_t tpq = engine_.document().timing().ticks_per_quarter;
     for (const auto& n : pasted) {
-      if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
+      if (!wds::chart_editor::is_bindable_hold_body(n.note_type)) continue;
       after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), n, tpq);
     }
   }
@@ -3099,18 +3430,13 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   }
   if (!execute_maybe_extended(std::move(composite), paste_speeds, paste_label)) return false;
 
-  const auto before_ids = [&] {
-    std::unordered_set<int32_t> ids;
-    for (const auto& n : before) ids.insert(n.id);
-    return ids;
-  }();
   selected_.clear();
   selected_speed_ticks_.clear();
-  for (const auto& n : engine_.document().notes()) {
-    if (!before_ids.count(n.id) && is_selectable_chart_note(n)) {
-      selected_.insert(n.id);
-    }
-  }
+  // Pasted notes (ids from first_new_id up) and their generated eighths are the only
+  // notes with ids >= first_new_id.
+  for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
+    if (is_user_selectable(n)) selected_.insert(n.id);
+  });
   selected_speed_ticks_ = std::move(pasted_speed_ticks);
   clear_hold_sel_focus();
   return true;
@@ -3224,7 +3550,9 @@ bool ChartEditPanel::delete_selected() {
 
   auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Delete");
   if (delete_notes) {
-    composite->add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(notes, "Delete"));
+    // Deleted mid-stars free their ticks: surviving holds regain the eighth there,
+    // inside this same undo step.
+    append_remove_with_eighth_refresh(*composite, engine_.document(), notes, "Delete");
   }
   if (delete_speeds) {
     composite->add(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
@@ -3243,8 +3571,9 @@ bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {
   // Middle-click deletes only the hit note (+ hold mid dependents). Never the
   // paired hold head/body — those stay independently deletable.
   const auto notes = notes_with_hold_dependents(engine_.document(), {*hit});
-  if (!engine_.execute_command(
-          std::make_unique<wds::chart_editor::RemoveNotesCommand>(notes, "Delete Note"))) {
+  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Delete Note");
+  append_remove_with_eighth_refresh(*composite, engine_.document(), notes, "Delete Note");
+  if (!engine_.execute_command(std::move(composite))) {
     return false;
   }
   for (const auto& n : notes) selected_.erase(n.id);
@@ -3347,7 +3676,7 @@ void ChartEditPanel::paint(wds::interaction::UiPainter& painter) const {
                   engine_.preview_config(), selected_, std::nullopt, {}, std::nullopt, skin_,
                   show_timing_grid, error_ticks_,
                   &offset_violation_ids_, offset_violation_strength(), waveform_,
-                  spectrogram_ ? &spectrogram_ : nullptr, spectrum_mode_);
+                  spectrogram_ ? &spectrogram_ : nullptr, spectrum_mode_, &engine_.document());
   // Modals are painted last via paint_popups() from UiManager (above skins).
 }
 
@@ -4152,7 +4481,8 @@ bool ChartEditPanel::handle_popup_pointer_down(const wds::interaction::PointerDo
 bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::PointerDownEvent& event) {
   if (!left_gutter_.contains(event.position)) return false;
   sync_viewport();
-  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes(),
+                         &engine_.document());
   for (const auto& hit : hits) {
     if (!split_label_hot_bounds(hit).contains(event.position)) continue;
     if (event.button == wds::interaction::PointerButton::Middle) {
@@ -4342,18 +4672,19 @@ bool ChartEditPanel::try_convert_hold_tail_to_nontail(wds::interaction::Vec2 poi
   const auto target = nontail_type_for_hold(hit->note_type);
   if (!target) return false;
   const int32_t tpq = engine_.document().timing().ticks_per_quarter;
-  NotationNote after = wds::chart_editor::convert_note_type(*hit, *target, tpq);
-  std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
-  changes[hit->id] = {*hit, after};
-  std::vector<NotationNote> removals;
-  for (const auto& note : engine_.document().notes()) {
-    if (note.note_type != NoteType::HoldEighth) continue;
-    if (wds::chart_editor::is_authored_hold_eighth(note) ||
-        wds::chart_editor::is_suppressed_hold_eighth(note)) {
-      continue;
+  const NotationNote converted = wds::chart_editor::convert_note_type(*hit, *target, tpq);
+  // Tailed and nontail holds derive identical eighths: swap the body type and
+  // regenerate its eighths in one SetNotesCommand (single undo step).
+  const auto before_notes = engine_.document().notes();
+  auto after_notes = before_notes;
+  for (auto& n : after_notes) {
+    if (n.id == hit->id) {
+      n = converted;
+      break;
     }
-    if (hit->id >= 0 && note.parent_hold_id == hit->id) removals.push_back(note);
   }
+  after_notes = wds::chart_editor::with_recomputed_hold_eighths(std::move(after_notes),
+                                                                converted, tpq);
   auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Convert to nontail");
   if (engine_.document().compatibility_profile() ==
       wds::chart_editor::ChartCompatibilityProfile::Official) {
@@ -4361,12 +4692,8 @@ bool ChartEditPanel::try_convert_hold_tail_to_nontail(wds::interaction::Vec2 poi
         wds::chart_editor::ChartCompatibilityProfile::Official,
         wds::chart_editor::ChartCompatibilityProfile::SiriusExtended));
   }
-  composite->add(
-      std::make_unique<wds::chart_editor::UpdateNotesCommand>(std::move(changes), "Convert to nontail"));
-  if (!removals.empty()) {
-    composite->add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(
-        std::move(removals), "Clear hold eighths"));
-  }
+  composite->add(std::make_unique<wds::chart_editor::SetNotesCommand>(
+      before_notes, std::move(after_notes), "Convert to nontail"));
   return engine_.execute_command(std::move(composite));
 }
 
@@ -4425,7 +4752,7 @@ void ChartEditPanel::paint_side_columns(wds::interaction::UiPainter& painter) co
 void ChartEditPanel::paint_overlays(wds::interaction::UiPainter& painter) const {
   sync_viewport();
   renderer_.paint_overlays(painter, viewport_, engine_.document().notes(), selected_,
-                           std::nullopt);
+                           std::nullopt, &engine_.document());
   paint_gutter_overlays(painter);
   paint_marquee(painter);
 }
@@ -4454,7 +4781,8 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
   // Compact split chips above skinned notes. Color ID only on hover/drag.
   // Hits are time-ascending; paint reverse so earlier labels stay on top.
   namespace th = wds::interaction::theme;
-  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes(),
+                         &engine_.document());
   auto paint_leader = [&](const wds::interaction::Rect& bounds, float anchor_y, bool is_start,
                           int column, const wds::interaction::Color& c, float z) {
     const float natural_y =
@@ -4676,7 +5004,13 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
       // JumpScratch side edges win over the next body's start-time hit at chain joints.
       std::optional<NotationNote> scratch_edge_owner;
       float scratch_edge_dist = 1e9f;
-      for (const auto& note : engine_.document().notes()) {
+      // Chain-body end caps only matter within the cap padding of the click's y
+      // (same windowed walk, in notes() order, as the hover-cursor path).
+      const float cap_pad = viewport_.note_height_px() * 0.55f;
+      const auto cap_window =
+          notes_near_y(event.position.y, cap_pad + 1.0f, note_spans().chain_span);
+      for (const NotationNote* cap_it = cap_window.first; cap_it != cap_window.second; ++cap_it) {
+        const NotationNote& note = *cap_it;
         if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
         if (!near_scratch_end_cap(note, event.position.y)) continue;
         if (!near_scratch_end_left(note, event.position.x) &&
@@ -5229,7 +5563,16 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         (void)inserted;
         return &it->second;
       }
-      for (const auto& note : engine_.document().notes()) {
+      // Document fallback. A candidate must abut `body`'s drag-start end tick
+      // (originally_chained: next.start_tick == prev.end_tick), and notes already in
+      // drag_originals_ were rejected by the loop above (is_candidate only sees a note
+      // through original_of), so only notes STARTING at that tick can match. Ascending
+      // indices == the old full scan's notes() order.
+      auto& starting = note_index_scratch_;
+      engine_.document().note_indices_starting_at(original_of(body.id, body).end_tick, starting);
+      const auto& doc_notes = engine_.document().notes();
+      for (const std::size_t index : starting) {
+        const NotationNote& note = doc_notes[index];
         if (!is_candidate(note)) continue;
         auto [it, inserted] = working.emplace(note.id, note);
         (void)inserted;
@@ -5257,7 +5600,16 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         (void)inserted;
         return &it->second;
       }
-      for (const auto& note : engine_.document().notes()) {
+      // Document fallback. A candidate must end exactly at `body`'s drag-start start
+      // tick (originally_chained: next.start_tick == prev.end_tick) and be a chain body
+      // (a tailed type), so only tail-ending notes at that tick can match. Notes in
+      // drag_originals_ were already rejected above. Ascending indices == notes() order.
+      auto& tails = note_index_scratch_;
+      engine_.document().tail_note_indices_ending_at(original_of(body.id, body).start_tick,
+                                                     tails);
+      const auto& doc_notes = engine_.document().notes();
+      for (const std::size_t index : tails) {
+        const NotationNote& note = doc_notes[index];
         if (!is_candidate(note)) continue;
         auto [it, inserted] = working.emplace(note.id, note);
         (void)inserted;
@@ -5581,7 +5933,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     // Keep equal-width hold heads matched to a resized body.
     auto sync_equal_width_heads = [&](std::unordered_map<int32_t, NotationNote>& next) {
       for (const auto& [id, body_next] : next) {
-        if (!wds::chart_editor::is_hold_with_tail(body_next.note_type)) continue;
+        if (!wds::chart_editor::is_bindable_hold_body(body_next.note_type)) continue;
         auto body_orig_it = drag_originals_.find(id);
         if (body_orig_it == drag_originals_.end()) continue;
         const auto& body_orig = body_orig_it->second;
@@ -6345,6 +6697,9 @@ bool ChartEditPanel::commit_curve_fill() {
   input.include_head = hold_chain_prev_id_ < 0;
   input.ticks_per_quarter = engine_.document().timing().ticks_per_quarter;
   input.next_id = engine_.document().next_note_id();
+  // input.notes is an unmodified copy of document().notes() taken just above, so the
+  // auto-head occupancy lookup may use the document's start/end trees.
+  input.document = &engine_.document();
   const auto commit = wds::chart_editor::build_scratch_hold_curve_commit(input);
   if (!commit) return false;
   if (!engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
@@ -6353,18 +6708,18 @@ bool ChartEditPanel::commit_curve_fill() {
   }
   engine_.rebuild_snapshot();
 
-  std::unordered_set<int32_t> before_ids;
-  for (const auto& note : commit->before) before_ids.insert(note.id);
   clear_hold_sel_focus();
   selected_.clear();
   for (const int32_t id : hold_chain_ids_) selected_.insert(id);
-  for (const auto& note : engine_.document().notes()) {
-    if (before_ids.count(note.id)) continue;
+  // Every note the commit introduced (head, bodies, eighths) got an id >= the
+  // document's next id at build time; everything in commit->before is older.
+  for_each_note_allocated_since(engine_.document(), input.next_id,
+                                [&](const NotationNote& note) {
     if (wds::chart_editor::is_hold_head_note(note) ||
         wds::chart_editor::is_hold_with_tail(note.note_type)) {
       selected_.insert(note.id);
     }
-  }
+  });
 
   curve_mode_active_ = false;
   curve_dismissed_ = false;

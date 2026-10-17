@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -67,6 +68,15 @@ def read_cached(folder, spec, job):
         return None
 
 
+def ffmpeg_command(exe, source, path):
+    # -protocol_whitelist must precede -i so a crafted input (playlist/URL
+    # references inside the "audio" file) cannot make ffmpeg open network or other protocols.
+    return [str(exe), "-nostdin", "-v", "error", "-y",
+            "-protocol_whitelist", "file",
+            "-i", str(source), "-map", "0:a:0", "-vn", "-ac", "2",
+            "-t", "1801", "-c:a", "pcm_f32le", str(path)]
+
+
 def decode(source, job, sf):
     try:
         info = sf.info(source)
@@ -76,9 +86,7 @@ def decode(source, job, sf):
         path = job / "decoded.wav"
         with (job / "decode.log").open("wb") as log:
             proc = subprocess.Popen(
-                [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-y",
-                 "-i", str(source), "-map", "0:a:0", "-vn", "-ac", "2",
-                 "-t", "1801", "-c:a", "pcm_f32le", str(path)],
+                ffmpeg_command(imageio_ffmpeg.get_ffmpeg_exe(), source, path),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
@@ -269,6 +277,11 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.threads <= 16:
         parser.error("threads must be between 1 and 16")
+    # Turn SIGTERM into an exception so decode()'s finally block kills ffmpeg.
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    except (ValueError, OSError):
+        pass
     try:
         separate(args)
         return 0

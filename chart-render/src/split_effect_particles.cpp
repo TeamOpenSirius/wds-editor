@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -50,6 +51,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -57,6 +59,39 @@
 
 namespace wds::chart_render {
 namespace {
+
+#ifndef NDEBUG
+// Debug-only detector for concurrent entry into the single-owner-thread API. Same-thread
+// re-entry (collect -> playback -> controller cache) is allowed.
+std::atomic<int> g_owner_depth{0};
+std::atomic<std::thread::id> g_owner_thread{std::thread::id{}};
+
+class OwnerThreadGuard {
+ public:
+  OwnerThreadGuard() noexcept {
+    const std::thread::id me = std::this_thread::get_id();
+    if (g_owner_depth.fetch_add(1, std::memory_order_acq_rel) == 0) {
+      g_owner_thread.store(me, std::memory_order_release);
+    } else {
+      assert(g_owner_thread.load(std::memory_order_acquire) == me &&
+             "split effect API entered concurrently from two threads");
+    }
+  }
+  ~OwnerThreadGuard() {
+    if (g_owner_depth.load(std::memory_order_acquire) == 1) {
+      g_owner_thread.store(std::thread::id{}, std::memory_order_release);
+    }
+    g_owner_depth.fetch_sub(1, std::memory_order_acq_rel);
+  }
+  OwnerThreadGuard(const OwnerThreadGuard&) = delete;
+  OwnerThreadGuard& operator=(const OwnerThreadGuard&) = delete;
+};
+#else
+class OwnerThreadGuard {
+ public:
+  OwnerThreadGuard() noexcept {}
+};
+#endif
 
 std::atomic<uint64_t> g_trail_frame_gen{1};
 
@@ -125,7 +160,8 @@ float* SplitEffectTrailArena::alloc(size_t n) {
     chunks_.push_back(std::move(first));
     cur_ = 0;
   }
-  if (chunks_[cur_].used + n > chunks_[cur_].cap) {
+  // Advance past chunks that cannot fit n (full, or an oversized chunk with used == cap).
+  while (chunks_[cur_].used + n > chunks_[cur_].cap) {
     ++cur_;
     if (cur_ >= chunks_.size()) {
       Chunk next;
@@ -475,6 +511,7 @@ openwds_split_effects::Controller* cached_controller(int32_t color_id) {
 }  // namespace
 
 openwds_split_effects::Controller* official_split_effect_controller(int32_t effect_id) {
+  const OwnerThreadGuard owner_guard;
   ControllerCache& cache = controller_cache();
   const auto it = cache.find(effect_id);
   if (it != cache.end()) {
@@ -493,6 +530,7 @@ openwds_split_effects::Controller* official_split_effect_controller(int32_t effe
 
 void set_split_effect_collect_controller_override(
     openwds_split_effects::Controller* controller) noexcept {
+  const OwnerThreadGuard owner_guard;
   g_collect_controller_override = controller;
   shuriken::split_eval_cache_bump_epoch();
 }
@@ -1537,6 +1575,7 @@ int collect_split_effect_particles(const wds::chart_editor::PreviewSplitLaneInst
 int collect_split_effect_particles_playback(
     const wds::chart_editor::PreviewSplitLaneInstance& split, int quality, double now_sec,
     SplitEffectPlaybackState& state, SplitEffectLiveParticle* out, int max_out) {
+  const OwnerThreadGuard owner_guard;
   if (out == nullptr || max_out <= 0) {
     return 0;
   }
@@ -2150,6 +2189,7 @@ SplitEffectPrecommitStats split_effect_precommit_buffers(const SplitEffectPrecom
 void collect_split_effect_frame(
     const std::vector<wds::chart_editor::PreviewSplitLaneInstance>& splits, int quality,
     double now_sec, bool playing, SplitEffectPlaybackState& state, SplitEffectFrameCollect& io) {
+  const OwnerThreadGuard owner_guard;
   wds::common::minflt_stage("collect.begin");
   split_collect_begin_frame();
   {

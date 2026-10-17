@@ -17,7 +17,13 @@
 #include <QThread>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
+#if !defined(_WIN32)
+#include <csignal>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace wds::ui {
 struct StemPanelTestAccess {
@@ -33,6 +39,13 @@ struct StemPanelTestAccess {
   static void launch(StemPanel& panel, bool hang = false) {
     panel.launch(QCoreApplication::applicationFilePath(),
                  {"--fake-worker", panel.job_->path(), hang ? "hang" : "normal"});
+  }
+  static void launch_grandchild(StemPanel& panel) {
+    panel.launch(QCoreApplication::applicationFilePath(),
+                 {"--fake-worker", panel.job_->path(), "grandchild"});
+  }
+  static int sweep(const QString& dir, const QString& keep, qint64 max_age) {
+    return StemPanel::sweep_stale_jobs(dir, keep, max_age);
   }
   static void cancel(StemPanel& panel) { panel.cancel(); }
   static void complete(StemPanel& panel) {
@@ -64,6 +77,20 @@ bool until(const std::function<bool()>& predicate, int timeout = 5000) {
 
 int main(int argc, char** argv) {
   if (argc > 2 && QByteArray(argv[1]) == "--fake-worker") {
+#if !defined(_WIN32)
+    if (QByteArray(argv[3]) == "grandchild") {
+      // Stand-in for ffmpeg: a child that outlives a plain kill of this process.
+      const pid_t child = fork();
+      if (child == 0) {
+        execlp("sleep", "sleep", "30", static_cast<char*>(nullptr));
+        _exit(127);
+      }
+      QFile pid_file(QString::fromUtf8(argv[2]) + "/grandchild.pid");
+      pid_file.open(QIODevice::WriteOnly);
+      pid_file.write(QByteArray::number(static_cast<qlonglong>(child)));
+      pid_file.close();
+    }
+#endif
     // Deliberately split a JSON line across pipe reads; don't require Python/torch.
     std::printf("{\"protocol\":1,\"event\":\"progress\",");
     std::fflush(stdout);
@@ -92,7 +119,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     for (int i = 0; i < 200; ++i) {
-      if (QByteArray(argv[3]) != "hang" && QFile::exists(QString::fromUtf8(argv[2]) + "/cancel")) return 2;
+      if (QByteArray(argv[3]) == "normal" && QFile::exists(QString::fromUtf8(argv[2]) + "/cancel")) return 2;
       QThread::msleep(25);
     }
     return 0;
@@ -185,5 +212,53 @@ int main(int argc, char** argv) {
     panel.detach();
     expect(!QFile::exists(job), "editor shutdown reaps worker before cleaning job");
   }
+  {
+    // Stale `.job-*` sweep: old removed, fresh / current / unrelated kept.
+    QTemporaryDir stem;
+    auto make = [&](const QString& name, bool old, bool with_child) {
+      const auto path = stem.filePath(name);
+      QDir().mkpath(path);
+      if (with_child) { QFile f(path + "/decoded.wav"); f.open(QIODevice::WriteOnly); f.write("x"); }
+      if (old) {
+        const auto past = std::filesystem::file_time_type::clock::now() - std::chrono::hours(3);
+        if (with_child) std::filesystem::last_write_time((path + "/decoded.wav").toStdString(), past);
+        std::filesystem::last_write_time(path.toStdString(), past);
+      }
+      return path;
+    };
+    const auto old_dir = make(".job-old111", true, true);
+    const auto fresh_dir = make(".job-new222", false, false);
+    const auto current_dir = make(".job-cur333", true, false);
+    const auto busy_dir = make(".job-busy44", true, false);
+    { QFile f(busy_dir + "/decoded.wav"); f.open(QIODevice::WriteOnly); f.write("x"); }  // fresh child
+    std::filesystem::last_write_time(busy_dir.toStdString(),
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(3));
+    const auto other = make("other-dir", true, false);
+    const int removed = Access::sweep(stem.path(), current_dir, 3600);
+    expect(removed == 1, "sweep reports one removal");
+    expect(!QFile::exists(old_dir), "stale job dir removed");
+    expect(QFile::exists(fresh_dir), "fresh job dir kept");
+    expect(QFile::exists(current_dir), "current job dir kept");
+    expect(QFile::exists(busy_dir), "job dir with recently written file kept");
+    expect(QFile::exists(other), "non-job dir kept");
+  }
+#if !defined(_WIN32)
+  {
+    StemPanel panel(nullptr);
+    Access::prepare(panel, cache.path());
+    const auto job = Access::job(panel);
+    Access::launch_grandchild(panel);
+    expect(until([&] { return Access::progress(panel) == 50; }), "grandchild fixture starts");
+    QFile pid_file(job + "/grandchild.pid");
+    pid_t grandchild = 0;
+    if (pid_file.open(QIODevice::ReadOnly)) grandchild = static_cast<pid_t>(pid_file.readAll().toLongLong());
+    expect(grandchild > 1 && ::kill(grandchild, 0) == 0, "grandchild is alive before cancel");
+    Access::cancel(panel);
+    expect(until([&] { return !Access::active(panel); }, 8000), "cancel finishes with grandchild");
+    expect(grandchild > 1 && until([&] { return ::kill(grandchild, 0) != 0; }, 3000),
+           "cancel kills the worker's whole process group");
+    if (grandchild > 1) ::kill(grandchild, SIGKILL);  // hygiene if the assertion failed
+  }
+#endif
   return failures ? 1 : 0;
 }

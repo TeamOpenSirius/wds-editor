@@ -58,6 +58,16 @@ struct ScratchHoldCurveCommitInput {
   bool include_head = true;
   int32_t ticks_per_quarter = 480;
   int32_t next_id = 0;
+  // Optional accelerator for the auto-head occupancy lookup. When non-null, `notes`
+  // MUST be an unmodified copy of document->notes() (same size and order) taken
+  // while the document was in its current state; the head lookup then queries the
+  // document's start/end trees instead of scanning every note. Each candidate
+  // position is cross-checked by note id (and the size compared) with a fallback to
+  // the full scan on mismatch, but that is only a guard against stale pointers: the
+  // copy contract above is what guarantees an identical result. Leave null (tests,
+  // synthetic note lists) for the scan. The UI sets exactly this field.
+  // Only read during build_scratch_hold_curve_commit (GUI thread); not retained.
+  const ChartDocument* document = nullptr;
 };
 
 struct ScratchHoldCurveCommit {

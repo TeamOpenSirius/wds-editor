@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 #include <QAction>
+#include <QPointer>
 #include <QString>
 #include <QTimer>
 #include "wds/ui/editor_session.hpp"
@@ -118,7 +119,7 @@ class EditorMainWindow final : public QMainWindow {
   bool busy_active_ = false;
   bool force_close_ = false;
   std::uint64_t open_generation_ = 0;
-  std::vector<QObject*> open_watchers_;
+  std::vector<QPointer<QObject>> open_watchers_;
   std::string skins_dir_;
   std::string icons_dir_;
   QString theme_dir_;

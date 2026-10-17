@@ -369,7 +369,7 @@ void PreviewSnapshotBuilder::rebuild_notes(PreviewSnapshot& out, int64_t preview
 
   for (int32_t note_id : candidate_buffer_) {
     const NotationNote* note = lookup_note(note_id);
-    if (note == nullptr || is_suppressed_hold_eighth(*note)) {
+    if (note == nullptr) {
       continue;
     }
     // Split gimmicks only drive split_lanes / STAGE_COVER — never a playable tap sprite.
@@ -401,7 +401,7 @@ void PreviewSnapshotBuilder::update_notes_incremental(PreviewSnapshot& inout,
 
   for (int32_t note_id : candidate_buffer_) {
     const NotationNote* note = lookup_note(note_id);
-    if (note == nullptr || is_suppressed_hold_eighth(*note)) {
+    if (note == nullptr) {
       continue;
     }
     if (is_split_lane_gimmick(note->gimmick_type)) {

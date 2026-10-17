@@ -16,8 +16,9 @@ namespace wds::chart_editor {
 //   startTime     — note/gimmick start in music seconds (beat≡second at BPM 60)
 //   endTime       — hold/split end in seconds; -1 = instantaneous (no duration)
 //   type          — AppConst.NoteType (10/20/80/100/900/…); 0 = gimmick-only (split);
-//                   900 (HoldEighth) is kept on import (preview-only, not recomputed)
-//                   and generated on export from editable charts (always gimmick 0 /
+//                   900 (HoldEighth) rows are kept on CSV import. Official CSV has no
+//                   BPM, so the editor cannot rebuild the eighth grid; file times stay.
+//                   Export of an editable chart still generates type 900 (gimmick 0 /
 //                   scratch 0). Export rows are sorted by startTime then type;
 //                   -1 = HiSpeed (endTime holds non-negative multiplier; stored in
 //                   scroll_speed_points, never in NotationNote);

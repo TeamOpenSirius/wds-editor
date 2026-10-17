@@ -470,6 +470,93 @@ inline constexpr bool mapped_flush_range_valid(MappedFlushRange range, VkDeviceS
   return ((range.size % atom) == 0) || (range.offset + range.size == alloc_size);
 }
 
+// Byte capacity for one VB/IB ring slot. The committed ring size (already
+// grown and clamped by commit_ring_grow / next_ring_target) is the target,
+// bounded by `ring_max` (0 = unbounded). A request larger than that is
+// honoured, rounded up to 1 MiB. Never derived from the slot's previous
+// capacity: doubling it bypassed the ring clamp (3 frames x VB+IB x 2 buffers).
+inline constexpr size_t ring_slot_capacity(size_t bytes, size_t ring_bytes,
+                                           size_t ring_max) noexcept {
+  constexpr size_t kMiB = 1024 * 1024;
+  size_t target = ring_bytes;
+  if (ring_max > 0 && target > ring_max) {
+    target = ring_max;
+  }
+  if (bytes <= target) {
+    return target;
+  }
+  return ((bytes + kMiB - 1) / kMiB) * kMiB;
+}
+
+// Retirement is gated on completed GPU work, never on draw_frame call counts.
+// `submit_seq` counts successful vkQueueSubmit calls of real frames (aborted
+// acquires and drain submits do not advance it). Each frame slot remembers the
+// submit_seq of its last real submit. When that slot's fence wait returns, every
+// submit up to and including it is complete (a vkQueueSubmit fence signal also
+// covers earlier submissions on the same queue), so the completed watermark
+// advances to it. The watermark never moves backwards.
+inline constexpr uint64_t advance_completed_submit(uint64_t completed,
+                                                   uint64_t slot_submit_seq) noexcept {
+  return slot_submit_seq > completed ? slot_submit_seq : completed;
+}
+
+// A destroyed texture may be reaped only after every submit issued before the
+// destroy call has completed. `retiring` is false for live or never-retired
+// textures.
+inline constexpr bool texture_retire_gate_open(bool retiring, uint64_t retire_after_submit,
+                                               uint64_t completed_submit_seq) noexcept {
+  return retiring && completed_submit_seq >= retire_after_submit;
+}
+
+// render_finished semaphores are per swapchain image. A frame whose acquired
+// image has no semaphore (swapchain rebuilt mid-frame) must abort, not index.
+inline constexpr bool render_finished_index_valid(uint32_t image_index,
+                                                  size_t semaphore_count) noexcept {
+  return static_cast<size_t>(image_index) < semaphore_count;
+}
+
+// In-place extras: tessellation workers write each part straight into the
+// mapped VB/IB and space parts by RESERVED capacity (cur += cap), so the used
+// elements are not contiguous. The real end of the extras region is the max
+// over parts of (element offset + used), never the sum of used counts. A sum
+// under-sizes the staging copy and non-coherent flush and the GPU reads stale
+// tails. Fold one part in with this.
+inline constexpr uint64_t extras_extent_merge(uint64_t hi, uint64_t offset,
+                                              uint64_t used) noexcept {
+  return (offset + used) > hi ? (offset + used) : hi;
+}
+
+// Where draw_frame packs the CPU heads (scene, glow heads, UI, ...) when
+// extras already sit in the mapped ring. Heads normally go at element 0 and
+// must end at or below `low` (lowest element any in-place extra occupies).
+// If they do not, they are packed after `extent` (end of the extras'
+// used data) instead; indices are absolute so any base works. `fits` is false
+// only when even that exceeds `capacity`; the caller must then write nothing.
+// Pass low=UINT64_MAX, extent=0 when no extras are in place.
+struct HeadPlacement {
+  bool fits = false;
+  uint32_t base = 0;
+};
+
+inline constexpr HeadPlacement place_cpu_heads(uint64_t count, uint64_t low, uint64_t extent,
+                                               uint64_t capacity) noexcept {
+  HeadPlacement out{};
+  if (count == 0) {
+    out.fits = true;
+    return out;
+  }
+  if (count <= low && count <= capacity) {
+    out.fits = true;
+    return out;
+  }
+  const uint64_t end = extent + count;
+  if (end <= capacity && end <= 0xFFFFFFFFull) {
+    out.fits = true;
+    out.base = static_cast<uint32_t>(extent);
+  }
+  return out;
+}
+
 // Never occupy every swapchain image with in-flight submits — leave at least
 // one for the presentation engine. 3 images → 2 FIF; 5 images → 3 FIF.
 inline constexpr int frames_in_flight_for_swapchain(uint32_t image_count,

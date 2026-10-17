@@ -183,6 +183,66 @@ struct SfxSyncSlot {
   std::vector<SfxSyncSlot*>* free_list = nullptr;
 };
 
+// True when `slot` has finished its life (claim decided, sync detached, no
+// callback on the stack) and may go back to the pool. Lock-free; the caller
+// re-checks under sfx_mu before acting on it.
+bool slot_recyclable(const SfxSyncSlot& slot) noexcept {
+  return slot.in_use.load(std::memory_order_acquire) &&
+         slot.claim.load(std::memory_order_acquire) != SfxSyncClaim::Pending &&
+         slot.in_callback.load(std::memory_order_acquire) == 0 &&
+         slot.sync_detached.load(std::memory_order_acquire);
+}
+
+// Return `slot` to the free list if it is recyclable. Caller holds *slot->sfx_mu.
+// This is the ONLY place a slot re-enters the free list, and it is O(pending):
+// callers recycle exactly the slot whose state just changed (callback end, clear,
+// failed/finished arm), so the free list stays authoritative without ever
+// sweeping the whole pool on the schedule path.
+bool recycle_slot_locked(SfxSyncSlot* slot) {
+  if (slot == nullptr || !slot_recyclable(*slot)) {
+    return false;
+  }
+  for (const SfxSyncSlot* pending : *slot->pending_syncs) {
+    if (pending == slot) {
+      return false;
+    }
+  }
+  const unsigned long long handle = slot->handle.load(std::memory_order_acquire);
+  if (handle != 0) {
+    slot->last_handle.store(handle, std::memory_order_release);
+  }
+  slot->handle.store(0, std::memory_order_release);
+  slot->clip = HitSfxClip::Count;
+  slot->kind = SfxSyncKind::OneShot;
+  slot->claim.store(SfxSyncClaim::Pending, std::memory_order_release);
+  slot->sync_detached.store(false, std::memory_order_release);
+  slot->generation.fetch_add(1, std::memory_order_acq_rel);
+  slot->in_use.store(false, std::memory_order_release);
+  slot->free_list->push_back(slot);
+  return true;
+}
+
+// hold_state bits. Written with CAS by both the control thread and the mixer
+// thread (MIXTIME HoldOn/HoldOff gates).
+// A POS sync this close ahead of the mixed position can lose the race against
+// the mixer thread; treat it as already mixed and fire immediately instead.
+constexpr std::int64_t kMixedMarginUs = 1000;
+constexpr std::uint8_t kHoldPlaying = 0x1;  // loop is (to be) audible
+// A mixer-thread gate set kHoldPlaying at MIX time, which runs ahead of the
+// audible/heard clock by the device buffer. While set, the control thread's
+// clock-derived reconcile must not undo the gate; it clears the bit once the
+// heard clock agrees with the gated state (or any explicit set/stop happens).
+constexpr std::uint8_t kHoldGateOwned = 0x2;
+
+// SYNCPROC user data for the persistent Hold region-loop sync. Lives in Impl
+// (stable address); `start_bytes` is written once during initialize() before any
+// sync exists. The callback reads nothing else mutable.
+struct HoldLoopCtx {
+  QWORD start_bytes = 0;
+  std::atomic<int>* sync_in_flight = nullptr;
+  std::atomic<bool>* shutting_down = nullptr;
+};
+
 const char* utf8_basename(const std::string& path) noexcept {
   const char* s = path.c_str();
   const char* base = s;
@@ -226,6 +286,28 @@ void publish_audio_backend_ok() {
   wds::common::crash_set_context(wds::common::CrashContextField::AudioBackend, buf);
 }
 
+// True while the device BASS was initialised on is still initialised and still
+// the system default output. A full initialize() (BASS_Init(-1)) used to pick up
+// a changed default on every song load; reload_music() keeps the device, so it
+// must notice the change itself and let the caller re-initialise instead.
+bool bass_device_is_system_default() {
+  const DWORD current = BASS_GetDevice();
+  if (current == static_cast<DWORD>(-1)) {
+    return false;
+  }
+  BASS_DEVICEINFO info{};
+  if (!BASS_GetDeviceInfo(current, &info) || (info.flags & BASS_DEVICE_INIT) == 0 ||
+      (info.flags & BASS_DEVICE_ENABLED) == 0) {
+    return false;
+  }
+  for (DWORD dev = 1; BASS_GetDeviceInfo(dev, &info); ++dev) {
+    if ((info.flags & BASS_DEVICE_DEFAULT) != 0) {
+      return dev == current;
+    }
+  }
+  return true;  // no default reported: nothing to compare against
+}
+
 void publish_audio_backend_fail(int code) {
   char buf[64];
   std::snprintf(buf, sizeof(buf), "BASS init failed code=%d", code);
@@ -243,8 +325,18 @@ struct AudioEngine::Impl {
   DWORD music_bpf = 0;  // bytes per frame
   std::array<HSAMPLE, static_cast<size_t>(HitSfxClip::Count)> samples{};
   std::array<bool, static_cast<size_t>(HitSfxClip::Count)> sample_ok{};
-  HCHANNEL hold_ch = 0;
-  bool hold_playing = false;
+  // Hold stream ownership (see "Hold threading" above set_hold_looping):
+  //  * hold_ch / hold_loop_sync are created, replaced and freed ONLY by the
+  //    control (GUI) thread. hold_ch is atomic because MIXTIME gate callbacks
+  //    read it; it is published after the stream and its loop sync exist and is
+  //    zeroed before they are torn down.
+  //  * hold_state is the only value both sides write; every writer uses CAS and
+  //    then re-applies the pause flag from the latest state.
+  //  * hold_custom_loop / hold_loop_*_bytes are written during initialize()
+  //    before any stream or sync exists and are read-only afterwards.
+  std::atomic<HCHANNEL> hold_ch{0};
+  std::atomic<std::uint8_t> hold_state{0};
+  HoldLoopCtx hold_loop_ctx;
   bool hold_custom_loop = false;
   bool hold_loop_has_samples = false;
   double hold_loop_start_ms = 0.0;
@@ -254,7 +346,7 @@ struct AudioEngine::Impl {
   double hold_loop_end_samples = 0.0;
   QWORD hold_loop_start_bytes = 0;
   QWORD hold_loop_end_bytes = 0;
-  HSYNC hold_loop_sync = 0;
+  HSYNC hold_loop_sync = 0;  // control thread only
   char music_basename[128]{};
 
   std::mutex sfx_mu;
@@ -264,12 +356,18 @@ struct AudioEngine::Impl {
   std::vector<SfxSyncSlot*> free_list;
   std::atomic<int> sync_in_flight{0};
   std::atomic<bool>* shutting_down = nullptr;
+  // Full-pool recovery sweeps (slow path only, see acquire_slot_locked). Stays 0
+  // unless the free list ran dry; tests assert the schedule hot path never scans.
+  std::atomic<std::uint64_t> pool_sweeps{0};
+  // Effects directory the SFX samples above were loaded from; reload_music()
+  // only keeps them when the next song asks for the same one.
+  std::string effects_directory;
 
   void init_slot_pool(AudioEngine* engine);
   bool owns_slot(const SfxSyncSlot* slot) const noexcept;
   SfxSyncSlot* acquire_slot_locked();
   void try_recycle_locked(SfxSyncSlot* slot);
-  void try_recycle_all_locked();
+  void sweep_stranded_locked();
   void unlink_pending_locked(SfxSyncSlot* slot);
   void wait_sync_in_flight(const char* where);
 };
@@ -290,6 +388,8 @@ void AudioEngine::Impl::init_slot_pool(AudioEngine* engine) {
     slot.free_list = &free_list;
     free_list.push_back(&slot);
   }
+  hold_loop_ctx.sync_in_flight = &sync_in_flight;
+  hold_loop_ctx.shutting_down = shutting_down;
 }
 
 bool AudioEngine::Impl::owns_slot(const SfxSyncSlot* slot) const noexcept {
@@ -307,58 +407,39 @@ bool AudioEngine::Impl::owns_slot(const SfxSyncSlot* slot) const noexcept {
 }
 
 void AudioEngine::Impl::unlink_pending_locked(SfxSyncSlot* slot) {
+  // Callers unlink the slot they just armed, which sits at/near the back.
   auto& syncs = pending_syncs;
-  for (size_t i = 0; i < syncs.size(); ++i) {
-    if (syncs[i] == slot) {
-      syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+  for (size_t i = syncs.size(); i > 0; --i) {
+    if (syncs[i - 1] == slot) {
+      syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i - 1));
       return;
     }
   }
 }
 
 void AudioEngine::Impl::try_recycle_locked(SfxSyncSlot* slot) {
-  if (slot == nullptr || !slot->in_use.load(std::memory_order_acquire)) {
-    return;
-  }
-  if (slot->claim.load(std::memory_order_acquire) == SfxSyncClaim::Pending) {
-    return;
-  }
-  if (slot->in_callback.load(std::memory_order_acquire) != 0) {
-    return;
-  }
-  if (!slot->sync_detached.load(std::memory_order_acquire)) {
-    return;
-  }
-  for (const SfxSyncSlot* pending : pending_syncs) {
-    if (pending == slot) {
-      return;
-    }
-  }
-  const unsigned long long handle = slot->handle.load(std::memory_order_acquire);
-  if (handle != 0) {
-    slot->last_handle.store(handle, std::memory_order_release);
-  }
-  slot->handle.store(0, std::memory_order_release);
-  slot->clip = HitSfxClip::Count;
-  slot->kind = SfxSyncKind::OneShot;
-  slot->claim.store(SfxSyncClaim::Pending, std::memory_order_release);
-  slot->sync_detached.store(false, std::memory_order_release);
-  slot->generation.fetch_add(1, std::memory_order_acq_rel);
-  slot->in_use.store(false, std::memory_order_release);
-  free_list.push_back(slot);
+  (void)recycle_slot_locked(slot);
 }
 
-void AudioEngine::Impl::try_recycle_all_locked() {
+// Safety net, not part of the normal flow: every transition that makes a slot
+// recyclable (callback end, clear_*, a finished/failed arm, handle_sfx_sync)
+// recycles that one slot itself, so the free list is authoritative. This walks
+// the whole pool and is only reached when the free list is empty, i.e. when a
+// slot was stranded by a path that did not recycle it. Counted in pool_sweeps.
+void AudioEngine::Impl::sweep_stranded_locked() {
   if (slots == nullptr) {
     return;
   }
+  pool_sweeps.fetch_add(1, std::memory_order_relaxed);
   for (size_t i = 0; i < kMaxPendingSfxSyncs; ++i) {
-    try_recycle_locked(&slots[i]);
+    (void)recycle_slot_locked(&slots[i]);
   }
 }
 
 SfxSyncSlot* AudioEngine::Impl::acquire_slot_locked() {
-  try_recycle_all_locked();
+  if (free_list.empty()) {
+    sweep_stranded_locked();
+  }
   if (free_list.empty()) {
     return nullptr;
   }
@@ -436,36 +517,13 @@ void try_recycle_slot(SfxSyncSlot* slot) {
       slot->free_list == nullptr) {
     return;
   }
+  // Cheap lock-free filter: callbacks that cannot recycle (claim still Pending,
+  // another callback on the stack, ...) must not queue behind sfx_mu.
+  if (!slot_recyclable(*slot)) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(*slot->sfx_mu);
-  if (!slot->in_use.load(std::memory_order_acquire)) {
-    return;
-  }
-  if (slot->claim.load(std::memory_order_acquire) == SfxSyncClaim::Pending) {
-    return;
-  }
-  if (slot->in_callback.load(std::memory_order_acquire) != 0) {
-    return;
-  }
-  if (!slot->sync_detached.load(std::memory_order_acquire)) {
-    return;
-  }
-  for (const SfxSyncSlot* pending : *slot->pending_syncs) {
-    if (pending == slot) {
-      return;
-    }
-  }
-  const unsigned long long handle = slot->handle.load(std::memory_order_acquire);
-  if (handle != 0) {
-    slot->last_handle.store(handle, std::memory_order_release);
-  }
-  slot->handle.store(0, std::memory_order_release);
-  slot->clip = HitSfxClip::Count;
-  slot->kind = SfxSyncKind::OneShot;
-  slot->claim.store(SfxSyncClaim::Pending, std::memory_order_release);
-  slot->sync_detached.store(false, std::memory_order_release);
-  slot->generation.fetch_add(1, std::memory_order_acq_rel);
-  slot->in_use.store(false, std::memory_order_release);
-  slot->free_list->push_back(slot);
+  (void)recycle_slot_locked(slot);
 }
 
 void CALLBACK sfx_pos_sync_proc(HSYNC handle, DWORD /*channel*/, DWORD /*data*/, void* user) {
@@ -491,6 +549,25 @@ void CALLBACK sfx_pos_sync_proc(HSYNC handle, DWORD /*channel*/, DWORD /*data*/,
   }
 
   try_recycle_slot(slot);
+}
+
+// Persistent (non-ONETIME) POS sync on the Hold source: rewinds to the loop
+// start whenever playback reaches the region end. Armed once per Hold stream by
+// the control thread and never re-armed or removed from here, so the callback
+// writes no engine state. It runs on the mixer thread (a sync on a mixer source
+// is always mixtime), so: no allocation, no logging, no engine pointer. It is
+// counted in sync_in_flight so shutdown waits for it, and it targets the
+// `channel` BASS hands in rather than any cached handle.
+void CALLBACK hold_region_sync_proc(HSYNC /*handle*/, DWORD channel, DWORD /*data*/, void* user) {
+  auto* ctx = static_cast<HoldLoopCtx*>(user);
+  if (ctx == nullptr || ctx->sync_in_flight == nullptr) {
+    return;
+  }
+  SyncInFlightGuard in_flight(*ctx->sync_in_flight);
+  if (ctx->shutting_down != nullptr && ctx->shutting_down->load(std::memory_order_seq_cst)) {
+    return;
+  }
+  BASS_ChannelSetPosition(channel, ctx->start_bytes, BASS_POS_BYTE);
 }
 
 }  // namespace
@@ -528,6 +605,7 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
   impl->device_ok = true;
   copy_basename(impl->music_basename, sizeof(impl->music_basename), music_path);
   impl->shutting_down = &shutting_down_;
+  impl->effects_directory = effects_directory;
   impl->init_slot_pool(this);
   // Wire impl_ before attribute helpers (apply_music_rate / volume) touch it.
   std::atomic_store(&impl_, impl);
@@ -714,6 +792,10 @@ void AudioEngine::shutdown() {
 
   impl->wait_sync_in_flight("pre-free");
 
+  // Free the Hold stream (and its loop sync) before the mixer/samples go away.
+  // Shutdown runs on the control thread, which owns Hold structure.
+  retire_hold_channel();
+
   if (impl->keep_alive != 0) {
     BASS_ChannelStop(impl->keep_alive);
     BASS_StreamFree(impl->keep_alive);
@@ -739,9 +821,6 @@ void AudioEngine::shutdown() {
       sample = 0;
     }
   }
-  impl->hold_ch = 0;
-  impl->hold_playing = false;
-
   if (impl->device_ok) {
     BASS_Free();
     impl->device_ok = false;
@@ -774,6 +853,22 @@ std::uint64_t AudioEngine::music_heard_bytes() const {
     }
   }
   return BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
+}
+
+std::uint64_t AudioEngine::music_mixed_bytes() const {
+  const std::uint64_t heard = music_heard_bytes();
+  if (impl_ == nullptr || impl_->music == 0 || impl_->mixer == 0) {
+    return heard;
+  }
+  // `music` is a decoding source plugged into the mixer, so its plain
+  // BASS_ChannelGetPosition is how far the mixer has pulled (decoded/mixed) it —
+  // the position MIXTIME POS syncs fire against. BASS_Mixer_ChannelGetPosition
+  // instead subtracts the mixer's playback buffer (= heard position).
+  const QWORD mixed = BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
+  if (mixed == static_cast<QWORD>(-1)) {
+    return heard;
+  }
+  return std::max<std::uint64_t>(heard, mixed);
 }
 
 bool AudioEngine::replace_music_source(const std::string& path) {
@@ -829,6 +924,95 @@ bool AudioEngine::replace_music_source(const std::string& path) {
   }
   if (playing) play_music();
   return positioned;
+}
+
+bool AudioEngine::reload_music(const std::string& effects_directory,
+                               const std::string& music_path) {
+  if (test_double_ != nullptr || shutting_down_.load(std::memory_order_seq_cst)) {
+    return false;
+  }
+  const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
+  if (!impl || !ready_ || !impl->device_ok || impl->mixer == 0 || impl->music == 0 ||
+      music_path.empty() || effects_directory != impl->effects_directory) {
+    return false;
+  }
+  std::error_code ec;
+  if (!fs::is_regular_file(path_from_utf8(music_path), ec) || ec) {
+    return false;
+  }
+  if (!bass_device_is_system_default()) {
+    WDS_LOG("AudioEngine: output device changed, full re-initialise instead of reload\n");
+    return false;
+  }
+  // Open first (same flags as initialize): a file that does not open leaves the
+  // engine exactly as it was. Streams are device-independent handles, so this is
+  // safe next to the waveform decoders that share the device.
+  const HSTREAM next = stream_from_file(music_path, BASS_STREAM_DECODE | BASS_STREAM_PRESCAN);
+  if (next == 0) {
+    WDS_LOG("AudioEngine: reload music open failed %s code=%d\n", music_path.c_str(),
+            BASS_ErrorGetCode());
+    return false;
+  }
+  float freq = 0.0f;
+  if (!BASS_ChannelGetAttribute(next, BASS_ATTRIB_FREQ, &freq) || freq <= 0.0f) {
+    BASS_StreamFree(next);
+    return false;
+  }
+
+  const bool was_playing = music_playing_.load(std::memory_order_acquire);
+  BASS_ChannelPause(impl->mixer);
+  // Same teardown a seek does: removes every POS sync armed on the old music,
+  // drops live one-shots, parks the (kept) Hold stream and bumps the generation.
+  begin_timeline_control();
+  // A MIXTIME callback that already started must finish before the old source dies.
+  impl->wait_sync_in_flight("music-reload");
+
+  BASS_ChannelSetAttribute(next, BASS_ATTRIB_VOL, 0.0f);
+  if (!BASS_Mixer_StreamAddChannel(impl->mixer, next, 0)) {
+    WDS_LOG("AudioEngine: reload Mixer_StreamAddChannel failed code=%d\n", BASS_ErrorGetCode());
+    BASS_StreamFree(next);
+    if (was_playing) {
+      BASS_ChannelPlay(impl->mixer, FALSE);
+    }
+    return false;
+  }
+  const HSTREAM previous = impl->music;
+  BASS_Mixer_ChannelRemove(previous);
+  BASS_StreamFree(previous);
+  impl->music = next;
+  music_ = static_cast<unsigned long long>(next);
+  music_base_freq_ = freq;
+  copy_basename(impl->music_basename, sizeof(impl->music_basename), music_path);
+  cache_music_format();
+  apply_music_rate();  // nothing from the new source is mixed yet: no flush needed
+  apply_music_volume();  // lifts the mute used while adding
+  music_playing_.store(false, std::memory_order_release);
+  last_bass_error_ = 0;
+  // Reset the new source and drop whatever the mixer still holds from the old one.
+  (void)set_position(wds::common::Microseconds{0});
+  // Match pause_music(): the device keeps decoding silence while paused.
+  ensure_keep_alive();
+  WDS_LOG("AudioEngine: music reloaded %s (device and SFX kept)\n", music_path.c_str());
+  return true;
+}
+
+bool AudioEngine::sfx_slot_pool_stats(SfxSlotPoolStats* out) const noexcept {
+  const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
+  if (!impl || out == nullptr || impl->slots == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(impl->sfx_mu);
+  out->capacity = kMaxPendingSfxSyncs;
+  out->free_count = impl->free_list.size();
+  out->pending_count = impl->pending_syncs.size();
+  out->in_use_count = 0;
+  for (size_t i = 0; i < kMaxPendingSfxSyncs; ++i) {
+    if (impl->slots[i].in_use.load(std::memory_order_acquire)) {
+      ++out->in_use_count;
+    }
+  }
+  out->full_sweeps = impl->pool_sweeps.load(std::memory_order_relaxed);
+  return true;
 }
 
 wds::common::Microseconds AudioEngine::position() const {
@@ -1060,8 +1244,9 @@ void AudioEngine::apply_sfx_volume() {
       BASS_SampleSetInfo(impl_->samples[i], &info);
     }
   }
-  if (impl_->hold_ch != 0) {
-    BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, vol);
+  const HCHANNEL hold = impl_->hold_ch.load(std::memory_order_acquire);
+  if (hold != 0) {
+    BASS_ChannelSetAttribute(hold, BASS_ATTRIB_VOL, vol);
   }
 }
 
@@ -1215,7 +1400,12 @@ void AudioEngine::remove_mixer_sfx_sources() {
   if (impl_ == nullptr || impl_->mixer == 0) {
     return;
   }
-  detach_hold_region_loop();
+  // The Hold stream stays in the mixer (paused) across seek/pause/rate change:
+  // it is re-armed by position reset, so there is nothing to recreate or leak,
+  // and it exists before any HoldOn gate can fire. It is freed by
+  // retire_hold_channel (shutdown / error paths) only.
+  park_hold_channel();
+  const HCHANNEL hold = impl_->hold_ch.load(std::memory_order_acquire);
   const DWORD count = BASS_Mixer_StreamGetChannels(impl_->mixer, nullptr, 0);
   if (count == 0 || count == static_cast<DWORD>(-1)) {
     return;
@@ -1223,13 +1413,16 @@ void AudioEngine::remove_mixer_sfx_sources() {
   std::vector<DWORD> chans(count);
   const DWORD got = BASS_Mixer_StreamGetChannels(impl_->mixer, chans.data(), count);
   for (DWORD i = 0; i < got; ++i) {
-    if (chans[i] == 0 || chans[i] == impl_->music) {
+    if (chans[i] == 0 || chans[i] == impl_->music || chans[i] == hold) {
       continue;
     }
+    // bassmix documents BASS_STREAM_AUTOFREE on a mixer source as "free when it
+    // ends"; bass.h/bassmix.h do not say BASS_Mixer_ChannelRemove frees it, so
+    // do not rely on that. Free explicitly: if the library already freed it the
+    // call just fails with BASS_ERROR_HANDLE.
     BASS_Mixer_ChannelRemove(chans[i]);
+    BASS_StreamFree(chans[i]);
   }
-  impl_->hold_ch = 0;
-  impl_->hold_playing = false;
 }
 
 void AudioEngine::handle_sfx_sync(unsigned long long sync_handle, void* payload, HitSfxClip clip) {
@@ -1247,30 +1440,39 @@ void AudioEngine::handle_sfx_sync(unsigned long long sync_handle, void* payload,
     return;
   }
 
-  InCallbackGuard in_callback(slot);
-  bool won_play = false;
   {
-    std::lock_guard<std::mutex> lock(impl->sfx_mu);
-    auto& syncs = impl->pending_syncs;
-    bool found_pending = false;
-    for (size_t i = 0; i < syncs.size(); ++i) {
-      if (pending_sync_identifies(syncs[i]->handle.load(std::memory_order_acquire), sync_handle,
-                                  syncs[i] == slot)) {
-        found_pending = true;
-        won_play = claim_sfx_sync_callback_play(slot->claim, true);
-        slot->sync_detached.store(true, std::memory_order_release);
-        syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
-        break;
+    InCallbackGuard in_callback(slot);
+    bool won_play = false;
+    {
+      std::lock_guard<std::mutex> lock(impl->sfx_mu);
+      auto& syncs = impl->pending_syncs;
+      bool found_pending = false;
+      for (size_t i = 0; i < syncs.size(); ++i) {
+        if (pending_sync_identifies(syncs[i]->handle.load(std::memory_order_acquire), sync_handle,
+                                    syncs[i] == slot)) {
+          found_pending = true;
+          won_play = claim_sfx_sync_callback_play(slot->claim, true);
+          slot->sync_detached.store(true, std::memory_order_release);
+          syncs.erase(syncs.begin() + static_cast<std::ptrdiff_t>(i));
+          break;
+        }
+      }
+      if (!found_pending) {
+        (void)claim_sfx_sync_callback_play(slot->claim, false);
       }
     }
-    if (!found_pending) {
-      (void)claim_sfx_sync_callback_play(slot->claim, false);
+    if (won_play && !shutting_down_.load(std::memory_order_seq_cst) &&
+        std::atomic_load(&impl_).get() == impl.get()) {
+      // Runs on the BASS mixer thread (MIXTIME). Hold gates touch only the
+      // already-published Hold channel; structural Hold work stays on the control thread.
+      fire_sync_action(slot->kind, clip, /*on_mixer_thread=*/true);
     }
   }
-  if (won_play && !shutting_down_.load(std::memory_order_seq_cst) &&
-      std::atomic_load(&impl_).get() == impl.get()) {
-    fire_sync_action(slot->kind, clip);
-  }
+  // This call decided the slot's fate, so give it back now. Under the real
+  // SYNCPROC the outer in_callback guard is still up and the lock-free filter
+  // makes this a no-op; sfx_pos_sync_proc recycles after it unwinds. Direct
+  // callers (tests, replays) have no such wrapper.
+  try_recycle_slot(slot);
 }
 
 void AudioEngine::warmup_sfx() {
@@ -1337,17 +1539,20 @@ bool AudioEngine::schedule_sfx_at(HitSfxClip clip, wds::common::Microseconds at)
 }
 
 bool AudioEngine::schedule_hold_gate(bool enabled, wds::common::Microseconds at) {
+  // Control thread: make sure the Hold stream exists (and is published) before a
+  // gate that will touch it from the mixer thread can possibly fire.
+  warmup_hold_channel();
   return schedule_music_sync(enabled ? SfxSyncKind::HoldOn : SfxSyncKind::HoldOff, HitSfxClip::Hold,
                              at);
 }
 
-void AudioEngine::fire_sync_action(SfxSyncKind kind, HitSfxClip clip) {
-  if (kind == SfxSyncKind::HoldOn) {
-    set_hold_looping(true);
-    return;
-  }
-  if (kind == SfxSyncKind::HoldOff) {
-    set_hold_looping(false);
+void AudioEngine::fire_sync_action(SfxSyncKind kind, HitSfxClip clip, bool on_mixer_thread) {
+  if (kind == SfxSyncKind::HoldOn || kind == SfxSyncKind::HoldOff) {
+    if (on_mixer_thread) {
+      apply_hold_gate(kind == SfxSyncKind::HoldOn);
+    } else {
+      set_hold_looping(kind == SfxSyncKind::HoldOn);
+    }
     return;
   }
   if (clip != HitSfxClip::Hold && clip != HitSfxClip::Count) {
@@ -1356,7 +1561,11 @@ void AudioEngine::fire_sync_action(SfxSyncKind kind, HitSfxClip clip) {
 }
 
 bool AudioEngine::hold_looping() const noexcept {
-  return impl_ != nullptr && impl_->hold_playing;
+  return impl_ != nullptr && (impl_->hold_state.load(std::memory_order_seq_cst) & kHoldPlaying) != 0;
+}
+
+unsigned long long AudioEngine::hold_channel_handle() const noexcept {
+  return impl_ != nullptr ? impl_->hold_ch.load(std::memory_order_acquire) : 0;
 }
 
 bool AudioEngine::schedule_music_sync(SfxSyncKind kind, HitSfxClip clip,
@@ -1381,12 +1590,21 @@ bool AudioEngine::schedule_music_sync(SfxSyncKind kind, HitSfxClip clip,
     return true;
   }
 
-  // Heard playtime (mixer source), not decode frontier. MIXTIME sync then plugs
-  // SFX into the same mix cycle as the music byte — not a device ChannelPlay.
+  // The admission window (TooFar / capacity) is measured on the heard clock, but
+  // whether a MIXTIME POS sync can still fire depends on the MIXED position: the
+  // mixer renders ahead of what is heard by its playback buffer (500 ms default),
+  // and a POS sync set at or behind the mixed position never fires (the byte was
+  // already mixed) — the hit would be dropped and its slot would sit in
+  // pending_syncs until the next clear. Targets not safely ahead of the mixed
+  // position therefore take the immediate path, like past/due ones. The sync then
+  // plugs SFX into the same mix cycle as the music byte — not a device ChannelPlay.
   const QWORD target = align_music_bytes(us_to_bytes(impl->music, at));
   const QWORD play_pos = music_heard_bytes();
-  if (target <= play_pos) {
-    // Past/due one-shots ignore the future pending cap.
+  const QWORD mix_margin =
+      align_music_bytes(us_to_bytes(impl->music, wds::common::Microseconds{kMixedMarginUs}));
+  const QWORD mixed_pos = music_mixed_bytes();
+  if (target <= play_pos || target <= mixed_pos + mix_margin) {
+    // Past/due (or already mixed) one-shots ignore the future pending cap.
     fire_sync_action(kind, clip);
     return true;
   }
@@ -1468,15 +1686,20 @@ bool AudioEngine::schedule_music_sync(SfxSyncKind kind, HitSfxClip clip,
   {
     std::lock_guard<std::mutex> lock(impl->sfx_mu);
     claim = slot->claim.load(std::memory_order_acquire);
-    for (SfxSyncSlot* pending : impl->pending_syncs) {
-      if (pending == slot) {
+    // This slot was pushed last by this (single-writer) thread, so it is at or
+    // near the back unless a callback already took it: search from the back.
+    for (auto it = impl->pending_syncs.rbegin(); it != impl->pending_syncs.rend(); ++it) {
+      if (*it == slot) {
         found_pending = true;
         break;
       }
     }
   }
 
-  const bool due = target <= music_heard_bytes();
+  // The mixer may have passed the target between the check above and SetSync
+  // taking effect; re-read the mixed (not heard) position so such a sync, which
+  // can no longer fire, is resolved as PlayDue instead of stranding the slot.
+  const bool due = target <= music_mixed_bytes() + mix_margin;
   const SfxSyncArmResult result = decide_arm_resolution(sync != 0, found_pending, claim, due);
 
   if (result == SfxSyncArmResult::CallbackConsumed) {
@@ -1696,6 +1919,7 @@ bool AudioEngine::resolve_hold_loop_bytes() {
   }
   impl_->hold_loop_start_bytes = start_bytes;
   impl_->hold_loop_end_bytes = end_bytes;
+  impl_->hold_loop_ctx.start_bytes = start_bytes;  // before any Hold stream/sync exists
   WDS_LOG("AudioEngine: Hold custom loop %llu-%llu bytes (len=%llu)\n",
           static_cast<unsigned long long>(start_bytes),
           static_cast<unsigned long long>(end_bytes),
@@ -1703,41 +1927,143 @@ bool AudioEngine::resolve_hold_loop_bytes() {
   return true;
 }
 
-void CALLBACK hold_region_sync_proc(HSYNC /*handle*/, DWORD /*channel*/, DWORD /*data*/,
-                                    void* user) {
-  auto* engine = static_cast<AudioEngine*>(user);
-  if (engine != nullptr) {
-    engine->handle_hold_region_sync();
-  }
-}
+// --- Hold threading ---------------------------------------------------------
+// Two threads touch the Hold voice:
+//  * control (GUI) thread: warmup_hold_channel, set_hold_looping,
+//    reconcile_hold_looping, park/retire, volume, schedule_hold_gate.
+//  * BASS mixer thread: MIXTIME HoldOn/HoldOff gates (apply_hold_gate) and the
+//    persistent region-loop sync (hold_region_sync_proc).
+//
+// Ownership: the control thread alone creates/adds/removes/frees the Hold
+// stream and arms/removes its loop sync. The stream is created (warmup,
+// schedule_hold_gate) and published in hold_ch BEFORE any gate that could use it
+// is armed; it stays in the mixer, paused, across seek/pause/rate change. A gate
+// callback only does thread-safe BASS calls on the published channel
+// (BASS_ChannelSetPosition, BASS_Mixer_ChannelFlags PAUSE) and updates the atomic
+// hold_state; it never creates, frees, or re-arms anything and does not log.
+//
+// BASS semantics relied on (bass.h/bassmix.h are silent; from the BASS docs):
+//  * BASS API calls are thread-safe and may be made from a SYNCPROC; a call with
+//    a stale handle fails with BASS_ERROR_HANDLE instead of crashing.
+//  * BASS_ChannelSetSync on a mixer source is always mixtime. A non-ONETIME POS
+//    sync fires every time playback crosses the position, so the loop callback
+//    needs no re-arm.
+//  * BASS_ChannelRemoveSync is NOT assumed to wait for a callback that is already
+//    running. Teardown therefore (1) zeroes hold_ch so new callbacks bail,
+//    (2) removes the sync, (3) waits for sync_in_flight (every callback bumps it
+//    first), and only then (4) frees the stream. The wait runs on the control
+//    thread holding no lock, so it cannot deadlock with a mixer-thread callback.
+//  * BASS_Mixer_ChannelRemove does not document freeing the source, and
+//    BASS_STREAM_AUTOFREE on a mixer source means "free when it ends"; sources
+//    are freed explicitly with BASS_StreamFree.
+//
+// Mix time vs heard time: a gate fires when the mixer decodes the music byte,
+// ahead of what is audible by the device buffer. Gates therefore mark
+// kHoldGateOwned and reconcile_hold_looping (the clock-derived GUI correction)
+// stands down until the heard clock agrees, so the two writers do not undo each
+// other (HoldOn switched straight back off / HoldOff immediately restarted).
 
-void AudioEngine::handle_hold_region_sync() {
-  if (impl_ == nullptr || impl_->hold_ch == 0 || !impl_->hold_custom_loop) {
+void AudioEngine::apply_hold_pause_state() {
+  // Safe from either thread. Every writer updates hold_state first and calls
+  // this afterwards; re-checking the state makes the last writer's value win
+  // even when the GUI and a gate interleave.
+  const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
+  if (!impl || impl->mixer == 0) {
     return;
   }
-  impl_->hold_loop_sync = 0;
-  BASS_ChannelSetPosition(impl_->hold_ch, impl_->hold_loop_start_bytes, BASS_POS_BYTE);
-  arm_hold_region_loop();
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const std::uint8_t state = impl->hold_state.load(std::memory_order_seq_cst);
+    const HCHANNEL ch = impl->hold_ch.load(std::memory_order_acquire);
+    if (ch == 0) {
+      return;
+    }
+    BASS_Mixer_ChannelFlags(ch, (state & kHoldPlaying) != 0 ? 0 : BASS_MIXER_CHAN_PAUSE,
+                            BASS_MIXER_CHAN_PAUSE);
+    if (impl->hold_state.load(std::memory_order_seq_cst) == state) {
+      return;
+    }
+  }
 }
 
-void AudioEngine::detach_hold_region_loop() {
+void AudioEngine::apply_hold_gate(bool on) {
+  // BASS mixer thread (MIXTIME). No allocation, no logging, no structural change.
+  const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
+  if (!impl || impl->mixer == 0) {
+    return;
+  }
+  const HCHANNEL ch = impl->hold_ch.load(std::memory_order_acquire);
+  if (ch == 0) {
+    return;
+  }
+  std::uint8_t state = impl->hold_state.load(std::memory_order_seq_cst);
+  if (on && (state & kHoldPlaying) == 0) {
+    // Rewind while still paused so the first mixed block starts at the attack.
+    BASS_ChannelSetPosition(ch, 0, BASS_POS_BYTE);
+  }
+  const std::uint8_t next = on ? static_cast<std::uint8_t>(kHoldPlaying | kHoldGateOwned)
+                               : kHoldGateOwned;
+  while (!impl->hold_state.compare_exchange_weak(state, next, std::memory_order_seq_cst)) {
+  }
+  apply_hold_pause_state();
+}
+
+void AudioEngine::install_hold_loop_sync(std::uint32_t ch) {
+  // Control thread, before the channel is published. Persistent sync: the
+  // callback only rewinds, so it never needs to re-arm or write engine state.
+  if (impl_ == nullptr || ch == 0 || !impl_->hold_custom_loop || impl_->hold_loop_sync != 0) {
+    return;
+  }
+  impl_->hold_loop_sync = BASS_ChannelSetSync(ch, BASS_SYNC_POS | BASS_SYNC_MIXTIME,
+                                              impl_->hold_loop_end_bytes, hold_region_sync_proc,
+                                              &impl_->hold_loop_ctx);
+}
+
+void AudioEngine::retire_hold_channel() {
+  // Control thread only. Drops hold_ch and frees everything attached to it.
   if (impl_ == nullptr) {
     return;
   }
-  if (impl_->hold_loop_sync != 0 && impl_->hold_ch != 0) {
-    BASS_ChannelRemoveSync(impl_->hold_ch, impl_->hold_loop_sync);
-  }
+  const HCHANNEL ch = impl_->hold_ch.exchange(0, std::memory_order_seq_cst);
+  impl_->hold_state.store(0, std::memory_order_seq_cst);
+  const HSYNC sync = impl_->hold_loop_sync;
   impl_->hold_loop_sync = 0;
-}
-
-void AudioEngine::arm_hold_region_loop() {
-  detach_hold_region_loop();
-  if (impl_ == nullptr || impl_->hold_ch == 0 || !impl_->hold_custom_loop) {
+  if (ch == 0) {
     return;
   }
-  impl_->hold_loop_sync =
-      BASS_ChannelSetSync(impl_->hold_ch, BASS_SYNC_POS | BASS_SYNC_MIXTIME | BASS_SYNC_ONETIME,
-                          impl_->hold_loop_end_bytes, hold_region_sync_proc, this);
+  if (sync != 0) {
+    BASS_ChannelRemoveSync(ch, sync);
+  }
+  if (impl_->mixer != 0) {
+    BASS_Mixer_ChannelRemove(ch);
+  }
+  // A callback that loaded `ch` before the exchange may still be running.
+  impl_->wait_sync_in_flight("hold-retire");
+  if (impl_->mixer != 0) {
+    BASS_StreamFree(ch);
+  } else {
+    BASS_ChannelStop(ch);
+  }
+}
+
+void AudioEngine::park_hold_channel() {
+  // Control thread. Silence Hold without freeing it (seek / pause / rate change).
+  if (impl_ == nullptr) {
+    return;
+  }
+  impl_->hold_state.store(0, std::memory_order_seq_cst);
+  if (impl_->mixer == 0) {
+    const HCHANNEL ch = impl_->hold_ch.load(std::memory_order_acquire);
+    if (ch != 0) {
+      BASS_ChannelPause(ch);
+    }
+    return;
+  }
+  apply_hold_pause_state();
+  // Gates are cleared before this runs, but one that already won its claim may
+  // still be mid-callback and unpause after us. Drain it, then pause again.
+  impl_->wait_sync_in_flight("hold-park");
+  impl_->hold_state.store(0, std::memory_order_seq_cst);
+  apply_hold_pause_state();
 }
 
 void AudioEngine::warmup_hold_channel() {
@@ -1745,37 +2071,44 @@ void AudioEngine::warmup_hold_channel() {
     return;
   }
   const size_t hold_idx = static_cast<size_t>(HitSfxClip::Hold);
-  if (!impl_->sample_ok[hold_idx] || impl_->hold_ch != 0) {
+  if (!impl_->sample_ok[hold_idx] || impl_->hold_ch.load(std::memory_order_acquire) != 0) {
     return;
   }
   if (impl_->mixer != 0) {
-    impl_->hold_ch =
+    const HCHANNEL ch =
         BASS_SampleGetChannel(impl_->samples[hold_idx], BASS_SAMCHAN_STREAM | BASS_STREAM_DECODE);
-    if (impl_->hold_ch == 0) {
+    if (ch == 0) {
       WDS_LOG("AudioEngine: Hold decode warmup failed code=%d\n", BASS_ErrorGetCode());
       return;
     }
-    BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
-    if (!BASS_Mixer_StreamAddChannel(impl_->mixer, impl_->hold_ch,
+    BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+    // No BASS_STREAM_AUTOFREE: this stream is owned and freed by retire_hold_channel.
+    if (!BASS_Mixer_StreamAddChannel(impl_->mixer, ch,
                                      BASS_MIXER_CHAN_PAUSE | BASS_MIXER_CHAN_NORAMPIN)) {
       WDS_LOG("AudioEngine: Mixer warmup Hold failed code=%d\n", BASS_ErrorGetCode());
-      BASS_StreamFree(impl_->hold_ch);
-      impl_->hold_ch = 0;
+      BASS_StreamFree(ch);
       return;
     }
+    impl_->hold_state.store(0, std::memory_order_seq_cst);
+    install_hold_loop_sync(ch);
+    impl_->hold_ch.store(ch, std::memory_order_release);  // publish last
     return;
   }
-  impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
-  if (impl_->hold_ch == 0) {
+  const HCHANNEL ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
+  if (ch == 0) {
     return;
   }
-  BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, 0.0f);
-  BASS_ChannelPlay(impl_->hold_ch, TRUE);
-  BASS_ChannelPause(impl_->hold_ch);
-  BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+  BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, 0.0f);
+  BASS_ChannelPlay(ch, TRUE);
+  BASS_ChannelPause(ch);
+  BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+  impl_->hold_state.store(0, std::memory_order_seq_cst);
+  install_hold_loop_sync(ch);
+  impl_->hold_ch.store(ch, std::memory_order_release);
 }
 
 void AudioEngine::set_hold_looping(bool enabled) {
+  // Control thread. Explicit set: takes ownership back from any fired gate.
   if (!sfx_ready_ || impl_ == nullptr) {
     return;
   }
@@ -1783,40 +2116,77 @@ void AudioEngine::set_hold_looping(bool enabled) {
   if (!impl_->sample_ok[hold_idx]) {
     return;
   }
-  if (enabled == impl_->hold_playing) {
+  const bool playing = (impl_->hold_state.load(std::memory_order_seq_cst) & kHoldPlaying) != 0;
+  if (enabled == playing) {
+    impl_->hold_state.fetch_and(static_cast<std::uint8_t>(~kHoldGateOwned),
+                                std::memory_order_seq_cst);
     return;
   }
   if (enabled) {
     warmup_hold_channel();
-    if (impl_->hold_ch == 0) {
+    HCHANNEL ch = impl_->hold_ch.load(std::memory_order_acquire);
+    if (ch == 0) {
       return;
     }
-    BASS_ChannelSetAttribute(impl_->hold_ch, BASS_ATTRIB_VOL, effective_sfx_volume());
-    BASS_ChannelSetPosition(impl_->hold_ch, 0, BASS_POS_BYTE);
-    arm_hold_region_loop();
+    BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+    BASS_ChannelSetPosition(ch, 0, BASS_POS_BYTE);
     if (impl_->mixer != 0) {
-      BASS_Mixer_ChannelFlags(impl_->hold_ch, 0, BASS_MIXER_CHAN_PAUSE);
-    } else if (!BASS_ChannelPlay(impl_->hold_ch, TRUE)) {
-      impl_->hold_ch = BASS_SampleGetChannel(impl_->samples[hold_idx], FALSE);
-      if (impl_->hold_ch == 0 || !BASS_ChannelPlay(impl_->hold_ch, TRUE)) {
+      impl_->hold_state.store(kHoldPlaying, std::memory_order_seq_cst);
+      apply_hold_pause_state();
+      return;
+    }
+    if (!BASS_ChannelPlay(ch, TRUE)) {
+      // Drop the dead voice (stop + remove sync) and try a fresh one.
+      retire_hold_channel();
+      warmup_hold_channel();
+      ch = impl_->hold_ch.load(std::memory_order_acquire);
+      if (ch == 0 || !BASS_ChannelPlay(ch, TRUE)) {
         WDS_LOG("AudioEngine: Hold ChannelPlay failed code=%d\n", BASS_ErrorGetCode());
-        impl_->hold_ch = 0;
+        retire_hold_channel();
         return;
       }
-      arm_hold_region_loop();
     }
-    impl_->hold_playing = true;
+    impl_->hold_state.store(kHoldPlaying, std::memory_order_seq_cst);
     return;
   }
-  detach_hold_region_loop();
-  if (impl_->hold_ch != 0) {
-    if (impl_->mixer != 0) {
-      BASS_Mixer_ChannelFlags(impl_->hold_ch, BASS_MIXER_CHAN_PAUSE, BASS_MIXER_CHAN_PAUSE);
-    } else {
-      BASS_ChannelPause(impl_->hold_ch);
+  impl_->hold_state.store(0, std::memory_order_seq_cst);
+  if (impl_->mixer != 0) {
+    apply_hold_pause_state();
+  } else {
+    const HCHANNEL ch = impl_->hold_ch.load(std::memory_order_acquire);
+    if (ch != 0) {
+      BASS_ChannelPause(ch);
     }
   }
-  impl_->hold_playing = false;
+}
+
+void AudioEngine::reconcile_hold_looping(bool desired_by_clock) {
+  // Control thread, called every tick with the heard-clock verdict. Behaves like
+  // set_hold_looping except that it leaves a state a mixer-thread gate has
+  // already set at mix time (ahead of the heard clock) alone until the clock
+  // catches up and the two agree.
+  if (impl_ == nullptr) {
+    return;
+  }
+  std::uint8_t state = impl_->hold_state.load(std::memory_order_seq_cst);
+  for (;;) {
+    const bool playing = (state & kHoldPlaying) != 0;
+    if (desired_by_clock == playing) {
+      if ((state & kHoldGateOwned) == 0) {
+        return;
+      }
+      const std::uint8_t cleared = static_cast<std::uint8_t>(state & ~kHoldGateOwned);
+      if (impl_->hold_state.compare_exchange_weak(state, cleared, std::memory_order_seq_cst)) {
+        return;
+      }
+      continue;
+    }
+    if ((state & kHoldGateOwned) != 0) {
+      return;
+    }
+    break;
+  }
+  set_hold_looping(desired_by_clock);
 }
 
 void AudioEngine::stop_playing_sfx() {
@@ -1827,11 +2197,9 @@ void AudioEngine::stop_playing_sfx() {
     remove_mixer_sfx_sources();
     return;
   }
-  if (impl_->hold_ch != 0) {
-    BASS_ChannelStop(impl_->hold_ch);
-    impl_->hold_ch = 0;
-    impl_->hold_playing = false;
-  }
+  // No mixer: the Hold voice is a plain sample channel; stop and free it (the
+  // next set_hold_looping(true) recreates it).
+  retire_hold_channel();
   for (uint8_t i = 0; i < static_cast<uint8_t>(HitSfxClip::Count); ++i) {
     if (static_cast<HitSfxClip>(i) == HitSfxClip::Hold) {
       continue;

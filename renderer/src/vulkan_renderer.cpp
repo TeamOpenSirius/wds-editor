@@ -244,8 +244,9 @@ struct GpuTexture {
   int height = 0;
   bool alive = false;
   bool nearest = false;  // UI font atlases — avoid LINEAR soft-fringe emboldening.
-  uint64_t retire_after_seq = 0;  // 0 = not retiring; GPU-free when frame_seq >= this
-  uint64_t sampled_seq = 0;       // 0 = never bound in a submitted draw
+  bool retiring = false;               // destroy_texture ran; waiting for the GPU
+  uint64_t retire_after_submit = 0;    // GPU-free when completed_submit_seq >= this
+  uint64_t sampled_seq = 0;       // 0 = never bound in a recorded draw
 };
 
 uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props,
@@ -424,9 +425,8 @@ void destroy_host_staging(VkDevice device, HostStaging& staging) {
   staging = {};
 }
 
-std::vector<uint32_t> host_visible_memory_types(VkPhysicalDevice phys, uint32_t type_bits) {
-  VkPhysicalDeviceMemoryProperties mem{};
-  vkGetPhysicalDeviceMemoryProperties(phys, &mem);
+std::vector<uint32_t> host_visible_memory_types(const VkPhysicalDeviceMemoryProperties& mem,
+                                                uint32_t type_bits) {
   std::vector<uint32_t> ranked;
   auto consider = [&](bool want_coherent, bool avoid_device_local) {
     for (uint32_t i = 0; i < mem.memoryTypeCount; ++i) {
@@ -457,8 +457,12 @@ std::vector<uint32_t> host_visible_memory_types(VkPhysicalDevice phys, uint32_t 
   return ranked;
 }
 
-UploadResult create_filled_host_staging(VkDevice device, VkPhysicalDevice physical,
-                                        VkDeviceSize bytes, const void* src, HostStaging* out) {
+// `mem_props` / `atom` come from Impl's cached physical-device query (per-chunk
+// vkGetPhysicalDevice* calls were pure overhead).
+UploadResult create_filled_host_staging(VkDevice device,
+                                        const VkPhysicalDeviceMemoryProperties& mem_props,
+                                        VkDeviceSize atom, VkDeviceSize bytes, const void* src,
+                                        HostStaging* out) {
   if (out == nullptr || src == nullptr || bytes == 0) {
     return make_upload_result(VK_ERROR_INITIALIZATION_FAILED, UploadStage::Buffer);
   }
@@ -475,18 +479,12 @@ UploadResult create_filled_host_staging(VkDevice device, VkPhysicalDevice physic
   }
   VkMemoryRequirements req{};
   vkGetBufferMemoryRequirements(device, staging.buffer, &req);
-  const std::vector<uint32_t> types = host_visible_memory_types(physical, req.memoryTypeBits);
+  const std::vector<uint32_t> types = host_visible_memory_types(mem_props, req.memoryTypeBits);
   if (types.empty()) {
     destroy_host_staging(device, staging);
     return upload_no_memory_type(UploadStage::Buffer);
   }
 
-  VkPhysicalDeviceMemoryProperties mem_props{};
-  vkGetPhysicalDeviceMemoryProperties(physical, &mem_props);
-  VkPhysicalDeviceProperties dev_props{};
-  vkGetPhysicalDeviceProperties(physical, &dev_props);
-  const VkDeviceSize atom =
-      dev_props.limits.nonCoherentAtomSize > 0 ? dev_props.limits.nonCoherentAtomSize : 1;
   UploadResult last_fail = upload_no_memory_type(UploadStage::Buffer);
   for (uint32_t type_index : types) {
     if (staging.buffer == VK_NULL_HANDLE) {
@@ -652,9 +650,33 @@ struct GpuDrawBucket {
   uint8_t overlay_pipe = 0;
 };
 
+struct TexKeyFix {
+  TextureId texture = kInvalidTextureId;
+  bool disable_alpha_clip = false;
+};
+
+// Per-frame planning vectors kept on Impl so clear() retains capacity. Only
+// valid inside one draw_frame call: nothing may keep a reference past it.
+struct DrawPlanScratch {
+  std::vector<GpuDrawBucket> scene;
+  std::vector<GpuDrawBucket> early;
+  std::vector<GpuDrawBucket> mid;
+  std::vector<GpuDrawBucket> additive;
+  std::vector<GpuDrawBucket> carve;
+  std::vector<GpuDrawBucket> post;
+  std::vector<GpuDrawBucket> post2;
+  std::vector<GpuDrawBucket> head_packed;
+  std::vector<TexKeyFix> order;
+};
+
 }  // namespace
 
 struct VulkanRenderer::Impl {
+  DrawPlanScratch plan_scratch;
+  // Physical-device data is immutable for a device; queried once per physical.
+  VkPhysicalDevice cached_props_for = VK_NULL_HANDLE;
+  VkPhysicalDeviceMemoryProperties cached_mem_props{};
+  VkDeviceSize cached_non_coherent_atom = 1;
   std::function<VkSurfaceKHR(VkInstance)> create_surface;
   std::function<VkSurfaceKHR()> acquire_surface;
   std::function<void(int* width, int* height)> framebuffer_size;
@@ -806,11 +828,18 @@ struct VulkanRenderer::Impl {
   VkCommandPool upload_command_pool = VK_NULL_HANDLE;
   std::array<VkCommandBuffer, kMaxFramesInFlight> command_buffers{};
   std::array<VkSemaphore, kMaxFramesInFlight> image_available{};
-  std::array<VkSemaphore, kMaxFramesInFlight> render_finished{};
+  // One per swapchain image (not per frame slot): present waits on the
+  // semaphore of the image it presents, so a slot re-submit cannot re-signal a
+  // semaphore whose present wait is still pending.
+  std::vector<VkSemaphore> render_finished;
   std::array<VkFence, kMaxFramesInFlight> in_flight{};
   uint32_t frame_index = 0;
   int frames_in_flight = kMaxFramesInFlight;
-  uint64_t frame_seq = 0;
+  uint64_t frame_seq = 0;  // draw_frame call counter; only a "sampled" marker
+  // GPU-completion bookkeeping for texture retirement (see advance_completed_submit).
+  uint64_t submit_seq = 0;            // successful real-frame vkQueueSubmit count
+  uint64_t completed_submit_seq = 0;  // all submits <= this are known complete
+  std::array<uint64_t, kMaxFramesInFlight> slot_submit_seq{};
   int preferred_msaa = 1;
 
   struct FrameVertexBuffer {
@@ -874,7 +903,7 @@ struct VulkanRenderer::Impl {
   void push_syuriken_pc(VkCommandBuffer cmd, const float* mvp) const;
   bool bucket_is_syuriken(const DrawBucket& bucket) const noexcept;
   void record_bloom(VkCommandBuffer cmd, uint32_t image_index);
-  bool ensure_ring_slot(FrameVertexBuffer& slot, size_t bytes, size_t ring,
+  bool ensure_ring_slot(FrameVertexBuffer& slot, size_t bytes, size_t ring, size_t ring_max,
                         VkBufferUsageFlags usage);
   bool ensure_frame_vertex_capacity(uint32_t frame, size_t bytes);
   bool ensure_frame_index_capacity(uint32_t frame, size_t bytes);
@@ -890,7 +919,10 @@ struct VulkanRenderer::Impl {
   TextureId alloc_texture_slot();
   void release_texture_descriptor(GpuTexture& tex);
   void destroy_gpu_texture_resources(GpuTexture& tex);
-  void reap_retired_textures(uint64_t now_seq);
+  void reap_retired_textures();
+  void note_slot_fence_signalled(uint32_t frame) noexcept;
+  void destroy_render_finished(std::vector<VkSemaphore>& sems);
+  bool create_render_finished(size_t count);
   UploadResult upload_texture_pixels(GpuTexture& tex, TextureId id, const unsigned char* pixels,
                                      int width, int height);
   bool create_descriptor_block(uint32_t capacity);
@@ -1114,6 +1146,8 @@ void VulkanRenderer::Impl::cleanup_swapchain_resources_keep_handle() {
   }
   swapchain_images.clear();
   images_in_flight.clear();
+  // Device is idle above, so no present wait is pending on these.
+  destroy_render_finished(render_finished);
   last_present_ok = false;
   last_presented_image = UINT32_MAX;
 }
@@ -1775,6 +1809,8 @@ VkResult VulkanRenderer::Impl::device_wait_idle_result() {
     apply_msaa_idle_acc_us += path_elapsed_us(t0);
   }
   if (result == VK_SUCCESS) {
+    // Idle proves every submitted frame is done.
+    completed_submit_seq = advance_completed_submit(completed_submit_seq, submit_seq);
     // Idle proves the upload queue is done; only then drop staging/cmd/fence.
     force_release_pending_uploads();
   }
@@ -2022,6 +2058,8 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   std::vector<VkFramebuffer> old_framebuffers = std::move(framebuffers);
   std::vector<VkImage> old_images = std::move(swapchain_images);
   std::vector<VkFence> old_images_in_flight = std::move(images_in_flight);
+  std::vector<VkSemaphore> old_render_finished = std::move(render_finished);
+  render_finished.clear();  // moved-from state is unspecified; start empty
   const VkImageView old_color_view = color_msaa_view;
   const VkImage old_color_image = color_msaa_image;
   const VkDeviceMemory old_color_memory = color_msaa_memory;
@@ -2059,6 +2097,8 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     framebuffers = std::move(old_framebuffers);
     swapchain_images = std::move(old_images);
     images_in_flight = std::move(old_images_in_flight);
+    destroy_render_finished(render_finished);  // semaphores of the failed new chain
+    render_finished = std::move(old_render_finished);
     vkDestroySwapchainKHR(device, new_swapchain, nullptr);
     swapchain = old_swapchain;
     swapchain_format = prev_format;
@@ -2106,6 +2146,10 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     return false;
   }
   images_in_flight.assign(actual, VK_NULL_HANDLE);
+  if (!create_render_finished(actual)) {
+    restore_previous();
+    return false;
+  }
   frames_in_flight = frames_in_flight_for_swapchain(actual, kMaxFramesInFlight);
   if (frame_index >= static_cast<uint32_t>(frames_in_flight)) {
     frame_index = 0;
@@ -2142,6 +2186,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 
   // Success — wait for in-flight frames before retiring old swapchain / bloom.
   (void)device_wait_idle_result();
+  destroy_render_finished(old_render_finished);
   destroy_gpu_timestamp_pools();
   if (!create_bloom_resources()) {
     WDS_LOG("bloom off (extent=%ux%u blit=%d)\n", swapchain_extent.width, swapchain_extent.height,
@@ -2168,7 +2213,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 }
 
 bool VulkanRenderer::Impl::ensure_ring_slot(FrameVertexBuffer& slot, size_t bytes, size_t ring,
-                                           VkBufferUsageFlags usage) {
+                                           size_t ring_max, VkBufferUsageFlags usage) {
   if (bytes <= slot.capacity_bytes && slot.buffer != VK_NULL_HANDLE) {
     if (slot.mapped == nullptr) {
       return remap_frame_vertices() && slot.mapped != nullptr;
@@ -2205,8 +2250,7 @@ bool VulkanRenderer::Impl::ensure_ring_slot(FrameVertexBuffer& slot, size_t byte
   destroy_slot();
 
   const size_t ring_bytes = ring > 0 ? ring : kRingVertexCapacityBytes;
-  size_t capacity = std::max(bytes, ring_bytes);
-  capacity = std::max(capacity, slot.capacity_bytes * 2);
+  const size_t capacity = ring_slot_capacity(bytes, ring_bytes, ring_max);
   slot.capacity_bytes = 0;
 
   auto make_buffer = [&](VkBufferUsageFlags make_usage, VkBuffer* out) -> bool {
@@ -2321,7 +2365,7 @@ bool VulkanRenderer::Impl::ensure_ring_slot(FrameVertexBuffer& slot, size_t byte
 bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t bytes) {
   const size_t ring =
       persistent_ring_bytes > 0 ? persistent_ring_bytes : kRingVertexCapacityBytes;
-  return ensure_ring_slot(frame_vertices[frame], bytes, ring,
+  return ensure_ring_slot(frame_vertices[frame], bytes, ring, persistent_ring_max_bytes,
                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 }
 
@@ -2329,7 +2373,8 @@ bool VulkanRenderer::Impl::ensure_frame_index_capacity(uint32_t frame, size_t by
   const size_t ring = persistent_index_ring_bytes > 0
                           ? persistent_index_ring_bytes
                           : VulkanRenderer::kPersistentIndexRingBytes;
-  return ensure_ring_slot(frame_indices[frame], bytes, ring, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+  return ensure_ring_slot(frame_indices[frame], bytes, ring, persistent_index_ring_max_bytes,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 }
 
 size_t VulkanRenderer::Impl::next_ring_target(size_t min_bytes) const noexcept {
@@ -2580,13 +2625,42 @@ void VulkanRenderer::Impl::destroy_gpu_texture_resources(GpuTexture& tex) {
   tex = GpuTexture{};
 }
 
-void VulkanRenderer::Impl::reap_retired_textures(uint64_t now_seq) {
+void VulkanRenderer::Impl::note_slot_fence_signalled(uint32_t frame) noexcept {
+  if (frame < slot_submit_seq.size()) {
+    completed_submit_seq = advance_completed_submit(completed_submit_seq, slot_submit_seq[frame]);
+  }
+}
+
+void VulkanRenderer::Impl::destroy_render_finished(std::vector<VkSemaphore>& sems) {
+  if (device != VK_NULL_HANDLE) {
+    for (VkSemaphore sem : sems) {
+      if (sem) vkDestroySemaphore(device, sem, nullptr);
+    }
+  }
+  sems.clear();
+}
+
+bool VulkanRenderer::Impl::create_render_finished(size_t count) {
+  destroy_render_finished(render_finished);
+  VkSemaphoreCreateInfo sem_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+  render_finished.assign(count, VK_NULL_HANDLE);
+  for (size_t i = 0; i < count; ++i) {
+    if (!create_sync_object_ok(vkCreateSemaphore(device, &sem_info, nullptr, &render_finished[i]))) {
+      destroy_render_finished(render_finished);
+      return false;
+    }
+  }
+  return true;
+}
+
+void VulkanRenderer::Impl::reap_retired_textures() {
   for (size_t i = 1; i < textures.size(); ++i) {
     GpuTexture& tex = textures[i];
     if (tex.alive || tex.image == VK_NULL_HANDLE) {
       continue;
     }
-    const bool retire_due = tex.retire_after_seq != 0 && now_seq >= tex.retire_after_seq;
+    const bool retire_due =
+        texture_retire_gate_open(tex.retiring, tex.retire_after_submit, completed_submit_seq);
     const bool never_sampled = tex.sampled_seq == 0;
     const bool upload_in_flight = texture_has_pending_upload(static_cast<TextureId>(i));
     if (upload_may_destroy_texture_image(upload_in_flight, retire_due || never_sampled, false)) {
@@ -2742,6 +2816,15 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
     return make_upload_result(VK_ERROR_INITIALIZATION_FAILED, UploadStage::Buffer);
   }
 
+  if (cached_props_for != physical) {
+    VkPhysicalDeviceProperties dev_props{};
+    vkGetPhysicalDeviceProperties(physical, &dev_props);
+    vkGetPhysicalDeviceMemoryProperties(physical, &cached_mem_props);
+    cached_non_coherent_atom =
+        dev_props.limits.nonCoherentAtomSize > 0 ? dev_props.limits.nonCoherentAtomSize : 1;
+    cached_props_for = physical;
+  }
+
   unmap_frame_vertices();
   // Leave rings unmapped. Consecutive create_texture_rgba calls then share the
   // ICD map budget and can QueueSubmit without a remap/unmap pair each time.
@@ -2755,7 +2838,7 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(rows) * row_bytes;
     HostStaging block{};
     const UploadResult filled = create_filled_host_staging(
-        device, physical, bytes,
+        device, cached_mem_props, cached_non_coherent_atom, bytes,
         pixels + static_cast<size_t>(y) * static_cast<size_t>(row_bytes), &block);
     if (!filled.ok()) {
       destroy_host_staging(device, block);
@@ -4282,11 +4365,6 @@ void vb_fill_dump_keep_empty(DrawBatch& out, const std::vector<GpuDrawBucket>& b
   }
 }
 
-struct TexKeyFix {
-  TextureId texture = kInvalidTextureId;
-  bool disable_alpha_clip = false;
-};
-
 void vb_add_tex_key(std::vector<TexKeyFix>& order, TextureId texture, bool clip) {
   for (const auto& k : order) {
     if (k.texture == texture && k.disable_alpha_clip == clip) {
@@ -4302,8 +4380,9 @@ uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch*
                              bool head_keep_empty, bool head_first,
                              const DrawBatch* const* extras, size_t extra_n, uint32_t cursor,
                              DrawVertex* dst, bool extras_in_place, const DrawVertex* mapped,
-                             uint32_t* idx_dst, uint32_t* idx_cursor) {
-  std::vector<GpuDrawBucket> head_packed;
+                             uint32_t* idx_dst, uint32_t* idx_cursor, DrawPlanScratch& scratch) {
+  std::vector<GpuDrawBucket>& head_packed = scratch.head_packed;
+  head_packed.clear();
   if (head != nullptr) {
     for (const auto& bucket : head->buckets) {
       GpuDrawBucket g;
@@ -4330,7 +4409,8 @@ uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch*
     }
   }
 
-  std::vector<TexKeyFix> order;
+  std::vector<TexKeyFix>& order = scratch.order;
+  order.clear();
   auto add_head_keys = [&]() {
     for (const auto& g : head_packed) {
       vb_add_tex_key(order, g.texture, g.disable_alpha_clip);
@@ -5141,8 +5221,6 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     if (!create_sync_object_ok(
             vkCreateSemaphore(impl_->device, &sem_info, nullptr, &impl_->image_available[i])) ||
         !create_sync_object_ok(
-            vkCreateSemaphore(impl_->device, &sem_info, nullptr, &impl_->render_finished[i])) ||
-        !create_sync_object_ok(
             vkCreateFence(impl_->device, &fence_info, nullptr, &impl_->in_flight[i]))) {
       return false;
     }
@@ -5187,12 +5265,11 @@ void VulkanRenderer::destroy() {
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
       if (impl_->image_available[i])
         vkDestroySemaphore(impl_->device, impl_->image_available[i], nullptr);
-      if (impl_->render_finished[i])
-        vkDestroySemaphore(impl_->device, impl_->render_finished[i], nullptr);
       if (impl_->in_flight[i]) vkDestroyFence(impl_->device, impl_->in_flight[i], nullptr);
     }
 
-    impl_->cleanup_swapchain();
+    impl_->cleanup_swapchain();  // also destroys the per-image render_finished semaphores
+    impl_->destroy_render_finished(impl_->render_finished);  // no-op normally
     impl_->destroy_gpu_timestamp_pools();
     impl_->destroy_bloom_pipeline();
     if (impl_->pipeline) vkDestroyPipeline(impl_->device, impl_->pipeline, nullptr);
@@ -5650,7 +5727,7 @@ TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int
       return info;
     }
   }
-  impl_->reap_retired_textures(impl_->frame_seq);
+  impl_->reap_retired_textures();
   PathTimer timed(path_diag_enabled_, &path_diag_, RendererPathSegment::CreateTextureRgba);
   const TextureId id = impl_->alloc_texture_slot();
   GpuTexture& tex = impl_->textures[id];
@@ -5663,7 +5740,8 @@ TextureInfo VulkanRenderer::create_texture_rgba(const unsigned char* pixels, int
     }
     if (impl_->texture_has_pending_upload(id)) {
       tex.alive = false;
-      tex.retire_after_seq = impl_->frame_seq;
+      tex.retiring = true;
+      tex.retire_after_submit = impl_->submit_seq;
     } else {
       impl_->destroy_gpu_texture_resources(tex);
     }
@@ -5743,6 +5821,7 @@ bool VulkanRenderer::lock_persistent_vb(size_t min_bytes, PersistentVbLock* out,
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
                                                            fence_t0)
           .count();
+  impl_->note_slot_fence_signalled(frame);
   if (!impl_->remap_frame_vertices()) {
     return false;
   }
@@ -5810,8 +5889,10 @@ void VulkanRenderer::destroy_texture(TextureId id) {
   }
   // Delay free until in-flight frames that sampled this image have completed.
   // Do not vkDeviceWaitIdle on the UI thread (CJK atlas / DPI hitch).
-  tex.retire_after_seq =
-      impl_->frame_seq + static_cast<uint64_t>(std::max(1, impl_->frames_in_flight));
+  // Reaped once every submit issued so far has completed (fence observed),
+  // independent of how many draw_frame calls bail before submitting.
+  tex.retiring = true;
+  tex.retire_after_submit = impl_->submit_seq;
 }
 
 bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r,
@@ -5841,7 +5922,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     }
     (void)impl_->reap_pending_uploads();
     if (!draw_frame_zero_extent_reap_applies_health()) {
-      impl_->reap_retired_textures(impl_->frame_seq);
+      impl_->reap_retired_textures();
     }
   };
   if (health_ == RendererHealth::SurfaceLost) {
@@ -5889,7 +5970,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
         return false;
       }
     }
-    impl_->reap_retired_textures(impl_->frame_seq);
+    impl_->reap_retired_textures();
   }
 
   using clock = std::chrono::steady_clock;
@@ -5902,8 +5983,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->last_fence_wait_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - fence_t0).count();
   impl_->reap_gpu_timestamps(frame);
+  // This slot's fence is signalled: every submit up to its last one is complete.
+  impl_->note_slot_fence_signalled(frame);
   ++impl_->frame_seq;
-  impl_->reap_retired_textures(impl_->frame_seq);
+  impl_->reap_retired_textures();
 
   uint32_t image_index = 0;
   const auto acquire_t0 = clock::now();
@@ -5923,13 +6006,44 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     return apply_wsi_action(acquire_action);
   }
 
+  // From here on an image is acquired and image_available[frame] is signalled.
+  // Any failure return must go through this: it consumes the semaphore with a
+  // command-buffer-less submit and, when vkResetFences already ran, passes the
+  // fence so it is signalled again (the next vkWaitForFences is UINT64_MAX and
+  // would hang the UI forever on an unsignalled fence). The acquired image can
+  // never be presented without a render, so the swapchain is rebuilt to
+  // release it; otherwise repeated failures exhaust the images and acquire
+  // blocks.
+  auto abort_after_acquire = [&](bool fence_was_reset) -> bool {
+    VkPipelineStageFlags drain_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    drain.waitSemaphoreCount = 1;
+    drain.pWaitSemaphores = &impl_->image_available[frame];
+    drain.pWaitDstStageMask = &drain_stage;
+    const VkResult drain_r = vkQueueSubmit(impl_->graphics_queue, 1, &drain,
+                                           fence_was_reset ? impl_->in_flight[frame]
+                                                           : VK_NULL_HANDLE);
+    if (!check_device_result(drain_r)) {
+      return false;
+    }
+    // recover_swapchain() idles the device, which also advances the completed
+    // watermark. The drain submit never signals render_finished.
+    vkQueueWaitIdle(impl_->graphics_queue);
+    (void)recover_swapchain();
+    return false;
+  };
+
   // Do not reuse a swapchain image that is still referenced by an in-flight submit.
   if (image_index < impl_->images_in_flight.size() &&
       impl_->images_in_flight[image_index] != VK_NULL_HANDLE) {
     if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->images_in_flight[image_index],
                                             VK_TRUE, UINT64_MAX))) {
-      return false;
+      return abort_after_acquire(false);
     }
+  }
+  if (!render_finished_index_valid(image_index, impl_->render_finished.size())) {
+    impl_->note_draw_stopped("render-finished-missing");
+    return abort_after_acquire(false);
   }
 
   auto extra_vert_count = [](const DrawBatch* const* xs, size_t n) -> size_t {
@@ -5997,22 +6111,12 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                            : std::max(packed_bytes, grow_ring);
   if (!impl_->remap_frame_vertices()) {
     impl_->note_draw_stopped("vertex-remap-failed");
-    return false;
+    return abort_after_acquire(false);
   }
   if (!impl_->ensure_frame_vertex_capacity(frame, bytes)) {
     impl_->note_draw_stopped("vertex-capacity-failed");
     // Fence still signaled (not reset yet). Drain the acquire semaphore only.
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    drain.waitSemaphoreCount = 1;
-    drain.pWaitSemaphores = &impl_->image_available[frame];
-    drain.pWaitDstStageMask = &wait_stage;
-    const VkResult drain_r = vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
-    if (!check_device_result(drain_r)) {
-      return false;
-    }
-    vkQueueWaitIdle(impl_->graphics_queue);
-    return false;
+    return abort_after_acquire(false);
   }
   const size_t packed_idx =
       batch.index_count() + (early_additive ? early_additive->index_count() : 0) +
@@ -6044,65 +6148,140 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                               : std::max(packed_idx_bytes, grow_ib_ring);
   if (ib_bytes > 0 && !impl_->ensure_frame_index_capacity(frame, ib_bytes)) {
     impl_->note_draw_stopped("index-capacity-failed");
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    drain.waitSemaphoreCount = 1;
-    drain.pWaitSemaphores = &impl_->image_available[frame];
-    drain.pWaitDstStageMask = &wait_stage;
-    const VkResult drain_r = vkQueueSubmit(impl_->graphics_queue, 1, &drain, VK_NULL_HANDLE);
-    if (!check_device_result(drain_r)) {
-      return false;
-    }
-    vkQueueWaitIdle(impl_->graphics_queue);
-    return false;
-  }
-
-  // Reset only once capacity is ensured so a failed path cannot leave the fence unsignaled.
-  if (!check_device_result(vkResetFences(impl_->device, 1, &impl_->in_flight[frame]))) {
-    return false;
+    return abort_after_acquire(false);
   }
 
   auto& vb = impl_->frame_vertices[frame];
   auto& ib = impl_->frame_indices[frame];
-  std::vector<GpuDrawBucket> scene_gpu;
-  std::vector<GpuDrawBucket> early_gpu;
-  std::vector<GpuDrawBucket> mid_gpu;
-  std::vector<GpuDrawBucket> additive_gpu;
-  std::vector<GpuDrawBucket> carve_gpu;
-  std::vector<GpuDrawBucket> post_gpu;
-  std::vector<GpuDrawBucket> post2_gpu;
+
+  // Decide where the CPU heads go BEFORE vkResetFences and before any write.
+  // In-place extras already occupy the mapped VB/IB (spaced by reserved
+  // capacity), so the head pack must not overwrite them or run past the
+  // mapping. Extras are NOT heads: only buckets the plan functions actually
+  // memcpy count here.
+  const uint64_t vb_cap_verts = vb.capacity_bytes / sizeof(DrawVertex);
+  const uint64_t ib_cap_idx = ib.mapped != nullptr ? ib.capacity_bytes / sizeof(uint32_t) : 0;
+  uint64_t ext_v_low = UINT64_MAX;  // lowest vertex any in-place extra occupies
+  uint64_t ext_v_hi = 0;            // end of the extras' used vertices
+  uint64_t ext_i_low = UINT64_MAX;
+  uint64_t ext_i_hi = 0;
+  bool extras_layout_ok = true;
+  uint64_t head_verts = 0;
+  uint64_t head_idx = 0;
+  auto count_head = [&](const DrawBatch* b, bool is_extra) {
+    if (b == nullptr) {
+      return;
+    }
+    if (is_extra && extras_in_place && b->ext_dst != nullptr) {
+      // Lives in the mapped ring already; fold its extent instead.
+      if (vb.mapped == nullptr || b->ext_dst < static_cast<const DrawVertex*>(vb.mapped)) {
+        extras_layout_ok = false;
+        return;
+      }
+      const uint64_t off =
+          static_cast<uint64_t>(b->ext_dst - static_cast<const DrawVertex*>(vb.mapped));
+      ext_v_low = std::min(ext_v_low, off);
+      ext_v_hi = extras_extent_merge(ext_v_hi, off, b->ext_used);
+      if (b->ext_idx != nullptr) {
+        if (ib.mapped == nullptr || b->ext_idx < static_cast<const uint32_t*>(ib.mapped)) {
+          extras_layout_ok = false;
+          return;
+        }
+        const uint64_t ioff =
+            static_cast<uint64_t>(b->ext_idx - static_cast<const uint32_t*>(ib.mapped));
+        ext_i_low = std::min(ext_i_low, ioff);
+        ext_i_hi = extras_extent_merge(ext_i_hi, ioff, b->ext_idx_used);
+      }
+      return;
+    }
+    for (const auto& bucket : b->buckets) {
+      head_verts += bucket.vertices.size();
+      head_idx += bucket.indices.size();
+    }
+  };
+  count_head(&batch, false);
+  count_head(early_additive, false);
+  count_head(mid_overlay, false);
+  count_head(additive, false);
+  count_head(scene_carve, false);
+  count_head(post_overlay, false);
+  count_head(post_overlay2, false);
+  for (size_t i = 0; early_extra != nullptr && i < early_extra_n; ++i) {
+    count_head(early_extra[i], true);
+  }
+  for (size_t i = 0; mid_prefix != nullptr && i < mid_prefix_n; ++i) {
+    count_head(mid_prefix[i], true);
+  }
+  for (size_t i = 0; carve_prefix != nullptr && i < carve_prefix_n; ++i) {
+    count_head(carve_prefix[i], true);
+  }
+  if (extras_in_place) {
+    if (mapped_extra_low > 0) {
+      ext_v_low = std::min<uint64_t>(ext_v_low, mapped_extra_low);
+    }
+    if (ext_v_hi > vb_cap_verts || ext_i_hi > ib_cap_idx) {
+      extras_layout_ok = false;
+    }
+  }
+  const HeadPlacement vert_place = place_cpu_heads(head_verts, ext_v_low, ext_v_hi, vb_cap_verts);
+  // Without a mapped IB the plan functions skip index writes entirely.
+  const HeadPlacement idx_place =
+      ib.mapped != nullptr ? place_cpu_heads(head_idx, ext_i_low, ext_i_hi, ib_cap_idx)
+                           : HeadPlacement{true, 0};
+  if (!extras_layout_ok || !vert_place.fits || !idx_place.fits) {
+    // Nothing written, fence not reset yet: still signalled.
+    impl_->note_draw_stopped("vb-head-overflow");
+    return abort_after_acquire(false);
+  }
+
+  // Reset only once capacity is ensured so a failed path cannot leave the fence unsignaled.
+  if (!check_device_result(vkResetFences(impl_->device, 1, &impl_->in_flight[frame]))) {
+    return abort_after_acquire(false);
+  }
+
+  // Reused across frames (capacity kept); cleared here, never referenced after draw_frame returns.
+  DrawPlanScratch& scratch = impl_->plan_scratch;
+  std::vector<GpuDrawBucket>& scene_gpu = scratch.scene;
+  std::vector<GpuDrawBucket>& early_gpu = scratch.early;
+  std::vector<GpuDrawBucket>& mid_gpu = scratch.mid;
+  std::vector<GpuDrawBucket>& additive_gpu = scratch.additive;
+  std::vector<GpuDrawBucket>& carve_gpu = scratch.carve;
+  std::vector<GpuDrawBucket>& post_gpu = scratch.post;
+  std::vector<GpuDrawBucket>& post2_gpu = scratch.post2;
+  scene_gpu.clear();
+  early_gpu.clear();
+  mid_gpu.clear();
+  additive_gpu.clear();
+  carve_gpu.clear();
+  post_gpu.clear();
+  post2_gpu.clear();
   {
     WDS_PERF_SCOPE("vk.upload");
     auto* dst = static_cast<DrawVertex*>(vb.mapped);
     auto* idx_dst = static_cast<uint32_t*>(ib.mapped);
-    uint32_t cursor = 0;
-    uint32_t idx_cursor = 0;
+    // Normally 0; past the extras only when the heads would not fit below them.
+    uint32_t cursor = vert_place.base;
+    uint32_t idx_cursor = idx_place.base;
     cursor = vb_plan_layer_draws(scene_gpu, &batch, true, true, nullptr, 0, cursor, dst, false,
-                                 dst, idx_dst, &idx_cursor);
+                                 dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_layer_draws(early_gpu, early_additive, true, true, early_extra, early_extra_n,
-                                 cursor, dst, extras_in_place, dst, idx_dst, &idx_cursor);
+                                 cursor, dst, extras_in_place, dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_layer_draws(mid_gpu, mid_overlay, true, false, mid_prefix, mid_prefix_n,
-                                 cursor, dst, extras_in_place, dst, idx_dst, &idx_cursor);
+                                 cursor, dst, extras_in_place, dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_layer_draws(additive_gpu, additive, true, true, nullptr, 0, cursor, dst,
-                                 false, dst, idx_dst, &idx_cursor);
+                                 false, dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_ordered_draws(carve_gpu, scene_carve, carve_prefix, carve_prefix_n, cursor, dst,
                                    extras_in_place, dst, idx_dst, &idx_cursor);
     cursor = vb_plan_layer_draws(post_gpu, post_overlay, true, true, nullptr, 0, cursor, dst,
-                                 false, dst, idx_dst, &idx_cursor);
+                                 false, dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_layer_draws(post2_gpu, post_overlay2, true, true, nullptr, 0, cursor, dst,
-                                 false, dst, idx_dst, &idx_cursor);
-    if (extras_in_place && mapped_extra_low > 0 && cursor > mapped_extra_low) {
-      // CPU heads grew into the extra reservation. Refuse rather than overlap.
-      impl_->note_draw_stopped("vb-head-overlap");
-      return false;
-    }
+                                 false, dst, idx_dst, &idx_cursor, scratch);
     uint32_t used_verts = cursor;
     if (extras_in_place) {
-      const uint32_t extra_hi =
-          mapped_extra_low + static_cast<uint32_t>(extra_vert_count(early_extra, early_extra_n) +
-                                                   extra_vert_count(mid_prefix, mid_prefix_n) +
-                                                   extra_vert_count(carve_prefix, carve_prefix_n));
-      used_verts = std::max(used_verts, extra_hi);
+      // Parts are spaced by reserved capacity, so the real end is the max of
+      // (offset + used) (ext_v_hi), not mapped_extra_low + sum(used). The
+      // staging copy and the non-coherent flush both size from this.
+      used_verts = std::max(used_verts, static_cast<uint32_t>(ext_v_hi));
     }
     const VkDeviceSize used_bytes =
         static_cast<VkDeviceSize>(used_verts) * static_cast<VkDeviceSize>(sizeof(DrawVertex));
@@ -6111,23 +6290,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     impl_->note_vb_high_water(impl_->last_vb_used_bytes);
     uint32_t used_idx = idx_cursor;
     if (extras_in_place) {
-      auto extra_idx_hi = [&](const DrawBatch* const* xs, size_t n) -> uint32_t {
-        uint32_t hi = 0;
-        if (xs == nullptr || idx_dst == nullptr) {
-          return 0;
-        }
-        for (size_t i = 0; i < n; ++i) {
-          if (xs[i] == nullptr || xs[i]->ext_idx == nullptr) {
-            continue;
-          }
-          const uint32_t off = static_cast<uint32_t>(xs[i]->ext_idx - idx_dst);
-          hi = std::max(hi, off + xs[i]->ext_idx_used);
-        }
-        return hi;
-      };
-      used_idx = std::max(used_idx, extra_idx_hi(early_extra, early_extra_n));
-      used_idx = std::max(used_idx, extra_idx_hi(mid_prefix, mid_prefix_n));
-      used_idx = std::max(used_idx, extra_idx_hi(carve_prefix, carve_prefix_n));
+      // Same max(offset + used) extent, computed before the fence reset.
+      used_idx = std::max(used_idx, static_cast<uint32_t>(ext_i_hi));
     }
     const VkDeviceSize used_idx_bytes =
         static_cast<VkDeviceSize>(used_idx) * static_cast<VkDeviceSize>(sizeof(uint32_t));
@@ -6549,7 +6713,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &cmd;
   submit.signalSemaphoreCount = 1;
-  submit.pSignalSemaphores = &impl_->render_finished[frame];
+  submit.pSignalSemaphores = &impl_->render_finished[image_index];
   const auto submit_t0 = clock::now();
   const VkResult submit_r =
       vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]);
@@ -6560,23 +6724,12 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     }
     emit_health(RendererHealthEvent::Fatal, submit_r);
     // Fence was reset but not submitted — signal it via drain so the next frame wait returns.
-    VkPipelineStageFlags drain_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    drain.waitSemaphoreCount = 1;
-    drain.pWaitSemaphores = &impl_->image_available[frame];
-    drain.pWaitDstStageMask = &drain_stage;
-    const VkResult drain_r =
-        vkQueueSubmit(impl_->graphics_queue, 1, &drain, impl_->in_flight[frame]);
-    if (drain_r == VK_ERROR_DEVICE_LOST) {
-      emit_health(RendererHealthEvent::DeviceLost, drain_r);
-      return false;
-    }
-    if (drain_r == VK_SUCCESS) {
-      vkQueueWaitIdle(impl_->graphics_queue);
-    }
-    return false;
+    return abort_after_acquire(true);
   }
   impl_->images_in_flight[image_index] = impl_->in_flight[frame];
+  // Real frame submitted: remember which submit this slot's fence now guards.
+  ++impl_->submit_seq;
+  impl_->slot_submit_seq[frame] = impl_->submit_seq;
   if (gpu_time) {
     impl_->commit_gpu_timestamps(frame);
   }
@@ -6585,7 +6738,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
 
   VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
   present.waitSemaphoreCount = 1;
-  present.pWaitSemaphores = &impl_->render_finished[frame];
+  present.pWaitSemaphores = &impl_->render_finished[image_index];
   present.swapchainCount = 1;
   present.pSwapchains = &impl_->swapchain;
   present.pImageIndices = &image_index;
