@@ -44,14 +44,32 @@ enum class CrashContextField {
 // crash file and writes running.sentinel. Safe to call once.
 void install_crash_handlers();
 
-// Per-thread sigaltstack using a 64 KB thread_local buffer. No-op on
-// Windows. Idempotent on the calling thread.
+// POSIX: per-thread sigaltstack using a 64 KB thread_local buffer.
+// Windows: reserves extra stack on the calling thread (SetThreadStackGuarantee)
+// so the unhandled-exception filter can run after a stack overflow.
+// Idempotent on the calling thread.
 void install_thread_crash_stack();
 
 // Log + (non-Windows) dialog for recoverable entry-point failures.
 // Returns after the user dismisses the dialog (or immediately if dialogs
 // are suppressed).
 void report_fatal(const char* kind, const char* detail);
+
+// Test-only: hook run inside report_fatal() while the crash lock is still held
+// (after the report/dialog, before release). Lets tests hold the lock open to
+// verify that a crash on another thread waits and is then reported.
+using CrashTestHook = void (*)();
+namespace testing {
+void set_report_fatal_hook(CrashTestHook hook);
+
+// POSIX only (no-ops on Windows). The hook runs inside the crash report's
+// symbolization window (alarm() watchdog armed), right before the
+// non-async-signal-safe dladdr / backtrace_symbols_fd work. A hook that never
+// returns simulates a loader-lock deadlock. The timeout is in whole seconds
+// (default 3); 0 disables the watchdog.
+void set_symbolize_hook(CrashTestHook hook);
+void set_symbolize_timeout_seconds(unsigned seconds);
+}
 
 void crash_set_context(CrashContextField field, const char* utf8);
 

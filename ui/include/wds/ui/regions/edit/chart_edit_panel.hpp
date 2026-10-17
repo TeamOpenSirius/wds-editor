@@ -24,6 +24,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace wds::chart_editor {
@@ -32,8 +33,60 @@ class ChartEditorEngine;
 
 namespace wds::ui {
 
+// Id / tick set whose every mutation bumps a generation counter. visual_revision()
+// hashes the counter instead of walking the set, and because the underlying set is
+// only reachable through const access, no mutation site can forget to bump it.
+class TrackedIdSet {
+ public:
+  using Set = std::unordered_set<int32_t>;
+
+  TrackedIdSet() = default;
+  TrackedIdSet(const TrackedIdSet&) = delete;
+  TrackedIdSet& operator=(const TrackedIdSet&) = delete;
+
+  TrackedIdSet& operator=(Set other) {
+    set_ = std::move(other);
+    ++generation_;
+    return *this;
+  }
+
+  const Set& set() const noexcept { return set_; }
+  operator const Set&() const noexcept { return set_; }
+  uint64_t generation() const noexcept { return generation_; }
+
+  bool empty() const noexcept { return set_.empty(); }
+  std::size_t size() const noexcept { return set_.size(); }
+  std::size_t count(int32_t id) const { return set_.count(id); }
+  Set::const_iterator begin() const noexcept { return set_.begin(); }
+  Set::const_iterator end() const noexcept { return set_.end(); }
+  Set::const_iterator find(int32_t id) const { return set_.find(id); }
+
+  bool insert(int32_t id) {
+    const bool inserted = set_.insert(id).second;
+    if (inserted) ++generation_;
+    return inserted;
+  }
+  std::size_t erase(int32_t id) {
+    const std::size_t removed = set_.erase(id);
+    if (removed != 0) ++generation_;
+    return removed;
+  }
+  void clear() {
+    if (set_.empty()) return;
+    set_.clear();
+    ++generation_;
+  }
+
+ private:
+  Set set_;
+  uint64_t generation_ = 0;
+};
+
+struct ChartEditPanelTestAccess;
+
 class ChartEditPanel final : public wds::interaction::Widget {
  public:
+  friend struct ChartEditPanelTestAccess;  // tests reach hit_test_note / placement helpers
   explicit ChartEditPanel(wds::chart_editor::ChartEditorEngine& engine);
 
   void set_grid(wds::chart_editor::EditGridConfig grid);
@@ -74,9 +127,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   EditDrawDepthConfig& draw_depth() noexcept { return renderer_.draw_depth(); }
   void set_draw_depth(EditDrawDepthConfig depth) noexcept { renderer_.set_draw_depth(depth); }
 
-  const std::unordered_set<int32_t>& selected() const noexcept { return selected_; }
+  const std::unordered_set<int32_t>& selected() const noexcept { return selected_.set(); }
   const std::unordered_set<int32_t>& selected_speed_ticks() const noexcept {
-    return selected_speed_ticks_;
+    return selected_speed_ticks_.set();
   }
   void clear_selection() {
     selected_.clear();
@@ -296,6 +349,23 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void apply_placement_lane_width(wds::interaction::Vec2 point, int32_t& lane,
                                   int32_t& width) const;
   std::optional<wds::chart_editor::NotationNote> hit_test_note(wds::interaction::Vec2 point) const;
+  // Longest tick spans (end - start, floored at 0) per note class, cached per
+  // document content generation. They bound how far before a pointer's time an
+  // overlapping hold / split can start, so scans can binary-search notes().
+  struct NoteSpanCache {
+    const void* doc = nullptr;
+    uint64_t generation = 0;
+    std::size_t note_count = 0;
+    bool valid = false;
+    int64_t hit_span = 0;    // hit-testable notes (not split / HoldEighth / mid-star)
+    int64_t chain_span = 0;  // hold-chain bodies
+    int64_t split_span = 0;  // split-lane gimmicks
+  };
+  const NoteSpanCache& note_spans() const;
+  // Contiguous slice of document().notes() (same order) that can reach within
+  // `reach` px of screen `y`; a conservative superset, callers re-test exactly.
+  std::pair<const wds::chart_editor::NotationNote*, const wds::chart_editor::NotationNote*>
+  notes_near_y(float y, float reach, int64_t max_span_ticks) const;
   float width_edge_px(const wds::chart_editor::NotationNote& note) const;
   float time_edge_px(const wds::chart_editor::NotationNote& note) const;
   bool near_left_edge(const wds::chart_editor::NotationNote& note, float x) const;
@@ -325,12 +395,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void finish_place_gesture(const wds::interaction::PointerUpEvent& event);
   void finish_marquee(wds::interaction::Vec2 end);
   void begin_marquee(wds::interaction::Vec2 pos);
-  // Marquee in tick/x space so scroll during drag can extend past the view, and
-  // so the box can cover the split / speed label tracks.
+  // Marquee in tick/lane space so scroll during drag can extend past the view.
+  // Time snaps to the edit subdivision; X expands to whole tracks (split gutter,
+  // each playfield lane, and the speed gutter when extended editing is on).
   wds::interaction::Rect marquee_screen_rect(wds::interaction::Vec2 end) const;
+  // Left/right screen edges of the marquee track under `x` (split / lane / speed).
+  std::pair<float, float> marquee_track_x_span(float x) const;
   void begin_move_selection_from_label(wds::interaction::Vec2 pos, int32_t open_split_id,
                                        int32_t open_speed_tick);
-  void finish_move(bool refresh_eighths = true);
+  void finish_move(bool refresh_eighths = true, bool prune_stars = false);
   void finish_resize();
   void finish_hold_adjust();
   void finish_hold_body(bool chain_next);
@@ -495,8 +568,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   std::function<void()> on_extra_visible_lanes_changed_;
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
-  std::unordered_set<int32_t> selected_;
-  std::unordered_set<int32_t> selected_speed_ticks_;
+  TrackedIdSet selected_;
+  TrackedIdSet selected_speed_ticks_;
+  mutable NoteSpanCache note_span_cache_{};
+  mutable std::vector<int32_t> split_mids_scratch_{};
+  mutable std::vector<int32_t> split_one_scratch_{};
+  // Reused `out` buffers for ChartDocument index queries (note_indices_*/split range).
+  // Never hold one across a call that can re-enter another user of the same buffer.
+  mutable std::vector<std::size_t> note_index_scratch_{};
+  mutable std::vector<int32_t> note_id_scratch_{};
   std::vector<wds::chart_editor::NotationNote> clipboard_;
   std::vector<wds::chart_editor::ScrollSpeedPoint> clipboard_speed_;
   int default_width_ = 3;

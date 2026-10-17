@@ -28,6 +28,22 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#ifndef JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+#define JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 0x00002000
+#endif
+#else
+#include <csignal>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
+#include <filesystem>
+
 namespace wds::ui {
 
 StemPanel::StemPanel(UiManager* manager, QWidget* parent)
@@ -128,14 +144,107 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   });
   kill_timer_.setSingleShot(true);
   kill_timer_.setInterval(3000);
-  connect(&kill_timer_, &QTimer::timeout, this, [this] { process_.kill(); });
+  connect(&kill_timer_, &QTimer::timeout, this, [this] { kill_process_tree(); });
+#if !defined(_WIN32)
+  // Own session/process group so killpg() reaches ffmpeg and other grandchildren.
+  process_.setChildProcessModifier([] { ::setsid(); });
+#else
+  connect(&process_, &QProcess::started, this, [this] { assign_job_object(); });
+#endif
   connect(&source_timer_, &QTimer::timeout, this, [this] { sync_source(); });
-  source_timer_.start(300);
+  source_timer_.setInterval(300);
   refresh_cache_dir();
   sync_source();
 }
 
+void StemPanel::update_polling() {
+  // Stat-ing the source can block on slow mounts, so only poll while someone
+  // can see the panel or a job/published stems depend on source changes.
+  const bool needed = manager_ && (isVisible() || active_ || !tracks_.isEmpty());
+  if (needed) {
+    if (!source_timer_.isActive()) source_timer_.start();
+  } else {
+    source_timer_.stop();
+  }
+}
+
+void StemPanel::showEvent(QShowEvent* event) {
+  QDialog::showEvent(event);
+  sync_source();
+}
+
+void StemPanel::hideEvent(QHideEvent* event) {
+  QDialog::hideEvent(event);
+  update_polling();
+}
+
 StemPanel::~StemPanel() { detach(); }
+
+void StemPanel::assign_job_object() {
+#if defined(_WIN32)
+  close_job_object();
+  const qint64 pid = process_.processId();
+  if (pid <= 0) return;
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (!job) return;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+  ZeroMemory(&limits, sizeof(limits));
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  bool ok = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) != 0;
+  if (ok) {
+    HANDLE worker = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+    ok = worker && AssignProcessToJobObject(job, worker) != 0;
+    if (worker) CloseHandle(worker);
+  }
+  if (!ok) {
+    // e.g. already inside a non-nestable job; fall back to killing the worker only.
+    CloseHandle(job);
+    return;
+  }
+  job_object_ = job;
+#endif
+}
+
+void StemPanel::close_job_object() {
+#if defined(_WIN32)
+  // KILL_ON_JOB_CLOSE reaps any stragglers still in the job.
+  if (job_object_) CloseHandle(static_cast<HANDLE>(job_object_));
+  job_object_ = nullptr;
+#endif
+}
+
+void StemPanel::kill_process_tree() {
+#if defined(_WIN32)
+  if (job_object_) TerminateJobObject(static_cast<HANDLE>(job_object_), 1);
+#else
+  // processId() is non-zero only while running; the worker is its own group leader.
+  const qint64 pid = process_.processId();
+  if (pid > 1) ::killpg(static_cast<pid_t>(pid), SIGKILL);
+#endif
+  process_.kill();
+}
+
+int StemPanel::sweep_stale_jobs(const QString& dir, const QString& keep, qint64 max_age_secs) {
+  const QDir root(dir);
+  if (!root.exists()) return 0;
+  const QString keep_path = keep.isEmpty() ? QString() : QFileInfo(keep).canonicalFilePath();
+  const auto now = QDateTime::currentDateTime();
+  int removed = 0;
+  const auto entries = root.entryInfoList({QStringLiteral(".job-*")},
+                                          QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot);
+  for (const auto& entry : entries) {
+    if (entry.isSymLink()) continue;
+    if (!keep_path.isEmpty() && entry.canonicalFilePath() == keep_path) continue;
+    // A long job may not touch the directory itself; use the newest direct child too.
+    auto newest = entry.lastModified();
+    const auto children = QDir(entry.absoluteFilePath()).entryInfoList(
+        QDir::Files | QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot);
+    for (const auto& child : children) newest = qMax(newest, child.lastModified());
+    if (newest.secsTo(now) < max_age_secs) continue;
+    if (QDir(entry.absoluteFilePath()).removeRecursively()) ++removed;
+  }
+  return removed;
+}
 
 QStringList StemPanel::track_names() const {
   if (tracks_.isEmpty()) return {tr("原曲")};
@@ -165,12 +274,16 @@ void StemPanel::detach() {
   kill_timer_.stop();
   disconnect(&process_, nullptr, this, nullptr);
   if (process_.state() != QProcess::NotRunning) {
-    if (job_) { QFile marker(job_->filePath("cancel")); marker.open(QIODevice::WriteOnly); }
+    if (job_) {
+      QFile marker(job_->filePath("cancel"));
+      if (!marker.open(QIODevice::WriteOnly)) qWarning("StemPanel: cannot write cancel marker");
+    }
     if (!process_.waitForFinished(300)) {
-      process_.kill();
+      kill_process_tree();
       process_.waitForFinished(1000);
     }
   }
+  close_job_object();
   job_.reset();
   // Ephemeral stem cache lives only for this editor session.
   ephemeral_cache_.reset();
@@ -226,6 +339,13 @@ void StemPanel::refresh_cache_dir() {
     cache_ephemeral_ = true;
   }
   if (unsaved_warning_) unsaved_warning_->setVisible(cache_ephemeral_);
+  if (!cache_ephemeral_ && !cache_dir_.isEmpty() && cache_dir_ != swept_dir_) {
+    // One-time per Stem folder: reclaim jobs left by crashed sessions.
+    swept_dir_ = cache_dir_;
+    QTimer::singleShot(0, this, [this, dir = cache_dir_] {
+      sweep_stale_jobs(dir, job_ ? job_->path() : QString(), 3600);
+    });
+  }
 }
 
 void StemPanel::refresh_controls() {
@@ -237,6 +357,7 @@ void StemPanel::refresh_controls() {
   device_->setEnabled(!active_);
   threads_->setEnabled(!active_);
   background_->setEnabled(!active_);
+  update_polling();
 }
 
 bool StemPanel::prepare_job() {
@@ -297,7 +418,10 @@ void StemPanel::start() {
 void StemPanel::cancel() {
   if (!active_ || cancelled_) return;
   cancelled_ = true;
-  if (job_) { QFile marker(job_->filePath("cancel")); marker.open(QIODevice::WriteOnly); }
+  if (job_) {
+    QFile marker(job_->filePath("cancel"));
+    if (!marker.open(QIODevice::WriteOnly)) qWarning("StemPanel: cannot write cancel marker");
+  }
   if (install_step_) process_.terminate();
   kill_timer_.start();
   status_->setText(tr("正在取消…"));
@@ -388,6 +512,7 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
   read_output();
   note_download_progress(QString::fromUtf8(process_.readAllStandardError()));
   kill_timer_.stop();
+  close_job_object();
   const bool success = code == 0 && status == QProcess::NormalExit && !cancelled_;
   if (success && install_step_ == 1) {
     install_step_ = 2;

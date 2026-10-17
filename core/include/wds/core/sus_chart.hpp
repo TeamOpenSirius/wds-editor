@@ -26,8 +26,9 @@ namespace wds::chart_editor {
 //   #TIL00 non-negative global HiSpeed is retained as scroll_speed_points.
 // - Legacy #2 Hold channels from older WDS exports import as blue Hold.
 // - Ched 12-key pad: export L→L+2; import auto-detects offset 2 for the 2..d window.
-// - HoldEighth is generated on export as slide type 5 (invisible mid) and
-//   ignored on import (type 5 never becomes Sound; type 900 is not a SUS note).
+// - HoldEighth is generated on export as slide type 5 (invisible mid). On import
+//   slide type 5 never becomes Sound or HoldEighth; eighths are always recomputed
+//   from the imported holds (tailed and nontail) on the tpq/2 grid.
 
 struct SusChartMetadata {
   std::string title;

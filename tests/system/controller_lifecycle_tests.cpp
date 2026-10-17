@@ -1,6 +1,7 @@
 #include <wds/chart_render/openwds_split_effects/controller.hpp>
 
 #include <cassert>
+#include <cstddef>
 #include <string>
 
 #ifndef WDS_TEST_REPO_ROOT
@@ -8,6 +9,7 @@
 #endif
 
 using namespace wds::chart_render::openwds_split_effects;
+namespace unity = wds::chart_render::unity;
 
 int main() {
   const std::string resources = std::string(WDS_TEST_REPO_ROOT) + "/resources";
@@ -51,5 +53,24 @@ int main() {
       if (system) assert(!system->isPlaying());
     }
   }
+
+  // Ownership: hydrated Material/Mesh objects are released with the Controller.
+  controller.reset();
+  assert(unity::Material::live_count.load() == 0);
+  assert(unity::Mesh::live_count.load() == 0);
+  std::size_t first_run_materials = 0;
+  for (int round = 0; round < 8; ++round) {
+    auto c = create_controller(10050, resources);
+    if (!c) c = create_controller(2020, resources);
+    assert(c && c->initialize(false, 100, 10, 100));
+    const int live = unity::Material::live_count.load();
+    if (round == 0) first_run_materials = static_cast<std::size_t>(live);
+    // Same inputs hydrate the same number of materials every round.
+    assert(static_cast<std::size_t>(live) == first_run_materials);
+    (void)live;
+  }
+  (void)first_run_materials;
+  assert(unity::Material::live_count.load() == 0);
+  assert(unity::Mesh::live_count.load() == 0);
   return 0;
 }

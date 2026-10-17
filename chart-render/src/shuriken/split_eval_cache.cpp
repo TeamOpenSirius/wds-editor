@@ -106,9 +106,17 @@ struct FlatSlot {
   Entry* entry = nullptr;
 };
 
+// In-shard home slot. The low log2(kShards) bits of h picked the shard, so
+// they are constant inside one map; use the remaining bits, re-mixed.
+inline std::size_t slot_home(std::uint64_t h, std::size_t mask) noexcept {
+  const std::uint64_t x = (h >> 8) * 0x9e3779b97f4a7c15ull;
+  return static_cast<std::size_t>(x >> 32) & mask;
+}
+
 struct FlatMap {
   std::vector<FlatSlot> slots;
   std::size_t size = 0;
+  std::size_t hand = 0;  // eviction clock position
 
   bool empty() const noexcept { return size == 0; }
 
@@ -128,7 +136,7 @@ struct FlatMap {
       return nullptr;
     }
     const std::size_t mask = slots.size() - 1;
-    std::size_t i = static_cast<std::size_t>(h) & mask;
+    std::size_t i = slot_home(h, mask);
     for (;;) {
       FlatSlot& s = slots[i];
       if (s.hash == 0) {
@@ -149,7 +157,7 @@ struct FlatMap {
       if (s.hash == 0) {
         continue;
       }
-      std::size_t i = static_cast<std::size_t>(s.hash) & mask;
+      std::size_t i = slot_home(s.hash, mask);
       while (next[i].hash != 0) {
         i = (i + 1) & mask;
       }
@@ -163,7 +171,7 @@ struct FlatMap {
       grow();
     }
     const std::size_t mask = slots.size() - 1;
-    std::size_t i = static_cast<std::size_t>(h) & mask;
+    std::size_t i = slot_home(h, mask);
     for (;;) {
       FlatSlot& s = slots[i];
       if (s.hash == 0) {
@@ -194,7 +202,7 @@ struct FlatMap {
         if (slots[j].hash == 0) {
           return;
         }
-        const std::size_t home = static_cast<std::size_t>(slots[j].hash) & mask;
+        const std::size_t home = slot_home(slots[j].hash, mask);
         if (((i - home) & mask) < ((j - home) & mask)) {
           slots[i] = slots[j];
           i = j;
@@ -364,21 +372,36 @@ void evict_one(Shard& sh) {
   if (sh.map.empty()) {
     return;
   }
+  // Sampled LRU: walk a persistent clock hand over the slot array, look at
+  // up to kSample occupied entries and evict the least recently used one
+  // (oldest used_gen, then oldest tick). O(kSample) per eviction.
+  constexpr int kSample = 16;
+  const std::size_t n = sh.map.slots.size();
+  const std::size_t mask = n - 1;
+  std::size_t i = sh.map.hand & mask;
   std::size_t victim = static_cast<std::size_t>(-1);
-  std::uint64_t oldest = ~0ull;
-  for (std::size_t i = 0; i < sh.map.slots.size(); ++i) {
+  std::uint64_t best_gen = ~0ull;
+  std::uint64_t best_tick = ~0ull;
+  int seen = 0;
+  // Scan at most n slots, so a sparse table still terminates.
+  for (std::size_t step = 0; step < n && seen < kSample; ++step) {
     const FlatSlot& s = sh.map.slots[i];
-    if (s.hash == 0 || s.entry == nullptr) {
-      continue;
+    if (s.hash != 0 && s.entry != nullptr) {
+      ++seen;
+      const std::uint64_t g = s.entry->used_gen.load(std::memory_order_relaxed);
+      const std::uint64_t t = s.entry->tick;
+      if (g < best_gen || (g == best_gen && t < best_tick)) {
+        best_gen = g;
+        best_tick = t;
+        victim = i;
+      }
     }
-    if (s.entry->tick < oldest) {
-      oldest = s.entry->tick;
-      victim = i;
-    }
+    i = (i + 1) & mask;
   }
   if (victim == static_cast<std::size_t>(-1)) {
     return;
   }
+  sh.map.hand = i;
   Entry* e = sh.map.slots[victim].entry;
   drop_entry_account(sh, *e);
   give_entry(sh, e);
@@ -581,7 +604,8 @@ void apply_store_locked(Cache& c, Shard& sh, std::uint64_t h, const ParticleCach
     evict_until_fit(c, sh, kEntryOverhead + sizeof(IntegratorGridState));
     slot = sh.map.insert(h, key, take_entry(sh));
     sh.particles.fetch_add(1, std::memory_order_relaxed);
-    sh.bytes.fetch_add(kEntryOverhead, std::memory_order_relaxed);
+    // Recycled entries keep aligned.capacity(); drop_entry_account subtracts it.
+    sh.bytes.fetch_add(entry_bytes(*slot->entry), std::memory_order_relaxed);
   }
   Entry& e = *slot->entry;
   const std::size_t old_b = entry_bytes(e);
@@ -684,7 +708,7 @@ void split_eval_cache_store_rol(const ParticleCacheKey& key, std::uint8_t axis, 
     evict_until_fit(c, sh, kEntryOverhead);
     slot = sh.map.insert(h, key, take_entry(sh));
     sh.particles.fetch_add(1, std::memory_order_relaxed);
-    sh.bytes.fetch_add(kEntryOverhead, std::memory_order_relaxed);
+    sh.bytes.fetch_add(entry_bytes(*slot->entry), std::memory_order_relaxed);
   }
   Entry& e = *slot->entry;
   if (k >= e.rol_k[axis]) {

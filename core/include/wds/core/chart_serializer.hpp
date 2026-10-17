@@ -37,8 +37,10 @@ class ChartSerializer {
   // Load treats -1 / missing / non-hold parents as
   // unbound and infers binds (type + open span + exact lanes) on every version.
   // v1/v2 load creates a default tick-0 point.
-  // Derived HoldEighth rows are omitted; authored type-900 points are stored as
-  // N records. Deleted generated points use SUPPRESSED_EIGHTHS tombstones.
+  // HoldEighth is purely derived: save never writes HoldEighth N rows, X rows or a
+  // SUPPRESSED_EIGHTHS section. Load parses and discards any legacy HoldEighth N
+  // rows (authored / suppressed markers included) and legacy SUPPRESSED_EIGHTHS /
+  // X rows, then recomputes every hold's eighths (tailed and nontail).
   static SerializeResult save_to_file(const NotationChart& chart, const std::string& path);
   static SerializeResult load_from_file(const std::string& path, NotationChart& out_chart);
 

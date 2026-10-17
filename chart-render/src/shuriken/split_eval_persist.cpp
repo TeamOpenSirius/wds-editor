@@ -163,16 +163,17 @@ struct Registry {
 };
 
 std::atomic<Registry*> g_reg{nullptr};
+std::mutex g_init_mu;
 
 Registry& registry() noexcept {
   Registry* p = g_reg.load(std::memory_order_acquire);
-  if (p != nullptr) {
-    return *p;
-  }
-  p = g_reg.load(std::memory_order_relaxed);
   if (p == nullptr) {
-    p = new Registry();
-    g_reg.store(p, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_init_mu);
+    p = g_reg.load(std::memory_order_relaxed);
+    if (p == nullptr) {
+      p = new Registry();
+      g_reg.store(p, std::memory_order_release);
+    }
   }
   return *p;
 }
@@ -181,15 +182,31 @@ int shard_of(const SystemCarryKey& key) noexcept {
   return static_cast<int>(KeyHash{}(key) & static_cast<std::size_t>(kShards - 1));
 }
 
-void note_drop(Registry& r, std::size_t drop, std::size_t npart) noexcept {
-  const std::size_t bytes = r.bytes.load(std::memory_order_relaxed);
-  r.bytes.store(bytes > drop ? bytes - drop : 0, std::memory_order_relaxed);
-  const std::size_t sys = r.systems.load(std::memory_order_relaxed);
-  if (sys > 0) {
-    r.systems.store(sys - 1, std::memory_order_relaxed);
+// Saturating atomic subtract. Global counters are touched under different
+// per-shard mutexes, so every update must be a single atomic RMW.
+void sat_sub(std::atomic<std::size_t>& a, std::size_t d) noexcept {
+  std::size_t cur = a.load(std::memory_order_relaxed);
+  for (;;) {
+    const std::size_t next = cur >= d ? cur - d : 0;
+    if (a.compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
+      return;
+    }
   }
-  const std::size_t parts = r.particles.load(std::memory_order_relaxed);
-  r.particles.store(parts > npart ? parts - npart : 0, std::memory_order_relaxed);
+}
+
+// Apply (new_v - old_v) to a global counter as one atomic operation.
+void apply_delta(std::atomic<std::size_t>& a, std::size_t old_v, std::size_t new_v) noexcept {
+  if (new_v >= old_v) {
+    a.fetch_add(new_v - old_v, std::memory_order_relaxed);
+  } else {
+    sat_sub(a, old_v - new_v);
+  }
+}
+
+void note_drop(Registry& r, std::size_t drop, std::size_t npart) noexcept {
+  sat_sub(r.bytes, drop);
+  sat_sub(r.systems, 1);
+  sat_sub(r.particles, npart);
 }
 
 uint32_t alloc_store(Registry& r, const SystemCarryKey& key) {
@@ -413,6 +430,11 @@ bool should_rebuild(float prev, float now, float gap) noexcept {
   return false;
 }
 
+// HAZARD (latent): the claim is per-thread, but the pool's wait loop steals
+// work. If a thread holding a persist claim ran a nested parallel_for, it
+// could pick up another claim-taking task and clobber these thread_locals
+// (the outer claim would then fall back to the registry lookup or be lost).
+// No such nested path exists today; keep it that way or make this a stack.
 thread_local PersistStore* tls_claim_st = nullptr;
 thread_local uint32_t tls_claim_id = 0xffffffffu;
 thread_local uint32_t tls_claim_gen = 0;
@@ -772,6 +794,11 @@ void persist_release(PersistClaim& c) noexcept {
   }
   PersistStore* st = claimed_store(c);
   if (st != nullptr) {
+    // Clear busy under the shard lock so eviction (which holds it) never sees
+    // a half-released store.
+    Registry& r = registry();
+    Shard& sh = r.shards[shard_of(st->key)];
+    std::lock_guard<std::mutex> lock(sh.mu);
     st->busy = 0;
   }
   tls_clear_claim();
@@ -849,17 +876,17 @@ void persist_commit(PersistClaim& c, float now, const std::vector<PrimaryEvalJob
   if (fp != nullptr && fp->want != 0) {
     st->fp = *fp;
   }
-  st->busy = 0;
+  // Keep busy set until accounting is done and we hold the shard lock, so
+  // eviction cannot free this store while we still read it.
   const std::size_t add = store_bytes(*st);
-  const std::size_t bytes = r.bytes.load(std::memory_order_relaxed);
-  r.bytes.store(bytes > old_bytes ? bytes - old_bytes + add : add, std::memory_order_relaxed);
-  const std::size_t parts = r.particles.load(std::memory_order_relaxed);
-  r.particles.store(parts > old_n ? parts - old_n + st->colds.size() : st->colds.size(),
-                    std::memory_order_relaxed);
+  const std::size_t new_n = st->colds.size();
   r.commits.fetch_add(1, std::memory_order_relaxed);
   Shard& sh = r.shards[shard_of(key)];
   {
     std::lock_guard<std::mutex> lock(sh.mu);
+    st->busy = 0;
+    apply_delta(r.bytes, old_bytes, add);
+    apply_delta(r.particles, old_n, new_n);
     trim_budget(r, sh, key);
   }
   tls_clear_claim();

@@ -147,6 +147,11 @@ struct SplitIndicatorCluster {
 // returned pointer is therefore valid only until the next insertion; never hold it across event processing or a
 // synchronous miss (use it immediately inside the paint, or copy the QImages, which are implicitly shared).
 // _if_ready never builds or evicts; nullptr = not built.
+// Budget: a build whose layers would exceed half the budget (~24 MB) is refused: the sync API caches an empty
+// cluster for it, the _request API keeps returning nullptr (negative-cached for a few seconds, no callback loop).
+// Entries looked up (request / _if_ready) since the previous background delivery are pinned against eviction by the
+// delivery, so a visible working set larger than the budget is kept (temporary overshoot) and shrinks back once the
+// entries are no longer requested. Synchronous inserts use the plain LRU rule.
 const SplitIndicatorCluster* split_effect_indicator_cluster(const SplitIndicatorClusterKey& key);
 const SplitIndicatorCluster* split_effect_indicator_cluster_if_ready(const SplitIndicatorClusterKey& key);
 

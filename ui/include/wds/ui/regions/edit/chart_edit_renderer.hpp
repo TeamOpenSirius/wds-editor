@@ -51,13 +51,18 @@ class ChartEditRenderer {
              float violation_strength = 0.0f,
              const wds::audio::WaveformOverview* waveform = nullptr,
              const wds::renderer::TextureInfo* spectrogram = nullptr,
-             EditSpectrumMode spectrum_mode = EditSpectrumMode::Envelope) const;
+             EditSpectrumMode spectrum_mode = EditSpectrumMode::Envelope,
+             // Optional: document whose notes() is `notes` (enables split-tree queries).
+             const wds::chart_editor::ChartDocument* doc = nullptr) const;
 
   // Drawn after skinned notes so the highlight sits on top of sprites.
   void paint_overlays(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                       const std::vector<wds::chart_editor::NotationNote>& notes,
                       const std::unordered_set<int32_t>& selected,
-                      const std::optional<wds::interaction::Rect>& marquee = std::nullopt) const;
+                      const std::optional<wds::interaction::Rect>& marquee = std::nullopt,
+                      // Optional: the document whose notes() is `notes`. Enables index
+                      // queries for hold pairing / selection lookup (GUI thread only).
+                      const wds::chart_editor::ChartDocument* doc = nullptr) const;
 
   void append_skinned_backdrop(wds::renderer::DrawBatch& batch,
                                const wds::renderer::SkinCatalog& skin,

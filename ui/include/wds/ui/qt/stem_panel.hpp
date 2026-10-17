@@ -31,9 +31,14 @@ class StemPanel final : public QDialog {
   bool select_track(int index);
   void set_tracks_changed_handler(std::function<void()> handler);
 
+ protected:
+  void showEvent(QShowEvent* event) override;
+  void hideEvent(QHideEvent* event) override;
+
  private:
   friend struct StemPanelTestAccess;
   void sync_source();
+  void update_polling();
   void start();
   void cancel();
   void install_runtime();
@@ -46,8 +51,17 @@ class StemPanel final : public QDialog {
   void notify_tracks_changed();
   void note_download_progress(const QString& text);
   QString runtime_python() const;
+  // Kill the worker and everything it spawned (ffmpeg): process group on POSIX,
+  // Job Object on Windows. Always finishes with QProcess::kill().
+  void kill_process_tree();
+  void assign_job_object();
+  void close_job_object();
+  // Removes `.job-*` directories in `dir` untouched for `max_age_secs`, except `keep`.
+  static int sweep_stale_jobs(const QString& dir, const QString& keep, qint64 max_age_secs);
 
   UiManager* manager_;
+  void* job_object_ = nullptr;  // Windows HANDLE; unused elsewhere
+  QString swept_dir_;
   QProcess process_;
   QTimer source_timer_;
   QTimer kill_timer_;

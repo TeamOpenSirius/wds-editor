@@ -902,6 +902,20 @@ void hydrate_emission(unity::EmissionModule& dst, std::string_view module) {
   dst.SetBursts(bursts.data(), static_cast<int>(bursts.size()));
 }
 
+// Allocates T, records shared ownership in `owners`, returns the raw
+// non-owning pointer (nullptr on allocation failure, matching the old
+// new(std::nothrow) behaviour).
+template <typename T>
+T* make_owned(std::vector<std::shared_ptr<void>>& owners) noexcept {
+  try {
+    auto object = std::make_shared<T>();
+    owners.push_back(object);
+    return object.get();
+  } catch (const std::bad_alloc&) {
+    return nullptr;
+  }
+}
+
 void hydrate_shape(unity::ShapeModule& dst, std::string_view module,
                    const LoadedEffect& graph, const SerializedObjectRecord& source) {
   if (module.empty()) return;
@@ -941,12 +955,12 @@ void hydrate_shape(unity::ShapeModule& dst, std::string_view module,
   parse_vec3(member_object(module, "m_Scale"), dst.scale);
   const ParsedPPtr mesh = parse_pptr(member_object(module, "m_Mesh"));
   if (mesh.path_id != 0) {
-    dst.mesh = new (std::nothrow) unity::Mesh();
+    dst.mesh = make_owned<unity::Mesh>(dst.owned_resources);
     (void)resolve_pptr(graph, source, mesh);
   }
   const ParsedPPtr sprite = parse_pptr(member_object(module, "m_Sprite"));
   if (sprite.path_id != 0) {
-    dst.sprite = new (std::nothrow) unity::Sprite();
+    dst.sprite = make_owned<unity::Sprite>(dst.owned_resources);
     (void)resolve_pptr(graph, source, sprite);
   }
 }
@@ -1286,7 +1300,7 @@ bool hydrate_particle_system_renderer(unity::ParticleSystemRenderer& dst,
   try_member_bool(tree, "m_FreeformStretching", dst.freeformStretching);
   try_member_bool(tree, "m_RotateWithStretchDirection", dst.rotateWithStretchDirection);
   for_each_array_element(member_array(tree, "m_Materials"), [&](std::string_view item) {
-    auto* material = new (std::nothrow) unity::Material();
+    auto* material = make_owned<unity::Material>(dst.owned_resources);
     if (material == nullptr) return;
     const ParsedPPtr pptr = parse_pptr(item);
     if (const auto* resolved = resolve_pptr(graph, psr, pptr)) {
@@ -1300,7 +1314,7 @@ bool hydrate_particle_system_renderer(unity::ParticleSystemRenderer& dst,
   });
   const ParsedPPtr mesh = parse_pptr(member_object(tree, "m_Mesh"));
   if (mesh.path_id != 0) {
-    dst.mesh = new (std::nothrow) unity::Mesh();
+    dst.mesh = make_owned<unity::Mesh>(dst.owned_resources);
     (void)resolve_pptr(graph, psr, mesh);
   }
   std::vector<unity::ParticleSystemVertexStream> streams;

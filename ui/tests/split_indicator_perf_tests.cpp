@@ -402,6 +402,151 @@ int main(int argc, char** argv) {
     }
   }
 
+  // ---- 6. Cache budget: pinning and the per-entry size guard --------------------------------------------------------
+  {
+    constexpr qint64 kBudget = static_cast<qint64>(kLruCapMb * 1024.0 * 1024.0);
+    auto big_key = [&](int32_t id, float lane, int band) {
+      SplitIndicatorClusterKey k = editor_key_at(id, SplitLaneType::Full, lane);
+      k.band_h = band;
+      return k;
+    };
+    QObject notifier;
+    int callbacks = 0;
+    auto on_ready = [&callbacks] { ++callbacks; };
+
+    // Average cluster size at this scale (sync builds at a lane the test below does not use).
+    double sum_bytes = 0;
+    int measured = 0;
+    for (std::size_t i = 0; i < ids.size() && measured < 6; ++i) {
+      const SplitIndicatorCluster* c = wds::ui::split_effect_indicator_cluster(big_key(ids[i], 79.0f, 1500));
+      if (c != nullptr && !c->empty) {
+        sum_bytes += static_cast<double>(cluster_bytes(*c));
+        ++measured;
+      }
+    }
+    const double avg = measured > 0 ? sum_bytes / measured : 0.0;
+    const std::size_t k_count =
+        avg > 0 ? static_cast<std::size_t>(std::ceil(1.6 * static_cast<double>(kBudget) / avg)) + 1 : 0;
+    std::printf("\n[6] cache budget: avg cluster %.2f MB at lane 80 / band 1500, requesting %zu distinct (budget %.0f MB)\n",
+                avg / (1024.0 * 1024.0), k_count, kLruCapMb);
+    if (k_count == 0 || k_count > 200 || k_count + 3 > ids.size()) {
+      std::printf("  skipped: clusters too small/large to exceed the budget with the available ids\n");
+    } else {
+      const auto key_of = [&](std::size_t i) { return big_key(ids[i], 80.0f, 1500); };
+      QImage frame(64, 64, QImage::Format_ARGB32_Premultiplied);
+      // One simulated paint: re-request every key in [first, last) (touches ready ones); true when all are ready.
+      const auto paint = [&](std::size_t first, std::size_t last) {
+        bool all = true;
+        for (std::size_t i = first; i < last; ++i) {
+          if (wds::ui::split_effect_indicator_cluster_request(key_of(i), &notifier, on_ready) == nullptr) all = false;
+        }
+        return all;
+      };
+      const auto pump = [] {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+      };
+      (void)frame;
+
+      // Frame set 1: more distinct clusters than the budget holds, all re-requested every paint. Pinned entries must
+      // survive every delivery, so all of them end up present.
+      QElapsedTimer wall;
+      wall.start();
+      while (!paint(0, k_count) && ms_since(wall) < 120000.0) pump();
+      std::size_t present = 0;
+      qint64 total = 0;
+      for (std::size_t i = 0; i < k_count; ++i) {
+        const SplitIndicatorCluster* c = wds::ui::split_effect_indicator_cluster_if_ready(key_of(i));
+        if (c != nullptr) {
+          ++present;
+          total += c->alpha_layer.sizeInBytes() + c->add_layer.sizeInBytes() + c->sub_layer.sizeInBytes();
+        }
+      }
+      std::printf("  all-visible phase: %zu/%zu present, %.1f MB (pinned overshoot allowed)\n", present, k_count,
+                  static_cast<double>(total) / (1024.0 * 1024.0));
+      if (present != k_count) {
+        std::fprintf(stderr, "FAIL: only %zu/%zu requested clusters survived while they were all requested\n", present,
+                     k_count);
+        ++failures;
+      }
+
+      // Frame set 2: only the first 2 stay visible; three new keys are delivered one after another (each delivery is
+      // a drain). The generation advances and the unpinned rest must be evicted back under the budget.
+      for (std::size_t extra = k_count; extra < k_count + 3; ++extra) {
+        QElapsedTimer w2;
+        w2.start();
+        for (;;) {
+          (void)paint(0, 2);
+          if (wds::ui::split_effect_indicator_cluster_request(key_of(extra), &notifier, on_ready) != nullptr) break;
+          if (ms_since(w2) > 60000.0) break;
+          pump();
+        }
+        pump();
+      }
+      std::size_t present2 = 0;
+      qint64 total2 = 0;
+      for (std::size_t i = 0; i < k_count + 3; ++i) {
+        const SplitIndicatorCluster* c = wds::ui::split_effect_indicator_cluster_if_ready(key_of(i));
+        if (c != nullptr) {
+          ++present2;
+          total2 += c->alpha_layer.sizeInBytes() + c->add_layer.sizeInBytes() + c->sub_layer.sizeInBytes();
+        }
+      }
+      std::printf("  after unpinning: %zu present, %.1f MB\n", present2, static_cast<double>(total2) / (1024.0 * 1024.0));
+      if (total2 > kBudget) {
+        std::fprintf(stderr, "FAIL: %.1f MB cached after the working set shrank, budget %.0f MB\n",
+                     static_cast<double>(total2) / (1024.0 * 1024.0), kLruCapMb);
+        ++failures;
+      }
+      if (wds::ui::split_effect_indicator_cluster_if_ready(key_of(0)) == nullptr ||
+          wds::ui::split_effect_indicator_cluster_if_ready(key_of(1)) == nullptr) {
+        std::fprintf(stderr, "FAIL: still-visible clusters were evicted\n");
+        ++failures;
+      }
+    }
+
+    // Oversized request: lane 400 / band 2048 is far above half the budget for any id with wide content. It must be
+    // refused (stay "not ready", no callback loop) or, if built, fit in half the budget; never exceed it.
+    {
+      constexpr std::size_t kN = 8;
+      const std::size_t n = std::min(kN, ids.size());
+      const int before = callbacks;
+      for (std::size_t i = 0; i < n; ++i) {
+        (void)wds::ui::split_effect_indicator_cluster_request(big_key(ids[i], 400.0f, 2048), &notifier, on_ready);
+      }
+      QElapsedTimer w3;
+      w3.start();
+      while (callbacks - before < static_cast<int>(n) && ms_since(w3) < 60000.0) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+      }
+      std::size_t refused = 0;
+      for (std::size_t i = 0; i < n; ++i) {
+        const SplitIndicatorCluster* c =
+            wds::ui::split_effect_indicator_cluster_request(big_key(ids[i], 400.0f, 2048), &notifier, on_ready);
+        if (c == nullptr) {
+          ++refused;
+        } else if (static_cast<qint64>(c->alpha_layer.sizeInBytes() + c->add_layer.sizeInBytes() +
+                                       c->sub_layer.sizeInBytes()) > kBudget / 2) {
+          std::fprintf(stderr, "FAIL: an oversized cluster (%.1f MB) was cached\n",
+                       static_cast<double>(cluster_bytes(*c)) / (1024.0 * 1024.0));
+          ++failures;
+        }
+      }
+      // A refused key must not queue again nor produce further callbacks right away.
+      const int settled = callbacks;
+      for (int i = 0; i < 5; ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+      }
+      std::printf("  oversized: %zu/%zu refused, %d extra callbacks after settling\n", refused, n, callbacks - settled);
+      if (callbacks - settled != 0) {
+        std::fprintf(stderr, "FAIL: refused keys keep producing callbacks\n");
+        ++failures;
+      }
+    }
+  }
+
   std::printf("\nthresholds: cached frame median <= %.1f ms, single cold build <= %.1f ms, cold-request frame median "
               "<= %.1f ms -> %s\n",
               kMaxCachedFrameMs, kMaxColdBuildMs, kMaxColdRequestFrameMs, failures ? "FAIL" : "PASS");

@@ -637,26 +637,48 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   if (!ready_) {
     return false;
   }
-  // Join first: AudioEngine::shutdown() / BASS_Free() must not run while a
-  // waveform worker still holds a process-global BASS decode stream.
-  join_waveform_workers();
+  // Never wait for the old song's waveform decode on the GUI thread: cancel it
+  // (stale results are dropped by generation) and let it wind down; poll() in
+  // tick() reaps it. It is only joined below, if the BASS device has to be
+  // torn down.
+  waveform_jobs_.cancel_all();
   preview_.join_speculative_split_collect();
   const auto effects = preview_.config().effects_directory;
   const bool was_playing = preserve_playback && transport_.playing();
   const int64_t pos =
       preserve_playback ? transport_.committed_ms() : transport_.chart_start_ms();
   const int64_t kept_offset = transport_.chart_offset_ms();
-  transport_.shutdown();
-  auto restore_transport = [&](const std::string& path) -> bool {
-    if (!transport_.initialize(effects, path)) {
-      return false;
-    }
+  auto finish_restore = [&] {
     transport_.set_chart_offset_ms(kept_offset);
     preview_.attach_audio(&transport_.audio());
     transport_.request_seek_ms(pos);
     if (was_playing) {
       transport_.request_play();
     }
+  };
+  // Fast path: keep the BASS device, SFX samples, mixer and Hold stream and swap
+  // only the music stream. Anything it cannot do safely (no music yet, different
+  // effects dir, output device changed, file will not open) falls through to the
+  // full re-initialise below, which behaves exactly as before.
+  if (transport_.reload_music(effects, music_path)) {
+    finish_restore();
+    if (!preserve_playback) {
+      engine_.seek(transport_.chart_start_ms());
+    }
+    rebuild_waveform(music_path);
+    return true;
+  }
+  // Full path ends in BASS_Free(): a decode worker's stream handle must not
+  // outlive the device (handles can be reissued by the next BASS_Init), so join
+  // the cancelled workers first. They check the cancel flag around the stream
+  // open and every chunk, and no longer PRESCAN, so this wait is short.
+  join_waveform_workers();
+  transport_.shutdown();
+  auto restore_transport = [&](const std::string& path) -> bool {
+    if (!transport_.initialize(effects, path)) {
+      return false;
+    }
+    finish_restore();
     return true;
   };
   if (!restore_transport(music_path)) {
@@ -683,10 +705,8 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
 
 bool ChartPreviewPanel::audition_music(const std::string& music_path) {
   if (!ready_ || !transport_.audio().replace_music_source(music_path)) return false;
-  // Cancel old waveform work without joining or destroying the process-global BASS device.
-  for (auto& pending : pending_waveforms_) {
-    if (pending.cancel) pending.cancel->store(true, std::memory_order_relaxed);
-  }
+  // rebuild_waveform() cancels the old decode without joining (the BASS device
+  // stays up here).
   rebuild_waveform(music_path);
   return true;
 }
@@ -695,69 +715,25 @@ void ChartPreviewPanel::join_waveform_workers() {
   // WaveformOverview::load() creates its own BASS decode stream on the same
   // process-global device (BASS_StreamCreateFile / BASS_ChannelGetData /
   // BASS_StreamFree). AudioEngine::shutdown() ends in BASS_Free(), so every
-  // pending worker must be joined before any transport/engine shutdown.
-  ++waveform_generation_;
-  for (auto& pending : pending_waveforms_) {
-    if (pending.cancel) {
-      pending.cancel->store(true, std::memory_order_relaxed);
-    }
-  }
-  for (auto& pending : pending_waveforms_) {
-    if (pending.result.valid()) {
-      try {
-        (void)pending.result.get();
-      } catch (...) {
-        WDS_LOG("ChartPreviewPanel: waveform worker failed during shutdown\n");
-      }
-    }
-  }
-  pending_waveforms_.clear();
+  // worker must be joined before any transport/engine shutdown. This is the only
+  // place that waits; see WaveformJobs.
+  waveform_jobs_.shutdown();
 }
 
 void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
   destroy_spectrogram_texture();
   waveform_.clear();
-  const std::uint64_t generation = ++waveform_generation_;
-  if (music_path.empty() || !transport_.audio().has_music()) {
-    return;
-  }
   // Decoding the full song and calculating two FFTs per hop is the expensive
   // part of project opening. Keep it off the Qt/render thread; tick() installs
   // only the newest completed result and performs the Vulkan upload there.
-  auto cancel = std::make_shared<std::atomic<bool>>(false);
-  pending_waveforms_.push_back(PendingWaveform{
-      generation, cancel,
-      std::async(std::launch::async, [music_path, cancel] {
-        wds::common::install_thread_crash_stack();
-        wds::audio::WaveformOverview decoded;
-        if (!decoded.load(music_path, cancel.get())) {
-          if (!cancel->load(std::memory_order_relaxed)) {
-            WDS_LOG("ChartPreviewPanel: waveform decode failed %s\n", music_path.c_str());
-          }
-          decoded.clear();
-        }
-        return decoded;
-      })});
+  // restart() cancels (never joins) any decode still running for a previous song.
+  const bool decode = !music_path.empty() && transport_.audio().has_music();
+  (void)waveform_jobs_.restart(decode ? music_path : std::string{});
 }
 
 void ChartPreviewPanel::collect_ready_waveforms() {
-  using namespace std::chrono_literals;
-  for (auto it = pending_waveforms_.begin(); it != pending_waveforms_.end();) {
-    if (!it->result.valid() || it->result.wait_for(0ms) != std::future_status::ready) {
-      ++it;
-      continue;
-    }
-    wds::audio::WaveformOverview decoded;
-    try {
-      decoded = it->result.get();
-    } catch (...) {
-      WDS_LOG("ChartPreviewPanel: waveform worker failed\n");
-      decoded.clear();
-    }
-    const bool cancelled = it->cancel && it->cancel->load(std::memory_order_relaxed);
-    const bool current = it->generation == waveform_generation_;
-    it = pending_waveforms_.erase(it);
-    if (cancelled || !current || decoded.empty()) continue;
+  wds::audio::WaveformOverview decoded;
+  if (waveform_jobs_.poll(decoded)) {
     waveform_ = std::move(decoded);
     bake_spectrogram_texture();
   }

@@ -340,6 +340,10 @@ struct SplitEffectFrameCollect {
   int total = 0;
 };
 
+// THREAD CONTRACT: call from one thread at a time (the GUI/preview owner thread).
+// Not safe for concurrent callers: auto-seed session, latches, controller cache and the
+// shared RNG are unsynchronised process-global state. Internally fans out to the split
+// collect pool. Debug builds assert on concurrent entry from a second thread.
 void collect_split_effect_frame(
     const std::vector<wds::chart_editor::PreviewSplitLaneInstance>& splits, int quality,
     double now_sec, bool playing, SplitEffectPlaybackState& state, SplitEffectFrameCollect& io);
@@ -511,6 +515,8 @@ void set_split_effects_resource_root(std::string root);
 // find_split_effects_resource_root(executable_dir(), current_path()), else "resources".
 std::string split_effects_resource_root();
 
+// THREAD CONTRACT: owner thread only, one thread at a time (shares the unsynchronised
+// controller cache with collect_split_effect_frame).
 // Hydrated controller for an official effect id. Dump writers that need to
 // mutate modules before bind should take a non-const ParticleSystem from
 // Controller::lines() (not catalog.inc).

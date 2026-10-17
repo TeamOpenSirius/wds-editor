@@ -40,7 +40,10 @@ class WaveformOverview {
 
   // Decode `path` through a dedicated BASS decode stream. Requires BASS_Init
   // (AudioEngine already running). Empty path clears. False on failure (clears).
-  // When `cancel` is set, hop/chunk loops abort and return false (clears).
+  // When `cancel` is set, hop/chunk loops abort and return false (clears). It is
+  // also checked before and right after the (uninterruptible) stream open, so a
+  // job cancelled while opening frees its stream and returns without decoding.
+  // The stream is opened without PRESCAN; the result covers what was decoded.
   bool load(const std::string& path, const std::atomic<bool>* cancel = nullptr);
 
   // Max peak in half-open [ms_lo, ms_hi). 0 when empty or fully outside audio.

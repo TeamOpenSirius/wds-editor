@@ -997,19 +997,26 @@ int split_noise_hold_for(const SplitEffectParticle& p, int32_t effect_id) noexce
     return split_noise_hold();
   }
   // Bind copies miss catalog_particle_index; lookup_or_decide then memcmp's
-  // the whole row. Cache by pointer + effect + overrides so hash / ctor /
-  // hold share one decide per system on the worker.
-  thread_local const SplitEffectParticle* last_p = nullptr;
+  // the whole row. Cache by row CONTENT + effect + overrides so hash / ctor /
+  // hold share one decide per system on the worker. Not keyed on &p: p is
+  // often a reused task slot (fs.tasks) that holds different rows over time,
+  // so an address key returned stale counts depending on which worker ran
+  // which task. The result is a pure function of (row bytes, effect_id,
+  // overrides); padding differences can only cause a miss, never a wrong hit.
+  thread_local bool have_row = false;
+  alignas(SplitEffectParticle) thread_local unsigned char last_row[sizeof(SplitEffectParticle)];
   thread_local int32_t last_id = 0;
   thread_local int last_n = 4;
   thread_local int last_exact = -2;
   thread_local int last_hold_ov = -3;
-  if (last_p == &p && last_id == effect_id && last_exact == g_noise_exact_override &&
-      last_hold_ov == g_noise_hold_override) {
+  if (have_row && last_id == effect_id && last_exact == g_noise_exact_override &&
+      last_hold_ov == g_noise_hold_override &&
+      std::memcmp(last_row, &p, sizeof(SplitEffectParticle)) == 0) {
     return last_n;
   }
   last_n = lookup_or_decide(p, effect_id);
-  last_p = &p;
+  std::memcpy(last_row, &p, sizeof(SplitEffectParticle));
+  have_row = true;
   last_id = effect_id;
   last_exact = g_noise_exact_override;
   last_hold_ov = g_noise_hold_override;

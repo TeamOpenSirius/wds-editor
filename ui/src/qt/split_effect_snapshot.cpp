@@ -4,6 +4,7 @@
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 
 #include <wds/chart_render/split_effect_catalog.hpp>
+#include <wds/common/crash_handler.hpp>
 #include <wds/core/split_effect_gate.hpp>
 
 #include <QByteArray>
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -47,6 +49,10 @@ constexpr std::size_t kMaxSprites = 2048;
 constexpr std::size_t kMaxPixmaps = 512;
 constexpr float kPi = 3.14159265358979f;
 constexpr qint64 kClusterCacheBytes = 48ll * 1024 * 1024;
+// A single cluster may never exceed half the budget: larger builds are refused (see build_cluster) so one entry can
+// not blow the LRU. Normal editor clusters are a few MB.
+constexpr qint64 kMaxClusterEntryBytes = kClusterCacheBytes / 2;
+constexpr std::chrono::seconds kRefusedTtl{5};  // how long a refused key is not re-queued
 constexpr int kMaxStripSegPx = 64;         // strip segment image side cap
 constexpr float kMinStripPx = 1.5f;        // widest strip vertex is lifted to this when min_sprite_px > 0
 constexpr float kStripOverlapPx = 0.5f;    // far-edge overlap of alpha-layer segments (hides SourceOver AA seams)
@@ -79,6 +85,51 @@ SharedAtlas& shared_atlas() {
   return s;
 }
 
+// Small LRU map (most recently used first), bounded by entry count; the least recently used entry is evicted one at
+// a time. Not thread safe: each instance is owned by one thread.
+template <typename V>
+class LruMap {
+ public:
+  explicit LruMap(std::size_t cap = 1) : cap_(std::max<std::size_t>(1, cap)) {}
+
+  // Touches the entry; nullptr when absent. The pointer is valid until the next insert / clear.
+  const V* find(const QByteArray& key) {
+    const auto it = map_.constFind(key);
+    if (it == map_.cend()) return nullptr;
+    list_.splice(list_.begin(), list_, it.value());
+    return &list_.front().second;
+  }
+  // No LRU touch.
+  bool contains(const QByteArray& key) const { return map_.contains(key); }
+
+  void insert(const QByteArray& key, V value) {
+    const auto it = map_.constFind(key);
+    if (it != map_.cend()) {
+      it.value()->second = std::move(value);
+      list_.splice(list_.begin(), list_, it.value());
+      return;
+    }
+    list_.emplace_front(key, std::move(value));
+    map_.insert(key, list_.begin());
+    while (list_.size() > cap_) {
+      map_.remove(list_.back().first);
+      list_.pop_back();
+    }
+  }
+
+  void clear() {
+    map_.clear();
+    list_.clear();
+  }
+  std::size_t size() const { return list_.size(); }
+
+ private:
+  using List = std::list<std::pair<QByteArray, V>>;
+  std::size_t cap_;
+  List list_;
+  QHash<QByteArray, typename List::iterator> map_;
+};
+
 struct ThreadCaches {
   quint64 gen = 0;
   QImage atlas;
@@ -89,7 +140,7 @@ struct ThreadCaches {
   QRgb trail_texel = qRgba(255, 255, 255, 255);
   bool trail_loaded = false;
   QHash<uint16_t, QImage> tiles;      // source_tile cache
-  QHash<QByteArray, QImage> sprites;  // cached_sprite cache
+  LruMap<QImage> sprites{kMaxSprites};  // cached_sprite cache
 };
 
 ThreadCaches& thread_caches() {
@@ -286,8 +337,7 @@ QImage cached_sprite(const SplitSnapParticle& sp, uint8_t shape, int w, int h) {
   k.w = static_cast<int16_t>(w);
   k.h = static_cast<int16_t>(h);
   const QByteArray key = pod_key(k);
-  const auto it = cache.constFind(key);
-  if (it != cache.cend()) return it.value();
+  if (const QImage* hit = cache.find(key)) return *hit;
 
   QImage tile = source_tile(sp.uv, sp.blend, shape);
   QImage out;
@@ -304,8 +354,7 @@ QImage cached_sprite(const SplitSnapParticle& sp, uint8_t shape, int w, int h) {
     }
     tint_image(out, sp.blend, k.r / 64.0f, k.g / 64.0f, k.b / 64.0f, k.a / 64.0f);
   }
-  if (cache.size() >= static_cast<qsizetype>(kMaxSprites)) cache.clear();
-  cache.insert(key, out);
+  cache.insert(key, out);  // LRU: evicts the least recently used sprite when full
   return out;
 }
 
@@ -1000,9 +1049,12 @@ int32_t split_line_edge(int32_t i, int32_t n, const std::vector<int32_t>& mids) 
              : static_cast<int32_t>(std::lround(static_cast<float>(i * kLanes) / static_cast<float>(n)));
 }
 
-QHash<QByteArray, QPixmap>& pixmap_cache() {
-  static QHash<QByteArray, QPixmap> cache;
-  return cache;
+// Deliberately never destroyed: a function-local static would be destructed during static destruction, after the
+// QGuiApplication is gone, and QPixmap destruction then is unsafe. The cluster worker's aboutToQuit hook clears it
+// while the application object is still alive.
+LruMap<QPixmap>& pixmap_cache() {
+  static LruMap<QPixmap>* cache = new LruMap<QPixmap>(kMaxPixmaps);
+  return *cache;
 }
 
 struct PixmapKeyPod {
@@ -1152,12 +1204,25 @@ struct ClusterEntry {
   QByteArray key;
   SplitIndicatorCluster cluster;
   qint64 bytes = 0;
+  quint64 touch = 0;  // generation of the last request / lookup / insertion (see ClusterCache::pin_from)
 };
 
+// Pinning: a paint re-requests every visible key, so a delivery must never evict a cluster that is still on screen.
+// `gen` is the current "paint generation". Every lookup (request / _if_ready hit) stamps the entry with `gen` and
+// sets `touched`. Each drain() (= the delivery of background results, which runs from the event loop between paints)
+// first advances the generation if anything was touched since the last advance: `pin_from` becomes the generation
+// that just ended, so entries touched during it (the previous paint's working set) and everything inserted since are
+// pinned and survive that drain's eviction; entries not touched for a whole generation are evictable. The budget can
+// therefore be exceeded temporarily, but only by pinned entries (each capped at kMaxClusterEntryBytes).
 struct ClusterCache {
   std::list<ClusterEntry> lru;  // front = most recently used; std::list keeps element addresses stable
   QHash<QByteArray, std::list<ClusterEntry>::iterator> map;
   qint64 bytes = 0;
+  quint64 gen = 1;
+  quint64 pin_from = 0;
+  bool touched = false;
+  // Keys whose build was refused as oversized: not re-queued until the deadline (then retried once).
+  QHash<QByteArray, std::chrono::steady_clock::time_point> refused;
 };
 
 ClusterCache& cluster_cache() {
@@ -1169,7 +1234,21 @@ void clear_cluster_cache() {
   ClusterCache& cc = cluster_cache();
   cc.map.clear();
   cc.lru.clear();
+  cc.refused.clear();
   cc.bytes = 0;
+  cc.touched = false;
+}
+
+void cluster_touch(ClusterCache& cc, ClusterEntry& e) {
+  e.touch = cc.gen;
+  cc.touched = true;
+}
+
+void cluster_advance_generation(ClusterCache& cc) {
+  if (!cc.touched) return;
+  cc.pin_from = cc.gen;
+  ++cc.gen;
+  cc.touched = false;
 }
 
 struct ClusterKeyPod {
@@ -1303,7 +1382,9 @@ void cluster_layout(const SplitIndicatorClusterKey& key, const ClusterKeyPod& kp
   build_layout(bp, line_x.data(), static_cast<int>(line_x.size()), 0.0f, static_cast<float>(kp.band_h), true, lay);
 }
 
-SplitIndicatorCluster build_cluster(const SplitIndicatorClusterKey& key, const ClusterKeyPod& kp) {
+// *refused (optional) is set, and an empty cluster returned, when the layers would exceed kMaxClusterEntryBytes.
+SplitIndicatorCluster build_cluster(const SplitIndicatorClusterKey& key, const ClusterKeyPod& kp,
+                                    bool* refused = nullptr) {
   SplitIndicatorCluster out;
   Layout lay;
   cluster_layout(key, kp, lay);
@@ -1316,6 +1397,9 @@ SplitIndicatorCluster build_cluster(const SplitIndicatorClusterKey& key, const C
   const int cy = static_cast<int>(std::floor(u.top()));
   const int cw = std::clamp(static_cast<int>(std::ceil(u.right())) - cx, 1, kMaxClusterSidePx);
   const int ch = std::clamp(static_cast<int>(std::ceil(u.bottom())) - cy, 1, kMaxClusterSidePx);
+  // Unclamped canvas size (doubles: the bounds are floats and could be huge) for the size guard below.
+  const double raw_w = std::max(1.0, std::ceil(u.right()) - static_cast<double>(cx));
+  const double raw_h = std::max(1.0, std::ceil(u.bottom()) - static_cast<double>(cy));
 
   // Items are applied in baked (= preview draw) order. Normal items are painted into their layer; a subtractive item
   // is applied to what the layers hold at that point (apply_subtractive) and accumulates its residual into `trans`.
@@ -1329,6 +1413,13 @@ SplitIndicatorCluster build_cluster(const SplitIndicatorClusterKey& key, const C
     } else {
       used[it.alpha_layer() ? 0 : 1] = true;
     }
+  }
+  // Refuse before allocating: the final cluster is at most the canvas size per layer, and one entry must never be
+  // able to exceed half the cache budget. The caller treats it as "not ready" (request) / an empty cluster (sync).
+  const int layer_count = (used[0] ? 1 : 0) + (used[1] ? 1 : 0) + (has_sub ? 1 : 0);
+  if (raw_w * raw_h * 4.0 * static_cast<double>(layer_count) > static_cast<double>(kMaxClusterEntryBytes)) {
+    if (refused != nullptr) *refused = true;
+    return out;
   }
   for (int li = 0; li < 2; ++li) {
     if (!used[li]) continue;
@@ -1409,13 +1500,18 @@ SplitIndicatorCluster build_cluster(const SplitIndicatorClusterKey& key, const C
   return out;
 }
 
-// Inserts at the LRU front and evicts from the back (never the entry just inserted). GUI thread only. If the id is
-// already cached (a synchronous build raced a worker result) the existing entry is touched and kept.
-const SplitIndicatorCluster* cluster_cache_insert(const QByteArray& id, SplitIndicatorCluster&& cluster) {
+// Inserts at the LRU front and evicts from the back (never the entry just inserted; with honor_pins also never an
+// entry touched at or after cc.pin_from, see ClusterCache). GUI thread only. If the id is already cached (a
+// synchronous build raced a worker result) the existing entry is touched and kept.
+// honor_pins = true: delivery of background results (drain). false: synchronous builds, which have no paint
+// generation and use the plain LRU rule.
+const SplitIndicatorCluster* cluster_cache_insert(const QByteArray& id, SplitIndicatorCluster&& cluster,
+                                                  bool honor_pins) {
   ClusterCache& cc = cluster_cache();
   const auto hit = cc.map.constFind(id);
   if (hit != cc.map.cend()) {
     cc.lru.splice(cc.lru.begin(), cc.lru, hit.value());
+    cc.lru.front().touch = cc.gen;
     return &cc.lru.front().cluster;
   }
   ClusterEntry e;
@@ -1423,14 +1519,18 @@ const SplitIndicatorCluster* cluster_cache_insert(const QByteArray& id, SplitInd
   e.cluster = std::move(cluster);
   e.bytes = e.cluster.alpha_layer.sizeInBytes() + e.cluster.add_layer.sizeInBytes() +
             e.cluster.sub_layer.sizeInBytes();
+  e.touch = cc.gen;  // the waiting widget repaints and requests it again in this generation
   cc.lru.push_front(std::move(e));
   cc.map.insert(cc.lru.front().key, cc.lru.begin());
   cc.bytes += cc.lru.front().bytes;
-  while (cc.bytes > kClusterCacheBytes && cc.lru.size() > 1) {
-    ClusterEntry& victim = cc.lru.back();
-    cc.bytes -= victim.bytes;
-    cc.map.remove(victim.key);
-    cc.lru.pop_back();
+  auto it = cc.lru.end();
+  while (cc.bytes > kClusterCacheBytes && it != cc.lru.begin()) {
+    --it;
+    if (it == cc.lru.begin()) break;  // the entry just inserted
+    if (honor_pins && it->touch >= cc.pin_from) continue;
+    cc.bytes -= it->bytes;
+    cc.map.remove(it->key);
+    it = cc.lru.erase(it);
   }
   return &cc.lru.front().cluster;
 }
@@ -1456,6 +1556,9 @@ struct BuildResult {
   // false: the build threw (allocation failure). drain() caches an EMPTY cluster for the key so a paint that
   // re-requests it every frame (editor during playback) cannot keep the worker rebuilding a failing key forever.
   bool ok = false;
+  // true: the build was refused as oversized (see build_cluster). drain() inserts nothing and negative-caches the key
+  // for kRefusedTtl so paints that re-request it do not queue it again.
+  bool refused = false;
 };
 
 struct Waiter {
@@ -1497,6 +1600,16 @@ class ClusterWorker {
     attach(app);
 
     const QByteArray id = pod_key(cluster_key_pod(key));
+    {
+      // Refused as oversized: stay "not ready" (callers use their fallback) without queueing or registering a
+      // callback, so a repaint cannot loop on it. Retried once the TTL has passed.
+      ClusterCache& cc = cluster_cache();
+      const auto rit = cc.refused.find(id);
+      if (rit != cc.refused.end()) {
+        if (std::chrono::steady_clock::now() < rit.value()) return nullptr;
+        cc.refused.erase(rit);
+      }
+    }
     auto it = waiters_.find(id);
     const bool inflight = it != waiters_.end();
     if (!inflight) it = waiters_.insert(id, std::vector<Waiter>());
@@ -1592,13 +1705,20 @@ class ClusterWorker {
     waiters_.clear();  // callbacks of the previous app are meaningless, and stale entries would mask "in flight"
     hooks_.clear();    // handles of the old app's connections (freed with it)
     hooked_app_ = app;
-    hooks_.push_back(QObject::connect(app, &QCoreApplication::aboutToQuit, [this] { shutdown(); }));
+    // After the join, release the GUI-side caches while the application object is still alive (QPixmap must not be
+    // destroyed after the QGuiApplication; the pixmap cache is leaked on purpose, so this is its only teardown).
+    hooks_.push_back(QObject::connect(app, &QCoreApplication::aboutToQuit, [this] {
+      shutdown();
+      pixmap_cache().clear();
+      clear_cluster_cache();
+    }));
     qAddPostRoutine(&ClusterWorker::post_routine);
   }
 
   static void post_routine() { instance().shutdown(); }
 
   void run() {
+    wds::common::install_thread_crash_stack();  // report a stack overflow on this thread
     for (;;) {
       QueuedBuild job;
       {
@@ -1611,7 +1731,7 @@ class ClusterWorker {
       BuildResult r;
       r.id = std::move(job.id);
       try {
-        r.cluster = build_cluster(job.key, cluster_key_pod(job.key));
+        r.cluster = build_cluster(job.key, cluster_key_pod(job.key), &r.refused);
         r.ok = true;
       } catch (...) {
         r.ok = false;
@@ -1641,6 +1761,8 @@ class ClusterWorker {
       batch.swap(done_);
       drain_posted_ = false;
     }
+    ClusterCache& cc = cluster_cache();
+    cluster_advance_generation(cc);  // pins the working set of the paint(s) since the previous drain
     for (BuildResult& r : batch) {
       std::vector<Waiter> ws;
       const auto wit = waiters_.find(r.id);
@@ -1648,8 +1770,13 @@ class ClusterWorker {
         ws = std::move(wit.value());
         waiters_.erase(wit);
       }
+      if (r.refused) {
+        cc.refused.insert(r.id, std::chrono::steady_clock::now() + kRefusedTtl);
+        deliver_waiters(ws);  // they repaint, find the key "not ready" and use their fallback
+        continue;
+      }
       if (!r.ok) r.cluster = SplitIndicatorCluster();  // negative entry (empty=true), see BuildResult::ok
-      cluster_cache_insert(r.id, std::move(r.cluster));
+      cluster_cache_insert(r.id, std::move(r.cluster), true);
       deliver_waiters(ws);
     }
   }
@@ -1691,13 +1818,16 @@ const SplitIndicatorCluster* split_effect_indicator_cluster_if_ready(const Split
   const auto it = cc.map.constFind(id);
   if (it == cc.map.cend()) return nullptr;
   cc.lru.splice(cc.lru.begin(), cc.lru, it.value());  // iterators/addresses stay valid
+  cluster_touch(cc, cc.lru.front());
   return &cc.lru.front().cluster;
 }
 
 const SplitIndicatorCluster* split_effect_indicator_cluster(const SplitIndicatorClusterKey& key) {
   if (const SplitIndicatorCluster* hit = split_effect_indicator_cluster_if_ready(key)) return hit;
   const ClusterKeyPod kp = cluster_key_pod(key);
-  return cluster_cache_insert(pod_key(kp), build_cluster(key, kp));  // GUI-thread state only
+  bool refused = false;
+  SplitIndicatorCluster built = build_cluster(key, kp, &refused);  // refused => empty cluster, cached as such
+  return cluster_cache_insert(pod_key(kp), std::move(built), false);  // GUI-thread state only
 }
 
 const SplitIndicatorCluster* split_effect_indicator_cluster_request(const SplitIndicatorClusterKey& key,
@@ -1755,18 +1885,15 @@ void draw_split_effect_indicator_cluster(QPainter& p, const SplitIndicatorCluste
 QPixmap split_effect_indicator_pixmap(const SplitIndicatorPixmapKey& key) {
   auto& cache = pixmap_cache();
   const QByteArray id = pixmap_cache_key(key);
-  const auto it = cache.constFind(id);
-  if (it != cache.cend()) return it.value();
+  if (const QPixmap* hit = cache.find(id)) return *hit;
   QPixmap pm = render_indicator_pixmap(key);
-  if (cache.size() >= static_cast<qsizetype>(kMaxPixmaps)) cache.clear();
-  cache.insert(id, pm);
+  cache.insert(id, pm);  // LRU eviction, one entry at a time
   return pm;
 }
 
 QPixmap split_effect_indicator_pixmap_if_ready(const SplitIndicatorPixmapKey& key) {
-  const auto it = pixmap_cache().constFind(pixmap_cache_key(key));
-  if (it == pixmap_cache().cend()) return {};
-  return it.value();
+  if (const QPixmap* hit = pixmap_cache().find(pixmap_cache_key(key))) return *hit;
+  return {};
 }
 
 int prefetch_split_effect_indicator_pixmaps(const std::vector<int32_t>& ids, SplitIndicatorPixmapKey key,
@@ -1778,7 +1905,7 @@ int prefetch_split_effect_indicator_pixmaps(const std::vector<int32_t>& ids, Spl
     key.color_id = id;
     const QByteArray ck = pixmap_cache_key(key);
     if (cache.contains(ck)) continue;
-    cache.insert(ck, render_indicator_pixmap(key));
+    cache.insert(ck, render_indicator_pixmap(key));  // may evict the oldest entry (LRU) once the cap is reached
     if (++built >= max_new) break;
   }
   return built;

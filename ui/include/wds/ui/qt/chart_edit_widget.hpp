@@ -2,12 +2,14 @@
 
 #include <QWidget>
 #include <QImage>
+#include <QPen>
 #include <QPixmap>
 #include <QString>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <utility>
 #include <vector>
 
 class QEnterEvent;
@@ -21,9 +23,60 @@ class QShowEvent;
 class QSlider;
 class QTimer;
 
+#include <wds/interaction/types.hpp>
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 
 namespace wds::ui {
+
+// Per-frame split geometry, built once in paintEvent and drawn by the main pass and the two
+// edge-spill strips (the strips only clip, they never recompute). Plain scratch data: vectors keep
+// their capacity between frames.
+inline constexpr int kChartEditSplitRampStops = 24;  // ramp gradients carry stops [0, 24]
+
+struct ChartEditSplitEdge {
+  float x = 0.0f;  // pixel-snapped line centre
+  wds::interaction::Color color{};  // final RGB/alpha before the per-segment opacity
+};
+
+struct ChartEditSplitSegment {
+  bool valid = false;
+  bool ramp = false;  // gradient along y0 -> y1 from `stops`; otherwise flat `max_op`
+  float y0 = 0.0f, y1 = 0.0f;  // unclamped ramp endpoints
+  float top = 0.0f, bot = 0.0f;  // y extent clamped to the playfield
+  float max_op = 0.0f;
+  float stops[kChartEditSplitRampStops + 1] = {};
+};
+
+struct ChartEditSplitItem {
+  const wds::chart_editor::NotationNote* note = nullptr;  // points into the document's notes
+  bool selected = false;
+  bool lines_visible = false;
+  int32_t color_id = 0;
+  int32_t split_count = 1;
+  int64_t start_ms = 0;
+  int64_t end_ms = 0;  // >= start_ms
+  int64_t appear_ms = 1;
+  int64_t fade_start_ms = 0;
+  int64_t fade_end_ms = 0;
+  float line_w = 2.0f;
+  uint32_t edge_begin = 0, edge_end = 0;  // range in ChartEditSplitFrame::edges
+  ChartEditSplitSegment seg[3];  // fade-in ramp, steady, fade-out ramp
+};
+
+struct ChartEditGuideLine {
+  float x = 0.0f;
+  QPen pen;
+};
+
+struct ChartEditSplitFrame {
+  std::vector<std::size_t> note_indices;  // windowed split gimmicks, ascending note index
+  std::vector<ChartEditSplitItem> items;  // same order as note_indices
+  std::vector<ChartEditSplitEdge> edges;
+  std::vector<ChartEditGuideLine> guide_lines;
+  std::vector<std::pair<float, float>> guide_spans;  // (top, bot) px not covered by a split
+  std::vector<std::pair<float, float>> cover_scratch;
+  std::vector<int32_t> mids_scratch;
+};
 
 // Native Qt canvas for chart authoring. Preview remains on Vulkan; this widget
 // deliberately owns no graphics context and uses QPainter only.
@@ -72,14 +125,19 @@ class ChartEditWidget final : public QWidget {
   void update_extra_lane_slider_label();
   wds::interaction::Modifiers mods(Qt::KeyboardModifiers) const;
   wds::interaction::Vec2 point(const QPointF&) const;
+  // Draws notes[indices[k]]; indices must be ascending (document order) and already culled.
   void paint_notes(QPainter& painter,
-                   const std::vector<wds::chart_editor::NotationNote>& notes, float opacity,
-                   bool show_selection, int32_t range_lo, int32_t range_hi);
+                   const std::vector<wds::chart_editor::NotationNote>& notes,
+                   const std::vector<std::size_t>& indices, float opacity, bool show_selection);
   void sync_audio_backdrop(const EditViewport& v, const wds::interaction::Rect& bounds);
   void fill_audio_backdrop_rows(const EditViewport& v, const wds::audio::WaveformOverview& waveform,
                                 EditSpectrumMode mode, int row0, int row1);
+  // Refills visible_note_indices_ with the notes touching [range_lo, range_hi] (tick space).
   void sync_visible_notes(const std::vector<wds::chart_editor::NotationNote>& notes,
                           int32_t range_lo, int32_t range_hi);
+  // Content-generation-keyed span metadata that lets the tick windows binary-search the
+  // (start_tick, id)-sorted note vector instead of scanning every note.
+  void ensure_note_span_cache(const std::vector<wds::chart_editor::NotationNote>& notes);
   void playfield_cull_ticks(int32_t& lo, int32_t& hi) const;
   void paint_waveform(QPainter& painter, const EditViewport& v, const wds::interaction::Rect& bounds);
   void present_qt_modals();
@@ -109,8 +167,10 @@ class ChartEditWidget final : public QWidget {
   uint64_t paint_count_ = 0;
   std::vector<std::size_t> visible_note_indices_;
   std::vector<std::size_t> note_draw_order_;
+  std::vector<int64_t> note_draw_key_ms_;
   std::vector<wds::chart_editor::NotationNote> ghost_scratch_;
-  std::vector<wds::chart_editor::NotationNote> split_notes_scratch_;
+  std::vector<std::size_t> ghost_indices_;
+  ChartEditSplitFrame split_frame_;
   QImage audio_backdrop_;
   EditSpectrumMode backdrop_mode_ = EditSpectrumMode::None;
   const void* backdrop_wave_ = nullptr;
@@ -123,9 +183,14 @@ class ChartEditWidget final : public QWidget {
   float backdrop_scroll_ms_ = 0;
   int backdrop_x0_ = 0;
   int backdrop_y0_ = 0;
-  const void* note_cull_notes_ = nullptr;
-  std::size_t note_cull_n_ = 0;
-  int32_t note_cull_lo_ = 0;
-  int32_t note_cull_hi_ = 0;
+  // Key of ensure_note_span_cache(). The spans below only depend on the notes' ticks, so an
+  // in-place reorder of equal-start_tick notes (normalize_for_save) cannot invalidate them.
+  const void* note_span_doc_ = nullptr;
+  const void* note_span_data_ = nullptr;
+  std::size_t note_span_n_ = 0;
+  uint64_t note_span_gen_ = ~uint64_t{0};
+  bool note_sorted_ = false;           // notes are ascending by start_tick
+  int64_t note_max_span_ticks_ = 0;    // max(end_tick, start_tick) - start_tick over all notes
+  int64_t split_max_span_ticks_ = 0;   // same, split gimmicks only
 };
 }

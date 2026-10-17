@@ -8,9 +8,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include <wds/common/crash_handler.hpp>
 
 #ifndef _WIN32
 #include <pthread.h>
@@ -422,6 +426,11 @@ class SplitCollectPool {
 
   void wake_for_heavy() {
     ensure_workers(std::max(0, topo().cap - 1));
+    {
+      // Taking mu_ orders this notify after any worker's predicate check, so a worker that
+      // just saw "no heavy hold" is already blocked in wait() and receives the wake-up.
+      std::lock_guard<std::mutex> lock(mu_);
+    }
     cv_wake_.notify_all();
   }
 
@@ -434,6 +443,8 @@ class SplitCollectPool {
            static_cast<int>(workers_.size()) < extra_cap_) {
       const int wid = static_cast<int>(workers_.size()) + 1;
       workers_.emplace_back([this, wid] {
+        // Alternate signal stack so a stack overflow on this thread can still be reported.
+        wds::common::install_thread_crash_stack();
         tls_worker_id = wid;
         worker_main();
       });
@@ -463,6 +474,7 @@ class SplitCollectPool {
         job->grain = grain;
         job->fn = fn;
         job->ctx = ctx;
+        job->error = nullptr;
         job->id = ++next_id_;
         job->max_workers = participants;
         active_[job_count_++] = job;
@@ -498,9 +510,15 @@ class SplitCollectPool {
       }
     }
 
+    std::exception_ptr error;
     {
       std::lock_guard<std::mutex> lock(mu_);
+      error = std::move(job->error);
+      job->error = nullptr;
       pop_job_locked(id);
+    }
+    if (error) {
+      std::rethrow_exception(error);
     }
   }
 
@@ -517,6 +535,15 @@ class SplitCollectPool {
     void* ctx = nullptr;
     uint64_t id = 0;
     int max_workers = 1;
+    std::exception_ptr error;  // first exception thrown by fn; guarded by mu_
+  };
+
+  // Restores tls_claim_depth even when fn throws.
+  struct ClaimDepthGuard {
+    ClaimDepthGuard() { ++tls_claim_depth; }
+    ~ClaimDepthGuard() { --tls_claim_depth; }
+    ClaimDepthGuard(const ClaimDepthGuard&) = delete;
+    ClaimDepthGuard& operator=(const ClaimDepthGuard&) = delete;
   };
 
   struct Claim {
@@ -587,22 +614,33 @@ class SplitCollectPool {
       }
     }
     const bool time_busy = split_wall_enabled() && tls_claim_depth == 0;
-    ++tls_claim_depth;
-    if (time_busy) {
-      const auto t0 = std::chrono::steady_clock::now();
-      for (size_t i = c.i0; i < c.i1; ++i) {
-        c.fn(i, c.ctx);
+    std::exception_ptr err;
+    {
+      ClaimDepthGuard depth_guard;
+      const auto t0 = time_busy ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point();
+      try {
+        for (size_t i = c.i0; i < c.i1; ++i) {
+          c.fn(i, c.ctx);
+        }
+      } catch (...) {
+        // Never unwind past the claim: the items must still be counted as finished so the
+        // job completes, and the caller thread rethrows once the job is popped.
+        err = std::current_exception();
       }
-      const auto t1 = std::chrono::steady_clock::now();
-      split_wall_note_worker_busy(
-          tls_worker_id,
-          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
-    } else {
-      for (size_t i = c.i0; i < c.i1; ++i) {
-        c.fn(i, c.ctx);
+      if (time_busy) {
+        const auto t1 = std::chrono::steady_clock::now();
+        split_wall_note_worker_busy(
+            tls_worker_id,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
       }
     }
-    --tls_claim_depth;
+    if (err) {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!c.job->error) {
+        c.job->error = err;
+      }
+    }
     const size_t got = c.i1 - c.i0;
     const size_t nitems = c.job->end - c.job->begin;
     const size_t prev = c.job->finished.fetch_add(got, std::memory_order_acq_rel);
@@ -625,7 +663,8 @@ class SplitCollectPool {
       active_[job_count_ - 1] = nullptr;
       --job_count_;
       free_[free_count_++] = j;
-      cv_wake_.notify_all();
+      // No notify: removing a job never makes a worker's wait predicate (stop_ / claimable work /
+      // heavy hold) true, so waking parked workers here would only make them re-sleep.
       return;
     }
   }
@@ -680,32 +719,52 @@ class SplitCollectPool {
   bool stop_ = false;
 };
 
-SplitCollectPool* g_pool = nullptr;
+// Not std::call_once: after_fork_child must be able to reset the pool so the child re-creates it.
+std::atomic<SplitCollectPool*> g_pool{nullptr};
+std::mutex g_pool_mu;  // serialises creation and the atfork registration flag
 
 #ifndef _WIN32
-void after_fork_child() {
-  g_pool = nullptr;
+// Hold g_pool_mu across fork() so the child never inherits it locked by a vanished thread.
+void before_fork() {
+  g_pool_mu.lock();
 }
 
-void ensure_atfork() {
+void after_fork_parent() {
+  g_pool_mu.unlock();
+}
+
+void after_fork_child() {
+  g_pool.store(nullptr, std::memory_order_release);
+  g_pool_mu.unlock();
+}
+
+// Caller holds g_pool_mu.
+void ensure_atfork_locked() {
   static bool registered = false;
   if (registered) {
     return;
   }
-  pthread_atfork(nullptr, nullptr, after_fork_child);
+  pthread_atfork(before_fork, after_fork_parent, after_fork_child);
   registered = true;
 }
 #endif
 
 SplitCollectPool& ensure_pool(int threads) {
-#ifndef _WIN32
-  ensure_atfork();
-#endif
-  if (g_pool == nullptr) {
-    const int extra = threads > 1 ? threads - 1 : 0;
-    g_pool = new SplitCollectPool(extra);
+  SplitCollectPool* p = g_pool.load(std::memory_order_acquire);
+  if (p != nullptr) {
+    return *p;
   }
-  return *g_pool;
+  std::lock_guard<std::mutex> lock(g_pool_mu);
+  p = g_pool.load(std::memory_order_relaxed);
+  if (p == nullptr) {
+#ifndef _WIN32
+    ensure_atfork_locked();
+#endif
+    const int extra = threads > 1 ? threads - 1 : 0;
+    p = new SplitCollectPool(extra);
+    g_pool.store(p, std::memory_order_release);
+  }
+  return *p;
 }
 
 size_t adaptive_grain(size_t n, int threads) noexcept {

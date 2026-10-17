@@ -6,10 +6,19 @@
 #include <algorithm>
 
 namespace wds::chart_editor {
+namespace {
+
+// End-tree key: ms of the raw end tick (see ChartNoteIndex::query_ends_in_range).
+int64_t end_tree_key_ms(const NotationNote& note, const MusicTiming& timing) {
+  return tick_to_milliseconds(note.end_tick, timing);
+}
+
+}  // namespace
 
 void ChartNoteIndex::clear() {
   by_start_ms_.clear();
   split_lane_by_start_ms_.clear();
+  by_end_ms_.clear();
   max_hold_span_ms_ = 0;
   max_split_span_ms_ = 0;
   hold_span_stale_ = false;
@@ -20,6 +29,7 @@ void ChartNoteIndex::rebuild(const std::vector<NotationNote>& notes, const Music
 
   std::vector<std::pair<int64_t, int32_t>> start_entries;
   std::vector<std::pair<int64_t, int32_t>> split_entries;
+  std::vector<std::pair<int64_t, int32_t>> end_entries;
   start_entries.reserve(notes.size());
   split_entries.reserve(notes.size() / 4);
 
@@ -32,10 +42,14 @@ void ChartNoteIndex::rebuild(const std::vector<NotationNote>& notes, const Music
     if (is_split_lane_gimmick(note.gimmick_type)) {
       split_entries.emplace_back(start_ms, note.id);
     }
+    if (is_hold_with_tail(note.note_type)) {
+      end_entries.emplace_back(end_tree_key_ms(note, timing), note.id);
+    }
   }
 
   by_start_ms_.build(start_entries);
   split_lane_by_start_ms_.build(split_entries);
+  by_end_ms_.build(end_entries);
 }
 
 void ChartNoteIndex::on_note_added(const NotationNote& note, const MusicTiming& timing) {
@@ -47,11 +61,17 @@ void ChartNoteIndex::on_note_added(const NotationNote& note, const MusicTiming& 
   if (is_split_lane_gimmick(note.gimmick_type)) {
     split_lane_by_start_ms_.insert(start_ms, note.id);
   }
+  if (is_hold_with_tail(note.note_type)) {
+    by_end_ms_.insert(end_tree_key_ms(note, timing), note.id);
+  }
 }
 
 void ChartNoteIndex::on_note_removed(const NotationNote& note, const MusicTiming& timing) {
   const int64_t start_ms = note.start_ms(timing);
   remove_id(note.id, start_ms);
+  if (is_hold_with_tail(note.note_type)) {
+    by_end_ms_.erase(end_tree_key_ms(note, timing), note.id);
+  }
 
   const int64_t span = std::max<int64_t>(0, note.end_ms(timing) - note.start_ms(timing));
   if (is_split_lane_gimmick(note.gimmick_type)) {
@@ -76,6 +96,22 @@ void ChartNoteIndex::on_note_updated(const NotationNote& old_note, const Notatio
   if (old_ms != new_ms) {
     remove_id(old_note.id, old_ms);
     insert_id(new_note.id, new_ms);
+  }
+
+  // End tree: re-key when the tail-ness or the raw end tick's ms changed.
+  const bool old_has_tail = is_hold_with_tail(old_note.note_type);
+  const bool new_has_tail = is_hold_with_tail(new_note.note_type);
+  if (old_has_tail || new_has_tail) {
+    const int64_t old_end_key = old_has_tail ? end_tree_key_ms(old_note, timing) : 0;
+    const int64_t new_end_key = new_has_tail ? end_tree_key_ms(new_note, timing) : 0;
+    if (old_has_tail != new_has_tail || old_end_key != new_end_key) {
+      if (old_has_tail) {
+        by_end_ms_.erase(old_end_key, old_note.id);
+      }
+      if (new_has_tail) {
+        by_end_ms_.insert(new_end_key, new_note.id);
+      }
+    }
   }
 
   const bool old_is_split = is_split_lane_gimmick(old_note.gimmick_type);
@@ -141,6 +177,17 @@ void ChartNoteIndex::query_candidates(int64_t time_ms, int64_t lead_ms, int64_t 
   }
 
   by_start_ms_.for_each_in_range(lower, upper, [&](int64_t /*key*/, int32_t note_id) {
+    out_note_ids.push_back(note_id);
+  });
+}
+
+void ChartNoteIndex::query_ends_in_range(int64_t lower_ms, int64_t upper_ms,
+                                         std::vector<int32_t>& out_note_ids) const {
+  out_note_ids.clear();
+  if (lower_ms > upper_ms) {
+    return;
+  }
+  by_end_ms_.for_each_in_range(lower_ms, upper_ms, [&](int64_t /*key*/, int32_t note_id) {
     out_note_ids.push_back(note_id);
   });
 }

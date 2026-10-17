@@ -468,9 +468,39 @@ void run_microbench() {
       hash_ns > 1e-9 ? popt / hash_ns : 0.0);
 }
 
+// split_noise_hold_for must not key its per-thread cache on the address of p:
+// task slots are reused for different rows. Reuse one address for many rows
+// and require the same answer as the stable catalog pointer.
+void test_hold_for_reused_slot() {
+  using wds::chart_render::shuriken::split_noise_hold_for;
+  const int32_t ids[] = {11621, 11711, 10380};
+  SplitEffectParticle slot = catalog_noise_particle();
+  int compared = 0;
+  for (int pass = 0; pass < 2; ++pass) {
+    for (const int32_t id : ids) {
+      const auto* entry = official_split_effect(id);
+      if (entry == nullptr) {
+        continue;
+      }
+      uint16_t n = 0;
+      const SplitEffectParticle* ps = official_split_effect_particles(*entry, &n);
+      for (uint16_t i = 0; i < n; ++i) {
+        const uint16_t k = pass == 0 ? i : static_cast<uint16_t>(n - 1 - i);
+        const int expect = split_noise_hold_for(ps[k], id);
+        slot = ps[k];  // same address, different content each iteration
+        CHECK(split_noise_hold_for(slot, id) == expect);
+        CHECK(split_noise_hold_for(slot, id) == expect);
+        ++compared;
+      }
+    }
+  }
+  CHECK(compared > 0);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  test_hold_for_reused_slot();
   test_perlin_and_fbm_random();
   test_perlin_lattice_and_pairs();
   test_eval_noise_velocity_catalog_and_random();

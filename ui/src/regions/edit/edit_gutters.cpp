@@ -335,12 +335,44 @@ std::vector<SplitCoverageMs> collect_split_coverage_ms(
 
 std::vector<std::pair<float, float>> merged_split_hide_ranges_ms(
     const std::vector<NotationNote>& notes, const wds::chart_editor::MusicTiming& timing,
-    const wds::chart_editor::PreviewConfig& preview, float view_ms_lo, float view_ms_hi) {
+    const wds::chart_editor::PreviewConfig& preview, float view_ms_lo, float view_ms_hi,
+    const wds::chart_editor::ChartDocument* doc) {
   std::vector<std::pair<float, float>> covered;
-  for (const auto& range : collect_split_coverage_ms(notes, timing, preview)) {
-    const float lo = std::max(view_ms_lo, static_cast<float>(range.fade_start_ms));
-    const float hi = std::min(view_ms_hi, static_cast<float>(range.fade_end_ms));
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  // Same arithmetic as collect_split_coverage_ms, per note.
+  auto add_note = [&](const NotationNote& note) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
+    const int64_t steady_start = note.start_ms(timing);
+    const int64_t steady_end = std::max(steady_start, note.end_ms(timing));
+    const int64_t fade_start = steady_start - appear_ms;
+    const int64_t fade_end = wds::chart_editor::official_split_destroy_ms(steady_start, steady_end);
+    const float lo = std::max(view_ms_lo, static_cast<float>(fade_start));
+    const float hi = std::min(view_ms_hi, static_cast<float>(fade_end));
     if (hi > lo) covered.emplace_back(lo, hi);
+  };
+  // Integer window, widened by 2 ms to absorb float rounding; the exact filter above
+  // still decides inclusion, so widening never changes the result.
+  const int64_t win_lo = static_cast<int64_t>(std::floor(view_ms_lo)) - 2;
+  const int64_t win_hi = static_cast<int64_t>(std::ceil(view_ms_hi)) + 2;
+  if (doc != nullptr && !doc->index().hold_span_stale()) {
+    // A split is relevant iff fade_start < win_hi and fade_end > win_lo, where
+    // fade_end = max(start, end) + hide delay <= start + max span + hide delay.
+    const int64_t reach =
+        doc->index().max_split_span_ms() + wds::chart_editor::kOfficialSplitHideDelayMs;
+    const int64_t key_lo = win_lo - reach;
+    const int64_t key_hi = win_hi + appear_ms;
+    thread_local std::vector<int32_t> ids;
+    doc->index().query_split_lanes_in_range(key_lo, key_hi, ids);
+    for (const int32_t id : ids) {
+      if (const auto note = doc->find_note(id)) add_note(*note);
+    }
+  } else {
+    for (const auto& note : notes) {
+      // Sorted by start_tick (start_ms is monotone): nothing later can reach the view.
+      if (note.start_ms(timing) - appear_ms > win_hi) break;
+      add_note(note);
+    }
   }
   std::sort(covered.begin(), covered.end());
   std::vector<std::pair<float, float>> merged;
@@ -389,20 +421,6 @@ float split_line_opacity_at_tick(const NotationNote& note,
   return split_line_opacity_at_ms(
       note, timing, preview,
       wds::chart_editor::tick_to_milliseconds(tick, timing));
-}
-
-const NotationNote* split_note_covering_tick(const std::vector<NotationNote>& notes,
-                                             const wds::chart_editor::MusicTiming& timing,
-                                             const wds::chart_editor::PreviewConfig& preview,
-                                             int32_t tick) {
-  // Cover check is wall-clock (same as preview fade), not BPM→tick conversion /
-  // subdivision banding — otherwise edit-mode hide edges snap to 拍内分割.
-  const int64_t time_ms =
-      wds::chart_editor::tick_to_milliseconds(tick, timing);
-  for (const auto& note : notes) {
-    if (split_line_opacity_at_ms(note, timing, preview, time_ms) > 0.0f) return &note;
-  }
-  return nullptr;
 }
 
 void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewport& viewport,
@@ -597,7 +615,8 @@ Rect split_label_hot_bounds(const GutterLabelHit& hit) {
 }
 
 std::vector<GutterLabelHit> build_split_label_hits(const EditViewport& viewport, const Rect& gutter,
-                                                   const std::vector<NotationNote>& notes) {
+                                                   const std::vector<NotationNote>& notes,
+                                                   const wds::chart_editor::ChartDocument* doc) {
   const SplitCols cols = make_split_cols(gutter);
   const float view_pad = cols.h * 8.0f;
 
@@ -608,19 +627,39 @@ std::vector<GutterLabelHit> build_split_label_hits(const EditViewport& viewport,
     float anchor_y = 0.0f;
   };
   std::vector<Draft> drafts;
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+  const float y_lo = gutter.y - view_pad;
+  const float y_hi = gutter.bottom() + view_pad;
+  auto add_note = [&](const NotationNote& note) {
+    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
     const int32_t start_tick = note.start_tick;
     const int32_t end_tick = std::max(note.start_tick, note.end_tick);
     const float y0 = viewport.y_at(note.start_tick);
     const float y1 = viewport.y_at(end_tick);
-    if (y0 >= gutter.y - view_pad && y0 <= gutter.bottom() + view_pad) {
+    if (y0 >= y_lo && y0 <= y_hi) {
       drafts.push_back({note.id, true, start_tick, y0});
     }
-    if (y1 >= gutter.y - view_pad && y1 <= gutter.bottom() + view_pad &&
-        note.end_tick > note.start_tick) {
+    if (y1 >= y_lo && y1 <= y_hi && note.end_tick > note.start_tick) {
       drafts.push_back({note.id, false, end_tick, y1});
     }
+  };
+  // `drafts` is fully re-sorted below by (anchor_tick, is_start, note_id), a total
+  // order, so the order candidates are visited in does not affect the result.
+  const bool can_window = doc != nullptr && !doc->index().hold_span_stale() &&
+                          viewport.bounds().h >= 1.0f && viewport.visible_ms() > 0;
+  if (can_window) {
+    // y is linear and decreasing in ms: the label band maps to an ms interval.
+    constexpr int64_t kSlackMs = 4;  // float/rounding slack; exact y filter still applies
+    const int64_t m_lo = static_cast<int64_t>(std::floor(viewport.ms_at_y(y_hi))) - kSlackMs;
+    const int64_t m_hi = static_cast<int64_t>(std::ceil(viewport.ms_at_y(y_lo))) + kSlackMs;
+    // Start label in window, or end label in window (end <= start + max span).
+    const int64_t key_lo = m_lo - doc->index().max_split_span_ms();
+    thread_local std::vector<int32_t> ids;
+    doc->index().query_split_lanes_in_range(key_lo, m_hi, ids);
+    for (const int32_t id : ids) {
+      if (const auto note = doc->find_note(id)) add_note(*note);
+    }
+  } else {
+    for (const auto& note : notes) add_note(note);
   }
   // Ascending time: hit-test prefers earlier; paint should reverse-iterate.
   std::sort(drafts.begin(), drafts.end(), [](const Draft& a, const Draft& b) {

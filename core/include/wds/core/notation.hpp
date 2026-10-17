@@ -37,6 +37,10 @@ inline bool is_valid_ticks_per_quarter(int32_t tpq) noexcept {
   return tpq >= 1 && tpq <= kMaxTicksPerQuarter;
 }
 
+// Cached verdict of "points are usable as-is" (tick-0 anchor, strictly increasing
+// ticks). Lives next to MusicTiming::prefix_ms and shares its validity rule.
+enum class TimingPointsState : uint8_t { Unknown = 0, Normalized, NotNormalized };
+
 struct MusicTiming {
   double bpm = 120.0;
   // Tick-based authoring (preferred over absolute seconds for precision).
@@ -50,7 +54,19 @@ struct MusicTiming {
   std::vector<TimingPoint> points;
   // Milliseconds from tick 0 (excluding offset_ms) at each points[i].tick.
   // Filled by normalize_timing_points / tick↔ms; not part of the file format.
+  //
+  // Cache contract (prefix_ms + points_state): both are valid only while
+  // prefix_ms.size() == points.size() (and points is non-empty). They are
+  // (re)filled by normalize_timing_points / rebuild_timing_prefix_ms and lazily by
+  // tick_to_milliseconds / milliseconds_to_tick. Code that edits `points` or
+  // `ticks_per_quarter` in place must call normalize_timing_points() (or clear
+  // prefix_ms) afterwards; ChartDocument::set_timing already normalizes.
+  // Threading: the caches are `mutable` and written lazily with no locking, so a
+  // MusicTiming that is not yet normalized must only be read from one thread (the
+  // GUI thread). A normalized MusicTiming is read-only on the hot path and may be
+  // shared; copy it (caches are copied along) before handing it to workers.
   mutable std::vector<double> prefix_ms;
+  mutable TimingPointsState points_state = TimingPointsState::Unknown;
 };
 
 // Editor note — field layout mirrors official CSV columns, but times stay in ticks:
@@ -91,23 +107,6 @@ struct ConcurrentLineNote {
   int32_t width = 1;
 };
 
-// A deleted generated HoldEighth remains as a non-rendered tombstone so the
-// next derived-point rebuild does not recreate it.
-inline constexpr int32_t kSuppressedHoldEighthScratchLength =
-    std::numeric_limits<int32_t>::min();
-// Author-placed type 900. The private marker is written as scratchLength=0 in
-// official CSV, but retained in .wdschart so derived-point rebuilds keep it.
-inline constexpr int32_t kAuthoredHoldEighthScratchLength =
-    std::numeric_limits<int32_t>::min() + 1;
-inline bool is_suppressed_hold_eighth(const NotationNote& note) noexcept {
-  return note.note_type == NoteType::HoldEighth &&
-         note.scratch_length == kSuppressedHoldEighthScratchLength;
-}
-inline bool is_authored_hold_eighth(const NotationNote& note) noexcept {
-  return note.note_type == NoteType::HoldEighth &&
-         note.scratch_length == kAuthoredHoldEighthScratchLength;
-}
-
 // Visual scroll-speed event. The event starts at tick and remains in effect
 // until the next point. Multiplier 0 freezes notes; negative values are invalid.
 // A chart with no points has multiplier 1.0.
@@ -134,6 +133,10 @@ struct NotationChart {
   std::vector<ConcurrentLineNote> concurrent_lines;
   std::vector<ScrollSpeedPoint> scroll_speed_points;
   ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
+  // Set only by official CSV import. Type-900 rows are the chart's eighths.
+  // The file has no BPM, so load must not replace them with a tpq/2 grid.
+  // Not written to .wdschart. SUS / editable charts leave this false.
+  bool keep_file_eighths = false;
 };
 
 // Feature IDs for a packer to copy into custom-song requiredFeatures metadata.
@@ -182,7 +185,56 @@ class ChartDocument {
   // Rejects the whole batch (no mutation) on read-only, duplicate ids, or unknown ids.
   bool apply_note_updates(const std::vector<NoteUpdate>& updates);
   bool remove_note(int32_t id);
+  // Bulk add_note: one sort / id-index / concurrent-line rebuild for the whole
+  // batch. Ids are assigned exactly as sequential add_note calls would. All or
+  // nothing: when any note would be rejected no note is added (next_id_ still
+  // advances over the notes planned before the failure, like the sequential path).
+  // out_ids (optional) receives the ids planned for the processed notes — all of
+  // them on success, the prefix before the failing note otherwise. Empty succeeds.
+  bool add_notes(const std::vector<NotationNote>& notes, std::vector<int32_t>* out_ids = nullptr);
+  // Bulk remove_note: one rebuild. Rejects the whole batch (no mutation) on
+  // read-only, unknown ids, or repeated ids. Empty succeeds.
+  bool remove_notes(const std::vector<int32_t>& ids);
   std::optional<NotationNote> find_note(int32_t id) const;
+
+  // ---- Tick-exact note lookups backed by the start / end AVL trees ----
+  //
+  // Each fills `out` (cleared first) with INDICES INTO notes(), strictly ascending,
+  // i.e. in notes() order == (start_tick, id) order. A caller that used to take "the
+  // first match of a linear scan over notes()" gets the identical note by taking the
+  // first index that passes its predicate (use the last for reverse scans).
+  //
+  // Results are exact in ticks (same_tick() is plain ==): the trees are queried with
+  // the ms window [ms(lo) - 1, ms(hi) + 1] (tick->ms is monotonic non-decreasing; the
+  // 1 ms slack absorbs double rounding) and every candidate is then filtered by tick.
+  // Cost: O(log N + c + k log k) where c = notes in the ms window (a superset of the
+  // k matches only when several ticks round to the same/adjacent ms), no whole-list
+  // scan and no heap allocation beyond growth of `out` (pass a reused vector in hot
+  // paths). Degenerate notes (end_tick <= start_tick, negative ticks) are handled
+  // exactly because the trees are keyed by the raw start / end tick.
+  //
+  // Threading: const but reads the live trees / id map, so call from the GUI thread
+  // (the one that mutates the document) or while no mutation can run. The returned
+  // indices are invalidated by ANY document mutation.
+  //
+  // Notes with start_tick in [lo_tick, hi_tick] (inclusive). lo > hi yields empty.
+  void note_indices_starting_in(int32_t lo_tick, int32_t hi_tick,
+                                std::vector<size_t>& out) const;
+  // Same as note_indices_starting_in(tick, tick, out).
+  void note_indices_starting_at(int32_t tick, std::vector<size_t>& out) const;
+  // Notes with a judged tail (is_hold_with_tail(note_type)) whose end_tick is in
+  // [lo_tick, hi_tick]. Includes tailed notes with end_tick <= start_tick.
+  void tail_note_indices_ending_in(int32_t lo_tick, int32_t hi_tick,
+                                   std::vector<size_t>& out) const;
+  // Same as tail_note_indices_ending_in(tick, tick, out).
+  void tail_note_indices_ending_at(int32_t tick, std::vector<size_t>& out) const;
+
+  // Indices into notes() (strictly ascending == notes() order) of every note whose
+  // parent_hold_id == `parent_hold_id`, regardless of tick position. `out` is cleared
+  // first; negative parents yield empty. O(k). Backed by a map rebuilt together with
+  // the id index in every mutator (parent changes included). GUI-thread only;
+  // indices are invalidated by ANY document mutation.
+  void note_indices_with_parent(int32_t parent_hold_id, std::vector<size_t>& out) const;
 
   bool set_notes(std::vector<NotationNote> notes);
   bool set_concurrent_lines(std::vector<ConcurrentLineNote> lines);
@@ -230,11 +282,16 @@ class ChartDocument {
   std::vector<ScrollSpeedPoint> scroll_speed_points_;
   ChartCompatibilityProfile compatibility_profile_ = ChartCompatibilityProfile::Official;
   std::unordered_map<int32_t, size_t> id_to_index_;
+  // parent_hold_id (>= 0) -> ascending indices into notes_; rebuilt by rebuild_id_index().
+  std::unordered_map<int32_t, std::vector<size_t>> children_by_parent_;
   ChartNoteIndex index_;
   int32_t next_id_ = 0;
   bool is_dirty_ = false;
   uint64_t content_generation_ = 0;
   ChartEditMode edit_mode_ = ChartEditMode::Editable;
+  // Copied from NotationChart so switching read-only CSV charts does not
+  // regenerate eighths. Cleared for every chart that did not come from CSV.
+  bool keep_file_eighths_ = false;
 };
 
 int64_t tick_to_milliseconds(int32_t tick, const MusicTiming& timing);

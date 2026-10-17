@@ -1,9 +1,13 @@
 #include <wds/chart_render/openwds_split_effects/controller.hpp>
 
+#include <wds/common/crash_handler.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <exception>
+#include <mutex>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -349,34 +353,66 @@ bool Controller::initialize(bool split_effect_light_setting,
       fn(0);
       return;
     }
+    constexpr std::size_t kMaxWorkers = 8;
     const unsigned hw = std::thread::hardware_concurrency();
-    const std::size_t workers =
-        std::min(count, hw > 0 ? static_cast<std::size_t>(hw) : std::size_t{1});
-    if (workers <= 1) {
-      for (std::size_t i = 0; i < count; ++i) fn(i);
-      return;
-    }
+    const std::size_t workers = std::max<std::size_t>(
+        1, std::min({count, kMaxWorkers, hw > 0 ? static_cast<std::size_t>(hw) : std::size_t{1}}));
     std::atomic<std::size_t> next{0};
-    std::vector<std::thread> threads;
-    threads.reserve(workers);
-    for (std::size_t w = 0; w < workers; ++w) {
-      threads.emplace_back([&] {
+    std::mutex error_mutex;
+    std::exception_ptr first_error;
+    // Pulls work items until exhausted; records the first exception and stops
+    // all workers early instead of letting it escape a thread (std::terminate).
+    const auto drain = [&] {
+      try {
         for (;;) {
           const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
           if (i >= count) break;
           fn(i);
         }
-      });
+      } catch (...) {
+        {
+          const std::lock_guard<std::mutex> lock(error_mutex);
+          if (!first_error) first_error = std::current_exception();
+        }
+        next.store(count, std::memory_order_relaxed);
+      }
+    };
+    std::vector<std::thread> threads;
+    if (workers > 1) {
+      try {
+        threads.reserve(workers - 1);
+        for (std::size_t w = 0; w + 1 < workers; ++w) {
+          threads.emplace_back([&] {
+            wds::common::install_thread_crash_stack();
+            drain();
+          });
+        }
+      } catch (...) {
+        // Thread creation failed: the started threads keep draining and the
+        // calling thread runs the remaining work below.
+      }
     }
+    drain();  // calling thread participates (also the inline fallback)
     for (auto& t : threads) t.join();
+    if (first_error) std::rethrow_exception(first_error);
   };
 
   const auto t_u0 = Clock::now();
-  run_parallel(unique.size(), [&](std::size_t i) { hydrate_unique(unique[i]); });
+  try {
+    run_parallel(unique.size(), [&](std::size_t i) { hydrate_unique(unique[i]); });
+  } catch (...) {
+    initialized_ = false;
+    return false;
+  }
   const double unique_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_u0).count();
 
   const auto t_c0 = Clock::now();
-  run_parallel(jobs.size(), [&](std::size_t i) { finish_job(jobs[i]); });
+  try {
+    run_parallel(jobs.size(), [&](std::size_t i) { finish_job(jobs[i]); });
+  } catch (...) {
+    initialized_ = false;
+    return false;
+  }
   const double clone_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_c0).count();
   const double hydrate_ms = unique_ms + clone_ms;
   const std::size_t unique_ps = unique.size();

@@ -332,11 +332,22 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
     return false;
   }
 
-  const HSTREAM dec =
-      stream_from_file(path, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT | BASS_STREAM_PRESCAN);
+  // The open is a single blocking BASS call that cannot be interrupted, so the
+  // cancel flag is checked on both sides of it. No BASS_STREAM_PRESCAN: this
+  // stream is only ever decoded front to back, and PRESCAN reads the whole file
+  // once up front (seconds on slow storage for VBR MP3) just to make the length
+  // and seeking exact. The length below is only a sizing hint: peaks_ and the
+  // spectrogram grow as frames arrive, and an over-estimate is trimmed after the
+  // decode. (Playback keeps PRESCAN: it needs exact length and seeking.)
+  if (cancelled()) return false;
+  const HSTREAM dec = stream_from_file(path, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT);
   if (dec == 0) {
     WDS_LOG("WaveformOverview: decode open failed %s code=%d\n", path.c_str(),
             BASS_ErrorGetCode());
+    return false;
+  }
+  if (cancelled()) {
+    BASS_StreamFree(dec);
     return false;
   }
 
@@ -433,6 +444,7 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
 
   std::vector<float> buf(16384);
   std::uint64_t pcm_frame = 0;
+  std::size_t used_buckets = 0;  // highest bucket written + 1
   float max_peak = 0.0f;
 
   const auto abort_decode = [&]() -> bool {
@@ -467,6 +479,7 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
         peaks_[bucket] = mag;
         max_peak = std::max(max_peak, mag);
       }
+      used_buckets = std::max(used_buckets, std::min(bucket + 1, peaks_.size()));
 
       ring_l[ring_write] = left;
       ring_r[ring_write] = right;
@@ -485,6 +498,10 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
 
   if (cancelled()) return abort_decode();
   BASS_StreamFree(dec);
+
+  // The pre-sized bucket count came from an unverified length; keep exactly what
+  // was decoded so duration_ms() matches the audio.
+  if (peaks_.size() > used_buckets) peaks_.resize(used_buckets);
 
   if (max_peak > 1.0e-6f) {
     const float inv = 1.0f / max_peak;

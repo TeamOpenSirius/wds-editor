@@ -7,6 +7,7 @@
 // their status is exposed by ParticleSystem::backend_status().
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -161,9 +162,9 @@ struct MinMaxGradient {
 
 class Texture { public: virtual ~Texture() = default; int width = 0; int height = 0; };
 class Texture2D : public Texture { public: Texture2D() = default; Texture2D(int w, int h) { width = w; height = h; } };
-class Mesh { public: virtual ~Mesh() = default; std::vector<Vector3> vertices; std::vector<Vector2> uv; std::vector<std::uint32_t> triangles; };
+class Mesh { public: Mesh() { ++live_count; } Mesh(const Mesh& o) : vertices(o.vertices), uv(o.uv), triangles(o.triangles) { ++live_count; } Mesh& operator=(const Mesh&) = default; virtual ~Mesh() { --live_count; } inline static std::atomic<int> live_count{0}; std::vector<Vector3> vertices; std::vector<Vector2> uv; std::vector<std::uint32_t> triangles; };
 class Shader;
-class Material { public: virtual ~Material() = default; std::string name; std::shared_ptr<Texture> mainTexture; std::shared_ptr<Shader> shader; };
+class Material { public: Material() { ++live_count; } Material(const Material& o) : name(o.name), mainTexture(o.mainTexture), shader(o.shader) { ++live_count; } Material& operator=(const Material&) = default; virtual ~Material() { --live_count; } inline static std::atomic<int> live_count{0}; std::string name; std::shared_ptr<Texture> mainTexture; std::shared_ptr<Shader> shader; };
 class Sprite { public: virtual ~Sprite() = default; std::shared_ptr<Texture> texture; Vector4 textureRect{}; };
 class Shader { public: virtual ~Shader() = default; std::string name; static std::shared_ptr<Shader> Find(const std::string& shaderName) { auto result = std::make_shared<Shader>(); result->name = shaderName; return result; } };
 class MeshFilter { public: virtual ~MeshFilter() = default; Mesh* sharedMesh = nullptr; Transform* transform = nullptr; };
@@ -321,6 +322,9 @@ struct ShapeModule {
   bool enabled = true; ParticleSystemShapeType shapeType = ParticleSystemShapeType::Cone; float angle = 25.0f; float radius = 1.0f; float radiusThickness = 1.0f; float length = 5.0f; float arc = 360.0f; float arcSpread = 0.0f; float arcSpeed = 0.0f;
   ParticleSystemShapeMultiModeValue arcMode = ParticleSystemShapeMultiModeValue::Random; Vector3 position{}; Vector3 rotation{}; Vector3 scale{1.0f, 1.0f, 1.0f}; float randomDirectionAmount = 0.0f; float sphericalDirectionAmount = 0.0f; float randomPositionAmount = 0.0f; bool alignToDirection = false;
   Mesh* mesh = nullptr; Sprite* sprite = nullptr; void* meshRenderer = nullptr;
+  // Owns the objects behind mesh / sprite when hydrated. Copies share ownership,
+  // so the raw pointers above never dangle while any copy of this module lives.
+  std::vector<std::shared_ptr<void>> owned_resources;
 };
 struct VelocityOverLifetimeModule { bool enabled = false; ParticleSystemSimulationSpace space = ParticleSystemSimulationSpace::Local; MinMaxCurve x{}, y{}, z{}, orbitalX{}, orbitalY{}, orbitalZ{}, orbitalOffsetX{}, orbitalOffsetY{}, orbitalOffsetZ{}, radial{}, speedModifier{ParticleSystemCurveMode::Constant, 1.0f}; };
 struct ForceOverLifetimeModule { bool enabled = false; ParticleSystemSimulationSpace space = ParticleSystemSimulationSpace::Local; MinMaxCurve x{}, y{}, z{}, xMultiplier{}, yMultiplier{}, zMultiplier{}; bool randomized = false; };
@@ -399,6 +403,10 @@ class ParticleSystemRenderer {
   Mesh* mesh = nullptr;
   Material* material = nullptr;
   std::vector<Material*> materials;
+  // Owns the Material / Mesh objects behind the raw pointers above when
+  // hydrated. Copies share ownership, so the pointers never dangle while any
+  // copy of this renderer lives.
+  std::vector<std::shared_ptr<void>> owned_resources;
   bool freeformStretching = false;
   bool rotateWithStretchDirection = false;
   std::vector<ParticleSystemVertexStream> activeVertexStreams;

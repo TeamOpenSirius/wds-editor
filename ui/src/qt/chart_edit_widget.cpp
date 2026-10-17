@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <unordered_set>
 #include <cstring>
 #include <string>
@@ -139,6 +140,31 @@ struct ScopedAA {
 
 bool note_in_tick_window(const wds::chart_editor::NotationNote& n, int32_t lo, int32_t hi) {
   return n.start_tick <= hi && std::max(n.end_tick, n.start_tick) >= lo;
+}
+
+// Calls f(index) for every note satisfying note_in_tick_window(note, lo, hi), ascending index.
+// `sorted` = notes ascending by start_tick and `max_span` >= max(end_tick, start_tick) - start_tick
+// for every candidate note: a note starting before lo - max_span cannot reach lo, and one starting
+// after hi cannot match, so only [lower_bound(lo - max_span), first start_tick > hi) is visited.
+// Same set and order as a full scan; falls back to the full scan when not sorted.
+template <typename F>
+void for_each_note_in_tick_window(const std::vector<wds::chart_editor::NotationNote>& notes,
+                                  bool sorted, int64_t max_span, int32_t lo, int32_t hi, F&& f) {
+  std::size_t i = 0;
+  if (sorted) {
+    const int64_t min_start = static_cast<int64_t>(lo) - std::max<int64_t>(0, max_span);
+    i = static_cast<std::size_t>(
+        std::lower_bound(notes.begin(), notes.end(), min_start,
+                         [](const wds::chart_editor::NotationNote& n, int64_t v) {
+                           return static_cast<int64_t>(n.start_tick) < v;
+                         }) -
+        notes.begin());
+  }
+  for (const std::size_t n = notes.size(); i < n; ++i) {
+    const auto& note = notes[i];
+    if (sorted && note.start_tick > hi) break;
+    if (note_in_tick_window(note, lo, hi)) f(i);
+  }
 }
 
 
@@ -248,132 +274,221 @@ void paint_click_marks(QPainter& p, const EditViewport& v, const ChartEditPanel&
   for (const auto& mark : panel.click_taps()) draw_dot(mark.ms);
 }
 
-void paint_lane_guides(QPainter& p, const EditViewport& v, const wds::interaction::Rect& b,
-                       const std::vector<wds::chart_editor::NotationNote>& notes,
-                       const wds::chart_editor::MusicTiming& timing,
-                       const wds::chart_editor::PreviewConfig& preview) {
-  const float view_ms_lo = v.scroll_ms();
-  const float view_ms_hi = view_ms_lo + static_cast<float>(v.visible_ms());
-  const auto merged =
-      merged_split_hide_ranges_ms(notes, timing, preview, view_ms_lo, view_ms_hi);
-  const int first = v.first_visible_lane();
-  const int lanes = v.visible_lane_count();
-  const float lane_px = v.lane_width(1);
-  auto draw_span = [&](float y0, float y1) {
-    const float top = std::max(std::min(y0, y1), b.y);
-    const float bot = std::min(std::max(y0, y1), b.bottom());
-    if (bot <= top) return;
-    for (int i = first; i <= first + lanes; ++i) {
-      if (!lane_guide_visible(i, lane_px)) continue;
-      const bool edge = i == 0 || i == 12;
-      namespace th = wds::interaction::theme;
-      p.setPen(QPen(qcolor(edge ? th::kEditLaneEdge : th::kEditLaneInner),
-                    static_cast<qreal>(lane_guide_thickness(i))));
-      p.drawLine(QPointF(v.x_at(i), top), QPointF(v.x_at(i), bot));
-    }
-  };
-  float cursor = view_ms_lo;
-  for (const auto& seg : merged) {
-    if (seg.first > cursor) draw_span(v.y_at_ms(cursor), v.y_at_ms(seg.first));
-    cursor = std::max(cursor, seg.second);
-  }
-  if (view_ms_hi > cursor) draw_span(v.y_at_ms(cursor), v.y_at_ms(view_ms_hi));
-}
-
-void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interaction::Rect& b,
+// Builds, once per frame, everything the split passes draw: the windowed split items with their
+// line segments / ramp stops / edge colors, and the default lane guides with the spans not hidden
+// by a split. The main pass and the two edge-spill strips only draw from this (see draw_* below).
+void build_split_frame(ChartEditSplitFrame& f, const EditViewport& v,
+                       const wds::interaction::Rect& b,
                        const std::vector<wds::chart_editor::NotationNote>& notes,
                        const wds::chart_editor::MusicTiming& timing,
                        const wds::chart_editor::PreviewConfig& preview,
                        const std::unordered_set<int32_t>& selected) {
   constexpr float kSplitLineW = 2.0f;
   constexpr float kSplitLineHighlightW = 4.0f;
+  constexpr int kRampStops = kChartEditSplitRampStops;
+  f.items.clear();
+  f.edges.clear();
+  f.guide_lines.clear();
+  f.guide_spans.clear();
+  f.cover_scratch.clear();
   const int lanes = std::max(1, v.grid().lane_count);
   const float view_ms_lo = v.scroll_ms();
   const float view_ms_hi = view_ms_lo + static_cast<float>(v.visible_ms());
-  auto paint_one = [&](const wds::chart_editor::NotationNote& note, bool highlight) {
-    const int64_t start_ms = note.start_ms(timing);
-    const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
-    const int64_t appear = std::max<int64_t>(
-        1, static_cast<int64_t>(
-               std::llround(static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
-    const float fade0 = static_cast<float>(start_ms - appear);
-    const float fade1 = static_cast<float>(
-        wds::chart_editor::official_split_destroy_ms(start_ms, end_ms));
-    if (fade1 < view_ms_lo || fade0 > view_ms_hi) return;
-    const int32_t color_id = note.scratch_length;
-    const int32_t split_count = wds::chart_editor::get_split_count(note.gimmick_type);
-    const float line_w = highlight ? kSplitLineHighlightW : kSplitLineW;
-    std::vector<int32_t> mids;
-    split_boundaries_12(split_count, mids);
-    // `ramp` segments (fade-in / fade-out) carry a vertical alpha gradient sampled from the opacity curve, so
-    // opacity varies along the line from the fade start to the fade end instead of one flat value per frame.
-    constexpr int kRampStops = 24;
-    auto draw_edges = [&](float ms0, float ms1, bool ramp) {
-      if (ms1 <= ms0) return;
-      const float y0 = v.y_at_ms(ms0);
-      const float y1 = v.y_at_ms(ms1);
-      const float top = std::max(std::min(y0, y1), b.y);
-      const float bot = std::min(std::max(y0, y1), b.bottom());
-      if (bot <= top) return;
+  const int64_t appear =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  const int64_t fade_out_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
+
+  for (const std::size_t index : f.note_indices) {
+    const auto& note = notes[index];
+    ChartEditSplitItem it;
+    it.note = &note;
+    it.selected = selected.count(note.id) != 0;
+    it.color_id = note.scratch_length;
+    it.split_count = wds::chart_editor::get_split_count(note.gimmick_type);
+    it.start_ms = note.start_ms(timing);
+    it.end_ms = std::max(it.start_ms, note.end_ms(timing));
+    it.appear_ms = appear;
+    it.fade_start_ms = it.start_ms - appear;
+    it.fade_end_ms = wds::chart_editor::official_split_destroy_ms(it.start_ms, it.end_ms);
+    it.line_w = it.selected ? kSplitLineHighlightW : kSplitLineW;
+
+    // Lane-guide hide coverage (fade-in start .. destroy), clipped to the view.
+    {
+      const float lo = std::max(view_ms_lo, static_cast<float>(it.fade_start_ms));
+      const float hi = std::min(view_ms_hi, static_cast<float>(it.fade_end_ms));
+      if (hi > lo) f.cover_scratch.emplace_back(lo, hi);
+    }
+
+    const float fade0 = static_cast<float>(it.fade_start_ms);
+    const float fade1 = static_cast<float>(it.fade_end_ms);
+    it.lines_visible = !(fade1 < view_ms_lo || fade0 > view_ms_hi);
+    if (it.lines_visible) {
+      // Opacity curve of split_line_opacity_at_ms with the per-note terms hoisted.
+      const int64_t expire_ms = wds::chart_editor::official_split_expire_ms(it.start_ms, it.end_ms);
       auto opacity_at = [&](float ms) {
-        return split_line_opacity_at_ms(note, timing, preview,
-                                        static_cast<int64_t>(std::llround(ms)));
+        const int64_t t = static_cast<int64_t>(std::llround(ms));
+        if (t < it.fade_start_ms || t >= it.fade_end_ms) return 0.0f;
+        if (t < it.start_ms) {
+          const float u = std::clamp(
+              static_cast<float>(t - it.fade_start_ms) / static_cast<float>(it.appear_ms), 0.0f,
+              1.0f);
+          return wds::chart_editor::official_split_fade_in_scale(u);
+        }
+        if (t >= expire_ms) {
+          const float u = std::clamp(
+              static_cast<float>(t - expire_ms) / static_cast<float>(fade_out_ms), 0.0f, 1.0f);
+          return wds::chart_editor::official_split_fade_out_alpha(u);
+        }
+        return 1.0f;
       };
-      // Per-stop opacity along [ms0, ms1] (t = 0 at ms0 / y0, t = 1 at ms1 / y1).
-      float stops[kRampStops + 1];
-      float max_op = 0.0f;
-      const bool use_ramp = ramp && std::abs(y1 - y0) >= 1.0f;
-      if (use_ramp) {
-        for (int i = 0; i <= kRampStops; ++i) {
-          const float t = static_cast<float>(i) / static_cast<float>(kRampStops);
-          stops[i] = opacity_at(ms0 + (ms1 - ms0) * t);
-          max_op = std::max(max_op, stops[i]);
-        }
-      } else {
-        max_op = opacity_at((ms0 + ms1) * 0.5f);
-      }
-      if (max_op <= 0.001f) return;
-      auto draw_v = [&](int32_t edge, int32_t slot) {
-        auto c = split_slot_color(color_id, slot, split_count, nullptr);
-        if (c.a < 0.02f) return;
-        apply_official_split_rgb_opacity(c);
-        if (highlight) {
-          c = c.lerp({1.0f, 1.0f, 1.0f, c.a}, 0.28f);
-        }
-        const float x = std::floor(v.x_at(edge) + 0.5f);
-        const QRectF r(x - static_cast<qreal>(line_w) * 0.5, top, line_w, bot - top);
+      // `ramp` segments (fade-in / fade-out) carry a vertical alpha gradient sampled from the opacity
+      // curve, so opacity varies along the line from the fade start to the fade end.
+      auto make_seg = [&](ChartEditSplitSegment& s, float ms0, float ms1, bool ramp) {
+        s.valid = false;
+        if (ms1 <= ms0) return;
+        const float y0 = v.y_at_ms(ms0);
+        const float y1 = v.y_at_ms(ms1);
+        const float top = std::max(std::min(y0, y1), b.y);
+        const float bot = std::min(std::max(y0, y1), b.bottom());
+        if (bot <= top) return;
+        const bool use_ramp = ramp && std::abs(y1 - y0) >= 1.0f;
+        float max_op = 0.0f;
         if (use_ramp) {
-          QLinearGradient grad(QPointF(x, y0), QPointF(x, y1));
           for (int i = 0; i <= kRampStops; ++i) {
-            auto stop_c = c;
-            stop_c.a *= stops[i];
-            grad.setColorAt(static_cast<qreal>(i) / kRampStops, qcolor(stop_c));
+            const float t = static_cast<float>(i) / static_cast<float>(kRampStops);
+            s.stops[i] = opacity_at(ms0 + (ms1 - ms0) * t);
+            max_op = std::max(max_op, s.stops[i]);
           }
+        } else {
+          max_op = opacity_at((ms0 + ms1) * 0.5f);
+        }
+        if (max_op <= 0.001f) return;
+        s.valid = true;
+        s.ramp = use_ramp;
+        s.y0 = y0;
+        s.y1 = y1;
+        s.top = top;
+        s.bot = bot;
+        s.max_op = max_op;
+      };
+      const float start_f = static_cast<float>(it.start_ms);
+      const float end_f = static_cast<float>(it.end_ms);
+      make_seg(it.seg[0], std::max(fade0, view_ms_lo), std::min(start_f, view_ms_hi), true);
+      make_seg(it.seg[1], std::max(start_f, view_ms_lo), std::min(end_f, view_ms_hi), false);
+      make_seg(it.seg[2], std::max(end_f, view_ms_lo), std::min(fade1, view_ms_hi), true);
+
+      it.edge_begin = static_cast<uint32_t>(f.edges.size());
+      if (it.seg[0].valid || it.seg[1].valid || it.seg[2].valid) {
+        auto add_edge = [&](int32_t edge, int32_t slot) {
+          auto c = split_slot_color(it.color_id, slot, it.split_count, nullptr);
+          if (c.a < 0.02f) return;
+          apply_official_split_rgb_opacity(c);
+          if (it.selected) {
+            c = c.lerp({1.0f, 1.0f, 1.0f, c.a}, 0.28f);
+          }
+          f.edges.push_back({std::floor(v.x_at(edge) + 0.5f), c});
+        };
+        split_boundaries_12(it.split_count, f.mids_scratch);
+        add_edge(0, 0);
+        int32_t slot = 1;
+        for (int32_t mid : f.mids_scratch) add_edge(mid + 1, slot++);
+        add_edge(lanes, std::max(1, it.split_count));
+      }
+      it.edge_end = static_cast<uint32_t>(f.edges.size());
+    }
+    f.items.push_back(it);
+  }
+
+  // Default lane guides, punched out where a split fade window covers the view.
+  std::sort(f.cover_scratch.begin(), f.cover_scratch.end());
+  std::size_t merged = 0;
+  for (std::size_t i = 0; i < f.cover_scratch.size(); ++i) {
+    const auto seg = f.cover_scratch[i];
+    if (merged == 0 || seg.first > f.cover_scratch[merged - 1].second) {
+      f.cover_scratch[merged++] = seg;
+    } else {
+      f.cover_scratch[merged - 1].second = std::max(f.cover_scratch[merged - 1].second, seg.second);
+    }
+  }
+  f.cover_scratch.resize(merged);
+  auto add_span = [&](float y0, float y1) {
+    const float top = std::max(std::min(y0, y1), b.y);
+    const float bot = std::min(std::max(y0, y1), b.bottom());
+    if (bot <= top) return;
+    f.guide_spans.emplace_back(top, bot);
+  };
+  float cursor = view_ms_lo;
+  for (const auto& seg : f.cover_scratch) {
+    if (seg.first > cursor) add_span(v.y_at_ms(cursor), v.y_at_ms(seg.first));
+    cursor = std::max(cursor, seg.second);
+  }
+  if (view_ms_hi > cursor) add_span(v.y_at_ms(cursor), v.y_at_ms(view_ms_hi));
+  if (f.guide_spans.empty()) return;
+  const int first = v.first_visible_lane();
+  const int guide_lanes = v.visible_lane_count();
+  const float lane_px = v.lane_width(1);
+  namespace th = wds::interaction::theme;
+  for (int i = first; i <= first + guide_lanes; ++i) {
+    if (!lane_guide_visible(i, lane_px)) continue;
+    const bool edge = i == 0 || i == 12;
+    f.guide_lines.push_back(
+        {v.x_at(i), QPen(qcolor(edge ? th::kEditLaneEdge : th::kEditLaneInner),
+                         static_cast<qreal>(lane_guide_thickness(i)))});
+  }
+}
+
+// Draws the lane guides from `f`. Lines wholly outside [x_lo, x_hi] (plus pen/AA slack) are skipped:
+// they could not touch a clip confined to that range, so the pixels match an unfiltered draw.
+void draw_lane_guides(QPainter& p, const ChartEditSplitFrame& f, float x_lo, float x_hi) {
+  for (const auto& span : f.guide_spans) {
+    for (const auto& line : f.guide_lines) {
+      const float slack = static_cast<float>(line.pen.widthF()) * 0.5f + 1.5f;
+      if (line.x + slack < x_lo || line.x - slack > x_hi) continue;
+      p.setPen(line.pen);
+      p.drawLine(QPointF(line.x, span.first), QPointF(line.x, span.second));
+    }
+  }
+}
+
+// Draws the split lines from `f`: unselected splits first, then the selected (highlighted) ones.
+// x_lo / x_hi cull edges exactly like draw_lane_guides.
+void draw_split_lines(QPainter& p, const ChartEditSplitFrame& f, float x_lo, float x_hi) {
+  constexpr int kRampStops = kChartEditSplitRampStops;
+  const auto draw_item = [&](const ChartEditSplitItem& it) {
+    if (!it.lines_visible) return;
+    const float slack = it.line_w * 0.5f + 1.5f;
+    for (const auto& s : it.seg) {
+      if (!s.valid) continue;
+      for (uint32_t e = it.edge_begin; e < it.edge_end; ++e) {
+        const auto& edge = f.edges[e];
+        if (edge.x + slack < x_lo || edge.x - slack > x_hi) continue;
+        const QRectF r(edge.x - static_cast<qreal>(it.line_w) * 0.5, s.top, it.line_w,
+                       s.bot - s.top);
+        if (s.ramp) {
+          QLinearGradient grad(QPointF(edge.x, s.y0), QPointF(edge.x, s.y1));
+          QGradientStops stops;
+          stops.reserve(kRampStops + 1);
+          for (int i = 0; i <= kRampStops; ++i) {
+            auto stop_c = edge.color;
+            stop_c.a *= s.stops[i];
+            stops.push_back({static_cast<qreal>(i) / kRampStops, qcolor(stop_c)});
+          }
+          grad.setStops(stops);
           p.fillRect(r, QBrush(grad));
         } else {
-          c.a *= max_op;
+          auto c = edge.color;
+          c.a *= s.max_op;
           p.fillRect(r, qcolor(c));
         }
-      };
-      draw_v(0, 0);
-      int32_t slot = 1;
-      for (int32_t mid : mids) draw_v(mid + 1, slot++);
-      draw_v(lanes, std::max(1, split_count));
-    };
-    draw_edges(std::max(fade0, view_ms_lo), std::min(static_cast<float>(start_ms), view_ms_hi), true);
-    draw_edges(std::max(static_cast<float>(start_ms), view_ms_lo),
-               std::min(static_cast<float>(end_ms), view_ms_hi), false);
-    draw_edges(std::max(static_cast<float>(end_ms), view_ms_lo), std::min(fade1, view_ms_hi), true);
+      }
+    }
   };
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (selected.count(note.id)) continue;
-    paint_one(note, false);
+  for (const auto& it : f.items) {
+    if (!it.selected) draw_item(it);
   }
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (!selected.count(note.id)) continue;
-    paint_one(note, true);
+  for (const auto& it : f.items) {
+    if (it.selected) draw_item(it);
   }
 }
 
@@ -409,7 +524,7 @@ SplitIndicatorClusterKey split_cluster_key(int32_t color_id, int32_t split_count
   return k;
 }
 
-// Fade-in duration exactly as paint_split_lines computes it.
+// Fade-in duration exactly as build_split_frame computes it.
 int64_t split_appear_ms(const wds::chart_editor::PreviewConfig& preview) {
   return std::max<int64_t>(
       1, static_cast<int64_t>(std::llround(static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
@@ -424,10 +539,7 @@ int split_band_q(const EditViewport& v, float fade0, int64_t appear) {
 }
 
 void paint_split_particles(QPainter& p, const EditViewport& v, const wds::interaction::Rect& b,
-                           const std::vector<wds::chart_editor::NotationNote>& notes,
-                           const wds::chart_editor::MusicTiming& timing,
-                           const wds::chart_editor::PreviewConfig& preview,
-                           const std::unordered_set<int32_t>& selected, QObject* notify,
+                           const ChartEditSplitFrame& frame, QObject* notify,
                            const std::function<void()>& on_ready) {
   constexpr float kMinBandPx = 16.0f;
   const float view_ms_lo = v.scroll_ms();
@@ -435,10 +547,11 @@ void paint_split_particles(QPainter& p, const EditViewport& v, const wds::intera
   const float lane_px = split_lane_px(v);
   if (lane_px <= 0.5f) return;
   const float x0 = std::floor(v.x_at(0) + 0.5f);
-  auto paint_one = [&](const wds::chart_editor::NotationNote& note) {
-    const int64_t start_ms = note.start_ms(timing);
-    const int64_t appear = split_appear_ms(preview);
-    const float fade0 = static_cast<float>(start_ms - appear);
+  auto paint_one = [&](const ChartEditSplitItem& item) {
+    const auto& note = *item.note;
+    const int64_t start_ms = item.start_ms;
+    const int64_t appear = item.appear_ms;
+    const float fade0 = static_cast<float>(item.fade_start_ms);
     if (static_cast<float>(start_ms) < view_ms_lo || fade0 > view_ms_hi) return;
     const float y_bottom = v.y_at_ms(fade0);  // fade0 = earliest time = bottom end of the segment on screen
     const int band_q = split_band_q(v, fade0, appear);
@@ -477,15 +590,11 @@ void paint_split_particles(QPainter& p, const EditViewport& v, const wds::intera
       }
     }
   };
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (selected.count(note.id)) continue;
-    paint_one(note);
+  for (const auto& item : frame.items) {
+    if (!item.selected) paint_one(item);
   }
-  for (const auto& note : notes) {
-    if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (!selected.count(note.id)) continue;
-    paint_one(note);
+  for (const auto& item : frame.items) {
+    if (item.selected) paint_one(item);
   }
 }
 
@@ -882,14 +991,22 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
         timing);
     const int32_t split_lo = std::min(cull_lo, fade_lo);
     const int32_t split_hi = std::max(cull_hi, fade_hi);
-    split_notes_scratch_.clear();
-    for (const auto& note : notes) {
-      if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-      if (note_in_tick_window(note, split_lo, split_hi)) split_notes_scratch_.push_back(note);
-    }
-    paint_lane_guides(p, v, b, split_notes_scratch_, timing, preview);
+    // Windowed split gimmicks: binary-search the sorted notes (split_max_span_ticks_ bounds how far
+    // back a long split can start and still reach the window), then compute all split geometry once.
+    ensure_note_span_cache(notes);
+    split_frame_.note_indices.clear();
+    for_each_note_in_tick_window(notes, note_sorted_, split_max_span_ticks_, split_lo, split_hi,
+                                 [&](std::size_t i) {
+                                   if (wds::chart_editor::is_split_lane_gimmick(notes[i].gimmick_type)) {
+                                     split_frame_.note_indices.push_back(i);
+                                   }
+                                 });
+    build_split_frame(split_frame_, v, b, notes, timing, preview, panel_->selected());
+    draw_lane_guides(p, split_frame_, -std::numeric_limits<float>::infinity(),
+                     std::numeric_limits<float>::infinity());
   }
-  paint_split_lines(p, v, b, split_notes_scratch_, timing, preview, panel_->selected());
+  draw_split_lines(p, split_frame_, -std::numeric_limits<float>::infinity(),
+                   std::numeric_limits<float>::infinity());
   // 12-cell judgeline tracks authored lanes 0..N as extra columns shrink them.
   if (!judgment_.isNull()) {
     const float h = v.judgeline_height_px();
@@ -897,7 +1014,8 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
                  judgment_, judgment_.rect());
   }
 
-  paint_notes(p, notes, 1.0f, true, cull_lo, cull_hi);
+  sync_visible_notes(notes, cull_lo, cull_hi);
+  paint_notes(p, notes, visible_note_indices_, 1.0f, true);
   {
     // Prefetch first, visible requests second: the builder is LIFO so the visible clusters are built first.
     {
@@ -905,15 +1023,17 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
       const int64_t appear = split_appear_ms(preview);
       schedule_split_prefetch(notes, split_lane_px(v), split_band_q(v, 0.0f, appear));
     }
-    paint_split_particles(p, v, b, split_notes_scratch_, timing, preview, panel_->selected(),
-                          this, [this] { request_split_repaint(); });
+    paint_split_particles(p, v, b, split_frame_, this, [this] { request_split_repaint(); });
   }
   paint_click_marks(p, v, *panel_);
   for (const auto& ghost : panel_->skinned_ghosts()) {
     if (!ghost.visible) continue;
+    // Ghosts are not part of the document: own one-note list, never the visible-note cache.
+    if (!note_in_tick_window(ghost.note, cull_lo, cull_hi)) continue;
     ghost_scratch_.clear();
     ghost_scratch_.push_back(ghost.note);
-    paint_notes(p, ghost_scratch_, ghost.alpha, false, cull_lo, cull_hi);
+    ghost_indices_.assign(1, 0);
+    paint_notes(p, ghost_scratch_, ghost_indices_, ghost.alpha, false);
   }
   p.restore();
   flush_ui_painter(p, chrome);
@@ -926,11 +1046,15 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     for (const QRectF& strip : strips) {
       p.save();
       p.setClipRect(strip);
+      // Geometry was built once above; the clip does the cutting, the x range just skips lines that
+      // cannot reach the strip.
+      const float x_lo = static_cast<float>(strip.left());
+      const float x_hi = static_cast<float>(strip.right());
       {
         ScopedAA aa(p);
-        paint_lane_guides(p, v, b, split_notes_scratch_, timing, preview);
+        draw_lane_guides(p, split_frame_, x_lo, x_hi);
       }
-      paint_split_lines(p, v, b, split_notes_scratch_, timing, preview, panel_->selected());
+      draw_split_lines(p, split_frame_, x_lo, x_hi);
       p.restore();
     }
   }
@@ -1116,21 +1240,41 @@ void ChartEditWidget::sync_audio_backdrop(const EditViewport& v,
   backdrop_scroll_ms_ += static_cast<float>(drow) * ms_per_px;
 }
 
-void ChartEditWidget::sync_visible_notes(const std::vector<wds::chart_editor::NotationNote>& notes,
-                                        int32_t range_lo, int32_t range_hi) {
-  if (note_cull_notes_ == notes.data() && note_cull_n_ == notes.size() &&
-      note_cull_lo_ == range_lo && note_cull_hi_ == range_hi) {
+void ChartEditWidget::ensure_note_span_cache(
+    const std::vector<wds::chart_editor::NotationNote>& notes) {
+  if (!panel_) return;
+  const auto& doc = panel_->engine().document();
+  const uint64_t gen = doc.content_generation();
+  if (note_span_doc_ == &doc && note_span_data_ == notes.data() && note_span_n_ == notes.size() &&
+      note_span_gen_ == gen) {
     return;
   }
-  note_cull_notes_ = notes.data();
-  note_cull_n_ = notes.size();
-  note_cull_lo_ = range_lo;
-  note_cull_hi_ = range_hi;
-  visible_note_indices_.clear();
-  if (visible_note_indices_.capacity() < notes.size()) visible_note_indices_.reserve(notes.size());
+  note_span_doc_ = &doc;
+  note_span_data_ = notes.data();
+  note_span_n_ = notes.size();
+  note_span_gen_ = gen;
+  note_sorted_ = true;
+  note_max_span_ticks_ = 0;
+  split_max_span_ticks_ = 0;
   for (std::size_t i = 0; i < notes.size(); ++i) {
-    if (note_in_tick_window(notes[i], range_lo, range_hi)) visible_note_indices_.push_back(i);
+    const auto& n = notes[i];
+    if (i > 0 && notes[i - 1].start_tick > n.start_tick) note_sorted_ = false;
+    const int64_t span = static_cast<int64_t>(std::max(n.end_tick, n.start_tick)) - n.start_tick;
+    note_max_span_ticks_ = std::max(note_max_span_ticks_, span);
+    if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+      split_max_span_ticks_ = std::max(split_max_span_ticks_, span);
+    }
   }
+}
+
+void ChartEditWidget::sync_visible_notes(const std::vector<wds::chart_editor::NotationNote>& notes,
+                                        int32_t range_lo, int32_t range_hi) {
+  // Recomputed on every call (O(log N + k) with the span cache): the window moves with the scroll
+  // so a (lo, hi) key would never hit, and the indices must not outlive an in-place edit.
+  ensure_note_span_cache(notes);
+  visible_note_indices_.clear();
+  for_each_note_in_tick_window(notes, note_sorted_, note_max_span_ticks_, range_lo, range_hi,
+                               [&](std::size_t i) { visible_note_indices_.push_back(i); });
 }
 
 void ChartEditWidget::playfield_cull_ticks(int32_t& lo, int32_t& hi) const {
@@ -1173,13 +1317,11 @@ void ChartEditWidget::paint_waveform(QPainter& p, const EditViewport& v,
 
 void ChartEditWidget::paint_notes(QPainter& p,
                                   const std::vector<wds::chart_editor::NotationNote>& notes,
-                                  float opacity, bool show_selection, int32_t range_lo,
-                                  int32_t range_hi) {
-  if (!panel_ || notes.empty() || opacity <= 0.001f) return;
+                                  const std::vector<std::size_t>& indices, float opacity,
+                                  bool show_selection) {
+  if (!panel_ || notes.empty() || indices.empty() || opacity <= 0.001f) return;
   const auto& v = panel_->viewport();
   const auto& timing = panel_->engine().document().timing();
-  sync_visible_notes(notes, range_lo, range_hi);
-  if (visible_note_indices_.empty()) return;
   p.save();
   p.setRenderHint(QPainter::SmoothPixmapTransform, true);
   if (opacity < 0.999f) p.setOpacity(opacity);
@@ -1194,20 +1336,24 @@ void ChartEditWidget::paint_notes(QPainter& p,
   // Use the same millisecond-based ordering contract as the Vulkan editor and
   // preview. Tick order alone is wrong across BPM segments and can put a tap
   // behind a cap that is rendered later at the same wall-clock position.
+  // The sort key (start ms) is computed once per note here, not inside the comparator; indices are in
+  // document order so equal ticks are adjacent and share one conversion.
+  note_draw_key_ms_.resize(indices.size());
+  for (std::size_t k = 0; k < indices.size(); ++k) {
+    const int32_t tick = notes[indices[k]].start_tick;
+    note_draw_key_ms_[k] = (k > 0 && tick == notes[indices[k - 1]].start_tick)
+                               ? note_draw_key_ms_[k - 1]
+                               : wds::chart_editor::tick_to_milliseconds(tick, timing);
+  }
   wds::chart_render::build_draw_order_indices(
-      visible_note_indices_.size(), note_draw_order_,
-      [&](std::size_t i) {
-        return wds::chart_editor::tick_to_milliseconds(
-            notes[visible_note_indices_[i]].start_tick, timing);
-      },
-      [&](std::size_t i) {
-        return static_cast<int32_t>(notes[visible_note_indices_[i]].note_type);
-      });
+      indices.size(), note_draw_order_,
+      [&](std::size_t i) { return note_draw_key_ms_[i]; },
+      [&](std::size_t i) { return static_cast<int32_t>(notes[indices[i]].note_type); });
   // Paint every hold ribbon before any note sprite. A per-note body/cap pass
   // lets a later hold cover taps that happen to share its time range; the
   // editor must instead keep all selectable note art above every ribbon.
   for (const std::size_t vis : note_draw_order_) {
-    const auto& n = notes[visible_note_indices_[vis]];
+    const auto& n = notes[indices[vis]];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth ||
         wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) ||
         n.end_tick <= n.start_tick ||
@@ -1235,7 +1381,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
     }
   }
   for (const std::size_t vis : note_draw_order_) {
-    const auto& n = notes[visible_note_indices_[vis]];
+    const auto& n = notes[indices[vis]];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth) continue;
     if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
     if (!v.lane_span_visible(n.lane, n.width)) continue;
@@ -1330,7 +1476,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
   // Flick sprites are a separate top pass in the legacy renderer. This keeps
   // a chain's terminal arrow above the following segment's tap cap.
   if (!arrow_.isNull()) {
-    for (const std::size_t index : visible_note_indices_) {
+    for (const std::size_t index : indices) {
       const auto& n = notes[index];
       if (!wds::chart_editor::is_flick_like(n.note_type)) continue;
       const float y = v.y_at(n.start_tick), inset = v.note_inset_px(n.width);

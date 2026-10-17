@@ -928,16 +928,23 @@ void EditorMainWindow::track_open_watcher(QObject* watcher) {
 }
 
 void EditorMainWindow::untrack_open_watcher(QObject* watcher) {
-  open_watchers_.erase(std::remove(open_watchers_.begin(), open_watchers_.end(), watcher),
+  open_watchers_.erase(std::remove_if(open_watchers_.begin(), open_watchers_.end(),
+                                      [watcher](const QPointer<QObject>& p) {
+                                        return p.isNull() || p.data() == watcher;
+                                      }),
                        open_watchers_.end());
 }
 
 void EditorMainWindow::wait_open_project_watchers() {
   const auto watchers = open_watchers_;
-  for (auto* obj : watchers) {
+  for (const auto& p : watchers) {
+    QObject* obj = p.data();
     if (obj == nullptr) continue;
     static_cast<QFutureWatcher<PreparedWdsProject>*>(obj)->waitForFinished();
   }
+  open_watchers_.erase(std::remove_if(open_watchers_.begin(), open_watchers_.end(),
+                                      [](const QPointer<QObject>& p) { return p.isNull(); }),
+                       open_watchers_.end());
 }
 
 bool EditorMainWindow::show_startup_splash() {

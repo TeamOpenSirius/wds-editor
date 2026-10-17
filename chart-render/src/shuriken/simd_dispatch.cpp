@@ -1,5 +1,6 @@
 #include "simd_dispatch.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -24,7 +25,12 @@ enum class Forced : int {
   Avx2 = 4,
 };
 
-Forced g_force = Forced::Unset;
+std::atomic<Forced> g_force{Forced::Unset};
+
+// Resolved SplitSimdPath cached as int; -1 = unresolved. Avoids repeated CPUID
+// (which traps under hypervisors) in per-particle hot loops.
+constexpr int kPathUnresolved = -1;
+std::atomic<int> g_cached_path{kPathUnresolved};
 
 bool env_eq(const char* raw, const char* want) noexcept {
   return raw != nullptr && std::strcmp(raw, want) == 0;
@@ -155,8 +161,14 @@ SplitSimdPath apply_force(Forced f) noexcept {
 }  // namespace
 
 SplitSimdPath split_simd_path() noexcept {
-  const Forced f = g_force != Forced::Unset ? g_force : env_force();
-  return apply_force(f);
+  const int cached = g_cached_path.load(std::memory_order_acquire);
+  if (cached != kPathUnresolved) {
+    return static_cast<SplitSimdPath>(cached);
+  }
+  const Forced g = g_force.load(std::memory_order_acquire);
+  const SplitSimdPath p = apply_force(g != Forced::Unset ? g : env_force());
+  g_cached_path.store(static_cast<int>(p), std::memory_order_release);
+  return p;
 }
 
 const char* split_simd_name() noexcept {
@@ -207,10 +219,11 @@ bool split_simd_has_fma() noexcept {
 
 void split_simd_force_for_tests(const char* name) noexcept {
   if (name == nullptr || name[0] == '\0') {
-    g_force = Forced::Unset;
-    return;
+    g_force.store(Forced::Unset, std::memory_order_release);
+  } else {
+    g_force.store(parse_name(name), std::memory_order_release);
   }
-  g_force = parse_name(name);
+  g_cached_path.store(kPathUnresolved, std::memory_order_release);
 }
 
 }  // namespace wds::chart_render

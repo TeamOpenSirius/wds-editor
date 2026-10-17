@@ -150,7 +150,7 @@ void test_renderer_draws_visible_markers_without_expiry() {
   const std::vector<int32_t> ticks = {0, 480};
   wds::interaction::UiPainter painter;
   renderer.paint(painter, viewport, timing, {}, preview, selected, std::nullopt, {}, std::nullopt,
-                 nullptr, true, -1, ticks);
+                 nullptr, true, ticks);
 
   CHECK_EQ(count_error_marker_rects(painter, viewport.y_at(0)), 1);
   CHECK_EQ(count_error_marker_rects(painter, viewport.y_at(480)), 1);
@@ -158,7 +158,7 @@ void test_renderer_draws_visible_markers_without_expiry() {
   const std::vector<int32_t> offscreen_ticks = {48000};
   wds::interaction::UiPainter offscreen;
   renderer.paint(offscreen, viewport, timing, {}, preview, selected, std::nullopt, {}, std::nullopt,
-                 nullptr, true, -1, offscreen_ticks);
+                 nullptr, true, offscreen_ticks);
   int yellow = 0;
   for (const auto& rect : offscreen.rects()) {
     if (color_near(rect.color, kChartErrorMarkerColor) &&
@@ -328,7 +328,7 @@ void test_waveform_aligns_with_viewport_ms_and_zoom() {
   setup(close, 20, 500.0f);
   wds::interaction::UiPainter close_paint;
   renderer.paint(close_paint, close, close.timing(), {}, preview, selected, std::nullopt, {},
-                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform);
+                 std::nullopt, nullptr, false, {}, nullptr,0.0f, &waveform);
   CHECK(covers(close_paint, close, 1500.0f));
   CHECK(!covers(close_paint, close, 800.0f));
 
@@ -336,7 +336,7 @@ void test_waveform_aligns_with_viewport_ms_and_zoom() {
   setup(wide, 40, 0.0f);
   wds::interaction::UiPainter wide_paint;
   renderer.paint(wide_paint, wide, wide.timing(), {}, preview, selected, std::nullopt, {},
-                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform);
+                 std::nullopt, nullptr, false, {}, nullptr,0.0f, &waveform);
   CHECK(covers(wide_paint, wide, 1500.0f));
   const float y_close = close.y_at_ms(1500.0f);
   const float y_wide = wide.y_at_ms(1500.0f);
@@ -378,7 +378,7 @@ void test_spectrogram_uv_follows_viewport_ms() {
   setup(viewport, 20, 500.0f);
   wds::interaction::UiPainter painter;
   renderer.paint(painter, viewport, viewport.timing(), {}, preview, selected, std::nullopt, {},
-                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform, &tex,
+                 std::nullopt, nullptr, false, {}, nullptr,0.0f, &waveform, &tex,
                  EditSpectrumMode::Spectrogram);
   CHECK_EQ(static_cast<int>(painter.behind_sprites().size()), 1);
   const auto& spr = painter.behind_sprites().front();
@@ -394,7 +394,7 @@ void test_spectrogram_uv_follows_viewport_ms() {
   setup(zoomed, 40, 0.0f);
   wds::interaction::UiPainter zoomed_paint;
   renderer.paint(zoomed_paint, zoomed, zoomed.timing(), {}, preview, selected, std::nullopt, {},
-                 std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform, &tex,
+                 std::nullopt, nullptr, false, {}, nullptr,0.0f, &waveform, &tex,
                  EditSpectrumMode::Spectrogram);
   CHECK_EQ(static_cast<int>(zoomed_paint.behind_sprites().size()), 1);
   CHECK(std::fabs(zoomed_paint.behind_sprites().front().texture.v1 -
@@ -434,7 +434,7 @@ void test_spectrum_mode_selects_backdrop() {
   auto paint = [&](EditSpectrumMode mode) {
     wds::interaction::UiPainter p;
     renderer.paint(p, viewport, viewport.timing(), {}, preview, selected, std::nullopt, {},
-                   std::nullopt, nullptr, false, -1, {}, nullptr, 0.0f, &waveform, &tex, mode);
+                   std::nullopt, nullptr, false, {}, nullptr,0.0f, &waveform, &tex, mode);
     return p;
   };
 

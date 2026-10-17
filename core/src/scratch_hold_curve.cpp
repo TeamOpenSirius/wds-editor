@@ -7,6 +7,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <iterator>
+#include <limits>
+#include <optional>
+#include <vector>
 
 namespace wds::chart_editor {
 
@@ -116,11 +121,44 @@ std::optional<ScratchHoldCurveCommit> build_scratch_hold_curve_commit(
   }
 
   if (input.include_head) {
-    ChartDocument occupancy;
-    occupancy.set_notes(commit.after);
-    if (auto head = make_auto_hold_head(occupancy, input.generated_bodies.front())) {
-      commit.after.push_back(*head);
+    const NotationNote& first_body = input.generated_bodies.front();
+    std::optional<NotationNote> head;
+    bool indexed = false;
+    if (input.document != nullptr) {
+      // commit.after still has input.notes' positions (the previous body was only
+      // modified in place; its ticks/type are unchanged, so the document's
+      // start-at-T / tail-end-at-T candidates cover it). Only notes starting at the
+      // head tick or tails ending there influence the head's free lane runs.
+      const auto& doc_notes = input.document->notes();
+      if (doc_notes.size() == input.notes.size() && is_bindable_hold_body(first_body.note_type) &&
+          first_body.width >= 1) {
+        std::vector<std::size_t> starting;
+        std::vector<std::size_t> tails;
+        input.document->note_indices_starting_at(first_body.start_tick, starting);
+        input.document->tail_note_indices_ending_at(first_body.start_tick, tails);
+        std::vector<std::size_t> candidates;
+        candidates.reserve(starting.size() + tails.size());
+        std::set_union(starting.begin(), starting.end(), tails.begin(), tails.end(),
+                       std::back_inserter(candidates));
+        bool consistent = true;
+        for (const std::size_t index : candidates) {
+          if (doc_notes[index].id != commit.after[index].id) {
+            consistent = false;
+            break;
+          }
+        }
+        if (consistent) {
+          // Unassigned ids (< 0) must not match notes that also carry one (same as
+          // the scan overload).
+          NotationNote probe = first_body;
+          if (probe.id < 0) probe.id = std::numeric_limits<int32_t>::min();
+          head = make_auto_hold_head(probe, commit.after, candidates);
+          indexed = true;
+        }
+      }
     }
+    if (!indexed) head = make_auto_hold_head(first_body, commit.after);
+    if (head) commit.after.push_back(*head);
   }
 
   for (auto body : input.generated_bodies) {

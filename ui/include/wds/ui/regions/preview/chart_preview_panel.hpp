@@ -5,6 +5,7 @@
 #include "wds/renderer/preview_visual_config.hpp"
 
 #include <wds/audio/transport.hpp>
+#include <wds/audio/waveform_jobs.hpp>
 #include <wds/audio/waveform_overview.hpp>
 
 #include <wds/core/chart_editor_engine.hpp>
@@ -129,6 +130,8 @@ class ChartPreviewPanel {
                          const std::string& ui_font_path, bool initialize_audio = true);
   bool load_chart(const std::string& chart_path, const std::string& music_config_path);
   void seed_empty_chart();
+  // Blocking join of every waveform decode. Only for teardown / before BASS_Free;
+  // song switches use waveform_jobs_.cancel_all() and never wait.
   void join_waveform_workers();
   void rebuild_waveform(const std::string& music_path);
   void collect_ready_waveforms();
@@ -142,13 +145,8 @@ class ChartPreviewPanel {
   PlaybackPreviewView preview_;
   wds::audio::Transport transport_;
   wds::audio::WaveformOverview waveform_;
-  struct PendingWaveform {
-    std::uint64_t generation = 0;
-    std::shared_ptr<std::atomic<bool>> cancel;
-    std::future<wds::audio::WaveformOverview> result;
-  };
-  std::vector<PendingWaveform> pending_waveforms_;
-  std::uint64_t waveform_generation_ = 0;
+  // Declared after transport_ so it is destroyed (and joined) first.
+  wds::audio::WaveformJobs waveform_jobs_;
   std::uint64_t music_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;

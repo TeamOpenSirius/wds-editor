@@ -1,6 +1,10 @@
 #include "split_collect_pool.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -83,12 +87,90 @@ void test_named_topologies() {
   expect_caps(4, 6, 4, 8, "m4-4p6e");
 }
 
+constexpr size_t kPoolItems = 256;
+constexpr uint64_t kHeavyHint = 100000;  // forces the pool path when cap > 1
+
+struct CountCtx {
+  std::atomic<int> hits[kPoolItems];
+  size_t throw_at = kPoolItems;
+  CountCtx() {
+    for (auto& h : hits) {
+      h.store(0, std::memory_order_relaxed);
+    }
+  }
+};
+
+void count_fn(size_t i, void* p) {
+  auto* ctx = static_cast<CountCtx*>(p);
+  ctx->hits[i].fetch_add(1, std::memory_order_relaxed);
+  if (i == ctx->throw_at || i == ctx->throw_at + 100) {
+    throw std::runtime_error("split_collect test throw");
+  }
+}
+
+void sum_fn(size_t i, void* p) {
+  static_cast<std::atomic<long>*>(p)->fetch_add(static_cast<long>(i), std::memory_order_relaxed);
+}
+
+void test_exception_rethrown_and_pool_reusable() {
+  for (int round = 0; round < 3; ++round) {
+    CountCtx ctx;
+    ctx.throw_at = 37;
+    bool caught = false;
+    try {
+      wds::chart_render::split_collect_parallel_for(0, kPoolItems, 1, count_fn, &ctx, kHeavyHint);
+    } catch (const std::runtime_error&) {
+      caught = true;
+    }
+    CHECK(caught);
+    bool at_most_once = true;
+    for (const auto& h : ctx.hits) {
+      if (h.load(std::memory_order_relaxed) > 1) {
+        at_most_once = false;
+      }
+    }
+    CHECK(at_most_once);
+    CHECK(wds::chart_render::split_collect_claim_depth() == 0);
+
+    std::atomic<long> sum{0};
+    wds::chart_render::split_collect_parallel_for(0, kPoolItems, 1, sum_fn, &sum, kHeavyHint);
+    CHECK(sum.load() == static_cast<long>(kPoolItems * (kPoolItems - 1) / 2));
+  }
+}
+
+void test_concurrent_first_use() {
+  constexpr int kThreads = 4;
+  std::atomic<long> sums[kThreads];
+  for (auto& s : sums) {
+    s.store(0, std::memory_order_relaxed);
+  }
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([t, &sums, &go] {
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      wds::chart_render::split_collect_parallel_for(0, 1000, 1, sum_fn, &sums[t], kHeavyHint);
+    });
+  }
+  go.store(true, std::memory_order_release);
+  for (std::thread& th : threads) {
+    th.join();
+  }
+  for (const auto& s : sums) {
+    CHECK(s.load() == 999L * 1000L / 2);
+  }
+}
+
 }  // namespace
 
 int main() {
   test_linux_smt_not_cores();
   test_linux_hybrid_12th();
   test_named_topologies();
+  test_concurrent_first_use();
+  test_exception_rethrown_and_pool_reusable();
   if (failures != 0) {
     std::fprintf(stderr, "%d checks failed\n", failures);
     return 1;

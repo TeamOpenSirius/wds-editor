@@ -1,5 +1,7 @@
 #include <wds/core/edit_history.hpp>
 
+#include <algorithm>
+
 namespace wds::chart_editor {
 
 CompositeCommand::CompositeCommand(std::string label) : label_(std::move(label)) {}
@@ -34,6 +36,12 @@ bool CompositeCommand::undo(ChartDocument& doc) {
   return true;
 }
 std::string CompositeCommand::label() const { return label_; }
+size_t CompositeCommand::size_bytes() const {
+  size_t total = sizeof(*this) + label_.capacity() +
+                 commands_.capacity() * sizeof(std::unique_ptr<IEditCommand>);
+  for (const auto& c : commands_) total += c->size_bytes();
+  return total;
+}
 
 SetNotesCommand::SetNotesCommand(std::vector<NotationNote> before, std::vector<NotationNote> after,
                                  std::string label)
@@ -41,12 +49,22 @@ SetNotesCommand::SetNotesCommand(std::vector<NotationNote> before, std::vector<N
 bool SetNotesCommand::execute(ChartDocument& doc) { return doc.set_notes(after_); }
 bool SetNotesCommand::undo(ChartDocument& doc) { return doc.set_notes(before_); }
 std::string SetNotesCommand::label() const { return label_; }
+size_t SetNotesCommand::size_bytes() const {
+  return sizeof(*this) + (before_.capacity() + after_.capacity()) * sizeof(NotationNote) +
+         label_.capacity();
+}
 
 SetTimingCommand::SetTimingCommand(MusicTiming before, MusicTiming after, std::string label)
     : before_(std::move(before)), after_(std::move(after)), label_(std::move(label)) {}
 bool SetTimingCommand::execute(ChartDocument& doc) { return doc.set_timing(after_); }
 bool SetTimingCommand::undo(ChartDocument& doc) { return doc.set_timing(before_); }
 std::string SetTimingCommand::label() const { return label_; }
+size_t SetTimingCommand::size_bytes() const {
+  const auto heap = [](const MusicTiming& t) {
+    return t.points.capacity() * sizeof(TimingPoint) + t.prefix_ms.capacity() * sizeof(double);
+  };
+  return sizeof(*this) + heap(before_) + heap(after_) + label_.capacity();
+}
 
 SetScrollSpeedPointsCommand::SetScrollSpeedPointsCommand(
     std::vector<ScrollSpeedPoint> before, std::vector<ScrollSpeedPoint> after, std::string label)
@@ -58,6 +76,10 @@ bool SetScrollSpeedPointsCommand::undo(ChartDocument& doc) {
   return doc.set_scroll_speed_points(before_);
 }
 std::string SetScrollSpeedPointsCommand::label() const { return label_; }
+size_t SetScrollSpeedPointsCommand::size_bytes() const {
+  return sizeof(*this) + (before_.capacity() + after_.capacity()) * sizeof(ScrollSpeedPoint) +
+         label_.capacity();
+}
 
 SetCompatibilityProfileCommand::SetCompatibilityProfileCommand(
     ChartCompatibilityProfile before, ChartCompatibilityProfile after)
@@ -73,58 +95,43 @@ std::string SetCompatibilityProfileCommand::label() const { return "Set compatib
 AddNotesCommand::AddNotesCommand(std::vector<NotationNote> notes, std::string label)
     : notes_(std::move(notes)), label_(std::move(label)) {}
 bool AddNotesCommand::execute(ChartDocument& doc) {
-  size_t added = 0;
-  for (; added < notes_.size(); ++added) {
-    auto note = notes_[added];
-    if (note.id >= 0 && doc.find_note(note.id).has_value()) {
-      while (added > 0) doc.remove_note(notes_[--added].id);
-      return false;
-    }
-    const int32_t id = doc.add_note(note);
-    if (id < 0) {
-      while (added > 0) doc.remove_note(notes_[--added].id);
-      return false;
-    }
-    notes_[added].id = id;
+  // One bulk add (single sort / index rebuild). Ids are recorded back into notes_
+  // so redo re-adds with the same ids; on failure the doc is left untouched.
+  std::vector<int32_t> ids;
+  const bool ok = doc.add_notes(notes_, &ids);
+  for (size_t i = 0; i < ids.size() && i < notes_.size(); ++i) {
+    notes_[i].id = ids[i];
   }
-  return true;
+  return ok;
 }
 bool AddNotesCommand::undo(ChartDocument& doc) {
-  size_t removed = 0;
-  for (; removed < notes_.size(); ++removed) {
-    if (!doc.remove_note(notes_[removed].id)) {
-      while (removed > 0) doc.add_note(notes_[--removed]);
-      return false;
-    }
+  std::vector<int32_t> ids;
+  ids.reserve(notes_.size());
+  for (const auto& note : notes_) {
+    ids.push_back(note.id);
   }
-  return true;
+  return doc.remove_notes(ids);
 }
 std::string AddNotesCommand::label() const { return label_; }
+size_t AddNotesCommand::size_bytes() const {
+  return sizeof(*this) + notes_.capacity() * sizeof(NotationNote) + label_.capacity();
+}
 
 RemoveNotesCommand::RemoveNotesCommand(std::vector<NotationNote> notes, std::string label)
     : notes_(std::move(notes)), label_(std::move(label)) {}
 bool RemoveNotesCommand::execute(ChartDocument& doc) {
-  size_t removed = 0;
-  for (; removed < notes_.size(); ++removed) {
-    if (!doc.remove_note(notes_[removed].id)) {
-      while (removed > 0) doc.add_note(notes_[--removed]);
-      return false;
-    }
+  std::vector<int32_t> ids;
+  ids.reserve(notes_.size());
+  for (const auto& note : notes_) {
+    ids.push_back(note.id);
   }
-  return true;
+  return doc.remove_notes(ids);
 }
-bool RemoveNotesCommand::undo(ChartDocument& doc) {
-  size_t added = 0;
-  for (; added < notes_.size(); ++added) {
-    const auto& note = notes_[added];
-    if (doc.find_note(note.id).has_value() || doc.add_note(note) < 0) {
-      while (added > 0) doc.remove_note(notes_[--added].id);
-      return false;
-    }
-  }
-  return true;
-}
+bool RemoveNotesCommand::undo(ChartDocument& doc) { return doc.add_notes(notes_); }
 std::string RemoveNotesCommand::label() const { return label_; }
+size_t RemoveNotesCommand::size_bytes() const {
+  return sizeof(*this) + notes_.capacity() * sizeof(NotationNote) + label_.capacity();
+}
 
 UpdateNotesCommand::UpdateNotesCommand(std::unordered_map<int32_t, NotePair> changes,
                                        std::string label)
@@ -140,25 +147,59 @@ bool UpdateNotesCommand::apply(ChartDocument& doc, bool after) {
 bool UpdateNotesCommand::execute(ChartDocument& doc) { return apply(doc, true); }
 bool UpdateNotesCommand::undo(ChartDocument& doc) { return apply(doc, false); }
 std::string UpdateNotesCommand::label() const { return label_; }
+size_t UpdateNotesCommand::size_bytes() const {
+  // Node = pair<const int32_t, NotePair> + next pointer / hash overhead.
+  using Node = std::pair<const int32_t, NotePair>;
+  return sizeof(*this) + changes_.size() * (sizeof(Node) + 2 * sizeof(void*)) +
+         changes_.bucket_count() * sizeof(void*) + label_.capacity();
+}
 
 bool EditHistory::execute(std::unique_ptr<IEditCommand> cmd, ChartDocument& doc) {
   if (!cmd || !cmd->execute(doc)) return false;
-  undo_.push_back(std::move(cmd));
+  Entry entry;
+  entry.bytes = cmd->size_bytes();
+  entry.command = std::move(cmd);
+  undo_.push_back(std::move(entry));
   redo_.clear();
+  trim_undo();
   return true;
 }
 bool EditHistory::undo(ChartDocument& doc) {
-  if (undo_.empty() || !undo_.back()->undo(doc)) return false;
+  if (undo_.empty() || !undo_.back().command->undo(doc)) return false;
   redo_.push_back(std::move(undo_.back()));
   undo_.pop_back();
   return true;
 }
 bool EditHistory::redo(ChartDocument& doc) {
-  if (redo_.empty() || !redo_.back()->execute(doc)) return false;
+  if (redo_.empty() || !redo_.back().command->execute(doc)) return false;
   undo_.push_back(std::move(redo_.back()));
   redo_.pop_back();
   return true;
 }
 void EditHistory::clear() { undo_.clear(); redo_.clear(); }
+
+size_t EditHistory::undo_bytes() const noexcept {
+  size_t total = 0;
+  for (const auto& e : undo_) total += e.bytes;
+  return total;
+}
+size_t EditHistory::redo_bytes() const noexcept {
+  size_t total = 0;
+  for (const auto& e : redo_) total += e.bytes;
+  return total;
+}
+void EditHistory::set_limits(EditHistoryLimits limits) {
+  limits_ = limits;
+  trim_undo();
+}
+
+void EditHistory::trim_undo() {
+  size_t total = undo_bytes();
+  while (undo_.size() > limits_.min_keep &&
+         (undo_.size() > limits_.max_entries || total > limits_.max_bytes)) {
+    total -= std::min(total, undo_.front().bytes);
+    undo_.pop_front();
+  }
+}
 
 }  // namespace wds::chart_editor

@@ -263,17 +263,33 @@ int walk_shard_of(const SubemitWalkKey& key) noexcept {
   return static_cast<int>(WalkKeyHash{}(key) & static_cast<std::size_t>(kWalkShards - 1));
 }
 
-void note_drop_bytes(Store& s, std::size_t drop, std::size_t npart, bool drop_system) noexcept {
-  const std::size_t bytes = s.bytes.load(std::memory_order_relaxed);
-  s.bytes.store(bytes > drop ? bytes - drop : 0, std::memory_order_relaxed);
-  if (drop_system) {
-    const std::size_t sys = s.systems.load(std::memory_order_relaxed);
-    if (sys > 0) {
-      s.systems.store(sys - 1, std::memory_order_relaxed);
+// Saturating atomic subtract. Global counters are updated under different
+// per-shard mutexes, so every update must be a single atomic RMW.
+void sat_sub(std::atomic<std::size_t>& a, std::size_t d) noexcept {
+  std::size_t cur = a.load(std::memory_order_relaxed);
+  for (;;) {
+    const std::size_t next = cur >= d ? cur - d : 0;
+    if (a.compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
+      return;
     }
   }
-  const std::size_t parts = s.particles.load(std::memory_order_relaxed);
-  s.particles.store(parts > npart ? parts - npart : 0, std::memory_order_relaxed);
+}
+
+// Apply (new_v - old_v) to a global counter as one atomic operation.
+void apply_delta(std::atomic<std::size_t>& a, std::size_t old_v, std::size_t new_v) noexcept {
+  if (new_v >= old_v) {
+    a.fetch_add(new_v - old_v, std::memory_order_relaxed);
+  } else {
+    sat_sub(a, old_v - new_v);
+  }
+}
+
+void note_drop_bytes(Store& s, std::size_t drop, std::size_t npart, bool drop_system) noexcept {
+  sat_sub(s.bytes, drop);
+  if (drop_system) {
+    sat_sub(s.systems, 1);
+  }
+  sat_sub(s.particles, npart);
 }
 
 void evict_one(Store& s, Shard& sh) {
@@ -308,8 +324,7 @@ void evict_walk(Store& s, WalkShard& sh) {
   auto node = std::move(oldest->second);
   sh.map.erase(oldest);
   give_walk_entry(sh, std::move(node));
-  const std::size_t bytes = s.bytes.load(std::memory_order_relaxed);
-  s.bytes.store(bytes > drop ? bytes - drop : 0, std::memory_order_relaxed);
+  sat_sub(s.bytes, drop);
 }
 
 }  // namespace
@@ -508,10 +523,8 @@ bool split_eval_carry_lookup_for_now(const SystemCarryKey& key, float now,
 
 void apply_entry_delta(Store& s, std::size_t old_bytes, std::size_t old_n, std::size_t add,
                        std::size_t npart) noexcept {
-  const std::size_t bytes = s.bytes.load(std::memory_order_relaxed);
-  s.bytes.store(bytes > old_bytes ? bytes - old_bytes + add : add, std::memory_order_relaxed);
-  const std::size_t pn = s.particles.load(std::memory_order_relaxed);
-  s.particles.store(pn > old_n ? pn - old_n + npart : npart, std::memory_order_relaxed);
+  apply_delta(s.bytes, old_bytes, add);
+  apply_delta(s.particles, old_n, npart);
 }
 
 void trim_shard_for_key(Store& s, Shard& sh, const SystemCarryKey& key, Entry* self) {
@@ -855,8 +868,7 @@ void split_eval_walk_store(const SubemitWalkKey& key, float now_t, SubemitWalkCu
   walk_cursor_to_entry(e, now_t, std::move(cur));
   e.tick = ++sh.tick;
   const std::size_t add = walk_bytes(e);
-  const std::size_t bytes = s.bytes.load(std::memory_order_relaxed);
-  s.bytes.store(bytes > old_bytes ? bytes - old_bytes + add : add, std::memory_order_relaxed);
+  apply_delta(s.bytes, old_bytes, add);
   trim_walk_shard_for_key(s, sh, key, &e);
   s.walk_commits.fetch_add(1, std::memory_order_relaxed);
 }
