@@ -97,7 +97,7 @@ PreviewSettingsPanel::PreviewSettingsPanel(ChartPreviewPanel& preview) : preview
     int64_t end = 1;
     seek_window_ms(start, end);
     const int64_t span = std::max<int64_t>(end - start, 1);
-    preview_.transport().request_seek_ms(
+    preview_.request_seek_ms(
         start + static_cast<int64_t>(fraction * static_cast<double>(span)));
   });
   seek_slider_ = seek.get();

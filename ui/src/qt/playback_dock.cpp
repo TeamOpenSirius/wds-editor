@@ -318,7 +318,7 @@ void PlaybackBar::seek_to_slider(int value) {
   // Queue only — poll() commits on the next preview tick, same as the
   // legacy Slider::on_change path. Do not latch audio.position() or
   // rewrite play_anchor_ms_ here; that was the pause-to-start creep.
-  manager_->chart_preview().transport().request_seek_ms(target);
+  manager_->chart_preview().request_seek_ms(target);
 }
 
 void PlaybackBar::build_ui() {

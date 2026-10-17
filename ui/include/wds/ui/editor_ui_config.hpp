@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,6 +58,9 @@ struct EditorUiConfig {
   int note_height_level = 8;
   // Official SplitEffectLineOpacity (10..100 step 10).
   int split_line_opacity = 100;
+  // Official SpritEffectSettingType: Rich=0, Normal=1, Light=2.
+  // GameSettings default is Rich; BothEnds then plays as Full (center line included).
+  int split_effect_quality = 0;
   // Preferred Vulkan MSAA samples: 1 (低) / 2 (中) / 4 (高). Default matches app 2×.
   int msaa_samples = 2;
   // Edit-panel audio backdrop: none / envelope / frequency spectrogram.
@@ -84,6 +88,8 @@ struct EditorUiConfig {
   bool new_note_place_logic = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
+  // Minutes between Auto backups of an on-disk project. One of 5/10/15/20/30/45/60.
+  int backup_interval_min = 15;
   // When true, negate timeline-scrub wheel deltas (not Option+wheel visible range).
   bool invert_scroll_wheel = false;
   // When true, invert Option+wheel visible-range adjust direction.
@@ -116,6 +122,20 @@ inline int clamp_subdivisions_per_beat(int value) noexcept {
 
 inline float clamp_playback_rate(float rate) noexcept {
   return std::clamp(rate, 0.25f, 2.0f);
+}
+
+inline int clamp_backup_interval_min(int minutes) noexcept {
+  static constexpr int kOptions[] = {5, 10, 15, 20, 30, 45, 60};
+  int best = 15;
+  int best_delta = 1000;
+  for (int option : kOptions) {
+    const int delta = std::abs(option - minutes);
+    if (delta < best_delta) {
+      best_delta = delta;
+      best = option;
+    }
+  }
+  return best;
 }
 
 // Resolves the platform config path (creates nothing; save may create dirs).

@@ -31,6 +31,11 @@ class RealtimeVulkanWindow final : public QWindow {
   void set_idle_throttle_bypass(std::function<bool()> playing) {
     idle_throttle_bypass_ = std::move(playing);
   }
+  // Called on SurfaceAboutToBeDestroyed, before QWindow destroys the VkSurface.
+  // Empty clears the callback.
+  void set_surface_teardown(std::function<void()> teardown) {
+    surface_teardown_ = std::move(teardown);
+  }
   // Host-level resize suspension covers the short interval where QMainWindow
   // is relayouting docks and the native child window has not settled yet.
   // Pending frames are dropped until both host and child resizing have settled.
@@ -43,6 +48,9 @@ class RealtimeVulkanWindow final : public QWindow {
   // Queue a frame even while resize-settle is holding idle presents. Used for
   // the first-open init path so the preview is not stuck waiting on dock layout.
   void request_frame();
+  // CLI WDS_DUMP_VERTS: run the frame callback even if the Cocoa layer is
+  // not exposed (agent-launched binary, collapsed dock, 0×0 surface wait).
+  void pump_cli_frame();
   void mark_presented() noexcept;
 
  protected:
@@ -58,6 +66,7 @@ class RealtimeVulkanWindow final : public QWindow {
   wds::interaction::InputQueue input_queue_;
   std::unique_ptr<QtInputAdapter> input_adapter_;
   FrameCallback frame_callback_;
+  std::function<void()> surface_teardown_;
   std::function<bool()> idle_throttle_bypass_;
   std::chrono::steady_clock::time_point last_frame_{};
   int64_t idle_frame_interval_us_ = 0;
@@ -69,5 +78,6 @@ class RealtimeVulkanWindow final : public QWindow {
   bool presented_ = false;
   bool force_frame_ = false;
   bool frame_hold_logged_ = false;
+  bool surface_dead_ = false;
 };
 }

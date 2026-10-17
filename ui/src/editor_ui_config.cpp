@@ -297,6 +297,12 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
     if (parse_int(value, v)) {
       cfg.note_height_level = wds::chart_editor::official_clamp_note_height_level(static_cast<int>(v));
     }
+  } else if (key == "split_effect_quality") {
+    int32_t v = cfg.split_effect_quality;
+    if (parse_int(value, v)) {
+      cfg.split_effect_quality =
+          wds::chart_editor::official_clamp_sprit_effect_setting(static_cast<int>(v));
+    }
   } else if (key == "split_line_opacity") {
     int32_t v = cfg.split_line_opacity;
     if (parse_int(value, v)) {
@@ -358,6 +364,9 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "sus_auto_convert") {
     bool v = cfg.sus_auto_convert;
     if (parse_bool(value, v)) cfg.sus_auto_convert = v;
+  } else if (key == "backup_interval_min") {
+    int32_t v = cfg.backup_interval_min;
+    if (parse_int(value, v)) cfg.backup_interval_min = clamp_backup_interval_min(static_cast<int>(v));
   } else if (key == "invert_scroll_wheel") {
     bool v = cfg.invert_scroll_wheel;
     if (parse_bool(value, v)) cfg.invert_scroll_wheel = v;
@@ -549,6 +558,8 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "note_speed: " << speed << '\n'
       << "note_start_offset: " << cfg.note_start_offset << '\n'
       << "note_height_level: " << cfg.note_height_level << '\n'
+      << "split_effect_quality: "
+      << wds::chart_editor::official_clamp_sprit_effect_setting(cfg.split_effect_quality) << '\n'
       << "split_line_opacity: " << cfg.split_line_opacity << '\n'
       << "spectrum_display: " << spectrum_display_key(cfg.spectrum_display) << '\n'
       << "msaa_samples: " << clamp_msaa_samples(cfg.msaa_samples) << '\n'
@@ -567,6 +578,7 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "lane_count: " << std::clamp(cfg.lane_count, 1, 32) << '\n'
       << "new_note_place_logic: " << emit_bool(cfg.new_note_place_logic) << '\n'
       << "sus_auto_convert: " << emit_bool(cfg.sus_auto_convert) << '\n'
+      << "backup_interval_min: " << clamp_backup_interval_min(cfg.backup_interval_min) << '\n'
       << "invert_scroll_wheel: " << emit_bool(cfg.invert_scroll_wheel) << '\n'
       << "invert_visible_range_scroll: " << emit_bool(cfg.invert_visible_range_scroll) << '\n'
       << "allow_crash_log_sensitive: " << emit_bool(cfg.allow_crash_log_sensitive) << '\n'
