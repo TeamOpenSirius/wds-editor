@@ -54,7 +54,9 @@ target_compile_definitions(wds_common PRIVATE
 
 if(WIN32)
   # MiniDumpWriteDump / StackWalk64 are resolved from dbghelp at install time.
-  target_link_libraries(wds_common PUBLIC kernel32 user32)
+  # psapi: GetProcessMemoryInfo (page-fault / working-set stage counters). MinGW-w64 only maps it onto
+  # kernel32's K32 export for newer PSAPI_VERSION settings, so link the import library explicitly.
+  target_link_libraries(wds_common PUBLIC kernel32 user32 psapi)
 elseif(APPLE)
   # backtrace() / dladdr are in libSystem.
 else()

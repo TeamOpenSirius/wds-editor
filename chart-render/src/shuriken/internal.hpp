@@ -397,11 +397,13 @@ struct IntegratorGridState {
 static_assert(offsetof(IntegratorGridState, trace) == 32, "hot pose is 32 B");
 static_assert(alignof(IntegratorGridState) >= 4, "");
 
+// Both types are layout-compatible 32 B poses (see the static_assert above). The void* casts state that this is
+// a raw byte copy, which keeps GCC's -Wclass-memaccess quiet.
 inline void copy_grid_hot(const IntegratorGridState& g, IntegratorHot& h) noexcept {
-  std::memcpy(&h, &g, sizeof(IntegratorHot));
+  std::memcpy(static_cast<void*>(&h), static_cast<const void*>(&g), sizeof(IntegratorHot));
 }
 inline void copy_hot_grid(const IntegratorHot& h, IntegratorGridState& g) noexcept {
-  std::memcpy(&g, &h, sizeof(IntegratorHot));
+  std::memcpy(static_cast<void*>(&g), static_cast<const void*>(&h), sizeof(IntegratorHot));
 }
 
 class PoseIntegrator {

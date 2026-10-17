@@ -122,11 +122,11 @@ add_executable(wds_split_effect_seek_cache_tests
   ${CMAKE_SOURCE_DIR}/tests/system/split_effect_seek_cache_tests.cpp)
 target_link_libraries(wds_split_effect_seek_cache_tests PRIVATE wds::chart_render)
 
-add_executable(wds_split_effect_bench tools/split_effect_bench.cpp)
-target_link_libraries(wds_split_effect_bench PRIVATE wds::chart_render)
-if(MSVC)
-  target_compile_options(wds_split_effect_bench PRIVATE /W4)
-else()
+# Developer benchmark. It forks worker processes and uses poll / waitpid / getrusage, so it is POSIX-only
+# (macOS, Linux) and is skipped for Windows targets (MinGW cross build and MSVC).
+if(NOT WIN32)
+  add_executable(wds_split_effect_bench tools/split_effect_bench.cpp)
+  target_link_libraries(wds_split_effect_bench PRIVATE wds::chart_render)
   target_compile_options(wds_split_effect_bench PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
