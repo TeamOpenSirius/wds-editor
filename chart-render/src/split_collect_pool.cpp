@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
@@ -101,7 +102,13 @@ void fill_topo_windows(Topo& t) noexcept {
       if (rec->Relationship == RelationProcessorCore) {
         // MSDN: 0 = most efficient (E) when a classification exists;
         // 9th-gen / Zen3 have no classification and stay 0.
-        if (rec->Processor.EfficiencyClass == 0) {
+        // PROCESSOR_RELATIONSHIP is { BYTE Flags; BYTE EfficiencyClass; BYTE Reserved[20]; ... } in the
+        // Windows SDK, but older MinGW-w64 headers declare Flags + Reserved[21] and have no
+        // EfficiencyClass member, so read that byte by offset instead of by name.
+        static_assert(offsetof(PROCESSOR_RELATIONSHIP, Flags) == 0, "Flags is the first byte");
+        const unsigned efficiency_class =
+            reinterpret_cast<const unsigned char*>(&rec->Processor)[1];
+        if (efficiency_class == 0) {
           ++class0;
         } else {
           ++class_hi;
@@ -269,11 +276,34 @@ const Topo& topo() noexcept {
 void win_set_heavy(bool heavy) noexcept {
   HANDLE th = GetCurrentThread();
   SetThreadPriority(th, heavy ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL);
-  THREAD_POWER_THROTTLING_STATE s{};
-  s.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
-  s.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
-  s.StateMask = heavy ? 0 : THREAD_POWER_THROTTLING_EXECUTION_SPEED;
-  SetThreadInformation(th, ThreadPowerThrottling, &s, sizeof(s));
+  // THREAD_POWER_THROTTLING_STATE / ThreadPowerThrottling are missing from older MinGW-w64 headers, and
+  // SetThreadInformation itself only exists from Windows 8. Mirror the SDK layout and resolve the call at
+  // runtime; where it is unavailable the priority change above is all that is applied.
+  struct ThreadPowerThrottlingState {
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+  };
+  constexpr ULONG kCurrentVersion = 1;        // THREAD_POWER_THROTTLING_CURRENT_VERSION
+  constexpr ULONG kExecutionSpeed = 0x1;      // THREAD_POWER_THROTTLING_EXECUTION_SPEED
+  constexpr int kThreadPowerThrottling = 3;   // THREAD_INFORMATION_CLASS::ThreadPowerThrottling
+  using SetThreadInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+  static const SetThreadInformationFn set_thread_information = []() -> SetThreadInformationFn {
+    const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    if (kernel == nullptr) {
+      return nullptr;
+    }
+    return reinterpret_cast<SetThreadInformationFn>(
+        reinterpret_cast<void*>(GetProcAddress(kernel, "SetThreadInformation")));
+  }();
+  if (set_thread_information == nullptr) {
+    return;
+  }
+  ThreadPowerThrottlingState s{};
+  s.Version = kCurrentVersion;
+  s.ControlMask = kExecutionSpeed;
+  s.StateMask = heavy ? 0 : kExecutionSpeed;
+  set_thread_information(th, kThreadPowerThrottling, &s, static_cast<DWORD>(sizeof(s)));
 }
 #endif
 

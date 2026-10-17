@@ -68,7 +68,9 @@
 #include <functional>
 #include <memory>
 #include <string>
+#if !defined(Q_OS_WIN)
 #include <sys/resource.h>
+#endif
 #include <unordered_map>
 #include <vector>
 
@@ -155,8 +157,51 @@ struct ProcessCpuSnap {
   int thread_n = 0;
 };
 
+#if !defined(Q_OS_WIN)
 int64_t timeval_to_us(const timeval& t) noexcept {
   return static_cast<int64_t>(t.tv_sec) * 1000000LL + static_cast<int64_t>(t.tv_usec);
+}
+#endif
+
+#if defined(Q_OS_WIN)
+// FILETIME is in 100 ns units.
+int64_t filetime_to_us(const FILETIME& ft) noexcept {
+  ULARGE_INTEGER v;
+  v.LowPart = ft.dwLowDateTime;
+  v.HighPart = ft.dwHighDateTime;
+  return static_cast<int64_t>(v.QuadPart / 10ULL);
+}
+#endif
+
+// Cumulative user / system CPU time of this process in microseconds; false if unavailable.
+bool process_cpu_times_us(int64_t& user_us, int64_t& sys_us) noexcept {
+#if defined(Q_OS_WIN)
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+    return false;
+  }
+  user_us = filetime_to_us(user);
+  sys_us = filetime_to_us(kernel);
+  return true;
+#else
+  rusage ru{};
+  if (getrusage(RUSAGE_SELF, &ru) != 0) {
+    return false;
+  }
+  user_us = timeval_to_us(ru.ru_utime);
+  sys_us = timeval_to_us(ru.ru_stime);
+  return true;
+#endif
+}
+
+// Minor page faults since process start (0 where the OS has no such counter, e.g. Windows).
+long process_minor_faults() noexcept {
+#if defined(Q_OS_WIN)
+  return 0;
+#else
+  rusage ru{};
+  return getrusage(RUSAGE_SELF, &ru) == 0 ? ru.ru_minflt : 0;
+#endif
 }
 
 #if defined(Q_OS_MACOS)
@@ -195,11 +240,7 @@ void sample_thread_cpu(std::unordered_map<uint64_t, int64_t>& out, int& thread_n
 #endif
 
 void sample_process_cpu(ProcessCpuSnap& snap) {
-  rusage ru{};
-  if (getrusage(RUSAGE_SELF, &ru) == 0) {
-    snap.user_us = timeval_to_us(ru.ru_utime);
-    snap.sys_us = timeval_to_us(ru.ru_stime);
-  }
+  (void)process_cpu_times_us(snap.user_us, snap.sys_us);
 #if defined(Q_OS_MACOS)
   sample_thread_cpu(snap.thread_us, snap.thread_n);
 #else
@@ -500,11 +541,7 @@ class FrameDiagLogger {
       const int64_t leftover_work = leftover_tick + leftover_render;
       const int64_t wall_parts = tick_us + render_cpu + submit_wait + fence_us + acquire_us + present_us;
       const int64_t display_gap = wall_us > wall_parts ? wall_us - wall_parts : 0;
-      rusage ru{};
-      long minflt = 0;
-      if (getrusage(RUSAGE_SELF, &ru) == 0) {
-        minflt = ru.ru_minflt;
-      }
+      const long minflt = process_minor_faults();
       const long dminflt = last_minflt_ > 0 ? minflt - last_minflt_ : minflt;
       last_minflt_ = minflt;
       const long seek_minflt = preview_panel.last_seek_minflt();
