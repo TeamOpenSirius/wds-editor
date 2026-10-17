@@ -21,8 +21,9 @@ namespace wds::chart_editor {
 //                   scratch 0). Export rows are sorted by startTime then type;
 //                   -1 = HiSpeed (endTime holds non-negative multiplier; stored in
 //                   scroll_speed_points, never in NotationNote);
-//                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
-//                   editor imports as JumpScratch split / orphan Flick — never stored as 40)
+//                   31 = ScratchSound (purple mid-star); 40 = Scratch (kept as-is;
+//                   looks like Flick; the editor cannot author it);
+//                   split rows always export type 0, leftLane -1, laneLength 0
 //   leftLane      — leftmost lane, official 1..12; Extended may overhang;
 //                   split rows use -1
 //   laneLength    — width in lanes; split rows use 0

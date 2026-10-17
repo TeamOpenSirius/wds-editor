@@ -16,8 +16,9 @@ enum class NoteType : int32_t {
   Critical = 20,
   Sound = 30,
   ScratchSound = 31,  // Purple hold mid-star (Sirius ScratchSound)
-  // Sirius CSV type 40 = SoundPurple (mid-hold scratch) — interchange only;
-  // editor imports as JumpScratch segments / Flick. Do not author type 40.
+  // Official AppConst.NoteType Scratch. CSV keeps 40 as-is. Looks like Flick
+  // in edit/preview (including hit FX). The editor cannot author this type.
+  Scratch = 40,
   Flick = 50,
   HoldStart = 80,
   CriticalHoldStart = 81,
@@ -107,5 +108,9 @@ enum class ChartCompatibilityProfile : uint8_t {
 inline constexpr int32_t kAutoNoteId = -1;
 // Sound / ScratchSound / HoldEighth with no parent hold (official CSV, unmatched legacy).
 inline constexpr int32_t kNoBoundHoldId = -1;
+
+inline bool is_flick_like(NoteType type) noexcept {
+  return type == NoteType::Flick || type == NoteType::Scratch;
+}
 
 }  // namespace wds::chart_editor

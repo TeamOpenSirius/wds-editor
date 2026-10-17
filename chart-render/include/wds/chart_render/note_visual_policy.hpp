@@ -13,7 +13,7 @@ namespace wds::chart_render {
 
 // A ScratchHold body only owns an end arrow when it has a judged tail.
 inline bool preview_draws_start_scratch_arrows(wds::chart_editor::NoteType type) noexcept {
-  return type == wds::chart_editor::NoteType::Flick;
+  return wds::chart_editor::is_flick_like(type);
 }
 
 // Cap scale for Unity-style Sliced holds/flats.

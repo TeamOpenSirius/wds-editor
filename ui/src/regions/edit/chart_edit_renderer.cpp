@@ -48,9 +48,11 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   }
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
+  // Ribbon includes nontail bodies; with_tail is only the end-cap / chain-span path.
+  // Match preview: bindable bodies never invent a start head (paired HoldStart owns it).
   const bool hold_ribbon =
       note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
-  const bool hold_body =
+  const bool with_tail =
       note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
 
   if (pass == NoteVisualPass::HoldBody) {
@@ -88,7 +90,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   // ScratchHold / JumpScratch end span (shared with preview snapshot).
   int32_t end_lane = note.lane;
   int32_t end_width = note.width;
-  if (hold_body && wds::chart_editor::is_hold_chain_body(note.note_type)) {
+  if (with_tail && wds::chart_editor::is_hold_chain_body(note.note_type)) {
     const auto span = wds::chart_editor::resolve_end_lane_span(note);
     end_lane = span.first;
     end_width = span.second;
@@ -107,7 +109,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     params.arrow_w = arrow_w;
     params.scratch_length = note.scratch_length;
     params.official_one_direction =
-        note.note_type == wds::chart_editor::NoteType::Flick &&
+        wds::chart_editor::is_flick_like(note.note_type) &&
         wds::chart_editor::is_one_direction(note.gimmick_type);
     for (const auto& inst : wds::chart_render::layout_static_scratch_arrows(params)) {
       wds::renderer::Quad q = wds::interaction::rect_to_quad(
@@ -154,8 +156,8 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
 
   NoteSprites head = sprites;
   NoteSprites tail = sprites;
-  const bool scratch_hold = hold_body && wds::chart_editor::is_scratch_hold_body(note.note_type);
-  if (hold_body) {
+  const bool scratch_hold = with_tail && wds::chart_editor::is_scratch_hold_body(note.note_type);
+  if (with_tail) {
     // Hold body never draws a start head — paired head notes own that art.
     apply_hold_tail_sprites(tail, skin, scratch_hold);
     tail.connection = sprites.connection;
@@ -164,8 +166,9 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     tail.connection_b = sprites.connection_b;
   }
 
-  if (hold_body) {
-    if (note.end_tick > note.start_tick) {
+  if (hold_ribbon) {
+    // Tailed: end cap only. Nontail: ribbon only (no invented start/end flats).
+    if (with_tail) {
       draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   } else {
@@ -522,8 +525,9 @@ void ChartEditRenderer::paint_overlays(
       continue;
     }
 
+    // Include nontail ribbons so selection spans the body, not a tap-sized head.
     const bool hold_body =
-        note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
+        note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
     bool paired = false;
     bool clear_head_zone = false;
     if (hold_body) {
@@ -572,9 +576,8 @@ void ChartEditRenderer::paint_overlays(
     const float x1 = std::max(viewport.x_at(note.lane) + viewport.lane_width(note.width),
                               viewport.x_at(end_lane) + viewport.lane_width(end_width));
     const float inset =
-        (note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type))
-            ? viewport.hold_inset_px(std::max(note.width, end_width))
-            : viewport.note_inset_px(std::max(note.width, end_width));
+        hold_body ? viewport.hold_inset_px(std::max(note.width, end_width))
+                  : viewport.note_inset_px(std::max(note.width, end_width));
     const wds::interaction::Rect box{x0 + inset - kPad, top, (x1 - x0) - inset * 2.0f + kPad * 2.0f,
                                      bottom - top};
     paint_box(box, paired);

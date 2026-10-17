@@ -1,6 +1,7 @@
 #include "wds/ui/qt/split_picker_dialog.hpp"
 #include "wds/ui/qt/split_effect_snapshot.hpp"
 
+#include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 #include "wds/ui/regions/edit/split_effect_tags.hpp"
@@ -9,6 +10,8 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
+#include <QEvent>
+#include <QIcon>
 #include <QPaintEvent>
 #include <QFontMetrics>
 #include <QFont>
@@ -62,8 +65,10 @@ constexpr int kPreviewIdGap = 8;
 // defined only through the box model here and polish can never undo it.
 constexpr int kControlH = 24;
 constexpr int kControlContentH = kControlH - 2;
-// Horizontal spacing of the top panel grid (label column <-> controls) and of the 图层 row (chips <-> 清除筛选).
+// Horizontal spacing of the top panel grid (label column <-> controls).
 constexpr int kGridSpacing = 8;
+// Vertical spacing between the grid rows; also the spacing between the wrapped 主题 chip lines.
+constexpr int kGridRowSpacing = 8;
 constexpr int kPanelToListGap = 10;  // extra gap under the filter panel, on top of the root layout spacing
 
 // Common QSS body for the top-area controls: fixed content height, no vertical padding, no margin.
@@ -236,16 +241,65 @@ class ColorThumb final : public QWidget {
   std::shared_ptr<SplitPickerPreviewState> state_;
 };
 
-// Left-aligned wrapping layout for the filter chips. Chips keep their size hint and wrap onto the next row
-// when the width runs out, so they never widen the (fixed-width) dialog.
+// Layout for the filter chips. Three modes:
+//
+//  * normal: left-aligned wrapping flow, chips keep their size hint and wrap when the width runs out, so they never
+//    widen the (fixed-width) dialog.
+//  * balanced_justified (the 主题 row): all chips live in uniform SLOTS (slot_w = max(widest chip, min_slot_w_)).
+//    The chips are split by COUNT as evenly as possible over the minimal number of lines n whose per-line count
+//    (ceil(count / n)) fits the width. A column grid is derived ONCE from a full line (the spare width is spread over
+//    the gaps) and every line, including a shorter last line, uses the same column x positions, so the columns line
+//    up vertically. Each chip is centred in its slot. The size hint is a single slot, so the row never drives the
+//    panel width.
+//  * follower (the 图层 row): ignores its own wrapping, takes the column grid of a master layout (the 主题 row) for
+//    the same rect width and places its chips in columns 0, 1, 2, ... on a single line. One optional trailing item
+//    (the clear button) is right-aligned to the right edge of the rect, i.e. the right edge of the master's last
+//    column. There is NO wrapping: if the follower has more chips than the master has columns minus one, the extra
+//    chips simply overflow to the right.
 class ChipFlowLayout final : public QLayout {
  public:
-  ChipFlowLayout(QWidget* parent, int h_gap, int v_gap)
-      : QLayout(parent), h_gap_(h_gap), v_gap_(v_gap) {
+  ChipFlowLayout(QWidget* parent, int h_gap, int v_gap, bool balanced_justified = false)
+      : QLayout(parent), h_gap_(h_gap), v_gap_(v_gap), balanced_(balanced_justified) {
     setContentsMargins(0, 0, 0, 0);
   }
   ~ChipFlowLayout() override {
     while (QLayoutItem* item = takeAt(0)) delete item;
+  }
+
+  // Lower bound of the slot width; the dialog sets the same value (widest chip overall) on both rows.
+  void set_min_slot_width(int w) {
+    if (min_slot_w_ == w) return;
+    min_slot_w_ = w;
+    invalidate();
+  }
+  // Follower mode: take the column grid from `master` (which must outlive this layout's use).
+  void set_column_master(const ChipFlowLayout* master) {
+    master_ = master;
+    invalidate();
+  }
+  // Item whose widget is right-aligned instead of occupying a column (follower mode).
+  void set_trailing_item(QWidget* w) {
+    trailing_ = w;
+    invalidate();
+  }
+
+  // Column grid for `width`: per = slots per line, slot_w = slot width, gap = distance between slots, rem = number of
+  // leading gaps that get one extra pixel. Column c starts at c * (slot_w + gap) + min(c, rem).
+  void column_grid(int width, int& per, int& slot_w, int& gap, int& rem) const {
+    slot_w = slot_width();
+    const int n = non_trailing_count();
+    per = 1;
+    for (int lines = 1; lines <= n; ++lines) {
+      per = (n + lines - 1) / lines;
+      if (per * slot_w + (per - 1) * h_gap_ <= width) break;
+    }
+    const int extra = std::max(0, width - per * slot_w - (per - 1) * h_gap_);
+    gap = h_gap_;
+    rem = 0;
+    if (per > 1) {
+      gap += extra / (per - 1);
+      rem = extra % (per - 1);
+    }
   }
 
   void addItem(QLayoutItem* item) override { items_.append(item); }
@@ -263,6 +317,14 @@ class ChipFlowLayout final : public QLayout {
     place(rect, false);
   }
   QSize sizeHint() const override {
+    if (master_ != nullptr) {
+      // (non-trailing chips + 1 slot for the trailing item) at the minimum gap.
+      const int k = non_trailing_count();
+      const int cols = k + (has_trailing() ? 1 : 0);
+      const int w = cols > 0 ? cols * slot_width() + (cols - 1) * h_gap_ : 0;
+      return {w, max_item_height()};
+    }
+    if (balanced_) return minimumSize();  // one slot x chip height; the line count follows the width
     int w = 0;
     int h = 0;
     for (int i = 0; i < items_.size(); ++i) {
@@ -274,13 +336,99 @@ class ChipFlowLayout final : public QLayout {
     return {w, h};
   }
   QSize minimumSize() const override {
+    if (master_ != nullptr) return sizeHint();
+    if (balanced_) return {slot_width(), max_item_height()};
     QSize size;
     for (const QLayoutItem* item : items_) size = size.expandedTo(item->sizeHint());
     return size;
   }
 
  private:
+  bool is_trailing(const QLayoutItem* item) const {
+    return trailing_ != nullptr && item->widget() == trailing_;
+  }
+  bool has_trailing() const {
+    for (const QLayoutItem* item : items_) {
+      if (is_trailing(item)) return true;
+    }
+    return false;
+  }
+  int non_trailing_count() const {
+    int n = 0;
+    for (const QLayoutItem* item : items_) {
+      if (!is_trailing(item)) ++n;
+    }
+    return n;
+  }
+  int max_item_height() const {
+    int h = 0;
+    for (const QLayoutItem* item : items_) h = std::max(h, item->sizeHint().height());
+    return h;
+  }
+  // Uniform slot width: widest own (non-trailing) item, at least min_slot_w_.
+  int slot_width() const {
+    int w = min_slot_w_;
+    for (const QLayoutItem* item : items_) {
+      if (!is_trailing(item)) w = std::max(w, item->sizeHint().width());
+    }
+    return w;
+  }
+
+  int place_balanced(const QRect& rect, bool test_only) const {
+    const int n = static_cast<int>(items_.size());
+    if (n == 0) return 0;
+    int per = 1;
+    int slot_w = 0;
+    int gap = 0;
+    int rem = 0;
+    column_grid(rect.width(), per, slot_w, gap, rem);
+
+    int y = rect.y();
+    for (int start = 0; start < n; start += per) {
+      const int end = std::min(n, start + per);
+      int line_h = 0;
+      for (int i = start; i < end; ++i) line_h = std::max(line_h, items_[i]->sizeHint().height());
+      if (!test_only) {
+        for (int i = start; i < end; ++i) {
+          const int col = i - start;
+          const QSize s = items_[i]->sizeHint();
+          const int x = rect.x() + col * (slot_w + gap) + std::min(col, rem) + (slot_w - s.width()) / 2;
+          items_[i]->setGeometry(QRect(QPoint(x, y), s));
+        }
+      }
+      y += line_h + v_gap_;
+    }
+    return y - v_gap_ - rect.y();
+  }
+
+  int place_follower(const QRect& rect, bool test_only) const {
+    const int line_h = max_item_height();
+    if (test_only) return line_h;
+    int per = 1;
+    int slot_w = 0;
+    int gap = 0;
+    int rem = 0;
+    master_->column_grid(rect.width(), per, slot_w, gap, rem);
+    (void)per;  // columns past the master's last one are not wrapped (see class comment)
+    int col = 0;
+    for (QLayoutItem* item : items_) {
+      const QSize s = item->sizeHint();
+      int x = 0;
+      if (is_trailing(item)) {
+        x = rect.x() + rect.width() - s.width();
+      } else {
+        // Columns beyond the master's last one (see class comment) just continue the same arithmetic.
+        x = rect.x() + col * (slot_w + gap) + std::min(col, rem) + (slot_w - s.width()) / 2;
+        ++col;
+      }
+      item->setGeometry(QRect(QPoint(x, rect.y() + (line_h - s.height()) / 2), s));
+    }
+    return line_h;
+  }
+
   int place(const QRect& rect, bool test_only) const {
+    if (master_ != nullptr) return place_follower(rect, test_only);
+    if (balanced_) return place_balanced(rect, test_only);
     int x = rect.x();
     int y = rect.y();
     int line_h = 0;
@@ -301,7 +449,13 @@ class ChipFlowLayout final : public QLayout {
   QList<QLayoutItem*> items_;
   int h_gap_;
   int v_gap_;
+  bool balanced_ = false;
+  int min_slot_w_ = 0;
+  const ChipFlowLayout* master_ = nullptr;
+  QWidget* trailing_ = nullptr;
 };
+
+ChipFlowLayout* flow_layout(QWidget* w) { return w != nullptr ? static_cast<ChipFlowLayout*>(w->layout()) : nullptr; }
 
 // Tri-state filter chip: off / include (checked) / exclude (red outline).
 // Each left click cycles Off -> Include -> Exclude -> Off.
@@ -318,8 +472,7 @@ class TagChip final : public QPushButton {
     setDefault(false);
     setFocusPolicy(Qt::NoFocus);
     setFixedHeight(kControlH);
-    setToolTip(QString::fromUtf8(info.tooltip_utf8) +
-               QStringLiteral("\n单击切换：包含 → 排除 → 不限"));
+    setToolTip(QString::fromUtf8(info.tooltip_utf8));
     apply_state();
     // clicked fires after QAbstractButton flipped the check state; set_state() re-syncs it from state_.
     connect(this, &QPushButton::clicked, this, [this] {
@@ -520,10 +673,12 @@ SplitPickerDialog::SplitPickerDialog(int32_t count, int32_t color_id,
   count_type_row->addWidget(search_);
 
   // Tag chip flow (图层 / 主题). The theme list is data-driven.
-  auto make_chip_flow = [this](QWidget* parent, const std::vector<SplitEffectTagInfo>& tags) {
+  // `balanced` (theme row): even-by-count lines, each full line justified to both edges, line spacing equal to the
+  // grid's row spacing so the lines read as regular rows.
+  auto make_chip_flow = [this](QWidget* parent, const std::vector<SplitEffectTagInfo>& tags, bool balanced) {
     auto* row = new QWidget(parent);
     row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    auto* flow = new ChipFlowLayout(row, 6, 6);
+    auto* flow = new ChipFlowLayout(row, 6, balanced ? kGridRowSpacing : 6, balanced);
     for (const auto& info : tags) {
       auto* chip = new TagChip(info, row);
       chip->on_changed = [this] {
@@ -535,26 +690,33 @@ SplitPickerDialog::SplitPickerDialog(int32_t count, int32_t color_id,
     }
     return row;
   };
-  // 图层 row (the shorter one) also carries 清除筛选 at its right end.
-  auto* layer_row = new QWidget(top_panel_);
-  layer_row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-  auto* layer_lay = new QHBoxLayout(layer_row);
-  layer_lay->setContentsMargins(0, 0, 0, 0);
-  layer_lay->setSpacing(kGridSpacing);
-  layer_flow_ = make_chip_flow(layer_row, split_effect_layer_tags());
-  layer_lay->addWidget(layer_flow_, 1, Qt::AlignTop);
-  clear_btn_ = new QPushButton(tr("清除筛选"), layer_row);
+  layer_flow_ = make_chip_flow(top_panel_, split_effect_layer_tags(), false);
+  theme_flow_ = make_chip_flow(top_panel_, split_effect_theme_tags(), true);
+  // 清除筛选 (icon only, same X as the shortcut dialog's clear buttons) is the trailing item of the 图层 flow, which
+  // follows the column grid of the 主题 flow: the button sits right-aligned in the last column.
+  clear_btn_ = new QPushButton(layer_flow_);
+  clear_btn_->setObjectName(QStringLiteral("splitPickerClear"));
+  clear_btn_->setIcon(themed_named_icon("clear", {}, 16));
+  clear_btn_->setIconSize(QSize(16, 16));
   clear_btn_->setFlat(true);
   clear_btn_->setAutoDefault(false);
   clear_btn_->setDefault(false);
   clear_btn_->setFocusPolicy(Qt::NoFocus);
   clear_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   clear_btn_->setStyleSheet(QStringLiteral("QPushButton { ") + control_box_css() +
-                            QStringLiteral(" padding-left:10px; padding-right:10px; icon-size:0px; }"));
-  clear_btn_->setFixedHeight(kControlH);
+                            QStringLiteral(" min-width:%1px; max-width:%1px; width:%1px; padding:0px; }")
+                                .arg(kControlContentH));
+  clear_btn_->setFixedSize(kControlH, kControlH);
+  clear_btn_->setToolTip(tr("清空筛选"));
+  clear_btn_->setAccessibleName(tr("清空筛选"));
   clear_btn_->setEnabled(false);
-  layer_lay->addWidget(clear_btn_, 0, Qt::AlignTop);
-  theme_flow_ = make_chip_flow(top_panel_, split_effect_theme_tags());
+  {
+    ChipFlowLayout* layer_lay = flow_layout(layer_flow_);
+    layer_lay->addWidget(clear_btn_);
+    layer_lay->set_trailing_item(clear_btn_);
+    layer_lay->set_column_master(flow_layout(theme_flow_));
+  }
+  update_chip_slot_width();
   QWidget* theme_row = theme_flow_;
   layer_label_ = new QLabel(tr("图层"), top_panel_);
   theme_label_ = new QLabel(tr("主题"), top_panel_);
@@ -605,14 +767,14 @@ SplitPickerDialog::SplitPickerDialog(int32_t count, int32_t color_id,
   grid->setHorizontalSpacing(kGridSpacing);
   grid->setColumnStretch(0, 0);
   grid->setColumnStretch(1, 1);
-  grid->setVerticalSpacing(8);
+  grid->setVerticalSpacing(kGridRowSpacing);
   count_label_ = new QLabel(tr("轨道数"), top_panel_);
   style_control_label(count_label_, Qt::AlignLeft | Qt::AlignVCenter);
   // Row 0 is centred; the wrapping rows are top-aligned so the label lines up with the FIRST chip line.
   grid->addWidget(count_label_, 0, 0, Qt::AlignVCenter);
   grid->addWidget(controls_, 0, 1, Qt::AlignVCenter);
   grid->addWidget(layer_label_, 1, 0, Qt::AlignTop);
-  grid->addWidget(layer_row, 1, 1, Qt::AlignTop);
+  grid->addWidget(layer_flow_, 1, 1, Qt::AlignTop);
   grid->addWidget(theme_label_, 2, 0, Qt::AlignTop);
   grid->addWidget(theme_row, 2, 1, Qt::AlignTop);
   root->addWidget(top_panel_, 0, Qt::AlignHCenter);
@@ -658,6 +820,22 @@ SplitPickerDialog::SplitPickerDialog(int32_t count, int32_t color_id,
   });
 }
 
+// Both chip rows share one slot width = the widest chip overall, so the 图层 chips line up with the 主题 columns.
+void SplitPickerDialog::update_chip_slot_width() {
+  int w = 0;
+  for (const QPushButton* b : chips_) w = std::max(w, b->sizeHint().width());
+  if (ChipFlowLayout* l = flow_layout(layer_flow_)) l->set_min_slot_width(w);
+  if (ChipFlowLayout* l = flow_layout(theme_flow_)) l->set_min_slot_width(w);
+}
+
+void SplitPickerDialog::changeEvent(QEvent* event) {
+  QDialog::changeEvent(event);
+  if (event != nullptr && clear_btn_ != nullptr &&
+      (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange)) {
+    clear_btn_->setIcon(themed_named_icon("clear", {}, 16));
+  }
+}
+
 int SplitPickerDialog::min_body_width() const {
   if (colors_ == nullptr) return 1;
   int sb = 0;
@@ -671,8 +849,9 @@ int SplitPickerDialog::min_body_width() const {
 
 // Width W of the top panel: label column + grid spacing + the widest of the three rows at its natural width.
 //  row 0: the fixed items of the controls row (stretch collapsed -> minimumSizeHint)
-//  row 1: single-line layer chips + spacing + 清除筛选
-//  row 2: single-line theme chips (normally the widest, so it defines the block width)
+//  row 1: single-line layer chips + one slot for the clear button (follower flow size hint)
+//  row 2: theme chips are balanced over several justified lines, so they do NOT drive the width; only the widest
+//         single chip is a lower bound.
 int SplitPickerDialog::content_width() const {
   if (controls_ == nullptr) return 1;
   const int label_w = std::max({
@@ -682,9 +861,10 @@ int SplitPickerDialog::content_width() const {
       1,
   });
   const int row0_w = controls_->minimumSizeHint().width();
-  const int layer_w = (layer_flow_ != nullptr ? layer_flow_->sizeHint().width() : 0) + kGridSpacing +
-                      (clear_btn_ != nullptr ? clear_btn_->sizeHint().width() : 0);
-  const int theme_w = theme_flow_ != nullptr ? theme_flow_->sizeHint().width() : 0;
+  // The follower flow's size hint already contains the slot of the clear button.
+  const int layer_w = layer_flow_ != nullptr ? layer_flow_->sizeHint().width() : 0;
+  // Balanced flow: minimumSizeHint().width() == widest chip.
+  const int theme_w = theme_flow_ != nullptr ? theme_flow_->minimumSizeHint().width() : 0;
   int w = label_w + kGridSpacing + std::max({row0_w, layer_w, theme_w, 1});
   // Never wider than the screen allows (chips wrap instead), but at least the preview body width.
   if (const QScreen* s = screen()) {
@@ -697,6 +877,7 @@ int SplitPickerDialog::content_width() const {
 void SplitPickerDialog::sync_aligned_width() {
   if (aligning_ || controls_ == nullptr || search_ == nullptr || colors_ == nullptr) return;
   aligning_ = true;
+  update_chip_slot_width();
   const int panel_w = content_width();
   if (top_panel_ != nullptr) top_panel_->setFixedWidth(panel_w);
   const int body_w = std::max(panel_w, min_body_width());

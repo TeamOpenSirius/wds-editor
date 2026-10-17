@@ -2064,7 +2064,7 @@ void test_official_chart_import_and_roundtrip() {
   bool found_split = false;
   bool found_jump = false;
   bool found_flick = false;
-  bool found_orphan_as_flick = false;
+  bool found_official_scratch = false;
   for (const auto& n : notes) {
     if (n.note_type == NoteType::Critical && n.width == 4 && n.lane == 0) {
       found_critical = true;
@@ -2092,9 +2092,9 @@ void test_official_chart_import_and_roundtrip() {
       found_flick = true;
       CHECK_EQ(n.lane, 3);  // official 4
     }
-    // Official sample orphan type=40 (Sirius SoundPurple) → Flick.
-    if (n.note_type == NoteType::Flick && n.width == 3 && n.lane == 3) {
-      found_orphan_as_flick = true;
+    // Official sample type=40 Scratch stays Scratch (looks like Flick).
+    if (n.note_type == NoteType::Scratch && n.width == 3 && n.lane == 3) {
+      found_official_scratch = true;
       MusicTiming local = timing;
       local.offset_ms = 0;
       CHECK_EQ(n.start_tick,
@@ -2105,7 +2105,7 @@ void test_official_chart_import_and_roundtrip() {
   CHECK(found_split);
   CHECK(found_jump);
   CHECK(found_flick);
-  CHECK(found_orphan_as_flick);
+  CHECK(found_official_scratch);
 
   const fs::path out_path = temp_chart_path("official_roundtrip.csv");
   const auto save = engine.export_official_to_file(out_path.string());
@@ -3164,9 +3164,8 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   }
 }
 
-// Sirius type 40 mid-scratch splits purple holds; HoldEighth/Split export match sus2txt.
-void test_official_sound_purple_split_and_row_semantics() {
-  // ScratchHold 1..3s lanes 1-3 width 3; mid SoundPurple at 2s with scratchLength=3.
+// Official type 40 is Scratch (kept). Split rows export type 0 / lane -1 / width 0.
+void test_official_scratch_and_split_row_semantics() {
   const std::string csv =
       "1.0,3.0,110,1,3,0,0\n"
       "2.0,-1.0,40,1,3,0,3\n"
@@ -3186,23 +3185,31 @@ void test_official_sound_purple_split_and_row_semantics() {
   int eighths = 0;
   int type40 = 0;
   for (const auto& n : chart.notes) {
-    if (static_cast<int32_t>(n.note_type) == 40) ++type40;
+    if (n.note_type == NoteType::Scratch) {
+      ++type40;
+      CHECK_EQ(n.start_tick, 960);
+      CHECK_EQ(n.end_tick, n.start_tick);
+      CHECK_EQ(n.lane, 0);
+      CHECK_EQ(n.width, 3);
+      CHECK_EQ(n.scratch_length, 3);
+    }
     if (n.note_type == NoteType::ScratchHold) {
       ++scratch_holds;
-      if (n.gimmick_type == GimmickType::JumpScratch) {
-        ++jump;
-        CHECK_EQ(n.scratch_length, 3);
-        CHECK_EQ(n.end_tick, 960);
-      }
+      CHECK_EQ(n.start_tick, 480);
+      CHECK_EQ(n.end_tick, 1440);
+      CHECK_EQ(static_cast<int>(n.gimmick_type), static_cast<int>(GimmickType::None));
     }
     if (n.note_type == NoteType::ScratchSound) ++stars;
     if (n.note_type == NoteType::HoldEighth) ++eighths;
   }
-  CHECK_EQ(type40, 0);
-  CHECK_EQ(scratch_holds, 2);
-  CHECK_EQ(jump, 1);
+  CHECK_EQ(type40, 1);
+  CHECK_EQ(scratch_holds, 1);
+  CHECK_EQ(jump, 0);
   CHECK_EQ(stars, 1);
   CHECK_EQ(eighths, 1);
+
+  CHECK_EQ(static_cast<int>(convert_note_type(chart.notes[0], NoteType::Scratch, 480).note_type),
+           static_cast<int>(chart.notes[0].note_type));
 
   // Export: HoldEighth endTime=-1; Split leftLane=-1; JumpScratch name when scratch≠0.
   NotationChart export_chart;
@@ -3278,6 +3285,37 @@ void test_official_sound_purple_split_and_row_semantics() {
   }
   CHECK(out.find("-1,0,12,") != std::string::npos || out.find("-1,0,Split2,") != std::string::npos);
   CHECK(out.find("JumpScratch,2") != std::string::npos);
+
+  // Critical+Split3 covering 12 lanes still exports the official placeholder.
+  {
+    NotationChart split_chart;
+    split_chart.timing.bpm = 60.0;
+    split_chart.timing.ticks_per_quarter = 480;
+    NotationNote split;
+    split.id = 0;
+    split.start_tick = 0;
+    split.end_tick = 960;
+    split.note_type = NoteType::Critical;
+    split.lane = 0;
+    split.width = 12;
+    split.gimmick_type = GimmickType::Split3;
+    split.scratch_length = 3;
+    split_chart.notes.push_back(split);
+    std::string split_out;
+    CHECK_EQ(static_cast<int>(
+                 OfficialChartFormat::serialize_chart(split_chart, split_out, save_opt).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(split_out.find(",0,-1,0,") != std::string::npos);
+    CHECK(split_out.find(",20,") == std::string::npos);
+  }
+
+  {
+    std::string scratch_out;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, scratch_out).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(scratch_out.find(",40,") != std::string::npos);
+    CHECK(scratch_out.find(",110,") != std::string::npos);
+  }
 }
 
 void test_migrate_wdschart_scratch_to_flick_script() {
@@ -3308,9 +3346,11 @@ void test_migrate_wdschart_scratch_to_flick_script() {
   CHECK_EQ(static_cast<int>(chart.notes.size()), 2);
   CHECK(chart.notes[1].note_type == NoteType::Flick);
 
-  NotationChart rejected;
-  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(src.string(), rejected).error),
-           static_cast<int>(SerializeError::ParseError));
+  NotationChart raw;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(src.string(), raw).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(raw.notes.size()), 2);
+  CHECK(raw.notes[1].note_type == NoteType::Scratch);
 }
 
 void test_save_failure_preserves_note_ids() {
@@ -7031,6 +7071,7 @@ bool reference_is_combo_head_note(const NotationNote& note) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
+    case NoteType::Scratch:
     case NoteType::BlueTap:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
@@ -8587,7 +8628,7 @@ int main() {
   test_sus_ignores_file_eighth_and_export_generates();
   test_official_csv_tempo_map_export();
   test_official_csv_flick_scratch_length_encodes_width();
-  test_official_sound_purple_split_and_row_semantics();
+  test_official_scratch_and_split_row_semantics();
   test_migrate_wdschart_scratch_to_flick_script();
   test_save_failure_preserves_note_ids();
   test_sus_meter_and_mid_measure_bpm_roundtrip();
