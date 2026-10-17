@@ -825,13 +825,16 @@ void EditorMainWindow::handle_ui_change(UiChange change) {
         toolbar_widget_->refresh_enabled_states();
       }
       refresh_window_title();
+      if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
       break;
     case UiChange::History:
       refresh_history_actions();
+      if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
       break;
     case UiChange::Document:
       refresh_window_title();
       arm_backup_timer();
+      if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
       break;
     case UiChange::PlaceTool:
       sync_toolbox_place_checks();

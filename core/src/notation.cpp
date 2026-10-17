@@ -475,7 +475,7 @@ void build_mid_star_index(const std::vector<NotationNote>& notes, const MusicTim
   index.generation = 0;
 
   for (size_t i = 0; i < notes.size(); ++i) {
-    if (!is_hold_mid_star(notes[i].note_type)) {
+    if (!is_hold_mid_star(notes[i].note_type) || is_suppressed_hold_eighth(notes[i])) {
       continue;
     }
     const MidStarRef ref{i, notes[i].start_ms(timing)};
@@ -614,7 +614,8 @@ void collect_preview_combo_hits(const std::vector<NotationNote>& notes, const Mu
   }
 
   for (size_t i = 0; i < notes.size(); ++i) {
-    if (star_consumed[i] || !is_hold_mid_star(notes[i].note_type)) {
+    if (star_consumed[i] || !is_hold_mid_star(notes[i].note_type) ||
+        is_suppressed_hold_eighth(notes[i])) {
       continue;
     }
     if (is_split_lane_gimmick(notes[i].gimmick_type)) {
@@ -729,6 +730,70 @@ ChartDocument::ChartDocument(MusicTiming timing) : timing_(std::move(timing)) {
   normalize_timing_points(timing_);
 }
 
+bool note_requires_sirius_extended(const NotationNote& note) noexcept {
+  if (is_nontail_hold_body(note.note_type)) return true;
+  if (note.note_type == NoteType::HoldEighth || note.note_type == NoteType::None ||
+      is_split_lane_gimmick(note.gimmick_type)) return false;
+  return note.lane < 0 || note.width > 12 ||
+         static_cast<int64_t>(note.lane) + note.width > 12;
+}
+
+std::vector<std::string> required_chart_features(const NotationChart& chart) {
+  bool nontail = false;
+  bool overhang = false;
+  for (const auto& note : chart.notes) {
+    nontail = nontail || is_nontail_hold_body(note.note_type);
+    if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
+    overhang = overhang || note.lane < 0 || static_cast<int64_t>(note.lane) + note.width > 12;
+  }
+  std::vector<std::string> features;
+  if (nontail) features.emplace_back("nontail-hold-v1");
+  if (!chart.scroll_speed_points.empty()) features.emplace_back("positive-sv-v1");
+  if (overhang) features.emplace_back("lane-overhang-v1");
+  return features;
+}
+
+bool ChartDocument::set_scroll_speed_points(std::vector<ScrollSpeedPoint> points) {
+  if (is_read_only()) return false;
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official && !points.empty()) return false;
+  for (const auto& point : points) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+      return false;
+    }
+  }
+  std::sort(points.begin(), points.end(), [](const auto& a, const auto& b) {
+    return a.tick < b.tick;
+  });
+  for (size_t i = 1; i < points.size(); ++i) {
+    if (points[i - 1].tick == points[i].tick) return false;
+  }
+  scroll_speed_points_ = std::move(points);
+  mark_dirty();
+  return true;
+}
+
+bool ChartDocument::set_compatibility_profile(ChartCompatibilityProfile profile) {
+  if (is_read_only()) return false;
+  if (profile == compatibility_profile_) return true;
+  if (profile == ChartCompatibilityProfile::Official) {
+    if (!scroll_speed_points_.empty()) return false;
+    for (const auto& note : notes_) {
+      if (note_requires_sirius_extended(note)) return false;
+      if (note.note_type == NoteType::HoldEighth || is_split_lane_gimmick(note.gimmick_type) ||
+          (note.note_type == NoteType::None && note.width == 0)) {
+        continue;
+      }
+      if (note.width < 1 || note.width > 12 || note.lane < 0 ||
+          static_cast<int64_t>(note.lane) + note.width > 12) {
+        return false;
+      }
+    }
+  }
+  compatibility_profile_ = profile;
+  mark_dirty();
+  return true;
+}
+
 bool ChartDocument::set_timing(MusicTiming timing) {
   if (is_read_only()) {
     return false;
@@ -767,6 +832,8 @@ int32_t ChartDocument::add_note(NotationNote note) {
   if (is_read_only()) {
     return -1;
   }
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official &&
+      note_requires_sirius_extended(note)) return -1;
   constexpr int32_t kMaxId = std::numeric_limits<int32_t>::max();
   if (note.id < 0) {
     if (next_id_ == kMaxId) {
@@ -813,6 +880,8 @@ bool ChartDocument::apply_note_updates(const std::vector<NoteUpdate>& updates) {
   }
 
   for (const auto& update : updates) {
+    if (compatibility_profile_ == ChartCompatibilityProfile::Official &&
+        note_requires_sirius_extended(update.note)) return false;
     const auto it = id_to_index_.find(update.id);
     const NotationNote old_note = notes_[it->second];
     NotationNote updated = update.note;
@@ -865,6 +934,8 @@ bool ChartDocument::set_notes(std::vector<NotationNote> notes) {
   if (is_read_only()) {
     return false;
   }
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official &&
+      std::any_of(notes.begin(), notes.end(), note_requires_sirius_extended)) return false;
   const NoteIdPlan plan = plan_note_ids(notes, next_id_);
   if (!plan.ok || plan.ids.size() != notes.size()) {
     return false;
@@ -915,6 +986,8 @@ NotationChart ChartDocument::to_notation_chart() const {
   chart.timing = timing_;
   chart.notes = notes_;
   chart.concurrent_lines = concurrent_lines_;
+  chart.scroll_speed_points = scroll_speed_points_;
+  chart.compatibility_profile = compatibility_profile_;
   return chart;
 }
 
@@ -931,6 +1004,8 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
   normalize_timing_points(timing_);
   notes_ = chart.notes;
   concurrent_lines_ = chart.concurrent_lines;
+  scroll_speed_points_ = chart.scroll_speed_points;
+  compatibility_profile_ = chart.compatibility_profile;
   edit_mode_ = mode;
 
   if (!chart_note_ids_keepable(notes_)) {

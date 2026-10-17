@@ -533,6 +533,12 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   if (!ready_) {
     return;
   }
+  const uint64_t chart_revision = engine_.document().content_generation();
+  if (scroll_geometry_revision_ != chart_revision) {
+    preview_.geometry().set_scroll_speed_points(engine_.document().scroll_speed_points(),
+                                                engine_.document().timing());
+    scroll_geometry_revision_ = chart_revision;
+  }
   if (display_refresh_hz_fn_) {
     display_refresh_hz_ = std::max(1, display_refresh_hz_fn_());
   }

@@ -23,6 +23,9 @@ class PreviewSnapshotBuilder {
   PreviewSnapshotBuilder(PreviewConfig config = {});
 
   void set_config(PreviewConfig config);
+  void set_scroll_speed_points(std::vector<ScrollSpeedPoint> points,
+                               const MusicTiming& timing);
+  void set_compatibility_profile(ChartCompatibilityProfile profile);
 
   PreviewSnapshot build(const NotationChart& chart, const ChartNoteIndex& index,
                         int64_t preview_time_ms, PreviewPlaybackState playback_state,
@@ -132,6 +135,7 @@ class PreviewSnapshotBuilder {
   mutable uint64_t cached_combo_revision_ = ~uint64_t{0};
   mutable const std::vector<NotationNote>* cached_combo_notes_ = nullptr;
   mutable std::vector<int64_t> cached_combo_hits_;
+  double minimum_scroll_multiplier_ = 1.0;
 };
 
 }  // namespace wds::chart_editor

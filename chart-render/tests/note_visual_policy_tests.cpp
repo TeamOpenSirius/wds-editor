@@ -73,6 +73,12 @@ void test_concurrent_line_sliced_caps_stay_four_pixels() {
 }
 
 void test_scratch_arrow_sides() {
+  using wds::chart_editor::NoteType;
+  using wds::chart_render::preview_draws_start_scratch_arrows;
+  CHECK(preview_draws_start_scratch_arrows(NoteType::Flick));
+  CHECK(!preview_draws_start_scratch_arrows(NoteType::ScratchHold));
+  CHECK(!preview_draws_start_scratch_arrows(NoteType::NontailScratchHold));
+  CHECK(!preview_draws_start_scratch_arrows(NoteType::NontailScratchCriticalHold));
   assert(scratch_arrow_sides(-3).draw_left && !scratch_arrow_sides(-3).draw_right);
   assert(!scratch_arrow_sides(4).draw_left && scratch_arrow_sides(4).draw_right);
   assert(scratch_arrow_sides(0).draw_left && scratch_arrow_sides(0).draw_right);

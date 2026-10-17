@@ -18,13 +18,12 @@ namespace wds::chart_editor {
 // - Start #5 on the body or an adjacent sus2txt span → addStart=false (no pink
 //   head). Start #5 with no end/mid #5 → shouldUnscratch back to blue Hold + head.
 // - Critical gold head = Critical tap (#1 type 2) covering the slide start.
-// - Damage (#1 type 4) at start → intentional headless; at end → Nontail (import
-//   may degrade to a tailed Hold and record a warning).
+// - Damage (#1 type 4) at start → intentional headless; at end → Nontail.
 // - Slide mid (#3 type 3) → Sound / ScratchSound by parent hold family.
 // - Mid #5 on the exact body span → purple split (SoundPurple). JumpScratch
 //   only when the Air encodes a nonzero scratch span; sl=0 stays gimmick 0.
 // - #TIL01 export must be `#TIL01: "` (colon-space) so sus2txt can parse it.
-//   #TIL00 HiSpeed is ignored (editor cannot author).
+//   #TIL00 non-negative global HiSpeed is retained as scroll_speed_points.
 // - Legacy #2 Hold channels from older WDS exports import as blue Hold.
 // - Ched 12-key pad: export L→L+2; import auto-detects offset 2 for the 2..d window.
 // - HoldEighth is generated on export as slide type 5 (invisible mid) and
@@ -48,7 +47,7 @@ struct SusChartMetadata {
 struct SusChartLoadResult {
   NotationChart chart;
   SusChartMetadata meta;
-  // Human-readable lossy-import notes (Nontail→tailed, ignored HiSpeed, orphans…).
+  // Human-readable import notes (skipped incompatible SV points, orphans…).
   std::vector<std::string> warnings;
 };
 

@@ -15,9 +15,11 @@
 #include <wds/renderer/draw_batch.hpp>
 #include <wds/renderer/skin_catalog.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -40,6 +42,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Fired after exact Option+wheel changes visible_hectoms (sync toolbar + persist).
   void set_visible_range_changed_handler(std::function<void()> handler) {
     on_visible_range_changed_ = std::move(handler);
+  }
+  void set_extra_visible_lanes_changed_handler(std::function<void()> handler) {
+    on_extra_visible_lanes_changed_ = std::move(handler);
   }
   void set_cursor_setter(std::function<void(wds::interaction::CursorKind)> setter) {
     cursor_setter_ = std::move(setter);
@@ -98,6 +103,16 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_spectrum_mode(EditSpectrumMode mode) noexcept { spectrum_mode_ = mode; }
   EditSpectrumMode spectrum_mode() const noexcept { return spectrum_mode_; }
   void set_note_height_level(int level) noexcept { viewport_.set_note_height_level(level); }
+
+  void set_extended_editing_active(bool enabled) noexcept;
+  bool extended_editing_active() const noexcept { return extended_editing_active_; }
+  void set_extra_visible_lanes(int extra) noexcept;
+  int extra_visible_lanes() const noexcept { return extra_visible_lanes_session_; }
+  void set_lane_slider_hovered(bool hovered) noexcept;
+  bool lane_slider_hovered() const noexcept { return lane_slider_hovered_; }
+  std::size_t gutter_ghost_count() const noexcept { return gutter_ghosts_.size(); }
+  const wds::interaction::Rect& playfield() const noexcept { return playfield_; }
+  const wds::interaction::Rect& speed_gutter() const noexcept { return speed_gutter_; }
 
   // Toolbox (new-note-place) mode: left click places the current override type.
   // Tests call this directly; UiManager wires it from new_note_place_logic.
@@ -196,9 +211,16 @@ class ChartEditPanel final : public wds::interaction::Widget {
     int32_t numerator = 4;
     int32_t denominator = 4;
   };
+  struct SpeedModalDraft {
+    int32_t tick = 0;
+    double multiplier = 1.0;
+  };
   // Snapshot + close an in-panel modal so a Qt dialog can own the form.
   bool take_split_modal(SplitModalDraft& out);
   bool take_timing_modal(TimingModalDraft& out);
+  bool take_speed_modal(SpeedModalDraft& out);
+  bool apply_scroll_speed(int32_t tick, double multiplier);
+  bool delete_scroll_speed(int32_t tick);
   bool add_split_effect(int32_t tick, int32_t count, int32_t color_id,
                         wds::chart_editor::SplitLaneType type = wds::chart_editor::SplitLaneType::Full);
   bool edit_split_effect(int32_t note_id, int32_t count, int32_t color_id,
@@ -207,7 +229,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool apply_meter(int32_t tick, int32_t numerator, int32_t denominator);
 
   // Modal dialogs (split picker / timing) — paint after overlays, above everything.
-  bool has_modal_popup() const noexcept { return split_picker_open_ || timing_popup_open_; }
+  bool has_modal_popup() const noexcept {
+    return split_picker_open_ || timing_popup_open_ || speed_popup_open_;
+  }
   bool is_interaction_modal() const override { return has_modal_popup(); }
   bool blocks_interaction_behind(wds::interaction::Vec2 point) const override;
   void paint_popups(wds::interaction::UiPainter& painter) const;
@@ -248,6 +272,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
     AdjustHoldTime,
     PlaceHoldBody,
     DragSplitEdge,
+    DragSpeedPoint,
   };
 
   struct GhostNote {
@@ -362,7 +387,14 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   bool handle_popup_pointer_down(const wds::interaction::PointerDownEvent& event);
   bool handle_left_gutter_pointer_down(const wds::interaction::PointerDownEvent& event);
+  bool handle_speed_gutter_pointer_down(const wds::interaction::PointerDownEvent& event);
   bool handle_right_gutter_pointer_down(const wds::interaction::PointerDownEvent& event);
+  void open_speed_popup(int32_t tick);
+  void close_speed_popup();
+  void sync_speed_point_to_pointer(wds::interaction::Vec2 point);
+  bool execute_maybe_extended(std::unique_ptr<wds::chart_editor::IEditCommand> cmd,
+                              bool introduces_extended, const std::string& label);
+  bool try_convert_hold_tail_to_nontail(wds::interaction::Vec2 point);
   void paint_gutters(wds::interaction::UiPainter& painter) const;
   void paint_gutter_overlays(wds::interaction::UiPainter& painter) const;
   void open_split_picker(int32_t tick);
@@ -407,9 +439,20 @@ class ChartEditPanel final : public wds::interaction::Widget {
   std::unordered_set<int32_t> offset_violation_ids_;
   float offset_violation_elapsed_ = 0.0f;
   mutable wds::interaction::Rect left_gutter_{};
+  mutable wds::interaction::Rect speed_gutter_{};       // scroll speed (extended)
   mutable wds::interaction::Rect right_gutter_{};       // BPM / meter
   mutable wds::interaction::Rect measure_gutter_{};     // measure index (far right)
   mutable wds::interaction::Rect playfield_{};
+  bool extended_editing_active_ = false;
+  int extra_visible_lanes_session_ = 0;
+  bool lane_slider_hovered_ = false;
+  bool speed_popup_open_ = false;
+  int32_t speed_edit_tick_ = 0;
+  double speed_edit_multiplier_ = 1.0;
+  int32_t drag_speed_tick_ = 0;
+  int32_t drag_speed_press_tick_ = 0;
+  bool speed_point_ever_moved_ = false;
+  std::vector<wds::chart_editor::ScrollSpeedPoint> drag_speed_original_points_{};
   mutable wds::interaction::Rect split_picker_bounds_{};
   mutable wds::interaction::Rect timing_popup_bounds_{};
   mutable std::vector<wds::interaction::Rect> split_count_buttons_{};
@@ -431,6 +474,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable wds::interaction::Rect timing_den_field_{};
   std::function<void(int64_t)> seek_ms_;
   std::function<void()> on_visible_range_changed_;
+  std::function<void()> on_extra_visible_lanes_changed_;
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
   std::unordered_set<int32_t> selected_;

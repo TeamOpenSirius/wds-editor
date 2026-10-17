@@ -58,6 +58,34 @@ class SetTimingCommand final : public IEditCommand {
   std::string label_;
 };
 
+class SetScrollSpeedPointsCommand final : public IEditCommand {
+ public:
+  SetScrollSpeedPointsCommand(std::vector<ScrollSpeedPoint> before,
+                             std::vector<ScrollSpeedPoint> after,
+                             std::string label = "Set scroll speed");
+  bool execute(ChartDocument& doc) override;
+  bool undo(ChartDocument& doc) override;
+  std::string label() const override;
+
+ private:
+  std::vector<ScrollSpeedPoint> before_;
+  std::vector<ScrollSpeedPoint> after_;
+  std::string label_;
+};
+
+class SetCompatibilityProfileCommand final : public IEditCommand {
+ public:
+  SetCompatibilityProfileCommand(ChartCompatibilityProfile before,
+                                 ChartCompatibilityProfile after);
+  bool execute(ChartDocument& doc) override;
+  bool undo(ChartDocument& doc) override;
+  std::string label() const override;
+
+ private:
+  ChartCompatibilityProfile before_;
+  ChartCompatibilityProfile after_;
+};
+
 class AddNotesCommand final : public IEditCommand {
  public:
   explicit AddNotesCommand(std::vector<NotationNote> notes, std::string label = "Add notes");

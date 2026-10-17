@@ -145,6 +145,7 @@ class ChartEditorEngine {
   PreviewSnapshot snapshot_;
   PreviewSnapshotCallback snapshot_callback_;
   int64_t preview_lead_in_visible_ms_ = 0;
+  uint64_t scroll_points_revision_ = ~uint64_t{0};
 };
 
 }  // namespace wds::chart_editor

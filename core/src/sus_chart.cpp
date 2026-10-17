@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
+#include <iomanip>
+#include <limits>
 #include <cmath>
 #include <map>
 #include <numeric>
@@ -291,7 +294,16 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     int types = 0;    // color id
   };
   std::vector<TilSplitPoint> til_splits;
-  bool saw_hispeed_til = false;
+  struct TilSpeedPoint {
+    int measure = 0;
+    int subtick = 0;
+    double multiplier = 1.0;
+  };
+  std::vector<TilSpeedPoint> til_speeds;
+  size_t skipped_nonpositive_speed_points = 0;
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
+  bool saw_compatibility_profile = false;
+  int declared_lane_offset = -1;
 
   int measure_base = 0;
   std::istringstream stream(text);
@@ -323,6 +335,27 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       }
     }
     const std::string header_l = to_lower_ascii(header);
+
+    if (header_l == "wds_profile") {
+      saw_compatibility_profile = true;
+      const std::string profile = to_lower_ascii(trim_copy(data));
+      if (profile == "siriusextended") {
+        compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+      } else if (profile == "official") {
+        compatibility_profile = ChartCompatibilityProfile::Official;
+      } else {
+        return {SerializeError::ParseError, "SUS unknown WDS_PROFILE"};
+      }
+      continue;
+    }
+    if (header_l == "wds_lane_offset") {
+      int offset = -1;
+      if (!parse_int(data, offset) || offset < 0 || offset > 35) {
+        return {SerializeError::ParseError, "SUS invalid WDS_LANE_OFFSET"};
+      }
+      declared_lane_offset = offset;
+      continue;
+    }
 
     auto set_meta_str = [&](const char* key, std::string& field) {
       if (to_lower_ascii(header) == key) {
@@ -388,11 +421,40 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       if (id >= 0 && parse_double(data, bpm) && bpm > 0.0) bpm_defs[id] = bpm;
       continue;
     }
-    // #TIL00 HiSpeed (ignored — editor cannot author). #TIL01 split lines.
+    // Sirius SUS #TIL00 global non-negative SV; #TIL01 split lines.
     if (header_l.rfind("til", 0) == 0) {
       const std::string til_id = header_l.size() >= 5 ? header_l.substr(3, 2) : "";
       if (til_id == "00") {
-        saw_hispeed_til = true;
+        std::string body = trim_copy(data);
+        if (body.size() >= 2 && body.front() == '"' && body.back() == '"') {
+          body = body.substr(1, body.size() - 2);
+        }
+        std::string entry;
+        std::istringstream es(body);
+        while (std::getline(es, entry, ',')) {
+          entry = trim_copy(entry);
+          if (entry.empty()) continue;
+          const size_t colon = entry.find(':');
+          const size_t quote = entry.find('\'');
+          if (colon == std::string::npos || quote == std::string::npos || quote >= colon) {
+            return {SerializeError::ParseError, "SUS #TIL00 malformed speed entry"};
+          }
+          int measure = 0;
+          int subtick = 0;
+          double multiplier = 0.0;
+          if (!parse_int(entry.substr(0, quote), measure) ||
+              !parse_int(entry.substr(quote + 1, colon - quote - 1), subtick) ||
+              !parse_double(entry.substr(colon + 1), multiplier) || measure < 0 ||
+              static_cast<int64_t>(measure) + measure_base > 200000 || subtick < 0 ||
+              !std::isfinite(multiplier)) {
+            return {SerializeError::ParseError, "SUS #TIL00 invalid speed entry"};
+          }
+          if (multiplier < 0.0) {
+            ++skipped_nonpositive_speed_points;
+            continue;
+          }
+          til_speeds.push_back({measure + measure_base, subtick, multiplier});
+        }
         continue;
       }
       if (til_id == "01") {
@@ -551,6 +613,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   for (const auto& p : til_splits) {
     max_measure_needed = std::max(max_measure_needed, p.measure);
   }
+  for (const auto& p : til_speeds) {
+    max_measure_needed = std::max(max_measure_needed, p.measure);
+  }
   if (max_measure_needed > kMaxMeasureIndex) {
     return {SerializeError::ParseError, "SUS measure index exceeds limit"};
   }
@@ -600,9 +665,25 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
 
   NotationChart chart;
+  chart.compatibility_profile = compatibility_profile;
   chart.timing.ticks_per_quarter = meta.ticks_per_beat;
   chart.timing.offset_ms =
       static_cast<int64_t>(std::llround(meta.wave_offset_sec * 1000.0));
+  for (const auto& point : til_speeds) {
+    const int64_t tick = measure_start_tick(point.measure) + point.subtick;
+    if (tick < 0 || tick > INT32_MAX) {
+      return {SerializeError::ParseError, "SUS #TIL00 tick out of range"};
+    }
+    chart.scroll_speed_points.push_back(
+        ScrollSpeedPoint{static_cast<int32_t>(tick), point.multiplier});
+  }
+  std::sort(chart.scroll_speed_points.begin(), chart.scroll_speed_points.end(),
+            [](const auto& a, const auto& b) { return a.tick < b.tick; });
+  for (size_t i = 1; i < chart.scroll_speed_points.size(); ++i) {
+    if (chart.scroll_speed_points[i - 1].tick == chart.scroll_speed_points[i].tick) {
+      return {SerializeError::ParseError, "SUS #TIL00 duplicate speed tick"};
+    }
+  }
 
   // Timing points from BPM changes + #mmm02 measure lengths.
   std::sort(bpm_changes.begin(), bpm_changes.end(),
@@ -689,7 +770,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     max_end = std::max(max_end, ev.lane + ev.width);
   }
   int lane_offset = 0;
-  if (min_lane < 99 && min_lane >= 2 && max_end <= 14) {
+  if (declared_lane_offset >= 0) {
+    lane_offset = declared_lane_offset;
+  } else if (min_lane < 99 && min_lane >= 2 && max_end <= 14) {
     lane_offset = 2;
   } else if (min_lane < 99 && max_end > 12 && min_lane >= 2) {
     lane_offset = min_lane;
@@ -698,9 +781,13 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
 
   auto map_lane = [&](int lane) {
-    return std::clamp(lane - lane_offset, 0, 11);
+    const int mapped = lane - lane_offset;
+    return compatibility_profile == ChartCompatibilityProfile::SiriusExtended
+               ? mapped
+               : std::clamp(mapped, 0, 11);
   };
   auto map_width = [&](int lane, int width) {
+    if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) return width;
     const int left = map_lane(lane);
     return std::clamp(width, 1, 12 - left);
   };
@@ -733,7 +820,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   };
 
   auto slide_start_has_air = [&](int64_t tick, int left, int right) -> bool {
-    for (int i = 0; i <= 11; ++i) {
+    for (int i = std::min(0, left); i <= std::max(11, right); ++i) {
       if (i > left && i < right) continue;
       const int al = (i <= left) ? i : left;
       const int ar = (i <= left) ? right : i;
@@ -751,7 +838,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   };
   auto find_slide_end_air = [&](int64_t tick, int left, int right) -> FoundAir {
     FoundAir found;
-    for (int i = 0; i <= 11; ++i) {
+    for (int i = std::min(0, left); i <= std::max(11, right); ++i) {
       if (i > left && i <= right) continue;
       const int al = (i <= left) ? i : left;
       const int ar = (i <= left) ? right : i;
@@ -843,7 +930,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
           body.scratch_length = 0;
         }
         auto [lo, hi] = get_scratch_end_lane_range(body);
-        if (lo < 0 || hi > 11) {
+        if (compatibility_profile == ChartCompatibilityProfile::Official &&
+            (lo < 0 || hi > 11)) {
           lo = std::max(lo, 0);
           hi = std::min(hi, 11);
           set_scratch_hold_end_lanes(body, std::min(lo, body.lane),
@@ -864,14 +952,22 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
                         return matches_damage_marker(d, body);
                       });
 
-      // End Damage → Nontail degraded to tailed hold.
+      // End Damage marks a body with no judged tail in the Sirius extension.
       const bool end_damage = std::any_of(
           damage_end_markers.begin(), damage_end_markers.end(), [&](const SusDamageMarker& d) {
             return same_tick_i(d.tick, static_cast<int32_t>(t1)) && d.lane == body_lane &&
                    d.width == body_width;
           });
       if (end_damage) {
-        push_unique_warning(warnings, "无尾 Hold（终点 Damage）已转为有尾 Hold");
+        switch (body.note_type) {
+          case NoteType::Hold: body.note_type = NoteType::NontailHold; break;
+          case NoteType::CriticalHold: body.note_type = NoteType::NontailCriticalHold; break;
+          case NoteType::ScratchHold: body.note_type = NoteType::NontailScratchHold; break;
+          case NoteType::ScratchCriticalHold:
+            body.note_type = NoteType::NontailScratchCriticalHold;
+            break;
+          default: break;
+        }
       }
 
       notes.push_back(body);
@@ -1014,9 +1110,6 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
 
   // #TIL01 → split-lane gimmick notes (pair +lines start with -lines end).
-  if (saw_hispeed_til) {
-    push_unique_warning(warnings, "已忽略 #TIL00 HiSpeed（编辑器暂不支持）");
-  }
   {
     struct OpenSplit {
       int lines = 0;
@@ -1073,6 +1166,26 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   reassign_dense_ids_preserving_parent_binds(notes);
 
   chart.notes = std::move(notes);
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    if (saw_compatibility_profile) {
+      return {SerializeError::ParseError, "SUS Sirius Extended profile required"};
+    }
+    chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  }
+  if (skipped_nonpositive_speed_points > 0) {
+    push_unique_warning(warnings,
+                        "已跳过 " + std::to_string(skipped_nonpositive_speed_points) +
+                            " 个负速 SV 点");
+  }
+  if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
+    for (const auto& note : chart.notes) {
+      if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
+      if (note.width < 1) {
+        return {SerializeError::ParseError, "SUS note width out of range"};
+      }
+    }
+  }
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
 
   out.chart = std::move(chart);
@@ -1090,12 +1203,33 @@ SerializeResult SusChartFormat::load_file(const std::string& path, SusChartLoadR
 SerializeResult SusChartFormat::serialize(const NotationChart& chart,
                                           const SusChartSaveOptions& options,
                                           std::string& out_text) {
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    return {SerializeError::ParseError, "Sirius Extended profile required for SV, nontail holds or overhang"};
+  }
   MusicTiming timing = chart.timing;
   normalize_timing_points(timing);
   const int tpq = std::max(1, timing.ticks_per_quarter);
-  const int lane_pad = options.ched_lane_padding ? 2 : 0;
   const std::vector<NotationNote> export_notes =
       with_all_hold_eighths_recomputed(chart.notes, timing.ticks_per_quarter);
+
+  int lane_pad = options.ched_lane_padding ? 2 : 0;
+  if (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
+    int min_lane = 0;
+    int max_end = 0;
+    for (const auto& note : export_notes) {
+      if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
+      if (note.width < 1 || note.width > 35) {
+        return {SerializeError::ParseError, "SUS note lane/width out of range"};
+      }
+      min_lane = std::min(min_lane, note.lane);
+      max_end = std::max(max_end, note.end_lane());
+    }
+    lane_pad = std::max(lane_pad, -min_lane);
+    if (max_end + lane_pad > 35) {
+      return {SerializeError::ParseError, "SUS lane span exceeds base36 range"};
+    }
+  }
 
   auto sus_lane = [&](int32_t lane) { return std::clamp(lane + lane_pad, 0, 35); };
 
@@ -1107,6 +1241,9 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   for (const auto& n : export_notes) {
     max_tick = std::max(max_tick, static_cast<int64_t>(n.start_tick));
     max_tick = std::max(max_tick, static_cast<int64_t>(n.end_tick));
+  }
+  for (const auto& point : chart.scroll_speed_points) {
+    max_tick = std::max(max_tick, static_cast<int64_t>(point.tick));
   }
   std::vector<int32_t> measure_starts = measure_ticks_in_range(0, static_cast<int32_t>(max_tick), timing);
   if (measure_starts.empty()) measure_starts.push_back(0);
@@ -1162,6 +1299,9 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
 
   std::ostringstream ss;
   ss << "This file was generated by WDS Chart Editor.\n";
+  if (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
+    ss << "#WDS_PROFILE SiriusExtended\n#WDS_LANE_OFFSET " << lane_pad << "\n";
+  }
   const auto& meta = options.meta;
   auto emit_str = [&](const char* key, const std::string& value) {
     ss << '#' << key << " \"" << value << "\"\n";
@@ -1430,6 +1570,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
         body->note_type == NoteType::ScratchCriticalHold ||
         body->note_type == NoteType::NontailScratchHold ||
         body->note_type == NoteType::NontailScratchCriticalHold;
+    const bool nontail_body = is_nontail_hold_body(body->note_type);
 
     std::string suffix = "3";
     suffix.push_back(base36_digit(sl));
@@ -1440,6 +1581,11 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     end_suffix.push_back(base36_digit(sl));
     end_suffix.push_back(base36_digit(h.channel));
     place(end_suffix, t1, 2, channel_width);
+    if (nontail_body) {
+      std::string dmg_suffix = "1";
+      dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
+      place(dmg_suffix, t1, kSusTapDamage, channel_width);
+    }
 
     // Critical Hold* → Critical tap + slide channel (no separate HoldStart*).
     const bool critical_hold =
@@ -1474,9 +1620,11 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       const int cover_l = cover.first;
       const int cover_w = std::max(1, cover.second - cover.first + 1);
       const int air_dir = air_type_from_scratch_length(body->scratch_length);
-      std::string flick_suffix = "1";
-      flick_suffix.push_back(base36_digit(sus_lane(cover_l)));
-      place(flick_suffix, t1, kSusTapFlick, cover_w);
+      if (!nontail_body) {
+        std::string flick_suffix = "1";
+        flick_suffix.push_back(base36_digit(sus_lane(cover_l)));
+        place(flick_suffix, t1, kSusTapFlick, cover_w);
+      }
       std::string air_suffix = "5";
       air_suffix.push_back(base36_digit(sus_lane(cover_l)));
       place(air_suffix, t1, air_dir, cover_w);
@@ -1525,6 +1673,23 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       suffix.push_back(base36_digit(sl));
       place(suffix, tick, type, w);
     }
+  }
+
+  // Sirius #TIL00 global non-negative SV events.
+  if (!chart.scroll_speed_points.empty()) {
+    ss << "#TIL00: \"";
+    for (size_t i = 0; i < chart.scroll_speed_points.size(); ++i) {
+      const auto& point = chart.scroll_speed_points[i];
+      if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+        return {SerializeError::ParseError, "SUS scroll speed must be non-negative"};
+      }
+      if (i) ss << ", ";
+      const auto loc = locate_tick(point.tick);
+      ss << loc.measure << '\'' << loc.local << ':' << std::defaultfloat
+         << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << point.multiplier << std::setprecision(4);
+    }
+    ss << "\"\n\n";
   }
 
   // #TIL01 split-lane gimmicks.

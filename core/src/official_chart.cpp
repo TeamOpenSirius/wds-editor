@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -255,6 +257,7 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
   NotationChart chart;
   chart.timing.bpm = options.bpm;
   chart.timing.ticks_per_quarter = options.ticks_per_quarter;
+  chart.compatibility_profile = options.compatibility_profile;
   if (options.delay_seconds.has_value()) {
     chart.timing.offset_ms =
         static_cast<int64_t>(std::llround(*options.delay_seconds * 1000.0));
@@ -303,21 +306,33 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has invalid numeric fields"};
     }
+    // OpenWDS StandardNotation.Parse has no lower bound on start/end seconds
+    // (negative start is valid). HiSpeed stores the multiplier in endTime, so
+    // do not apply the ordinary end_sec upper bound to those rows.
+    const bool is_hispeed = type_raw == kHiSpeedType;
     if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec > 1.0e7 ||
-        end_sec > 1.0e7) {
+        (!is_hispeed && end_sec > 1.0e7)) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has out-of-range time"};
     }
-    if (lane_length < 0 || lane_length > 12) {
+    if (lane_length < 0 ||
+        (lane_length > 12 &&
+         options.compatibility_profile == ChartCompatibilityProfile::Official)) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
     }
     // Official leftLane is often 1-based; validate the eventual 0-based span.
-    if (left_lane > 0) {
+    const bool zero_width_placeholder =
+        lane_length == 0 && left_lane <= 0 && (type_raw == 0 || is_hispeed);
+    if (!zero_width_placeholder) {
       const int64_t zero_based =
-          options.convert_lane_to_zero_based ? static_cast<int64_t>(left_lane) - 1
-                                            : static_cast<int64_t>(left_lane);
-      if (zero_based + static_cast<int64_t>(lane_length) > 12) {
+          (options.convert_lane_to_zero_based)
+              ? static_cast<int64_t>(left_lane) - 1
+              : static_cast<int64_t>(left_lane);
+      const int64_t end_exclusive = zero_based + static_cast<int64_t>(lane_length);
+      if (options.compatibility_profile == ChartCompatibilityProfile::Official
+              ? (zero_based < 0 || end_exclusive > 12)
+              : (lane_length < 1)) {
         return {SerializeError::ParseError,
                 "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
       }
@@ -329,13 +344,18 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
               "official chart: line " + std::to_string(line_no) + " has invalid gimmickType"};
     }
 
-    if (type_raw == kHiSpeedType) {
+    if (is_hispeed) {
       if (options.skip_hispeed) {
         continue;
       }
-      return {SerializeError::ParseError,
-              "official chart: HiSpeed rows are not supported (line " +
-                  std::to_string(line_no) + ")"};
+      if (!is_valid_scroll_multiplier(end_sec)) {
+        return {SerializeError::ParseError,
+                "official chart: HiSpeed multiplier must be non-negative (line " +
+                    std::to_string(line_no) + ")"};
+      }
+      chart.scroll_speed_points.push_back(
+          ScrollSpeedPoint{seconds_to_tick(start_sec, chart.timing), end_sec});
+      continue;
     }
     NotationNote note;
     note.id = next_id++;
@@ -359,7 +379,7 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
       note.lane = 0;
       note.width = 0;
       note.note_type = NoteType::None;
-    } else if (options.convert_lane_to_zero_based && left_lane > 0) {
+    } else if (options.convert_lane_to_zero_based) {
       note.lane = left_lane - 1;
     } else {
       note.lane = left_lane;
@@ -393,6 +413,19 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
               return a.start_tick < b.start_tick;
             });
   apply_sound_purple_cuts(chart.notes, next_id, sound_purple_cuts);
+  mark_nontail_hold_eighths_authored(chart.notes);
+
+  std::sort(chart.scroll_speed_points.begin(), chart.scroll_speed_points.end(),
+            [](const auto& a, const auto& b) { return a.tick < b.tick; });
+  for (size_t i = 1; i < chart.scroll_speed_points.size(); ++i) {
+    if (chart.scroll_speed_points[i - 1].tick == chart.scroll_speed_points[i].tick) {
+      return {SerializeError::ParseError, "official chart: duplicate HiSpeed time"};
+    }
+  }
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    return {SerializeError::ParseError, "official chart: Sirius Extended profile required"};
+  }
 
   normalize_timing_points(chart.timing);
   // Sync lines are derived the same way as editor charts.
@@ -428,9 +461,27 @@ SerializeResult OfficialChartFormat::load_chart_with_music_config(
   return load_chart_file(chart_path, out_chart, options);
 }
 
+SerializeResult OfficialChartFormat::load_chart_auto_profile(
+    const std::string& chart_path, const std::string& music_config_path,
+    NotationChart& out_chart) {
+  auto result = load_chart_with_music_config(chart_path, music_config_path, out_chart);
+  if (result.error == SerializeError::Ok ||
+      (result.message.find("out-of-range lane/width") == std::string::npos &&
+       result.message.find("Sirius Extended profile required") == std::string::npos)) {
+    return result;
+  }
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  return load_chart_with_music_config(chart_path, music_config_path, out_chart, extended);
+}
+
 SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
                                                      std::string& out_text,
                                                      const OfficialChartSaveOptions& options) {
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    return {SerializeError::ParseError, "Sirius Extended profile required for SV, nontail holds or overhang"};
+  }
   std::ostringstream ss;
   ss.setf(std::ios::fixed);
   ss.precision(4);
@@ -448,7 +499,55 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     return a.id < b.id;
   });
 
+  struct CsvRow {
+    int32_t tick = 0;
+    bool speed = false;
+    const NotationNote* note = nullptr;
+    double multiplier = 1.0;
+  };
+  std::vector<CsvRow> rows;
+  rows.reserve(notes.size() + chart.scroll_speed_points.size());
   for (const auto& note : notes) {
+    if (is_suppressed_hold_eighth(note)) continue;
+    rows.push_back(CsvRow{note.start_tick, false, &note, 1.0});
+  }
+  for (const auto& point : chart.scroll_speed_points) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+      return {SerializeError::ParseError, "official chart: invalid HiSpeed multiplier"};
+    }
+    rows.push_back(CsvRow{point.tick, true, nullptr, point.multiplier});
+  }
+  std::vector<int32_t> speed_ticks;
+  speed_ticks.reserve(chart.scroll_speed_points.size());
+  for (const auto& point : chart.scroll_speed_points) speed_ticks.push_back(point.tick);
+  std::sort(speed_ticks.begin(), speed_ticks.end());
+  if (std::adjacent_find(speed_ticks.begin(), speed_ticks.end()) != speed_ticks.end()) {
+    return {SerializeError::ParseError, "official chart: duplicate HiSpeed time"};
+  }
+  std::stable_sort(rows.begin(), rows.end(), [](const CsvRow& a, const CsvRow& b) {
+    if (a.tick != b.tick) return a.tick < b.tick;
+    return a.speed && !b.speed;
+  });
+
+  for (const auto& row : rows) {
+    if (row.speed) {
+      ss << tick_to_seconds(row.tick, chart.timing) << ',' << std::defaultfloat
+         << std::setprecision(std::numeric_limits<double>::max_digits10) << row.multiplier
+         << ',' << kHiSpeedType << ",0,0,0,0\n";
+      ss << std::fixed << std::setprecision(4);
+      continue;
+    }
+    const auto& note = *row.note;
+    const bool split_placeholder =
+        is_split_lane_gimmick(note.gimmick_type) ||
+        (note.note_type == NoteType::None && note.lane == 0 && note.width == 0);
+    const int64_t end_exclusive = static_cast<int64_t>(note.lane) + note.width;
+    if (!split_placeholder &&
+        (note.width < 1 ||
+         (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+          (note.lane < 0 || note.width > 12 || end_exclusive > 12)))) {
+      return {SerializeError::ParseError, "official chart: note lane/width out of range"};
+    }
     const double start_sec = tick_to_seconds(note.start_tick, chart.timing);
 
     // Official: hold body / split write endTime; taps / heads / mid-stars / HoldEighth → -1.

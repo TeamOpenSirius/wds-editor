@@ -19,6 +19,21 @@ namespace wds::ui {
 
 class EditViewport;
 
+inline bool lane_guide_visible(int32_t edge, float lane_px) noexcept {
+  if (edge == 0 || edge == 12) return true;
+  int stride = 1;
+  if (lane_px < 4.0f) stride = 6;
+  else if (lane_px < 6.0f) stride = 4;
+  else if (lane_px < 10.0f) stride = 2;
+  int rem = edge % stride;
+  if (rem < 0) rem += stride;
+  return rem == 0;
+}
+
+inline float lane_guide_thickness(int32_t edge) noexcept {
+  return (edge == 0 || edge == 12) ? 2.5f : 1.0f;
+}
+
 // Lane boundary indices for a 12-lane split (matches playback_preview.cpp).
 void split_boundaries_12(int32_t split_count, std::vector<int32_t>& out);
 
@@ -189,5 +204,31 @@ wds::interaction::Rect meter_label_bounds(const EditViewport& viewport,
 inline constexpr wds::interaction::Color kSplitLabelGhostColor{0.22f, 0.48f, 0.95f, 0.45f};
 inline constexpr wds::interaction::Color kBpmLabelGhostColor{0.48f, 0.30f, 0.14f, 0.45f};
 inline constexpr wds::interaction::Color kMeterLabelGhostColor{0.10f, 0.38f, 0.24f, 0.45f};
+inline constexpr wds::interaction::Color kSpeedLabelColor{0.42f, 0.28f, 0.72f, 0.96f};
+inline constexpr wds::interaction::Color kSpeedLabelGhostColor{0.42f, 0.28f, 0.72f, 0.45f};
+
+struct SpeedLabelHit {
+  int32_t tick = 0;
+  wds::interaction::Rect bounds{};
+};
+
+void paint_speed_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                        const wds::interaction::Rect& gutter,
+                        const std::vector<wds::chart_editor::ScrollSpeedPoint>& points,
+                        bool show_marks = true);
+
+std::vector<SpeedLabelHit> build_speed_label_hits(
+    const EditViewport& viewport, const wds::interaction::Rect& gutter,
+    const std::vector<wds::chart_editor::ScrollSpeedPoint>& points);
+
+wds::interaction::Rect speed_label_bounds(const EditViewport& viewport,
+                                          const wds::interaction::Rect& gutter, int32_t tick);
+
+std::optional<int32_t> speed_tick_at(const EditViewport& viewport,
+                                     const wds::interaction::Rect& gutter,
+                                     const std::vector<wds::chart_editor::ScrollSpeedPoint>& points,
+                                     wds::interaction::Vec2 point);
+
+std::string format_speed_label(double multiplier);
 
 }  // namespace wds::ui
