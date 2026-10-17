@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package a built WDS target into a self-contained release artifact.
 # Intended build hosts:
-#   win-x86_64 — Linux machine with MinGW / vcpkg (Linux is host-only, not a product target)
+#   win-x86_64 — Linux machine with MinGW / vcpkg (Linux packaging host)
 #   macos-arm  — Apple Silicon Mac with Homebrew deps
 #
 # External deps policy (ship everything we can):
@@ -2480,7 +2480,7 @@ case "$TARGET" in
   win-x86_64) package_win "$BUILD_DIR" ;;
   macos-arm)  package_macos "$BUILD_DIR" ;;
   linux*)
-    die "Linux is not a supported product target; package win-x86_64 or macos-arm"
+    die "Linux release packaging is not available; use scripts/build-linux.sh for a native development build"
     ;;
   *)
     die "unsupported target: $TARGET"

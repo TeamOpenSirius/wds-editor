@@ -60,6 +60,16 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WDS_BASS_LIBRARY}" "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>")
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # The startup dependency check expects BASS beside the executable. RPATH
+  # also supports the bin/ + lib/ install layout without a global loader change.
+  add_custom_command(TARGET wds_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WDS_BASS_LIBRARY}" "${WDS_BASSMIX_LIBRARY}" "$<TARGET_FILE_DIR:wds_editor>")
+  set_target_properties(wds_editor PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN/../lib")
+endif()
 if(MSVC)
   target_compile_options(wds_editor PRIVATE /utf-8)
 endif()
@@ -72,6 +82,9 @@ endif()
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/skins" DESTINATION .)
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/effects" DESTINATION .)
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/resources" DESTINATION .)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  install(DIRECTORY "${CMAKE_SOURCE_DIR}/icons" DESTINATION .)
+endif()
 install(DIRECTORY "${CMAKE_BINARY_DIR}/renderer/shaders/" DESTINATION shaders)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Regular.ttf" DESTINATION fonts)
@@ -82,12 +95,20 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/theme/Yami.obt")
   install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/theme/" DESTINATION theme)
 endif()
-  if(COMMAND qt_generate_deploy_app_script)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COMMAND qt_generate_deploy_script)
+    # Qt 6.8's app helper emits an unquoted executable path on Linux. Generate
+    # the same deployment call with quotes so build directories may contain spaces.
+    qt_generate_deploy_script(
+      TARGET wds_editor
+      OUTPUT_SCRIPT wds_qt_deploy_script
+      CONTENT "qt_deploy_runtime_dependencies(EXECUTABLE \"$<TARGET_FILE:wds_editor>\" GENERATE_QT_CONF)")
+    install(SCRIPT "${wds_qt_deploy_script}")
+  elseif(COMMAND qt_generate_deploy_app_script)
     qt_generate_deploy_app_script(
       TARGET wds_editor
       OUTPUT_SCRIPT wds_qt_deploy_script
       NO_UNSUPPORTED_PLATFORM_ERROR)
-    install(SCRIPT ${wds_qt_deploy_script})
+    install(SCRIPT "${wds_qt_deploy_script}")
   endif()
 endif()
 
@@ -280,3 +301,8 @@ endif()
 
 # The Qt target above is the sole product editor; the realtime renderer is hosted by
 # QVulkanInstance.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET wds_editor)
+  # add_executable() does not perform Qt's finalization automatically. Collect
+  # platform/image plugins after all linked targets exist for Linux deployment.
+  qt_finalize_target(wds_editor)
+endif()

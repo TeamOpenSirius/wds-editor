@@ -84,8 +84,9 @@ void check_bass_runtime(StartupDependencyReport& report, const fs::path& exe_dir
     report.missing.push_back("libbass.dylib（应位于程序目录或 lib/）");
   }
 #else
-  if (!any_exists({exe_dir / "libbass.so", exe_dir / "lib" / "libbass.so"})) {
-    report.missing.push_back("libbass.so（应位于程序目录或 lib/）");
+  if (!any_exists({exe_dir / "libbass.so", exe_dir / "lib" / "libbass.so",
+                   exe_dir / ".." / "lib" / "libbass.so"})) {
+    report.missing.push_back("libbass.so（应位于程序目录、lib/ 或 ../lib/）");
   }
 #endif
 }

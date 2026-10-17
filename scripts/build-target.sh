@@ -29,7 +29,7 @@ Targets:
   win-x86_64     Windows x86_64 (MinGW-w64 + vcpkg; typical Linux host)
   macos-arm      Apple Silicon native (Homebrew)
 
-  Linux is not a product target — on Linux hosts, build win-x86_64 only.
+  Native Linux development builds: use scripts/build-linux.sh (no release packaging).
 
 Build flavors:
   --release      CMAKE_BUILD_TYPE=Release (default)
@@ -342,9 +342,8 @@ case "$1" in
     exec "${ROOT}/scripts/package-target.sh" "$@"
     ;;
   linux*)
-    echo "error: Linux is not a supported product target." >&2
-    echo "On a Linux host, set WDS_VCPKG_ROOT (see scripts/env.example) then:" >&2
-    echo "  ./scripts/build-target.sh win-x86_64" >&2
+    echo "For native Linux development builds, use ./scripts/build-linux.sh." >&2
+    echo "This script packages win-x86_64 and macos-arm releases only." >&2
     exit 1
     ;;
 esac

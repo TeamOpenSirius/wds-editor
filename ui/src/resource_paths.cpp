@@ -32,6 +32,10 @@ std::vector<fs::path> resource_candidates(const char* argv0, const char* name) {
   if (!exe_dir.empty()) {
     out.push_back(exe_dir / name);
     out.push_back(exe_dir / ".." / "Resources" / name);
+#if defined(__linux__)
+    // Native cmake --install: <prefix>/bin/wds_editor and <prefix>/<name>.
+    out.push_back(exe_dir / ".." / name);
+#endif
   }
   return out;
 }
