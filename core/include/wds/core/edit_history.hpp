@@ -161,6 +161,13 @@ class EditHistory {
  public:
   EditHistory() = default;
   explicit EditHistory(EditHistoryLimits limits) : limits_(limits) {}
+  // Entry holds unique_ptr — history is move-only. Mark moves noexcept so
+  // containers (e.g. vector<ChartSlot>) reallocate by move instead of copy
+  // (libstdc++ move_if_noexcept; MinGW reserve otherwise tries to copy).
+  EditHistory(EditHistory&&) noexcept = default;
+  EditHistory& operator=(EditHistory&&) noexcept = default;
+  EditHistory(const EditHistory&) = delete;
+  EditHistory& operator=(const EditHistory&) = delete;
 
   bool execute(std::unique_ptr<IEditCommand> cmd, ChartDocument& doc);
   bool undo(ChartDocument& doc);
