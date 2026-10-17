@@ -20,6 +20,19 @@ namespace {
 
 constexpr std::size_t kMaxSerializedCount = 1'000'000;
 constexpr double kMaxTickRaw = static_cast<double>(INT32_MAX);
+constexpr double kMinTickRaw = -kMaxTickRaw;
+
+bool tick_field_in_range(double raw) noexcept {
+  return std::isfinite(raw) && raw >= kMinTickRaw && raw <= kMaxTickRaw;
+}
+
+bool parse_tick_field(double raw, int32_t& out) noexcept {
+  if (!tick_field_in_range(raw)) {
+    return false;
+  }
+  out = static_cast<int32_t>(std::llround(raw));
+  return true;
+}
 
 bool is_known_note_type(int32_t raw) noexcept {
   switch (static_cast<NoteType>(raw)) {
@@ -257,12 +270,10 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
           static_cast<int64_t>(note.lane) + static_cast<int64_t>(note.width) > 12) {
         return {SerializeError::ParseError, "note lane/width out of range"};
       }
-      if (!std::isfinite(start_tick_raw) || !std::isfinite(end_tick_raw) || start_tick_raw < 0.0 ||
-          end_tick_raw < 0.0 || start_tick_raw > kMaxTickRaw || end_tick_raw > kMaxTickRaw) {
+      if (!parse_tick_field(start_tick_raw, note.start_tick) ||
+          !parse_tick_field(end_tick_raw, note.end_tick)) {
         return {SerializeError::ParseError, "note tick out of range"};
       }
-      note.start_tick = static_cast<int32_t>(std::llround(start_tick_raw));
-      note.end_tick = static_cast<int32_t>(std::llround(end_tick_raw));
       if (note.id == std::numeric_limits<int32_t>::max()) {
         return {SerializeError::ParseError, "note id out of range"};
       }

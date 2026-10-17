@@ -4,6 +4,7 @@
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
 #include <wds/core/note_edit_ops.hpp>
+#include <wds/core/timing_map.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -273,9 +274,14 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     }
 
     const auto cols = split_csv_line(line);
-    if (cols.size() < 7) {
+    // StandardNotation.Parse in OpenWDS accepts the compact 5-column form
+    // (start, end, type, lane, width) as well as the full 7-column form
+    // (the latter carries gimmick type/value). Keep the same shape contract
+    // so a hand-authored preview chart can be loaded by both runtimes.
+    if (cols.size() != 5 && cols.size() != 7) {
       return {SerializeError::ParseError,
-              "official chart: line " + std::to_string(line_no) + " has < 7 columns"};
+              "official chart: line " + std::to_string(line_no) +
+                  " must have 5 or 7 columns"};
     }
 
     double start_sec = 0.0;
@@ -288,13 +294,17 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     if (!parse_double(trim_copy(cols[0]), start_sec) ||
         !parse_double(trim_copy(cols[1]), end_sec) || !parse_int(trim_copy(cols[2]), type_raw) ||
         !parse_int(trim_copy(cols[3]), left_lane) ||
-        !parse_int(trim_copy(cols[4]), lane_length) ||
-        !parse_int(trim_copy(cols[6]), scratch_length)) {
+        !parse_int(trim_copy(cols[4]), lane_length)) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has invalid numeric fields"};
     }
-    if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec < 0.0 ||
-        start_sec > 1.0e7 || end_sec > 1.0e7) {
+    if (cols.size() == 7 &&
+        (!parse_int(trim_copy(cols[6]), scratch_length))) {
+      return {SerializeError::ParseError,
+              "official chart: line " + std::to_string(line_no) + " has invalid numeric fields"};
+    }
+    if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec > 1.0e7 ||
+        end_sec > 1.0e7) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has out-of-range time"};
     }
@@ -314,7 +324,7 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     }
 
     GimmickType gimmick = GimmickType::None;
-    if (!parse_gimmick_token(cols[5], gimmick)) {
+    if (cols.size() == 7 && !parse_gimmick_token(cols[5], gimmick)) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has invalid gimmickType"};
     }
@@ -384,6 +394,7 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
             });
   apply_sound_purple_cuts(chart.notes, next_id, sound_purple_cuts);
 
+  normalize_timing_points(chart.timing);
   // Sync lines are derived the same way as editor charts.
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
   out_chart = std::move(chart);
@@ -549,7 +560,7 @@ bool OfficialChartFormat::looks_like_official_chart_text(const std::string& text
       return false;
     }
     const auto cols = split_csv_line(line);
-    if (cols.size() >= 7) {
+    if (cols.size() == 5 || cols.size() == 7) {
       double start = 0.0;
       int32_t type = 0;
       return parse_double(trim_copy(cols[0]), start) && parse_int(trim_copy(cols[2]), type);

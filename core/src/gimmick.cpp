@@ -32,6 +32,13 @@ SplitLaneType get_split_lane_type(GimmickType gimmick) noexcept {
   return static_cast<SplitLaneType>(decade + (decade & 1) - 1);
 }
 
+GimmickType split_gimmick_for(int32_t split_count, SplitLaneType type) noexcept {
+  const int32_t n = std::clamp(split_count, 1, 6);
+  int32_t t = static_cast<int32_t>(type);
+  if (t != 1 && t != 3 && t != 5 && t != 7) t = 1;
+  return static_cast<GimmickType>(10 * t + n);
+}
+
 bool is_jump_scratch(GimmickType gimmick) noexcept {
   return gimmick == GimmickType::JumpScratch;
 }
