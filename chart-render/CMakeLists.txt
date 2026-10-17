@@ -1,6 +1,17 @@
 # Chart-specific visual helpers (stage geometry, skins, note strips).
 # Depends on wds_draw / wds_renderer and official playfield math from wds::core.
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND
+   NOT EXISTS "${CMAKE_BINARY_DIR}/resources")
+  # Native Linux builds live outside the checkout by default. The editor and
+  # particle tests discover resources beside/above their executables.
+  file(CREATE_LINK "${CMAKE_SOURCE_DIR}/resources" "${CMAKE_BINARY_DIR}/resources"
+    SYMBOLIC RESULT _wds_resources_link_error)
+  if(NOT _wds_resources_link_error STREQUAL "0")
+    message(FATAL_ERROR "Cannot link build resources: ${_wds_resources_link_error}")
+  endif()
+endif()
+
 add_library(wds_chart_render STATIC
   src/stage_geometry.cpp
   src/skin_catalog.cpp

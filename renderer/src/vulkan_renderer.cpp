@@ -569,6 +569,9 @@ std::string resolve_shader_dir() {
       fs::current_path(ec) / "shaders",
       exe_dir / "shaders",
       exe_dir / ".." / "Resources" / "shaders",
+#if defined(__linux__)
+      exe_dir / ".." / "shaders",  // native install: <prefix>/bin/wds_editor
+#endif
       // In-tree: build-<target>[-debug]/ui/wds_editor → ../renderer/shaders
       exe_dir / ".." / "renderer" / "shaders",
       fs::current_path(ec) / "renderer" / "shaders",

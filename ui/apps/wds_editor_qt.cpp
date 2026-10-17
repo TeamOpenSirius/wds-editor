@@ -21,6 +21,7 @@
 #include "wds/common/log.hpp"
 #include "wds/common/perf_stages.hpp"
 #include "wds/common/runtime_env.hpp"
+#include "wds/common/utf8_path.hpp"
 #include "wds/renderer/vulkan_renderer.hpp"
 #include <wds/chart_render/split_effect_particles.hpp>
 
@@ -138,6 +139,11 @@ void prepare_bundled_qt_plugins(const char* argv0) {
   }
 #else
   (void)argv0;
+#endif
+#if defined(Q_OS_LINUX)
+  const auto exe_dir = wds::common::executable_dir(argv0);
+  bundled = QString::fromStdString(wds::common::path_to_utf8(exe_dir / ".." / "plugins"));
+  if (QDir(bundled).exists()) add_qt_plugin_path(bundled, true);
 #endif
 #if defined(WDS_QT_SVG_PLUGIN_DIR)
   // Homebrew / MinGW splits qtsvg into its own prefix; qtbase's plugin root
@@ -1729,7 +1735,7 @@ int main(int argc, char** argv) {
       (std::getenv("WDS_DUMP_VERTS") != nullptr && std::getenv("WDS_DUMP_VERTS")[0] != '\0');
   if (!args.contains("--smoke-test") && !cli_automation) {
     maybe_notify_previous_crash(nullptr);
-    if (!window.show_startup_splash()) {
+    if (open_path.isEmpty() && !window.show_startup_splash()) {
       wds::common::mark_clean_exit();
       return 0;
     }
@@ -1770,12 +1776,13 @@ int main(int argc, char** argv) {
     QScreen* screen = preview_window != nullptr ? preview_window->screen() : nullptr;
     if (screen == nullptr && window.windowHandle() != nullptr) screen = window.windowHandle()->screen();
     if (screen == nullptr) screen = QGuiApplication::primaryScreen();
+    const QPixmap native_window = screen != nullptr ? screen->grabWindow(window.winId()) : QPixmap{};
     QPixmap shot;
     QPixmap candidates[3];
     int n_cand = 0;
     if (preview_window != nullptr && preview_window->handle() != nullptr && screen != nullptr)
       candidates[n_cand++] = screen->grabWindow(preview_window->winId());
-    if (screen != nullptr) candidates[n_cand++] = screen->grabWindow(window.winId());
+    if (screen != nullptr) candidates[n_cand++] = native_window;
     candidates[n_cand++] = window.grab();
     qint64 best = -1;
     for (int i = 0; i < n_cand; ++i) {
@@ -1784,6 +1791,12 @@ int main(int argc, char** argv) {
         shot = candidates[i];
       }
     }
+#if defined(Q_OS_LINUX)
+    // QWidget::grab() omits the native Vulkan child. Its blank background may
+    // be brighter than the real preview, so prefer the full X11 window grab.
+    if (QGuiApplication::platformName() == QLatin1String("xcb") && !native_window.isNull())
+      shot = native_window;
+#endif
     if (shot.isNull() || !shot.save(screenshot_path, "PNG")) {
       std::fprintf(stderr, "failed to save screenshot: %s\n", screenshot_path.toUtf8().constData());
       return false;
@@ -1796,6 +1809,16 @@ int main(int argc, char** argv) {
   for (const auto& item : screenshots) {
     const QString screenshot_path = item.first;
     const int screenshot_ms = item.second;
+#if defined(Q_OS_LINUX)
+    if (QGuiApplication::platformName() == QLatin1String("xcb")) {
+      // X11 screen grabs include occluding windows. Raise before an explicitly
+      // requested capture, leaving the window manager time to process it.
+      QTimer::singleShot(std::max(0, screenshot_ms - 200), &window, [&window] {
+        window.raise();
+        window.activateWindow();
+      });
+    }
+#endif
     QTimer::singleShot(screenshot_ms, &window, [&, screenshot_path] {
       if (preview_window != nullptr) preview_window->request_frame();
       window.repaint();
@@ -2102,7 +2125,7 @@ int main(int argc, char** argv) {
       app.quit();
     });
   }
-  if (args.contains("--smoke-test")) {
+  if (args.contains("--smoke-test") && quit_after_sec < 0) {
     QTimer::singleShot(1200, &app, [&window, &app] {
       window.discard_unsaved_on_close();
       window.close();
