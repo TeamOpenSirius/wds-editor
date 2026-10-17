@@ -49,8 +49,34 @@ compile_commands.json
 # MSI Binary-table dumps (not build inputs; WixUI assets come from wixl-data)
 /Binary/
 
-# Optional local-only docs
+# Only build / package / test inputs belong in the repo. Everything below stays
+# on disk locally: notes, Unity screenshot-compare and alignment tooling, the
+# asset-generation scripts that feed the checked-in *.inc tables, and the
+# build MCP server that only the Claude agent uses.
 /docs/
+/.agents/
+/tests/README.md
+/chart-render/docs/
+/chart-render/unity_particle_api_manifest.json
+/scripts/data/
+/scripts/mcp/
+/scripts/align2_*.py
+/scripts/compare_*.py
+/scripts/extract_split_effect_catalog.py
+/scripts/generate_offlinepreview_resources.py
+/scripts/generate_split_effect_*.py
+/scripts/patch_split_effect_*.py
+/scripts/run_one_dump.sh
+/scripts/split_effect_min_cover.py
+/scripts/verify_offlinepreview_pack.py
+
+# Python bytecode from scripts/
+__pycache__/
+*.pyc
+
+# Legacy full export (local only). The tracked runtime data lives in the
+# repo-root resources/.
+/chart-render/openwds-split-effects/resources/
 
 # Optional sample BGM for local testing
 /suzume_no_tojimari.ogg
