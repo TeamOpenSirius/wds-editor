@@ -5,9 +5,12 @@
 
 #include <QEvent>
 #include <QGuiApplication>
+#include <QPlatformSurfaceEvent>
 #include <QResizeEvent>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 namespace wds::ui {
 
@@ -60,7 +63,20 @@ void RealtimeVulkanWindow::set_resize_suspended(bool suspended) noexcept {
 
 void RealtimeVulkanWindow::request_frame() {
   force_frame_ = true;
-  if (frame_callback_) requestUpdate();
+  if (frame_callback_ && !surface_dead_) requestUpdate();
+}
+
+void RealtimeVulkanWindow::pump_cli_frame() {
+  if (!frame_callback_) return;
+  force_frame_ = true;
+  if (!surface_dead_) requestUpdate();
+  const int lw = std::max(160, width());
+  const int lh = std::max(90, height());
+  const qreal scale = devicePixelRatio();
+  const int fb_w = std::max(1, qRound(static_cast<qreal>(lw) * scale));
+  const int fb_h = std::max(1, qRound(static_cast<qreal>(lh) * scale));
+  frame_callback_(0.016f, lw, lh, fb_w, fb_h, input_queue_.events());
+  input_queue_.clear();
 }
 
 void RealtimeVulkanWindow::mark_presented() noexcept { presented_ = true; }
@@ -72,13 +88,18 @@ wds::interaction::Vec2 RealtimeVulkanWindow::pointer_logical() const noexcept {
 wds::renderer::VulkanHostSurface RealtimeVulkanWindow::host_surface() const {
   wds::renderer::VulkanHostSurface host;
   host.external_instance = instance_ != nullptr ? instance_->vkInstance() : VK_NULL_HANDLE;
-  host.external_surface = QVulkanInstance::surfaceForWindow(const_cast<RealtimeVulkanWindow*>(this));
   host.renderer_owns_instance = false;
   host.renderer_owns_surface = false;
   auto* self = const_cast<RealtimeVulkanWindow*>(this);
   host.acquire_surface = [self] {
+    if (self->surface_dead_) {
+      return static_cast<VkSurfaceKHR>(VK_NULL_HANDLE);
+    }
     return QVulkanInstance::surfaceForWindow(self);
   };
+  if (!surface_dead_) {
+    host.external_surface = QVulkanInstance::surfaceForWindow(self);
+  }
   host.display_refresh_hz = [self] {
     return self->screen() != nullptr ? std::max(1, qRound(self->screen()->refreshRate())) : 60;
   };
@@ -91,8 +112,31 @@ wds::renderer::VulkanHostSurface RealtimeVulkanWindow::host_surface() const {
 }
 
 bool RealtimeVulkanWindow::event(QEvent* event) {
+  if (event->type() == QEvent::PlatformSurface) {
+    const auto* pe = static_cast<QPlatformSurfaceEvent*>(event);
+    if (pe->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed) {
+      surface_dead_ = true;
+      if (surface_teardown_) {
+        surface_teardown_();
+      }
+    }
+    const bool created = pe->surfaceEventType() == QPlatformSurfaceEvent::SurfaceCreated;
+    const bool handled = QWindow::event(event);
+    if (created) {
+      surface_dead_ = false;
+      last_frame_ = std::chrono::steady_clock::now();
+      pending_elapsed_us_ = 0;
+      schedule_frame();
+    }
+    return handled;
+  }
   if (event->type() == QEvent::UpdateRequest) {
     if (!frame_callback_) {
+      return true;
+    }
+    if (surface_dead_) {
+      note_frame_hold("surface-dead");
+      pending_elapsed_us_ = 0;
       return true;
     }
     // A request already queued before the resize must not reach the renderer,
@@ -107,7 +151,9 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     }
     force_frame_ = false;
     initialized_ = isExposed();
-    if (!initialized_) {
+    const char* dump_verts = std::getenv("WDS_DUMP_VERTS");
+    const bool cli_dump = dump_verts != nullptr && dump_verts[0] != '\0';
+    if (!initialized_ && !cli_dump) {
       note_frame_hold("unexposed");
       return true;
     }
@@ -128,9 +174,9 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       schedule_frame();
       return true;
     }
-    int fb_w = 1, fb_h = 1;
-    const auto host = host_surface();
-    host.framebuffer_size(&fb_w, &fb_h);
+    const qreal scale = devicePixelRatio();
+    const int fb_w = std::max(1, qRound(width() * scale));
+    const int fb_h = std::max(1, qRound(height() * scale));
     if (startup) {
       WDS_LOG("preview first frame resize=%d suspend=%d exposed=%d logical=%dx%d fb=%dx%d\n",
               resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0, isExposed() ? 1 : 0, width(),
@@ -193,6 +239,10 @@ void RealtimeVulkanWindow::note_frame_resume() {
 
 void RealtimeVulkanWindow::schedule_frame() {
   if (!frame_callback_) return;
+  if (surface_dead_) {
+    note_frame_hold("surface-dead");
+    return;
+  }
   if (!isExposed()) {
     note_frame_hold("unexposed");
     return;

@@ -102,8 +102,7 @@ class EditViewport {
   int32_t lane_at(float x, int32_t width = 1) const {
     const int32_t w = std::max(1, width);
     const int32_t lane = wds::chart_editor::round_to_int_tick(lane_left_at_f(x, w));
-    return wds::chart_editor::clamp_lane_for_width(lane, w, grid_.lane_count,
-                                                   grid_.compatibility_profile);
+    return wds::chart_editor::clamp_lane_for_width(lane, w, grid_.lane_count);
   }
   float x_at(int32_t lane) const { return bounds_.x + lane * bounds_.w / grid_.lane_count; }
   float lane_width(int32_t width) const { return width * bounds_.w / grid_.lane_count; }
@@ -146,15 +145,6 @@ class EditViewport {
     const float side = mid_star_size_px();
     const float cx = x + width * 0.5f;
     return {cx - side * 0.5f, y0 - side * 0.5f, side, side};
-  }
-
-  wds::interaction::Rect authored_eighth_star_screen_rect(
-      const wds::chart_editor::NotationNote& note) const {
-    const auto star = mid_star_screen_rect(note);
-    constexpr float kScale = 0.75f;
-    const float side = star.w * kScale;
-    return {star.x + (star.w - side) * 0.5f,
-            star.y + (star.h - side) * 0.5f, side, side};
   }
 
   // Playhead always on the judgeline at 1:1 — no lead-in ease / speed change.

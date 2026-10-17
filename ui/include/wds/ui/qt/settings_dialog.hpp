@@ -53,6 +53,7 @@ class SettingsPanel final : public QWidget {
   QComboBox* theme_combo_ = nullptr;
 
   QCheckBox* sus_auto_convert_ = nullptr;
+  QComboBox* backup_interval_ = nullptr;
   QCheckBox* mute_hold_body_sfx_ = nullptr;
   QCheckBox* invert_scroll_wheel_ = nullptr;
   QCheckBox* invert_visible_range_scroll_ = nullptr;
@@ -62,6 +63,7 @@ class SettingsPanel final : public QWidget {
   QDoubleSpinBox* note_speed_ = nullptr;
   QSpinBox* note_start_offset_ = nullptr;
   QSpinBox* note_height_level_ = nullptr;
+  QComboBox* split_effect_quality_ = nullptr;
   QSpinBox* split_line_opacity_ = nullptr;
   QComboBox* spectrum_display_ = nullptr;
   QComboBox* msaa_samples_ = nullptr;

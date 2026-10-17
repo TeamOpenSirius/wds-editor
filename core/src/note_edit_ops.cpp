@@ -145,7 +145,13 @@ std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationN
   return notes;
 }
 
+bool is_playfield_selectable(const NotationNote& note) noexcept {
+  if (note.note_type == NoteType::HoldEighth) return false;
+  return !is_split_lane_gimmick(note.gimmick_type);
+}
+
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
+  if (!is_playfield_selectable(note)) return note;
   const bool was_hold = is_bindable_hold_body(note.note_type) && note.end_tick > note.start_tick;
   const bool target_hold = is_bindable_hold_body(target);
   const bool was_chain = is_hold_chain_body(note.note_type);
@@ -528,7 +534,9 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
   selected_bodies.reserve(selected.size());
   for (const int32_t id : selected) {
     auto note = doc.find_note(id);
-    if (note && is_bindable_hold_body(note->note_type)) selected_bodies.push_back(id);
+    if (note && is_playfield_selectable(*note) && is_bindable_hold_body(note->note_type)) {
+      selected_bodies.push_back(id);
+    }
   }
 
   for (const int32_t body_id : selected_bodies) {
@@ -585,7 +593,7 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
   for (const int32_t id : selected) {
     if (handled.count(id) || remove_ids.count(id)) continue;
     auto note = doc.find_note(id);
-    if (!note) continue;
+    if (!note || !is_playfield_selectable(*note)) continue;
     NotationNote after = convert_note_type(*note, target, tpq);
     apply_convert_scratch_override(after, scratch_length);
     result.updates[id] = after;

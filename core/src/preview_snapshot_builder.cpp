@@ -36,7 +36,7 @@ void query_preview_split_candidates(const ChartNoteIndex& index, int64_t preview
                                     const PreviewConfig& config,
                                     std::vector<int32_t>& out_note_ids) {
   const int64_t appear_ms = split_fade_sec_to_ms(config.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_sec_to_ms(config.split_line_animation_end_sec);
+  const int64_t disappear_ms = official_split_hide_tail_ms(config.split_line_animation_end_sec);
   const int64_t lower_ms =
       sat_sub_nonneg(sat_sub_nonneg(preview_time_ms, index.max_split_span_ms()), disappear_ms);
   const int64_t upper_ms = sat_add_nonneg(preview_time_ms, appear_ms);

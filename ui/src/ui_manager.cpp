@@ -15,6 +15,7 @@
 #include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 
+#include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/core/chart_validation.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/notation.hpp>
@@ -50,12 +51,14 @@ void capture_display_from_preview(const ChartPreviewPanel& preview, EditorUiConf
   cfg.note_height_level = visual.note_height_level;
   cfg.split_line_opacity =
       static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) * 100.0));
+  cfg.split_effect_quality =
+      wds::chart_editor::official_clamp_sprit_effect_setting(visual.split_effect_quality);
   cfg.msaa_samples = visual.msaa_samples;
 }
 
 void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& cfg) {
   preview.apply_display_settings(cfg.note_speed, cfg.note_start_offset, cfg.note_height_level,
-                                 cfg.split_line_opacity);
+                                 cfg.split_line_opacity, cfg.split_effect_quality);
   preview.preview().apply_msaa(cfg.msaa_samples);
 }
 
@@ -145,7 +148,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit_panel_ = edit.get();
-  edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
+  edit->set_seek_ms([this](int64_t ms) { chart_preview_->request_seek_ms(ms); });
   edit->set_visible_range_changed_handler([this] {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
@@ -199,8 +202,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     with_save_if_dirty([this] {
       if (auto path = native_file_dialog::open_file("导入官方谱面", {"csv", "sus"})) {
         if (!session_->import_official(*path)) {
-          const auto& reason = session_->last_import_error();
-          set_status(reason.empty() ? "导入失败：" + *path : reason, StatusLevel::Error);
+          set_status("导入失败：" + *path, StatusLevel::Error);
         }
       } else {
         set_status("导入已取消", StatusLevel::Info);
@@ -232,8 +234,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
       if (session_->add_chart_from_file(*path)) {
         set_status("已添加谱面：" + *path, StatusLevel::Info);
       } else {
-        const auto& reason = session_->last_import_error();
-        set_status(reason.empty() ? "添加谱面失败：" + *path : reason, StatusLevel::Error);
+        set_status("添加谱面失败：" + *path, StatusLevel::Error);
       }
     } else {
       set_status("添加谱面已取消", StatusLevel::Info);
@@ -369,7 +370,7 @@ void UiManager::toggle_playback(bool shift_pause_variant) {
   // Checked: swap those two Space behaviors.
   const bool pause_here = pause_at_current ? !shift_pause_variant : shift_pause_variant;
   if (!pause_here) {
-    transport.request_seek_ms(play_anchor_ms_);
+    chart_preview_->request_seek_ms(play_anchor_ms_);
   }
   transport.request_pause();
 }
@@ -385,7 +386,10 @@ void UiManager::play_from_chart_start() {
   if (!transport.intends_playing()) {
     play_anchor_ms_ = transport.committed_ms();
   }
-  transport.request_seek_ms(transport.chart_start_ms());
+  // Unity 2022.3 useAutoRandomSeed: a new seed each Play(), not each seek.
+  chart_preview_->join_speculative_split_collect();
+  wds::chart_render::reset_split_effect_auto_seed_session();
+  chart_preview_->request_seek_ms(transport.chart_start_ms());
   transport.request_play();
 }
 
@@ -600,8 +604,8 @@ void UiManager::check_chart_errors() {
     const int32_t first_tick = result.error_ticks.front();
     const int64_t ms =
         wds::chart_editor::tick_to_milliseconds(first_tick, engine.document().timing());
+    chart_preview_->request_seek_ms(ms);
     chart_preview_->transport().request_pause();
-    chart_preview_->transport().request_seek_ms(ms);
     wds::common::TimelineSnapshot snap;
     snap.position = wds::common::ms_to_us(ms);
     snap.state = wds::common::PlaybackState::Paused;
@@ -628,8 +632,8 @@ std::vector<int32_t> UiManager::collect_chart_error_ticks() {
 void UiManager::jump_to_error_tick(int32_t tick) {
   auto& engine = session_->engine();
   const int64_t ms = wds::chart_editor::tick_to_milliseconds(tick, engine.document().timing());
+  chart_preview_->request_seek_ms(ms);
   chart_preview_->transport().request_pause();
-  chart_preview_->transport().request_seek_ms(ms);
   wds::common::TimelineSnapshot snap;
   snap.position = wds::common::ms_to_us(ms);
   snap.state = wds::common::PlaybackState::Paused;
@@ -867,6 +871,7 @@ void UiManager::load_ui_config() {
   if (!load_editor_ui_config(config_path_, cfg)) return;
   wds::interaction::set_width_slot_values(cfg.width_slots);
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
@@ -900,6 +905,7 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
   cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
   cfg.sus_auto_convert = session_->sus_auto_convert();
+  cfg.backup_interval_min = backup_interval_min_;
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
@@ -917,6 +923,7 @@ void UiManager::snapshot_ui_config_for_qt(EditorUiConfig& cfg) { capture_live_ui
 
 void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
@@ -1079,8 +1086,10 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
     double sync_ms = session_->engine().timeline_us() / 1000.0;
     if (chart_preview_ != nullptr &&
         session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
-      // Match preview present clock (committed + one display-frame lead).
-      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
+      // Match the preview draw clock (transport + one display-frame lead).
+      const int64_t lead = chart_preview_->last_visual_lead_us();
+      sync_ms += static_cast<double>(lead > 0 ? lead : chart_preview_->display_frame_lead_us()) /
+                 1000.0;
     }
     edit->sync_to_timeline_ms(sync_ms);
     if (chart_preview_ != nullptr) {

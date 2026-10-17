@@ -5,6 +5,8 @@
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 #include "wds/ui/toolbar_curve_selection.hpp"
 
+#include <wds/core/chart_serializer.hpp>
+
 #include <wds/interaction/events.hpp>
 #include <wds/interaction/font_atlas.hpp>
 #include <wds/interaction/theme.hpp>
@@ -14,13 +16,15 @@
 #include <wds/interaction/widgets/checkbox.hpp>
 #include <wds/interaction/widgets/dropdown.hpp>
 #include <wds/interaction/widgets/icon_button.hpp>
-#include <wds/core/chart_serializer.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -715,109 +719,161 @@ void test_two_column_settings_and_aligned_curve_row() {
   assert_curve_row_readable(kToolbarTypicalWidth);
 }
 
-void test_refresh_import_requires_selected_feature_level() {
-  namespace fs = std::filesystem;
-  namespace ce = wds::chart_editor;
-  const fs::path base = fs::temp_directory_path() / "wds_refresh_import_gate";
-  fs::create_directories(base);
-  const fs::path csv = base / "extended.csv";
-  const fs::path nontail_csv = base / "nontail.csv";
-  const fs::path overhang_csv = base / "overhang.csv";
-  const fs::path original_csv = base / "original.csv";
-  const fs::path sus = base / "extended.sus";
-  const fs::path native = base / "extended.wdschart";
-  const fs::path pack_chart = base / "1.csv";
-  const fs::path music_config = base / "music_config.csv";
+std::string read_all(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
 
-  ce::NotationChart chart;
-  chart.compatibility_profile = ce::ChartCompatibilityProfile::SiriusExtended;
-  chart.timing.bpm = 60.0;
-  chart.timing.ticks_per_quarter = 480;
-  ce::NotationNote body;
-  body.id = 0;
-  body.start_tick = 0;
-  body.end_tick = 480;
-  body.note_type = ce::NoteType::NontailHold;
-  body.lane = 2;
-  body.width = 3;
-  chart.notes.push_back(body);
-  chart.scroll_speed_points = {{0, 1.5}};
-  CHECK(ce::OfficialChartFormat::save_chart_file(chart, csv.string()).error ==
-        ce::SerializeError::Ok);
-  auto nontail_only = chart;
-  nontail_only.scroll_speed_points.clear();
-  CHECK(ce::OfficialChartFormat::save_chart_file(nontail_only, nontail_csv.string()).error ==
-        ce::SerializeError::Ok);
-  auto overhang_only = nontail_only;
-  overhang_only.notes[0].note_type = ce::NoteType::Normal;
-  overhang_only.notes[0].end_tick = 0;
-  overhang_only.notes[0].lane = -1;
-  CHECK(ce::OfficialChartFormat::save_chart_file(overhang_only, overhang_csv.string()).error ==
-        ce::SerializeError::Ok);
-  auto original = overhang_only;
-  original.compatibility_profile = ce::ChartCompatibilityProfile::Official;
-  original.notes[0].lane = 2;
-  CHECK(ce::OfficialChartFormat::save_chart_file(original, original_csv.string()).error ==
-        ce::SerializeError::Ok);
-  CHECK(ce::SusChartFormat::save_file(chart, sus.string(), ce::SusChartSaveOptions{}).error ==
-        ce::SerializeError::Ok);
-  CHECK(ce::ChartSerializer::save_to_file(chart, native.string()).error ==
-        ce::SerializeError::Ok);
-  fs::copy_file(csv, pack_chart, fs::copy_options::overwrite_existing);
-  ce::OfficialMusicConfig music;
-  music.cue_sheet_name = "Music";
-  music.cue_name = "1";
-  CHECK(ce::OfficialChartFormat::save_music_config_file(music, music_config.string()).error ==
-        ce::SerializeError::Ok);
+int count_backup_dirs(const std::filesystem::path& root, const char* suffix) {
+  if (!std::filesystem::exists(root)) return 0;
+  int n = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    if (!entry.is_directory()) continue;
+    const auto name = entry.path().filename().string();
+    if (name.find(suffix) != std::string::npos) ++n;
+  }
+  return n;
+}
+
+std::filesystem::path first_backup_dir(const std::filesystem::path& root, const char* suffix) {
+  if (!std::filesystem::exists(root)) return {};
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    if (!entry.is_directory()) continue;
+    const auto name = entry.path().filename().string();
+    if (name.find(suffix) != std::string::npos) return entry.path();
+  }
+  return {};
+}
+
+void test_create_project_writes_first_chart() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_create_project_chart" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  CHECK(!session.add_chart());
+  CHECK(session.create_project(project.string()));
+  CHECK(session.project_path() == project.string());
+  CHECK(fs::exists(dir / "1.wdschart"));
+  CHECK(fs::exists(project));
+  CHECK(session.chart_path(0).find("1.wdschart") != std::string::npos);
+  CHECK(!session.dirty());
+  CHECK(session.add_chart());
+  CHECK(fs::exists(dir / "2.wdschart"));
+  CHECK_EQ(session.chart_count(), 2u);
+  CHECK(session.add_chart());
+  CHECK(fs::exists(dir / "3.wdschart"));
+  CHECK_EQ(session.chart_count(), 3u);
+  fs::remove_all(dir);
+}
+
+void test_first_save_skips_manual_backup() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_backup_first_save" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  session.set_backup_sink([&](std::vector<wds::ui::ChartBackupItem> items) {
+    (void)wds::ui::write_chart_backup_folder(session.auto_backup_directory(),
+                                             wds::ui::ChartBackupKind::Manual, items);
+  });
+  CHECK(session.new_project());
+  CHECK(session.save_as(project.string()));
+  CHECK(!fs::exists(dir / "AutoBackup"));
+  fs::remove_all(dir);
+}
+
+void test_second_save_manual_backup_keeps_previous_disk() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_backup_manual" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  session.set_backup_sink([&](std::vector<wds::ui::ChartBackupItem> items) {
+    (void)wds::ui::write_chart_backup_folder(session.auto_backup_directory(),
+                                             wds::ui::ChartBackupKind::Manual, items);
+  });
+  CHECK(session.new_project());
+  CHECK(session.save_as(project.string()));
+  const std::string before = read_all(dir / "1.wdschart");
+  CHECK(!before.empty());
+
+  wds::chart_editor::NotationNote note;
+  note.start_tick = 480;
+  note.lane = 0;
+  note.width = 2;
+  CHECK(session.engine().document().add_note(note) >= 0);
+  CHECK(session.save());
+
+  const auto backup_root = dir / "AutoBackup";
+  CHECK_EQ(count_backup_dirs(backup_root, "_Manual"), 1);
+  CHECK_EQ(count_backup_dirs(backup_root, "_Auto"), 0);
+  const auto manual = first_backup_dir(backup_root, "_Manual");
+  CHECK(!manual.empty());
+  CHECK(read_all(manual / "1.wdschart") == before);
+  CHECK(read_all(dir / "1.wdschart") != before);
+  fs::remove_all(dir);
+}
+
+void test_auto_backup_normalizes_ids_without_mutating_session() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_backup_auto" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
 
   wds::ui::ChartPreviewPanel preview;
   wds::ui::EditorSession session(preview);
   CHECK(session.new_project());
-  CHECK(!session.import_official(csv.string()));
-  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
-  CHECK(session.engine().document().is_editable());
-  CHECK(!session.import_official(nontail_csv.string()));
-  CHECK(!session.import_official(overhang_csv.string()));
-  CHECK(!session.import_official(sus.string()));
-  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
-  CHECK(!session.add_chart_from_file(native.string()));
-  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
-  CHECK(!session.import_official(music_config.string()));
-  CHECK(session.last_import_error().find("Refresh") != std::string::npos);
-  CHECK(session.import_official(original_csv.string()));
+  CHECK(session.save_as(project.string()));
+  const std::string bound_chart = session.chart_path(0);
+  const std::string bound_project = session.project_path();
 
-  CHECK(session.new_project());
-  CHECK(session.engine().document().set_compatibility_profile(
-      ce::ChartCompatibilityProfile::SiriusExtended));
-  CHECK(session.import_official(music_config.string()));
-  CHECK(session.new_project());
-  CHECK(session.engine().document().set_compatibility_profile(
-      ce::ChartCompatibilityProfile::SiriusExtended));
-  CHECK(session.import_official(csv.string()));
-  CHECK(session.engine().document().compatibility_profile() ==
-        ce::ChartCompatibilityProfile::SiriusExtended);
+  wds::chart_editor::NotationChart chart;
+  wds::chart_editor::NotationNote a;
+  a.id = 50;
+  a.start_tick = 0;
+  a.lane = 0;
+  a.width = 1;
+  wds::chart_editor::NotationNote b;
+  b.id = 80;
+  b.start_tick = 480;
+  b.lane = 1;
+  b.width = 1;
+  chart.notes = {a, b};
+  session.engine().load_chart(chart);
 
-  CHECK(session.new_project());
-  CHECK(session.engine().document().set_compatibility_profile(
-      ce::ChartCompatibilityProfile::SiriusExtended));
-  CHECK(session.import_official(sus.string()));
+  std::vector<wds::ui::ChartBackupItem> items;
+  CHECK(session.capture_auto_backup(items));
+  CHECK_EQ(items.size(), 1u);
+  std::string out_dir;
+  CHECK(wds::ui::write_chart_backup_folder(session.auto_backup_directory(),
+                                           wds::ui::ChartBackupKind::Auto, items, &out_dir));
+  CHECK(session.project_path() == bound_project);
+  CHECK(session.chart_path(0) == bound_chart);
 
-  std::error_code ignored;
-  fs::remove(csv, ignored);
-  fs::remove(nontail_csv, ignored);
-  fs::remove(overhang_csv, ignored);
-  fs::remove(original_csv, ignored);
-  fs::remove(sus, ignored);
-  fs::remove(native, ignored);
-  fs::remove(pack_chart, ignored);
-  fs::remove(music_config, ignored);
-  fs::remove(base, ignored);
+  wds::chart_editor::NotationChart loaded;
+  const auto load =
+      wds::chart_editor::ChartSerializer::load_from_file(out_dir + "/1.wdschart", loaded);
+  CHECK(load.error == wds::chart_editor::SerializeError::Ok);
+  CHECK_EQ(loaded.notes.size(), 2u);
+  CHECK_EQ(loaded.notes[0].id, 0);
+  CHECK_EQ(loaded.notes[1].id, 1);
+  fs::remove_all(dir);
 }
 
 }  // namespace
 
 int main() {
-  test_refresh_import_requires_selected_feature_level();
   test_toolbar_action_order_has_no_undo_redo();
   test_curve_and_check_actions_dispatch_from_toolbar_hits();
   test_dropdown_empty_item_and_stable_id_with_duplicates();
@@ -828,6 +884,10 @@ int main() {
   test_two_column_settings_and_aligned_curve_row();
   test_default_window_toolbar_uses_standard_gaps_and_curve_row_columns();
   test_crushed_toolbar_controls_do_not_overlap();
+  test_create_project_writes_first_chart();
+  test_first_save_skips_manual_backup();
+  test_second_save_manual_backup_keeps_previous_disk();
+  test_auto_backup_normalizes_ids_without_mutating_session();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

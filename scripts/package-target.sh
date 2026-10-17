@@ -36,7 +36,7 @@ Writes: dist/wds-win-x86_64.msi   (+ portable dist/wds-win-x86_64.zip)
   Skip dsymutil / objcopy debug-split (also WDS_PACKAGE_SYMBOLS=0). Default on.
 
 --stage-win-debug:
-  Copy skins/effects/shaders/fonts/icons + vulkan-1.dll next to
+  Copy skins/effects/resources/shaders/fonts/icons + vulkan-1.dll next to
   <build-dir>/ui/wds_editor.exe so a Win Debug tree is runnable without MSI/zip.
   (Cross-compiled Debug bakes Linux WDS_REPO_ROOT / WDS_SHADER_DIR paths.)
 
@@ -171,7 +171,7 @@ copy_theme() {
 }
 
 # Portable resource tree shared by every platform (zip root or Contents/Resources):
-#   skins/ effects/ fonts/ icons/ shaders/ theme/ wds.png [licenses/] [optional sample ogg]
+#   skins/ effects/ resources/ fonts/ icons/ shaders/ theme/ wds.png [licenses/] [optional sample ogg]
 copy_skins_effects() {
   local stage="$1"
   mkdir -p "${stage}"
@@ -186,6 +186,18 @@ copy_skins_effects() {
   if [[ -f "${ROOT}/suzume_no_tojimari.ogg" ]]; then
     cp -a "${ROOT}/suzume_no_tojimari.ogg" "${stage}/"
   fi
+}
+
+# Split-effect particle object tables (resources/<group>/<name>.bundle.objects.tsv|jsonl).
+# Hard requirement: without it the package has no split-line particles. Wipe first so
+# a re-run into an existing stage cannot keep stale files.
+copy_split_effect_resources() {
+  local stage="$1"
+  [[ -d "${ROOT}/resources" ]] || \
+    die "resources/ missing (expected ${ROOT}/resources); a package without it has no split-line particles"
+  mkdir -p "${stage}"
+  rm -rf "${stage}/resources"
+  cp -a "${ROOT}/resources" "${stage}/"
 }
 
 copy_fonts() {
@@ -268,6 +280,7 @@ copy_shaders() {
 copy_portable_resources() {
   local stage="$1" build_dir="$2"
   copy_skins_effects "$stage"
+  copy_split_effect_resources "$stage"
   copy_fonts "$stage" "$build_dir"
   copy_icons "$stage" "$build_dir"
   copy_theme "$stage"
@@ -313,7 +326,7 @@ Re-running the MSI updates an existing install in place (UpdateDlg; single ARP e
 This zip is a portable copy of the same payload.
 
 Bundled next to wds_editor.exe:
-  skins\ effects\ fonts\ icons\ shaders\ wds.png
+  skins\ effects\ resources\ fonts\ icons\ shaders\ wds.png
   bass.dll, bassmix.dll, vulkan-1.dll, Uninstall.exe
   MinGW runtimes when required by Qt (libstdc++-6 / libgcc_s_seh / libwinpthread)
 
@@ -334,7 +347,7 @@ WDS Editor package (macos-arm) — self-contained .app
 
 Inside WDS Editor.app:
   Contents/MacOS/       wds_editor + lib/ (png, vulkan, MoltenVK, bass)
-  Contents/Resources/   skins effects fonts icons shaders wds.icns wds.png
+  Contents/Resources/   skins effects resources fonts icons shaders wds.icns wds.png
                         + vulkan/icd.d/MoltenVK_icd.json
 
 1. Prefer the DMG: open wds-macos-arm.dmg, drag WDS Editor.app into Applications.
@@ -359,9 +372,21 @@ make_zip() {
   need_cmd zip
   (
     cd "$(dirname "$stage")"
-    zip -r -q "$zip_path" "$(basename "$stage")"
+    # -y stores symlinks as links; without it libvulkan.dylib becomes a second real copy and dyld loads two loaders.
+    zip -r -y -q "$zip_path" "$(basename "$stage")"
   )
   echo "Packaged: $zip_path"
+}
+
+# Fail if the zip did not preserve every symlink in the staged tree.
+verify_zip_symlinks() {
+  local stage="$1" zip_path="$2" want got
+  need_cmd zipinfo
+  want="$(find "$stage" -type l | wc -l | tr -d ' ')"
+  got="$(zipinfo "$zip_path" | grep -c '^l' || true)"
+  if [[ "$want" != "$got" ]]; then
+    die "symlinks not preserved in $zip_path (staged: $want, in zip: $got); dereferenced symlinks duplicate libs such as libvulkan.dylib"
+  fi
 }
 
 # --- win-x86_64 -------------------------------------------------------------
@@ -2356,6 +2381,7 @@ package_macos() {
   write_macos_app_bundle "$stage" "$demo" "$build_dir"
   write_readme "$stage" macos-arm
   make_zip "$stage" "${DIST_DIR}/wds-macos-arm.zip"
+  verify_zip_symlinks "$stage" "${DIST_DIR}/wds-macos-arm.zip"
   make_macos_dmg "${stage}/WDS Editor.app" "${DIST_DIR}/wds-macos-arm.dmg"
 }
 
@@ -2368,8 +2394,9 @@ stage_win_debug() {
   [[ -f "${editor}" ]] || die "missing ${editor} (build win Debug first)"
 
   # fonts/icons/wds.png are already POST_BUILD'd into ui/. Only fill gaps that the
-  # in-tree Debug tree is missing (skins/effects/shaders + vulkan-1.dll).
+  # in-tree Debug tree is missing (skins/effects/resources/shaders + vulkan-1.dll).
   copy_skins_effects "$stage"
+  copy_split_effect_resources "$stage"
   copy_shaders "$stage" "$build_dir"
   if [[ ! -f "${stage}/wds.png" ]]; then
     copy_app_icon "$stage"
@@ -2406,7 +2433,7 @@ stage_win_debug() {
   cp -a "${vk_dll}" "${stage}/vulkan-1.dll"
 
   echo "Win Debug runtime staged at: ${stage}"
-    echo "Copy the whole ui/ folder to Windows (exe + bass.dll + bassmix.dll + vulkan-1.dll + skins/effects/shaders/fonts/icons)."
+    echo "Copy the whole ui/ folder to Windows (exe + bass.dll + bassmix.dll + vulkan-1.dll + skins/effects/resources/shaders/fonts/icons)."
 }
 
 # --- main -------------------------------------------------------------------

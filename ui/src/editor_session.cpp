@@ -9,16 +9,18 @@
 #include <wds/core/chart_editor_engine.hpp>
 #include <wds/core/chart_serializer.hpp>
 #include <wds/core/file_io.hpp>
-#include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/project.hpp>
 #include <wds/core/sus_chart.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,6 +49,12 @@ wds::chart_editor::NotationChart normalized_copy(
   wds::chart_editor::ChartDocument doc;
   doc.load_from_chart(chart, wds::chart_editor::ChartEditMode::Editable);
   return doc.normalized_chart();
+}
+
+wds::chart_editor::NotationChart chart_for_disk(const wds::chart_editor::NotationChart& chart) {
+  auto copy = normalized_copy(chart);
+  copy.timing.offset_ms = 0;
+  return copy;
 }
 
 std::string to_lower_ascii(std::string s) {
@@ -206,6 +214,60 @@ bool path_exists_utf8(const std::string& utf8) {
 #endif
 }
 
+std::string path_basename_utf8(const std::string& path) {
+  return path_to_utf8(path_from_utf8(path).filename());
+}
+
+std::string unique_name_in_set(std::unordered_set<std::string>& used, std::string name) {
+  if (name.empty()) name = "chart.wdschart";
+  if (used.insert(name).second) return name;
+  const auto dot = name.rfind('.');
+  const std::string stem = dot == std::string::npos ? name : name.substr(0, dot);
+  const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+  for (int n = 2; n < 10000; ++n) {
+    std::string candidate = stem + "-" + std::to_string(n) + ext;
+    if (used.insert(candidate).second) return candidate;
+  }
+  return name;
+}
+
+std::string format_backup_stamp(ChartBackupKind kind) {
+  const std::time_t now =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s(&local, &now);
+#else
+  localtime_r(&now, &local);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%d_%H-%M-%S", &local);
+  std::string name(buf);
+  name += kind == ChartBackupKind::Auto ? "_Auto" : "_Manual";
+  return name;
+}
+
+std::string unique_backup_dir(const std::string& root, ChartBackupKind kind) {
+  const std::string base = join_utf8(root, format_backup_stamp(kind));
+  if (!path_exists_utf8(base)) return base;
+  for (int n = 2; n < 1000; ++n) {
+    const std::string candidate = base + "-" + std::to_string(n);
+    if (!path_exists_utf8(candidate)) return candidate;
+  }
+  return {};
+}
+
+std::string next_numbered_wdschart(const std::string& dir,
+                                   const std::unordered_set<std::string>& used) {
+  if (dir.empty()) return {};
+  for (int n = 1; n < 100000; ++n) {
+    const std::string candidate = join_utf8(dir, std::to_string(n) + ".wdschart");
+    if (used.count(candidate) || path_exists_utf8(candidate)) continue;
+    return candidate;
+  }
+  return {};
+}
+
 bool copy_utf8_overwrite(const std::string& from_utf8, const std::string& to_utf8,
                          std::error_code& ec) {
 #if defined(_WIN32)
@@ -346,17 +408,26 @@ std::string ascii_token_or(const std::string& value, const std::string& fallback
 
 }  // namespace
 
-EditorSession::EditorSession(ChartPreviewPanel& preview) : preview_(preview) {}
-
-bool EditorSession::allows_refresh_import(const wds::chart_editor::NotationChart& chart) {
-  if (engine().document().compatibility_profile() ==
-          wds::chart_editor::ChartCompatibilityProfile::SiriusExtended ||
-      (chart.compatibility_profile == wds::chart_editor::ChartCompatibilityProfile::Official &&
-       wds::chart_editor::required_chart_features(chart).empty())) return true;
-  last_import_error_ = "请先将功能等级切换为 Refresh，再导入含 SV、无尾或超界内容的谱面";
-  status(last_import_error_, StatusLevel::Error);
-  return false;
+bool write_chart_backup_folder(const std::string& backup_root, ChartBackupKind kind,
+                               const std::vector<ChartBackupItem>& items, std::string* out_dir) {
+  if (backup_root.empty() || items.empty()) return false;
+  const std::string dir = unique_backup_dir(backup_root, kind);
+  if (dir.empty()) return false;
+  std::unordered_set<std::string> used;
+  for (const auto& item : items) {
+    const std::string name = unique_name_in_set(used, item.filename);
+    const std::string dest = join_utf8(dir, name);
+    const auto result =
+        item.from_disk
+            ? wds::chart_editor::write_text_atomic(dest, item.disk_text)
+            : wds::chart_editor::ChartSerializer::save_to_file(chart_for_disk(item.chart), dest);
+    if (!ok(result)) return false;
+  }
+  if (out_dir != nullptr) *out_dir = dir;
+  return true;
 }
+
+EditorSession::EditorSession(ChartPreviewPanel& preview) : preview_(preview) {}
 
 void EditorSession::status(std::string text, StatusLevel level) {
   if (status_handler_) status_handler_(std::move(text), level);
@@ -457,6 +528,9 @@ bool EditorSession::activate_chart(std::size_t index) {
   if (!charts_[index].dirty) {
     engine().mark_saved();
   }
+  if (preview_.ready()) {
+    preview_.request_buffer_precommit();
+  }
   return true;
 }
 
@@ -490,11 +564,20 @@ bool EditorSession::new_project() {
   // Opening a fresh project must not inherit the previous song's playhead —
   // preview only draws the current time window, so a late cursor looks empty.
   preview_.load_music({}, false);  // clear any previously imported BGM
+  if (preview_.ready()) {
+    preview_.request_buffer_precommit();
+  }
   preview_.reset_playback();
   status("已新建工程", StatusLevel::Info);
   notify_project_reloaded();
   publish_crash_context();
   return true;
+}
+
+bool EditorSession::create_project(const std::string& path) {
+  if (path.empty()) return false;
+  if (!new_project()) return false;
+  return save_as(path);
 }
 
 bool EditorSession::open_wdsproject(const std::string& path) {
@@ -518,7 +601,7 @@ PreparedWdsProject EditorSession::prepare_wdsproject(const std::string& path) {
     const std::string chart_path =
         wds::chart_editor::ProjectSerializer::resolve_path(path, chart_rel);
     wds::chart_editor::NotationChart chart;
-    if (!ok(wds::chart_editor::ChartSerializer::load_from_file(chart_path, chart))) {
+    if (!ok(wds::chart_editor::ChartSerializer::load_auto(chart_path, chart))) {
       prepared.error = "无法加载谱面 " + chart_path;
       prepared.chart_paths.clear();
       prepared.charts.clear();
@@ -593,22 +676,89 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
   return true;
 }
 
-bool EditorSession::collect_chart_paths_for_save(std::vector<std::string>& out_paths) {
+std::string EditorSession::auto_backup_directory() const {
+  if (project_path_.empty()) return {};
+  const std::string dir = wds::chart_editor::ProjectSerializer::project_directory(project_path_);
+  if (dir.empty()) return {};
+  return join_utf8(dir, "AutoBackup");
+}
+
+bool EditorSession::capture_auto_backup(std::vector<ChartBackupItem>& out) {
+  out.clear();
+  if (project_path_.empty() || read_only_ || charts_.empty()) return false;
+  sync_active_chart();
+  std::vector<std::string> paths;
+  if (!collect_chart_paths_for_save(project_path_, paths) || paths.size() != charts_.size()) {
+    return false;
+  }
+  out.reserve(charts_.size());
+  for (std::size_t i = 0; i < charts_.size(); ++i) {
+    ChartBackupItem item;
+    item.filename = path_basename_utf8(paths[i]);
+    item.chart = charts_[i].chart;
+    item.from_disk = false;
+    out.push_back(std::move(item));
+  }
+  return !out.empty();
+}
+
+bool EditorSession::capture_manual_backup(std::vector<ChartBackupItem>& out) {
+  out.clear();
+  if (project_path_.empty() || read_only_) return false;
+  for (const auto& slot : charts_) {
+    if (slot.path.empty() || !file_is_regular_utf8(slot.path)) continue;
+    wds::chart_editor::SerializeResult status;
+    std::string text = wds::chart_editor::read_text_file(slot.path, status);
+    if (!ok(status)) continue;
+    ChartBackupItem item;
+    item.filename = path_basename_utf8(slot.path);
+    item.disk_text = std::move(text);
+    item.from_disk = true;
+    out.push_back(std::move(item));
+  }
+  return true;
+}
+
+bool EditorSession::collect_chart_paths_for_save(const std::string& project_path,
+                                                std::vector<std::string>& out_paths) {
   // Collect destinations without mutating session paths — commit only after each
   // write succeeds so a failed save never "locks" a bad path into the session.
   out_paths.clear();
   out_paths.reserve(charts_.size());
+  const std::string dir = wds::chart_editor::ProjectSerializer::project_directory(project_path);
+  if (dir.empty()) return false;
+  std::unordered_set<std::string> used;
+  for (const auto& slot : charts_) {
+    if (!slot.path.empty()) used.insert(slot.path);
+  }
   for (std::size_t i = 0; i < charts_.size(); ++i) {
     if (!charts_[i].path.empty()) {
       out_paths.push_back(charts_[i].path);
       continue;
     }
-    const std::string default_name = std::to_string(i + 1) + ".wdschart";
-    const std::string title = "保存谱面 " + std::to_string(i + 1);
-    auto chosen = native_file_dialog::save_file(title, default_name, {"wdschart"});
-    if (!chosen || chosen->empty()) return false;
-    out_paths.push_back(*chosen);
+    std::string chosen = next_numbered_wdschart(dir, used);
+    if (chosen.empty()) return false;
+    used.insert(chosen);
+    out_paths.push_back(std::move(chosen));
   }
+  return true;
+}
+
+bool EditorSession::write_project_file(const std::string& project_path) {
+  if (project_path.empty()) return false;
+  wds::chart_editor::WdsProject project;
+  project.music_path = music_path_;
+  project.offset_ms = offset_ms_;
+  project.active_chart_index = static_cast<int32_t>(active_chart_index_);
+  project.chart_paths.clear();
+  project.chart_paths.reserve(charts_.size());
+  for (const auto& slot : charts_) {
+    project.chart_paths.push_back(slot.path);
+  }
+  const auto project_save =
+      wds::chart_editor::ProjectSerializer::save_relativized(std::move(project), project_path);
+  if (!ok(project_save)) return false;
+  project_path_ = project_path;
   return true;
 }
 
@@ -622,20 +772,23 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
     status("保存失败：没有可写入的工程或谱面", StatusLevel::Error);
     return false;
   }
+  const bool trigger_manual = !project_path_.empty();
+  std::vector<ChartBackupItem> manual;
+  if (trigger_manual) {
+    (void)capture_manual_backup(manual);
+  }
   // Snapshot chart data only — keep engine undo history (scheme B).
   sync_active_chart();
 
   std::vector<std::string> chart_paths;
-  if (!collect_chart_paths_for_save(chart_paths)) {
-    status("保存已取消：需要为未绑定谱面指定 .wdschart 路径", StatusLevel::Info);
+  if (!collect_chart_paths_for_save(project_path, chart_paths)) {
+    status("保存失败：无法为未绑定谱面分配 .wdschart 路径", StatusLevel::Error);
     return false;
   }
 
   for (std::size_t i = 0; i < charts_.size(); ++i) {
-    auto chart = normalized_copy(charts_[i].chart);
-    chart.timing.offset_ms = 0;
-    const auto chart_save =
-        wds::chart_editor::ChartSerializer::save_to_file(chart, chart_paths[i]);
+    const auto chart_save = wds::chart_editor::ChartSerializer::save_to_file(
+        chart_for_disk(charts_[i].chart), chart_paths[i]);
     if (!ok(chart_save)) {
       status("保存失败：无法写入谱面 " + chart_paths[i] +
                  (chart_save.message.empty() ? "" : " — " + chart_save.message),
@@ -647,30 +800,18 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
     charts_[i].dirty = false;
   }
 
-  wds::chart_editor::WdsProject project;
-  project.music_path = music_path_;  // path reference only — never copy audio on save
-  project.offset_ms = offset_ms_;
-  project.active_chart_index = static_cast<int32_t>(active_chart_index_);
-  project.chart_paths.clear();
-  project.chart_paths.reserve(charts_.size());
-  for (const auto& slot : charts_) {
-    project.chart_paths.push_back(slot.path);
-  }
-  const auto project_save =
-      wds::chart_editor::ProjectSerializer::save_relativized(std::move(project), project_path);
-  if (!ok(project_save)) {
-    status("保存失败：无法写入工程 " + project_path +
-               (project_save.message.empty() ? "" : " — " + project_save.message),
-           StatusLevel::Error);
+  if (!write_project_file(project_path)) {
+    status("保存失败：无法写入工程 " + project_path, StatusLevel::Error);
     return false;
   }
-
-  project_path_ = project_path;
   metadata_dirty_ = false;
   engine().mark_saved();
   status("已保存工程：" + project_path, StatusLevel::Info);
   notify_ui_change(SessionUiChange::Document);
   publish_crash_context();
+  if (trigger_manual && backup_sink_ && !manual.empty()) {
+    backup_sink_(std::move(manual));
+  }
   return true;
 }
 
@@ -707,13 +848,10 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
   loaded.reserve(chart_paths.size());
   for (const auto& chart_path : chart_paths) {
     wds::chart_editor::NotationChart chart;
-    const auto result = wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
-        chart_path, music_config_path, chart);
-    if (!ok(result)) {
-      last_import_error_ = result.message;
+    if (!ok(wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
+            chart_path, music_config_path, chart))) {
       return false;
     }
-    if (!allows_refresh_import(chart)) return false;
     chart.timing.offset_ms = 0;
     // Keep charts in memory only — do not bind official CSV paths (avoids overwriting
     // them when the user later saves a .wdsproject / .wdschart).
@@ -756,7 +894,6 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
 
 bool EditorSession::import_official(const std::string& chart_path,
                                     const std::string& music_config_path) {
-  last_import_error_.clear();
   if (chart_path.empty()) return false;
   if (is_music_config_path(chart_path)) {
     return import_official_pack(chart_path);
@@ -783,17 +920,8 @@ bool EditorSession::import_official(const std::string& chart_path,
   }
   const bool found_config = !config_path.empty();
 
-  // Parse before replacing the active chart so a feature-level rejection
-  // leaves the current project and undo history intact.
-  wds::chart_editor::NotationChart incoming;
-  const auto import_result = wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
-      chart_path, config_path, incoming);
-  if (!ok(import_result)) {
-    last_import_error_ = import_result.message;
-    return false;
-  }
-  if (!allows_refresh_import(incoming)) return false;
-  engine().load_chart(incoming, wds::chart_editor::ChartEditMode::OfficialPreviewOnly);
+  // Empty config_path → load chart only (DelaySeconds stays unset / 0).
+  if (!ok(engine().load_official_from_file(chart_path, config_path))) return false;
 
   project_path_.clear();
   music_path_.clear();
@@ -836,19 +964,9 @@ bool EditorSession::import_official(const std::string& chart_path,
 }
 
 bool EditorSession::import_sus(const std::string& path) {
-  wds::chart_editor::SusChartLoadResult loaded;
-  const auto import_result = wds::chart_editor::SusChartFormat::load_file(path, loaded);
-  if (!ok(import_result)) {
-    last_import_error_ = import_result.message;
-    return false;
-  }
-  if (!allows_refresh_import(loaded.chart)) return false;
-  auto prepared = loaded.chart;
-  prepared.notes = wds::chart_editor::with_all_hold_eighths_recomputed(
-      std::move(prepared.notes), prepared.timing.ticks_per_quarter);
-  engine().load_chart(prepared, wds::chart_editor::ChartEditMode::OfficialPreviewOnly);
-  auto meta = std::move(loaded.meta);
-  auto warnings = std::move(loaded.warnings);
+  wds::chart_editor::SusChartMetadata meta;
+  std::vector<std::string> warnings;
+  if (!ok(engine().load_sus_from_file(path, &meta, &warnings))) return false;
 
   project_path_.clear();
   offset_ms_ = engine().document().timing().offset_ms;
@@ -1158,6 +1276,20 @@ bool EditorSession::switch_chart(std::size_t index) {
 
 bool EditorSession::add_chart() {
   if (read_only_) return false;
+  if (project_path_.empty()) {
+    status("请先保存工程后再添加谱面", StatusLevel::Error);
+    return false;
+  }
+  const std::string dir = wds::chart_editor::ProjectSerializer::project_directory(project_path_);
+  std::unordered_set<std::string> used;
+  for (const auto& slot : charts_) {
+    if (!slot.path.empty()) used.insert(slot.path);
+  }
+  const std::string path = next_numbered_wdschart(dir, used);
+  if (path.empty()) {
+    status("添加失败：无法分配谱面文件名", StatusLevel::Error);
+    return false;
+  }
   stash_active();
   wds::chart_editor::MusicTiming timing;
   if (!charts_.empty()) {
@@ -1166,9 +1298,20 @@ bool EditorSession::add_chart() {
   timing.offset_ms = 0;
   ChartSlot slot;
   slot.chart = {timing, {}, {}};
-  slot.dirty = true;
+  slot.path = path;
+  if (!ok(wds::chart_editor::ChartSerializer::save_to_file(chart_for_disk(slot.chart), path))) {
+    status("添加失败：无法写入谱面 " + path, StatusLevel::Error);
+    return false;
+  }
+  slot.dirty = false;
   charts_.push_back(std::move(slot));
-  metadata_dirty_ = true;
+  if (!write_project_file(project_path_)) {
+    metadata_dirty_ = true;
+    status("已写入谱面但未能更新工程文件：" + path, StatusLevel::Error);
+  } else {
+    metadata_dirty_ = false;
+    status("已添加谱面：" + path, StatusLevel::Info);
+  }
   if (!activate_chart(charts_.size() - 1)) return false;
   notify_ui_change(SessionUiChange::Charts);
   notify_ui_change(SessionUiChange::Document);
@@ -1177,14 +1320,12 @@ bool EditorSession::add_chart() {
 
 bool EditorSession::add_chart_from_file(const std::string& path) {
   if (read_only_ || path.empty()) return false;
-  last_import_error_.clear();
-  wds::chart_editor::NotationChart chart;
-  const auto load_result = wds::chart_editor::ChartSerializer::load_from_file(path, chart);
-  if (!ok(load_result)) {
-    last_import_error_ = load_result.message;
+  if (project_path_.empty()) {
+    status("请先保存工程后再添加谱面", StatusLevel::Error);
     return false;
   }
-  if (!allows_refresh_import(chart)) return false;
+  wds::chart_editor::NotationChart chart;
+  if (!ok(wds::chart_editor::ChartSerializer::load_from_file(path, chart))) return false;
   chart.timing.offset_ms = 0;
   stash_active();
   {
@@ -1193,7 +1334,13 @@ bool EditorSession::add_chart_from_file(const std::string& path) {
     slot.chart = std::move(chart);
     charts_.push_back(std::move(slot));
   }
-  metadata_dirty_ = true;
+  if (!write_project_file(project_path_)) {
+    metadata_dirty_ = true;
+    status("已添加谱面但未能更新工程文件：" + path, StatusLevel::Error);
+  } else {
+    metadata_dirty_ = false;
+    status("已添加谱面：" + path, StatusLevel::Info);
+  }
   if (!activate_chart(charts_.size() - 1)) return false;
   notify_ui_change(SessionUiChange::Charts);
   notify_ui_change(SessionUiChange::Document);
