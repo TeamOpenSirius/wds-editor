@@ -2,14 +2,8 @@
 # Normalizes target id and adjusts defaults for cross builds.
 
 if(NOT DEFINED WDS_TARGET OR WDS_TARGET STREQUAL "" OR WDS_TARGET STREQUAL "unknown")
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Linux is only a build host (MinGW → win-x86_64), not a product target.
-    message(FATAL_ERROR
-      "Native Linux builds are unsupported. On Linux, cross-compile Windows:\n"
-      "  ./scripts/build-target.sh win-x86_64 -- \\\n"
-      "    -DCMAKE_PREFIX_PATH=<vcpkg>/installed/x64-mingw-static \\\n"
-      "    -DVulkan_LIBRARY=<vcpkg>/installed/x64-mingw-static/lib/libvulkan-1.dll.a\n"
-      "Supported targets: win-x86_64, macos-arm (see cmake/CROSS_COMPILE.md).")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(WDS_TARGET "linux-x86_64")
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     set(WDS_TARGET "win-x86_64")
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")

@@ -41,10 +41,20 @@ elseif(WIN32)
   set(WDS_BASS_IMPLIB "${WDS_BASS_LIB_DIR}/bass.lib")
   set(WDS_BASSMIX_LIB "${WDS_BASS_LIB_DIR}/bassmix.dll")
   set(WDS_BASSMIX_IMPLIB "${WDS_BASS_LIB_DIR}/bassmix.lib")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" OR
+     NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Native Linux audio currently supports x86_64 only; select matching 64-bit BASS libraries.")
+  endif()
+  set(WDS_BASS_LINUX_DIR "" CACHE PATH "Directory containing Linux libbass.so and libbassmix.so")
+  if(NOT WDS_BASS_LINUX_DIR)
+    message(FATAL_ERROR "Set WDS_BASS_LINUX_DIR to the directory containing the BASS and BASSmix Linux shared libraries (https://www.un4seen.com/bass.html).")
+  endif()
+  set(WDS_BASS_LIB_DIR "${WDS_BASS_LINUX_DIR}")
+  set(WDS_BASS_LIB "${WDS_BASS_LIB_DIR}/libbass.so")
+  set(WDS_BASSMIX_LIB "${WDS_BASS_LIB_DIR}/libbassmix.so")
 else()
-  message(FATAL_ERROR
-    "Linux is not a supported product target (no BASS linux binary). "
-    "On Linux hosts, cross-compile win-x86_64 via cmake/toolchains/win-x86_64.cmake.")
+  message(FATAL_ERROR "Unsupported BASS platform: ${CMAKE_SYSTEM_NAME}")
 endif()
 
 if(NOT EXISTS "${WDS_BASS_LIB}")
@@ -79,6 +89,12 @@ else()
     IMPORTED_LOCATION "${WDS_BASSMIX_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${WDS_BASS_INCLUDE}"
   )
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # Upstream BASS .so files have no SONAME. Link by library name so DT_NEEDED
+  # does not embed the developer's absolute SDK path in installed binaries.
+  set_target_properties(wds_bass wds_bassmix PROPERTIES IMPORTED_NO_SONAME TRUE)
 endif()
 
 target_link_libraries(wds_audio_player PRIVATE wds_bass wds_bassmix)
