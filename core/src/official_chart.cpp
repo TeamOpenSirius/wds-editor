@@ -306,9 +306,12 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has invalid numeric fields"};
     }
+    // OpenWDS StandardNotation.Parse has no lower bound on start/end seconds
+    // (negative start is valid). HiSpeed stores the multiplier in endTime, so
+    // do not apply the ordinary end_sec upper bound to those rows.
     const bool is_hispeed = type_raw == kHiSpeedType;
-    if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec < 0.0 ||
-        start_sec > 1.0e7 || (!is_hispeed && end_sec > 1.0e7)) {
+    if (!std::isfinite(start_sec) || !std::isfinite(end_sec) || start_sec > 1.0e7 ||
+        (!is_hispeed && end_sec > 1.0e7)) {
       return {SerializeError::ParseError,
               "official chart: line " + std::to_string(line_no) + " has out-of-range time"};
     }
