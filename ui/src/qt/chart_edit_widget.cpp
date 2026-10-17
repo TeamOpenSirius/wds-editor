@@ -789,68 +789,149 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   }
 }
 
-void ChartEditWidget::sync_waveform_peaks(const EditViewport& v,
-                                         const wds::interaction::Rect& b) {
-  const auto* waveform = panel_ ? panel_->waveform() : nullptr;
-  if (!waveform || waveform->empty() || b.w <= 1.0f || b.h <= 1.0f) return;
+void ChartEditWidget::fill_audio_backdrop_rows(const EditViewport& v,
+                                               const wds::audio::WaveformOverview& waveform,
+                                               EditSpectrumMode mode, int row0, int row1) {
+  if (audio_backdrop_.isNull()) return;
+  const int rows = audio_backdrop_.height();
+  const int width = audio_backdrop_.width();
+  row0 = std::clamp(row0, 0, rows);
+  row1 = std::clamp(row1, row0, rows);
+  if (row1 <= row0 || width <= 0) return;
+  if (mode == EditSpectrumMode::Spectrogram) {
+    for (int i = row0; i < row1; ++i) {
+      const int y = backdrop_y0_ + i;
+      unsigned char* line = audio_backdrop_.scanLine(i);
+      if (!waveform.rasterize_row_rgba(v.ms_at_y(static_cast<float>(y)),
+                                       v.ms_at_y(static_cast<float>(y + 1)), line, width)) {
+        std::memset(line, 0, static_cast<std::size_t>(width) * 4u);
+      }
+    }
+    return;
+  }
+  for (int i = row0; i < row1; ++i) {
+    std::memset(audio_backdrop_.scanLine(i), 0, static_cast<std::size_t>(width) * 4u);
+  }
+  QPainter wp(&audio_backdrop_);
+  wp.setPen(Qt::NoPen);
+  wp.setBrush(qcolor(wds::interaction::theme::kEditWaveform));
+  wp.setClipRect(QRect(0, row0, width, row1 - row0));
+  const float cx = static_cast<float>(width) * 0.5f;
+  const float max_w = static_cast<float>(width) * 0.46f;
+  float run_y = 0.0f;
+  float run_h = 0.0f;
+  float run_w = -1.0f;
+  auto flush_run = [&]() {
+    if (run_w <= 0.5f || run_h <= 0.0f) return;
+    wp.drawRect(QRectF(cx - run_w * 0.5f, run_y, run_w, run_h));
+  };
+  for (int i = row0; i < row1; ++i) {
+    const int y = backdrop_y0_ + i;
+    const float peak = waveform.peak_in_range(v.ms_at_y(static_cast<float>(y)),
+                                              v.ms_at_y(static_cast<float>(y + 1)));
+    const float w = std::sqrt(std::clamp(peak, 0.0f, 1.0f)) * max_w;
+    if (w <= 0.5f) {
+      flush_run();
+      run_w = -1.0f;
+      continue;
+    }
+    if (run_w >= 0.0f && std::abs(w - run_w) < 1.0f) {
+      run_h += 1.0f;
+      run_w = std::max(run_w, w);
+    } else {
+      flush_run();
+      run_y = static_cast<float>(i);
+      run_h = 1.0f;
+      run_w = w;
+    }
+  }
+  flush_run();
+}
+
+void ChartEditWidget::sync_audio_backdrop(const EditViewport& v,
+                                          const wds::interaction::Rect& b) {
+  if (!panel_) {
+    audio_backdrop_ = {};
+    backdrop_mode_ = EditSpectrumMode::None;
+    return;
+  }
+  const auto mode = panel_->spectrum_mode();
+  const auto* waveform = panel_->waveform();
+  if (mode == EditSpectrumMode::None || waveform == nullptr || waveform->empty() ||
+      b.w <= 1.0f || b.h <= 1.0f ||
+      (mode == EditSpectrumMode::Spectrogram && !waveform->has_spectrogram())) {
+    audio_backdrop_ = {};
+    backdrop_mode_ = EditSpectrumMode::None;
+    backdrop_wave_ = nullptr;
+    return;
+  }
 
   const float vis = static_cast<float>(std::max(1, v.visible_ms()));
   const float view_lo = v.scroll_ms();
   const qreal dpr = std::max<qreal>(1.0, devicePixelRatioF());
   const float H = std::max(b.h, 1.0f);
+  const int x0 = std::max(0, static_cast<int>(std::floor(b.x)));
+  const int x1 = std::min(width(), static_cast<int>(std::ceil(b.x + b.w)));
   const int y0 = std::max(0, static_cast<int>(std::floor(b.y)));
   const int y1 = std::min(height(), static_cast<int>(std::ceil(b.bottom())));
-  if (y1 < y0) return;
+  if (x1 <= x0 || y1 < y0) return;
+  const int cols = x1 - x0;
   const int rows = y1 - y0 + 1;
   const float ms_per_px = vis / H;
 
-  auto sample_row = [&](int y) {
-    return waveform->peak_in_range(v.ms_at_y(static_cast<float>(y)),
-                                   v.ms_at_y(static_cast<float>(y + 1)));
+  const bool geom_ok = !audio_backdrop_.isNull() && mode == backdrop_mode_ &&
+                       waveform == backdrop_wave_ && waveform->size() == backdrop_peaks_ &&
+                       waveform->spec_frames() == backdrop_frames_ &&
+                       std::abs(backdrop_pw_ - b.w) < 0.5f &&
+                       std::abs(backdrop_ph_ - b.h) < 0.5f &&
+                       backdrop_visible_ms_ == v.visible_ms() &&
+                       std::abs(backdrop_dpr_ - dpr) < 0.01 && backdrop_x0_ == x0 &&
+                       backdrop_y0_ == y0 && audio_backdrop_.width() == cols &&
+                       audio_backdrop_.height() == rows;
+
+  auto remember_geom = [&]() {
+    backdrop_mode_ = mode;
+    backdrop_wave_ = waveform;
+    backdrop_peaks_ = waveform->size();
+    backdrop_frames_ = waveform->spec_frames();
+    backdrop_pw_ = b.w;
+    backdrop_ph_ = b.h;
+    backdrop_dpr_ = dpr;
+    backdrop_visible_ms_ = v.visible_ms();
+    backdrop_x0_ = x0;
+    backdrop_y0_ = y0;
   };
 
-  const bool geom_ok = waveform == wave_cache_key_ &&
-                       std::abs(wave_cache_pw_ - b.w) < 0.5f &&
-                       std::abs(wave_cache_ph_ - b.h) < 0.5f &&
-                       wave_cache_visible_ms_ == v.visible_ms() &&
-                       std::abs(wave_cache_dpr_ - dpr) < 0.01 &&
-                       wave_peaks_y0_ == y0 &&
-                       static_cast<int>(wave_row_peaks_.size()) == rows;
-
   if (!geom_ok) {
-    wave_cache_key_ = waveform;
-    wave_cache_pw_ = b.w;
-    wave_cache_ph_ = b.h;
-    wave_cache_dpr_ = dpr;
-    wave_cache_visible_ms_ = v.visible_ms();
-    wave_peaks_y0_ = y0;
-    wave_row_peaks_.resize(static_cast<std::size_t>(rows));
-    for (int i = 0; i < rows; ++i) wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
-    wave_peaks_scroll_ms_ = view_lo;
-  } else {
-    const int drow =
-        static_cast<int>(std::lround(static_cast<double>(view_lo - wave_peaks_scroll_ms_) /
-                                     static_cast<double>(ms_per_px)));
-    if (drow == 0) {
-      // Same whole-pixel scroll: reuse cached peaks.
-    } else if (drow >= rows || drow <= -rows) {
-      for (int i = 0; i < rows; ++i) wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
-      wave_peaks_scroll_ms_ = view_lo;
-    } else if (drow > 0) {
-      // Playback: later time at each y. Old row i moves to i+drow.
-      std::memmove(wave_row_peaks_.data() + drow, wave_row_peaks_.data(),
-                   static_cast<std::size_t>(rows - drow) * sizeof(float));
-      for (int i = 0; i < drow; ++i) wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
-      wave_peaks_scroll_ms_ += static_cast<float>(drow) * ms_per_px;
-    } else {
-      const int up = -drow;
-      std::memmove(wave_row_peaks_.data(), wave_row_peaks_.data() + up,
-                   static_cast<std::size_t>(rows - up) * sizeof(float));
-      for (int i = rows - up; i < rows; ++i)
-        wave_row_peaks_[static_cast<std::size_t>(i)] = sample_row(y0 + i);
-      wave_peaks_scroll_ms_ += static_cast<float>(drow) * ms_per_px;
-    }
+    audio_backdrop_ = QImage(cols, rows, QImage::Format_RGBA8888);
+    remember_geom();
+    fill_audio_backdrop_rows(v, *waveform, mode, 0, rows);
+    backdrop_scroll_ms_ = view_lo;
+    return;
   }
+
+  const int drow =
+      static_cast<int>(std::lround(static_cast<double>(view_lo - backdrop_scroll_ms_) /
+                                   static_cast<double>(ms_per_px)));
+  if (drow == 0) return;
+  if (drow >= rows || drow <= -rows) {
+    fill_audio_backdrop_rows(v, *waveform, mode, 0, rows);
+    backdrop_scroll_ms_ = view_lo;
+    return;
+  }
+  const int bpl = audio_backdrop_.bytesPerLine();
+  unsigned char* bits = audio_backdrop_.bits();
+  if (drow > 0) {
+    std::memmove(bits + static_cast<std::size_t>(drow) * static_cast<std::size_t>(bpl), bits,
+                 static_cast<std::size_t>(rows - drow) * static_cast<std::size_t>(bpl));
+    fill_audio_backdrop_rows(v, *waveform, mode, 0, drow);
+  } else {
+    const int up = -drow;
+    std::memmove(bits, bits + static_cast<std::size_t>(up) * static_cast<std::size_t>(bpl),
+                 static_cast<std::size_t>(rows - up) * static_cast<std::size_t>(bpl));
+    fill_audio_backdrop_rows(v, *waveform, mode, rows - up, rows);
+  }
+  backdrop_scroll_ms_ += static_cast<float>(drow) * ms_per_px;
 }
 
 void ChartEditWidget::sync_visible_notes(const std::vector<wds::chart_editor::NotationNote>& notes,
@@ -892,7 +973,7 @@ void ChartEditWidget::prepare_after_seek(int64_t timeline_ms) {
   panel_->sync_to_timeline_ms(static_cast<double>(timeline_ms));
   const auto& v = panel_->viewport();
   const auto b = v.bounds();
-  sync_waveform_peaks(v, b);
+  sync_audio_backdrop(v, b);
   int32_t lo = 0;
   int32_t hi = 0;
   playfield_cull_ticks(lo, hi);
@@ -901,33 +982,11 @@ void ChartEditWidget::prepare_after_seek(int64_t timeline_ms) {
 
 void ChartEditWidget::paint_waveform(QPainter& p, const EditViewport& v,
                                     const wds::interaction::Rect& b) {
-  const auto* waveform = panel_ ? panel_->waveform() : nullptr;
-  if (!waveform || waveform->empty() || b.w <= 1.0f || b.h <= 1.0f) return;
-  sync_waveform_peaks(v, b);
-  if (wave_row_peaks_.empty()) return;
-  const int y0 = wave_peaks_y0_;
-  const int rows = static_cast<int>(wave_row_peaks_.size());
-
-  const float center = b.x + b.w * 0.5f;
-  const float max_w = b.w * 0.46f;
-  const QColor wave_color = qcolor(wds::interaction::theme::kEditWaveform);
-  QVarLengthArray<QRectF, 512> wave_rects;
-  wave_rects.reserve(rows);
-  for (int i = 0; i < rows; ++i) {
-    const float amp =
-        std::sqrt(std::clamp(wave_row_peaks_[static_cast<std::size_t>(i)], 0.0f, 1.0f)) * max_w;
-    if (amp <= 0.5f) continue;
-    wave_rects.append(QRectF(center - amp, y0 + i, amp * 2.0f, 1.0f));
-  }
-  if (!wave_rects.isEmpty()) {
-    // Same brush fill as fillRect; AA is off on this painter. Restore pen
-    // and brush so later playfield draws keep the previous painter state.
-    p.save();
-    p.setPen(Qt::NoPen);
-    p.setBrush(wave_color);
-    p.drawRects(wave_rects.constData(), wave_rects.size());
-    p.restore();
-  }
+  if (!panel_) return;
+  if (panel_->spectrum_mode() == EditSpectrumMode::None) return;
+  sync_audio_backdrop(v, b);
+  if (audio_backdrop_.isNull()) return;
+  p.drawImage(backdrop_x0_, backdrop_y0_, audio_backdrop_);
 }
 
 void ChartEditWidget::paint_notes(QPainter& p,

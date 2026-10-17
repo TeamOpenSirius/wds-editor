@@ -388,11 +388,12 @@ void PlaybackBar::build_ui() {
   stem_row->setSpacing(kLabelFieldGap);
   stem_track_ = new QComboBox(stems);
   stem_track_->setObjectName(QStringLiteral("playbackStemTrack"));
-  stem_track_->setToolTip(tr("生成分轨后，可在这里切换试听音轨"));
-  auto* stem_label = new QLabel(tr("试听音轨"), stems);
+  stem_track_->setToolTip(tr("音轨选择"));
+  auto* stem_label = new QLabel(tr("音轨选择"), stems);
   stem_label->setBuddy(stem_track_);
-  auto* open_stems = new QPushButton(tr("本地分轨…"), stems);
+  auto* open_stems = new QPushButton(tr("生成分轨"), stems);
   open_stems->setObjectName(QStringLiteral("playbackStems"));
+  open_stems->setToolTip(tr("生成分轨"));
   stem_row->addWidget(stem_label);
   stem_row->addWidget(stem_track_, 1);
   stem_row->addWidget(open_stems);

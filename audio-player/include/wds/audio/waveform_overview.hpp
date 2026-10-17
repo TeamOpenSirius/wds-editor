@@ -14,7 +14,7 @@ class WaveformOverview {
  public:
   static constexpr int32_t kMsPerBucket = 1;
   static constexpr int kFftSize = 1024;
-  static constexpr int kFftHop = 512;
+  static constexpr int kFftHop = 256;
   static constexpr int kSpecBins = 192;
   static constexpr int kMaxSpecTexHeight = 8192;
 
@@ -45,6 +45,15 @@ class WaveformOverview {
 
   // Max peak in half-open [ms_lo, ms_hi). 0 when empty or fully outside audio.
   float peak_in_range(double ms_lo, double ms_hi) const noexcept;
+
+  // Peak magnitude per log bin over half-open [ms_lo, ms_hi). Frame i covers
+  // [i*hop, (i+1)*hop). `mag_l` / `mag_r` must hold spec_bins() bytes.
+  bool sample_spectrogram_range(double ms_lo, double ms_hi, std::uint8_t* mag_l,
+                                std::uint8_t* mag_r) const noexcept;
+
+  // One stereo spectrogram row, `width` RGBA8 pixels. Same mirror and color as
+  // rasterize_rgba: left high→low toward center, right low→high from center.
+  bool rasterize_row_rgba(double ms_lo, double ms_hi, unsigned char* rgba, int width) const;
 
   // Packed RGBA8 spectrogram (row 0 = t=0). Width is `2 * bins`:
   // left half = left channel high→low toward center; right half = right channel
