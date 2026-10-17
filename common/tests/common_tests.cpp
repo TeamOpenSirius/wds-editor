@@ -1,6 +1,7 @@
 #include "wds/common/app_version.hpp"
 #include "wds/common/common.hpp"
 #include "wds/common/crash_input_journal.hpp"
+#include "wds/common/perf_stages.hpp"
 #include "wds/common/utf8_path.hpp"
 
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -319,6 +321,71 @@ void test_app_version_parse_and_compare() {
   CHECK(!parse_app_version(""));
 }
 
+void test_perf_stages() {
+  using wds::common::perf::add_count;
+  using wds::common::perf::enabled;
+  using wds::common::perf::end_frame;
+  using wds::common::perf::set_enabled;
+  using wds::common::perf::window_frames;
+  using wds::common::perf::window_report;
+
+  set_enabled(false);
+  {
+    WDS_PERF_SCOPE("perf.test.disabled");
+    WDS_PERF_COUNT("perf.test.disabled_count", 99);
+  }
+  end_frame();
+  CHECK(window_frames() == 0);
+  CHECK(window_report().empty());
+
+  set_enabled(true);
+  {
+    WDS_PERF_SCOPE("perf.test.scope");
+    WDS_PERF_COUNT("perf.test.counter", 4);
+  }
+  end_frame();
+  const std::string r1 = window_report();
+  CHECK(r1.find("perf.test.scope") != std::string::npos);
+  CHECK(r1.find("perf.test.counter") != std::string::npos);
+
+  set_enabled(true);
+  const int shared = wds::common::perf::stage_id("perf.test.threads");
+  std::thread workers[4];
+  for (auto& th : workers) {
+    th = std::thread([shared]() {
+      for (int i = 0; i < 100; ++i) {
+        add_count(shared, 1);
+      }
+    });
+  }
+  for (auto& th : workers) {
+    th.join();
+  }
+  end_frame();
+  const std::string r2 = window_report();
+  CHECK(r2.find("perf.test.threads") != std::string::npos);
+  CHECK(r2.find("max=400") != std::string::npos);
+
+  set_enabled(true);
+  {
+    WDS_PERF_SCOPE("perf.test.early");
+    WDS_PERF_COUNT("perf.test.early_count", 2);
+  }
+  end_frame();
+  end_frame();
+  {
+    WDS_PERF_COUNT("perf.test.late_only", 7);
+  }
+  end_frame();
+  const std::string r3 = window_report();
+  CHECK(r3.find("perf.test.early") != std::string::npos);
+  CHECK(r3.find("perf.test.late_only") != std::string::npos);
+  CHECK(r3.find("max=7") != std::string::npos);
+
+  set_enabled(false);
+  (void)enabled();
+}
+
 }  // namespace
 
 int main() {
@@ -328,6 +395,7 @@ int main() {
   test_utf8_install_path_io();
   test_crash_input_journal();
   test_app_version_parse_and_compare();
+  test_perf_stages();
   if (failures != 0) {
     std::fprintf(stderr, "%d common test failure(s)\n", failures);
     return 1;

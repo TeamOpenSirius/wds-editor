@@ -4,6 +4,7 @@
 #include <QAction>
 #include <QString>
 #include <QTimer>
+#include "wds/ui/editor_session.hpp"
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
 #include "wds/ui/qt/update_checker.hpp"
 #include <array>
@@ -13,6 +14,7 @@
 #include <string>
 #include <vector>
 class QWindow;
+class QWidget;
 class QDockWidget;
 class QToolBar;
 
@@ -44,6 +46,18 @@ class EditorMainWindow final : public QMainWindow {
   void maybe_auto_check_updates();
   void set_viewport_windows(QWindow* preview, QWindow* editor);
   void set_editor_widget(QWidget* editor);
+  // Automation / --smoke-test / --quit-after: close without the unsaved-changes
+  // prompt, and do not write the mutated dock layout over the user's prefs.
+  void discard_unsaved_on_close();
+  // CLI --seek / WDS_DUMP_VERTS: a saved layout can hide or collapse the
+  // preview dock, leaving the Cocoa Vulkan surface 0×0 / unexposed so no
+  // frame callback (and no WDSV dump) ever runs.
+  void ensure_preview_viewport_for_cli();
+  // Float the preview dock and size the Vulkan surface so the framebuffer is
+  // `pixel_w` × `pixel_h` (device pixels). Developer capture; no new UI.
+  void prepare_preview_capture_size(int pixel_w, int pixel_h);
+  QWindow* preview_viewport() const noexcept { return preview_window_; }
+  QDockWidget* preview_dock() const noexcept { return preview_dock_; }
   // App-wide Space → transport toggle (except while typing / edit viewport focus).
   bool eventFilter(QObject* watched, QEvent* event) override;
  protected:
@@ -70,6 +84,11 @@ class EditorMainWindow final : public QMainWindow {
   void reset_default_layout();
   void apply_default_dock_sizes();
   void restore_or_reset_layout();
+  void save_chrome_layout();
+  void schedule_chrome_layout_save();
+  void watch_chrome_layout(QWidget* widget);
+  void conceal_unrevealed_floating_chrome();
+  void reveal_concealed_floating_chrome();
   void add_dock_toggle(QDockWidget* dock);
   void sync_toolbox_place_checks();
   void apply_command_icons();
@@ -79,7 +98,11 @@ class EditorMainWindow final : public QMainWindow {
   double timeline_now_ms() const;
   void refresh_window_title();
   void handle_ui_change(UiChange change);
+  void arm_backup_timer();
+  void fire_auto_backup();
+  void enqueue_backup_write(ChartBackupKind kind, std::vector<ChartBackupItem> items);
   void save_project_then(std::function<void()> done);
+  QString pick_wdsproject_save_path(QWidget* parent);
   void start_busy_job();
   void track_open_watcher(QObject* watcher);
   void untrack_open_watcher(QObject* watcher);
@@ -129,7 +152,12 @@ class EditorMainWindow final : public QMainWindow {
   ::QWindow* editor_window_ = nullptr;
   ::QWidget* editor_widget_ = nullptr;
   QTimer resize_settle_timer_;
+  QTimer backup_timer_;
+  QTimer layout_save_timer_;
   UpdateChecker update_checker_;
+  std::vector<QWidget*> concealed_floating_chrome_;
+  bool chrome_revealed_ = false;
+  bool persist_chrome_layout_ = true;
   bool native_resizing_ = false;
   std::uint8_t click_record_held_ = 0;
 };

@@ -1232,6 +1232,17 @@ void test_edit_side_columns_paint_and_modals() {
   }
   CHECK(added_split);
 
+  // Count and type are remembered across openings exactly like the color id.
+  CHECK(h.panel.add_split_effect(split.tick + 960, 4, 10620, wds::chart_editor::SplitLaneType::Light));
+  h.panel.on_pointer_down(
+      PointerDownEvent{{30.0f, h.panel.viewport().y_at(1920)}, PointerButton::Left, {}});
+  ChartEditPanel::SplitModalDraft again;
+  CHECK(h.panel.take_split_modal(again));
+  CHECK(again.tick != split.tick);
+  CHECK(again.count == 4);
+  CHECK(again.color_id == 10620);
+  CHECK(again.type == wds::chart_editor::SplitLaneType::Light);
+
   const wds::interaction::Rect right_gutter{708.0f, 0.0f, 52.0f, 1000.0f};
   const auto hits =
       wds::ui::build_timing_label_hits(h.panel.viewport(), right_gutter, h.engine.document().timing());
@@ -1687,6 +1698,48 @@ void test_convert_selected_hold_stars_and_defaults() {
   }
 }
 
+void test_marquee_and_convert_ignore_split_lines() {
+  using wds::chart_editor::GimmickType;
+  Harness h;
+  NotationNote split = make_split_effect(0, 480, GimmickType::Split3);
+  split.scratch_length = 10120;
+  const int32_t split_id = h.engine.add_note(split);
+  CHECK(split_id >= 0);
+
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 0;
+  tap.lane = 5;
+  tap.width = 2;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+
+  h.panel.set_selected({split_id, tap_id});
+  CHECK(!h.panel.selected().count(split_id));
+  CHECK(h.panel.selected().count(tap_id));
+
+  h.panel.clear_selection();
+  const auto start = h.at_tick_lane(0, 1);
+  const auto end = h.at_tick_lane(240, 8);
+  h.panel.on_pointer_down(PointerDownEvent{start, PointerButton::Left, primary_mods()});
+  h.panel.on_pointer_move(PointerMoveEvent{end, primary_mods()});
+  h.panel.on_pointer_up(PointerUpEvent{end, PointerButton::Left, primary_mods()});
+  CHECK(!h.panel.selected().count(split_id));
+  CHECK(h.panel.selected().count(tap_id));
+
+  CHECK(h.panel.convert_selected(NoteType::Flick, 1));
+  const auto after_split = h.engine.document().find_note(split_id);
+  const auto after_tap = h.engine.document().find_note(tap_id);
+  CHECK(after_split.has_value() && after_tap.has_value());
+  if (after_split && after_tap) {
+    CHECK(after_split->note_type == NoteType::None);
+    CHECK(after_split->gimmick_type == GimmickType::Split3);
+    CHECK_EQ(after_split->scratch_length, 10120);
+    CHECK_EQ(after_split->width, 12);
+    CHECK(after_tap->note_type == NoteType::Flick);
+  }
+}
+
 void test_split_width_follow_closed_interval_includes_endpoints() {
   using wds::chart_editor::GimmickType;
   // Split3 covers [0, 480], Split2 covers [480, 960]. Tick 480 is in both.
@@ -1891,6 +1944,7 @@ int main() {
   test_paste_hold_does_not_select_eighths();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
+  test_marquee_and_convert_ignore_split_lines();
   test_split_width_follow_closed_interval_includes_endpoints();
   test_toolbox_left_click_places_selected_type_and_ignores_swipe();
   test_toolbox_hold_click_min_length_equal_tail_and_gold();

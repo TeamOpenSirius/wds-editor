@@ -270,7 +270,10 @@ Color split_slot_color(int32_t color_id, int32_t world_index, int32_t split_coun
       wds::chart_editor::split_color_slot(color_id, split_count, world_index);
   float sr = 1.0f, sg = 1.0f, sb = 1.0f, sa = 1.0f;
   if (wds::chart_render::official_split_line_color(color_id, official, sr, sg, sb, sa)) {
-    return {sr, sg, sb, sa};
+    // fadeIn clip keys m_Color.a to 1 over the prefab alpha. A black line adds
+    // nothing under SrcAlpha One (the Syuriken tip only lifts toward max(rgb)).
+    const bool lit = sr > 0.0f || sg > 0.0f || sb > 0.0f;
+    return {sr, sg, sb, lit ? 1.0f : 0.0f};
   }
   return split_color_for_id(color_id);
 }
@@ -278,6 +281,10 @@ Color split_slot_color(int32_t color_id, int32_t world_index, int32_t split_coun
 void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept {
   const float k = wds::renderer::PreviewVisualConfig{}.split_line_opacity;
   wds::chart_render::apply_split_line_opacity(c.r, c.g, c.b, c.a, k, 1.0f);
+}
+
+const char* split_fade_arrow_utf8(int32_t color_id) noexcept {
+  return wds::chart_editor::split_fade_grows_from_tip(color_id) ? "\xE2\x86\x93" : "\xE2\x86\x91";
 }
 
 std::vector<int32_t> split_picker_color_ids() {
@@ -311,15 +318,14 @@ std::vector<SplitCoverageMs> collect_split_coverage_ms(
   std::vector<SplitCoverageMs> out;
   const int64_t appear_ms =
       wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
-  const int64_t disappear_ms =
-      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     SplitCoverageMs range;
     range.steady_start_ms = note.start_ms(timing);
     range.steady_end_ms = std::max(range.steady_start_ms, note.end_ms(timing));
     range.fade_start_ms = range.steady_start_ms - appear_ms;
-    range.fade_end_ms = range.steady_end_ms + disappear_ms;
+    range.fade_end_ms =
+        wds::chart_editor::official_split_destroy_ms(range.steady_start_ms, range.steady_end_ms);
     range.split_count = wds::chart_editor::get_split_count(note.gimmick_type);
     range.color_id = note.scratch_length;
     out.push_back(range);
@@ -357,19 +363,20 @@ float split_line_opacity_at_ms(const NotationNote& note,
   const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
   const int64_t appear_ms =
       wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
-  const int64_t disappear_ms =
+  const int64_t fade_out_ms =
       wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
+  const int64_t expire_ms = wds::chart_editor::official_split_expire_ms(start_ms, end_ms);
   const int64_t fade_start = start_ms - appear_ms;
-  const int64_t fade_end = end_ms + disappear_ms;
-  if (time_ms < fade_start || time_ms > fade_end) return 0.0f;
+  const int64_t fade_end = wds::chart_editor::official_split_destroy_ms(start_ms, end_ms);
+  if (time_ms < fade_start || time_ms >= fade_end) return 0.0f;
   if (time_ms < start_ms) {
     const float t = std::clamp(
         static_cast<float>(time_ms - fade_start) / static_cast<float>(appear_ms), 0.0f, 1.0f);
     return wds::chart_editor::official_split_fade_in_scale(t);
   }
-  if (time_ms > end_ms) {
+  if (time_ms >= expire_ms) {
     const float t = std::clamp(
-        static_cast<float>(time_ms - end_ms) / static_cast<float>(disappear_ms), 0.0f, 1.0f);
+        static_cast<float>(time_ms - expire_ms) / static_cast<float>(fade_out_ms), 0.0f, 1.0f);
     return wds::chart_editor::official_split_fade_out_alpha(t);
   }
   return 1.0f;

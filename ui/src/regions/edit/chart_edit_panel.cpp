@@ -292,7 +292,7 @@ void ChartEditPanel::set_selected(std::unordered_set<int32_t> ids) {
   selected_.clear();
   for (const int32_t id : ids) {
     const auto note = engine_.document().find_note(id);
-    if (note && note->note_type == NoteType::HoldEighth) continue;
+    if (!note || !wds::chart_editor::is_playfield_selectable(*note)) continue;
     selected_.insert(id);
   }
   sync_hold_sel_focus_to_selection();
@@ -859,6 +859,29 @@ int32_t ChartEditPanel::active_split_highlight_id() const noexcept {
 bool ChartEditPanel::active_split_highlight_is_end() const noexcept {
   if (mode_ == Mode::DragSplitEdge && drag_split_note_id_ >= 0) return drag_split_is_end_;
   return hovered_split_is_end_;
+}
+
+std::optional<ChartEditPanel::SplitHoverHint> ChartEditPanel::active_split_hover() const {
+  const int32_t note_id = active_split_highlight_id();
+  if (note_id < 0) return std::nullopt;
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const bool highlight_is_end = active_split_highlight_is_end();
+  const GutterLabelHit* active_hit = nullptr;
+  for (const auto& hit : hits) {
+    if (hit.note_id == note_id && hit.is_start == !highlight_is_end) {
+      active_hit = &hit;
+      break;
+    }
+  }
+  if (active_hit == nullptr) return std::nullopt;
+  auto note = engine_.document().find_note(note_id);
+  if (!note) return std::nullopt;
+  SplitHoverHint hint;
+  hint.color_id = note->scratch_length;
+  hint.split_count = wds::chart_editor::get_split_count(note->gimmick_type);
+  hint.type = wds::chart_editor::get_split_lane_type(note->gimmick_type);
+  hint.chip_bounds = active_hit->bounds;
+  return hint;
 }
 
 void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
@@ -2049,7 +2072,7 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
   selected_.clear();
   clear_hold_sel_focus();
   for (const auto& note : engine_.document().notes()) {
-    if (note.note_type == NoteType::HoldEighth) continue;
+    if (!wds::chart_editor::is_playfield_selectable(note)) continue;
     if (note.start_tick >= std::min(t0, t1) && note.start_tick <= std::max(t0, t1) &&
         note.lane <= std::max(l0, l1) && note.end_lane() >= std::min(l0, l1)) {
       selected_.insert(note.id);
@@ -2662,8 +2685,7 @@ bool ChartEditPanel::paste_at_pointer() {
   }();
   selected_.clear();
   for (const auto& n : engine_.document().notes()) {
-    // HoldEighth is always derived from holds — never enter the selection set.
-    if (!before_ids.count(n.id) && n.note_type != NoteType::HoldEighth) {
+    if (!before_ids.count(n.id) && wds::chart_editor::is_playfield_selectable(n)) {
       selected_.insert(n.id);
     }
   }
@@ -3223,10 +3245,12 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
   if (split_picker_memory_valid_) {
     split_picker_count_ = std::clamp(split_picker_memory_count_, 1, 6);
     split_picker_color_id_ = split_picker_memory_color_id_;
+    split_picker_type_ = split_picker_memory_type_;
     scroll_split_picker_to_color(split_picker_color_id_);
   } else {
     split_picker_count_ = 2;
     split_picker_color_id_ = 1;
+    split_picker_type_ = wds::chart_editor::SplitLaneType::Full;
   }
   close_timing_popup();
   hide_gutter_ghost();
@@ -3247,6 +3271,11 @@ void ChartEditPanel::remember_split_picker_count() {
 void ChartEditPanel::remember_split_picker_color() {
   split_picker_memory_valid_ = true;
   split_picker_memory_color_id_ = split_picker_color_id_;
+}
+
+void ChartEditPanel::remember_split_picker_type() {
+  split_picker_memory_valid_ = true;
+  split_picker_memory_type_ = split_picker_type_;
 }
 
 void ChartEditPanel::apply_split_search_text(const std::string& text) {
@@ -3299,6 +3328,7 @@ void ChartEditPanel::open_split_picker_for_edit(int32_t note_id) {
   split_scrollbar_dragging_ = false;
   split_picker_count_ = std::clamp(wds::chart_editor::get_split_count(note->gimmick_type), 1, 6);
   split_picker_color_id_ = note->scratch_length;
+  split_picker_type_ = wds::chart_editor::get_split_lane_type(note->gimmick_type);
   scroll_split_picker_to_color(split_picker_color_id_);
   close_timing_popup();
   hide_gutter_ghost();
@@ -3320,6 +3350,7 @@ bool ChartEditPanel::take_split_modal(SplitModalDraft& out) {
   out.edit_id = split_picker_edit_id_;
   out.count = split_picker_count_;
   out.color_id = split_picker_color_id_;
+  out.type = split_picker_type_;
   close_split_picker();
   return true;
 }
@@ -3349,13 +3380,14 @@ bool ChartEditPanel::take_timing_modal(TimingModalDraft& out) {
   return true;
 }
 
-bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color_id) {
+bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color_id,
+                                      wds::chart_editor::SplitLaneType type) {
   if (!engine_.is_editable()) return false;
   if (wds::chart_editor::tick_to_milliseconds(tick, engine_.document().timing()) < 0) return false;
   const int32_t tpq = std::max(1, engine_.document().timing().ticks_per_quarter);
   NotationNote note;
   note.note_type = NoteType::None;
-  note.gimmick_type = wds::chart_editor::split_gimmick_for_count(std::clamp(count, 1, 6));
+  note.gimmick_type = wds::chart_editor::split_gimmick_for(std::clamp(count, 1, 6), type);
   note.scratch_length = color_id;
   note.start_tick = tick;
   note.end_tick = note.start_tick + tpq;
@@ -3364,17 +3396,20 @@ bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color
   if (!commit_notes({note}, "Add split")) return false;
   split_picker_count_ = std::clamp(count, 1, 6);
   split_picker_color_id_ = color_id;
+  split_picker_type_ = type;
   remember_split_picker_count();
   remember_split_picker_color();
+  remember_split_picker_type();
   return true;
 }
 
-bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t color_id) {
+bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t color_id,
+                                       wds::chart_editor::SplitLaneType type) {
   if (!engine_.is_editable()) return false;
   auto prev = engine_.document().find_note(note_id);
   if (!prev || !wds::chart_editor::is_split_lane_gimmick(prev->gimmick_type)) return false;
   NotationNote updated = *prev;
-  updated.gimmick_type = wds::chart_editor::split_gimmick_for_count(std::clamp(count, 1, 6));
+  updated.gimmick_type = wds::chart_editor::split_gimmick_for(std::clamp(count, 1, 6), type);
   updated.scratch_length = color_id;
   if (updated.gimmick_type != prev->gimmick_type ||
       updated.scratch_length != prev->scratch_length) {
@@ -3384,8 +3419,10 @@ bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t c
   }
   split_picker_count_ = std::clamp(count, 1, 6);
   split_picker_color_id_ = color_id;
+  split_picker_type_ = type;
   remember_split_picker_count();
   remember_split_picker_color();
+  remember_split_picker_type();
   return true;
 }
 
@@ -3447,9 +3484,11 @@ bool ChartEditPanel::apply_meter(int32_t tick, int32_t numerator, int32_t denomi
 
 void ChartEditPanel::confirm_split_picker() {
   if (split_picker_edit_id_ >= 0) {
-    (void)edit_split_effect(split_picker_edit_id_, split_picker_count_, split_picker_color_id_);
+    (void)edit_split_effect(split_picker_edit_id_, split_picker_count_, split_picker_color_id_,
+                            split_picker_type_);
   } else {
-    (void)add_split_effect(split_picker_tick_, split_picker_count_, split_picker_color_id_);
+    (void)add_split_effect(split_picker_tick_, split_picker_count_, split_picker_color_id_,
+                           split_picker_type_);
   }
   close_split_picker();
 }
@@ -3766,7 +3805,6 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
   const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
   const int32_t highlight_id = active_split_highlight_id();
   const bool highlight_is_end = active_split_highlight_is_end();
-  const GutterLabelHit* active_hit = nullptr;
   auto paint_leader = [&](const wds::interaction::Rect& bounds, float anchor_y, bool is_start,
                           int column, const wds::interaction::Color& c, float z) {
     const float natural_y =
@@ -3790,7 +3828,6 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
     auto note = engine_.document().find_note(hit.note_id);
     if (!note) continue;
     const bool active = hit.note_id == highlight_id && hit.is_start == !highlight_is_end;
-    if (active) active_hit = &hit;
     const wds::interaction::Color c =
         hit.is_start ? wds::interaction::Color{0.22f, 0.48f, 0.95f, 1.0f}
                      : wds::interaction::Color{0.92f, 0.28f, 0.28f, 1.0f};
@@ -3802,22 +3839,6 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
     painter.fill_rect(hit.bounds, c, th::kCornerRadiusSm, 0.979f);
     painter.fill_rect(hit.bounds.inset(th::px(0.5f), th::px(0.5f)), {0.08f, 0.08f, 0.10f, 0.40f},
                       th::px(1.0f), 0.98f);
-  }
-  if (active_hit) {
-    if (auto note = engine_.document().find_note(active_hit->note_id)) {
-      const std::string id_text = std::to_string(note->scratch_length);
-      const float card_px = th::kFontSizeGutter;
-      const float card_h = th::px(26.0f);
-      const float card_w = std::max(th::px(56.0f), card_px * 0.62f * static_cast<float>(id_text.size()) +
-                                                       th::px(10.0f));
-      float card_y = active_hit->bounds.y + (active_hit->bounds.h - card_h) * 0.5f;
-      card_y = std::clamp(card_y, playfield_.y, std::max(playfield_.y, playfield_.bottom() - card_h));
-      const wds::interaction::Rect card{playfield_.x + th::px(2.0f), card_y, card_w, card_h};
-      painter.fill_rect(card, {0.10f, 0.11f, 0.14f, 0.94f}, th::kCornerRadiusMd, 0.982f);
-      painter.fill_rect(card.inset(th::px(0.5f), th::px(0.5f)), {0.22f, 0.24f, 0.28f, 0.9f},
-                        th::kCornerRadiusSm, 0.983f);
-      painter.label(card, id_text, {1.0f, 1.0f, 1.0f, 1.0f}, 0.984f, false, card_px);
-    }
   }
   for (const auto& ghost : gutter_ghosts_) {
     if (ghost.draw_leader) {

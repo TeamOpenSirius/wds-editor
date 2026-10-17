@@ -12,6 +12,8 @@ namespace wds::renderer {
 struct SkinCatalog {
   // Official GameBackground theater plate (curtains / floor / lights).
   TextureInfo ingame_background;
+  // Official BGShadow sprite (img_game_common_bg_shadow), sortingOrder −9.
+  TextureInfo bg_shadow;
   // Official BG_LaneBorder sprite (img_ingame_lane_border2).
   TextureInfo lane_border;
   TextureInfo judgeline;
@@ -74,7 +76,14 @@ struct SkinCatalog {
   TextureInfo bomb_flare_sound;
 
   TextureInfo soft_split_line;
+  // 1×1 white descriptor for SplitEffectSyuriken plates only. The renderer
+  // routes this texture id to syuriken.frag, so nothing else may draw with it.
+  TextureInfo syuriken_plate;
   TextureInfo soft_disk;
+  // Color UV atlas (skins/split_effect_uvs.png). Not in load(); preview preloads.
+  TextureInfo split_effect_uvs;
+  // Official SplitEffectSyurikenTrail _MainTex (BombEffectTrail). Preview preloads.
+  TextureInfo split_effect_trail;
 
   bool load(TextureCache& cache, const std::string& skins_directory);
 

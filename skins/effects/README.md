@@ -28,7 +28,9 @@ Required / used: note Top/Bottom/ticks, arrow, sync, official judgment
 (`img_ingame_judgment_area3.png`), official start-line plate
 (`img_game_common_start_line_500.png`), official lane border
 (`img_ingame_lane_border2.png`), Auto judgment + Combo AP digits, `ingame_bg.png`,
-and this `effects/bomb/` tree.
+official BGShadow (`img_game_common_bg_shadow.png`),
+split-effect atlases (`split_effect_uvs.png`, `split_effect_thumbs.png`),
+`bomb_effect_trail.png`, and this `effects/bomb/` tree.
 
 Do **not** keep: Combo FC/Normal, unused Judgment grades, Linear/Flick legacy Sonolus FX,
 split-line PNG plates (root or `effects/split/`), Transform 1/2, unused start-line

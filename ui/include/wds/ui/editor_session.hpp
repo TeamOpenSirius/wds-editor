@@ -41,6 +41,26 @@ enum class ExportFormat {
   Sus,
 };
 
+enum class ChartBackupKind {
+  Auto,
+  Manual,
+};
+
+// One chart in an Auto/Manual project backup. Auto carries an in-memory snapshot
+// (serialized on the worker). Manual carries the on-disk bytes from before save.
+struct ChartBackupItem {
+  std::string filename;
+  wds::chart_editor::NotationChart chart;
+  std::string disk_text;
+  bool from_disk = false;
+};
+
+// Write `items` into `<backup_root>/YYYY-MM-DD_HH-MM-SS_{Auto|Manual}/`.
+// Qt-free so tests can call it synchronously. Returns false on I/O failure.
+bool write_chart_backup_folder(const std::string& backup_root, ChartBackupKind kind,
+                               const std::vector<ChartBackupItem>& items,
+                               std::string* out_dir = nullptr);
+
 // Structural session changes that the Qt shell mirrors without polling.
 enum class SessionUiChange {
   Offset,
@@ -70,7 +90,10 @@ class EditorSession {
     status(std::move(text), level);
   }
 
+  // In-memory blank project with one chart. Bound + written by save_as / create_project.
   bool new_project();
+  // new_project + save_as: writes .wdsproject and 1.wdschart together.
+  bool create_project(const std::string& path);
   static PreparedWdsProject prepare_wdsproject(const std::string& path);
   bool apply_prepared_wdsproject(PreparedWdsProject prepared);
   bool open_wdsproject(const std::string& path);
@@ -92,12 +115,20 @@ class EditorSession {
     return last_offset_violation_ids_;
   }
   bool switch_chart(std::size_t index);
+  // Requires an on-disk project: writes the next free N.wdschart and updates .wdsproject.
   bool add_chart();
-  // Append an existing .wdschart into the current editable project.
+  // Append an existing .wdschart. Updates .wdsproject immediately when the project is bound.
   bool add_chart_from_file(const std::string& path);
 
   void set_sus_auto_convert(bool enabled) noexcept { sus_auto_convert_ = enabled; }
   bool sus_auto_convert() const noexcept { return sus_auto_convert_; }
+
+  void set_backup_sink(std::function<void(std::vector<ChartBackupItem>)> sink) {
+    backup_sink_ = std::move(sink);
+  }
+  std::string auto_backup_directory() const;
+  bool capture_auto_backup(std::vector<ChartBackupItem>& out);
+  bool capture_manual_backup(std::vector<ChartBackupItem>& out);
 
   const std::string& project_path() const noexcept { return project_path_; }
   const std::string& music_path() const noexcept { return music_path_; }
@@ -115,7 +146,7 @@ class EditorSession {
 
  private:
   struct ChartSlot {
-    std::string path;  // empty = not yet bound to a .wdschart file
+    std::string path;  // empty only for untitled / import until first save
     wds::chart_editor::NotationChart chart;
     bool dirty = false;
     // Per-chart undo stack; swapped with the engine history on chart switch.
@@ -132,8 +163,10 @@ class EditorSession {
   void stash_active();
   bool activate_chart(std::size_t index);
   void apply_chart_delay();
-  // Prompt for unbound chart destinations into `out_paths` (does not mutate session).
-  bool collect_chart_paths_for_save(std::vector<std::string>& out_paths);
+  // Bind any still-unbound charts (untitled first save / import) to N.wdschart.
+  bool collect_chart_paths_for_save(const std::string& project_path,
+                                   std::vector<std::string>& out_paths);
+  bool write_project_file(const std::string& project_path);
   bool write_all_charts_and_project(const std::string& project_path);
   bool import_official_pack(const std::string& music_config_path);
   bool import_sus(const std::string& path);
@@ -145,6 +178,7 @@ class EditorSession {
   ChartPreviewPanel& preview_;
   std::function<void(std::string, StatusLevel)> status_handler_;
   std::function<void(SessionUiChange)> on_ui_change_;
+  std::function<void(std::vector<ChartBackupItem>)> backup_sink_;
   std::string project_path_;
   std::string music_path_;
   std::vector<ChartSlot> charts_;

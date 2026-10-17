@@ -57,7 +57,7 @@ xattr -cr "/Applications/WDS Editor.app"
 
 ## 从源码编译
 
-仓库包含编译、打包与运行所需内容：源码、CMake/脚本、BASS、Vulkan 头、UI 字体/图标，以及运行时 `skins/`、`effects/` 等。  
+仓库包含编译、打包与运行所需内容：源码、CMake/脚本、BASS、Vulkan 头、UI 字体/图标，以及运行时 `skins/`、`effects/`、`resources/` 等。  
 本地路径请放在 `scripts/env.local`（已忽略），勿提交。
 
 **已验证的主机 / 目标组合：**
@@ -154,7 +154,7 @@ ctest --test-dir build-macos-arm --output-on-failure
 ./scripts/build-target.sh --package-only macos-arm
 ```
 
-默认全开模块时会注册：`wds_common_tests`、`wds_core_tests`、`wds_split_index_tests`、`wds_audio_player_tests`、`wds_renderer_tests`、`wds_note_visual_policy_tests`、`wds_split_line_official_colors_tests`、`wds_interaction_tests`、`wds_ui_logic_tests`、`wds_note_draw_order_tests`。
+默认全开模块时会注册单元测试（各模块 `*/tests/`）以及系统测试（`tests/system/`：分割线颜色/几何、分割线粒子播放、OpenWDS 绑定 / hydrate / 资源 / 控制器生命周期）。
 
 **Linux 宿主交叉出的 Windows PE 不能在该宿主上运行。** 不要对 `build-win-x86_64` 跑 `ctest`（部分测试目标仍可能被编译，但宿主执行的是 PE）。交叉策略见 [`cmake/CROSS_COMPILE.md`](cmake/CROSS_COMPILE.md)。
 
@@ -177,6 +177,8 @@ wds-editor/
 ├── ui/                     # Qt Dock 壳层、QPainter 编辑器 + Vulkan 预览
 ├── cmake/                  # 平台默认值与交叉 toolchain
 ├── scripts/                # 构建 / 打包 / 图标
+├── tests/system/           # 跨模块系统测试
+├── resources/              # 分割线粒子运行时数据（objects.tsv / objects.jsonl），随包发布
 └── skins/ effects/ icons/  # 运行时资源
 ```
 
@@ -218,11 +220,20 @@ ui → core → common
 | ---------- | ------------------------------------------------------- |
 | 皮肤 PNG   | `skins/`                                                |
 | 打击音效   | `effects/`                                              |
+| 分割线粒子 | `resources/`                                            |
 | 着色器     | `renderer/shaders/`                                     |
 | BASS       | `audio-player/third_party/bass/{macos-arm,win-x86_64}/` |
 | 应用图标源 | `logo.png` → `scripts/generate-app-icons.sh`            |
 
-Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
+Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/`、`resources/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
+
+**`resources/` 的查找方式**：程序按以下顺序寻找分割线粒子数据，可执行文件中不编入任何绝对路径。
+
+- 发行包（Windows zip / MSI）：与 `wds_editor.exe` 同级的 `resources/`；
+- macOS：`WDS Editor.app/Contents/Resources/resources`（可执行文件位于 `Contents/MacOS`）；
+- 构建树：从可执行文件所在目录逐级向上搜索仓库的 `resources/`。
+
+因此编译后的构建树（如 `build-macos-arm/ui/wds_editor`）无需打包即可直接运行。`package-target.sh` / `package-qt-release.ps1` 缺少 `resources/` 时会直接报错，不会产出缺少分割线粒子的包。
 
 ### 预览每帧数据流
 

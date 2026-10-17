@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <string>
@@ -31,6 +32,8 @@ class ChartPreviewPanel {
                         const wds::renderer::PreviewVisualConfig& visual,
                         const std::string& ui_font_path = {}, bool initialize_audio = true);
   void shutdown();
+  // Tear down the swapchain before the host destroys VkSurfaceKHR.
+  void abandon_host_surface();
 
   bool ready() const noexcept { return ready_; }
   // Populated when initialize / initialize_empty returns false.
@@ -71,7 +74,7 @@ class ChartPreviewPanel {
   void set_lane_count(int lane_count);
   // Apply official display settings (speed / 挡板 / note 厚度 / 分割线特效透明度).
   void apply_display_settings(double note_speed, int note_start_offset, int note_height_level,
-                              int split_line_opacity_percent);
+                              int split_line_opacity_percent, int split_effect_quality = 1);
   // Reload BGM path (empty clears to wall-clock).
   // When preserve_playback is false, seek to 0 and do not resume play (open/import).
   bool load_music(const std::string& music_path, bool preserve_playback = true);
@@ -81,9 +84,43 @@ class ChartPreviewPanel {
   wds::renderer::TextureInfo spectrogram_texture() const noexcept { return spectrogram_texture_; }
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
   void reset_playback();
+  // Join speculative collect, then queue a user seek (scrub / jump / CLI).
+  void request_seek_ms(int64_t time_ms);
+  // Document-function high-water request. fill_now (chart load / new project)
+  // touches every page at once; otherwise only the mark rises and idle
+  // pump_buffer_precommit slices do the touching.
+  void request_buffer_precommit(bool fill_now = true);
+  void pump_buffer_precommit();
+  void set_after_seek_prepare(std::function<void(int64_t)> fn) {
+    after_seek_prepare_ = std::move(fn);
+  }
+  int64_t last_seek_handle_us() const noexcept { return last_seek_handle_us_; }
+  long last_seek_minflt() const noexcept { return last_seek_minflt_; }
+  int64_t last_tick_preload_us() const noexcept { return last_tick_preload_us_; }
+  int64_t last_tick_transport_us() const noexcept { return last_tick_transport_us_; }
+  int64_t last_tick_geom_us() const noexcept { return last_tick_geom_us_; }
+  int64_t last_tick_sfx_us() const noexcept { return last_tick_sfx_us_; }
 
   // One display-frame lead (µs). Used by edit scroll sync while playing and by render().
   int64_t display_frame_lead_us() const noexcept;
+  // Playing draw lead: one vsync plus last snapshot→present cost (clamped to one vsync).
+  int64_t playing_visual_lead_us() const noexcept;
+  // Last playing visual lead actually applied to the preview draw clock.
+  int64_t last_visual_lead_us() const noexcept { return last_visual_lead_us_; }
+  int64_t last_displayed_now_us() const noexcept { return last_displayed_now_us_; }
+  // Syuriken pulse clock (µs) last passed to set_syuriken_uniforms. Not the
+  // note/particle visual lead.
+  int64_t last_pulse_now_us() const noexcept { return last_pulse_now_us_; }
+  // displayed − one vsync (present latency stays in displayed, not pictured).
+  int64_t last_pictured_now_us() const noexcept { return last_pictured_now_us_; }
+  int64_t last_injected_stall_us() const noexcept { return last_injected_stall_us_; }
+  int64_t last_play_start_stall_us() const noexcept { return last_play_start_stall_us_; }
+  // After present: live BASS position, or committed + this frame's render when no BGM.
+  int64_t last_bass_after_present_us() const noexcept { return last_bass_after_present_us_; }
+  // bass − (displayed chart − one vsync). Present latency stays in displayed.
+  int64_t last_heard_vs_picture_us() const noexcept { return last_heard_vs_picture_us_; }
+  // No-op leftover: speculative collect pipeline was removed.
+  void join_speculative_split_collect();
 
  private:
   bool finish_initialize(const wds::renderer::VulkanHostSurface& host,
@@ -96,6 +133,9 @@ class ChartPreviewPanel {
   void collect_ready_waveforms();
   void destroy_spectrogram_texture();
   void bake_spectrogram_texture();
+  void maybe_inject_preview_stall(bool playing, double chart_sec);
+  // Syuriken pulse clock: song/chart microseconds, no present-latency extra.
+  int64_t pulse_now_us(bool playing, int64_t timeline_us) const noexcept;
 
   std::string last_init_error_;
   PlaybackPreviewView preview_;
@@ -116,6 +156,30 @@ class ChartPreviewPanel {
   // Atlases replaced mid-frame; destroyed in flush_retired_font_textures().
   std::vector<wds::renderer::TextureInfo> retired_font_textures_;
   int display_refresh_hz_ = 60;
+  std::function<int()> display_refresh_hz_fn_;
+  int64_t last_visual_lead_us_ = 0;
+  int64_t last_displayed_now_us_ = 0;
+  int64_t last_pulse_now_us_ = 0;
+  int64_t last_pictured_now_us_ = 0;
+  int64_t last_injected_stall_us_ = 0;
+  int64_t last_play_start_stall_us_ = 0;
+  int64_t last_bass_after_present_us_ = 0;
+  int64_t last_heard_vs_picture_us_ = 0;
+  std::function<void(int64_t)> after_seek_prepare_;
+  int64_t last_seek_handle_us_ = 0;
+  long last_seek_minflt_ = 0;
+  int64_t last_tick_preload_us_ = 0;
+  int64_t last_tick_transport_us_ = 0;
+  int64_t last_tick_geom_us_ = 0;
+  int64_t last_tick_sfx_us_ = 0;
+  int64_t last_present_latency_us_ = 0;
+  bool last_render_playing_ = false;
+  bool stall_injected_ = false;
+  bool has_pinned_seek_ = false;
+  int64_t pinned_seek_ms_ = 0;
+  uint64_t last_doc_generation_ = 0;
+  bool skip_precommit_pump_ = false;
+  bool precommit_inited_ = false;
   int panel_fb_w_ = 0;
   int content_x_ = 0;
   int content_y_ = 0;
