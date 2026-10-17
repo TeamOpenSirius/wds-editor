@@ -44,15 +44,20 @@ int64_t sat_llround_i64(double value) noexcept {
 }
 
 int32_t sat_tick_from_double(double value) noexcept {
-  if (std::isnan(value) || value <= 0.0) {
+  if (std::isnan(value)) {
     return 0;
   }
   if (!std::isfinite(value)) {
-    return std::numeric_limits<int32_t>::max();
+    return value > 0.0 ? std::numeric_limits<int32_t>::max()
+                       : std::numeric_limits<int32_t>::min();
   }
   constexpr double kMax = static_cast<double>(std::numeric_limits<int32_t>::max());
+  constexpr double kMin = static_cast<double>(std::numeric_limits<int32_t>::min());
   if (value >= kMax) {
     return std::numeric_limits<int32_t>::max();
+  }
+  if (value <= kMin) {
+    return std::numeric_limits<int32_t>::min();
   }
   return static_cast<int32_t>(std::llround(value));
 }
@@ -154,7 +159,7 @@ int64_t tick_to_milliseconds_normalized(int32_t tick, const MusicTiming& timing)
   }
   ensure_timing_prefix(timing);
   const auto& pts = timing.points;
-  const int32_t target = std::max(0, tick);
+  const int32_t target = tick;
   const size_t i = last_index_tick_le(pts, target);
   const double tpq = static_cast<double>(timing.ticks_per_quarter);
   const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
@@ -170,7 +175,10 @@ int32_t milliseconds_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
     return 0;
   }
   const double remain = static_cast<double>(sat_sub_i64(ms, timing.offset_ms));
-  if (!std::isfinite(remain) || remain <= 0.0) {
+  if (!std::isfinite(remain)) {
+    return 0;
+  }
+  if (remain == 0.0) {
     return 0;
   }
   ensure_timing_prefix(timing);
@@ -180,7 +188,13 @@ int32_t milliseconds_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
   const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
   const double ms_per_tick = 60000.0 / (bpm * tpq);
   const double into = remain - timing.prefix_ms[i];
-  return sat_tick_from_double(static_cast<double>(pts[i].tick) + into / ms_per_tick);
+  const int32_t tick =
+      sat_tick_from_double(static_cast<double>(pts[i].tick) + into / ms_per_tick);
+  // Saturated int64 ms (e.g. INT64_MIN) must not map to INT32_MIN tick.
+  if (tick == std::numeric_limits<int32_t>::min()) {
+    return 0;
+  }
+  return tick;
 }
 
 }  // namespace
@@ -208,9 +222,10 @@ int64_t NotationNote::start_ms(const MusicTiming& timing) const {
 }
 
 int64_t NotationNote::end_ms(const MusicTiming& timing) const {
-  // Instantaneous notes (official endTime -1 → end_tick 0, or end <= start):
-  // use start as end so hold heads / taps never expire against a bogus early end_ms.
-  if (end_tick <= 0 || end_tick < start_tick) {
+  // Instantaneous notes (official endTime -1 → end_tick == start_tick; legacy
+  // .wdschart end_tick 0 with positive start): use start as end.
+  if (end_tick < start_tick || end_tick == start_tick ||
+      (end_tick <= 0 && start_tick > 0)) {
     return start_ms(timing);
   }
   return tick_to_milliseconds(end_tick, timing);

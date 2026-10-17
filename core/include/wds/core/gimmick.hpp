@@ -15,10 +15,26 @@ enum class SplitLaneType : int32_t {
   Ignore = 7,
 };
 
+inline const char* split_lane_type_name(SplitLaneType type) noexcept {
+  switch (type) {
+    case SplitLaneType::BothEnds:
+      return "BothEnds";
+    case SplitLaneType::Full:
+      return "Full";
+    case SplitLaneType::Light:
+      return "Light";
+    case SplitLaneType::Ignore:
+      return "Ignore";
+  }
+  return "Full";
+}
+
 // Port of Sirius.GimmickTypeExtensions (libil2cpp.so.c)
 bool is_split_lane_gimmick(GimmickType gimmick) noexcept;
 int32_t get_split_count(GimmickType gimmick) noexcept;
 SplitLaneType get_split_lane_type(GimmickType gimmick) noexcept;
+// Official encoding: 10 * SplitLaneType + count (Split3=13, FullSplit3=33, …).
+GimmickType split_gimmick_for(int32_t split_count, SplitLaneType type) noexcept;
 
 bool is_jump_scratch(GimmickType gimmick) noexcept;
 bool is_one_direction(GimmickType gimmick) noexcept;

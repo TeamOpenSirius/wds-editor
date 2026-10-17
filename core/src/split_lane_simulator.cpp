@@ -33,10 +33,11 @@ bool SplitLaneSimulator::is_split_active(const NotationNote& note, const MusicTi
   const int64_t start_ms = note.start_ms(timing);
   const int64_t end_ms = std::max(start_ms, note.end_ms(timing));
   const int64_t appear_ms = split_fade_sec_to_ms(config_.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_sec_to_ms(config_.split_line_animation_end_sec);
+  const int64_t expire_ms = official_split_expire_ms(start_ms, end_ms);
+  const int64_t hide_tail_ms = official_split_hide_tail_ms();
 
-  // Official: fadeIn starts at start−Show; fadeOut starts at EndMilliseconds.
-  return preview_time_ms >= start_ms - appear_ms && preview_time_ms < end_ms + disappear_ms;
+  // OpenWDS: fadeIn at start−Show; Tick hides at EndTickCount; Destroy 0.5s.
+  return preview_time_ms >= start_ms - appear_ms && preview_time_ms < expire_ms + hide_tail_ms;
 }
 
 void SplitLaneSimulator::fill_instance(PreviewSplitLaneInstance& out, const NotationNote& note,
@@ -51,36 +52,58 @@ void SplitLaneSimulator::fill_instance(PreviewSplitLaneInstance& out, const Nota
                   config_.lane_count + split_count);
 
   const int64_t appear_ms = split_fade_sec_to_ms(config_.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_sec_to_ms(config_.split_line_animation_end_sec);
+  const int64_t fade_out_ms = split_fade_sec_to_ms(config_.split_line_animation_end_sec);
+  const int64_t expire_ms = official_split_expire_ms(start_ms, end_ms);
 
   if (preview_time_ms < start_ms) {
-    // Official clip: LineHight.localScale.y cubic. Screen percent is that
-    // local-Y tip projected through LaneGroup Rx=60° + perspective FOV 50.
-    const float t = std::clamp(
-        static_cast<float>(preview_time_ms - (start_ms - appear_ms)) /
-            static_cast<float>(appear_ms),
-        0.0f, 1.0f);
+    // Pure function of chart preview_time_ms. OpenWDS does not ease Line X
+    // with Time.deltaTime (SplitEffectController.ApplyOriginalSplitPositions
+    // writes the SetLineX table once). Only LineHight.localScale.y follows
+    // the 1.0s fadeIn clip + 1/60 hop (official_split_fade_scale_at_elapsed).
+    // dump-pending-v1: board lossyScale.y == LineHight.
+    const float elapsed_sec =
+        static_cast<float>(preview_time_ms - (start_ms - appear_ms)) / 1000.0f;
+    const float appear_sec = static_cast<float>(appear_ms) / 1000.0f;
+    const float t = std::clamp((elapsed_sec - (1.0f / 60.0f)) / appear_sec, 0.0f, 1.0f);
     if (split_fade_grows_from_tip(note.scratch_length)) {
       const float end = official_split_fade_in_from_tip_end(t);
       out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/end,
-                          /*cover_alpha=*/1.0f - end, /*anim_phase=*/0);
+                          /*cover_alpha=*/std::clamp(1.0f - end, 0.0f, 1.0f),
+                          /*anim_phase=*/0);
     } else {
+      // Near end is Initialize origin (percent > 1), not the 16:9 floor.
       const float start = official_split_fade_in_from_judge_start(t);
-      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/start, /*percent_end=*/1.0f,
-                          /*cover_alpha=*/start, /*anim_phase=*/0);
+      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/start,
+                          /*percent_end=*/official_split_identity_origin_percent(),
+                          /*cover_alpha=*/std::clamp(start, 0.0f, 1.0f), /*anim_phase=*/0);
     }
-  } else if (preview_time_ms <= end_ms) {
-    out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
-                        /*cover_alpha=*/0.0f, /*anim_phase=*/1);
+  } else if (preview_time_ms < expire_ms) {
+    if (split_fade_grows_from_tip(note.scratch_length)) {
+      out.apply_animation(/*line_alpha=*/1.0f, /*percent_start=*/0.0f,
+                          /*percent_end=*/official_split_z180_near_percent(),
+                          /*cover_alpha=*/0.0f, /*anim_phase=*/1);
+    } else {
+      out.apply_animation(/*line_alpha=*/1.0f,
+                          /*percent_start=*/official_split_identity_far_percent(),
+                          /*percent_end=*/official_split_identity_origin_percent(),
+                          /*cover_alpha=*/0.0f, /*anim_phase=*/1);
+    }
   } else {
-    // Official SplitEffect_fadeOut_anim: full geometry, m_Color.a 1→0 over 0.3s
-    // (1 − smoothstep). Hide starts at EndMilliseconds.
+    // Runtime fadeOut clip is 0.3s (1−smoothstep). Destroy at +0.5s.
     const float t = std::clamp(
-        static_cast<float>(preview_time_ms - end_ms) / static_cast<float>(disappear_ms),
+        static_cast<float>(preview_time_ms - expire_ms) / static_cast<float>(fade_out_ms),
         0.0f, 1.0f);
     const float a = official_split_fade_out_alpha(t);
-    out.apply_animation(/*line_alpha=*/a, /*percent_start=*/0.0f, /*percent_end=*/1.0f,
-                        /*cover_alpha=*/1.0f - a, /*anim_phase=*/2);
+    if (split_fade_grows_from_tip(note.scratch_length)) {
+      out.apply_animation(/*line_alpha=*/a, /*percent_start=*/0.0f,
+                          /*percent_end=*/official_split_z180_near_percent(),
+                          /*cover_alpha=*/1.0f - a, /*anim_phase=*/2);
+    } else {
+      out.apply_animation(/*line_alpha=*/a,
+                          /*percent_start=*/official_split_identity_far_percent(),
+                          /*percent_end=*/official_split_identity_origin_percent(),
+                          /*cover_alpha=*/1.0f - a, /*anim_phase=*/2);
+    }
   }
 }
 
