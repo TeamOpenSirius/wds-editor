@@ -2,6 +2,7 @@
 #include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
+#include "wds/ui/editor_ui_config.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 #include "wds/ui/toolbar_curve_selection.hpp"
 
@@ -871,6 +872,15 @@ void test_auto_backup_normalizes_ids_without_mutating_session() {
   fs::remove_all(dir);
 }
 
+void test_settings_section_order_includes_format() {
+  CHECK_EQ(wds::ui::settings_section_count(), 10);
+  CHECK(std::string(wds::ui::settings_section_journal_id(0)) == "settings.tab_appearance");
+  CHECK(std::string(wds::ui::settings_section_journal_id(1)) == "settings.tab_file");
+  CHECK(std::string(wds::ui::settings_section_journal_id(2)) == "settings.tab_format");
+  CHECK(std::string(wds::ui::settings_section_journal_id(3)) == "settings.tab_audio");
+  CHECK(std::string(wds::ui::settings_section_journal_id(9)) == "settings.tab_updates");
+}
+
 }  // namespace
 
 int main() {
@@ -888,6 +898,7 @@ int main() {
   test_first_save_skips_manual_backup();
   test_second_save_manual_backup_keeps_previous_disk();
   test_auto_backup_normalizes_ids_without_mutating_session();
+  test_settings_section_order_includes_format();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

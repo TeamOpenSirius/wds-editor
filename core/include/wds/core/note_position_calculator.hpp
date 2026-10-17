@@ -24,9 +24,9 @@ class NotePositionCalculator {
   float note_width(int32_t lane_count, int32_t note_width_lanes) const;
   float note_position_x(int32_t lane, int32_t lane_count, int32_t note_width_lanes) const;
 
-  // Configure positive chart SV events. Events are immutable after this call
-  // and are only read by position queries, so callers can safely share the
-  // calculator with render/update workers.
+  // Configure chart SV events (multiplier ≥ 0; 0 freezes). Events are immutable
+  // after this call and are only read by position queries, so callers can safely
+  // share the calculator with render/update workers.
   void set_scroll_speed_points(std::vector<ScrollSpeedPoint> points,
                                const MusicTiming& timing);
   void clear_scroll_speed_points();

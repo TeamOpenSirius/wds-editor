@@ -608,6 +608,46 @@ void test_allow_crash_log_sensitive_default_and_round_trip() {
   CHECK(!loaded_off.allow_crash_log_sensitive);
 }
 
+void test_extended_features_default_and_round_trip() {
+  EditorUiConfig defaults;
+  CHECK(!defaults.extended_features);
+  CHECK_EQ(defaults.extra_visible_lanes, 0);
+
+  const auto missing = temp_config_path("extended_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK(!loaded_missing.extended_features);
+  CHECK_EQ(loaded_missing.extra_visible_lanes, 0);
+
+  EditorUiConfig cfg;
+  cfg.extended_features = true;
+  cfg.extra_visible_lanes = 7;
+  const auto path = temp_config_path("extended_on.yml");
+  CHECK(save_editor_ui_config(path.string(), cfg));
+  EditorUiConfig loaded;
+  CHECK(load_editor_ui_config(path.string(), loaded));
+  CHECK(loaded.extended_features);
+  CHECK_EQ(loaded.extra_visible_lanes, 7);
+
+  EditorUiConfig off;
+  off.extended_features = false;
+  const auto off_path = temp_config_path("extended_off.yml");
+  CHECK(save_editor_ui_config(off_path.string(), off));
+  EditorUiConfig loaded_off;
+  CHECK(load_editor_ui_config(off_path.string(), loaded_off));
+  CHECK(!loaded_off.extended_features);
+  CHECK_EQ(loaded_off.extra_visible_lanes, 0);
+
+  EditorUiConfig clamped;
+  clamped.extra_visible_lanes = 99;
+  const auto clamp_path = temp_config_path("extra_lanes_clamp.yml");
+  CHECK(save_editor_ui_config(clamp_path.string(), clamped));
+  EditorUiConfig loaded_clamp;
+  CHECK(load_editor_ui_config(clamp_path.string(), loaded_clamp));
+  CHECK_EQ(loaded_clamp.extra_visible_lanes, 20);
+}
+
 }  // namespace
 
 int main() {
@@ -628,6 +668,7 @@ int main() {
   test_save_truncates_in_memory_over_max();
   test_subdivisions_and_playback_rate_round_trip();
   test_allow_crash_log_sensitive_default_and_round_trip();
+  test_extended_features_default_and_round_trip();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

@@ -135,12 +135,10 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
         is_split_lane_gimmick(note.gimmick_type) ||
         (note.note_type == NoteType::None && note.lane == 0 && note.width == 0);
     const int64_t end_exclusive = static_cast<int64_t>(note.lane) + note.width;
-    const bool overlaps_playfield = note.lane < 12 && end_exclusive > 0;
     if (!split_placeholder &&
         (note.width < 1 ||
-         (chart.compatibility_profile == ChartCompatibilityProfile::Official
-              ? (note.lane < 0 || note.width > 12 || end_exclusive > 12)
-              : !overlaps_playfield))) {
+         (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+          (note.lane < 0 || note.width > 12 || end_exclusive > 12)))) {
       return {SerializeError::ParseError, "note lane/width out of range"};
     }
   }
@@ -168,7 +166,7 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
   std::unordered_set<int32_t> speed_ticks;
   ss << "SPEEDS " << chart.scroll_speed_points.size() << '\n';
   for (const auto& point : chart.scroll_speed_points) {
-    if (point.tick < 0 || !std::isfinite(point.multiplier) || !(point.multiplier > 0.0) ||
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier) ||
         !speed_ticks.insert(point.tick).second) {
       return {SerializeError::ParseError, "scroll speed point out of range"};
     }
@@ -324,13 +322,11 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
         return {SerializeError::ParseError, "unknown gimmick type"};
       }
       const int64_t note_end = static_cast<int64_t>(note.lane) + note.width;
-      const bool note_overlaps_playfield = note.lane < 12 && note_end > 0;
       const bool split_placeholder = is_split_lane_gimmick(static_cast<GimmickType>(gimmick_raw)) ||
                                      (note_type_raw == 0 && note.lane == 0 && note.width == 0);
-      if (!split_placeholder && (note.width < 0 ||
-          (chart.compatibility_profile == ChartCompatibilityProfile::Official
-               ? (note.lane < 0 || note.width > 12 || note_end > 12)
-               : (note.width < 1 || !note_overlaps_playfield)))) {
+      if (!split_placeholder && (note.width < 1 ||
+          (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+           (note.lane < 0 || note.width > 12 || note_end > 12)))) {
         return {SerializeError::ParseError, "note lane/width out of range"};
       }
       if (!parse_tick_field(start_tick_raw, note.start_tick) ||
@@ -385,8 +381,7 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     } else if (key == "S") {
       ScrollSpeedPoint point;
       file >> point.tick >> point.multiplier;
-      if (!file || point.tick < 0 || !std::isfinite(point.multiplier) ||
-          !(point.multiplier > 0.0)) {
+      if (!file || point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
         return {SerializeError::ParseError, "scroll speed point out of range"};
       }
       chart.scroll_speed_points.push_back(point);

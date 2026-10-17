@@ -421,7 +421,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       if (id >= 0 && parse_double(data, bpm) && bpm > 0.0) bpm_defs[id] = bpm;
       continue;
     }
-    // Sirius SUS #TIL00 global positive SV; #TIL01 split lines.
+    // Sirius SUS #TIL00 global non-negative SV; #TIL01 split lines.
     if (header_l.rfind("til", 0) == 0) {
       const std::string til_id = header_l.size() >= 5 ? header_l.substr(3, 2) : "";
       if (til_id == "00") {
@@ -449,7 +449,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
               !std::isfinite(multiplier)) {
             return {SerializeError::ParseError, "SUS #TIL00 invalid speed entry"};
           }
-          if (!(multiplier > 0.0)) {
+          if (multiplier < 0.0) {
             ++skipped_nonpositive_speed_points;
             continue;
           }
@@ -1176,14 +1176,13 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   if (skipped_nonpositive_speed_points > 0) {
     push_unique_warning(warnings,
                         "已跳过 " + std::to_string(skipped_nonpositive_speed_points) +
-                            " 个不兼容的负速/零速 SV 点（当前仅支持正向 SV）");
+                            " 个负速 SV 点");
   }
   if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
     for (const auto& note : chart.notes) {
       if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
-      if (note.width < 1 || note.lane >= 12 ||
-          static_cast<int64_t>(note.lane) + note.width <= 0) {
-        return {SerializeError::ParseError, "SUS note is fully outside playable lanes"};
+      if (note.width < 1) {
+        return {SerializeError::ParseError, "SUS note width out of range"};
       }
     }
   }
@@ -1220,7 +1219,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     int max_end = 0;
     for (const auto& note : export_notes) {
       if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
-      if (note.width < 1 || note.width > 35 || note.lane >= 12 || note.end_lane() < 0) {
+      if (note.width < 1 || note.width > 35) {
         return {SerializeError::ParseError, "SUS note lane/width out of range"};
       }
       min_lane = std::min(min_lane, note.lane);
@@ -1676,13 +1675,13 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     }
   }
 
-  // Sirius #TIL00 global positive SV events.
+  // Sirius #TIL00 global non-negative SV events.
   if (!chart.scroll_speed_points.empty()) {
     ss << "#TIL00: \"";
     for (size_t i = 0; i < chart.scroll_speed_points.size(); ++i) {
       const auto& point = chart.scroll_speed_points[i];
-      if (point.tick < 0 || !std::isfinite(point.multiplier) || !(point.multiplier > 0.0)) {
-        return {SerializeError::ParseError, "SUS scroll speed must be positive"};
+      if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+        return {SerializeError::ParseError, "SUS scroll speed must be non-negative"};
       }
       if (i) ss << ", ";
       const auto loc = locate_tick(point.tick);

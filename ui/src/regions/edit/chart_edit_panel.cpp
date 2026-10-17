@@ -24,6 +24,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,7 +56,23 @@ float time_edge_max_px() { return wds::interaction::theme::px(7.0f); }
 // the previous left+right sum so the playfield width stays unchanged.
 float left_gutter_w() { return wds::interaction::theme::px(60.0f); }
 float right_gutter_w() { return wds::interaction::theme::px(52.0f); }
+float speed_gutter_w() { return wds::interaction::theme::px(52.0f); }
 float measure_gutter_w() { return wds::interaction::theme::px(40.0f); }
+
+std::optional<NoteType> nontail_type_for_hold(NoteType type) noexcept {
+  switch (type) {
+    case NoteType::Hold:
+      return NoteType::NontailHold;
+    case NoteType::CriticalHold:
+      return NoteType::NontailCriticalHold;
+    case NoteType::ScratchHold:
+      return NoteType::NontailScratchHold;
+    case NoteType::ScratchCriticalHold:
+      return NoteType::NontailScratchCriticalHold;
+    default:
+      return std::nullopt;
+  }
+}
 
 float split_search_hint_width() {
   namespace th = wds::interaction::theme;
@@ -184,6 +201,9 @@ uint64_t ChartEditPanel::visual_revision() const {
   h = mix_i32(h, viewport_.visible_ms());
   h = mix_i32(h, viewport_.grid().visible_hectoms);
   h = mix_i32(h, viewport_.grid().lane_count);
+  h = mix_i32(h, viewport_.extra_visible_lanes());
+  h = mix(h, extended_editing_active_ ? 1ull : 0ull);
+  h = mix(h, lane_slider_hovered_ ? 1ull : 0ull);
   h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().w * 4.0f)));
   h = mix(h, static_cast<uint64_t>(std::lround(viewport_.bounds().h * 4.0f)));
   h = mix_i32(h, viewport_.note_height_level());
@@ -330,6 +350,10 @@ void ChartEditPanel::resync_pointer_overlays() {
   }
   if (mode_ == Mode::DragSplitEdge) {
     sync_split_edge_to_pointer(global_pointer_);
+    return;
+  }
+  if (mode_ == Mode::DragSpeedPoint) {
+    sync_speed_point_to_pointer(global_pointer_);
     return;
   }
   if (mode_ == Mode::Idle) {
@@ -501,18 +525,48 @@ bool ChartEditPanel::snap_hold_draft_chain_lane_and_sync(float desired_lane_f,
   return false;
 }
 
+void ChartEditPanel::set_extended_editing_active(bool enabled) noexcept {
+  if (extended_editing_active_ == enabled) return;
+  extended_editing_active_ = enabled;
+  viewport_.set_extra_visible_lanes(enabled ? extra_visible_lanes_session_ : 0);
+  sync_viewport();
+}
+
+void ChartEditPanel::set_extra_visible_lanes(int extra) noexcept {
+  extra = std::clamp(extra, 0, 20);
+  if (extra_visible_lanes_session_ == extra) {
+    viewport_.set_extra_visible_lanes(extended_editing_active_ ? extra_visible_lanes_session_ : 0);
+    return;
+  }
+  extra_visible_lanes_session_ = extra;
+  viewport_.set_extra_visible_lanes(extended_editing_active_ ? extra_visible_lanes_session_ : 0);
+  if (on_extra_visible_lanes_changed_) on_extra_visible_lanes_changed_();
+}
+
+void ChartEditPanel::set_lane_slider_hovered(bool hovered) noexcept {
+  if (lane_slider_hovered_ == hovered) return;
+  lane_slider_hovered_ = hovered;
+  if (hovered) {
+    hide_placement_ghost();
+    hide_gutter_ghost();
+  }
+}
+
 void ChartEditPanel::sync_viewport() const {
   const auto panel = absolute_bounds();
   const float lgw = left_gutter_w();
   const float rgw = right_gutter_w();
   const float mgw = measure_gutter_w();
+  const float sgw = extended_editing_active_ ? speed_gutter_w() : 0.0f;
   left_gutter_ = {panel.x, panel.y, lgw, panel.h};
   measure_gutter_ = {panel.right() - mgw, panel.y, mgw, panel.h};
   right_gutter_ = {measure_gutter_.x - rgw, panel.y, rgw, panel.h};
+  speed_gutter_ = {right_gutter_.x - sgw, panel.y, sgw, panel.h};
   playfield_ = {left_gutter_.right(), panel.y,
-                std::max(1.0f, panel.w - lgw - rgw - mgw), panel.h};
+                std::max(1.0f, panel.w - lgw - sgw - rgw - mgw), panel.h};
   viewport_.set_bounds(playfield_);
   viewport_.set_timing(engine_.document().timing());
+  viewport_.set_extra_visible_lanes(extended_editing_active_ ? extra_visible_lanes_session_ : 0);
 }
 
 void ChartEditPanel::apply_placement_lane_width(wds::interaction::Vec2 point, int32_t& lane,
@@ -567,7 +621,7 @@ wds::interaction::Vec2 ChartEditPanel::place_note_center() const {
   const NotationNote& note =
       mode_ == Mode::PlaceHoldBody ? hold_draft_ : place_anchor_;
   const float inset = viewport_.note_inset_px(note.width);
-  const float width = std::max(4.0f, viewport_.lane_width(note.width) - inset * 2.0f);
+  const float width = std::max(0.0f, viewport_.lane_width(note.width) - inset * 2.0f);
   return {viewport_.x_at(note.lane) + inset + width * 0.5f, viewport_.y_at(note.start_tick)};
 }
 
@@ -615,6 +669,11 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
   for (const auto& note : engine_.document().notes()) {
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     if (note.note_type == NoteType::HoldEighth) continue;
+    if (!viewport_.lane_span_visible(note.lane, note.width)) {
+      if (!(wds::chart_editor::is_hold_chain_body(note.note_type) && note.end_tick > note.start_tick)) {
+        continue;
+      }
+    }
 
     // Mid-stars: tight square hitbox matching the drawn tick (not full hold width).
     if (is_visible_mid_star(note.note_type)) {
@@ -887,7 +946,7 @@ std::optional<ChartEditPanel::SplitHoverHint> ChartEditPanel::active_split_hover
 void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
   hide_gutter_ghost();
   update_split_label_hover(point);
-  if (!engine_.is_editable() || has_modal_popup()) return;
+  if (!engine_.is_editable() || has_modal_popup() || lane_slider_hovered_) return;
   // Only while hovering idle — active place gestures keep the note ghost.
   if (mode_ != Mode::Idle) return;
 
@@ -904,6 +963,19 @@ void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
     const auto placed = split_start_placement(viewport_, left_gutter_, tick, hits);
     gutter_ghosts_.push_back(
         {placed.bounds, kSplitLabelGhostColor, placed.anchor_y, true, true, placed.column});
+    return;
+  }
+
+  if (speed_gutter_.w > 0.5f && speed_gutter_.contains(point)) {
+    const auto& points = engine_.document().scroll_speed_points();
+    const auto hits = build_speed_label_hits(viewport_, speed_gutter_, points);
+    for (const auto& hit : hits) {
+      if (hit.bounds.contains(point)) return;
+    }
+    if (auto tick = speed_tick_at(viewport_, speed_gutter_, points, point)) {
+      gutter_ghosts_.push_back(
+          {speed_label_bounds(viewport_, speed_gutter_, *tick), kSpeedLabelGhostColor});
+    }
     return;
   }
 
@@ -941,6 +1013,11 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
   }
   // Idle: hide once the cursor has left the edit pane by the leave slop.
   // PlaceGesture keeps the ghost while drawing, even outside the pane.
+  if (lane_slider_hovered_) {
+    ghost_.visible = false;
+    hide_gutter_ghost();
+    return;
+  }
   if (mode_ == Mode::Idle && !pointer_in_edit_ghost_zone(point)) {
     pointer_over_edit_ = false;
     ghost_.visible = false;
@@ -1024,8 +1101,9 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
     return;
   }
 
-  // BPM / split gutters: solid label ghosts (no text). Measure index is display-only.
-  if (left_gutter_.contains(point) || right_gutter_.contains(point)) {
+  // BPM / speed / split gutters: solid label ghosts (no text). Measure index is display-only.
+  if (left_gutter_.contains(point) || right_gutter_.contains(point) ||
+      (speed_gutter_.w > 0.5f && speed_gutter_.contains(point))) {
     ghost_.visible = false;
     update_gutter_ghost(point);
     return;
@@ -1091,14 +1169,32 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
   ghost_.visible = true;
 }
 
+bool ChartEditPanel::execute_maybe_extended(std::unique_ptr<wds::chart_editor::IEditCommand> cmd,
+                                           bool introduces_extended, const std::string& label) {
+  if (!cmd) return false;
+  const auto profile = engine_.document().compatibility_profile();
+  if (introduces_extended && profile == wds::chart_editor::ChartCompatibilityProfile::Official) {
+    auto composite = std::make_unique<wds::chart_editor::CompositeCommand>(label);
+    composite->add(std::make_unique<wds::chart_editor::SetCompatibilityProfileCommand>(
+        wds::chart_editor::ChartCompatibilityProfile::Official,
+        wds::chart_editor::ChartCompatibilityProfile::SiriusExtended));
+    composite->add(std::move(cmd));
+    return engine_.execute_command(std::move(composite));
+  }
+  return engine_.execute_command(std::move(cmd));
+}
+
 bool ChartEditPanel::commit_notes(std::vector<NotationNote> notes, const std::string& label) {
   if (!engine_.is_editable() || notes.empty()) return false;
   const auto& timing = engine_.document().timing();
+  bool introduces_extended = false;
   for (const auto& note : notes) {
     if (wds::chart_editor::note_intersects_negative_music_time(note, timing)) return false;
+    introduces_extended =
+        introduces_extended || wds::chart_editor::note_requires_sirius_extended(note);
   }
   auto cmd = std::make_unique<wds::chart_editor::AddNotesCommand>(std::move(notes), label);
-  if (!engine_.execute_command(std::move(cmd))) return false;
+  if (!execute_maybe_extended(std::move(cmd), introduces_extended, label)) return false;
   selected_.clear();
   clear_hold_sel_focus();
   return true;
@@ -1108,8 +1204,14 @@ bool ChartEditPanel::commit_updates(
     const std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair>& changes,
     const std::string& label) {
   if (changes.empty()) return false;
-  return engine_.execute_command(
-      std::make_unique<wds::chart_editor::UpdateNotesCommand>(changes, label));
+  bool introduces_extended = false;
+  for (const auto& [id, pair] : changes) {
+    introduces_extended =
+        introduces_extended || wds::chart_editor::note_requires_sirius_extended(pair.second);
+  }
+  return execute_maybe_extended(
+      std::make_unique<wds::chart_editor::UpdateNotesCommand>(changes, label), introduces_extended,
+      label);
 }
 
 void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
@@ -2084,6 +2186,15 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
 void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point) {
   if (mode_ != Mode::MoveSelection || !engine_.is_editable()) return;
   sync_viewport();
+  if (viewport_.extra_visible_lanes() > 0 &&
+      engine_.document().compatibility_profile() ==
+          wds::chart_editor::ChartCompatibilityProfile::Official) {
+    execute_maybe_extended(
+        std::make_unique<wds::chart_editor::SetCompatibilityProfileCommand>(
+            wds::chart_editor::ChartCompatibilityProfile::Official,
+            wds::chart_editor::ChartCompatibilityProfile::SiriusExtended),
+        false, "Enable Sirius Extended");
+  }
   // Keep the real pointer untouched; only snap math treats out-of-window as
   // the nearest in-window edge. Outside the edit pane, lane_at / tick_at still
   // resolve to the nearest in-range track / time.
@@ -2134,7 +2245,7 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
       if (id == moving_orig->id) {
         n.lane = snapped;
       } else {
-        n.lane = wds::chart_editor::clamp_lane_for_width(orig.lane + d_lane, orig.width, lane_count);
+        n.lane = viewport_.clamp_lane(orig.lane + d_lane, orig.width);
       }
       next[id] = n;
     }
@@ -2177,14 +2288,15 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
     if (orig.start_tick + applied_d_tick < floor) {
       applied_d_tick = floor - orig.start_tick;
     }
-    if (orig.width > 0 && lane_count > 0) {
+    if (orig.width > 0) {
       const auto [occ_lane, occ_width] = wds::chart_editor::occupied_lane_span(orig);
-      const int32_t max_lane = lane_count - occ_width;
-      if (occ_lane + d_lane < 0) {
-        d_lane = -occ_lane;
+      const int32_t first = viewport_.first_visible_lane();
+      const int32_t vis = viewport_.visible_lane_count();
+      if (occ_lane + d_lane < first) {
+        d_lane = first - occ_lane;
       }
-      if (occ_lane + d_lane > max_lane) {
-        d_lane = max_lane - occ_lane;
+      if (occ_lane + d_lane + occ_width > first + vis) {
+        d_lane = first + vis - occ_width - occ_lane;
       }
     }
   }
@@ -2200,7 +2312,7 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
     const int32_t new_start = std::max(floor, orig.start_tick + applied_d_tick);
     n.start_tick = new_start;
     n.end_tick = duration > 0 ? n.start_tick + duration : n.start_tick;
-    n.lane = wds::chart_editor::clamp_lane_for_width(orig.lane + d_lane, orig.width, lane_count);
+    n.lane = viewport_.clamp_lane(orig.lane + d_lane, orig.width);
     next[id] = n;
   }
   // Mid-stars / eighths: never free-drag laterally; lock to parent hold span.
@@ -2607,9 +2719,15 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
       !wds::chart_editor::nudge_notes_time(notes, delta_tick, first_legal_tick())) {
     return false;
   }
-  if (delta_lane != 0 &&
-      !wds::chart_editor::nudge_notes_lane(notes, delta_lane, viewport_.grid().lane_count)) {
-    return false;
+  if (delta_lane != 0) {
+    const int32_t first = viewport_.first_visible_lane();
+    const int32_t vis = viewport_.visible_lane_count();
+    for (const auto& note : notes) {
+      const auto [occ_lane, occ_width] = wds::chart_editor::occupied_lane_span(note);
+      const int32_t next = occ_lane + delta_lane;
+      if (occ_width < 1 || next < first || next + occ_width > first + vis) return false;
+    }
+    for (auto& note : notes) note.lane += delta_lane;
   }
   std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
   for (size_t i = 0; i < notes.size(); ++i) changes[notes[i].id] = {before[i], notes[i]};
@@ -2914,12 +3032,20 @@ void ChartEditPanel::paint_gutters(wds::interaction::UiPainter& painter) const {
   const bool show_timing_grid = engine_.is_editable();
   paint_split_gutter(painter, viewport_, left_gutter_, engine_.document().notes(), skin_,
                      show_timing_grid);
+  if (speed_gutter_.w > 0.5f) {
+    paint_speed_gutter(painter, viewport_, speed_gutter_, engine_.document().scroll_speed_points(),
+                       show_timing_grid);
+  }
   paint_timing_gutter(painter, viewport_, right_gutter_, timing, range.first, range.second,
                       show_timing_grid);
   paint_measure_index_gutter(painter, viewport_, measure_gutter_, timing, range.first,
                              range.second);
   painter.fill_rect({left_gutter_.right() - 0.5f, left_gutter_.y, 1.0f, left_gutter_.h},
                     wds::interaction::theme::kOutline);
+  if (speed_gutter_.w > 0.5f) {
+    painter.fill_rect({speed_gutter_.x - 0.5f, speed_gutter_.y, 1.0f, speed_gutter_.h},
+                      wds::interaction::theme::kOutline);
+  }
   painter.fill_rect({right_gutter_.x - 0.5f, right_gutter_.y, 1.0f, right_gutter_.h},
                     wds::interaction::theme::kOutline);
   painter.fill_rect({measure_gutter_.x - 0.5f, measure_gutter_.y, 1.0f, measure_gutter_.h},
@@ -3733,6 +3859,158 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
   return true;
 }
 
+void ChartEditPanel::open_speed_popup(int32_t tick) {
+  speed_popup_open_ = true;
+  speed_edit_tick_ = tick;
+  speed_edit_multiplier_ = 1.0;
+  for (const auto& point : engine_.document().scroll_speed_points()) {
+    if (point.tick == tick) {
+      speed_edit_multiplier_ = point.multiplier;
+      break;
+    }
+  }
+}
+
+void ChartEditPanel::close_speed_popup() { speed_popup_open_ = false; }
+
+bool ChartEditPanel::take_speed_modal(SpeedModalDraft& out) {
+  if (!speed_popup_open_) return false;
+  out.tick = speed_edit_tick_;
+  out.multiplier = speed_edit_multiplier_;
+  close_speed_popup();
+  return true;
+}
+
+bool ChartEditPanel::apply_scroll_speed(int32_t tick, double multiplier) {
+  if (!engine_.is_editable() || !extended_editing_active_) return false;
+  if (tick < 0 || !wds::chart_editor::is_valid_scroll_multiplier(multiplier)) return false;
+  auto before = engine_.document().scroll_speed_points();
+  auto after = before;
+  bool found = false;
+  for (auto& point : after) {
+    if (point.tick == tick) {
+      point.multiplier = multiplier;
+      found = true;
+      break;
+    }
+  }
+  if (!found) after.push_back({tick, multiplier});
+  return execute_maybe_extended(
+      std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(std::move(before),
+                                                                       std::move(after)),
+      true, "Set scroll speed");
+}
+
+bool ChartEditPanel::delete_scroll_speed(int32_t tick) {
+  if (!engine_.is_editable()) return false;
+  auto before = engine_.document().scroll_speed_points();
+  auto after = before;
+  after.erase(std::remove_if(after.begin(), after.end(),
+                             [tick](const auto& p) { return p.tick == tick; }),
+              after.end());
+  if (after.size() == before.size()) return false;
+  return engine_.execute_command(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
+      std::move(before), std::move(after), "Delete scroll speed"));
+}
+
+void ChartEditPanel::sync_speed_point_to_pointer(wds::interaction::Vec2 point) {
+  if (mode_ != Mode::DragSpeedPoint || !engine_.is_editable()) return;
+  sync_viewport();
+  const int32_t tick = viewport_.tick_at(pointer_as_in_host(point).y);
+  if (!speed_point_ever_moved_ && tick == drag_speed_press_tick_) return;
+  if (tick < 0 || tick == drag_speed_tick_) return;
+  auto after = engine_.document().scroll_speed_points();
+  for (const auto& p : after) {
+    if (p.tick == tick && p.tick != drag_speed_tick_) return;
+  }
+  double multiplier = 1.0;
+  bool found = false;
+  for (auto& p : after) {
+    if (p.tick == drag_speed_tick_) {
+      multiplier = p.multiplier;
+      p.tick = tick;
+      found = true;
+      break;
+    }
+  }
+  if (!found) return;
+  if (!engine_.document().set_scroll_speed_points(after)) return;
+  drag_speed_tick_ = tick;
+  speed_point_ever_moved_ = true;
+  engine_.rebuild_snapshot();
+  (void)multiplier;
+}
+
+bool ChartEditPanel::handle_speed_gutter_pointer_down(const wds::interaction::PointerDownEvent& event) {
+  if (!extended_editing_active_ || speed_gutter_.w <= 0.5f) return false;
+  if (!speed_gutter_.contains(event.position)) return false;
+  if (!engine_.is_editable()) return true;
+  sync_viewport();
+  const auto& points = engine_.document().scroll_speed_points();
+  const auto hits = build_speed_label_hits(viewport_, speed_gutter_, points);
+  for (const auto& hit : hits) {
+    if (!hit.bounds.contains(event.position)) continue;
+    if (event.button == wds::interaction::PointerButton::Middle) {
+      delete_scroll_speed(hit.tick);
+      return true;
+    }
+    if (wds::interaction::is_left_button(event.button)) {
+      drag_speed_original_points_ = points;
+      drag_speed_tick_ = hit.tick;
+      drag_speed_press_tick_ = viewport_.tick_at(event.position.y);
+      speed_point_ever_moved_ = false;
+      mode_ = Mode::DragSpeedPoint;
+      hide_gutter_ghost();
+      return true;
+    }
+    return true;
+  }
+  if (event.button == wds::interaction::PointerButton::Middle) return true;
+  if (wds::interaction::is_left_button(event.button)) {
+    if (auto tick = speed_tick_at(viewport_, speed_gutter_, points, event.position)) {
+      open_speed_popup(*tick);
+    }
+    return true;
+  }
+  return true;
+}
+
+bool ChartEditPanel::try_convert_hold_tail_to_nontail(wds::interaction::Vec2 point) {
+  if (!extended_editing_active_ || !engine_.is_editable()) return false;
+  const auto hit = hit_test_note(point);
+  if (!hit || !wds::chart_editor::is_hold_with_tail(hit->note_type)) return false;
+  if (!near_end_time(*hit, point.y)) return false;
+  const auto target = nontail_type_for_hold(hit->note_type);
+  if (!target) return false;
+  const int32_t tpq = engine_.document().timing().ticks_per_quarter;
+  NotationNote after = wds::chart_editor::convert_note_type(*hit, *target, tpq);
+  std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair> changes;
+  changes[hit->id] = {*hit, after};
+  std::vector<NotationNote> removals;
+  for (const auto& note : engine_.document().notes()) {
+    if (note.note_type != NoteType::HoldEighth) continue;
+    if (wds::chart_editor::is_authored_hold_eighth(note) ||
+        wds::chart_editor::is_suppressed_hold_eighth(note)) {
+      continue;
+    }
+    if (hit->id >= 0 && note.parent_hold_id == hit->id) removals.push_back(note);
+  }
+  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Convert to nontail");
+  if (engine_.document().compatibility_profile() ==
+      wds::chart_editor::ChartCompatibilityProfile::Official) {
+    composite->add(std::make_unique<wds::chart_editor::SetCompatibilityProfileCommand>(
+        wds::chart_editor::ChartCompatibilityProfile::Official,
+        wds::chart_editor::ChartCompatibilityProfile::SiriusExtended));
+  }
+  composite->add(
+      std::make_unique<wds::chart_editor::UpdateNotesCommand>(std::move(changes), "Convert to nontail"));
+  if (!removals.empty()) {
+    composite->add(std::make_unique<wds::chart_editor::RemoveNotesCommand>(
+        std::move(removals), "Clear hold eighths"));
+  }
+  return engine_.execute_command(std::move(composite));
+}
+
 bool ChartEditPanel::handle_right_gutter_pointer_down(const wds::interaction::PointerDownEvent& event) {
   // Measure-index column is display-only; absorb clicks so they do not hit the playfield.
   if (measure_gutter_.contains(event.position)) return true;
@@ -3937,7 +4215,13 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   gesture_.on_pointer_down(event);
 
   if (handle_left_gutter_pointer_down(event)) return;
+  if (handle_speed_gutter_pointer_down(event)) return;
   if (handle_right_gutter_pointer_down(event)) return;
+  if (lane_slider_hovered_) {
+    hide_placement_ghost();
+    hide_gutter_ghost();
+    return;
+  }
   if (!playfield_.contains(event.position)) return;
 
   // Middle interrupts in-progress placement before delete-on-note handling.
@@ -3986,6 +4270,10 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   if (auto hit = hit_test_note(event.position)) {
     hide_placement_ghost();
     if (wds::interaction::is_delete_single_note(event)) {
+      if (try_convert_hold_tail_to_nontail(event.position)) {
+        mode_ = Mode::Idle;
+        return;
+      }
       delete_note_at(event.position);
       mode_ = Mode::Idle;
       return;
@@ -4391,12 +4679,12 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         const int32_t width_delta = orig.lane - lane;
         const int32_t new_lane = orig.lane - width_delta;
         const int32_t new_width = orig.width + width_delta;
-        if (new_width < 1 || new_lane < 0) return std::nullopt;
+        if (new_width < 1 || new_lane < viewport_.first_visible_lane()) return std::nullopt;
         n.lane = new_lane;
         n.width = new_width;
       }
       wds::chart_editor::sync_flick_scratch_length_for_width(n, orig.width);
-      if (!wds::chart_editor::lane_in_bounds(n.lane, n.width, lane_count)) return std::nullopt;
+      if (!viewport_.lane_fully_visible(n.lane, n.width)) return std::nullopt;
       return n;
     };
 
@@ -4413,7 +4701,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         } else if (const auto updated = apply_body_delta(orig)) {
           n = *updated;
         }
-        if (!wds::chart_editor::lane_in_bounds(n.lane, n.width, lane_count)) {
+        if (!viewport_.lane_fully_visible(n.lane, n.width)) {
           next.clear();
           return false;
         }
@@ -4435,15 +4723,18 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     // Move one body edge; the opposite edge stays fixed.
     auto move_body_left_edge = [&](NotationNote& b, int32_t new_left) -> bool {
       const int32_t right = b.end_lane();
-      if (new_left > right || new_left < 0) return false;
+      if (new_left > right || new_left < viewport_.first_visible_lane()) return false;
       b.lane = new_left;
       b.width = right - new_left + 1;
-      return wds::chart_editor::lane_in_bounds(b.lane, b.width, lane_count);
+      return viewport_.lane_fully_visible(b.lane, b.width);
     };
     auto move_body_right_edge = [&](NotationNote& b, int32_t new_right) -> bool {
-      if (new_right < b.lane || new_right >= lane_count) return false;
+      if (new_right < b.lane ||
+          new_right >= viewport_.first_visible_lane() + viewport_.visible_lane_count()) {
+        return false;
+      }
       b.width = new_right - b.lane + 1;
-      return wds::chart_editor::lane_in_bounds(b.lane, b.width, lane_count);
+      return viewport_.lane_fully_visible(b.lane, b.width);
     };
 
     // Chain walk direction: forward = toward later segments, backward = earlier.
@@ -4820,7 +5111,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
           if (left_over <= 0) return false;
           const int32_t new_width = baseline_end - union_l + 1;
           if (new_width < 1 ||
-              !wds::chart_editor::lane_in_bounds(union_l, new_width, lane_count)) {
+              !viewport_.lane_fully_visible(union_l, new_width)) {
             return false;
           }
           prev.lane = union_l;
@@ -4833,7 +5124,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
           if (right_over <= 0) return false;
           const int32_t new_width = union_r - baseline_lane + 1;
           if (new_width < 1 ||
-              !wds::chart_editor::lane_in_bounds(baseline_lane, new_width, lane_count)) {
+              !viewport_.lane_fully_visible(baseline_lane, new_width)) {
             return false;
           }
           prev.lane = baseline_lane;
@@ -4874,7 +5165,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
           NotationNote head = head_orig;
           head.lane = prev.lane;
           head.width = prev.width;
-          if (!wds::chart_editor::lane_in_bounds(head.lane, head.width, lane_count)) {
+          if (!viewport_.lane_fully_visible(head.lane, head.width)) {
             return false;
           }
           working[hid] = head;
@@ -4911,7 +5202,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
           NotationNote head = head_orig;
           head.lane = body_next.lane;
           head.width = body_next.width;
-          if (!wds::chart_editor::lane_in_bounds(head.lane, head.width, lane_count)) {
+          if (!viewport_.lane_fully_visible(head.lane, head.width)) {
             return false;
           }
           next[hid] = head;
@@ -5134,9 +5425,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     } else {
       expect_lane = anchor_orig.lane - width_delta;
       expect_width = anchor_orig.width + width_delta;
-      if (expect_width < 1 || expect_lane < 0) return;
+      if (expect_width < 1 || expect_lane < viewport_.first_visible_lane()) return;
     }
-    if (!wds::chart_editor::lane_in_bounds(expect_lane, expect_width, lane_count)) return;
+    if (!viewport_.lane_fully_visible(expect_lane, expect_width)) return;
     // Same committed body geometry as last move — skip cover/direction work.
     if (expect_lane == resize_applied_body_lane_ && expect_width == resize_applied_body_width_) {
       return;
@@ -5175,7 +5466,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         n.width = new_width;
       }
       wds::chart_editor::sync_flick_scratch_length_for_width(n, orig.width);
-      if (!wds::chart_editor::lane_in_bounds(n.lane, n.width, lane_count)) {
+      if (!viewport_.lane_fully_visible(n.lane, n.width)) {
         return;
       }
 
@@ -5235,6 +5526,9 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
   if (mode_ == Mode::DragSplitEdge) {
     sync_split_edge_to_pointer(event.position);
   }
+  if (mode_ == Mode::DragSpeedPoint) {
+    sync_speed_point_to_pointer(event.position);
+  }
 }
 
 void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event) {
@@ -5292,6 +5586,32 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     update_split_label_hover(event.position);
     if (!ever_moved && wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
       open_split_picker_for_edit(note_id);
+    }
+    return;
+  }
+  if (mode_ == Mode::DragSpeedPoint) {
+    const bool ever_moved = speed_point_ever_moved_;
+    const int32_t tick = drag_speed_tick_;
+    if (ever_moved) {
+      auto current = engine_.document().scroll_speed_points();
+      if (current != drag_speed_original_points_) {
+        if (!engine_.document().set_scroll_speed_points(drag_speed_original_points_)) {
+          drag_speed_original_points_.clear();
+          speed_point_ever_moved_ = false;
+          mode_ = Mode::Idle;
+          return;
+        }
+        execute_maybe_extended(
+            std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
+                drag_speed_original_points_, std::move(current), "Move scroll speed"),
+            true, "Move scroll speed");
+      }
+    }
+    drag_speed_original_points_.clear();
+    speed_point_ever_moved_ = false;
+    mode_ = Mode::Idle;
+    if (!ever_moved && wds::interaction::is_left_button(event.button) && engine_.is_editable()) {
+      open_speed_popup(tick);
     }
     return;
   }
@@ -5556,7 +5876,7 @@ void ChartEditPanel::refresh_curve_ghosts() {
   const int32_t width = std::max(1, default_width_);
   const int32_t lane_count = viewport_.grid().lane_count;
   const int32_t origin_lane =
-      wds::chart_editor::clamp_lane_for_width(curve_origin_lane_, width, lane_count);
+      viewport_.clamp_lane(curve_origin_lane_, width);
   req.start_tick = curve_origin_tick_;
   req.end_tick = viewport_.tick_at(pointer_.y);
   req.start_center = wds::chart_editor::scratch_hold_lane_center(origin_lane, width);
@@ -5601,7 +5921,7 @@ bool ChartEditPanel::commit_curve_fill() {
   const int32_t width = std::max(1, default_width_);
   const int32_t lane_count = viewport_.grid().lane_count;
   const int32_t origin_lane =
-      wds::chart_editor::clamp_lane_for_width(curve_origin_lane_, width, lane_count);
+      viewport_.clamp_lane(curve_origin_lane_, width);
   req.start_tick = curve_origin_tick_;
   req.end_tick = viewport_.tick_at(pointer_.y);
   req.start_center = wds::chart_editor::scratch_hold_lane_center(origin_lane, width);

@@ -39,6 +39,7 @@ void check(bool condition, const char* expr, const char* file, int line) {
 #define CHECK(expr) check((expr), #expr, __FILE__, __LINE__)
 #define CHECK_EQ(a, b) check((a) == (b), #a " == " #b, __FILE__, __LINE__)
 
+using wds::chart_editor::ChartCompatibilityProfile;
 using wds::chart_editor::ChartEditorEngine;
 using wds::chart_editor::EasingAlgorithm;
 using wds::chart_editor::EasingDirection;
@@ -1884,6 +1885,80 @@ void test_toolbox_hold_ghost_follows_shift() {
   CHECK(saw_gold);
 }
 
+void test_extended_speed_gutter_slider_and_nontail() {
+  CHECK(wds::ui::lane_guide_visible(0, 3.0f));
+  CHECK(wds::ui::lane_guide_visible(12, 3.0f));
+  CHECK(!wds::ui::lane_guide_visible(1, 3.0f));
+  CHECK(wds::ui::lane_guide_thickness(0) > wds::ui::lane_guide_thickness(1));
+  {
+    Harness h;
+    CHECK(std::fabs(h.panel.speed_gutter().w) < 0.5f);
+    CHECK(std::fabs(h.panel.playfield().w - 648.0f) < 0.5f);
+    h.panel.set_extended_editing_active(true);
+    CHECK(std::fabs(h.panel.speed_gutter().w - 52.0f) < 0.5f);
+    CHECK(std::fabs(h.panel.playfield().w - 596.0f) < 0.5f);
+    CHECK(std::fabs(h.panel.speed_gutter().x + h.panel.speed_gutter().w - 708.0f) < 0.5f);
+    h.panel.set_extended_editing_active(false);
+    CHECK(std::fabs(h.panel.speed_gutter().w) < 0.5f);
+    CHECK(std::fabs(h.panel.playfield().w - 648.0f) < 0.5f);
+  }
+  {
+    Harness h;
+    h.panel.set_extended_editing_active(true);
+    const auto p = h.at_tick_lane(240, 3);
+    h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+    CHECK(!h.panel.skinned_ghosts().empty());
+    h.panel.set_lane_slider_hovered(true);
+    h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+    CHECK(h.panel.skinned_ghosts().empty());
+    h.panel.set_lane_slider_hovered(false);
+    h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+    CHECK(!h.panel.skinned_ghosts().empty());
+  }
+  {
+    Harness h;
+    h.panel.set_extended_editing_active(true);
+    CHECK(wds::ui::format_speed_label(1.5) == "1.5x");
+    CHECK(wds::ui::format_speed_label(0.0) == "0x");
+    const auto sg = h.panel.speed_gutter();
+    const float y = h.panel.viewport().y_at(480);
+    h.panel.on_pointer_move(PointerMoveEvent{{sg.x + sg.w * 0.5f, y}, {}});
+    CHECK_EQ(static_cast<int>(h.panel.gutter_ghost_count()), 1);
+    h.panel.on_pointer_down(PointerDownEvent{{sg.x + sg.w * 0.5f, y}, PointerButton::Left, {}});
+    ChartEditPanel::SpeedModalDraft speed;
+    CHECK(h.panel.take_speed_modal(speed));
+    CHECK(h.panel.apply_scroll_speed(speed.tick, 0.0));
+    CHECK_EQ(static_cast<int>(h.engine.document().scroll_speed_points().size()), 1);
+    CHECK(std::fabs(h.engine.document().scroll_speed_points().front().multiplier) < 1e-9);
+    CHECK(h.panel.apply_scroll_speed(speed.tick, 1.5));
+    CHECK_EQ(static_cast<int>(h.engine.document().scroll_speed_points().size()), 1);
+    CHECK(h.engine.document().compatibility_profile() == ChartCompatibilityProfile::SiriusExtended);
+    CHECK(std::fabs(h.engine.document().scroll_speed_points().front().multiplier - 1.5) < 1e-9);
+    const auto hits = wds::ui::build_speed_label_hits(h.panel.viewport(), h.panel.speed_gutter(),
+                                                      h.engine.document().scroll_speed_points());
+    CHECK(!hits.empty());
+    const float cx = hits.front().bounds.x + hits.front().bounds.w * 0.5f;
+    const float cy = hits.front().bounds.y + hits.front().bounds.h * 0.5f;
+    h.panel.on_pointer_down(PointerDownEvent{{cx, cy}, PointerButton::Middle, {}});
+    CHECK(h.engine.document().scroll_speed_points().empty());
+  }
+  {
+    Harness h;
+    h.enter_hold(false, 0, 480, 3);
+    h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+    h.panel.set_extended_editing_active(true);
+    h.panel.on_pointer_down(
+        PointerDownEvent{h.at_tick_lane(480, 3), PointerButton::Middle, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::NontailHold), 1);
+    CHECK(h.engine.document().compatibility_profile() == ChartCompatibilityProfile::SiriusExtended);
+    CHECK(h.engine.undo());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::NontailHold), 0);
+  }
+}
+
 void test_toolbox_scratch_hold_uses_regular_hold_buttons() {
   Harness h;
   h.panel.set_toolbox_place_mode(true);
@@ -1949,6 +2024,7 @@ int main() {
   test_toolbox_left_click_places_selected_type_and_ignores_swipe();
   test_toolbox_hold_click_min_length_equal_tail_and_gold();
   test_toolbox_hold_ghost_follows_shift();
+  test_extended_speed_gutter_slider_and_nontail();
   test_toolbox_scratch_hold_uses_regular_hold_buttons();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

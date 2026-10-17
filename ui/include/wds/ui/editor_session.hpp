@@ -122,6 +122,10 @@ class EditorSession {
 
   void set_sus_auto_convert(bool enabled) noexcept { sus_auto_convert_ = enabled; }
   bool sus_auto_convert() const noexcept { return sus_auto_convert_; }
+  void set_extended_features(bool enabled) noexcept { extended_features_ = enabled; }
+  bool extended_features() const noexcept { return extended_features_; }
+  bool chart_has_extended() const;
+  bool extended_editing_active() const;
 
   void set_backup_sink(std::function<void(std::vector<ChartBackupItem>)> sink) {
     backup_sink_ = std::move(sink);
@@ -189,6 +193,7 @@ class EditorSession {
   bool read_only_ = false;
   bool allow_delay_when_read_only_ = false;
   bool sus_auto_convert_ = false;
+  bool extended_features_ = false;
   // Fields mirrored into music_config.csv on official project export.
   std::string cue_sheet_name_ = "Music";
   std::string cue_name_ = "1";

@@ -74,9 +74,22 @@ int main() {
   const auto after = engine.position();
   expect(std::abs(after.count() - before.count()) < 30000, "playing switch keeps heard position");
   expect(engine.stream_playing(), "playing state preserved");
+  // Compare song ∆t to measured wall time. A fixed 200 ms sleep + absolute µs window
+  // flakes on shared CI when sleep overruns (0.75×280 ms wall ≈ 210 ms song > 195 ms).
+  const auto wall0 = std::chrono::steady_clock::now();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  const auto wall1 = std::chrono::steady_clock::now();
+  const auto wall_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(wall1 - wall0).count();
   const auto elapsed = engine.position().count() - after.count();
-  expect(elapsed > 75000 && elapsed < 195000, "0.75x rate survives audition switching");
+  const double ratio =
+      wall_us > 0 ? static_cast<double>(elapsed) / static_cast<double>(wall_us) : 0.0;
+  // 0.75× with slack for BASS device buffering / runner scheduling noise.
+  if (!(ratio > 0.50 && ratio < 0.95)) {
+    std::fprintf(stderr, "FAIL: 0.75x rate survives audition switching (ratio=%.3f song=%lld wall=%lld)\n",
+                 ratio, static_cast<long long>(elapsed), static_cast<long long>(wall_us));
+    ++failures;
+  }
   engine.pause_music();
   expect(engine.set_position(Microseconds{4'000'000}), "seek after switching");
   expect(std::abs(engine.position().count() - 4'000'000) < 1000, "seek uses current source format");

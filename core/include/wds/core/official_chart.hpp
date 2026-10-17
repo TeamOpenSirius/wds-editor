@@ -19,7 +19,7 @@ namespace wds::chart_editor {
 //                   900 (HoldEighth) is kept on import (preview-only, not recomputed)
 //                   and generated on export from editable charts (always gimmick 0 /
 //                   scratch 0). Export rows are sorted by startTime then type;
-//                   -1 = HiSpeed (endTime holds positive multiplier; stored in
+//                   -1 = HiSpeed (endTime holds non-negative multiplier; stored in
 //                   scroll_speed_points, never in NotationNote);
 //                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
 //                   editor imports as JumpScratch split / orphan Flick — never stored as 40)
@@ -68,8 +68,8 @@ struct OfficialChartLoadOptions {
   // Official lanes are 1-based (1..12); editor NotationNote uses 0-based (0..11).
   bool convert_lane_to_zero_based = true;
 
-  // Skip HiSpeed (type == -1) rows for legacy callers. Leave false so positive
-  // SV events are retained in scroll_speed_points.
+  // Skip HiSpeed (type == -1) rows for legacy callers. Leave false so
+  // non-negative SV events are retained in scroll_speed_points.
   bool skip_hispeed = false;
   ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 };

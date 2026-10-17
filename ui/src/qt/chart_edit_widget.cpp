@@ -2,6 +2,7 @@
 #include "wds/ui/qt/qt_input_adapter.hpp"
 #include "wds/ui/qt/split_effect_snapshot.hpp"
 #include "wds/ui/qt/split_picker_dialog.hpp"
+#include "wds/ui/qt/speed_edit_dialog.hpp"
 #include "wds/ui/qt/timing_edit_dialog.hpp"
 #include <wds/audio/waveform_overview.hpp>
 #include <wds/core/chart_editor_engine.hpp>
@@ -17,18 +18,26 @@
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
 
+#include <QCursor>
 #include <QEnterEvent>
 #include <QEvent>
 #include <QFocusEvent>
+#include <QGraphicsOpacityEffect>
 #include <QGuiApplication>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPropertyAnimation>
+#include <QSignalBlocker>
+#include <QSlider>
+#include <QStyle>
+#include <QStyleOptionSlider>
 #include <QTimer>
 #include <QVarLengthArray>
 #include <QShowEvent>
@@ -246,15 +255,19 @@ void paint_lane_guides(QPainter& p, const EditViewport& v, const wds::interactio
   const float view_ms_hi = view_ms_lo + static_cast<float>(v.visible_ms());
   const auto merged =
       merged_split_hide_ranges_ms(notes, timing, preview, view_ms_lo, view_ms_hi);
-  const int lanes = std::max(1, v.grid().lane_count);
+  const int first = v.first_visible_lane();
+  const int lanes = v.visible_lane_count();
+  const float lane_px = v.lane_width(1);
   auto draw_span = [&](float y0, float y1) {
     const float top = std::max(std::min(y0, y1), b.y);
     const float bot = std::min(std::max(y0, y1), b.bottom());
     if (bot <= top) return;
-    for (int i = 0; i <= lanes; ++i) {
-      const bool edge = i == 0 || i == lanes;
+    for (int i = first; i <= first + lanes; ++i) {
+      if (!lane_guide_visible(i, lane_px)) continue;
+      const bool edge = i == 0 || i == 12;
       namespace th = wds::interaction::theme;
-      p.setPen(QPen(qcolor(edge ? th::kEditLaneEdge : th::kEditLaneInner), edge ? 1.5 : 1.0));
+      p.setPen(QPen(qcolor(edge ? th::kEditLaneEdge : th::kEditLaneInner),
+                    static_cast<qreal>(lane_guide_thickness(i))));
       p.drawLine(QPointF(v.x_at(i), top), QPointF(v.x_at(i), bot));
     }
   };
@@ -475,6 +488,70 @@ void paint_split_particles(QPainter& p, const EditViewport& v, const wds::intera
   }
 }
 
+// Groove is thin so QSlider only starts a drag on the handle. Any press on
+// this control jumps to that x and keeps tracking, matching the playback seek bar.
+class ExtraLaneSlider final : public QSlider {
+ public:
+  using QSlider::QSlider;
+
+  QRect handle_rect() const {
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    return style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+  }
+
+ protected:
+  void mousePressEvent(QMouseEvent* event) override {
+    if (event->button() != Qt::LeftButton) {
+      QSlider::mousePressEvent(event);
+      return;
+    }
+    groove_drag_ = true;
+    setSliderDown(true);
+    setValue(value_from_pos(event->position().toPoint()));
+    event->accept();
+  }
+
+  void mouseMoveEvent(QMouseEvent* event) override {
+    if (!groove_drag_) {
+      QSlider::mouseMoveEvent(event);
+      return;
+    }
+    setValue(value_from_pos(event->position().toPoint()));
+    event->accept();
+  }
+
+  void mouseReleaseEvent(QMouseEvent* event) override {
+    if (!groove_drag_) {
+      QSlider::mouseReleaseEvent(event);
+      return;
+    }
+    setValue(value_from_pos(event->position().toPoint()));
+    groove_drag_ = false;
+    setSliderDown(false);
+    event->accept();
+  }
+
+ private:
+  int value_from_pos(const QPoint& pos) const {
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    const QRect groove =
+        style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
+    const QRect handle =
+        style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+    const int slider_length = std::max(1, handle.width());
+    const int slider_min = groove.isValid() ? groove.x() : 0;
+    const int slider_max = groove.isValid() ? groove.right() - slider_length + 1
+                                            : std::max(0, width() - slider_length);
+    const int span = std::max(1, slider_max - slider_min);
+    return QStyle::sliderValueFromPosition(minimum(), maximum(), pos.x() - slider_min, span,
+                                           opt.upsideDown);
+  }
+
+  bool groove_drag_ = false;
+};
+
 }  // namespace
 
 ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
@@ -487,6 +564,44 @@ ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
   setAttribute(Qt::WA_InputMethodEnabled, false);
   hold_blue_ = pixmap_from_hold_bake(false);
   hold_purple_ = pixmap_from_hold_bake(true);
+  extra_lane_slider_ = new ExtraLaneSlider(Qt::Horizontal, this);
+  extra_lane_slider_->setRange(0, 20);
+  extra_lane_slider_->setValue(0);
+  extra_lane_slider_->setVisible(false);
+  extra_lane_slider_->setFocusPolicy(Qt::NoFocus);
+  extra_lane_slider_->setMinimumHeight(22);
+  extra_lane_slider_opacity_ = new QGraphicsOpacityEffect(extra_lane_slider_);
+  extra_lane_slider_opacity_->setOpacity(0.3);
+  extra_lane_slider_->setGraphicsEffect(extra_lane_slider_opacity_);
+  extra_lane_slider_fade_ = new QPropertyAnimation(extra_lane_slider_opacity_, "opacity", this);
+  extra_lane_slider_fade_->setDuration(100);
+  extra_lane_slider_->installEventFilter(this);
+  extra_lane_slider_label_ = new QLabel(this);
+  extra_lane_slider_label_->setVisible(false);
+  extra_lane_slider_label_->setAttribute(Qt::WA_TransparentForMouseEvents);
+  extra_lane_slider_label_->setAlignment(Qt::AlignCenter);
+  extra_lane_slider_label_->setStyleSheet(
+      QStringLiteral("background: rgba(26, 28, 36, 240); color: white; padding: 2px 8px; "
+                     "border-radius: 4px;"));
+  connect(extra_lane_slider_, &QSlider::valueChanged, this, [this](int value) {
+    if (panel_ == nullptr) return;
+    panel_->set_extra_visible_lanes(value);
+    update_extra_lane_slider_label();
+    mark_dirty();
+    update();
+  });
+  connect(extra_lane_slider_, &QSlider::sliderMoved, this, [this](int) {
+    update_extra_lane_slider_label();
+  });
+  connect(extra_lane_slider_, &QSlider::sliderPressed, this, [this] {
+    if (panel_ != nullptr) panel_->set_lane_slider_hovered(true);
+    fade_lane_slider(true);
+    update_extra_lane_slider_label();
+  });
+  connect(extra_lane_slider_, &QSlider::sliderReleased, this, [this] {
+    update_extra_lane_slider_label();
+    fade_lane_slider(extra_lane_slider_ != nullptr && extra_lane_slider_->underMouse());
+  });
 }
 
 void ChartEditWidget::set_skins_directory(const QString& directory) {
@@ -595,8 +710,74 @@ static wds::interaction::PointerButton button(Qt::MouseButton b) {
   if (b == Qt::MiddleButton) return wds::interaction::PointerButton::Middle;
   return wds::interaction::PointerButton::Left;
 }
+void ChartEditWidget::sync_extra_lane_slider() {
+  if (extra_lane_slider_ == nullptr || panel_ == nullptr) return;
+  const bool on = panel_->extended_editing_active();
+  extra_lane_slider_->setVisible(on);
+  if (!on) {
+    panel_->set_lane_slider_hovered(false);
+    if (extra_lane_slider_label_ != nullptr) extra_lane_slider_label_->hide();
+    return;
+  }
+  {
+    const QSignalBlocker blocker(extra_lane_slider_);
+    extra_lane_slider_->setValue(panel_->extra_visible_lanes());
+  }
+  const auto& pf = panel_->playfield();
+  const int w = std::max(220, static_cast<int>(pf.w) - 8);
+  const int h = 22;
+  extra_lane_slider_->setGeometry(static_cast<int>(pf.x + (pf.w - static_cast<float>(w)) * 0.5f),
+                                  static_cast<int>(pf.bottom() - static_cast<float>(h) - 6.0f), w,
+                                  h);
+  extra_lane_slider_->raise();
+  update_extra_lane_slider_label();
+}
+
+void ChartEditWidget::update_extra_lane_slider_label() {
+  if (extra_lane_slider_label_ == nullptr || extra_lane_slider_ == nullptr) return;
+  if (!extra_lane_slider_->isVisible() || !extra_lane_slider_->isSliderDown()) {
+    extra_lane_slider_label_->hide();
+    return;
+  }
+  extra_lane_slider_label_->setText(QString::number(extra_lane_slider_->value()));
+  extra_lane_slider_label_->adjustSize();
+  const auto* slider = static_cast<const ExtraLaneSlider*>(extra_lane_slider_);
+  const QRect local_handle = slider->handle_rect();
+  const QPoint handle_top_center =
+      extra_lane_slider_->mapToParent(QPoint(local_handle.center().x(), local_handle.top()));
+  const int x = handle_top_center.x() - extra_lane_slider_label_->width() / 2;
+  const int y = handle_top_center.y() - extra_lane_slider_label_->height() - 4;
+  extra_lane_slider_label_->move(std::max(0, x), std::max(0, y));
+  extra_lane_slider_label_->show();
+  extra_lane_slider_label_->raise();
+}
+
+void ChartEditWidget::fade_lane_slider(bool highlighted) {
+  if (extra_lane_slider_opacity_ == nullptr || extra_lane_slider_fade_ == nullptr) return;
+  extra_lane_slider_fade_->stop();
+  extra_lane_slider_fade_->setStartValue(extra_lane_slider_opacity_->opacity());
+  extra_lane_slider_fade_->setEndValue(highlighted ? 1.0 : 0.3);
+  extra_lane_slider_fade_->start();
+}
+
+bool ChartEditWidget::eventFilter(QObject* watched, QEvent* event) {
+  if (watched == extra_lane_slider_ && extra_lane_slider_ != nullptr) {
+    if (event->type() == QEvent::Enter) {
+      if (panel_ != nullptr) panel_->set_lane_slider_hovered(true);
+      fade_lane_slider(true);
+    } else if (event->type() == QEvent::Leave &&
+               (extra_lane_slider_ == nullptr || !extra_lane_slider_->isSliderDown())) {
+      if (panel_ != nullptr) panel_->set_lane_slider_hovered(false);
+      fade_lane_slider(false);
+    }
+  }
+  return QWidget::eventFilter(watched, event);
+}
+
 void ChartEditWidget::resizeEvent(QResizeEvent*) {
   if (panel_) panel_->set_bounds({0, 0, static_cast<float>(width()), static_cast<float>(height())});
+  if (panel_) panel_->viewport();
+  sync_extra_lane_slider();
   mark_dirty();
   update();
 }
@@ -649,6 +830,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   wds::interaction::UiPainter chrome;
   chrome.set_defer_glyphs(true);
   panel_->paint_side_columns(chrome);
+  sync_extra_lane_slider();
   const auto& v = panel_->viewport(); const auto b = v.bounds();
   const auto& notes = panel_->engine().document().notes();
   const auto& timing = panel_->engine().document().timing();
@@ -708,10 +890,11 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   }
   paint_split_lines(p, v, b, split_notes_scratch_, timing, preview,
                    panel_->active_split_highlight_id());
-  // Judgment-area skin sits below notes and spans the authored playfield.
+  // 12-cell judgeline tracks authored lanes 0..N as extra columns shrink them.
   if (!judgment_.isNull()) {
     const float h = v.judgeline_height_px();
-    p.drawPixmap(QRectF(b.x, v.judgeline_y() - h * .5f, b.w, h), judgment_, judgment_.rect());
+    p.drawPixmap(QRectF(v.judgeline_x(), v.judgeline_y() - h * .5f, v.judgeline_width_px(), h),
+                 judgment_, judgment_.rect());
   }
 
   paint_notes(p, notes, 1.0f, true, cull_lo, cull_hi);
@@ -1029,7 +1212,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth ||
         wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) ||
         n.end_tick <= n.start_tick ||
-        !wds::chart_editor::is_hold_with_tail(n.note_type)) {
+        !wds::chart_editor::is_bindable_hold_body(n.note_type)) {
       continue;
     }
     const bool scratch = wds::chart_editor::is_scratch_hold_body(n.note_type);
@@ -1037,7 +1220,9 @@ void ChartEditWidget::paint_notes(QPainter& p,
     const float y1 = v.y_at(n.end_tick);
     const float body_inset = v.hold_inset_px(n.width);
     const float body_x = v.x_at(n.lane) + body_inset;
-    const float body_w = std::max(4.0f, v.lane_width(n.width) - body_inset * 2.0f);
+    if (!v.lane_span_visible(n.lane, n.width)) continue;
+    const float body_w = std::max(0.0f, v.lane_width(n.width) - body_inset * 2.0f);
+    if (body_w < 0.5f) continue;
     const float body_top = std::max(std::min(y0, y1), playfield.y - 2.0f);
     const float body_bot = std::min(std::max(y0, y1), playfield.bottom() + 2.0f);
     if (body_bot > body_top) {
@@ -1054,10 +1239,15 @@ void ChartEditWidget::paint_notes(QPainter& p,
     const auto& n = notes[visible_note_indices_[vis]];
     if (n.note_type == wds::chart_editor::NoteType::HoldEighth) continue;
     if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
+    if (!v.lane_span_visible(n.lane, n.width)) continue;
     const float y0 = v.y_at(n.start_tick), y1 = v.y_at(n.end_tick > n.start_tick ? n.end_tick : n.start_tick);
     const float inset = v.note_inset_px(n.width);
     const float x = v.x_at(n.lane) + inset;
-    const float w = std::max(4.0f, v.lane_width(n.width) - inset * 2.0f);
+    const float w = std::max(0.0f, v.lane_width(n.width) - inset * 2.0f);
+    if (w < 0.5f && n.note_type != wds::chart_editor::NoteType::Sound &&
+        n.note_type != wds::chart_editor::NoteType::ScratchSound) {
+      continue;
+    }
     using NT = wds::chart_editor::NoteType;
     const bool scratch = n.note_type == NT::Flick || n.note_type == NT::ScratchHold ||
                          n.note_type == NT::ScratchCriticalHold || n.note_type == NT::NontailScratchHold ||
@@ -1073,7 +1263,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
     }
     const float tail_inset = v.note_inset_px(end_width);
     const float tail_x = v.x_at(end_lane) + tail_inset;
-    const float tail_w = std::max(4.0f, v.lane_width(end_width) - tail_inset * 2.0f);
+    const float tail_w = std::max(0.0f, v.lane_width(end_width) - tail_inset * 2.0f);
     const QPixmap* skin = &red_;
     if (n.note_type == NT::Sound) skin = &tick_blue_;
     else if (n.note_type == NT::ScratchSound) skin = &tick_purple_;
@@ -1139,7 +1329,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
       const auto& n = notes[index];
       if (n.note_type != wds::chart_editor::NoteType::Flick) continue;
       const float y = v.y_at(n.start_tick), inset = v.note_inset_px(n.width);
-      const float sx = v.x_at(n.lane) + inset, sw = std::max(4.0f, v.lane_width(n.width) - inset * 2.0f);
+      const float sx = v.x_at(n.lane) + inset, sw = std::max(0.0f, v.lane_width(n.width) - inset * 2.0f);
       const float ah = v.note_height_px();
       const float aw = std::min(sw, std::clamp(v.lane_width(1) * .55f, 8.0f, ah * 1.2f));
       wds::chart_render::StaticArrowLayoutParams ap{sx, sx + sw, aw, n.scratch_length};
@@ -1194,11 +1384,29 @@ void ChartEditWidget::present_qt_modals() {
     }
     mark_dirty();
     update();
+    return;
+  }
+
+  ChartEditPanel::SpeedModalDraft speed;
+  if (panel_->take_speed_modal(speed)) {
+    qt_modal_open_ = true;
+    SpeedEditDialog dialog(speed.multiplier, this);
+    const int result = dialog.exec();
+    qt_modal_open_ = false;
+    if (result == QDialog::Accepted) {
+      (void)panel_->apply_scroll_speed(speed.tick, dialog.multiplier());
+    }
+    mark_dirty();
+    update();
   }
 }
 
 void ChartEditWidget::mousePressEvent(QMouseEvent* e) {
   if (!panel_) return;
+  if (extra_lane_slider_ != nullptr && extra_lane_slider_->isVisible() &&
+      extra_lane_slider_->geometry().contains(e->position().toPoint())) {
+    return;
+  }
   setFocus();
   grabMouse();
   const auto pos = point(e->position());
