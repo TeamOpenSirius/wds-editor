@@ -1,7 +1,11 @@
 #include <wds/chart_render/stage_geometry.hpp>
+#include <wds/chart_render/openwds_hud_layout.hpp>
+
+#include <wds/core/official_split_x.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace wds::renderer {
 
@@ -114,7 +118,8 @@ float StageGeometry::content_aspect() const noexcept {
 Vec2 StageGeometry::ndc_to_content(wds::chart_editor::OfficialNdc ndc) const noexcept {
   const float cx = (content_.l + content_.r) * 0.5f;
   const float cy = (content_.t + content_.b) * 0.5f;
-  return {cx + ndc.x * content_.w * 0.5f, cy + ndc.y * content_.h * 0.5f};
+  const float z = std::max(config_.view_zoom, 1e-4f);
+  return {cx + ndc.x * content_.w * 0.5f * z, cy + ndc.y * content_.h * 0.5f * z};
 }
 
 Vec2 StageGeometry::project_judge(float local_x, float judge_y, float local_z) const noexcept {
@@ -123,6 +128,11 @@ Vec2 StageGeometry::project_judge(float local_x, float judge_y, float local_z) c
 
 Vec2 StageGeometry::project_main(float local_x, float main_y, float local_z) const noexcept {
   return ndc_to_content(project_main_xyz(local_x, main_y, local_z, content_aspect()));
+}
+
+Vec2 StageGeometry::project_world(float world_x, float world_y, float world_z) const noexcept {
+  return ndc_to_content(
+      wds::chart_render::project_world_xyz(world_x, world_y, world_z, content_aspect()));
 }
 
 float StageGeometry::percent_to_judge_y(float percent) const noexcept {
@@ -303,6 +313,21 @@ Quad StageGeometry::stage_quad() const {
   };
 }
 
+Quad StageGeometry::bg_shadow_quad(float scale_x, float scale_y) const {
+  float left = 0.0f;
+  float bottom = 0.0f;
+  float right = 0.0f;
+  float top = 0.0f;
+  wds::chart_editor::official_bg_shadow_local_rect(left, bottom, right, top);
+  const float z = wds::chart_editor::kOfficialBgShadowLocalZ;
+  return {
+      project_world(scale_x * left, scale_y * bottom, z),
+      project_world(scale_x * left, scale_y * top, z),
+      project_world(scale_x * right, scale_y * top, z),
+      project_world(scale_x * right, scale_y * bottom, z),
+  };
+}
+
 Quad StageGeometry::lane_border_quad(int32_t edge_index) const {
   const float x = official_lane_edge_x(edge_index, config_.lane_count);
   const float half = wds::chart_editor::kOfficialLaneBorderVisualWidth * 0.5f;
@@ -476,6 +501,350 @@ Quad StageGeometry::bomb_flare_billboard_quad(int32_t lane, int32_t end_lane,
   q.rb = {center.x + half, center.y - half};
   q.lt = {center.x - half, center.y + half};
   q.rt = {center.x + half, center.y + half};
+  return q;
+}
+
+Quad StageGeometry::split_particle_billboard_quad(float world_x, float main_y,
+                                                 float size_unity, float world_z) const {
+  const Vec2 center = project_main(world_x, main_y, world_z);
+  const float half_u = std::max(size_unity, 1e-4f) * 0.5f;
+  const float half =
+      0.5f * std::fabs(project_main(world_x + half_u, main_y, world_z).x -
+                       project_main(world_x - half_u, main_y, world_z).x);
+  Quad q;
+  q.lb = {center.x - half, center.y - half};
+  q.rb = {center.x + half, center.y - half};
+  q.lt = {center.x - half, center.y + half};
+  q.rt = {center.x + half, center.y + half};
+  return q;
+}
+
+bool StageGeometry::split_particle_oriented_world_corners(
+    float world_x, float main_y, float size_unity, float height_scale, float pivot_y, float roll,
+    float tilt_x, float tilt_y, float world_z, uint8_t render_alignment, float pivot_x,
+    float pivot_z, float* out_x, float* out_y, float* out_z) const {
+  if (out_x == nullptr || out_y == nullptr || out_z == nullptr) {
+    return false;
+  }
+  const float width = std::max(size_unity, 1e-4f);
+  const float height = width * std::max(height_scale, 1e-4f);
+  const float cr = std::cos(roll);
+  const float sr = std::sin(roll);
+  const float cxr = std::cos(tilt_x);
+  const float sxr = std::sin(tilt_x);
+  const float cyr = std::cos(tilt_y);
+  const float syr = std::sin(tilt_y);
+  auto rotate_local = [&](float lx, float ly, float lz, float& ox, float& oy, float& oz) {
+    float x = lx * cr - ly * sr;
+    float y = lx * sr + ly * cr;
+    float z = lz;
+    const float x2 = x * cyr + z * syr;
+    const float z2 = -x * syr + z * cyr;
+    ox = x2;
+    oy = y * cxr - z2 * sxr;
+    oz = y * sxr + z2 * cxr;
+  };
+  // hop / live dump align2-u1-unity-v1 4011 fi085: Unity Bake
+  // centroid−particle = pivot ⊙ size (camera.right / camera.up), X and Y
+  // same sign. Native Y already matched via live_y=−PSR_y then oyp=−live_y×h.
+  // X had no evaluate negate, so oxp=−live_x×w flipped the sign. Billboard
+  // only (this helper). Stretch / Mesh do not read oxp. Not 2022.3.
+  const float oxp = pivot_x * width;
+  const float oyp = -pivot_y * height;
+  const float ozp = -pivot_z * width;
+  const float hw = width * 0.5f;
+  const float hh = height * 0.5f;
+  const float lx[4] = {-hw, hw, hw, -hw};
+  const float ly[4] = {-hh, -hh, hh, hh};
+  const bool world_axes = render_alignment == 1 || render_alignment == 2;
+  const float tilt =
+      wds::chart_editor::official_deg_to_rad(wds::chart_editor::kOfficialLaneTiltDeg);
+  const float cam_up_y = std::cos(tilt);
+  const float cam_up_z = -std::sin(tilt);
+  const float cam_fwd_y = std::sin(tilt);
+  const float cam_fwd_z = std::cos(tilt);
+  for (int i = 0; i < 4; ++i) {
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    rotate_local(lx[i] + oxp, ly[i] + oyp, ozp, px, py, pz);
+    if (world_axes) {
+      // World (1) / Local (2): corners in LaneGroup / Main axes.
+      // world_x / main_y / world_z are already Main (integrate_pose).
+      out_x[i] = world_x + px;
+      out_y[i] = main_y + py;
+      out_z[i] = world_z + pz;
+    } else {
+      // View (0): camera-facing in LaneGroup, then PSR rotation3D in view
+      // space. Mapping lane-XY through rotate_local and then treating (px,py)
+      // as screen offsets foreshortened 711 official systems.
+      out_x[i] = world_x + px;
+      out_y[i] = main_y + py * cam_up_y + pz * cam_fwd_y;
+      out_z[i] = world_z + py * cam_up_z + pz * cam_fwd_z;
+    }
+  }
+  return true;
+}
+
+Quad StageGeometry::split_particle_oriented_quad(float world_x, float main_y, float size_unity,
+                                                float height_scale, float pivot_y, float roll,
+                                                float tilt_x, float tilt_y, float world_z,
+                                                uint8_t render_alignment, float pivot_x,
+                                                float pivot_z) const {
+  float cx[4], cy[4], cz[4];
+  if (!split_particle_oriented_world_corners(world_x, main_y, size_unity, height_scale, pivot_y,
+                                             roll, tilt_x, tilt_y, world_z, render_alignment,
+                                             pivot_x, pivot_z, cx, cy, cz)) {
+    Quad q{};
+    return q;
+  }
+  Quad q;
+  q.lb = project_main(cx[0], cy[0], cz[0]);
+  q.rb = project_main(cx[1], cy[1], cz[1]);
+  q.rt = project_main(cx[2], cy[2], cz[2]);
+  q.lt = project_main(cx[3], cy[3], cz[3]);
+  return q;
+}
+
+// Corners and velocity are LaneGroup / Main. vel_* is fill_live's Main
+// finite difference, not Unity World and not PS-local.
+bool StageGeometry::split_particle_stretch_world_corners(
+    float world_x, float main_y, float world_z, float vel_x, float vel_y, float vel_z, float across,
+    float along, float pivot_y, float roll, float pivot_x, float* out_x, float* out_y, float* out_z,
+    float length_scale, float velocity_scale, float camera_velocity_scale, float cam_vel_x,
+    float cam_vel_y, float cam_vel_z, uint8_t freeform_stretching, uint8_t rotate_with_stretch) const {
+  if (out_x == nullptr || out_y == nullptr || out_z == nullptr) {
+    return false;
+  }
+  // Official playfield camera: Rx(60°) + (0,0,12). View Z is camera-forward
+  // depth. Preview / official playfield camera is static (vel = 0,0,0).
+  const float rad =
+      wds::chart_editor::official_deg_to_rad(wds::chart_editor::kOfficialLaneTiltDeg);
+  const float c = std::cos(rad);
+  const float s = std::sin(rad);
+  const float cam_z = wds::chart_editor::kOfficialLaneGroupZ;
+  auto to_view_point = [&](float x, float y, float z, float& vx, float& vy, float& vz) {
+    vx = x;
+    vy = y * c - z * s;
+    vz = cam_z + y * s + z * c;
+  };
+  auto to_main_point = [&](float vx, float vy, float vz, float& x, float& y, float& z) {
+    x = vx;
+    y = vy * c + (vz - cam_z) * s;
+    z = (vz - cam_z) * c - vy * s;
+  };
+  auto store_view = [&](int i, float vx, float vy, float vz) {
+    to_main_point(vx, vy, vz, out_x[i], out_y[i], out_z[i]);
+  };
+
+  float px = 0.0f, py = 0.0f, pz = 0.0f;
+  to_view_point(world_x, main_y, world_z, px, py, pz);
+
+  if (freeform_stretching != 0) {
+    // Approved unofficial Freeform (pcwalton gist, experimental, not Unity
+    // 2022.3 ops). Particle space: origin at the particle, +Z = view +Z
+    // (View-aligned billboard plane), +Y = camera up, then roll around +Z.
+    // Camera C and up U are rotated into that frame. Do not mix with the
+    // kettlewell strip. Rotate With Stretch only on this branch.
+    const float cr = std::cos(roll);
+    const float sr = std::sin(roll);
+    const float Cx_view = -px;
+    const float Cy_view = -py;
+    const float Cz_view = -pz;
+    const float Cx = Cx_view * cr + Cy_view * sr;
+    const float Cy = -Cx_view * sr + Cy_view * cr;
+    const float Cz = Cz_view;
+    const float c2 = Cx * Cx + Cy * Cy + Cz * Cz;
+    if (c2 <= 1e-30f) {
+      return false;
+    }
+    const float inv_c = 1.0f / std::sqrt(c2);
+    const float z0x = -Cx * inv_c;
+    const float z0y = -Cy * inv_c;
+    const float z0z = -Cz * inv_c;
+    const float size_s = std::max(across, 1e-4f);
+    const float ell = length_scale;
+    float Xx = 0.0f, Xy = 0.0f, Xz = 0.0f;
+    float Yx = 0.0f, Yy = 0.0f, Yz = 0.0f;
+    if (rotate_with_stretch != 0) {
+      const float s2 = size_s * size_s;
+      const float Zx = s2 * ell * z0x;
+      const float Zy = s2 * ell * z0y;
+      const float Zz = s2 * z0z;
+      const float zxy2 = Zy * Zy + Zx * Zx;
+      if (zxy2 <= 1e-30f) {
+        return false;
+      }
+      const float inv_zxy = size_s / std::sqrt(zxy2);
+      Xx = Zy * inv_zxy;
+      Xy = -Zx * inv_zxy;
+      Xz = 0.0f;
+      const float xlen = std::sqrt(Xx * Xx + Xy * Xy + Xz * Xz);
+      const float zlen = std::sqrt(Zx * Zx + Zy * Zy + Zz * Zz);
+      if (xlen <= 1e-30f || zlen <= 1e-30f) {
+        return false;
+      }
+      const float xhx = Xx / xlen;
+      const float xhy = Xy / xlen;
+      const float xhz = Xz / xlen;
+      const float zhx = Zx / zlen;
+      const float zhy = Zy / zlen;
+      const float zhz = Zz / zlen;
+      float yhx = xhy * zhz - xhz * zhy;
+      float yhy = xhz * zhx - xhx * zhz;
+      float yhz = xhx * zhy - xhy * zhx;
+      const float yh2 = yhx * yhx + yhy * yhy + yhz * yhz;
+      if (yh2 <= 1e-30f) {
+        return false;
+      }
+      const float inv_yh = 1.0f / std::sqrt(yh2);
+      yhx *= inv_yh;
+      yhy *= inv_yh;
+      yhz *= inv_yh;
+      const float ell_safe = std::fabs(ell) > 1e-8f ? ell : 1e-8f;
+      const float ymag_den =
+          1.0f + yhz * yhz * (1.0f / (ell_safe * ell_safe) - 1.0f);
+      if (ymag_den <= 1e-30f) {
+        return false;
+      }
+      const float ymag = size_s / std::sqrt(ymag_den);
+      Yx = yhx * ymag;
+      Yy = yhy * ymag;
+      Yz = yhz * ymag;
+    } else {
+      const float Ux = sr;
+      const float Uy = cr;
+      const float Uz = 0.0f;
+      const float udot = Ux * z0x + Uy * z0y + Uz * z0z;
+      float x0x = Ux - z0x * udot;
+      float x0y = Uy - z0y * udot;
+      float x0z = Uz - z0z * udot;
+      const float x02 = x0x * x0x + x0y * x0y + x0z * x0z;
+      if (x02 <= 1e-30f) {
+        return false;
+      }
+      const float inv_x0 = 1.0f / std::sqrt(x02);
+      x0x *= inv_x0;
+      x0y *= inv_x0;
+      x0z *= inv_x0;
+      const float y0x = x0y * z0z - x0z * z0y;
+      const float y0y = x0z * z0x - x0x * z0z;
+      const float y0z = x0x * z0y - x0y * z0x;
+      Xx = size_s * x0x;
+      Xy = size_s * x0y;
+      Xz = size_s * ell * x0z;
+      Yx = size_s * y0x;
+      Yy = size_s * y0y;
+      Yz = size_s * ell * y0z;
+    }
+    auto store_particle = [&](int i, float ax, float ay) {
+      const float lx = (ax * 0.5f - pivot_x) * Xx + (ay * 0.5f - pivot_y) * Yx;
+      const float ly = (ax * 0.5f - pivot_x) * Xy + (ay * 0.5f - pivot_y) * Yy;
+      const float lz = (ax * 0.5f - pivot_x) * Xz + (ay * 0.5f - pivot_y) * Yz;
+      const float vx = px + lx * cr - ly * sr;
+      const float vy = py + lx * sr + ly * cr;
+      const float vz = pz + lz;
+      store_view(i, vx, vy, vz);
+    };
+    // Same UV corner order as kettlewell: lb, rb, rt, lt.
+    store_particle(0, -1.0f, -1.0f);
+    store_particle(1, 1.0f, -1.0f);
+    store_particle(2, 1.0f, 1.0f);
+    store_particle(3, -1.0f, 1.0f);
+    return true;
+  }
+
+  // Approved unofficial kettlewell 2025-02 strip (not Unity 2022.3).
+  // cameraVelocityScale: velocityVS -= cameraVel_vs * scale.
+  float vvx = vel_x;
+  float vvy = vel_y * c - vel_z * s;
+  float vvz = vel_y * s + vel_z * c;
+  const float cvx = cam_vel_x;
+  const float cvy = cam_vel_y * c - cam_vel_z * s;
+  const float cvz = cam_vel_y * s + cam_vel_z * c;
+  vvx -= cvx * camera_velocity_scale;
+  vvy -= cvy * camera_velocity_scale;
+  vvz -= cvz * camera_velocity_scale;
+  const float v2 = vvx * vvx + vvy * vvy + vvz * vvz;
+  if (v2 <= 1e-30f) {
+    return false;
+  }
+  const float speed_vs = 1.0f / std::sqrt(v2);
+  const float size_y = along;
+  px += vvx * (speed_vs * pivot_y * size_y);
+  py += vvy * (speed_vs * pivot_y * size_y);
+  pz += vvz * (speed_vs * pivot_y * size_y);
+  const float stretch = velocity_scale + speed_vs * (length_scale * size_y);
+  float ex = px - vvx * stretch;
+  float ey = py - vvy * stretch;
+  float ez = pz - vvz * stretch;
+  float dx = pz * ey - py * ez;
+  float dy = px * ez - pz * ex;
+  const float d2 = dx * dx + dy * dy;
+  if (d2 <= 1e-30f) {
+    return false;
+  }
+  // hsize.x is half the clamped Start Size width so ±n equals Main X width.
+  const float hsize_x = std::max(across, 1e-4f) * 0.5f;
+  const float inv_d = hsize_x / std::sqrt(d2);
+  dx *= inv_d;
+  dy *= inv_d;
+  px += dx * pivot_x;
+  py += dy * pivot_x;
+  ex += dx * pivot_x;
+  ey += dy * pivot_x;
+  const float cr = std::cos(roll);
+  const float sr = std::sin(roll);
+  const float nx = dx * cr - dy * sr;
+  const float ny = dx * sr + dy * cr;
+  // U (lb→rb) along +velocity: tail (end) → head (start). V across ±n.
+  store_view(0, ex - nx, ey - ny, ez);
+  store_view(1, px - nx, py - ny, pz);
+  store_view(2, px + nx, py + ny, pz);
+  store_view(3, ex + nx, ey + ny, ez);
+  return true;
+}
+
+Quad StageGeometry::split_particle_stretch_quad(float world_x, float main_y, float world_z,
+                                               float vel_x, float vel_y, float vel_z, float across,
+                                               float along, float pivot_y, float roll,
+                                               float pivot_x, float length_scale,
+                                               float velocity_scale, float camera_velocity_scale,
+                                               float cam_vel_x, float cam_vel_y, float cam_vel_z,
+                                               uint8_t freeform_stretching,
+                                               uint8_t rotate_with_stretch) const {
+  float cx[4], cy[4], cz[4];
+  if (!split_particle_stretch_world_corners(
+          world_x, main_y, world_z, vel_x, vel_y, vel_z, across, along, pivot_y, roll, pivot_x, cx,
+          cy, cz, length_scale, velocity_scale, camera_velocity_scale, cam_vel_x, cam_vel_y,
+          cam_vel_z, freeform_stretching, rotate_with_stretch)) {
+    return split_particle_oriented_quad(world_x, main_y, std::max(across, 1e-4f),
+                                        along / std::max(across, 1e-4f), pivot_y, roll, 0.0f, 0.0f,
+                                        world_z, 0, pivot_x, 0.0f);
+  }
+  Quad q;
+  q.lb = project_main(cx[0], cy[0], cz[0]);
+  q.rb = project_main(cx[1], cy[1], cz[1]);
+  q.rt = project_main(cx[2], cy[2], cz[2]);
+  q.lt = project_main(cx[3], cy[3], cz[3]);
+  return q;
+}
+
+Quad StageGeometry::split_line_quad_world_x(float world_x, float percent_start,
+                                            float percent_end, float u0, float u1,
+                                            float width_scale) const {
+  const float width_scale_k = std::max(width_scale, 1e-4f);
+  const float uu0 = std::clamp(u0, wds::chart_editor::kOfficialSplitLineMeshU0,
+                               wds::chart_editor::kOfficialSplitLineMeshU1);
+  const float uu1 = std::clamp(u1, wds::chart_editor::kOfficialSplitLineMeshU0,
+                               wds::chart_editor::kOfficialSplitLineMeshU1);
+  const float x0 = world_x + wds::chart_editor::official_split_line_local_x(uu0) * width_scale_k;
+  const float x1 = world_x + wds::chart_editor::official_split_line_local_x(uu1) * width_scale_k;
+  const float y0 = official_percent_to_main_y(percent_start);
+  const float y1 = official_percent_to_main_y(percent_end);
+  Quad q;
+  q.lt = project_main(x0, y0);
+  q.rt = project_main(x1, y0);
+  q.lb = project_main(x0, y1);
+  q.rb = project_main(x1, y1);
   return q;
 }
 
