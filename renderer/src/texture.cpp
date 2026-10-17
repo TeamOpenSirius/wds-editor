@@ -559,6 +559,20 @@ bool TextureCache::bake_atlas() {
   return true;
 }
 
+TextureInfo TextureCache::commit_standalone_gpu(const std::string& path, const TextureInfo& info) {
+  try {
+    std::function<void(int)> hook;
+    if (backend_enabled()) {
+      hook = backend_.before_standalone_commit;
+    }
+    commit_standalone_records(standalone_keys_, standalone_ids_, cache_, path, info, hook);
+  } catch (...) {
+    gpu_destroy(info.id);
+    return {};
+  }
+  return info;
+}
+
 TextureInfo TextureCache::load_standalone_png(const std::string& path) {
   if (!gpu_ready() || path.empty()) {
     return {};
@@ -576,17 +590,44 @@ TextureInfo TextureCache::load_standalone_png(const std::string& path) {
   if (!info) {
     return {};
   }
-  try {
-    std::function<void(int)> hook;
-    if (backend_enabled()) {
-      hook = backend_.before_standalone_commit;
-    }
-    commit_standalone_records(standalone_keys_, standalone_ids_, cache_, path, info, hook);
-  } catch (...) {
-    gpu_destroy(info.id);
+  return commit_standalone_gpu(path, info);
+}
+
+TextureInfo TextureCache::load_standalone_rgba(const std::string& path, const unsigned char* pixels,
+                                               int width, int height) {
+  if (!gpu_ready() || path.empty() || pixels == nullptr || width <= 0 || height <= 0) {
     return {};
   }
-  return info;
+  const auto it = cache_.find(path);
+  if (it != cache_.end()) {
+    return it->second;
+  }
+  TextureInfo info = gpu_create(pixels, width, height);
+  if (!info) {
+    return {};
+  }
+  return commit_standalone_gpu(path, info);
+}
+
+void TextureCache::bind_identity(TextureId id, std::string key) {
+  if (id == kInvalidTextureId || key.empty()) {
+    return;
+  }
+  extra_identities_[id] = std::move(key);
+}
+
+std::vector<std::pair<TextureId, std::string>> TextureCache::identity_entries() const {
+  std::vector<std::pair<TextureId, std::string>> out;
+  out.reserve(cache_.size() + extra_identities_.size());
+  for (const auto& kv : cache_) {
+    if (kv.second.id != kInvalidTextureId) {
+      out.emplace_back(kv.second.id, kv.first);
+    }
+  }
+  for (const auto& kv : extra_identities_) {
+    out.emplace_back(kv.first, kv.second);
+  }
+  return out;
 }
 
 TextureInfo TextureCache::get(const std::string& path) const {
@@ -614,6 +655,7 @@ void TextureCache::clear() {
   standalone_keys_.clear();
   pending_.clear();
   cache_.clear();
+  extra_identities_.clear();
   baked_ = false;
   needs_rebake_ = false;
 }

@@ -76,9 +76,17 @@ class TextureCache {
 
   // Full-res GPU texture outside the atlas (large BGs). Safe after bake_atlas().
   TextureInfo load_standalone_png(const std::string& path);
+  // Same as load_standalone_png but the caller already decoded RGBA8 (idle preload).
+  TextureInfo load_standalone_rgba(const std::string& path, const unsigned char* pixels, int width,
+                                   int height);
 
   // Valid after bake_atlas() / load_standalone_png().
   TextureInfo get(const std::string& path) const;
+
+  // Extra dump/compare name for a GPU id that is not in this cache (e.g. ui.solid).
+  void bind_identity(TextureId id, std::string key);
+  // id → path/key rows (atlas sprites share one id; extras included).
+  std::vector<std::pair<TextureId, std::string>> identity_entries() const;
 
   bool baked() const noexcept { return baked_; }
   TextureId atlas_id() const noexcept { return atlas_id_; }
@@ -96,6 +104,7 @@ class TextureCache {
   bool gpu_ready() const;
   TextureInfo gpu_create(const unsigned char* pixels, int width, int height);
   void gpu_destroy(TextureId id);
+  TextureInfo commit_standalone_gpu(const std::string& path, const TextureInfo& info);
 
   VulkanRenderer* renderer_ = nullptr;
   TextureCacheBackend backend_{};
@@ -106,6 +115,7 @@ class TextureCache {
   TextureId atlas_id_ = kInvalidTextureId;
   bool baked_ = false;
   bool needs_rebake_ = false;
+  std::unordered_map<TextureId, std::string> extra_identities_;
 };
 
 }  // namespace wds::renderer
