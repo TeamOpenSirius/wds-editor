@@ -56,6 +56,8 @@ struct StemPanelTestAccess {
   static int progress(StemPanel& panel) { return panel.progress_->value(); }
   static QString status(StemPanel& panel) { return panel.status_->text(); }
   static void failed_launch(StemPanel& panel) { panel.launch("/nonexistent/wds-stem-python", {}); }
+  static bool is_store_alias(const QString& path) { return StemPanel::is_windows_store_python_alias(path); }
+  static QString resolve_python(const QString& path) { return StemPanel::resolve_python(path); }
 };
 }
 
@@ -128,6 +130,31 @@ int main(int argc, char** argv) {
   QTemporaryDir cache;
   using wds::ui::StemPanel;
   using Access = wds::ui::StemPanelTestAccess;
+  {
+    expect(Access::is_store_alias(
+               QStringLiteral("C:/Users/x/AppData/Local/Microsoft/WindowsApps/python3.exe")),
+           "WindowsApps python3.exe is a Store alias");
+    expect(Access::is_store_alias(QStringLiteral(
+               R"(C:\Users\x\AppData\Local\Microsoft\WindowsApps\python.exe)")),
+           "WindowsApps python.exe with backslashes is a Store alias");
+    expect(Access::is_store_alias(
+               QStringLiteral("C:/Users/x/AppData/Local/Microsoft/WindowsApps/python3.12.exe")),
+           "WindowsApps python3.12.exe is a Store alias");
+    expect(!Access::is_store_alias(QStringLiteral(
+               "C:/Users/x/AppData/Local/Microsoft/WindowsApps/"
+               "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0/python.exe")),
+           "Store package python.exe is not an alias");
+    expect(!Access::is_store_alias(QStringLiteral(
+               "C:/Users/x/AppData/Local/Programs/Python/Python312/python.exe")),
+           "python.org install is not an alias");
+    expect(!Access::is_store_alias(QStringLiteral("/usr/bin/python3")),
+           "unix python is not an alias");
+    expect(!Access::is_store_alias(QString()), "empty path is not an alias");
+    expect(Access::resolve_python(
+               QStringLiteral("C:/Users/x/AppData/Local/Microsoft/WindowsApps/python3.exe"))
+               .isEmpty(),
+           "resolve rejects Store alias without launching it");
+  }
   int ticks = 0;
   QTimer heartbeat;
   QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; });

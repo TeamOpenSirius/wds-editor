@@ -45,6 +45,206 @@
 #include <filesystem>
 
 namespace wds::ui {
+namespace {
+
+bool windows_store_python_alias(const QString& path) {
+  if (path.isEmpty()) return false;
+  QString normalized = QDir::fromNativeSeparators(path.trimmed());
+  normalized.replace(QLatin1Char('\\'), QLatin1Char('/'));
+  const QFileInfo info(normalized);
+  const QString name = info.fileName().toLower();
+  const bool alias_name = name == QLatin1String("python.exe") || name == QLatin1String("python3.exe") ||
+                          (name.startsWith(QLatin1String("python3.")) && name.endsWith(QLatin1String(".exe")));
+  if (!alias_name) return false;
+  return info.dir().dirName().compare(QLatin1String("WindowsApps"), Qt::CaseInsensitive) == 0;
+}
+
+#ifdef Q_OS_WIN
+bool parse_python_version(const QString& text, int* major, int* minor) {
+  static const QRegularExpression re(QStringLiteral(R"(^(\d+)\.(\d+))"));
+  const auto match = re.match(text);
+  if (!match.hasMatch()) return false;
+  *major = match.captured(1).toInt();
+  *minor = match.captured(2).toInt();
+  return true;
+}
+
+QStringList path_dirs_without_windowsapps() {
+  QStringList dirs;
+  const auto path = qEnvironmentVariable("PATH");
+  for (const auto& dir : path.split(QDir::listSeparator(), Qt::SkipEmptyParts)) {
+    if (QFileInfo(dir).fileName().compare(QLatin1String("WindowsApps"), Qt::CaseInsensitive) == 0) continue;
+    dirs << dir;
+  }
+  return dirs;
+}
+
+QString find_named_python(const QString& name) {
+  const auto dirs = path_dirs_without_windowsapps();
+  QString found = QStandardPaths::findExecutable(name, dirs);
+  if (found.isEmpty() && !name.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive)) {
+    found = QStandardPaths::findExecutable(name + QLatin1String(".exe"), dirs);
+  }
+  if (found.isEmpty() || windows_store_python_alias(found)) return {};
+  return QFileInfo(found).absoluteFilePath();
+}
+
+QString python_from_py_launcher() {
+  auto dirs = path_dirs_without_windowsapps();
+  const QString root = qEnvironmentVariable("SystemRoot");
+  if (!root.isEmpty()) dirs.prepend(root);
+  QString py = QStandardPaths::findExecutable(QStringLiteral("py.exe"), dirs);
+  if (py.isEmpty()) py = QStandardPaths::findExecutable(QStringLiteral("py"), dirs);
+  if (py.isEmpty() || windows_store_python_alias(py)) return {};
+  QProcess probe;
+  probe.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+    args->flags |= CREATE_NO_WINDOW;
+  });
+  probe.start(py, {QStringLiteral("-3"), QStringLiteral("-c"),
+                   QStringLiteral("import sys; print(sys.executable)")});
+  if (!probe.waitForStarted(2000)) return {};
+  if (!probe.waitForFinished(4000)) {
+    probe.kill();
+    probe.waitForFinished(1000);
+    return {};
+  }
+  if (probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) return {};
+  const auto resolved = QString::fromUtf8(probe.readAllStandardOutput()).trimmed();
+  if (resolved.isEmpty() || windows_store_python_alias(resolved) || !QFileInfo::exists(resolved)) return {};
+  return QFileInfo(resolved).absoluteFilePath();
+}
+
+void collect_pep514(QStringList* out, QSettings::Scope scope, QSettings::Format format) {
+  QSettings root(format, scope, QStringLiteral("Python"), QStringLiteral("PythonCore"));
+  for (const auto& ver : root.childGroups()) {
+    int major = 0;
+    int minor = 0;
+    if (parse_python_version(ver, &major, &minor)) {
+      if (major < 3 || (major == 3 && minor < 10)) continue;
+    }
+    root.beginGroup(ver);
+    root.beginGroup(QStringLiteral("InstallPath"));
+    QString exe = root.value(QStringLiteral("ExecutablePath")).toString();
+    if (exe.isEmpty()) {
+      QString dir = root.value(QStringLiteral(".")).toString();
+      if (dir.isEmpty()) dir = root.value(QString()).toString();
+      if (!dir.isEmpty()) exe = QDir(dir).filePath(QStringLiteral("python.exe"));
+    }
+    root.endGroup();
+    root.endGroup();
+    if (exe.isEmpty()) continue;
+    const QFileInfo info(exe);
+    if (!info.exists() || !info.isFile() || windows_store_python_alias(info.absoluteFilePath())) continue;
+    out->append(info.absoluteFilePath());
+  }
+}
+
+QString python_from_pep514() {
+  QStringList found;
+  collect_pep514(&found, QSettings::UserScope, QSettings::Registry64Format);
+  collect_pep514(&found, QSettings::SystemScope, QSettings::Registry64Format);
+  collect_pep514(&found, QSettings::UserScope, QSettings::Registry32Format);
+  collect_pep514(&found, QSettings::SystemScope, QSettings::Registry32Format);
+  QString best;
+  int best_key = -1;
+  for (const auto& exe : found) {
+    int major = 3;
+    int minor = 10;
+    const QFileInfo info(exe);
+    parse_python_version(info.dir().dirName(), &major, &minor);
+    const int key = major * 1000 + minor;
+    if (key >= best_key) {
+      best_key = key;
+      best = exe;
+    }
+  }
+  return best;
+}
+
+QString python_from_standard_dirs() {
+  QStringList roots;
+  const QString local = qEnvironmentVariable("LOCALAPPDATA");
+  if (!local.isEmpty()) roots << local + QLatin1String("/Programs/Python");
+  const QString pf = qEnvironmentVariable("ProgramFiles");
+  if (!pf.isEmpty()) roots << pf;
+  const QString pf86 = qEnvironmentVariable("ProgramFiles(x86)");
+  if (!pf86.isEmpty()) roots << pf86;
+  QString best;
+  int best_key = -1;
+  static const QRegularExpression dir_re(QStringLiteral(R"(^Python(\d)(\d+)$)"),
+                                         QRegularExpression::CaseInsensitiveOption);
+  for (const auto& root : roots) {
+    QDir dir(root);
+    if (!dir.exists()) continue;
+    const auto entries = dir.entryList(QStringList{QStringLiteral("Python3*")},
+                                       QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const auto& name : entries) {
+      const QString exe = dir.filePath(name + QLatin1String("/python.exe"));
+      const QFileInfo info(exe);
+      if (!info.exists() || !info.isFile() || windows_store_python_alias(info.absoluteFilePath())) continue;
+      int key = 0;
+      const auto match = dir_re.match(name);
+      if (match.hasMatch()) {
+        const int major = match.captured(1).toInt();
+        const int minor = match.captured(2).toInt();
+        if (major < 3 || (major == 3 && minor < 10)) continue;
+        key = major * 1000 + minor;
+      }
+      if (key >= best_key) {
+        best_key = key;
+        best = info.absoluteFilePath();
+      }
+    }
+  }
+  return best;
+}
+#endif
+
+}  // namespace
+
+bool StemPanel::is_windows_store_python_alias(const QString& path) {
+  return windows_store_python_alias(path);
+}
+
+QString StemPanel::resolve_python(const QString& path) {
+  const QString trimmed = path.trimmed();
+  if (trimmed.isEmpty() || windows_store_python_alias(trimmed)) return {};
+  const bool has_sep = trimmed.contains(QLatin1Char('/')) || trimmed.contains(QLatin1Char('\\'));
+  if (has_sep || QFileInfo(trimmed).isAbsolute()) {
+    const QFileInfo info(trimmed);
+    if (info.exists() && info.isFile() && !windows_store_python_alias(info.absoluteFilePath())) {
+      return info.absoluteFilePath();
+    }
+#ifdef Q_OS_WIN
+    if (!trimmed.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive)) {
+      const QFileInfo exe(trimmed + QLatin1String(".exe"));
+      if (exe.exists() && exe.isFile() && !windows_store_python_alias(exe.absoluteFilePath())) {
+        return exe.absoluteFilePath();
+      }
+    }
+#endif
+    return {};
+  }
+#ifdef Q_OS_WIN
+  return find_named_python(trimmed);
+#else
+  return QStandardPaths::findExecutable(trimmed);
+#endif
+}
+
+QString StemPanel::discover_system_python() {
+#ifdef Q_OS_WIN
+  if (const auto pep = python_from_pep514(); !pep.isEmpty()) return pep;
+  if (const auto local = python_from_standard_dirs(); !local.isEmpty()) return local;
+  if (const auto named = find_named_python(QStringLiteral("python")); !named.isEmpty()) return named;
+  if (const auto named = find_named_python(QStringLiteral("python3")); !named.isEmpty()) return named;
+  return python_from_py_launcher();
+#else
+  QString found = QStandardPaths::findExecutable(QStringLiteral("python3"));
+  if (found.isEmpty()) found = QStandardPaths::findExecutable(QStringLiteral("python"));
+  return found;
+#endif
+}
 
 StemPanel::StemPanel(UiManager* manager, QWidget* parent)
     : QDialog(parent), manager_(manager) {
@@ -69,11 +269,10 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   python_ = new QLineEdit(this);
   python_->setObjectName("stemPython");
   QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
-  QString python = qEnvironmentVariable("WDS_STEM_PYTHON");
-  if (python.isEmpty()) python = settings.value("stems/python").toString();
-  if (python.isEmpty() && QFileInfo::exists(runtime_python())) python = runtime_python();
-  if (python.isEmpty()) python = QStandardPaths::findExecutable("python3");
-  if (python.isEmpty()) python = QStandardPaths::findExecutable("python");
+  QString python = resolve_python(qEnvironmentVariable("WDS_STEM_PYTHON"));
+  if (python.isEmpty()) python = resolve_python(settings.value("stems/python").toString());
+  if (python.isEmpty()) python = resolve_python(runtime_python());
+  if (python.isEmpty()) python = discover_system_python();
   python_->setText(python);
   python_->setPlaceholderText(tr("选择 Python 3.10 或更新版本"));
   auto* interpreter = new QHBoxLayout;
@@ -361,10 +560,15 @@ void StemPanel::refresh_controls() {
 }
 
 bool StemPanel::prepare_job() {
-  if (python_->text().trimmed().isEmpty()) {
-    status_->setText(tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境。"));
+  QString python = resolve_python(python_->text());
+  if (python.isEmpty()) python = resolve_python(runtime_python());
+  if (python.isEmpty()) {
+    status_->setText(is_windows_store_python_alias(python_->text())
+                         ? tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请安装 Python 3.10 或更新版本，或用「选择…」指定 python.exe。")
+                         : tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境。"));
     return false;
   }
+  python_->setText(python);
   if (cache_dir_.isEmpty() || !QDir().mkpath(cache_dir_)) {
     status_->setText(tr("无法创建分轨缓存目录"));
     return false;
