@@ -1657,7 +1657,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     const int64_t tick = static_cast<int64_t>(n->start_tick);
     const int sl = sus_lane(n->lane);
     const int w = std::clamp(n->width, 1, 35);
-    if (n->note_type == NoteType::Flick) {
+    if (is_flick_like(n->note_type)) {
       std::string tap_suffix = "1";
       tap_suffix.push_back(base36_digit(sl));
       place(tap_suffix, tick, kSusTapFlick, w);

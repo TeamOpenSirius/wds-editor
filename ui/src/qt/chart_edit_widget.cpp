@@ -1255,9 +1255,14 @@ void ChartEditWidget::paint_notes(QPainter& p,
     const bool critical = n.note_type == NT::Critical || n.note_type == NT::CriticalHold ||
                           n.note_type == NT::CriticalHoldStart || n.note_type == NT::NontailCriticalHold ||
                           n.note_type == NT::ScratchCriticalHold || n.note_type == NT::ScratchCriticalHoldStart;
-    const bool hold_body = n.end_tick > n.start_tick && wds::chart_editor::is_hold_with_tail(n.note_type);
+    // Ribbon includes nontail; with_tail is end-cap / JumpScratch span only.
+    // Match preview: bindable bodies never invent a start head.
+    const bool hold_ribbon =
+        n.end_tick > n.start_tick && wds::chart_editor::is_bindable_hold_body(n.note_type);
+    const bool with_tail =
+        n.end_tick > n.start_tick && wds::chart_editor::is_hold_with_tail(n.note_type);
     int end_lane = n.lane, end_width = n.width;
-    if (hold_body && wds::chart_editor::is_hold_chain_body(n.note_type)) {
+    if (with_tail && wds::chart_editor::is_hold_chain_body(n.note_type)) {
       const auto span = wds::chart_editor::resolve_end_lane_span(n);
       end_lane = span.first; end_width = span.second;
     }
@@ -1279,7 +1284,8 @@ void ChartEditWidget::paint_notes(QPainter& p,
     }
     // Hold bodies do not own a start cap; their paired HoldStart does. This is
     // essential at ScratchHold chain joints where two caps otherwise overlap.
-    if (!hold_body) {
+    // Nontail ribbons also must not invent a start (or end) flat.
+    if (!hold_ribbon) {
       if (is_tick) {
         if (skin->isNull()) p.fillRect(head, QColor(100, 190, 255));
         else p.drawPixmap(head, *skin, skin->rect());
@@ -1287,7 +1293,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
         draw_skin(*skin, head, v.tap_visual_world_width(n.width));
       }
     }
-    if (hold_body) {
+    if (with_tail) {
       // Tail caps are real note sprites, not just the ribbon endpoint.  Draw
       // them independently so a terminal ScratchHold still exposes its flick.
       // Gold-head bodies stay blue/purple at the tail — only the paired
@@ -1312,7 +1318,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
       ScopedAA aa(p);
       p.setBrush(Qt::NoBrush);
       p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.5));
-      if (hold_body) {
+      if (hold_ribbon) {
         const float left = std::min(x, tail_x), right = std::max(x + w, tail_x + tail_w);
         const float top = std::min(y0, y1) - v.note_height_px()*.5f;
         const float bottom = std::max(y0, y1) + v.note_height_px()*.5f;
@@ -1327,7 +1333,7 @@ void ChartEditWidget::paint_notes(QPainter& p,
   if (!arrow_.isNull()) {
     for (const std::size_t index : visible_note_indices_) {
       const auto& n = notes[index];
-      if (n.note_type != wds::chart_editor::NoteType::Flick) continue;
+      if (!wds::chart_editor::is_flick_like(n.note_type)) continue;
       const float y = v.y_at(n.start_tick), inset = v.note_inset_px(n.width);
       const float sx = v.x_at(n.lane) + inset, sw = std::max(0.0f, v.lane_width(n.width) - inset * 2.0f);
       const float ah = v.note_height_px();

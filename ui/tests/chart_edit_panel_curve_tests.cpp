@@ -1515,6 +1515,105 @@ void test_unselected_edge_edits_keep_selection() {
   }
 }
 
+void test_multi_select_drag_from_hold_keeps_foreign_notes() {
+  // Single click never enters hold layers — multi-select group-drags from the hold
+  // the same way as from a tap. Layer entry is double-click only.
+  Harness h;
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 1440;
+  tap.end_tick = 1440;
+  tap.lane = 6;
+  tap.width = 1;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+  h.enter_hold(false, 0, 960, 3);
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(960, 3), PointerButton::Left, {}});
+  int32_t hold_id = -1;
+  int32_t head_id = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Hold) hold_id = n.id;
+    if (n.note_type == NoteType::HoldStart) head_id = n.id;
+  }
+  CHECK(hold_id >= 0);
+  CHECK(head_id >= 0);
+
+  h.panel.set_selected({hold_id, head_id, tap_id});
+  CHECK_EQ(h.panel.selected().size(), 3u);
+
+  // Grab mid-body (not time edge) and drag up one beat.
+  const auto grab = h.at_tick_lane(480, 3);
+  const auto dest = h.at_tick_lane(960, 3);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(h.panel.selected().count(tap_id));
+  CHECK_EQ(h.panel.selected().size(), 3u);
+  h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+  h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+
+  const auto* hold_after = find_note_id(h.engine.document().notes(), hold_id);
+  const auto* tap_after = find_note_id(h.engine.document().notes(), tap_id);
+  CHECK(hold_after != nullptr);
+  CHECK(tap_after != nullptr);
+  CHECK_EQ(hold_after->start_tick, 480);
+  CHECK_EQ(tap_after->start_tick, 1920);
+
+  // Grabbing the head in the same multi-select also keeps the tap.
+  h.panel.set_selected({hold_id, head_id, tap_id});
+  const auto head_grab = h.at_tick_lane(hold_after->start_tick, 3);
+  const auto head_dest = h.at_tick_lane(hold_after->start_tick + 480, 3);
+  h.panel.on_pointer_down(PointerDownEvent{head_grab, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(tap_id));
+  CHECK_EQ(h.panel.selected().size(), 3u);
+  h.panel.on_pointer_move(PointerMoveEvent{head_dest, {}});
+  h.panel.on_pointer_up(PointerUpEvent{head_dest, PointerButton::Left, {}});
+  const auto* tap2 = find_note_id(h.engine.document().notes(), tap_id);
+  CHECK(tap2 != nullptr);
+  CHECK_EQ(tap2->start_tick, 2400);
+}
+
+void test_hold_layer_only_on_double_click() {
+  Harness h;
+  h.enter_hold(false, 0, 960, 3);
+  h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(960, 3), PointerButton::Left, {}});
+  int32_t hold_id = -1;
+  int32_t head_id = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Hold) hold_id = n.id;
+    if (n.note_type == NoteType::HoldStart) head_id = n.id;
+  }
+  CHECK(hold_id >= 0);
+  CHECK(head_id >= 0);
+
+  // Clear placement selection, then single-click the body: selects body+head, no layer.
+  h.panel.set_selected({});
+  const auto mid = h.at_tick_lane(480, 3);
+  h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(h.panel.selected().count(head_id));
+  // A second single click on an already-selected hold must not collapse to Parts.
+  h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(h.panel.selected().count(head_id));
+
+  // Hold is a chain-family body: (dbl) Chain → (dbl) Whole → (dbl) Parts.
+  h.panel.on_double_click(
+      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(h.panel.selected().count(head_id));
+  h.panel.on_double_click(
+      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(h.panel.selected().count(head_id));
+  h.panel.on_double_click(
+      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(!h.panel.selected().count(head_id));
+  CHECK_EQ(h.panel.selected().size(), 1u);
+}
+
 void test_paste_hold_does_not_select_eighths() {
   Harness h;
   h.enter_hold(false, 0, 960, 3);
@@ -1947,15 +2046,31 @@ void test_extended_speed_gutter_slider_and_nontail() {
     h.enter_hold(false, 0, 480, 3);
     h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(480, 3), PointerButton::Left, {}});
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
     h.panel.set_extended_editing_active(true);
+    // Select the body first so post-convert selection still covers the ribbon.
+    h.panel.on_pointer_down(
+        PointerDownEvent{h.at_tick_lane(240, 3), PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{h.at_tick_lane(240, 3), PointerButton::Left, {}});
+    CHECK(h.panel.selected().size() >= 1);
     h.panel.on_pointer_down(
         PointerDownEvent{h.at_tick_lane(480, 3), PointerButton::Middle, {}});
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::NontailHold), 1);
+    // Deleting the tail must not invent a second HoldStart — only convert the body.
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
     CHECK(h.engine.document().compatibility_profile() == ChartCompatibilityProfile::SiriusExtended);
+    // Body id stays selected so the selection box can span the nontail ribbon.
+    int32_t nontail_id = -1;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type == NoteType::NontailHold) nontail_id = n.id;
+    }
+    CHECK(nontail_id >= 0);
+    CHECK(h.panel.selected().count(nontail_id) != 0);
     CHECK(h.engine.undo());
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::NontailHold), 0);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
   }
 }
 
@@ -2016,6 +2131,8 @@ int main() {
   test_split_width_follow_unions_overlapping_effects();
   test_selected_width_resize_affects_only_grabbed_note();
   test_unselected_edge_edits_keep_selection();
+  test_multi_select_drag_from_hold_keeps_foreign_notes();
+  test_hold_layer_only_on_double_click();
   test_paste_hold_does_not_select_eighths();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();

@@ -618,10 +618,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
                                     const wds::chart_editor::NotationNote& next_body,
                                     bool scratch);
 
-  // --- Multi-layer hold selection ----------------------------------------------
-  // Normal: Whole → (dbl) Parts(head|body) → (dbl star) Stars
-  // ScratchHold: Chain → (dbl) Whole(segment) → (dbl) Parts → (dbl star) Stars
-  // Stars click body/head → Parts. Parts has no path back to Whole/Chain (blur resets).
+  // --- Multi-layer hold selection (double-click only) --------------------------
+  // Single click never advances layers — it only selects / group-drags like taps.
+  // Normal: (dbl) Whole → (dbl) Parts(head|body) → (dbl star) Stars
+  // ScratchHold: (dbl) Chain → (dbl) Whole(segment) → (dbl) Parts → (dbl star) Stars
+  // Stars dbl body/head → Parts. Parts has no path back to Whole/Chain (blur resets).
   enum class HoldSelLayer { None, Chain, Whole, Parts, Stars };
 
   void clear_hold_sel_focus();
@@ -633,8 +634,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void select_hold_segment(const wds::chart_editor::NotationNote& body);
   void select_hold_part(const wds::chart_editor::NotationNote& hit,
                         const wds::chart_editor::NotationNote& body);
-  // Primary-button selection for hold family notes. Returns false if not hold-related.
-  bool apply_hold_layered_click(const wds::chart_editor::NotationNote& hit);
+  // Double-click hold-family drill. Single click must not call this.
   void drill_hold_selection(const wds::chart_editor::NotationNote& hit);
   // True when a hold body is effectively selected for star placement.
   bool hold_body_selected_for_stars(const wds::chart_editor::NotationNote& body) const;

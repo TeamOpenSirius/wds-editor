@@ -983,6 +983,7 @@ EffectTint tint_for(NoteType type) {
     case NoteType::NontailScratchHold:
     case NoteType::NontailScratchCriticalHold:
     case NoteType::Flick:
+    case NoteType::Scratch:
     case NoteType::ScratchSound:
       return {0.85f, 0.35f, 1.0f};  // purple scratch family
     case NoteType::Sound:
@@ -4026,7 +4027,7 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   params.fill_to_far_edge = !jump && note.scratch_length != 0;
   params.scratch_length = note.scratch_length;
   params.official_one_direction =
-      note.note_type == wds::chart_editor::NoteType::Flick &&
+      wds::chart_editor::is_flick_like(note.note_type) &&
       wds::chart_editor::is_one_direction(note.gimmick_type);
   params.sonolus_num = static_cast<float>(count);
   params.anim_time_sec = static_cast<float>(anim_time_sec);
@@ -4069,7 +4070,7 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
     if (!hold_body && !mid_star && !is_split_lane_gimmick(note.gimmick_type)) {
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
           note.note_type == NoteType::Critical ||
-          note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
+          is_flick_like(note.note_type) || note.note_type == NoteType::BlueTap) {
         const double t0 = static_cast<double>(note.start_ms) / 1000.0;
         if (t0 <= now) {
           evts.push_back(BombEvt{t0, note.start_ms, note.lane, note.end_lane, note.note_type, 0,
@@ -4086,7 +4087,7 @@ void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapsh
             note.uses_jump_scratch_position || is_jump_scratch(note.gimmick_type);
         const bool jump_flare =
             use_jump_span &&
-            (is_scratch_hold_body(note.note_type) || note.note_type == NoteType::Flick);
+            (is_scratch_hold_body(note.note_type) || is_flick_like(note.note_type));
         int32_t fx_lane = note.lane;
         int32_t fx_end = note.end_lane;
         if (use_jump_span) {
@@ -4153,7 +4154,7 @@ BombFxSpec bomb_fx_spec_for(NoteType type, int hit_fx_role, bool jump_scratch_fl
   }
   // Plain hold tails: HoldBomb / scratch-colored HoldBomb Square only.
   if (hit_fx_role == 1) {
-    if (is_scratch_hold_body(type) || type == NoteType::Flick ||
+    if (is_scratch_hold_body(type) || is_flick_like(type) ||
         type == NoteType::ScratchSound) {
       return {"scratch", false};
     }
@@ -4166,6 +4167,7 @@ BombFxSpec bomb_fx_spec_for(NoteType type, int hit_fx_role, bool jump_scratch_fl
     case NoteType::ScratchCriticalHoldStart:
       return {"critical", true};
     case NoteType::Flick:
+    case NoteType::Scratch:
       return {"scratch", true};
     case NoteType::ScratchHoldStart:  // pink NormalNote head → purple ScratchBomb (no flare)
       return {"scratch", false};
@@ -4353,7 +4355,7 @@ void PlaybackPreviewView::draw_hit_effect_at(DrawBatch& batch, int32_t lane, int
     if (fx.flare && flare && age_sec < kFlareLife) {
       // Critical/Scratch BomFlare: RenderAlignment=View, startSize=8 constant.
       // Initialize never scales _bombFlare by laneCount / note width.
-      const bool scratch_flare = jump_scratch_flare || type == NoteType::Flick;
+      const bool scratch_flare = jump_scratch_flare || is_flick_like(type);
       const int flare_burst = scratch_flare ? 2 : 4;
       const float flare_start_a = scratch_flare ? (150.0f / 255.0f) : (50.0f / 255.0f);
       for (int i = 0; i < flare_burst; ++i) {
@@ -4619,7 +4621,7 @@ void PlaybackPreviewView::collect_due_hit_sfx(const PreviewSnapshot& snapshot, b
     if (!hold_body && !mid_star && !is_split_lane_gimmick(note.gimmick_type)) {
       if (is_hold_start(note.note_type) || note.note_type == NoteType::Normal ||
           note.note_type == NoteType::Critical ||
-          note.note_type == NoteType::Flick || note.note_type == NoteType::BlueTap) {
+          is_flick_like(note.note_type) || note.note_type == NoteType::BlueTap) {
         const bool paired = is_hold_start(note.note_type) &&
                             lookup.duration_hold_heads.count(note_span_key(
                                 note.start_ms, note.lane, note.width)) != 0;

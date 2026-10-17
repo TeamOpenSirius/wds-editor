@@ -76,6 +76,7 @@ void test_scratch_arrow_sides() {
   using wds::chart_editor::NoteType;
   using wds::chart_render::preview_draws_start_scratch_arrows;
   CHECK(preview_draws_start_scratch_arrows(NoteType::Flick));
+  CHECK(preview_draws_start_scratch_arrows(NoteType::Scratch));
   CHECK(!preview_draws_start_scratch_arrows(NoteType::ScratchHold));
   CHECK(!preview_draws_start_scratch_arrows(NoteType::NontailScratchHold));
   CHECK(!preview_draws_start_scratch_arrows(NoteType::NontailScratchCriticalHold));

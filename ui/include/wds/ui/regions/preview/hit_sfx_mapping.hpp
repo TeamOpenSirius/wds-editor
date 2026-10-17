@@ -14,6 +14,7 @@ inline wds::audio::HitSfxClip hit_sfx_clip_for_head(wds::chart_editor::NoteType 
     case NoteType::ScratchCriticalHoldStart:
       return wds::audio::HitSfxClip::Critical;
     case NoteType::Flick:
+    case NoteType::Scratch:
       return wds::audio::HitSfxClip::Scratch;
     case NoteType::Sound:
     case NoteType::ScratchSound:

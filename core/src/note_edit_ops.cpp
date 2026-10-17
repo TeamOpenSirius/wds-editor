@@ -152,6 +152,7 @@ bool is_playfield_selectable(const NotationNote& note) noexcept {
 
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
   if (!is_playfield_selectable(note)) return note;
+  if (target == NoteType::Scratch) return note;
   const bool was_hold = is_bindable_hold_body(note.note_type) && note.end_tick > note.start_tick;
   const bool target_hold = is_bindable_hold_body(target);
   const bool was_chain = is_hold_chain_body(note.note_type);
@@ -178,7 +179,7 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
   // Hold tail direction is computed from chain geometry unless authored; converting
   // a non-chain note always starts as equal-width bidirectional.
   if (!split) {
-    if (target == NoteType::Flick) {
+    if (is_flick_like(target)) {
       // Official Flick scratchLength is 0 / ±width. Keep authored |sl|>1 spans
       // (JumpScratch / converted hold tails); expand historic ±1 direction.
       note.scratch_length = official_flick_scratch_length(note.scratch_length, note.width);
@@ -507,7 +508,7 @@ void apply_convert_scratch_override(NotationNote& after,
                                     std::optional<int32_t> scratch_length) noexcept {
   if (!scratch_length.has_value()) return;
   const int32_t dir = *scratch_length;
-  if (after.note_type == NoteType::Flick) {
+  if (is_flick_like(after.note_type)) {
     after.scratch_length = encode_flick_scratch_length(dir, after.width);
   } else if (is_scratch_hold_body(after.note_type)) {
     after.scratch_length = dir < 0 ? -after.width : (dir > 0 ? after.width : 0);
@@ -521,7 +522,7 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
                                               NoteType target,
                                               std::optional<int32_t> scratch_length) {
   ConvertNotesResult result;
-  if (selected.empty()) return result;
+  if (selected.empty() || target == NoteType::Scratch) return result;
   const int32_t tpq = doc.timing().ticks_per_quarter;
   std::unordered_set<int32_t> handled;
   std::unordered_set<int32_t> remove_ids;

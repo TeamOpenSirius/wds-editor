@@ -156,52 +156,6 @@ bool path_ends_with_ci(const std::string& path, const std::string& suffix) {
   return true;
 }
 
-constexpr int32_t kSiriusSoundPurpleType = 40;
-
-bool lanes_overlap_notes(const NotationNote& a, const NotationNote& b) noexcept {
-  return a.lane <= b.end_lane() && b.lane <= a.end_lane();
-}
-
-// Sirius CSV type 40 (SoundPurple): mid-hold scratch → JumpScratch segments.
-// Orphans (no purple hold span) become Flick.
-void apply_sound_purple_cuts(std::vector<NotationNote>& notes, int32_t& next_id,
-                             const std::vector<NotationNote>& cuts) {
-  for (const auto& cut : cuts) {
-    const int32_t cut_tick = cut.start_tick;
-    int best = -1;
-    for (int i = 0; i < static_cast<int>(notes.size()); ++i) {
-      const auto& n = notes[static_cast<size_t>(i)];
-      if (!is_scratch_hold_body(n.note_type)) continue;
-      if (!(cut_tick > n.start_tick && cut_tick < n.end_tick)) continue;
-      if (!lanes_overlap_notes(n, cut)) continue;
-      best = i;
-      break;
-    }
-    if (best < 0) {
-      NotationNote flick = cut;
-      flick.id = next_id++;
-      flick.end_tick = flick.start_tick;
-      flick.note_type = NoteType::Flick;
-      flick.gimmick_type = GimmickType::None;
-      notes.push_back(flick);
-      continue;
-    }
-
-    NotationNote& body = notes[static_cast<size_t>(best)];
-    NotationNote first = body;
-    first.end_tick = cut_tick;
-    first.gimmick_type = GimmickType::JumpScratch;
-    first.scratch_length = cut.scratch_length;
-
-    NotationNote second = body;
-    second.id = next_id++;
-    second.start_tick = cut_tick;
-
-    body = first;
-    notes.push_back(second);
-  }
-}
-
 }  // namespace
 
 SerializeResult OfficialChartFormat::parse_music_config(const std::string& text,
@@ -267,7 +221,6 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
   chart.notes.reserve(lines.size());
 
   int32_t next_id = 0;
-  std::vector<NotationNote> sound_purple_cuts;
   size_t line_no = 0;
   for (const auto& raw_line : lines) {
     ++line_no;
@@ -371,32 +324,23 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     note.gimmick_type = gimmick;
     note.scratch_length = scratch_length;
 
-    // Split placeholders: official leftLane=-1 (or 0), laneLength=0 — keep off playable lanes.
-    const bool split_placeholder =
-        is_split_lane_gimmick(gimmick) ||
-        (type_raw == 0 && (left_lane < 0 || (left_lane == 0 && lane_length == 0)));
-    if (split_placeholder && left_lane <= 0) {
+    // Official split rows use type 0 and dummy leftLane=-1 / 0, laneLength=0.
+    // Any split gimmick is a lane event, never a tap/hold, even if type is 20.
+    const bool split_row = is_split_lane_gimmick(gimmick);
+    const bool dummy_split_lane =
+        left_lane <= 0 && (split_row || type_raw == 0 || (left_lane == 0 && lane_length == 0));
+    if (dummy_split_lane) {
       note.lane = 0;
       note.width = 0;
-      note.note_type = NoteType::None;
     } else if (options.convert_lane_to_zero_based) {
       note.lane = left_lane - 1;
     } else {
       note.lane = left_lane;
     }
 
-    // Sirius SoundPurple (40): defer — split purple holds / orphan → Flick.
-    if (type_raw == kSiriusSoundPurpleType) {
-      note.note_type = NoteType::Flick;  // placeholder type until apply
-      sound_purple_cuts.push_back(note);
-      // Reclaim id; apply assigns fresh ids.
-      --next_id;
-      continue;
-    }
-
-    note.note_type = static_cast<NoteType>(type_raw);
-    if (note.note_type == NoteType::Flick && !is_split_lane_gimmick(note.gimmick_type) &&
-        !is_jump_scratch(note.gimmick_type) && is_one_direction(note.gimmick_type)) {
+    note.note_type = split_row ? NoteType::None : static_cast<NoteType>(type_raw);
+    if (is_flick_like(note.note_type) && !is_jump_scratch(note.gimmick_type) &&
+        is_one_direction(note.gimmick_type)) {
       // Official OneDirection 0/1 → editor-internal None + ±width so place /
       // convert / mirror / arrows stay on the ±width path. None + nonzero is
       // an old editor chart and must keep its signed direction.
@@ -407,12 +351,6 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
     chart.notes.push_back(note);
   }
 
-  // Sort cuts by tick so multi-cut holds split stably left-to-right in time.
-  std::sort(sound_purple_cuts.begin(), sound_purple_cuts.end(),
-            [](const NotationNote& a, const NotationNote& b) {
-              return a.start_tick < b.start_tick;
-            });
-  apply_sound_purple_cuts(chart.notes, next_id, sound_purple_cuts);
   mark_nontail_hold_eighths_authored(chart.notes);
 
   std::sort(chart.scroll_speed_points.begin(), chart.scroll_speed_points.end(),
@@ -557,12 +495,23 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     const double end_sec =
         writes_end ? tick_to_seconds(note.end_tick, chart.timing) : -1.0;
 
-    const bool split_row =
-        is_split_lane_gimmick(note.gimmick_type) || note.note_type == NoteType::None;
+    if (is_split_lane_gimmick(note.gimmick_type)) {
+      ss << start_sec << ',';
+      if (end_sec < 0.0) {
+        ss << "-1.0";
+      } else {
+        ss << end_sec;
+      }
+      // Official sus2txt placeholder: type 0, leftLane=-1, laneLength=0.
+      ss << ",0,-1,0," << format_gimmick(note.gimmick_type, options.use_gimmick_names) << ','
+         << note.scratch_length << '\n';
+      continue;
+    }
+
+    const bool split_row = note.note_type == NoteType::None;
     int32_t lane = note.lane;
     int32_t width = note.width;
     if (split_row && note.lane == 0 && note.width == 0) {
-      // sus2txt: leftLane=-1, laneLength=0
       lane = -1;
       width = 0;
     } else if (options.convert_lane_to_one_based) {
@@ -574,7 +523,7 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     if (note.note_type == NoteType::HoldEighth) {
       gimmick = GimmickType::None;
       scratch_length = 0;
-    } else if (note.note_type == NoteType::Flick && !is_split_lane_gimmick(gimmick)) {
+    } else if (is_flick_like(note.note_type)) {
       if (is_jump_scratch(gimmick)) {
         scratch_length = note.scratch_length;
       } else if (is_one_direction(gimmick)) {

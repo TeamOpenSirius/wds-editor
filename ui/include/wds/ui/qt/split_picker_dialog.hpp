@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 
+class QEvent;
 class QResizeEvent;
 class QShowEvent;
 
@@ -38,6 +39,7 @@ class SplitPickerDialog final : public QDialog {
   wds::chart_editor::SplitLaneType type() const noexcept { return type_; }
 
  protected:
+  void changeEvent(QEvent* event) override;
   void showEvent(QShowEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
   // Accept and reject both end here: remembers the filter chips and search text for the next opening.
@@ -53,6 +55,7 @@ class SplitPickerDialog final : public QDialog {
   void run_prefetch(int gen);
   void schedule_locate_selected();
   void locate_selected_color();
+  void update_chip_slot_width();
   void sync_aligned_width();
   int content_width() const;
   int min_body_width() const;
@@ -69,12 +72,12 @@ class SplitPickerDialog final : public QDialog {
   QLabel* id_label_ = nullptr;
   QWidget* top_panel_ = nullptr;   // fixed-width, centred block holding the 3 control rows
   QWidget* controls_ = nullptr;    // row 0: count buttons, type, 编号 search
-  QWidget* layer_flow_ = nullptr;  // 图层 chip flow (natural single-line width feeds the panel width)
-  QWidget* theme_flow_ = nullptr;  // 主题 chip flow
+  QWidget* layer_flow_ = nullptr;  // 图层 chip flow (follower of the 主题 column grid; its single-line width feeds the panel width)
+  QWidget* theme_flow_ = nullptr;  // 主题 chip flow (balanced lines on a uniform column grid; only one slot feeds the width)
   QLabel* layer_label_ = nullptr;
   QLabel* theme_label_ = nullptr;
   QLineEdit* search_ = nullptr;
-  QPushButton* clear_btn_ = nullptr;  // 清除筛选 (end of the 图层 row)
+  QPushButton* clear_btn_ = nullptr;  // icon-only 清空筛选 (trailing item of the 图层 flow)
   QLabel* empty_label_ = nullptr;     // shown in the preview host when no id matches
   std::vector<QPushButton*> chips_;   // tri-state tag chips (layers first, then themes)
   QScrollArea* colors_ = nullptr;

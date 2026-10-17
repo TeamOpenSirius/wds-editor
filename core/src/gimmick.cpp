@@ -72,7 +72,7 @@ int32_t official_flick_scratch_length(int32_t scratch_length, int32_t width) noe
 }
 
 void sync_flick_scratch_length_for_width(NotationNote& note, int32_t previous_width) noexcept {
-  if (note.note_type != NoteType::Flick || note.scratch_length == 0) return;
+  if (!is_flick_like(note.note_type) || note.scratch_length == 0) return;
   const int32_t abs_sl = std::abs(note.scratch_length);
   if (abs_sl == 1 || abs_sl == std::max(1, previous_width)) {
     note.scratch_length = encode_flick_scratch_length(note.scratch_length, note.width);
