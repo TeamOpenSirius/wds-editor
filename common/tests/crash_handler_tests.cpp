@@ -377,13 +377,22 @@ void run_symbolize_watchdog() {
   CHECK(files.size() == 1);
   if (files.size() == 1) {
     const std::string text = read_file(files[0].c_str());
+    const int before = failures;
+    // Pre-symbolize body must already be on disk when the watchdog fires.
+    // Release/CI may get zero backtrace frames; the header PC and the stack
+    // section (frames or the unavailable placeholder) are still written first.
     CHECK(text.find("--- stack ---") != std::string::npos);
-    CHECK(text.find("  #0 0x") != std::string::npos);  // raw PCs
+    CHECK(text.find("pc: 0x") != std::string::npos);
+    CHECK(text.find("  #0 0x") != std::string::npos ||
+          text.find("(backtrace unavailable)") != std::string::npos);
     CHECK(text.find("--- input journal ---") != std::string::npos);
     CHECK(text.find("--- recent log ---") != std::string::npos);
     CHECK(text.find("symbolization timed out") != std::string::npos);
     CHECK(text.find("--- stack (symbolized) ---") == std::string::npos);
     CHECK(text.find("--- images ---") == std::string::npos);
+    if (failures != before) {
+      std::fprintf(stderr, "---- watchdog report ----\n%s\n", text.c_str());
+    }
   }
   remove_dir_contents(dir);
 }

@@ -155,6 +155,12 @@ class EditorSession {
     bool dirty = false;
     // Per-chart undo stack; swapped with the engine history on chart switch.
     wds::chart_editor::EditHistory history;
+
+    ChartSlot() = default;
+    ChartSlot(ChartSlot&&) noexcept = default;
+    ChartSlot& operator=(ChartSlot&&) noexcept = default;
+    ChartSlot(const ChartSlot&) = delete;
+    ChartSlot& operator=(const ChartSlot&) = delete;
   };
 
   void status(std::string text, StatusLevel level);
