@@ -18,8 +18,8 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPlainTextEdit>
 #include <QProgressBar>
+#include <QRegularExpression>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -34,13 +34,18 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
     : QDialog(parent), manager_(manager) {
   setWindowTitle(tr("本地分轨"));
   setModal(false);
-  resize(620, 460);
-  cache_dir_ = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + "/wds-editor/stems";
+  resize(620, 420);
   runtime_dir_ = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/wds-editor/stem-runtime";
   auto* layout = new QVBoxLayout(this);
   auto* explanation = new QLabel(tr("后台分离鼓、贝斯、人声和其他声部，可继续写谱和播放。\n首次使用需要安装运行环境并下载模型，之后可离线使用。"), this);
   explanation->setWordWrap(true);
   layout->addWidget(explanation);
+  unsaved_warning_ = new QLabel(
+      tr("当前工程尚未保存到磁盘：分轨缓存将写入临时目录，退出编辑器后无法继续使用。"),
+      this);
+  unsaved_warning_->setWordWrap(true);
+  unsaved_warning_->setObjectName(QStringLiteral("stemUnsavedWarning"));
+  layout->addWidget(unsaved_warning_);
   source_label_ = new QLabel(this);
   source_label_->setWordWrap(true);
   layout->addWidget(source_label_);
@@ -95,11 +100,6 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   status_ = new QLabel(tr("就绪"), this);
   status_->setWordWrap(true);
   layout->addWidget(status_);
-  log_ = new QPlainTextEdit(this);
-  log_->setReadOnly(true);
-  log_->setMaximumBlockCount(150);
-  log_->setMaximumHeight(110);
-  layout->addWidget(log_);
 
   connect(start_, &QPushButton::clicked, this, [this] { start(); });
   connect(cancel_, &QPushButton::clicked, this, [this] { cancel(); });
@@ -109,12 +109,14 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
     if (!file.isEmpty()) python_->setText(file);
   });
   connect(cache, &QPushButton::clicked, this, [this] {
+    refresh_cache_dir();
+    if (cache_dir_.isEmpty()) return;
     QDir().mkpath(cache_dir_);
     QDesktopServices::openUrl(QUrl::fromLocalFile(cache_dir_));
   });
   connect(&process_, &QProcess::readyReadStandardOutput, this, [this] { read_output(); });
   connect(&process_, &QProcess::readyReadStandardError, this, [this] {
-    append_log(QString::fromUtf8(process_.readAllStandardError()));
+    note_download_progress(QString::fromUtf8(process_.readAllStandardError()));
   });
   connect(&process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
           [this](int code, QProcess::ExitStatus status) { finished(code, status); });
@@ -129,6 +131,7 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   connect(&kill_timer_, &QTimer::timeout, this, [this] { process_.kill(); });
   connect(&source_timer_, &QTimer::timeout, this, [this] { sync_source(); });
   source_timer_.start(300);
+  refresh_cache_dir();
   sync_source();
 }
 
@@ -169,10 +172,15 @@ void StemPanel::detach() {
     }
   }
   job_.reset();
+  // Ephemeral stem cache lives only for this editor session.
+  ephemeral_cache_.reset();
+  cache_dir_.clear();
+  cache_ephemeral_ = false;
 }
 
 void StemPanel::sync_source() {
   if (!manager_) return;
+  refresh_cache_dir();
   const auto path = QString::fromStdString(manager_->session().music_path());
   const QFileInfo info(path);
   const auto stamp = path + ':' + QString::number(info.size()) + ':' + QString::number(info.lastModified().toMSecsSinceEpoch());
@@ -191,6 +199,35 @@ void StemPanel::sync_source() {
   refresh_controls();
 }
 
+void StemPanel::refresh_cache_dir() {
+  if (!manager_) {
+    // Unit tests inject cache_dir_ without a session; leave it alone.
+    if (unsaved_warning_) unsaved_warning_->setVisible(false);
+    return;
+  }
+  if (!manager_->session().project_path().empty()) {
+    const QFileInfo project(QString::fromStdString(manager_->session().project_path()));
+    cache_dir_ = project.absolutePath() + QStringLiteral("/Stem");
+    cache_ephemeral_ = false;
+    // Keep ephemeral_cache_ until detach so an in-session audition of
+    // stems generated before save still finds its files.
+  } else {
+    if (!ephemeral_cache_) {
+      ephemeral_cache_ = std::make_unique<QTemporaryDir>();
+      ephemeral_cache_->setAutoRemove(true);
+    }
+    if (!ephemeral_cache_->isValid()) {
+      cache_dir_.clear();
+      cache_ephemeral_ = true;
+      if (unsaved_warning_) unsaved_warning_->setVisible(true);
+      return;
+    }
+    cache_dir_ = ephemeral_cache_->path();
+    cache_ephemeral_ = true;
+  }
+  if (unsaved_warning_) unsaved_warning_->setVisible(cache_ephemeral_);
+}
+
 void StemPanel::refresh_controls() {
   start_->setEnabled(manager_ && !source_.isEmpty() && !active_);
   cancel_->setEnabled(active_ && !cancelled_);
@@ -207,7 +244,10 @@ bool StemPanel::prepare_job() {
     status_->setText(tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境。"));
     return false;
   }
-  QDir().mkpath(cache_dir_);
+  if (cache_dir_.isEmpty() || !QDir().mkpath(cache_dir_)) {
+    status_->setText(tr("无法创建分轨缓存目录"));
+    return false;
+  }
   job_ = std::make_unique<QTemporaryDir>(cache_dir_ + "/.job-XXXXXX");
   if (!job_->isValid() || !QFile::copy(":/wds/stem-worker.py", job_->filePath("worker.py")) ||
       !QFile::copy(":/wds/stem-requirements.txt", job_->filePath("requirements.txt"))) {
@@ -216,10 +256,10 @@ bool StemPanel::prepare_job() {
     return false;
   }
   cancelled_ = false;
+  downloading_model_ = false;
   error_.clear();
   manifest_.clear();
   output_.clear();
-  log_->clear();
   progress_->setRange(0, 100);
   progress_->setValue(0);
   return true;
@@ -265,6 +305,7 @@ void StemPanel::cancel() {
 }
 
 void StemPanel::install_runtime() {
+  refresh_cache_dir();
   if (active_ || !prepare_job()) return;
   install_step_ = 1;
   status_->setText(tr("正在创建独立运行环境…"));
@@ -277,13 +318,43 @@ void StemPanel::install_runtime() {
   }
 }
 
-void StemPanel::append_log(const QString& text) {
-  if (!text.trimmed().isEmpty()) log_->appendPlainText(text.right(8000).trimmed());
+void StemPanel::note_download_progress(const QString& text) {
+  if (text.isEmpty() || cancelled_) return;
+  int percent = -1;
+  static const QRegularExpression percent_re(QStringLiteral(R"((\d{1,3}(?:\.\d+)?)\s*%)"));
+  auto it = percent_re.globalMatch(text);
+  while (it.hasNext()) {
+    const int value = qRound(it.next().captured(1).toDouble());
+    if (value >= 0 && value <= 100) percent = value;
+  }
+  if (percent < 0) {
+    static const QRegularExpression bytes_re(
+        QStringLiteral(R"((\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*([KMG])?B)"),
+        QRegularExpression::CaseInsensitiveOption);
+    auto bytes = bytes_re.globalMatch(text);
+    while (bytes.hasNext()) {
+      const auto m = bytes.next();
+      const double done = m.captured(1).toDouble();
+      const double total = m.captured(2).toDouble();
+      if (total > 0.0) percent = qBound(0, qRound(100.0 * done / total), 100);
+    }
+  }
+  if (percent < 0) return;
+  progress_->setRange(0, 100);
+  progress_->setValue(percent);
+  if (install_step_) {
+    status_->setText(tr("正在下载并安装推理依赖… %1%").arg(percent));
+  } else if (downloading_model_) {
+    status_->setText(tr("正在下载 HTDemucs 模型… %1%").arg(percent));
+  }
 }
 
 void StemPanel::read_output() {
   const auto bytes = process_.readAllStandardOutput();
-  if (install_step_) { append_log(QString::fromUtf8(bytes)); return; }
+  if (install_step_) {
+    note_download_progress(QString::fromUtf8(bytes));
+    return;
+  }
   output_ += bytes;
   if (output_.size() > 65536) { error_ = tr("分轨进程返回了过长的消息"); cancel(); return; }
   while (true) {
@@ -292,14 +363,21 @@ void StemPanel::read_output() {
     const auto line = output_.left(end);
     output_.remove(0, end + 1);
     const auto object = QJsonDocument::fromJson(line).object();
-    if (object.value("protocol").toInt() != 1) { append_log(QString::fromUtf8(line)); continue; }
+    if (object.value("protocol").toInt() != 1) {
+      note_download_progress(QString::fromUtf8(line));
+      continue;
+    }
     const auto event = object.value("event").toString();
     if (event == "progress" && !cancelled_) {
+      const auto message = object.value("message").toString();
+      downloading_model_ = message.contains(QStringLiteral("下载"));
       progress_->setValue(object.value("percent").toInt());
-      status_->setText(object.value("message").toString());
+      status_->setText(message);
     } else if (event == "complete") {
+      downloading_model_ = false;
       manifest_ = object.value("manifest").toString();
     } else if (event == "error") {
+      downloading_model_ = false;
       error_ = object.value("message").toString();
     }
   }
@@ -308,7 +386,7 @@ void StemPanel::read_output() {
 void StemPanel::finished(int code, QProcess::ExitStatus status) {
   if (!active_) return;
   read_output();
-  append_log(QString::fromUtf8(process_.readAllStandardError()));
+  note_download_progress(QString::fromUtf8(process_.readAllStandardError()));
   kill_timer_.stop();
   const bool success = code == 0 && status == QProcess::NormalExit && !cancelled_;
   if (success && install_step_ == 1) {
@@ -318,12 +396,13 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
     return;
   }
   active_ = false;
+  downloading_model_ = false;
   progress_->setRange(0, 100);
   sync_source();
   if (cancelled_) {
     status_->setText(tr("已取消"));
   } else if (!success) {
-    status_->setText(error_.isEmpty() ? tr("任务失败，请查看下方日志。") : error_);
+    status_->setText(error_.isEmpty() ? tr("任务失败。") : error_);
   } else if (install_step_) {
     python_->setText(runtime_python());
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
@@ -352,7 +431,7 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
         status_->setText(tr("分轨结果不完整，请重新生成。"));
       }
     } else {
-      status_->setText(tr("未找到分轨结果，请查看日志。"));
+      status_->setText(tr("未找到分轨结果。"));
     }
   } else {
     status_->setText(tr("分轨已缓存；当前音源已更换。"));

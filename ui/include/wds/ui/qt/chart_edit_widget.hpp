@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QImage>
 #include <QPixmap>
 #include <QString>
 #include <chrono>
@@ -66,7 +67,9 @@ class ChartEditWidget final : public QWidget {
   void paint_notes(QPainter& painter,
                    const std::vector<wds::chart_editor::NotationNote>& notes, float opacity,
                    bool show_selection, int32_t range_lo, int32_t range_hi);
-  void sync_waveform_peaks(const EditViewport& v, const wds::interaction::Rect& bounds);
+  void sync_audio_backdrop(const EditViewport& v, const wds::interaction::Rect& bounds);
+  void fill_audio_backdrop_rows(const EditViewport& v, const wds::audio::WaveformOverview& waveform,
+                                EditSpectrumMode mode, int row0, int row1);
   void sync_visible_notes(const std::vector<wds::chart_editor::NotationNote>& notes,
                           int32_t range_lo, int32_t range_hi);
   void playfield_cull_ticks(int32_t& lo, int32_t& hi) const;
@@ -96,14 +99,18 @@ class ChartEditWidget final : public QWidget {
   std::vector<std::size_t> note_draw_order_;
   std::vector<wds::chart_editor::NotationNote> ghost_scratch_;
   std::vector<wds::chart_editor::NotationNote> split_notes_scratch_;
-  const void* wave_cache_key_ = nullptr;
-  float wave_cache_pw_ = 0;
-  float wave_cache_ph_ = 0;
-  qreal wave_cache_dpr_ = 1;
-  int32_t wave_cache_visible_ms_ = 0;
-  float wave_peaks_scroll_ms_ = 0;
-  int wave_peaks_y0_ = 0;
-  std::vector<float> wave_row_peaks_;
+  QImage audio_backdrop_;
+  EditSpectrumMode backdrop_mode_ = EditSpectrumMode::None;
+  const void* backdrop_wave_ = nullptr;
+  std::size_t backdrop_peaks_ = 0;
+  int backdrop_frames_ = 0;
+  float backdrop_pw_ = 0;
+  float backdrop_ph_ = 0;
+  qreal backdrop_dpr_ = 1;
+  int32_t backdrop_visible_ms_ = 0;
+  float backdrop_scroll_ms_ = 0;
+  int backdrop_x0_ = 0;
+  int backdrop_y0_ = 0;
   const void* note_cull_notes_ = nullptr;
   std::size_t note_cull_n_ = 0;
   int32_t note_cull_lo_ = 0;

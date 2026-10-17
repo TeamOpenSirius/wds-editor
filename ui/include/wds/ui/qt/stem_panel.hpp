@@ -12,7 +12,6 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
-class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
@@ -41,10 +40,11 @@ class StemPanel final : public QDialog {
   void read_output();
   void finished(int code, QProcess::ExitStatus status);
   void refresh_controls();
+  void refresh_cache_dir();
   bool prepare_job();
   void launch(const QString& python, const QStringList& arguments);
   void notify_tracks_changed();
-  void append_log(const QString& text);
+  void note_download_progress(const QString& text);
   QString runtime_python() const;
 
   UiManager* manager_;
@@ -52,8 +52,10 @@ class StemPanel final : public QDialog {
   QTimer source_timer_;
   QTimer kill_timer_;
   std::unique_ptr<QTemporaryDir> job_;
+  std::unique_ptr<QTemporaryDir> ephemeral_cache_;
   QString cache_dir_;
   QString runtime_dir_;
+  bool cache_ephemeral_ = false;
   QString source_;
   QString source_stamp_;
   QString job_source_;
@@ -67,9 +69,11 @@ class StemPanel final : public QDialog {
   QByteArray output_;
   bool active_ = false;
   bool cancelled_ = false;
+  bool downloading_model_ = false;
   int install_step_ = 0;
   int selected_track_ = 0;
   QLabel* source_label_;
+  QLabel* unsaved_warning_;
   QLabel* status_;
   QLineEdit* python_;
   QComboBox* device_;
@@ -80,6 +84,5 @@ class StemPanel final : public QDialog {
   QPushButton* install_;
   QPushButton* browse_;
   QProgressBar* progress_;
-  QPlainTextEdit* log_;
 };
 }  // namespace wds::ui
