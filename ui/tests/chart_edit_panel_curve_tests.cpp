@@ -1798,6 +1798,18 @@ void test_convert_selected_hold_stars_and_defaults() {
   }
 }
 
+Vec2 chip_center(const wds::interaction::Rect& bounds) {
+  return {bounds.x + bounds.w * 0.5f, bounds.y + bounds.h * 0.5f};
+}
+
+const wds::ui::GutterLabelHit* split_hit_for(const std::vector<wds::ui::GutterLabelHit>& hits,
+                                             int32_t note_id, bool is_start) {
+  for (const auto& hit : hits) {
+    if (hit.note_id == note_id && hit.is_start == is_start) return &hit;
+  }
+  return nullptr;
+}
+
 void test_marquee_and_convert_ignore_split_lines() {
   using wds::chart_editor::GimmickType;
   Harness h;
@@ -1815,7 +1827,7 @@ void test_marquee_and_convert_ignore_split_lines() {
   CHECK(tap_id >= 0);
 
   h.panel.set_selected({split_id, tap_id});
-  CHECK(!h.panel.selected().count(split_id));
+  CHECK(h.panel.selected().count(split_id));
   CHECK(h.panel.selected().count(tap_id));
 
   h.panel.clear_selection();
@@ -1827,6 +1839,7 @@ void test_marquee_and_convert_ignore_split_lines() {
   CHECK(!h.panel.selected().count(split_id));
   CHECK(h.panel.selected().count(tap_id));
 
+  h.panel.set_selected({split_id, tap_id});
   CHECK(h.panel.convert_selected(NoteType::Flick, 1));
   const auto after_split = h.engine.document().find_note(split_id);
   const auto after_tap = h.engine.document().find_note(tap_id);
@@ -1838,6 +1851,208 @@ void test_marquee_and_convert_ignore_split_lines() {
     CHECK_EQ(after_split->width, 12);
     CHECK(after_tap->note_type == NoteType::Flick);
   }
+}
+
+void test_gutter_label_select_copy_mirror_and_move() {
+  using wds::chart_editor::GimmickType;
+  {
+    Harness h;
+    NotationNote split = make_split_effect(0, 480, GimmickType::Split3);
+    split.scratch_length = 10120;
+    const int32_t split_id = h.engine.add_note(split);
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 0;
+    tap.lane = 3;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    h.panel.sync_to_timeline_ms(0.0);
+
+    const auto hits =
+        wds::ui::build_split_label_hits(h.panel.viewport(), h.panel.left_gutter(),
+                                        h.engine.document().notes());
+    const auto* start = split_hit_for(hits, split_id, true);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(start != nullptr && end != nullptr);
+    if (!start || !end) return;
+
+    const auto start_c = chip_center(start->bounds);
+    h.panel.on_pointer_down(PointerDownEvent{start_c, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{start_c, PointerButton::Left, {}});
+    CHECK(!h.panel.selected().count(split_id));
+    ChartEditPanel::SplitModalDraft draft;
+    CHECK(h.panel.take_split_modal(draft));
+    CHECK_EQ(draft.edit_id, split_id);
+
+    h.panel.on_pointer_down(PointerDownEvent{start_c, PointerButton::Left, primary_mods()});
+    h.panel.on_pointer_up(PointerUpEvent{start_c, PointerButton::Left, primary_mods()});
+    CHECK(h.panel.selected().count(split_id));
+    h.panel.on_pointer_down(PointerDownEvent{chip_center(end->bounds), PointerButton::Left,
+                                             primary_mods()});
+    h.panel.on_pointer_up(PointerUpEvent{chip_center(end->bounds), PointerButton::Left,
+                                         primary_mods()});
+    CHECK(!h.panel.selected().count(split_id));
+
+    const Vec2 box_start{h.panel.left_gutter().x + 1.0f, end->bounds.y - 12.0f};
+    const Vec2 box_end{end->bounds.right() - 1.0f, end->bounds.bottom() - 1.0f};
+    h.panel.on_pointer_down(PointerDownEvent{box_start, PointerButton::Left, primary_mods()});
+    h.panel.on_pointer_move(PointerMoveEvent{box_end, primary_mods()});
+    h.panel.on_pointer_up(PointerUpEvent{box_end, PointerButton::Left, primary_mods()});
+    CHECK(h.panel.selected().count(split_id));
+    CHECK(!h.panel.selected().count(tap_id));
+
+    h.panel.set_selected({split_id, tap_id});
+    CHECK(h.panel.mirror_selected(false));
+    const auto mirrored_split = h.engine.document().find_note(split_id);
+    const auto mirrored_tap = h.engine.document().find_note(tap_id);
+    CHECK(mirrored_split.has_value() && mirrored_tap.has_value());
+    if (mirrored_split && mirrored_tap) {
+      CHECK_EQ(mirrored_split->lane, 0);
+      CHECK_EQ(mirrored_split->width, 12);
+      CHECK_EQ(mirrored_tap->lane, 7);
+    }
+
+    h.panel.set_selected({split_id});
+    CHECK(h.panel.copy_selected());
+    const auto paste_at = h.at_tick_lane(960, 5);
+    h.panel.on_pointer_move(PointerMoveEvent{paste_at, {}});
+    CHECK(h.panel.paste_at_pointer());
+    int split_count = 0;
+    for (const auto& n : h.engine.document().notes()) {
+      if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) ++split_count;
+    }
+    CHECK_EQ(split_count, 2);
+    CHECK_EQ(static_cast<int>(h.panel.selected().size()), 1);
+    for (const int32_t id : h.panel.selected()) {
+      const auto pasted = h.engine.document().find_note(id);
+      CHECK(pasted.has_value());
+      if (pasted) {
+        CHECK(wds::chart_editor::is_split_lane_gimmick(pasted->gimmick_type));
+        CHECK(pasted->start_tick > 0);
+        CHECK_EQ(pasted->end_tick - pasted->start_tick, 480);
+      }
+    }
+  }
+  {
+    Harness h;
+    NotationNote split = make_split_effect(0, 480, GimmickType::Split2);
+    const int32_t split_id = h.engine.add_note(split);
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 0;
+    tap.lane = 4;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    h.panel.sync_to_timeline_ms(0.0);
+    h.panel.set_selected({split_id, tap_id});
+    const auto hits =
+        wds::ui::build_split_label_hits(h.panel.viewport(), h.panel.left_gutter(),
+                                        h.engine.document().notes());
+    const auto* start = split_hit_for(hits, split_id, true);
+    CHECK(start != nullptr);
+    if (!start) return;
+    const auto press = chip_center(start->bounds);
+    const auto dest = Vec2{press.x, h.panel.viewport().y_at(240)};
+    h.panel.on_pointer_down(PointerDownEvent{press, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+    h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+    const auto moved_split = h.engine.document().find_note(split_id);
+    const auto moved_tap = h.engine.document().find_note(tap_id);
+    CHECK(moved_split.has_value() && moved_tap.has_value());
+    if (moved_split && moved_tap) {
+      CHECK(moved_split->start_tick > 0);
+      CHECK_EQ(moved_split->end_tick - moved_split->start_tick, 480);
+      CHECK_EQ(moved_split->lane, 0);
+      CHECK_EQ(moved_tap->start_tick, moved_split->start_tick);
+      CHECK_EQ(moved_tap->lane, 4);
+    }
+  }
+  {
+    Harness h;
+    h.panel.set_extended_editing_active(true);
+    CHECK(h.panel.apply_scroll_speed(480, 1.5));
+    h.panel.sync_to_timeline_ms(0.0);
+    const auto hits = wds::ui::build_speed_label_hits(h.panel.viewport(), h.panel.speed_gutter(),
+                                                      h.engine.document().scroll_speed_points());
+    CHECK(!hits.empty());
+    if (hits.empty()) return;
+    const auto c = chip_center(hits.front().bounds);
+    h.panel.on_pointer_down(PointerDownEvent{c, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{c, PointerButton::Left, {}});
+    CHECK(h.panel.selected_speed_ticks().empty());
+    ChartEditPanel::SpeedModalDraft speed;
+    CHECK(h.panel.take_speed_modal(speed));
+
+    h.panel.on_pointer_down(PointerDownEvent{c, PointerButton::Left, primary_mods()});
+    h.panel.on_pointer_up(PointerUpEvent{c, PointerButton::Left, primary_mods()});
+    CHECK(h.panel.selected_speed_ticks().count(480));
+    CHECK(h.panel.copy_selected());
+    const auto paste_at = h.at_tick_lane(960, 3);
+    h.panel.on_pointer_move(PointerMoveEvent{paste_at, {}});
+    CHECK(h.panel.paste_at_pointer());
+    CHECK_EQ(static_cast<int>(h.engine.document().scroll_speed_points().size()), 2);
+    CHECK(!h.panel.mirror_selected(false));
+    CHECK(!h.panel.convert_selected(NoteType::Flick, 1));
+  }
+}
+
+void test_paste_mirror_is_one_history_step_and_skips_splits() {
+  using wds::chart_editor::GimmickType;
+  Harness h;
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 0;
+  tap.lane = 3;
+  tap.width = 2;
+  const int32_t tap_id = h.engine.add_note(tap);
+  NotationNote split = make_split_effect(0, 480, GimmickType::Split3);
+  const int32_t split_id = h.engine.add_note(split);
+  h.panel.set_selected({tap_id, split_id});
+  CHECK(h.panel.copy_selected());
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(960, 3), {}});
+  CHECK(!h.engine.history().can_undo());
+  CHECK(h.panel.paste_at_pointer(true));
+  CHECK(h.engine.history().can_undo());
+
+  int tap_count = 0;
+  int split_count = 0;
+  int32_t pasted_tap_lane = -1;
+  int32_t pasted_split_lane = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Normal) {
+      ++tap_count;
+      if (n.id == tap_id) {
+        CHECK_EQ(n.lane, 3);
+      } else {
+        pasted_tap_lane = n.lane;
+      }
+    }
+    if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+      ++split_count;
+      if (n.id == split_id) {
+        CHECK_EQ(n.lane, 0);
+        CHECK_EQ(n.width, 12);
+      } else {
+        pasted_split_lane = n.lane;
+      }
+    }
+  }
+  CHECK_EQ(tap_count, 2);
+  CHECK_EQ(split_count, 2);
+  CHECK_EQ(pasted_tap_lane, 7);
+  CHECK_EQ(pasted_split_lane, 0);
+
+  CHECK(h.engine.undo());
+  CHECK(!h.engine.history().can_undo());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Normal), 1);
+  int splits_after_undo = 0;
+  for (const auto& n : h.engine.document().notes()) {
+    if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) ++splits_after_undo;
+  }
+  CHECK_EQ(splits_after_undo, 1);
+  const auto original_tap = h.engine.document().find_note(tap_id);
+  CHECK(original_tap.has_value());
+  if (original_tap) CHECK_EQ(original_tap->lane, 3);
 }
 
 void test_split_width_follow_closed_interval_includes_endpoints() {
@@ -2137,6 +2352,8 @@ int main() {
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
   test_marquee_and_convert_ignore_split_lines();
+  test_gutter_label_select_copy_mirror_and_move();
+  test_paste_mirror_is_one_history_step_and_skips_splits();
   test_split_width_follow_closed_interval_includes_endpoints();
   test_toolbox_left_click_places_selected_type_and_ignores_swipe();
   test_toolbox_hold_click_min_length_equal_tail_and_gold();

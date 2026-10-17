@@ -20,6 +20,7 @@ enum class EditorShortcut : int {
   Redo,
   Copy,
   Paste,
+  PasteMirror,
   Mirror,
   MirrorAboutCenter,
   NudgeUp,

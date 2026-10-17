@@ -11,8 +11,9 @@
 
 namespace wds::chart_editor {
 
-// Playfield notes that box-select and convert-to-xx may touch. HoldEighth is
-// derived; split-lane gimmicks are edited only from the gutter picker.
+// Playfield notes that convert-to-xx and playfield box-select may touch.
+// HoldEighth is derived. Split-lane gimmicks are selected from gutter labels
+// and skipped by convert / mirror.
 bool is_playfield_selectable(const NotationNote& note) noexcept;
 
 // Convert one note to any target type. Extra fields are dropped; missing fields

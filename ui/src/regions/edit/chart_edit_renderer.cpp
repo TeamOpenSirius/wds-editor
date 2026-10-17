@@ -206,7 +206,6 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
                               const std::optional<wds::interaction::Rect>& marquee,
                               const wds::renderer::SkinCatalog* skin,
               bool show_beat_grid,
-              int32_t highlighted_split_note_id,
               const std::vector<int32_t>& error_ticks,
               const std::unordered_set<int32_t>* violation_note_ids,
               float violation_strength,
@@ -437,12 +436,12 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
 
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id == highlighted_split_note_id) continue;
+    if (selected.count(note.id)) continue;
     paint_one_split(note, kSplitLineW, false);
   }
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id != highlighted_split_note_id) continue;
+    if (!selected.count(note.id)) continue;
     paint_one_split(note, kSplitLineHighlightW, true);
   }
 

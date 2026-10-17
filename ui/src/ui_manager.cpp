@@ -411,6 +411,7 @@ void UiManager::bind_editor_shortcuts() {
   using wds::interaction::chord_nudge_up;
   using wds::interaction::chord_open;
   using wds::interaction::chord_paste;
+  using wds::interaction::chord_paste_mirror;
   using wds::interaction::chord_redo;
   using wds::interaction::chord_save;
   using wds::interaction::chord_pause_playback;
@@ -461,6 +462,9 @@ void UiManager::bind_editor_shortcuts() {
   });
   editor.bind(chord_paste(), [this] {
     if (auto* panel = edit_panel()) panel->paste_at_pointer();
+  });
+  editor.bind(chord_paste_mirror(), [this] {
+    if (auto* panel = edit_panel()) panel->paste_at_pointer(true);
   });
   editor.bind(chord_mirror(), [this] {
     if (auto* panel = edit_panel()) panel->mirror_selected(false);

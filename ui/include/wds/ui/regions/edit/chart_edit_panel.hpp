@@ -75,11 +75,16 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_draw_depth(EditDrawDepthConfig depth) noexcept { renderer_.set_draw_depth(depth); }
 
   const std::unordered_set<int32_t>& selected() const noexcept { return selected_; }
+  const std::unordered_set<int32_t>& selected_speed_ticks() const noexcept {
+    return selected_speed_ticks_;
+  }
   void clear_selection() {
     selected_.clear();
+    selected_speed_ticks_.clear();
     clear_hold_sel_focus();
   }
   void set_selected(std::unordered_set<int32_t> ids);
+  void set_selected_speed_ticks(std::unordered_set<int32_t> ticks);
 
   int default_width() const noexcept { return default_width_; }
   void set_default_width(int width) noexcept;
@@ -112,6 +117,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool lane_slider_hovered() const noexcept { return lane_slider_hovered_; }
   std::size_t gutter_ghost_count() const noexcept { return gutter_ghosts_.size(); }
   const wds::interaction::Rect& playfield() const noexcept { return playfield_; }
+  const wds::interaction::Rect& left_gutter() const noexcept { return left_gutter_; }
   const wds::interaction::Rect& speed_gutter() const noexcept { return speed_gutter_; }
 
   // Toolbox (new-note-place) mode: left click places the current override type.
@@ -135,7 +141,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool mirror_selected(bool about_center);
   bool nudge_selected(int32_t delta_tick, int32_t delta_lane);
   bool copy_selected();
-  bool paste_at_pointer();
+  // `mirror`: same as paste then playfield-mirror, one history step. Splits skip the flip.
+  bool paste_at_pointer(bool mirror = false);
   bool delete_selected();
   // Delete one note under the pointer; drops it from the selection if present.
   bool delete_note_at(wds::interaction::Vec2 point);
@@ -185,7 +192,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint_overlays(wds::interaction::UiPainter& painter) const;
   // Qt canvas: split / BPM / meter / measure columns and chips (no form chrome).
   void paint_side_columns(wds::interaction::UiPainter& painter) const;
-  // Hovered or dragged split-label pair; -1 if none. Qt canvas glows those lines.
+  // Hovered or dragged split-label pair; -1 if none. Hover card only — playfield
+  // split lines bold from selected(), same as the gutter chips.
   int32_t active_split_highlight_id() const noexcept;
   struct SplitHoverHint {
     int32_t color_id = 1;
@@ -316,8 +324,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
       HoldDraftSync sync = HoldDraftSync::WriteLivePrevCover);
   void finish_place_gesture(const wds::interaction::PointerUpEvent& event);
   void finish_marquee(wds::interaction::Vec2 end);
-  // Marquee in tick/lane space so scroll during drag can extend past the view.
+  void begin_marquee(wds::interaction::Vec2 pos);
+  // Marquee in tick/x space so scroll during drag can extend past the view, and
+  // so the box can cover the split / speed label tracks.
   wds::interaction::Rect marquee_screen_rect(wds::interaction::Vec2 end) const;
+  void begin_move_selection_from_label(wds::interaction::Vec2 pos, int32_t open_split_id,
+                                       int32_t open_speed_tick);
   void finish_move(bool refresh_eighths = true);
   void finish_resize();
   void finish_hold_adjust();
@@ -397,6 +409,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool try_convert_hold_tail_to_nontail(wds::interaction::Vec2 point);
   void paint_gutters(wds::interaction::UiPainter& painter) const;
   void paint_gutter_overlays(wds::interaction::UiPainter& painter) const;
+  void paint_marquee(wds::interaction::UiPainter& painter) const;
   void open_split_picker(int32_t tick);
   void open_split_picker_for_edit(int32_t note_id);
   void scroll_split_picker_to_color(int32_t color_id);
@@ -453,6 +466,11 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t drag_speed_press_tick_ = 0;
   bool speed_point_ever_moved_ = false;
   std::vector<wds::chart_editor::ScrollSpeedPoint> drag_speed_original_points_{};
+  std::unordered_set<int32_t> drag_speed_selected_ticks_{};
+  bool move_lock_lane_ = false;
+  bool move_selection_ever_moved_ = false;
+  int32_t move_click_opens_split_id_ = -1;
+  int32_t move_click_opens_speed_tick_ = -1;
   mutable wds::interaction::Rect split_picker_bounds_{};
   mutable wds::interaction::Rect timing_popup_bounds_{};
   mutable std::vector<wds::interaction::Rect> split_count_buttons_{};
@@ -478,7 +496,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
   std::unordered_set<int32_t> selected_;
+  std::unordered_set<int32_t> selected_speed_ticks_;
   std::vector<wds::chart_editor::NotationNote> clipboard_;
+  std::vector<wds::chart_editor::ScrollSpeedPoint> clipboard_speed_;
   int default_width_ = 3;
   bool split_width_follow_ = false;
   bool pause_at_current_ = false;
@@ -551,6 +571,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Marquee anchor in chart space (survives scroll while dragging).
   int32_t marquee_start_tick_ = 0;
   int32_t marquee_start_lane_ = 0;
+  float marquee_start_x_ = 0.0f;
 
   GhostNote ghost_{};
   std::vector<GhostNote> hold_stars_;

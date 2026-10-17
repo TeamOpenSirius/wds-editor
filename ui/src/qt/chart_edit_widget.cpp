@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_set>
 #include <cstring>
 #include <string>
 
@@ -283,7 +284,7 @@ void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interactio
                        const std::vector<wds::chart_editor::NotationNote>& notes,
                        const wds::chart_editor::MusicTiming& timing,
                        const wds::chart_editor::PreviewConfig& preview,
-                       int32_t highlighted_split_note_id) {
+                       const std::unordered_set<int32_t>& selected) {
   constexpr float kSplitLineW = 2.0f;
   constexpr float kSplitLineHighlightW = 4.0f;
   const int lanes = std::max(1, v.grid().lane_count);
@@ -366,12 +367,12 @@ void paint_split_lines(QPainter& p, const EditViewport& v, const wds::interactio
   };
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id == highlighted_split_note_id) continue;
+    if (selected.count(note.id)) continue;
     paint_one(note, false);
   }
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id != highlighted_split_note_id) continue;
+    if (!selected.count(note.id)) continue;
     paint_one(note, true);
   }
 }
@@ -426,7 +427,7 @@ void paint_split_particles(QPainter& p, const EditViewport& v, const wds::intera
                            const std::vector<wds::chart_editor::NotationNote>& notes,
                            const wds::chart_editor::MusicTiming& timing,
                            const wds::chart_editor::PreviewConfig& preview,
-                           int32_t highlighted_split_note_id, QObject* notify,
+                           const std::unordered_set<int32_t>& selected, QObject* notify,
                            const std::function<void()>& on_ready) {
   constexpr float kMinBandPx = 16.0f;
   const float view_ms_lo = v.scroll_ms();
@@ -478,12 +479,12 @@ void paint_split_particles(QPainter& p, const EditViewport& v, const wds::intera
   };
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id == highlighted_split_note_id) continue;
+    if (selected.count(note.id)) continue;
     paint_one(note);
   }
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id != highlighted_split_note_id) continue;
+    if (!selected.count(note.id)) continue;
     paint_one(note);
   }
 }
@@ -888,8 +889,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     }
     paint_lane_guides(p, v, b, split_notes_scratch_, timing, preview);
   }
-  paint_split_lines(p, v, b, split_notes_scratch_, timing, preview,
-                   panel_->active_split_highlight_id());
+  paint_split_lines(p, v, b, split_notes_scratch_, timing, preview, panel_->selected());
   // 12-cell judgeline tracks authored lanes 0..N as extra columns shrink them.
   if (!judgment_.isNull()) {
     const float h = v.judgeline_height_px();
@@ -905,7 +905,7 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
       const int64_t appear = split_appear_ms(preview);
       schedule_split_prefetch(notes, split_lane_px(v), split_band_q(v, 0.0f, appear));
     }
-    paint_split_particles(p, v, b, split_notes_scratch_, timing, preview, panel_->active_split_highlight_id(),
+    paint_split_particles(p, v, b, split_notes_scratch_, timing, preview, panel_->selected(),
                           this, [this] { request_split_repaint(); });
   }
   paint_click_marks(p, v, *panel_);
@@ -914,16 +914,6 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     ghost_scratch_.clear();
     ghost_scratch_.push_back(ghost.note);
     paint_notes(p, ghost_scratch_, ghost.alpha, false, cull_lo, cull_hi);
-  }
-  if (const auto marquee = panel_->active_marquee_rect()) {
-    const QRectF box = qrect(*marquee);
-    if (box.width() > 0.5 && box.height() > 0.5) {
-      p.fillRect(box, qcolor(wds::interaction::theme::kEditSelectionGlow));
-      ScopedAA aa(p);
-      p.setBrush(Qt::NoBrush);
-      p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.0));
-      p.drawRect(box);
-    }
   }
   p.restore();
   flush_ui_painter(p, chrome);
@@ -940,9 +930,18 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
         ScopedAA aa(p);
         paint_lane_guides(p, v, b, split_notes_scratch_, timing, preview);
       }
-      paint_split_lines(p, v, b, split_notes_scratch_, timing, preview,
-                        panel_->active_split_highlight_id());
+      paint_split_lines(p, v, b, split_notes_scratch_, timing, preview, panel_->selected());
       p.restore();
+    }
+  }
+  if (const auto marquee = panel_->active_marquee_rect()) {
+    const QRectF box = qrect(*marquee);
+    if (box.width() > 0.5 && box.height() > 0.5) {
+      p.fillRect(box, qcolor(wds::interaction::theme::kEditSelectionGlow));
+      ScopedAA aa(p);
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.0));
+      p.drawRect(box);
     }
   }
   if (const auto hover = panel_->active_split_hover()) {

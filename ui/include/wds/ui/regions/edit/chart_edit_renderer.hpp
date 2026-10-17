@@ -46,7 +46,6 @@ class ChartEditRenderer {
              const std::optional<wds::interaction::Rect>& marquee = std::nullopt,
              const wds::renderer::SkinCatalog* skin = nullptr,
              bool show_beat_grid = true,
-             int32_t highlighted_split_note_id = -1,
              const std::vector<int32_t>& error_ticks = {},
              const std::unordered_set<int32_t>* violation_note_ids = nullptr,
              float violation_strength = 0.0f,
