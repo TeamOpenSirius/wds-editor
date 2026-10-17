@@ -175,6 +175,11 @@ file(MAKE_DIRECTORY "${WDS_SHADER_BIN_DIR}")
 set(WDS_SPV_FILES
   "${WDS_SHADER_BIN_DIR}/textured_quad.vert.spv"
   "${WDS_SHADER_BIN_DIR}/textured_quad.frag.spv"
+  "${WDS_SHADER_BIN_DIR}/syuriken.vert.spv"
+  "${WDS_SHADER_BIN_DIR}/syuriken.frag.spv"
+  "${WDS_SHADER_BIN_DIR}/bloom.vert.spv"
+  "${WDS_SHADER_BIN_DIR}/bloom.frag.spv"
+  "${WDS_SHADER_BIN_DIR}/hdr_composite.frag.spv"
 )
 
 if(WDS_GLSLANG_VALIDATOR)
@@ -191,6 +196,41 @@ if(WDS_GLSLANG_VALIDATOR)
             -o "${WDS_SHADER_BIN_DIR}/textured_quad.frag.spv"
     DEPENDS "${WDS_SHADER_SRC_DIR}/textured_quad.frag"
     COMMENT "Compiling textured_quad.frag"
+  )
+  add_custom_command(
+    OUTPUT "${WDS_SHADER_BIN_DIR}/syuriken.vert.spv"
+    COMMAND "${WDS_GLSLANG_VALIDATOR}" -V "${WDS_SHADER_SRC_DIR}/syuriken.vert"
+            -o "${WDS_SHADER_BIN_DIR}/syuriken.vert.spv"
+    DEPENDS "${WDS_SHADER_SRC_DIR}/syuriken.vert"
+    COMMENT "Compiling syuriken.vert"
+  )
+  add_custom_command(
+    OUTPUT "${WDS_SHADER_BIN_DIR}/syuriken.frag.spv"
+    COMMAND "${WDS_GLSLANG_VALIDATOR}" -V "${WDS_SHADER_SRC_DIR}/syuriken.frag"
+            -o "${WDS_SHADER_BIN_DIR}/syuriken.frag.spv"
+    DEPENDS "${WDS_SHADER_SRC_DIR}/syuriken.frag"
+    COMMENT "Compiling syuriken.frag"
+  )
+  add_custom_command(
+    OUTPUT "${WDS_SHADER_BIN_DIR}/bloom.vert.spv"
+    COMMAND "${WDS_GLSLANG_VALIDATOR}" -V "${WDS_SHADER_SRC_DIR}/bloom.vert"
+            -o "${WDS_SHADER_BIN_DIR}/bloom.vert.spv"
+    DEPENDS "${WDS_SHADER_SRC_DIR}/bloom.vert"
+    COMMENT "Compiling bloom.vert"
+  )
+  add_custom_command(
+    OUTPUT "${WDS_SHADER_BIN_DIR}/bloom.frag.spv"
+    COMMAND "${WDS_GLSLANG_VALIDATOR}" -V "${WDS_SHADER_SRC_DIR}/bloom.frag"
+            -o "${WDS_SHADER_BIN_DIR}/bloom.frag.spv"
+    DEPENDS "${WDS_SHADER_SRC_DIR}/bloom.frag"
+    COMMENT "Compiling bloom.frag"
+  )
+  add_custom_command(
+    OUTPUT "${WDS_SHADER_BIN_DIR}/hdr_composite.frag.spv"
+    COMMAND "${WDS_GLSLANG_VALIDATOR}" -V "${WDS_SHADER_SRC_DIR}/hdr_composite.frag"
+            -o "${WDS_SHADER_BIN_DIR}/hdr_composite.frag.spv"
+    DEPENDS "${WDS_SHADER_SRC_DIR}/hdr_composite.frag"
+    COMMENT "Compiling hdr_composite.frag"
   )
   add_custom_target(wds_shaders DEPENDS ${WDS_SPV_FILES})
 else()
