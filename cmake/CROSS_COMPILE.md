@@ -1,13 +1,14 @@
 # Cross compilation
 
-Supported product targets:
+Supported build targets:
 
 | Target id | Platform | How to build |
 |-----------|----------|--------------|
 | `win-x86_64` | Windows x86_64 | Cross via MinGW on a **Linux host** (`cmake/toolchains/win-x86_64.cmake`) |
 | `macos-arm` | macOS arm64 | **Native** on Apple Silicon (no cross toolchain file) |
+| `linux-x86_64` | Linux x86_64 | **Native development build** via `scripts/build-linux.sh` |
 
-**Linux is not a product target.** A Linux machine is only used as the host for Windows MinGW / vcpkg / msitools packaging.
+Linux can run the editor natively and can also host Windows cross-compilation. Native dependencies, SDK setup, and local installation are documented in [README.md](../README.md). Linux release installers are not provided.
 
 ## Machine-specific configuration
 
@@ -71,6 +72,7 @@ ctest --test-dir build-macos-arm --output-on-failure
 | Host / target | CTest | What happens |
 |---------------|-------|----------------|
 | **macOS arm64 native** (`macos-arm`) | Run on the host | After `./scripts/build-target.sh macos-arm --no-package`, use `ctest --test-dir build-macos-arm --output-on-failure`, then `./scripts/build-target.sh --package-only macos-arm`. Binaries are host-native. |
+| **Linux x86_64 native** (`linux-x86_64`) | Run on the host | Use `scripts/build-linux.sh`, then `ctest --test-dir "$HOME/.cache/wds-editor/build-linux" --output-on-failure` (or your `WDS_LINUX_BUILD_DIR`). |
 | **Linux → Windows** (`win-x86_64`) | Do **not** run | Cross-compile (and package) only. The Linux host cannot execute those PE binaries. Do not run `ctest` against `build-win-x86_64`. |
 
 When `CMAKE_CROSSCOMPILING`:
@@ -130,4 +132,4 @@ On Darwin arm64, CMake auto-sets `WDS_TARGET=macos-arm`.
 
 ## Renderer / BASS notes
 
-`renderer` needs target `libpng` + Vulkan import library. **BASS** is vendored under `audio-player/third_party/bass/{macos-arm,win-x86_64}/`. Packaging copies the matching runtime into the artifact.
+`renderer` needs target `libpng` + Vulkan import library. **BASS** is vendored under `audio-player/third_party/bass/{macos-arm,win-x86_64}/`. Packaging copies the matching runtime into the artifact. Native Linux uses externally supplied `libbass.so` and `libbassmix.so` from `WDS_BASS_LINUX_DIR`.

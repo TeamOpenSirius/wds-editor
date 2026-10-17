@@ -74,6 +74,7 @@ xattr -cr "/Applications/WDS Editor.app"
 | ------------------- | ------------------------------ |
 | Linux x86_64        | `win-x86_64`（MinGW 交叉编译） |
 | macOS Apple Silicon | `macos-arm`（本机）            |
+| Linux Mint 22.3 / Ubuntu 24.04 x86_64 | `linux-x86_64`（本机，Qt 6.8.3） |
 
 Windows 本地可使用 Qt 6 + Visual Studio/CMake 构建；发行门禁仍以 CI 配置为准。
 
@@ -139,7 +140,91 @@ brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase 
 
 配置后可用标准 CMake workflow 构建 `wds_editor`；Qt 版 Release 打包入口为 `scripts/package-qt-release.ps1`。
 
+### D. Linux 本机编译（`linux-x86_64`）
+
+支持 Linux x86_64 原生开发构建；已在 Linux Mint 22.3（Ubuntu 24.04 基础）、X11、NVIDIA Vulkan 上验证。
+依赖 C++17 编译器、CMake、Ninja/Make、libpng/zlib、Vulkan loader/头文件、glslangValidator，
+以及 Qt **6.5 以上**的 Core/Gui/Widgets/Concurrent/Network/Svg。
+[Ubuntu 24.04 的 Qt 包](https://packages.ubuntu.com/noble/qt6-base-dev) 为 6.4 系列，需要另装较新 SDK；
+以下示例使用与现有构建一致的 Qt 6.8.3。
+
+Ubuntu 24.04 / Mint 22 的依赖准备：
+
+```bash
+sudo apt install build-essential ninja-build python3-venv libpng-dev zlib1g-dev \
+  libvulkan-dev glslang-tools libgl-dev libglx-dev libopengl-dev libegl-dev \
+  libxkbcommon-dev libxkbcommon-x11-0 libxcb-cursor0 libasound2t64 libpulse0
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wds-editor"
+python3 -m venv "$cache_dir/tools"
+"$cache_dir/tools/bin/pip" install aqtinstall cmake
+"$cache_dir/tools/bin/aqt" install-qt linux desktop 6.8.3 linux_gcc_64 \
+  -O "$cache_dir/qt" --archives qtbase qtsvg icu
+```
+
+从 [BASS 官方下载页](https://www.un4seen.com/bass.html) 分别下载 **BASS** 和 **BASSmix** 的 Linux 版本。
+将压缩包 `libs/x86_64/` 下的 `libbass.so`、`libbassmix.so` 放进
+`$cache_dir/deps/bass-linux/x86_64/`，保留随包许可文件。
+Linux 库由使用者提供，构建脚本不会自动下载或安装系统依赖；图形驱动还需提供可用的 Vulkan ICD。
+
+```bash
+./scripts/build-linux.sh
+"$cache_dir/tools/bin/ctest" --test-dir "$cache_dir/build-linux" --output-on-failure
+./scripts/run-linux.sh
+./scripts/run-linux.sh --open /absolute/path/song.wdsproject
+```
+
+构建产物默认位于用户缓存中。首次构建默认 `RelWithDebInfo`、4 个并行任务；后续构建保留已有
+生成器、构建类型及依赖配置。额外的 CMake `-D` / `-U` 参数可在 `--` 后传入，例如：
+
+```bash
+./scripts/build-linux.sh -- -DCMAKE_BUILD_TYPE=Debug
+```
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `WDS_LINUX_CACHE` | 缓存根目录，默认 `${XDG_CACHE_HOME:-$HOME/.cache}/wds-editor` |
+| `WDS_LINUX_BUILD_DIR` | 覆盖构建目录；构建和启动时使用相同值，不同 checkout 各用一个目录 |
+| `WDS_QT_LINUX_ROOT` | 自定义 Qt SDK 前缀，例如 `/opt/Qt/6.8.3/gcc_64` |
+| `WDS_BASS_LINUX_DIR` | 自定义 BASS/BASSmix `.so` 目录 |
+| `WDS_CMAKE` | 自定义 CMake 可执行文件 |
+| `CMAKE_BUILD_PARALLEL_LEVEL` | 编译并行数，默认 4 |
+| `CMAKE_GENERATOR` | 新构建的生成器；未指定时优先 Ninja |
+| `CMAKE_PREFIX_PATH` | 标准 CMake 搜索前缀；Linux 环境变量用冒号分隔，`-D` 参数用分号分隔 |
+
+脚本也识别缓存中的 Qt 6.8.3 SDK、`tools/bin`、`deps/sysroot/usr` 和可选的 `deps/runtime/lib`。
+显式设置的 SDK/工具优先；切换 Qt SDK 或编译器时请使用新的构建目录。
+脚本可从任意工作目录调用；带空格的路径请加引号。发现构建缓存属于另一 checkout 时会报错，避免启动旧版本。
+
+在有图形会话的机器上，可验证播放和截图：
+
+```bash
+./scripts/run-linux.sh --smoke-test --quit-after 6 --autoplay \
+  --open /absolute/path/song.wdsproject \
+  --screenshot /tmp/wds-editor-playing.png@4000
+```
+
+`--open` 直接打开工程；`--smoke-test` 跳过欢迎页和更新检查，默认 1.2 秒退出，
+显式 `--quit-after` 优先。工程应包含其引用的 `.wdschart` 与可解码音频。
+原生窗口运行已验证 X11；Wayland 尚未验证，可通过 `QT_QPA_PLATFORM=xcb` 使用 XWayland。
+
+也可用 CMake 安装到独立目录（Qt 6.8.3 的运行库部署已验证）：
+
+```bash
+"$cache_dir/tools/bin/cmake" --install "$cache_dir/build-linux" \
+  --prefix "$HOME/.local/opt/wds-editor"
+"$HOME/.local/opt/wds-editor/bin/wds_editor"
+```
+
+安装目录包含 `bin/`、`lib/`、Qt 插件及编辑器资源，可从其他工作目录启动；仍依赖宿主的图形/音频驱动。
+上面的系统依赖也需安装。若用缓存 `deps/runtime/lib` 临时代替系统 `libxcb-cursor0`，
+直接启动安装版时同样需设置相应的 `LD_LIBRARY_PATH`；`run-linux.sh` 会自动处理该开发环境兜底。
+本入口不生成 AppImage、deb 或 rpm，也不改变 Windows/macOS 的发布流程。
+脚本回归测试可单独运行：`python3 -B scripts/tests/linux_scripts_tests.py`，也会在找到 Python 3 的原生 Linux 构建中注册到 CTest。
+
 ### 构建模式速查
+
+以下为 `scripts/build-target.sh` 的发行构建模式；Linux 开发入口的默认值见上一节。
 
 | 模式              | 目录                    | 打包         | 日志           |
 | ----------------- | ----------------------- | ------------ | -------------- |
