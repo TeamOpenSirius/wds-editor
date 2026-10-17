@@ -14,17 +14,18 @@ Sirius / WDS 谱面视觉辅助：舞台梯形、车道、皮肤图集、音符�
 ```text
 chart-render/
 ├── CMakeLists.txt
-├── include/wds/chart_render/
-│   ├── stage_geometry.hpp
-│   ├── preview_visual_config.hpp
-│   ├── skin_catalog.hpp
-│   ├── split_line_skins.hpp
-│   └── note_strips.hpp
-└── src/
+├── include/wds/chart_render/   # 舞台几何、皮肤、分割线色、粒子 catalog / shuriken
+├── src/
+├── openwds-split-effects/      # OfflinePreview 资源图与控制器
+└── tests/                      # 本模块单元测试
 ```
 
-CMake：`wds_chart_render`（别名 `wds::chart_render`）。  
-依赖：`wds::draw`、`wds::renderer`（`TextureCache`）。
+CMake：`wds_chart_render`（别名 `wds::chart_render`），另有 `wds::unity_particle_api`、`wds::openwds_split_effects`。  
+依赖：`wds::draw`、`wds::renderer`（`TextureCache`）、`wds::core`。
+
+系统测试在仓库 `tests/system/`（分割线颜色/几何、粒子播放、OpenWDS 绑定）。单元测试留在本目录 `tests/`。
+
+分割线粒子数据（`*.bundle.objects.tsv` / `*.bundle.objects.jsonl`）读取自仓库根的 `resources/`，随发行包一起发布（包内位置见根 README「资源归属」）。
 
 ## 主要接口
 
@@ -70,5 +71,5 @@ const JudgelineQuad& jl = stage.judgeline();
 随 `WDS_BUILD_RENDERER=ON` 一起由根 `CMakeLists.txt` 加入；见仓库根 README。交叉时仍编译 `wds_note_visual_policy_tests` / `wds_split_line_official_colors_tests`，但 **不** 向 CTest 注册。macOS：
 
 ```bash
-ctest --test-dir build-macos-arm -R 'wds_note_visual_policy_tests|wds_split_line_official_colors_tests' --output-on-failure
+ctest --test-dir build-macos-arm -R 'wds_note_visual_policy_tests|wds_split_line_official_colors_tests|wds_split_effect_playback_tests|wds_openwds_' --output-on-failure
 ```
