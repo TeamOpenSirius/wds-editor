@@ -35,6 +35,9 @@ class AudioEngine {
 
   bool ready() const noexcept { return ready_; }
   bool has_music() const noexcept;
+  // Swap an equal-duration audition source without recreating BASS/Transport.
+  // GUI thread only; keeps heard position, gain, rate and playback intent.
+  bool replace_music_source(const std::string& path);
   bool sfx_ready() const noexcept { return sfx_ready_.load(std::memory_order_acquire); }
 
   // --- position ---

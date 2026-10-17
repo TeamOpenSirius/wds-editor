@@ -776,6 +776,61 @@ std::uint64_t AudioEngine::music_heard_bytes() const {
   return BASS_ChannelGetPosition(impl_->music, BASS_POS_BYTE);
 }
 
+bool AudioEngine::replace_music_source(const std::string& path) {
+  if (!impl_ || !impl_->music || !impl_->mixer || path.empty()) return false;
+  const HSTREAM replacement = stream_from_file(
+      path, BASS_STREAM_DECODE | BASS_STREAM_PRESCAN | BASS_SAMPLE_FLOAT);
+  if (!replacement) return false;
+  const double seconds = BASS_ChannelBytes2Seconds(
+      replacement, BASS_ChannelGetLength(replacement, BASS_POS_BYTE));
+  const auto old_duration = duration();
+  if (!std::isfinite(seconds) || std::abs(seconds * 1'000'000.0 - old_duration.count()) > 2000.0) {
+    BASS_StreamFree(replacement);
+    return false;
+  }
+  const auto heard = position();
+  const float previous_base_freq = music_base_freq_;
+  float replacement_freq = 0.0f;
+  if (!BASS_ChannelGetAttribute(replacement, BASS_ATTRIB_FREQ, &replacement_freq) || replacement_freq <= 0) {
+    BASS_StreamFree(replacement);
+    return false;
+  }
+  const bool playing = music_playing_.load(std::memory_order_acquire);
+  BASS_ChannelPause(impl_->mixer);
+  begin_timeline_control();
+  impl_->wait_sync_in_flight("audition-switch");
+  const HSTREAM previous = impl_->music;
+  // Add first, muted, so a failed add leaves the old source intact.
+  BASS_ChannelSetAttribute(replacement, BASS_ATTRIB_VOL, 0.0f);
+  if (!BASS_Mixer_StreamAddChannel(impl_->mixer, replacement, 0)) {
+    BASS_StreamFree(replacement);
+    if (playing) BASS_ChannelPlay(impl_->mixer, FALSE);
+    return false;
+  }
+  BASS_Mixer_ChannelRemove(previous);
+  impl_->music = replacement;
+  music_ = static_cast<unsigned long long>(replacement);
+  music_base_freq_ = replacement_freq;
+  cache_music_format();
+  apply_music_rate();
+  apply_music_volume();
+  const bool positioned = set_position(heard);
+  if (!positioned) {
+    BASS_Mixer_ChannelRemove(replacement);
+    impl_->music = previous;
+    music_ = static_cast<unsigned long long>(previous);
+    BASS_Mixer_StreamAddChannel(impl_->mixer, previous, 0);
+    music_base_freq_ = previous_base_freq;
+    cache_music_format();
+    (void)set_position(heard);
+    BASS_StreamFree(replacement);
+  } else {
+    BASS_StreamFree(previous);
+  }
+  if (playing) play_music();
+  return positioned;
+}
+
 wds::common::Microseconds AudioEngine::position() const {
   if (test_double_ != nullptr) {
     return test_double_->position;

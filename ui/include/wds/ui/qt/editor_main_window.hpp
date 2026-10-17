@@ -26,6 +26,7 @@ class ConvertBar;
 class EditorToolbarWidget;
 class SettingsPanel;
 class CurveTemplatesPanel;
+class StemPanel;
 class EditorMainWindow final : public QMainWindow {
  public:
   explicit EditorMainWindow(QWidget* parent = nullptr);
@@ -79,6 +80,7 @@ class EditorMainWindow final : public QMainWindow {
   void remember_recent_project(const QString& path);
  private:
   void create_control_docks();
+  void show_stem_panel();
   void reset_default_layout();
   void apply_default_dock_sizes();
   void restore_or_reset_layout();
@@ -145,6 +147,7 @@ class EditorMainWindow final : public QMainWindow {
   EditorToolbarWidget* toolbar_widget_ = nullptr;
   SettingsPanel* settings_panel_ = nullptr;
   CurveTemplatesPanel* curve_panel_ = nullptr;
+  StemPanel* stem_panel_ = nullptr;
   ::QWindow* preview_window_ = nullptr;
   ::QWindow* editor_window_ = nullptr;
   ::QWidget* editor_widget_ = nullptr;
