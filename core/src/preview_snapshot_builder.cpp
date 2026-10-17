@@ -538,6 +538,7 @@ void PreviewSnapshotBuilder::build_into(
   const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   out.combo_count = combo.combo;
   out.last_judge_ms = combo.last_judge_ms;
+  out.last_combo_fire_ms = combo.last_combo_fire_ms;
 }
 
 void PreviewSnapshotBuilder::update_incremental(
@@ -563,6 +564,7 @@ void PreviewSnapshotBuilder::update_incremental(
   const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   inout.combo_count = combo.combo;
   inout.last_judge_ms = combo.last_judge_ms;
+  inout.last_combo_fire_ms = combo.last_combo_fire_ms;
 }
 
 void PreviewSnapshotBuilder::rebuild_or_update(

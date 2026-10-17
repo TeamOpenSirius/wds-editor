@@ -350,6 +350,9 @@ void collect_hold_body_judge_times(const NotationNote& hold,
 struct PreviewComboState {
   int32_t combo = 0;
   int64_t last_judge_ms = -1;
+  // Time of the hit that crossed the current hundreds (100, 200, …).
+  // ComboPanel.SetComboCount OnFire / Combo_countper100_anim.
+  int64_t last_combo_fire_ms = -1;
 };
 
 // All auto-preview combo hit times, sorted (seek-safe). Hold soft judges come

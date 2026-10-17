@@ -4462,8 +4462,12 @@ void PlaybackPreviewView::draw_combo(DrawBatch& batch, const PreviewSnapshot& sn
     }
   }
 
+  using wds::chart_render::kOpenWdsComboCountAnimDuration;
+  using wds::chart_render::kOpenWdsComboCountPivotX;
+  using wds::chart_render::kOpenWdsComboCountPivotY;
   using wds::chart_render::kOpenWdsComboDigitH;
   using wds::chart_render::kOpenWdsComboDigitW;
+  using wds::chart_render::kOpenWdsComboFireAnimDuration;
   using wds::chart_render::kOpenWdsComboHeight;
   using wds::chart_render::kOpenWdsComboLabelH;
   using wds::chart_render::kOpenWdsComboLabelW;
@@ -4473,40 +4477,83 @@ void PlaybackPreviewView::draw_combo(DrawBatch& batch, const PreviewSnapshot& sn
   using wds::chart_render::kOpenWdsHudRefHeight;
   using wds::chart_render::kOpenWdsHudRefWidth;
   using wds::chart_render::openwds_canvas_map;
+  using wds::chart_render::openwds_combo_count_scale;
   using wds::chart_render::openwds_combo_digit_xs;
+  using wds::chart_render::openwds_combo_fire_alpha;
+  using wds::chart_render::openwds_combo_fire_scale;
+  using wds::chart_render::openwds_scale_about;
 
   const auto& content = geometry_.content();
   const auto canvas = openwds_canvas_map(content.l, content.r, content.b, content.t);
   const float combo_right = canvas.x(kOpenWdsHudRefWidth + kOpenWdsComboPosX);
   const float combo_bottom = canvas.y(0.5f * kOpenWdsHudRefHeight + kOpenWdsComboPosY);
-  const float combo_top = combo_bottom + canvas.scale * kOpenWdsComboHeight;
-  const float combo_left = combo_right - canvas.scale * kOpenWdsComboWidth;
+  const float combo_h = canvas.scale * kOpenWdsComboHeight;
+  const float combo_w = canvas.scale * kOpenWdsComboWidth;
+  const float combo_top = combo_bottom + combo_h;
+  const float combo_left = combo_right - combo_w;
   const float digit_w = canvas.scale * kOpenWdsComboDigitW;
   const float digit_h = canvas.scale * kOpenWdsComboDigitH;
   const float label_w = canvas.scale * kOpenWdsComboLabelW;
   const float label_h = canvas.scale * kOpenWdsComboLabelH;
+  // ComboCount pivot (0.5, 0.5) of the Combo root rect. Combo_anim scales this
+  // transform; ComboLabel is a sibling and stays unscaled.
+  const float pivot_x = combo_left + kOpenWdsComboCountPivotX * combo_w;
+  const float pivot_y = combo_bottom + kOpenWdsComboCountPivotY * combo_h;
 
-  int digits = 1;
-  for (int32_t n = snapshot.combo_count; n >= 10 && digits < 4; n /= 10) {
-    ++digits;
-  }
-  int xs_n = 0;
-  const float* xs = openwds_combo_digit_xs(digits, xs_n);
+  auto draw_digits = [&](int32_t number, float sx, float sy, float a, float z) {
+    int digits = 1;
+    for (int32_t n = number; n >= 10 && digits < 4; n /= 10) {
+      ++digits;
+    }
+    int xs_n = 0;
+    const float* xs = openwds_combo_digit_xs(digits, xs_n);
+    int32_t remaining = number;
+    for (int i = 0; i < xs_n; ++i) {
+      const int digit = remaining % 10;
+      remaining /= 10;
+      const float right = combo_right + canvas.scale * xs[i];
+      const float left = right - digit_w;
+      float x0 = left;
+      float y0 = combo_bottom;
+      float x1 = left;
+      float y1 = combo_bottom + digit_h;
+      float x2 = right;
+      float y2 = combo_bottom + digit_h;
+      float x3 = right;
+      float y3 = combo_bottom;
+      openwds_scale_about(pivot_x, pivot_y, sx, sy, x0, y0);
+      openwds_scale_about(pivot_x, pivot_y, sx, sy, x1, y1);
+      openwds_scale_about(pivot_x, pivot_y, sx, sy, x2, y2);
+      openwds_scale_about(pivot_x, pivot_y, sx, sy, x3, y3);
+      Quad q{{x0, y0}, {x1, y1}, {x2, y2}, {x3, y3}};
+      batch.add_sprite(skin_.combo_ap_digit[digit], q, z, a);
+    }
+  };
 
-  int32_t remaining = snapshot.combo_count;
   const float alpha = config_.combo_alpha;
   constexpr float kZ = 0.98f;
-  for (int i = 0; i < xs_n; ++i) {
-    const int digit = remaining % 10;
-    remaining /= 10;
-    const float right = combo_right + canvas.scale * xs[i];
-    const float left = right - digit_w;
-    Quad q{{left, combo_bottom},
-           {left, combo_bottom + digit_h},
-           {right, combo_bottom + digit_h},
-           {right, combo_bottom}};
-    batch.add_sprite(skin_.combo_ap_digit[digit], q, kZ, alpha);
+  const double now_sec = preview_now_sec(snapshot);
+
+  // ComboCountPer100 is drawn under ComboCount (Combo.prefab sibling order).
+  if (snapshot.combo_count >= 100 && snapshot.last_combo_fire_ms >= 0) {
+    const float fire_age =
+        static_cast<float>(now_sec - static_cast<double>(snapshot.last_combo_fire_ms) / 1000.0);
+    if (fire_age >= 0.0f && fire_age < kOpenWdsComboFireAnimDuration) {
+      const auto fire_s = openwds_combo_fire_scale(fire_age);
+      const float fire_a = openwds_combo_fire_alpha(fire_age) * alpha;
+      if (fire_a > 0.001f) {
+        draw_digits((snapshot.combo_count / 100) * 100, fire_s.x, fire_s.y, fire_a, kZ - 0.001f);
+      }
+    }
   }
+
+  float count_age = kOpenWdsComboCountAnimDuration;
+  if (snapshot.last_judge_ms >= 0) {
+    count_age =
+        static_cast<float>(now_sec - static_cast<double>(snapshot.last_judge_ms) / 1000.0);
+  }
+  const auto count_s = openwds_combo_count_scale(count_age);
+  draw_digits(snapshot.combo_count, count_s.x, count_s.y, alpha, kZ);
 
   const float label_cx = 0.5f * (combo_left + combo_right);
   const float label_left = label_cx - 0.5f * label_w;
