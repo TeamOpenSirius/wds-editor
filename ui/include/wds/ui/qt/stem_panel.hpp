@@ -51,6 +51,11 @@ class StemPanel final : public QDialog {
   void notify_tracks_changed();
   void note_download_progress(const QString& text);
   QString runtime_python() const;
+  // Windows Store python.exe / python3.exe under WindowsApps is an App Execution
+  // Alias and opens the Store; the real Store package lives in a subdirectory.
+  static bool is_windows_store_python_alias(const QString& path);
+  static QString resolve_python(const QString& path);
+  static QString discover_system_python();
   // Kill the worker and everything it spawned (ffmpeg): process group on POSIX,
   // Job Object on Windows. Always finishes with QProcess::kill().
   void kill_process_tree();
