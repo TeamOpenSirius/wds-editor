@@ -93,6 +93,7 @@ function Copy-FileIfPresent([string]$source, [string]$name) {
 
 Copy-Tree (Join-Path $repo 'skins') 'skins'
 Copy-Tree (Join-Path $repo 'effects') 'effects'
+Copy-Tree (Join-Path $repo 'resources') 'resources'
 Copy-Tree (Join-Path $repo 'ui\assets\fonts') 'fonts'
 Copy-Tree (Join-Path $repo 'ui\assets\theme') 'theme'
 Copy-Tree (Join-Path $repo 'icons') 'icons'
@@ -114,7 +115,7 @@ foreach ($candidate in $vulkanCandidates) {
 WDS Editor $((Get-Item $exe).VersionInfo.ProductVersion)
 
 Portable Windows package. Keep wds_editor.exe beside the folders and DLLs.
-Resources: skins, effects, fonts, theme, icons, shaders.
+Resources: skins, effects, resources, fonts, theme, icons, shaders.
 "@ | Set-Content -LiteralPath (Join-Path $OutputDir 'README.txt') -Encoding UTF8
 
 if (-not $NoZip) {

@@ -6,6 +6,7 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/split_fade.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/ui/note_skin_mapping.hpp>
 #include "wds/ui/regions/edit/edit_gutters.hpp"
@@ -334,11 +335,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const int64_t appear_ms = std::max<int64_t>(
         1, static_cast<int64_t>(
                std::llround(static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
-    const int64_t disappear_ms = std::max<int64_t>(
-        1, static_cast<int64_t>(
-               std::llround(static_cast<double>(preview.split_line_animation_end_sec) * 1000.0)));
     const int64_t fade_start_ms = start_ms - appear_ms;
-    const int64_t fade_end_ms = end_ms + disappear_ms;
+    const int64_t fade_end_ms = wds::chart_editor::official_split_destroy_ms(start_ms, end_ms);
 
     const float view_ms_lo = viewport.scroll_ms();
     const float view_ms_hi = view_ms_lo + static_cast<float>(viewport.visible_ms());

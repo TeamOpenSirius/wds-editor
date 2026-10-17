@@ -59,6 +59,7 @@ using wds::renderer::draw_frame_waits_pending_uploads_before_sample;
 using wds::renderer::draw_frame_zero_extent_reap_applies_health;
 using wds::renderer::frames_in_flight_for_swapchain;
 using wds::renderer::preferred_swapchain_image_count;
+using wds::renderer::recover_surface_has_reacquire;
 using wds::renderer::create_texture_rgba_waits_upload_fence;
 using wds::renderer::wait_pending_uploads_is_noop;
 using wds::renderer::next_frame_recovers_swapchain;
@@ -105,6 +106,8 @@ using wds::renderer::upload_submit_failure_recycles_slot;
 using wds::renderer::wait_pending_uploads_holds_staging_on_failure;
 using wds::renderer::wait_pending_uploads_reaps_after_ok_wait;
 using wds::renderer::kHostVisibleMapChunkBytes;
+using wds::renderer::mapped_flush_range;
+using wds::renderer::mapped_flush_range_valid;
 using wds::renderer::texture_upload_defers_vertex_remap;
 using wds::renderer::staging_copy_chunk_bytes;
 using wds::renderer::staging_copy_chunk_count;
@@ -431,6 +434,54 @@ void test_staging_copy_chunks_cap_host_maps() {
   CHECK(texture_upload_defers_vertex_remap());
 }
 
+void test_mapped_flush_range_atom_align_and_clamp() {
+  constexpr VkDeviceSize atom = 256;
+  constexpr VkDeviceSize alloc = 4096;
+
+  const auto empty = mapped_flush_range(0, 0, atom, alloc);
+  CHECK(empty.size == 0);
+  CHECK(mapped_flush_range_valid(empty, atom, alloc));
+
+  const auto one = mapped_flush_range(0, 1, atom, alloc);
+  CHECK(one.offset == 0);
+  CHECK(one.size == 256);
+  CHECK(mapped_flush_range_valid(one, atom, alloc));
+
+  const auto mid = mapped_flush_range(100, 10, atom, alloc);
+  CHECK(mid.offset == 0);
+  CHECK(mid.size == 256);
+  CHECK(mapped_flush_range_valid(mid, atom, alloc));
+
+  const auto exact = mapped_flush_range(256, 256, atom, alloc);
+  CHECK(exact.offset == 256);
+  CHECK(exact.size == 256);
+  CHECK(mapped_flush_range_valid(exact, atom, alloc));
+
+  const auto tail = mapped_flush_range(4000, 90, atom, alloc);
+  CHECK(tail.offset == 3840);
+  CHECK(tail.size == VK_WHOLE_SIZE);
+  CHECK(mapped_flush_range_valid(tail, atom, alloc));
+
+  const auto full = mapped_flush_range(0, 4096, atom, alloc);
+  CHECK(full.offset == 0);
+  CHECK(full.size == VK_WHOLE_SIZE);
+  CHECK(mapped_flush_range_valid(full, atom, alloc));
+
+  const auto past = mapped_flush_range(5000, 16, atom, alloc);
+  CHECK(past.size == 0);
+  CHECK(mapped_flush_range_valid(past, atom, alloc));
+
+  const auto unknown = mapped_flush_range(16, 8, atom, 0);
+  CHECK(unknown.offset == 0);
+  CHECK(unknown.size == VK_WHOLE_SIZE);
+  CHECK(mapped_flush_range_valid(unknown, atom, 0));
+
+  const auto molten = mapped_flush_range(1, 15, 16, 64);
+  CHECK(molten.offset == 0);
+  CHECK(molten.size == 16);
+  CHECK(mapped_flush_range_valid(molten, 16, 64));
+}
+
 void test_draw_frame_drains_pending_uploads_before_sample() {
   CHECK(draw_frame_waits_pending_uploads_before_sample());
   CHECK(!create_texture_rgba_waits_upload_fence());
@@ -478,6 +529,7 @@ void run_upload_result_tests() {
   test_unsampled_destroyed_texture_frees_after_upload();
   test_atlas_rebake_and_font_replace_hold_async_upload();
   test_staging_copy_chunks_cap_host_maps();
+  test_mapped_flush_range_atom_align_and_clamp();
   test_draw_frame_drains_pending_uploads_before_sample();
   test_stage_names_are_distinct_and_non_empty();
   test_failed_create_returns_invalid_texture_info();
@@ -497,6 +549,15 @@ void test_wsi_classify_swapchain_rebuild() {
 void test_wsi_classify_surface_lost_rebuilds_surface() {
   CHECK(classify_wsi_result(VK_ERROR_SURFACE_LOST_KHR) ==
         WsiRecoverAction::RecreateSurfaceAndSwapchain);
+}
+
+void test_recover_surface_has_reacquire() {
+  CHECK(recover_surface_has_reacquire(true, false, true));
+  CHECK(!recover_surface_has_reacquire(false, true, true));
+  CHECK(recover_surface_has_reacquire(false, true, false));
+  CHECK(!recover_surface_has_reacquire(true, false, false));
+  CHECK(!recover_surface_has_reacquire(false, false, false));
+  CHECK(!recover_surface_has_reacquire(false, false, true));
 }
 
 void test_wsi_classify_device_lost_is_unrecoverable() {
@@ -975,10 +1036,58 @@ void test_frames_in_flight_leaves_one_image_for_present() {
   CHECK(frames_in_flight_for_swapchain(4, 2) == 2);
 }
 
+void test_draw_batch_external_arena_matches_cpu() {
+  wds::renderer::DrawBatch cpu;
+  wds::renderer::DrawBatch ext;
+  wds::renderer::DrawVertex store[16]{};
+  uint32_t idx_store[48]{};
+  ext.bind_external(store, 16, idx_store, 48);
+  const wds::renderer::TextureInfo tex{3, 8, 8, 0.0f, 0.0f, 1.0f, 1.0f};
+  const wds::renderer::Quad quad{{-1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, -1.0f}};
+  cpu.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  CHECK(ext.using_external());
+  CHECK(!ext.external_overflow());
+  std::vector<wds::renderer::DrawVertex> cpu_list;
+  std::vector<wds::renderer::DrawVertex> ext_list;
+  cpu.expand_list(cpu_list);
+  ext.expand_list(ext_list);
+  CHECK(cpu_list.size() == 6);
+  CHECK(ext_list.size() == 6);
+  CHECK(ext.ext_runs.size() == 1);
+  wds::renderer::DrawBatch rec;
+  rec.append_from(ext);
+  std::vector<wds::renderer::DrawVertex> rec_list;
+  rec.expand_list(rec_list);
+  CHECK(rec_list.size() == 6);
+  CHECK(rec.buckets.size() == 1);
+  CHECK(std::memcmp(rec_list.data(), cpu_list.data(), 6 * sizeof(wds::renderer::DrawVertex)) == 0);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  CHECK(ext.external_overflow());
+}
+
+void test_butterfly_bucket_disables_only_alpha_clip() {
+  wds::renderer::DrawBatch batch;
+  const wds::renderer::TextureInfo tex{7, 8, 8, 0.0f, 0.0f, 1.0f, 1.0f};
+  const wds::renderer::Quad quad{{-1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f},
+                                 {1.0f, -1.0f}};
+  batch.add_sprite(tex, quad, 0.0f, 1.0f);
+  batch.add_sprite_no_alpha_clip(tex, quad, 0.0f, 1.0f);
+  CHECK(batch.buckets.size() == 2);
+  CHECK(batch.buckets[0].texture == tex.id);
+  CHECK(!batch.buckets[0].disable_alpha_clip);
+  CHECK(batch.buckets[1].texture == tex.id);
+  CHECK(batch.buckets[1].disable_alpha_clip);
+}
+
 void run_wsi_health_tests() {
   test_wsi_classify_success_is_none();
   test_wsi_classify_swapchain_rebuild();
   test_wsi_classify_surface_lost_rebuilds_surface();
+  test_recover_surface_has_reacquire();
   test_wsi_classify_device_lost_is_unrecoverable();
   test_wsi_classify_other_errors_are_fatal();
   test_health_ready_flags();
@@ -1004,6 +1113,8 @@ void run_wsi_health_tests() {
   test_draw_frame_reaps_before_zero_extent_or_occluded_return();
   test_preferred_swapchain_image_count_requests_fif_plus_two();
   test_frames_in_flight_leaves_one_image_for_present();
+  test_draw_batch_external_arena_matches_cpu();
+  test_butterfly_bucket_disables_only_alpha_clip();
   test_descriptor_full_block_is_skipped_then_grows();
   test_descriptor_pool_growth_and_retry_policy();
   test_descriptor_chain_300_cross_block_alloc_and_recycle();

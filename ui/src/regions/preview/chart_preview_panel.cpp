@@ -1,9 +1,17 @@
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 
 #include "wds/renderer/log.hpp"
+#include "wds/ui/frame_diag.hpp"
 
 #include <wds/common/crash_handler.hpp>
+#include <wds/common/minflt_stage.hpp>
+#include <wds/common/time.hpp>
+#include <wds/core/gimmick.hpp>
 #include <wds/core/official_playfield.hpp>
+#include <wds/core/preview_snapshot.hpp>
+#include <wds/core/split_fade.hpp>
+#include <wds/core/split_lane_simulator.hpp>
+#include <wds/chart_render/split_effect_particles.hpp>
 
 #include <wds/interaction/font_atlas.hpp>
 
@@ -12,12 +20,109 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 
 namespace wds::ui {
 namespace {
+
+long process_minflt() noexcept {
+#ifndef _WIN32
+  rusage ru{};
+  if (getrusage(RUSAGE_SELF, &ru) == 0) {
+    return ru.ru_minflt;
+  }
+#endif
+  return 0;
+}
+
+std::vector<wds::chart_editor::PreviewSplitLaneInstance> collect_steady_split_lanes(
+    const wds::chart_editor::ChartEditorEngine& engine) {
+  std::vector<int32_t> ids;
+  const auto& doc = engine.document();
+  doc.index().query_split_lanes_up_to(std::numeric_limits<int64_t>::max(), ids);
+  wds::chart_editor::SplitLaneSimulator sim(engine.preview_config());
+  const auto& timing = doc.timing();
+  std::vector<wds::chart_editor::PreviewSplitLaneInstance> out;
+  out.reserve(ids.size());
+  for (int32_t id : ids) {
+    const auto note = doc.find_note(id);
+    if (!note || !wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) {
+      continue;
+    }
+    wds::chart_editor::PreviewSplitLaneInstance inst;
+    sim.fill_instance(inst, *note, timing, note->start_ms(timing));
+    if (inst.split_count <= 0) {
+      continue;
+    }
+    out.push_back(inst);
+  }
+  return out;
+}
+
+std::vector<wds::chart_editor::PreviewSplitLaneInstance> collect_splits_at(
+    const wds::chart_editor::ChartEditorEngine& engine, int64_t preview_time_ms) {
+  std::vector<int32_t> ids;
+  const auto& doc = engine.document();
+  const auto& cfg = engine.preview_config();
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(cfg.split_line_animation_start_sec);
+  const int64_t hide_ms =
+      wds::chart_editor::official_split_hide_tail_ms(cfg.split_line_animation_end_sec);
+  const int64_t span = doc.index().max_split_span_ms();
+  int64_t lower = preview_time_ms;
+  if (span > 0 && lower > std::numeric_limits<int64_t>::min() + span) {
+    lower -= span;
+  }
+  if (hide_ms > 0 && lower > std::numeric_limits<int64_t>::min() + hide_ms) {
+    lower -= hide_ms;
+  }
+  int64_t upper = preview_time_ms;
+  if (appear_ms > 0 && upper < std::numeric_limits<int64_t>::max() - appear_ms) {
+    upper += appear_ms;
+  }
+  doc.index().query_split_lanes_in_range(lower, upper, ids);
+  wds::chart_editor::SplitLaneSimulator sim(cfg);
+  std::vector<wds::chart_editor::PreviewSplitLaneInstance> out;
+  sim.build_active_splits(doc.notes(), ids, doc.timing(), preview_time_ms, out);
+  return out;
+}
+
+void pump_lane_geom_rendered(wds::ui::PlaybackPreviewView& preview,
+                             const wds::chart_editor::ChartEditorEngine& engine,
+                             bool playing, int64_t lead_us, int64_t nominal_us) {
+  const auto& snap = engine.snapshot();
+  int64_t timeline_us = snap.timeline_us;
+  if (timeline_us == 0 && snap.timeline_ms != 0) {
+    timeline_us = wds::common::ms_to_us(snap.timeline_ms).count();
+  }
+  // Extra clocks build plate corners only (now_us=-1). Coloring T+2·lead
+  // would leave a warm-up batch for the wrong present time.
+  preview.pump_lane_geom_preload(snap.split_lanes, (!playing || lead_us <= 0) ? timeline_us : -1,
+                                !playing || lead_us <= 0);
+  const int64_t lead_ms = (lead_us + 500) / 1000;
+  const int64_t nominal_ms = (nominal_us + 500) / 1000;
+  if (playing && nominal_us > 0 && nominal_us != lead_us) {
+    preview.pump_lane_geom_preload(collect_splits_at(engine, snap.timeline_ms + nominal_ms), -1,
+                                   false);
+  }
+  if (lead_ms > 0) {
+    const int64_t pictured_ms = snap.timeline_ms + lead_ms;
+    preview.pump_lane_geom_preload(collect_splits_at(engine, pictured_ms), timeline_us + lead_us,
+                                   playing);
+    preview.pump_lane_geom_preload(collect_splits_at(engine, pictured_ms + lead_ms), -1, false);
+  }
+  if (!playing || preview.lane_geom_cache_empty()) {
+    preview.pump_lane_geom_preload(collect_steady_split_lanes(engine), -1, false);
+  }
+}
 
 void publish_vulkan_device_context(const wds::renderer::VulkanRenderer& vk) {
   const std::uint32_t drv = vk.device_driver_version();
@@ -43,7 +148,8 @@ bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface
                std::chrono::steady_clock::now() - t0)
         .count();
   };
-  display_refresh_hz_ = host.display_refresh_hz ? std::max(1, host.display_refresh_hz()) : 60;
+  display_refresh_hz_fn_ = host.display_refresh_hz;
+  display_refresh_hz_ = display_refresh_hz_fn_ ? std::max(1, display_refresh_hz_fn_()) : 60;
   if (initialize_audio && !transport_.initialize(visual.effects_directory, visual.bgm_path)) {
     last_init_error_ =
         "音频初始化失败（BASS / effects：" + visual.effects_directory + "）";
@@ -80,6 +186,10 @@ bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface
 
   const unsigned char white[4] = {255, 255, 255, 255};
   solid_texture_ = preview_.vulkan().create_texture_rgba(white, 1, 1);
+  if (solid_texture_) {
+    preview_.textures().bind_identity(solid_texture_.id, "ui.solid");
+  }
+  preview_.request_split_effect_preload();
 
   // Qt chrome owns all UI text (QFont / QPainter). FontAtlas is leftover for
   // the unused Vulkan UiPainter flush path and is not baked at startup.
@@ -125,6 +235,7 @@ void ChartPreviewPanel::shutdown() {
     solid_texture_ = {};
   }
   join_waveform_workers();
+  preview_.join_speculative_split_collect();
   destroy_spectrogram_texture();
   preview_.shutdown();
   transport_.shutdown();
@@ -139,6 +250,41 @@ int64_t ChartPreviewPanel::display_frame_lead_us() const noexcept {
   return 1'000'000 / std::max(hz, 1);
 }
 
+int64_t ChartPreviewPanel::playing_visual_lead_us() const noexcept {
+  const int64_t nominal = display_frame_lead_us();
+  // Last snapshot→present cost (not vkQueuePresent alone), clamped to one
+  // vsync: a hitch must not draw a second extra frame ahead. No EMA — the
+  // no-music clock is advanced by this frame's R after present so
+  // extra_prev and R_this cancel when R is stable and below one vsync.
+  const int64_t extra = std::clamp(last_present_latency_us_, int64_t{0}, nominal);
+  return nominal + extra;
+}
+
+int64_t ChartPreviewPanel::pulse_now_us(bool playing, int64_t timeline_us) const noexcept {
+  // hop / darkband-v2 2026-10-17. Pulse analog 43.06 Hz aliases at 60 fps
+  // (−0.718 cyc/frame). Present-latency extra on the note lead (0–16.7 ms)
+  // flipped the nearest wrap 22/540 frames (Δt std 2.39 ms). BASS decode
+  // position is song time (bytes→µs; BASS_ATTRIB_FREQ only changes wall
+  // speed, so d(song)/d(chart) stays 1 at every playback_rate). Not 2022.3.
+  // Pause/scrub: freeze on chart T, no lead — not Unity Time.time.
+  if (!playing) {
+    return timeline_us;
+  }
+  const int64_t scanout_us = display_frame_lead_us();
+  const auto& audio = transport_.audio();
+  if (audio.has_music() && audio.stream_playing()) {
+    return audio.position().count() + scanout_us;
+  }
+  return timeline_us + scanout_us;
+}
+
+void ChartPreviewPanel::abandon_host_surface() {
+  if (!ready_) {
+    return;
+  }
+  preview_.vulkan().abandon_host_surface();
+}
+
 void ChartPreviewPanel::resize_framebuffer(int width, int height) {
   if (!ready_ || width <= 0 || height <= 0) {
     return;
@@ -147,11 +293,16 @@ void ChartPreviewPanel::resize_framebuffer(int width, int height) {
 }
 
 void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) noexcept {
+  const bool changed = x != content_x_ || y != content_y_ || width != content_width_ ||
+                       height != content_height_;
   content_x_ = x;
   content_y_ = y;
   content_width_ = width;
   content_height_ = height;
   preview_.geometry().set_content_rect(content_x_, content_y_, content_width_, content_height_);
+  if (changed) {
+    preview_.invalidate_lane_geom_cache();
+  }
 }
 
 void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) noexcept {
@@ -177,26 +328,203 @@ void ChartPreviewPanel::flush_retired_font_textures() {
   retired_font_textures_.clear();
 }
 
+void ChartPreviewPanel::join_speculative_split_collect() {
+  preview_.join_speculative_split_collect();
+}
+
+void ChartPreviewPanel::request_buffer_precommit(bool fill_now) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto& doc = engine_.document();
+  const auto& timing = doc.timing();
+  const int64_t appear_ms = wds::chart_editor::split_fade_sec_to_ms(
+      engine_.preview_config().split_line_animation_start_sec);
+  std::vector<wds::chart_render::SplitEffectBoundNote> notes;
+  notes.reserve(doc.notes().size());
+  for (const auto& n : doc.notes()) {
+    if (!wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+      continue;
+    }
+    wds::chart_render::SplitEffectBoundNote b;
+    b.color_id = n.scratch_length;
+    b.start_ms = n.start_ms(timing);
+    b.end_ms = n.end_ms(timing);
+    notes.push_back(b);
+  }
+  const auto plan = wds::chart_render::split_effect_estimate_buffer_bound(
+      notes.data(), static_cast<int>(notes.size()), appear_ms);
+  preview_.request_buffer_precommit(plan, fill_now);
+  if (fill_now) {
+    skip_precommit_pump_ = true;
+  }
+  static const bool diag = frame_diag_enabled_from_env();
+  if (!diag) {
+    return;
+  }
+  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+  const auto st = preview_.last_precommit();
+  std::fprintf(stderr,
+               "PRECOMMIT_REQUEST us=%lld notes=%zu concurrent=%d pool=%d heaviest=%d×%d "
+               "live=%d trail=%d verts=%zu rss_kb=%ld pending=%d raise_us=%lld\n",
+               static_cast<long long>(us), notes.size(), plan.concurrent_instances,
+               plan.particle_cap, plan.heaviest_id, plan.floor_instances, plan.heaviest_live,
+               plan.trail_chunks, plan.draw_verts, st.rss_kb_before, st.pending,
+               static_cast<long long>(st.request_us));
+}
+
+void ChartPreviewPanel::pump_buffer_precommit() {
+  if (skip_precommit_pump_) {
+    skip_precommit_pump_ = false;
+    return;
+  }
+  preview_.pump_buffer_precommit(wds::chart_render::split_effect_idle_precommit_budget_us());
+}
+
+void ChartPreviewPanel::request_seek_ms(int64_t time_ms) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const long flt0 = process_minflt();
+  wds::common::minflt_stage("seek.begin");
+  preview_.join_speculative_split_collect();
+  wds::common::minflt_stage("seek.after_join");
+  transport_.request_seek_ms(time_ms);
+  // Pin the visual snapshot to T now. Transport poll may drop a seek when
+  // audio is not ready or a music set_position fails; line/lane geometry
+  // must still be a function of chart T (OpenWDS SplitLaneRuntime.Tick
+  // takes chartMilliseconds, not Time.deltaTime).
+  engine_.seek(time_ms);
+  wds::common::minflt_stage("seek.after_engine");
+  pinned_seek_ms_ = time_ms;
+  has_pinned_seek_ = true;
+  if (display_refresh_hz_fn_) {
+    display_refresh_hz_ = std::max(1, display_refresh_hz_fn_());
+  }
+  // Pose/carry from a previous pictured T must not leak into this seek.
+  // useAutoRandomSeed stays (Play remints; seek does not). Hash buckets
+  // and lane cell vectors keep capacity (memory reuse, not a result cache).
+  wds::chart_render::split_effect_clear_caches();
+  wds::common::minflt_stage("seek.after_clear");
+  last_present_latency_us_ = 0;
+  wds::chart_render::split_effect_prepare_heavy_collect(50);
+  preview_.reset_lane_geom_time_state();
+  const int64_t now_us = wds::common::ms_to_us(time_ms).count();
+  preview_.pump_lane_geom_preload(collect_splits_at(engine_, time_ms), now_us, true);
+  // First play tick draws at T+nominal lead (latency 0). Build that clock
+  // here so tick_geom / first lanes fill are not on the presented frame.
+  const int64_t lead_us = playing_visual_lead_us();
+  pump_lane_geom_rendered(preview_, engine_, true, lead_us, display_frame_lead_us());
+  // draw_split_lanes hashes snapshot lanes (committed T) with pictured now.
+  // Pictured collect_splits_at percents differ during fade; color that pair last.
+  preview_.pump_lane_geom_preload(engine_.snapshot().split_lanes, now_us + lead_us, true);
+  if (after_seek_prepare_) {
+    after_seek_prepare_(time_ms);
+  }
+  last_seek_handle_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+  last_seek_minflt_ = process_minflt() - flt0;
+  wds::common::minflt_stage("seek.end");
+  skip_precommit_pump_ = true;
+}
+
+void ChartPreviewPanel::maybe_inject_preview_stall(bool playing, double chart_sec) {
+  if (stall_injected_) {
+    return;
+  }
+  const int ms = preview_stall_ms_from_env();
+  if (ms <= 0 || !playing) {
+    return;
+  }
+  const double at = preview_stall_at_sec_from_env();
+  if (at >= 0.0 && chart_sec + 1e-9 < at) {
+    return;
+  }
+  stall_injected_ = true;
+  last_injected_stall_us_ = static_cast<int64_t>(ms) * 1000;
+  if (at < 0.0) {
+    last_play_start_stall_us_ = last_injected_stall_us_;
+  }
+  WDS_LOG("preview stall inject_ms=%d at_sec=%.3f chart_sec=%.3f\n", ms, at, chart_sec);
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
 void ChartPreviewPanel::tick(int64_t delta_us) {
   if (!ready_) {
     return;
   }
+  static const bool time_tick = frame_diag_enabled_from_env();
+  const auto t_all = time_tick ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
+  auto lapse = [&](std::chrono::steady_clock::time_point t0) -> int64_t {
+    if (!time_tick) {
+      return 0;
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+
+  auto t0 = t_all;
+  if (transport_.pending_seek()) {
+    preview_.join_speculative_split_collect();
+  }
+  const uint64_t doc_gen = engine_.document().content_generation();
+  if (doc_gen != last_doc_generation_ || !precommit_inited_) {
+    if (doc_gen != last_doc_generation_) {
+      preview_.join_speculative_split_collect();
+      preview_.request_split_effect_preload();
+      preview_.invalidate_lane_geom_cache();
+    }
+    last_doc_generation_ = doc_gen;
+    request_buffer_precommit(!precommit_inited_);
+    precommit_inited_ = true;
+  }
+  preview_.pump_split_effect_preload();
   collect_ready_waveforms();
-  // Clamp post-hitch spikes so Transport does not hard-snap (100 ms) on one frame.
-  constexpr int64_t kMaxWallDeltaUs = 80000;  // 80 ms
-  const int64_t clamped =
-      std::clamp(delta_us, int64_t{0}, kMaxWallDeltaUs);
-  // Transport clock only — no display lead. Lead is added to the draw clock in
-  // render() so it tracks presented frames (FIFO); SFX stays on the music clock.
-  const auto timeline = transport_.poll(clamped);
+  last_tick_preload_us_ = lapse(t0);
+
+  t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+  if (display_refresh_hz_fn_) {
+    display_refresh_hz_ = std::max(1, display_refresh_hz_fn_());
+  }
+  transport_.set_max_clock_error_us(display_frame_lead_us());
+  // Paused / capture seeks must not eat the QWindow frame-callback wall dt
+  // (pump_cli_frame always passes 16ms). OpenWDS lane Tick is chart ms.
+  const bool want_play = transport_.intends_playing();
+  const int64_t wall_us = want_play ? std::max<int64_t>(0, delta_us) : 0;
+  const auto timeline = transport_.poll(wall_us);
   engine_.apply_timeline(timeline);
-  // Keep SFX chart-delay / lead-in mapping in sync with transport + edit blank.
+  if (has_pinned_seek_) {
+    if (!want_play && engine_.timeline_ms() != pinned_seek_ms_) {
+      engine_.seek(pinned_seek_ms_);
+    } else if (want_play) {
+      has_pinned_seek_ = false;
+    }
+  }
   preview_.set_chart_offset_ms(transport_.chart_offset_ms());
   preview_.set_preview_lead_in_visible_ms(engine_.preview_lead_in_visible_ms());
-  // Arm music POS syncs while BGM is still paused on a fresh play request, then
-  // start audible music so early hits are not scheduled behind the decode frontier.
+  last_tick_transport_us_ = lapse(t0);
+
+  t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+  // Warm plates for the committed snapshot and the pictured clock. Appear
+  // percents at T+lead must be ready before the first rendered frame.
+  // Playing lead includes last present latency so late frames do not eat the
+  // one-vsync visual lead (see render()). First play frame draws at nominal
+  // only — clear leftover paused latency so prebuild matches that clock.
+  const bool playing = transport_.playing();
+  if (playing && !last_render_playing_) {
+    last_present_latency_us_ = 0;
+  }
+  pump_lane_geom_rendered(preview_, engine_, playing, playing ? playing_visual_lead_us() : 0,
+                         display_frame_lead_us());
+  last_tick_geom_us_ = lapse(t0);
+
+  t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+  // Arm POS SFX on a still-paused stream. Audible start waits until render()
+  // has collected the first picture at t0 (audio follows picture).
   preview_.sync_hit_sfx(engine_.snapshot());
-  transport_.start_pending_music();
+  last_tick_sfx_us_ = lapse(t0);
+  pump_buffer_precommit();
 }
 
 void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
@@ -205,14 +533,52 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   if (!ready_) {
     return;
   }
-  // One scan-out frame of visual lead while playing (does not scale with rate).
-  // Added to the draw clock only — do not apply+rollback the engine snapshot
-  // (that rebuilt combo / notes three times per frame).
+  if (display_refresh_hz_fn_) {
+    display_refresh_hz_ = std::max(1, display_refresh_hz_fn_());
+  }
   const auto committed = transport_.committed_snapshot();
   const bool playing = committed.state == wds::common::PlaybackState::Playing;
-  const int64_t lead_us = playing ? display_frame_lead_us() : 0;
-  preview_.render(engine_.snapshot(), ui_overlay, solid_texture_.id, modal_overlay, modal_chrome,
-                  lead_us);
+  const auto& snap = engine_.snapshot();
+  int64_t transport_us = snap.timeline_us;
+  if (transport_us == 0 && snap.timeline_ms != 0) {
+    transport_us = wds::common::ms_to_us(snap.timeline_ms).count();
+  }
+  const int64_t nominal_lead_us = display_frame_lead_us();
+  if (playing && !last_render_playing_) {
+    last_present_latency_us_ = 0;
+  }
+  last_render_playing_ = playing;
+  const int64_t lead_us = playing ? playing_visual_lead_us() : 0;
+  last_visual_lead_us_ = lead_us;
+  last_displayed_now_us_ = transport_us + lead_us;
+  last_pulse_now_us_ = pulse_now_us(playing, transport_us);
+  maybe_inject_preview_stall(playing, static_cast<double>(last_displayed_now_us_) / 1'000'000.0);
+  const auto present_t0 = std::chrono::steady_clock::now();
+  preview_.render(snap, ui_overlay, solid_texture_.id, modal_overlay, modal_chrome, lead_us,
+                  last_pulse_now_us_);
+  last_present_latency_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - present_t0)
+                                 .count();
+  if (transport_.audio().has_music()) {
+    last_bass_after_present_us_ = transport_.audio().position().count();
+  } else {
+    // No BGM: committed is the tick snapshot, not a running mixer. Advance
+    // it by this frame's snapshot→present cost so it pairs with last-frame
+    // extra in the lead. align_screen = extra_prev − R_this converges
+    // whenever R < one vsync. Leaving committed unmoved made align≈R
+    // (the 8ms/8ms signature) even though extra was already in lead.
+    last_bass_after_present_us_ =
+        transport_.committed_position().count() + last_present_latency_us_;
+  }
+  // pictured = displayed − one vsync, not minus (vsync + present latency).
+  // Late present is already in displayed; subtracting only the nominal lead
+  // keeps BASS−picture from locking to last-frame CPU time.
+  const int64_t pictured_us = last_displayed_now_us_ - (playing ? nominal_lead_us : 0);
+  last_pictured_now_us_ = pictured_us;
+  last_heard_vs_picture_us_ = last_bass_after_present_us_ - pictured_us;
+  // Picture is at t0; start (or retry) audible BGM so a cold first frame does
+  // not leave the picture behind a running clock. Seek-while-playing same path.
+  (void)transport_.start_pending_music();
 }
 
 void ChartPreviewPanel::set_lane_count(int lane_count) {
@@ -229,23 +595,29 @@ void ChartPreviewPanel::set_note_speed(double speed) {
   const auto& visual = preview_.config();
   apply_display_settings(speed, visual.note_start_offset, visual.note_height_level,
                          static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) *
-                                                      100.0)));
+                                                      100.0)),
+                         visual.split_effect_quality);
 }
 
 void ChartPreviewPanel::apply_display_settings(double note_speed, int note_start_offset,
                                                int note_height_level,
-                                               int split_line_opacity_percent) {
+                                               int split_line_opacity_percent,
+                                               int split_effect_quality) {
   note_speed = wds::chart_editor::official_clamp_note_speed(note_speed);
   note_start_offset = wds::chart_editor::official_clamp_note_start_offset(note_start_offset);
   note_height_level = wds::chart_editor::official_clamp_note_height_level(note_height_level);
   split_line_opacity_percent =
       wds::chart_editor::official_clamp_split_effect_line_opacity(split_line_opacity_percent);
+  split_effect_quality =
+      wds::chart_editor::official_clamp_sprit_effect_setting(split_effect_quality);
 
   auto visual = preview_.config();
   visual.note_speed = static_cast<float>(note_speed);
   visual.note_start_offset = note_start_offset;
   visual.note_height_level = note_height_level;
   visual.split_line_opacity = static_cast<float>(split_line_opacity_percent) / 100.0f;
+  visual.split_effect_quality = split_effect_quality;
+  preview_.join_speculative_split_collect();
   preview_.set_config(visual);
 
   auto core_cfg = engine_.preview_config();
@@ -262,6 +634,7 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   // Join first: AudioEngine::shutdown() / BASS_Free() must not run while a
   // waveform worker still holds a process-global BASS decode stream.
   join_waveform_workers();
+  preview_.join_speculative_split_collect();
   const auto effects = preview_.config().effects_directory;
   const bool was_playing = preserve_playback && transport_.playing();
   const int64_t pos =
@@ -402,6 +775,8 @@ void ChartPreviewPanel::bake_spectrogram_texture() {
   spectrogram_texture_ = preview_.vulkan().create_texture_rgba(rgba.data(), w, h, /*nearest=*/false);
   if (!spectrogram_texture_) {
     WDS_LOG("ChartPreviewPanel: spectrogram texture upload failed %dx%d\n", w, h);
+  } else {
+    preview_.textures().bind_identity(spectrogram_texture_.id, "ui.spectrogram");
   }
 }
 
@@ -409,10 +784,8 @@ void ChartPreviewPanel::reset_playback() {
   if (!ready_) {
     return;
   }
-  const int64_t start = transport_.chart_start_ms();
   transport_.request_pause();
-  transport_.request_seek_ms(start);
-  engine_.seek(start);
+  request_seek_ms(transport_.chart_start_ms());
 }
 
 bool ChartPreviewPanel::load_chart(const std::string& chart_path,

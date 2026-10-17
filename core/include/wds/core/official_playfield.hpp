@@ -81,10 +81,49 @@ inline constexpr float kOfficialStartLineSpriteHeight =
 // BG_Lane / BG_LaneBorder on Main: sliced 11.11×640, center pivot (LaneGroup.prefab).
 inline constexpr float kOfficialBgLaneWidth = 11.11f;
 inline constexpr float kOfficialBgLaneHeight = 640.0f;
-inline constexpr float kOfficialBgLaneAlpha = 0.8f;
+// OpenWDS LaneGroup.ApplySettings: prefab BG_Lane a=0.8 × LaneAlphaValue/100
+// (default 80 → 0.64; align2-n5 Unity BG_Lane a=0.64).
+inline constexpr float kOfficialBgLanePrefabAlpha = 0.8f;
+inline constexpr float kOfficialBgLaneAlpha = kOfficialBgLanePrefabAlpha * 80.0f / 100.0f;
 // Texture2D/ingame_bg: 1920×1180. SpriteRendererScreenFitter cover-fits this to the camera.
 inline constexpr float kOfficialIngameBgWidth = 1920.0f;
 inline constexpr float kOfficialIngameBgHeight = 1180.0f;
+// OpenWDS GameBackground.prefab BGShadow/{TopLeft,TopRight,BottomLeft,BottomRight}.
+// Sprite `img_game_common_bg_shadow`: m_Rect / textureRect (0,644,960,540),
+// ppu=100, pivot (1,0). RD mesh is 4 verts / 2 tris covering that rect
+// (CreateOfflineRhythmPreviewScene + prefab SpriteRenderer).
+// SpriteRenderer: color (1,1,1,1), Default, sortingOrder −9, flipX/Y=0,
+// drawMode=Simple, size 9.6×5.4, material Sprites-Default.
+// Child localPosition (0,0,12), localScale (±1.21875, ±1.33333, 1).
+// GameBackgroundShadow.Initialize copies sample.localScale (OpenWDS
+// SpriteRendererScreenFitter uniform cover) onto BGShadow; that scale is
+// from the origin so x/z and y/z cancel. Screen uses child scale × sprite
+// local rect at authored z=12. 禁止用闭源非均匀 Adjust。
+inline constexpr float kOfficialBgShadowPixelWidth = 960.0f;
+inline constexpr float kOfficialBgShadowPixelHeight = 540.0f;
+inline constexpr float kOfficialBgShadowPpu = 100.0f;
+inline constexpr float kOfficialBgShadowWidth =
+    kOfficialBgShadowPixelWidth / kOfficialBgShadowPpu;
+inline constexpr float kOfficialBgShadowHeight =
+    kOfficialBgShadowPixelHeight / kOfficialBgShadowPpu;
+inline constexpr float kOfficialBgShadowPivotX = 1.0f;
+inline constexpr float kOfficialBgShadowPivotY = 0.0f;
+inline constexpr float kOfficialBgShadowLocalZ = 12.0f;
+inline constexpr float kOfficialBgShadowScaleX = 1.21875f;
+inline constexpr float kOfficialBgShadowScaleY = 1.33333f;
+inline constexpr float kOfficialBgShadowColorR = 1.0f;
+inline constexpr float kOfficialBgShadowColorG = 1.0f;
+inline constexpr float kOfficialBgShadowColorB = 1.0f;
+inline constexpr float kOfficialBgShadowColorA = 1.0f;
+inline constexpr int kOfficialBgShadowSortingOrder = -9;
+
+inline void official_bg_shadow_local_rect(float& left, float& bottom, float& right,
+                                          float& top) noexcept {
+  left = -kOfficialBgShadowWidth * kOfficialBgShadowPivotX;
+  right = kOfficialBgShadowWidth * (1.0f - kOfficialBgShadowPivotX);
+  bottom = -kOfficialBgShadowHeight * kOfficialBgShadowPivotY;
+  top = kOfficialBgShadowHeight * (1.0f - kOfficialBgShadowPivotY);
+}
 // img_ingame_judgment_area3: 1119×72 @ 100 ppu, Simple draw (native 11.19×0.72).
 // Prefab m_Size.y=0.08 is stale (LaneMask height). Keep native width — the
 // outer pink stroke peaks (px 5 / 1113) sit on the 12-lane edges (±5.545).
@@ -105,6 +144,18 @@ inline constexpr float kOfficialCenterLane1Based = 7.0f;
 inline constexpr int kOfficialDefaultNoteHeightLevel = 8;
 inline constexpr int kOfficialDefaultNoteStartOffset = 0;
 inline constexpr int kOfficialDefaultSplitEffectLineOpacity = 100;
+// Official GameSettings.LaneAlphaValue default. Border 14+37x/100; fill SetA.
+inline constexpr int kOfficialDefaultLaneAlphaValue = 80;
+// AppConst.SpritEffectSettingType (official spelling). Persist these integers.
+inline constexpr int kOfficialSpritEffectRich = 0;
+inline constexpr int kOfficialSpritEffectNormal = 1;
+inline constexpr int kOfficialSpritEffectLight = 2;
+
+inline int official_clamp_sprit_effect_setting(int value) noexcept {
+  if (value <= kOfficialSpritEffectRich) return kOfficialSpritEffectRich;
+  if (value >= kOfficialSpritEffectLight) return kOfficialSpritEffectLight;
+  return kOfficialSpritEffectNormal;
+}
 // RecoveredGameSettings: NoteSpeed 1..25 step 0.1; NoteHeight 1..10;
 // NoteStartOffset 0..100 step 5; SplitEffectLineOpacity 10..100 step 10.
 inline constexpr double kOfficialMinNoteSpeed = 1.0;
@@ -154,6 +205,20 @@ struct OfficialNdc {
 
 inline float official_deg_to_rad(float deg) noexcept {
   return deg * (3.14159265358979323846f / 180.0f);
+}
+
+// Unity PhysicsManager default. 1.96.0 splitlane dump has no DynamicsManager
+// override; ParticleSystem.gravityModifier multiplies this world vector.
+inline constexpr float kUnityPhysicsGravityY = -9.81f;
+
+// World (0, gravityModifier * Physics.gravity.y, 0) in LaneGroup-local axes
+// (inverse Rx(kOfficialLaneTiltDeg)). All 121 nonzero catalog gravities are
+// Constant + World (moveWithTransform=1). 2020 scalar is 0.
+inline void official_gravity_lane_accel(float modifier, float& ay, float& az) noexcept {
+  const float rad = official_deg_to_rad(kOfficialLaneTiltDeg);
+  const float gy = kUnityPhysicsGravityY * modifier;
+  ay = gy * std::cos(rad);
+  az = -gy * std::sin(rad);
 }
 
 inline float official_camera_focal() noexcept {
@@ -347,6 +412,34 @@ inline float official_lane_right_x(int32_t lane_0based) noexcept {
   return official_span_right_x(lane_0based, lane_0based);
 }
 
+// Camera-space Z after LaneGroup Rx(60°) + (0,0,12). Unity clips z <= near;
+// we must not project those with max(z, 1e-4) or NDC X explodes across the stage.
+inline float official_main_camera_z(float local_y, float local_z) noexcept {
+  const float rad = official_deg_to_rad(kOfficialLaneTiltDeg);
+  return kOfficialLaneGroupZ + local_y * std::sin(rad) + local_z * std::cos(rad);
+}
+
+// OpenWDS OfflineRhythmPreview.unity Main Camera `near clip plane: 0.1`
+// (CreateOfflineRhythmPreviewScene.cs writes the same). N6 runtime dump
+// docs/split-effect-parity/results/align2-n6-unity-v1/dump/camera_volumes.json
+// `"near":0.1`. Runtime C# never assigns Camera.nearClipPlane (LiveParticleDump
+// only reads it). Menu scenes keep Unity's default 0.3 — not the playfield.
+inline constexpr float kOfficialCameraNearClip = 0.1f;
+// OpenWDS OfflineRhythmPreview.unity Main Camera (clearFlags=2 Solid Color):
+// `m_BackGroundColor: {r: 0.015, g: 0.02, b: 0.04, a: 1}`. Same literals in
+// CreateOfflineRhythmPreviewScene.CreateCamera. 2022.3 Camera.backgroundColor
+// is the solid clear when clearFlags is SolidColor
+// (docs.unity3d.com/2022.3/Documentation/ScriptReference/Camera-backgroundColor.html).
+// ingame_bg starfield texels are mostly α=0; the far lane shows this clear
+// through BG_Lane a=0.64. Menu scenes use other colors — not the playfield.
+inline constexpr float kOfficialCameraBackgroundR = 0.015f;
+inline constexpr float kOfficialCameraBackgroundG = 0.02f;
+inline constexpr float kOfficialCameraBackgroundB = 0.04f;
+
+inline bool official_main_in_front_of_camera(float local_y, float local_z) noexcept {
+  return official_main_camera_z(local_y, local_z) > kOfficialCameraNearClip;
+}
+
 // Project Main/LaneGroup-local (x, y, z) through Rx(60°) + (0,0,12) + FOV50.
 // aspect is content width/height (Unity vertical FOV: X is divided by aspect).
 inline OfficialNdc project_main_xyz(float local_x, float local_y, float local_z,
@@ -355,7 +448,7 @@ inline OfficialNdc project_main_xyz(float local_x, float local_y, float local_z,
   const float c = std::cos(rad);
   const float s = std::sin(rad);
   const float wy = local_y * c - local_z * s;
-  const float wz = kOfficialLaneGroupZ + local_y * s + local_z * c;
+  const float wz = official_main_camera_z(local_y, local_z);
   const float f = official_camera_focal();
   const float z = std::max(wz, 1e-4f);
   const float a = std::max(aspect, 1e-4f);
@@ -363,6 +456,379 @@ inline OfficialNdc project_main_xyz(float local_x, float local_y, float local_z,
   ndc.x = (local_x / z) * f / a;
   ndc.y = (wy / z) * f;
   return ndc;
+}
+
+// Unity Camera clips the ParticleSystem ribbon mesh at nearClipPlane (0.1).
+// camera_z is linear in Main y/z, so the intersection stays on the 3D segment
+// (same world X as the split). Rewriting z to 1e-4 is not Unity and explodes
+// NDC off that ray. Writes two visible endpoints and their t in [0,1].
+inline bool official_main_clip_segment_near(float x0, float y0, float z0, float x1, float y1,
+                                            float z1, float& ox0, float& oy0, float& oz0,
+                                            float& ox1, float& oy1, float& oz1, float& t0,
+                                            float& t1) noexcept {
+  const float c0 = official_main_camera_z(y0, z0);
+  const float c1 = official_main_camera_z(y1, z1);
+  const float n = kOfficialCameraNearClip;
+  const bool f0 = c0 > n;
+  const bool f1 = c1 > n;
+  if (!f0 && !f1) {
+    return false;
+  }
+  ox0 = x0;
+  oy0 = y0;
+  oz0 = z0;
+  ox1 = x1;
+  oy1 = y1;
+  oz1 = z1;
+  t0 = 0.0f;
+  t1 = 1.0f;
+  if (f0 && f1) {
+    return true;
+  }
+  const float den = c1 - c0;
+  if (std::fabs(den) < 1e-8f) {
+    return false;
+  }
+  const float t = (n - c0) / den;
+  const float ix = x0 + t * (x1 - x0);
+  const float iy = y0 + t * (y1 - y0);
+  const float iz = z0 + t * (z1 - z0);
+  if (f0) {
+    ox1 = ix;
+    oy1 = iy;
+    oz1 = iz;
+    t1 = t;
+  } else {
+    ox0 = ix;
+    oy0 = iy;
+    oz0 = iz;
+    t0 = t;
+  }
+  return true;
+}
+
+// Unity ParticleSystemRenderer trail mesh: GPU clips triangles at near and the
+// four side planes (−w ≤ clip.xy ≤ w). Software projection must clip those
+// mesh vertices before the perspective divide.
+inline constexpr int kOfficialViewClipMaxVerts = 16;
+
+inline void official_main_camera_lane_pos(float& x, float& y, float& z) noexcept {
+  x = 0.0f;
+  const float rad = official_deg_to_rad(kOfficialLaneTiltDeg);
+  y = -kOfficialLaneGroupZ * std::sin(rad);
+  z = -kOfficialLaneGroupZ * std::cos(rad);
+}
+
+// Camera +Z after LaneGroup Rx(60°). Unity ParticleSystemRenderSpace.View
+// (catalog default 0) faces this plane, not the eye ray to each vertex.
+inline void official_main_camera_forward(float& fx, float& fy, float& fz) noexcept {
+  const float rad = official_deg_to_rad(kOfficialLaneTiltDeg);
+  fx = 0.0f;
+  fy = std::sin(rad);
+  fz = std::cos(rad);
+}
+
+inline void official_main_clip_coord(float x, float y, float z, float aspect, float& cx, float& cy,
+                                     float& cw) noexcept {
+  const float rad = official_deg_to_rad(kOfficialLaneTiltDeg);
+  const float f = official_camera_focal();
+  const float a = std::max(aspect, 1e-4f);
+  cw = official_main_camera_z(y, z);
+  cx = x * (f / a);
+  cy = (y * std::cos(rad) - z * std::sin(rad)) * f;
+}
+
+// Camera-facing trail offset in LaneGroup. Unity Trails width is world units
+// perpendicular to the path and the camera plane (View): Cross(forward, tangent).
+// Facing (vertex − camera) is ParticleSystemRenderSpace.Facing, not the default.
+inline void official_main_trail_perp(float px, float py, float pz, float dx, float dy, float dz,
+                                     float& ox, float& oy, float& oz) noexcept {
+  (void)px;
+  (void)py;
+  (void)pz;
+  float fx = 0.0f, fy = 0.0f, fz = 0.0f;
+  official_main_camera_forward(fx, fy, fz);
+  ox = fy * dz - fz * dy;
+  oy = fz * dx - fx * dz;
+  oz = fx * dy - fy * dx;
+  const float len = std::sqrt(ox * ox + oy * oy + oz * oz);
+  if (len < 1e-8f) {
+    ox = 1.0f;
+    oy = 0.0f;
+    oz = 0.0f;
+    return;
+  }
+  ox /= len;
+  oy /= len;
+  oz /= len;
+}
+
+inline int official_main_clip_poly_view(const float* ix, const float* iy, const float* iz, int n,
+                                        float aspect, float* ox, float* oy, float* oz) noexcept {
+  if (n < 3 || n > kOfficialViewClipMaxVerts) {
+    return 0;
+  }
+  float ax[kOfficialViewClipMaxVerts];
+  float ay[kOfficialViewClipMaxVerts];
+  float az[kOfficialViewClipMaxVerts];
+  float bx[kOfficialViewClipMaxVerts];
+  float by[kOfficialViewClipMaxVerts];
+  float bz[kOfficialViewClipMaxVerts];
+  for (int i = 0; i < n; ++i) {
+    ax[i] = ix[i];
+    ay[i] = iy[i];
+    az[i] = iz[i];
+  }
+  int an = n;
+  auto plane_val = [&](float x, float y, float z, int plane) {
+    float cx = 0.0f, cy = 0.0f, cw = 0.0f;
+    official_main_clip_coord(x, y, z, aspect, cx, cy, cw);
+    switch (plane) {
+      case 0:
+        return cw - kOfficialCameraNearClip;
+      case 1:
+        return cw + cx;
+      case 2:
+        return cw - cx;
+      case 3:
+        return cw + cy;
+      default:
+        return cw - cy;
+    }
+  };
+  for (int plane = 0; plane < 5; ++plane) {
+    int bn = 0;
+    if (an < 3) {
+      return 0;
+    }
+    for (int i = 0; i < an; ++i) {
+      const int j = (i + an - 1) % an;
+      const float v0 = plane_val(ax[j], ay[j], az[j], plane);
+      const float v1 = plane_val(ax[i], ay[i], az[i], plane);
+      const bool in0 = v0 >= 0.0f;
+      const bool in1 = v1 >= 0.0f;
+      if (in0 != in1) {
+        const float den = v0 - v1;
+        const float t = std::fabs(den) < 1e-8f ? 0.0f : v0 / den;
+        if (bn < kOfficialViewClipMaxVerts) {
+          bx[bn] = ax[j] + (ax[i] - ax[j]) * t;
+          by[bn] = ay[j] + (ay[i] - ay[j]) * t;
+          bz[bn] = az[j] + (az[i] - az[j]) * t;
+          ++bn;
+        }
+      }
+      if (in1 && bn < kOfficialViewClipMaxVerts) {
+        bx[bn] = ax[i];
+        by[bn] = ay[i];
+        bz[bn] = az[i];
+        ++bn;
+      }
+    }
+    for (int i = 0; i < bn; ++i) {
+      ax[i] = bx[i];
+      ay[i] = by[i];
+      az[i] = bz[i];
+    }
+    an = bn;
+  }
+  for (int i = 0; i < an; ++i) {
+    ox[i] = ax[i];
+    oy[i] = ay[i];
+    oz[i] = az[i];
+  }
+  return an;
+}
+
+// Same five planes as official_main_clip_poly_view. Unity GPU clip interpolates
+// vertex attributes; Stretch Billboard UVs must ride the cut, not be rewritten
+// to 0–1 of the leftover polygon (that puts the sprite's transparent edge on
+// the near / bottom plane).
+inline int official_main_clip_poly_view_uv(const float* ix, const float* iy, const float* iz,
+                                           const float* iu, const float* iv, int n, float aspect,
+                                           float* ox, float* oy, float* oz, float* ou,
+                                           float* ov) noexcept {
+  if (n < 3 || n > kOfficialViewClipMaxVerts || iu == nullptr || iv == nullptr) {
+    return 0;
+  }
+  float ax[kOfficialViewClipMaxVerts];
+  float ay[kOfficialViewClipMaxVerts];
+  float az[kOfficialViewClipMaxVerts];
+  float au[kOfficialViewClipMaxVerts];
+  float av[kOfficialViewClipMaxVerts];
+  float bx[kOfficialViewClipMaxVerts];
+  float by[kOfficialViewClipMaxVerts];
+  float bz[kOfficialViewClipMaxVerts];
+  float bu[kOfficialViewClipMaxVerts];
+  float bv[kOfficialViewClipMaxVerts];
+  for (int i = 0; i < n; ++i) {
+    ax[i] = ix[i];
+    ay[i] = iy[i];
+    az[i] = iz[i];
+    au[i] = iu[i];
+    av[i] = iv[i];
+  }
+  int an = n;
+  auto plane_val = [&](float x, float y, float z, int plane) {
+    float cx = 0.0f, cy = 0.0f, cw = 0.0f;
+    official_main_clip_coord(x, y, z, aspect, cx, cy, cw);
+    switch (plane) {
+      case 0:
+        return cw - kOfficialCameraNearClip;
+      case 1:
+        return cw + cx;
+      case 2:
+        return cw - cx;
+      case 3:
+        return cw + cy;
+      default:
+        return cw - cy;
+    }
+  };
+  for (int plane = 0; plane < 5; ++plane) {
+    int bn = 0;
+    if (an < 3) {
+      return 0;
+    }
+    for (int i = 0; i < an; ++i) {
+      const int j = (i + an - 1) % an;
+      const float v0 = plane_val(ax[j], ay[j], az[j], plane);
+      const float v1 = plane_val(ax[i], ay[i], az[i], plane);
+      const bool in0 = v0 >= 0.0f;
+      const bool in1 = v1 >= 0.0f;
+      if (in0 != in1) {
+        const float den = v0 - v1;
+        const float t = std::fabs(den) < 1e-8f ? 0.0f : v0 / den;
+        if (bn < kOfficialViewClipMaxVerts) {
+          bx[bn] = ax[j] + (ax[i] - ax[j]) * t;
+          by[bn] = ay[j] + (ay[i] - ay[j]) * t;
+          bz[bn] = az[j] + (az[i] - az[j]) * t;
+          bu[bn] = au[j] + (au[i] - au[j]) * t;
+          bv[bn] = av[j] + (av[i] - av[j]) * t;
+          ++bn;
+        }
+      }
+      if (in1 && bn < kOfficialViewClipMaxVerts) {
+        bx[bn] = ax[i];
+        by[bn] = ay[i];
+        bz[bn] = az[i];
+        bu[bn] = au[i];
+        bv[bn] = av[i];
+        ++bn;
+      }
+    }
+    for (int i = 0; i < bn; ++i) {
+      ax[i] = bx[i];
+      ay[i] = by[i];
+      az[i] = bz[i];
+      au[i] = bu[i];
+      av[i] = bv[i];
+    }
+    an = bn;
+  }
+  for (int i = 0; i < an; ++i) {
+    ox[i] = ax[i];
+    oy[i] = ay[i];
+    oz[i] = az[i];
+    ou[i] = au[i];
+    ov[i] = av[i];
+  }
+  return an;
+}
+
+// View-space clip against Camera.nearClipPlane only, then the caller projects.
+// Preview is a 2D overlay: there is no 3D GPU clip, so a behind-camera corner
+// projected with max(z, 1e-4) explodes NDC. Unity rasterizes the leftover
+// after homogeneous near clip. Plane value is OpenWDS playfield 0.1 (scene +
+// N6 dump), not Unity's 0.3 default.
+// Side planes are the 2D viewport after projection — not a new size measure.
+// CPU Sutherland–Hodgman here is hop (preview is not a 3D GPU); 禁止标 2022.3.
+inline int official_main_clip_poly_near_uv(const float* ix, const float* iy, const float* iz,
+                                           const float* iu, const float* iv, int n, float* ox,
+                                           float* oy, float* oz, float* ou, float* ov) noexcept {
+  if (n < 3 || n > kOfficialViewClipMaxVerts || iu == nullptr || iv == nullptr || ox == nullptr ||
+      oy == nullptr || oz == nullptr || ou == nullptr || ov == nullptr) {
+    return 0;
+  }
+  const float near_z = kOfficialCameraNearClip;
+  int behind = 0;
+  int in_front = 0;
+  for (int i = 0; i < n; ++i) {
+    if (official_main_camera_z(iy[i], iz[i]) > near_z) {
+      ++in_front;
+    } else {
+      ++behind;
+    }
+  }
+  if (in_front == 0) {
+    return 0;
+  }
+  if (behind == 0) {
+    for (int i = 0; i < n; ++i) {
+      ox[i] = ix[i];
+      oy[i] = iy[i];
+      oz[i] = iz[i];
+      ou[i] = iu[i];
+      ov[i] = iv[i];
+    }
+    return n;
+  }
+  float ax[kOfficialViewClipMaxVerts];
+  float ay[kOfficialViewClipMaxVerts];
+  float az[kOfficialViewClipMaxVerts];
+  float au[kOfficialViewClipMaxVerts];
+  float av[kOfficialViewClipMaxVerts];
+  float bx[kOfficialViewClipMaxVerts];
+  float by[kOfficialViewClipMaxVerts];
+  float bz[kOfficialViewClipMaxVerts];
+  float bu[kOfficialViewClipMaxVerts];
+  float bv[kOfficialViewClipMaxVerts];
+  for (int i = 0; i < n; ++i) {
+    ax[i] = ix[i];
+    ay[i] = iy[i];
+    az[i] = iz[i];
+    au[i] = iu[i];
+    av[i] = iv[i];
+  }
+  int bn = 0;
+  auto plane_val = [&](float y, float z) { return official_main_camera_z(y, z) - near_z; };
+  for (int i = 0; i < n; ++i) {
+    const int j = (i + n - 1) % n;
+    const float v0 = plane_val(ay[j], az[j]);
+    const float v1 = plane_val(ay[i], az[i]);
+    const bool in0 = v0 >= 0.0f;
+    const bool in1 = v1 >= 0.0f;
+    if (in0 != in1) {
+      const float den = v0 - v1;
+      const float t = std::fabs(den) < 1e-8f ? 0.0f : v0 / den;
+      if (bn < kOfficialViewClipMaxVerts) {
+        bx[bn] = ax[j] + (ax[i] - ax[j]) * t;
+        by[bn] = ay[j] + (ay[i] - ay[j]) * t;
+        bz[bn] = az[j] + (az[i] - az[j]) * t;
+        bu[bn] = au[j] + (au[i] - au[j]) * t;
+        bv[bn] = av[j] + (av[i] - av[j]) * t;
+        ++bn;
+      }
+    }
+    if (in1 && bn < kOfficialViewClipMaxVerts) {
+      bx[bn] = ax[i];
+      by[bn] = ay[i];
+      bz[bn] = az[i];
+      bu[bn] = au[i];
+      bv[bn] = av[i];
+      ++bn;
+    }
+  }
+  if (bn < 3) {
+    return 0;
+  }
+  for (int i = 0; i < bn; ++i) {
+    ox[i] = bx[i];
+    oy[i] = by[i];
+    oz[i] = bz[i];
+    ou[i] = bu[i];
+    ov[i] = bv[i];
+  }
+  return bn;
 }
 
 inline OfficialNdc project_judge_xyz(float local_x, float local_y, float local_z,
@@ -491,8 +957,8 @@ inline float official_judgeline_percent() noexcept {
   return official_judge_y_to_percent(0.0f);
 }
 
-inline float official_lane_border_alpha(int split_line_opacity = 100) noexcept {
-  const int o = std::clamp(split_line_opacity, 0, 100);
+inline float official_lane_border_alpha(int /*split_line_opacity*/ = 100) noexcept {
+  const int o = kOfficialDefaultLaneAlphaValue;
   return (kOfficialLaneBorderAlphaMin +
           kOfficialLaneBorderAlphaRange * static_cast<float>(o) / 100.0f) /
          255.0f;

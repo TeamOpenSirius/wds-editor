@@ -1,0 +1,3 @@
+-8015457887526078469	Shader	d551fdebe953d818fb870054c43860041fffbfd6371c80a0456bb19abc9615ef	
+1	AssetBundle	56c92873a229c661ca8e427cb7e1abb924e5ff1bc16f8225d19114e50ea45609	m_PreloadTable[0]|0|-8015457887526078469|urp_assets_urp/fallbackerror.shader.bundle;m_PreloadTable[1]|0|2214449235232778024|urp_assets_urp/fallbackerror.shader.bundle
+2214449235232778024	Shader	bd03e38a96407a0e908f52bcaf33eca8bf84b0755758f5b505d413a35466faa1	m_Dependencies[0]|0|-8015457887526078469|urp_assets_urp/fallbackerror.shader.bundle

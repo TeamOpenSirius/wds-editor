@@ -71,6 +71,93 @@ fs::path temp_chart_path(const char* name) {
   return dir / name;
 }
 
+fs::path temp_chart_path(const std::string& name) {
+  return temp_chart_path(name.c_str());
+}
+
+bool timing_points_equal(const MusicTiming& a, const MusicTiming& b) {
+  if (a.bpm != b.bpm || a.ticks_per_quarter != b.ticks_per_quarter) {
+    return false;
+  }
+  if (a.points.size() != b.points.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.points.size(); ++i) {
+    const auto& x = a.points[i];
+    const auto& y = b.points[i];
+    if (x.tick != y.tick || x.bpm != y.bpm || x.numerator != y.numerator ||
+        x.denominator != y.denominator || x.has_bpm != y.has_bpm ||
+        x.has_meter != y.has_meter) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool notation_note_wdschart_equal(const NotationNote& a, const NotationNote& b) {
+  return a.id == b.id && a.start_tick == b.start_tick && a.end_tick == b.end_tick &&
+         a.lane == b.lane && a.width == b.width && a.note_type == b.note_type &&
+         a.gimmick_type == b.gimmick_type && a.scratch_length == b.scratch_length;
+}
+
+std::vector<NotationNote> notes_without_hold_eighths(const std::vector<NotationNote>& notes) {
+  std::vector<NotationNote> out;
+  out.reserve(notes.size());
+  for (const auto& n : notes) {
+    if (n.note_type != NoteType::HoldEighth) {
+      out.push_back(n);
+    }
+  }
+  return out;
+}
+
+bool charts_wdschart_persisted_equal(const NotationChart& a, const NotationChart& b) {
+  if (!timing_points_equal(a.timing, b.timing)) {
+    return false;
+  }
+  if (a.concurrent_lines.size() != b.concurrent_lines.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.concurrent_lines.size(); ++i) {
+    const auto& x = a.concurrent_lines[i];
+    const auto& y = b.concurrent_lines[i];
+    if (x.milliseconds != y.milliseconds || x.start_lane != y.start_lane ||
+        x.width != y.width) {
+      return false;
+    }
+  }
+  const auto na = notes_without_hold_eighths(a.notes);
+  const auto nb = notes_without_hold_eighths(b.notes);
+  if (na.size() != nb.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < na.size(); ++i) {
+    if (!notation_note_wdschart_equal(na[i], nb[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+SerializeResult wdschart_file_roundtrip(const NotationChart& in, NotationChart& out,
+                                        const fs::path& path) {
+  NotationChart to_save = in;
+  to_save.timing.offset_ms = 0;
+  const auto save = ChartSerializer::save_to_file(to_save, path.string());
+  if (save.error != SerializeError::Ok) {
+    return save;
+  }
+  return ChartSerializer::load_from_file(path.string(), out);
+}
+
+int32_t min_persisted_start_tick(const NotationChart& chart) {
+  int32_t min_tick = INT32_MAX;
+  for (const auto& n : notes_without_hold_eighths(chart.notes)) {
+    min_tick = std::min(min_tick, n.start_tick);
+  }
+  return min_tick;
+}
+
 void test_auto_note_id_starts_at_zero() {
   ChartDocument doc;
   const int32_t a = doc.add_note(make_tap(0, 0));
@@ -1368,14 +1455,15 @@ void test_split_fadein_direction_from_linehight_z180() {
   };
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
-  const int64_t mid = start_ms - 500;  // t=0.5 → tilt+FOV projected tips
-  const float kTip = official_split_fade_in_from_tip_end(0.5f);
-  const float kId = official_split_fade_in_from_judge_start(0.5f);
+  const int64_t mid = start_ms - 500;  // play_t=0.5; LineHight lag 1/60
+  const float kMidT = 0.5f - (1.0f / 60.0f);
+  const float kTip = official_split_fade_in_from_tip_end(kMidT);
+  const float kId = official_split_fade_in_from_judge_start(kMidT);
 
   PreviewSplitLaneInstance bottom;
   sim.fill_instance(bottom, make_split(10390, GimmickType::Split4), timing, mid);
   CHECK(std::fabs(bottom.split_percent_start - kId) < 0.02f);
-  CHECK(std::fabs(bottom.split_percent_end - 1.0f) < 0.02f);
+  CHECK(std::fabs(bottom.split_percent_end - official_split_identity_origin_percent()) < 0.02f);
   CHECK(bottom.split_percent_start < 0.10f);
 
   PreviewSplitLaneInstance tip;
@@ -1387,7 +1475,8 @@ void test_split_fadein_direction_from_linehight_z180() {
   PreviewSplitLaneInstance id_11611;
   sim.fill_instance(id_11611, make_split(11611, GimmickType::Split6), timing, mid);
   CHECK(id_11611.split_percent_start < 0.10f);
-  CHECK(std::fabs(id_11611.split_percent_end - 1.0f) < 0.02f);
+  CHECK(std::fabs(id_11611.split_percent_end - official_split_identity_origin_percent()) <
+        0.02f);
 
   PreviewSplitLaneInstance id_11612;
   sim.fill_instance(id_11612, make_split(11612, GimmickType::Split6), timing, mid);
@@ -1423,9 +1512,8 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   // Not the old ease-out quad (0.75 at t=0.5).
   CHECK(std::fabs(official_split_fade_in_scale(0.5f) - 0.75f) > 0.02f);
 
-  // Official scheduler: fadeIn at start−1s; fadeOut at EndTickCount.
-  // MinimumShowingMilliseconds is unused. Zero-length still gets the 1s show
-  // window, then hide starts immediately at start==end (no start+1500 pad).
+  // OpenWDS: fadeIn at start−1s. Tick hides at EndTickCount. Destroy 0.5s.
+  // Zero-length therefore plays fadeIn then immediately fadeOut.
   PreviewConfig cfg;
   SplitLaneSimulator sim(cfg);
   MusicTiming timing;
@@ -1439,6 +1527,8 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   note.scratch_length = 10390;
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  const int64_t expire_ms = official_split_expire_ms(start_ms, start_ms);
+  CHECK_EQ(expire_ms, start_ms);
   CHECK(sim.is_split_active(note, timing, start_ms - 1000));
   CHECK(!sim.is_split_active(note, timing, start_ms - 1001));
 
@@ -1446,19 +1536,20 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   sim.fill_instance(mid_in, note, timing, start_ms - 500);
   CHECK_EQ(mid_in.split_anim_phase, 0);
   CHECK(std::fabs(mid_in.split_line_alpha - 1.0f) < 0.02f);
-  CHECK(std::fabs(mid_in.split_percent_start - official_split_fade_in_from_judge_start(0.5f)) <
-        0.02f);
+  CHECK(std::fabs(mid_in.split_percent_start -
+                  official_split_fade_in_from_judge_start(0.5f - (1.0f / 60.0f))) < 0.02f);
 
   PreviewSplitLaneInstance at_end;
   sim.fill_instance(at_end, note, timing, start_ms);
-  CHECK_EQ(at_end.split_anim_phase, 1);
+  CHECK_EQ(at_end.split_anim_phase, 2);
+  CHECK(std::fabs(at_end.split_line_alpha - 1.0f) < 0.02f);
 
   PreviewSplitLaneInstance fade_out;
-  sim.fill_instance(fade_out, note, timing, start_ms + 75);
+  sim.fill_instance(fade_out, note, timing, expire_ms + 250);
   CHECK_EQ(fade_out.split_anim_phase, 2);
-  CHECK(std::fabs(fade_out.split_line_alpha - 0.84375f) < 0.02f);
-  CHECK(!sim.is_split_active(note, timing, start_ms + 300));
-  CHECK(!sim.is_split_active(note, timing, start_ms + 1500));
+  CHECK(std::fabs(fade_out.split_line_alpha - 0.0740741f) < 0.005f);
+  CHECK(sim.is_split_active(note, timing, expire_ms + 499));
+  CHECK(!sim.is_split_active(note, timing, expire_ms + 500));
 }
 
 void test_official_playfield_visual_lanes_are_six() {
@@ -1476,7 +1567,8 @@ void test_official_playfield_visual_lanes_are_six() {
   CHECK_EQ(official_visual_border_edge_index(1), 2);
   CHECK_EQ(official_visual_border_edge_index(3), 6);
   CHECK_EQ(official_visual_border_edge_index(6), 12);
-  CHECK(std::fabs(official_lane_border_alpha(100) - 51.0f / 255.0f) < 1e-5f);
+  CHECK(std::fabs(official_lane_border_alpha(100) - 43.6f / 255.0f) < 1e-5f);
+  CHECK(std::fabs(official_lane_border_alpha(10) - official_lane_border_alpha(100)) < 1e-6f);
 }
 
 void test_official_judge_sprite_pink_peaks_sit_on_track_edges() {
@@ -1691,7 +1783,12 @@ void test_official_split_fade_in_visible_hits_screen_before_clip_end() {
   CHECK(official_split_fade_in_from_tip_end(0.50f) > 0.28f);
   CHECK(official_split_fade_in_from_tip_end(0.50f) < 0.45f);
   CHECK(official_split_fade_in_from_tip_end(0.83f) >= 0.99f);
-  CHECK(std::fabs(official_split_fade_in_from_tip_end(1.0f) - 1.0f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_in_from_tip_end(1.0f) - official_split_z180_near_percent()) <
+        1e-4f);
+  CHECK(official_split_fade_in_from_tip_end(1.0f) > 1.0f);
+  CHECK(std::fabs(official_split_fade_in_from_judge_start(0.0f) -
+                  official_split_identity_origin_percent()) < 1e-4f);
+  CHECK(official_split_identity_origin_percent() > official_judgeline_percent());
   const float first =
       official_split_fade_in_from_tip_end(0.2f) - official_split_fade_in_from_tip_end(0.0f);
   const float last =
@@ -1735,9 +1832,10 @@ void test_official_split_fade_in_visible_hits_screen_before_clip_end() {
   PreviewSplitLaneInstance mid_tip;
   sim.fill_instance(mid_id, identity, timing, start_ms - 500);
   sim.fill_instance(mid_tip, tip, timing, start_ms - 500);
-  CHECK(std::fabs(mid_id.split_percent_start - official_split_fade_in_from_judge_start(0.5f)) <
-        0.01f);
-  CHECK(std::fabs(mid_tip.split_percent_end - official_split_fade_in_from_tip_end(0.5f)) < 0.01f);
+  CHECK(std::fabs(mid_id.split_percent_start -
+                  official_split_fade_in_from_judge_start(0.5f - (1.0f / 60.0f))) < 0.01f);
+  CHECK(std::fabs(mid_tip.split_percent_end -
+                  official_split_fade_in_from_tip_end(0.5f - (1.0f / 60.0f))) < 0.01f);
   CHECK(mid_tip.split_percent_end > mid_id.split_percent_start);
 
   PreviewSplitLaneInstance late_id;
@@ -1771,14 +1869,15 @@ void test_official_split_fade_in_scale_is_playfield_coverage() {
   sim.fill_instance(tip_mid, tip, timing, start_ms - 500);  // t=0.5
   CHECK_EQ(tip_mid.split_anim_phase, 0);
   CHECK(tip_mid.split_percent_start < 0.02f);
-  CHECK(std::fabs(tip_mid.split_percent_end - official_split_fade_in_visible(0.5f)) < 0.02f);
+  CHECK(std::fabs(tip_mid.split_percent_end -
+                  official_split_fade_in_visible(0.5f - (1.0f / 60.0f))) < 0.02f);
 }
 
-void test_official_split_fade_out_is_300ms_smoothstep_from_end() {
-  // Official SplitEffect_fadeOut_anim (1.96.0 animators.bundle): m_Color.a keys
-  // at t=0 (1) and t=0.3 (0). Cubic is 1 - smoothstep(u), u=t/0.3.
-  // Hide starts at EndMilliseconds — not start+1500.
+void test_official_split_fade_out_is_0_3s_smoothstep_from_expire() {
+  // Runtime animators.bundle fadeOut keys a at t=0 / t=0.3 (1−smoothstep).
+  // Tick starts fadeOut at EndMs; Destroy 0.5s.
   CHECK(std::fabs(PreviewConfig{}.split_line_animation_end_sec - 0.3f) < 1e-5f);
+  CHECK(std::fabs(kOfficialSplitFadeOutSec - 0.3f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.0f) - 1.0f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.25f) - 0.84375f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.5f) - 0.5f) < 1e-5f);
@@ -1793,32 +1892,38 @@ void test_official_split_fade_out_is_300ms_smoothstep_from_end() {
 
   NotationNote note;
   note.start_tick = 4800;  // 10s
-  note.end_tick = 5280;    // 11s — 1000ms span, below the old 1500ms pad
+  note.end_tick = 5280;    // 11s
   note.gimmick_type = GimmickType::Split3;
   note.scratch_length = 10390;
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
   const int64_t end_ms = tick_to_milliseconds(5280, timing);
   CHECK_EQ(end_ms - start_ms, 1000);
+  const int64_t expire_ms = official_split_expire_ms(start_ms, end_ms);
+  CHECK_EQ(expire_ms, end_ms);
 
-  PreviewSplitLaneInstance at_end;
-  sim.fill_instance(at_end, note, timing, end_ms);
-  CHECK_EQ(at_end.split_anim_phase, 1);
-  CHECK(std::fabs(at_end.split_line_alpha - 1.0f) < 0.02f);
+  PreviewSplitLaneInstance before_end;
+  sim.fill_instance(before_end, note, timing, end_ms - 1);
+  CHECK_EQ(before_end.split_anim_phase, 1);
+  CHECK(std::fabs(before_end.split_line_alpha - 1.0f) < 0.02f);
+  CHECK(std::fabs(before_end.split_percent_end - official_split_identity_origin_percent()) <
+        1e-4f);
+
+  PreviewSplitLaneInstance at_expire;
+  sim.fill_instance(at_expire, note, timing, expire_ms);
+  CHECK_EQ(at_expire.split_anim_phase, 2);
+  CHECK(std::fabs(at_expire.split_line_alpha - 1.0f) < 0.02f);
 
   PreviewSplitLaneInstance quarter;
-  sim.fill_instance(quarter, note, timing, end_ms + 75);
+  sim.fill_instance(quarter, note, timing, expire_ms + 250);
   CHECK_EQ(quarter.split_anim_phase, 2);
-  CHECK(std::fabs(quarter.split_line_alpha - 0.84375f) < 0.02f);
+  // align2-n5 Unity effect 3 at E+0.255: line a 0.0753.
+  CHECK(std::fabs(quarter.split_line_alpha - 0.0740741f) < 0.005f);
+  CHECK(std::fabs(quarter.split_percent_end - official_split_identity_origin_percent()) <
+        1e-4f);
 
-  PreviewSplitLaneInstance mid;
-  sim.fill_instance(mid, note, timing, end_ms + 150);
-  CHECK_EQ(mid.split_anim_phase, 2);
-  CHECK(std::fabs(mid.split_line_alpha - 0.5f) < 0.02f);
-
-  CHECK(sim.is_split_active(note, timing, end_ms + 299));
-  CHECK(!sim.is_split_active(note, timing, end_ms + 300));
-  CHECK(!sim.is_split_active(note, timing, start_ms + 1500));
+  CHECK(sim.is_split_active(note, timing, expire_ms + 499));
+  CHECK(!sim.is_split_active(note, timing, expire_ms + 500));
 }
 
 void test_split_color_slot_mirrors_linehight_z180() {
@@ -2026,6 +2131,172 @@ void test_official_chart_load_auto() {
     if (n.note_type == NoteType::HoldEighth) ++eighths;
   }
   CHECK_EQ(eighths, 1);
+}
+
+void test_official_chart_five_column_form_matches_openwds() {
+  // OpenWDS StandardNotation.Parse accepts compact 5-column rows and fills
+  // gimmick type/value with zero. This form is useful for a hand-authored
+  // baseline chart that contains ordinary notes next to 7-column splits.
+  const std::string csv =
+      "0.0,-1.0,10,1,1\n"
+      "1.0,2.0,100,2,2,\n";  // six columns must still be rejected
+  NotationChart chart;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart).error),
+           static_cast<int>(SerializeError::ParseError));
+
+  const std::string compact = "0.0,-1.0,10,1,1\n";
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(compact, chart).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(chart.notes.size(), static_cast<size_t>(1));
+  if (!chart.notes.empty()) {
+    CHECK_EQ(static_cast<int>(chart.notes[0].gimmick_type),
+             static_cast<int>(GimmickType::None));
+    CHECK_EQ(chart.notes[0].scratch_length, 0);
+    CHECK_EQ(chart.notes[0].lane, 0);  // official lane 1 → editor lane 0
+  }
+  CHECK(OfficialChartFormat::looks_like_official_chart_text(compact));
+}
+
+void test_official_chart_accepts_negative_start_seconds() {
+  // OpenWDS StandardNotation.Parse has no lower bound on start/end seconds.
+  const std::string csv =
+      "-0.0487,-1.0,10,1,1\n"
+      "1.0,-1.0,10,2,1\n";
+  NotationChart chart;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(chart.notes.size(), static_cast<size_t>(2));
+
+  MusicTiming local = chart.timing;
+  local.offset_ms = 0;
+  const int64_t csv_ms = static_cast<int64_t>(std::llround(-0.0487 * 1000.0));
+  CHECK_EQ(chart.notes[0].start_tick, milliseconds_to_tick(csv_ms, local));
+  CHECK_EQ(chart.notes[0].start_ms(local),
+           tick_to_milliseconds(chart.notes[0].start_tick, local));
+
+  std::string exported;
+  CHECK_EQ(static_cast<int>(
+               OfficialChartFormat::serialize_chart(chart, exported).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(exported.front() == '-');
+  NotationChart roundtrip;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(exported, roundtrip).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(roundtrip.notes[0].start_tick, chart.notes[0].start_tick);
+
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart("nan,-1.0,10,1,1\n", chart).error),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_wdschart_accepts_negative_note_ticks() {
+  NotationChart chart;
+  normalize_timing_points(chart.timing);
+  NotationNote early = make_tap(-24, 0);
+  early.id = 0;
+  early.end_tick = -24;
+  chart.notes.push_back(early);
+
+  NotationNote split = make_tap(-400, 0);
+  split.id = 1;
+  split.end_tick = -100;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.width = 0;
+  chart.notes.push_back(split);
+
+  const fs::path path = temp_chart_path("negative_ticks_roundtrip.wdschart");
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(wdschart_file_roundtrip(chart, loaded, path).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(charts_wdschart_persisted_equal(chart, loaded));
+  CHECK_EQ(loaded.notes[0].start_tick, -24);
+  CHECK_EQ(loaded.notes[1].end_tick, -100);
+
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "neg_tick_reject.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\nN 0 0 -2147484000.0 10 0 1 0 0 "
+               "-1\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_official_standard_charts_wdschart_and_csv_roundtrip() {
+  const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path() /
+                        "wds-resources/SongResources/OpenWDS/StandardCharts";
+  if (!fs::exists(root)) {
+    return;
+  }
+
+  const fs::path sample_paths[] = {
+      root / "10068/1/5.csv",
+      root / "265/1/5.csv",
+  };
+  for (const auto& csv_path : sample_paths) {
+    if (!fs::exists(csv_path)) {
+      continue;
+    }
+    NotationChart official;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::load_chart_file(csv_path.string(), official).error),
+             static_cast<int>(SerializeError::Ok));
+
+    bool has_negative_start = false;
+    for (const auto& n : official.notes) {
+      if (n.start_tick < 0) {
+        has_negative_start = true;
+        break;
+      }
+    }
+    CHECK(has_negative_start);
+
+    const fs::path wds_path =
+        temp_chart_path("std_" + csv_path.parent_path().parent_path().filename().string() + "_" +
+                        csv_path.filename().string() + ".wdschart");
+    NotationChart from_wds;
+    CHECK_EQ(static_cast<int>(wdschart_file_roundtrip(official, from_wds, wds_path).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(charts_wdschart_persisted_equal(official, from_wds));
+
+    std::string csv_out;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(official, csv_out).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(csv_out.find('-') != std::string::npos);
+    NotationChart from_csv;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv_out, from_csv).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK_EQ(notes_without_hold_eighths(official.notes).size(),
+             notes_without_hold_eighths(from_csv.notes).size());
+    CHECK_EQ(min_persisted_start_tick(official), min_persisted_start_tick(from_csv));
+    CHECK(min_persisted_start_tick(from_csv) < 0);
+  }
+
+  int roundtrip_ok = 0;
+  int roundtrip_fail = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".csv") {
+      continue;
+    }
+    if (entry.path().filename() == "music_config.csv") {
+      continue;
+    }
+    NotationChart official;
+    if (OfficialChartFormat::load_chart_file(entry.path().string(), official).error !=
+        SerializeError::Ok) {
+      ++roundtrip_fail;
+      continue;
+    }
+    const fs::path wds_path = temp_chart_path(
+        "scan_" + std::to_string(roundtrip_ok + roundtrip_fail) + ".wdschart");
+    NotationChart reloaded;
+    const auto rt = wdschart_file_roundtrip(official, reloaded, wds_path);
+    if (rt.error != SerializeError::Ok || !charts_wdschart_persisted_equal(official, reloaded)) {
+      ++roundtrip_fail;
+    } else {
+      ++roundtrip_ok;
+    }
+  }
+  std::fprintf(stderr, "StandardCharts wdschart roundtrip: ok=%d fail=%d\n", roundtrip_ok,
+               roundtrip_fail);
+  CHECK_EQ(roundtrip_fail, 0);
+  CHECK_EQ(roundtrip_ok, 1466);
 }
 
 void test_load_repo_test_official_charts() {
@@ -6294,6 +6565,39 @@ void test_convert_notes_in_selection_hold_stars() {
   CHECK_EQ(to_hold.updates.at(12).parent_hold_id, 10);
 }
 
+void test_convert_skips_split_lane_gimmicks() {
+  ChartDocument doc;
+  NotationNote tap = make_tap(0, 3);
+  tap.id = 1;
+  tap.width = 2;
+  CHECK(doc.add_note(tap) == 1);
+  NotationNote split;
+  split.id = 2;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.scratch_length = 10120;
+  split.start_tick = 0;
+  split.end_tick = 480;
+  split.lane = 0;
+  split.width = 12;
+  CHECK(doc.add_note(split) == 2);
+
+  CHECK(!is_playfield_selectable(*doc.find_note(2)));
+  CHECK(is_playfield_selectable(*doc.find_note(1)));
+
+  const NotationNote before = *doc.find_note(2);
+  const NotationNote converted = convert_note_type(before, NoteType::Normal, 480);
+  CHECK_EQ(converted.note_type, NoteType::None);
+  CHECK(converted.gimmick_type == GimmickType::Split3);
+  CHECK_EQ(converted.scratch_length, 10120);
+  CHECK_EQ(converted.width, 12);
+
+  const auto planned = convert_notes_in_selection(doc, {1, 2}, NoteType::Flick);
+  CHECK(planned.updates.find(2) == planned.updates.end());
+  CHECK(planned.updates.at(1).note_type == NoteType::Flick);
+  CHECK(planned.removals.empty());
+}
+
 NotationNote note_with_id(int32_t id, int32_t start_tick, int32_t lane) {
   NotationNote note = make_tap(start_tick, lane);
   note.id = id;
@@ -7768,6 +8072,7 @@ int main() {
   test_hold_head_pairs_exact_span_and_family();
   test_resolve_convert_target_is_identity();
   test_convert_notes_in_selection_hold_stars();
+  test_convert_skips_split_lane_gimmicks();
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
   test_normalize_remaps_and_rebinds_star_parents();
@@ -7823,12 +8128,16 @@ int main() {
   test_official_split_fade_in_cubic_and_zero_length();
   test_official_split_fade_in_visible_hits_screen_before_clip_end();
   test_official_split_fade_in_scale_is_playfield_coverage();
-  test_official_split_fade_out_is_300ms_smoothstep_from_end();
+  test_official_split_fade_out_is_0_3s_smoothstep_from_expire();
   test_split_color_slot_mirrors_linehight_z180();
   test_hold_start_visible_with_zero_end_tick();
   test_load_legacy_v1_wdschart();
   test_official_chart_import_and_roundtrip();
   test_official_chart_load_auto();
+  test_official_chart_five_column_form_matches_openwds();
+  test_official_chart_accepts_negative_start_seconds();
+  test_wdschart_accepts_negative_note_ticks();
+  test_official_standard_charts_wdschart_and_csv_roundtrip();
   test_load_repo_test_official_charts();
   test_wdsproject_format_roundtrip_and_relative_paths();
   test_edit_grid_and_note_operations();

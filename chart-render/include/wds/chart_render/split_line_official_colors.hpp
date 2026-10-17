@@ -6,7 +6,9 @@
 
 namespace wds::chart_render {
 
-// Official Initialize: RGB *= settings/100; SpriteRenderer.a stays _lineColor.a.
+// Official Initialize: RGB *= settings/100 and SpriteRenderer.a = _lineColor.a,
+// but OnFadeIn's SplitEffect_fadeIn_anim then keys m_Color.a to 1 on every line,
+// so the running game shows the clip alpha, not the prefab alpha.
 // fade_alpha is the Hide clip (1→0). Do not fold rgb_opacity into a.
 inline void apply_split_line_opacity(float& r, float& g, float& b, float& a, float rgb_opacity,
                                      float fade_alpha) noexcept {

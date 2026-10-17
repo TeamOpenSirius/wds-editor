@@ -21,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace wds::renderer {
@@ -230,6 +231,12 @@ inline constexpr bool create_sync_object_ok(VkResult result) noexcept {
   return result == VK_SUCCESS;
 }
 
+inline constexpr bool recover_surface_has_reacquire(bool has_create_surface,
+                                                   bool has_acquire_surface,
+                                                   bool owns_surface) noexcept {
+  return owns_surface ? has_create_surface : has_acquire_surface;
+}
+
 inline constexpr WsiRecoverAction classify_wsi_result(VkResult result) noexcept {
   switch (result) {
     case VK_SUCCESS:
@@ -402,6 +409,67 @@ inline constexpr uint32_t preferred_swapchain_image_count(uint32_t min_images, u
   return want;
 }
 
+// VkMappedMemoryRange: offset down to nonCoherentAtomSize, size up (or
+// VK_WHOLE_SIZE when the rounded end would pass the allocation). size==0 skips.
+// VUID-VkMappedMemoryRange-offset-00687 / size-00688 / size-01389.
+struct MappedFlushRange {
+  VkDeviceSize offset = 0;
+  VkDeviceSize size = 0;
+};
+
+inline constexpr MappedFlushRange mapped_flush_range(VkDeviceSize offset, VkDeviceSize bytes,
+                                                     VkDeviceSize atom,
+                                                     VkDeviceSize alloc_size) noexcept {
+  MappedFlushRange out{};
+  if (bytes == 0) {
+    return out;
+  }
+  if (atom == 0) {
+    atom = 1;
+  }
+  if (alloc_size == 0) {
+    out.offset = (offset / atom) * atom;
+    out.size = VK_WHOLE_SIZE;
+    return out;
+  }
+  if (offset >= alloc_size) {
+    return out;
+  }
+  const VkDeviceSize start = (offset / atom) * atom;
+  VkDeviceSize end = offset + bytes;
+  if (end > alloc_size) {
+    end = alloc_size;
+  }
+  const VkDeviceSize aligned_end = ((end + atom - 1) / atom) * atom;
+  out.offset = start;
+  if (aligned_end >= alloc_size) {
+    out.size = VK_WHOLE_SIZE;
+    return out;
+  }
+  out.size = aligned_end - start;
+  return out;
+}
+
+inline constexpr bool mapped_flush_range_valid(MappedFlushRange range, VkDeviceSize atom,
+                                               VkDeviceSize alloc_size) noexcept {
+  if (range.size == 0) {
+    return true;
+  }
+  if (atom == 0) {
+    atom = 1;
+  }
+  if ((range.offset % atom) != 0) {
+    return false;
+  }
+  if (range.size == VK_WHOLE_SIZE) {
+    return alloc_size == 0 || range.offset < alloc_size;
+  }
+  if (alloc_size == 0 || range.offset + range.size > alloc_size) {
+    return false;
+  }
+  return ((range.size % atom) == 0) || (range.offset + range.size == alloc_size);
+}
+
 // Never occupy every swapchain image with in-flight submits — leave at least
 // one for the presentation engine. 3 images → 2 FIF; 5 images → 3 FIF.
 inline constexpr int frames_in_flight_for_swapchain(uint32_t image_count,
@@ -475,6 +543,11 @@ class VulkanRenderer {
 
   bool resize(int width, int height);
 
+  // Platform surface is about to die (e.g. QPlatformSurfaceEvent). Drop the
+  // swapchain and the adopted handle; do not destroy a host-owned VkSurfaceKHR.
+  // The next draw/resize recovers via acquire_surface / create_surface.
+  void abandon_host_surface();
+
   // Win exclusive-fullscreen path: when true, recreate swapchain with
   // VK_EXT_full_screen_exclusive (APPLICATION_CONTROLLED) and acquire.
   // No-op on non-Win or when the extension is unavailable.
@@ -493,6 +566,34 @@ class VulkanRenderer {
   int64_t last_acquire_wait_us() const noexcept;
   int64_t last_present_us() const noexcept;
   int64_t last_gpu_submit_us() const noexcept;
+  int64_t last_draw_record_us() const noexcept;
+  // Last draw_frame VB / pass facts (used bytes, not ring capacity).
+  struct DrawFrameCpuDiag {
+    int64_t record_us = 0;
+    size_t used_bytes = 0;
+    size_t cap_bytes = 0;
+    size_t ring_bytes = 0;
+    size_t ib_used_bytes = 0;
+    size_t ib_cap_bytes = 0;
+    size_t ib_ring_bytes = 0;
+    size_t total_verts = 0;
+    size_t early_verts = 0;
+    size_t carve_verts = 0;
+    int staging = 0;
+    int bloom = 0;
+    int carve_pass = 0;
+    int64_t draws = 0;
+    int64_t pipe_binds = 0;
+    int64_t desc_binds = 0;
+    int64_t push_consts = 0;
+    int64_t render_passes = 0;
+    int64_t vb_binds = 0;
+  };
+  DrawFrameCpuDiag last_draw_cpu() const noexcept;
+  // Latest GPU timestamp-query segment times (nanoseconds). Empty until
+  // WDS_FRAME_DIAG=1 has collected a completed in-flight slot. Values lag
+  // by frames_in_flight; all zeros when timestamps are unsupported.
+  const std::vector<std::pair<const char*, int64_t>>& last_gpu_segments() const;
 
   // Opt-in segmented path timings (µs). Off by default — no extra clocks.
   void set_path_diagnostics_enabled(bool enabled) noexcept;
@@ -533,23 +634,106 @@ class VulkanRenderer {
   };
 
   // Draw order (depth write off → later passes win):
-  //   batch (stage / SplitEffect) → mid_overlay (notes / edit skins) →
-  //   additive (hit VFX) → post_overlay → post_overlay2 (modals).
-  // `additive` uses SRC_ALPHA / ONE. When `additive_scissor` is set, only that
-  // pass is clipped (UI in `batch` / `mid_overlay` stays unclipped).
+  //   batch (stage / ingame_bg) → mid_overlay (notes only) →
+  //   early_additive HDR (line plates, sort 0) → late additive HDR (hits) →
+  //   scene_carve (all split-effect particles, blit resolved scene into FP16,
+  //   per-bucket Alpha / Additive / Trail-clip, replace).
+  // OpenWDS prefab SortingGroup=20, Note m_SortingOrder=10, line SpriteRenderer
+  // 0. Unity 2022.3 Renderer.sortingOrder: higher draws later in the layer.
+  // HDR carve is OfflineRhythmPreview m_HDR=1 + unclamped Additive Custom1,
+  // not a sort≥1 convenience split. Trail clip 0.01 is ParticleTrailAdditive.
+  // Post overlays after replace. One+One composite is only for cleared
+  // extracts (line / hits). scene_carve replace is One Zero of the carved HDR.
+  // Mid overlay uses ParticleAlpha blend and clip(a-0.01) (kAlphaClip=1).
+  // Additive / bloom extract use clip(a-0.001) (kAlphaClip=2) unless overlay
+  // pipe selects Trail clip 0.01.
+  // When `additive_scissor` is set, the extract passes are clipped
+  // (UI in `batch` stays unclipped).
   // NOTE: DrawBatch::clear() keeps sticky bucket indices, so merging late into
   // `batch` does NOT guarantee later draw order across textures — use a later
   // pass instead.
-  bool draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r = 0.05f,
-                  float clear_g = 0.05f, float clear_b = 0.08f,
+  // Official SplitEffectSyuriken: GPU fragment (not CPU-tessellated vertex colors).
+  // `plate_tex` buckets in early_additive use this pipeline; other Add textures stay
+  // on textured_quad. No-op if the SPIR-V failed to load. Pulse world Y
+  // (batched identity ObjectToWorld, live dump darkband-orig-v1) rides in
+  // vertex alpha as positionWS.y + 64 (syuriken.frag).
+  void set_syuriken_uniforms(float time_sec, TextureId plate_tex) noexcept;
+  bool syuriken_ready() const noexcept;
+
+  // Persistent mapped VB ring. Starts at 64 MiB and grows ahead of need
+  // (75% high-water) up to kPersistentVertexRingMaxWantBytes, clamped per
+  // device by maxMemoryAllocationSize and the host-visible heap.
+  static constexpr size_t kPersistentVertexRingBytes = 64 * 1024 * 1024;
+  static constexpr size_t kPersistentVertexRingMaxWantBytes = 512 * 1024 * 1024;
+  static constexpr size_t kPersistentIndexRingBytes = 16 * 1024 * 1024;
+  static constexpr size_t kPersistentIndexRingMaxWantBytes = 128 * 1024 * 1024;
+
+  // Extra DrawBatches scattered into the mapped VB with append_from merge
+  // semantics (same-texture concat, extras skip empty). Head batches keep
+  // sticky empty slots so dump bucket order matches a CPU merge.
+  // When extras_in_mapped_vb is set, tessellation already wrote extras into
+  // the persistent ring at addresses >= mapped_extra_low; draw_frame only
+  // copies the small CPU heads into [0, mapped_extra_low).
+  struct DrawFrameExtras {
+    const DrawBatch* const* early_extra = nullptr;
+    size_t early_extra_n = 0;
+    const DrawBatch* const* mid_prefix = nullptr;
+    size_t mid_prefix_n = 0;
+    const DrawBatch* const* carve_prefix = nullptr;
+    size_t carve_prefix_n = 0;
+    bool extras_in_mapped_vb = false;
+    uint32_t mapped_extra_low = 0;
+  };
+
+  struct PersistentVbLock {
+    DrawVertex* mapped = nullptr;
+    size_t capacity_bytes = 0;
+    uint32_t* idx_mapped = nullptr;
+    size_t idx_capacity_bytes = 0;
+    uint32_t frame = 0;
+  };
+
+  // Wait this frame's in-flight fence and map the persistent ring so
+  // tessellation can write extras in place. Grows the ring (after the
+  // fence) when min_bytes or a pending 75% high-water hint exceeds the
+  // current size. Returns false only when the device clamp cannot hold
+  // min_bytes (caller then CPU-emits; draw_frame still tries to allocate).
+  bool lock_persistent_vb(size_t min_bytes, PersistentVbLock* out, size_t min_index_bytes = 0);
+  size_t persistent_vertex_ring_bytes() const noexcept;
+  size_t persistent_vertex_ring_max_bytes() const noexcept;
+  size_t persistent_index_ring_bytes() const noexcept;
+  size_t persistent_index_ring_max_bytes() const noexcept;
+
+  // When set, filled from the mapped VB after upload (what the GPU sees).
+  struct DrawFrameDump {
+    DrawBatch* scene = nullptr;
+    DrawBatch* glow = nullptr;
+    DrawBatch* notes = nullptr;
+    DrawBatch* late = nullptr;
+    DrawBatch* additive = nullptr;
+  };
+
+  // Default clear = OpenWDS OfflineRhythmPreview Main Camera backgroundColor
+  // (0.015, 0.02, 0.04). Playfield callers pass kOfficialCameraBackground*.
+  bool draw_frame(const DrawBatch& batch, const ScreenBounds& screen, float clear_r = 0.015f,
+                  float clear_g = 0.02f, float clear_b = 0.04f,
                   const DrawBatch* additive = nullptr,
                   const DrawBatch* post_overlay = nullptr,
                   const DrawBatch* post_overlay2 = nullptr,
                   const ScissorRect* additive_scissor = nullptr,
-                  const DrawBatch* mid_overlay = nullptr);
+                  const DrawBatch* mid_overlay = nullptr,
+                  const DrawBatch* early_additive = nullptr,
+                  const DrawBatch* scene_carve = nullptr,
+                  const DrawFrameExtras* extras = nullptr,
+                  DrawFrameDump* dump = nullptr);
 
   int framebuffer_width() const noexcept { return width_; }
   int framebuffer_height() const noexcept { return height_; }
+
+  // Last presented swapchain image → tightly packed RGBA8 (top-left origin).
+  // Needs a successful draw_frame and TRANSFER_SRC on the swapchain. Developer
+  // capture path; not used by the live preview.
+  bool readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& out_w, int& out_h);
 
  private:
   void emit_health(RendererHealthEvent event, VkResult result = VK_SUCCESS) noexcept;

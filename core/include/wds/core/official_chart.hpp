@@ -8,8 +8,9 @@
 
 namespace wds::chart_editor {
 
-// Official World Dai Star / Sirius decrypted chart CSV (7 columns, no header):
-//   startTime, endTime, type, leftLane, laneLength, gimmickType, scratchLength
+// Official World Dai Star / Sirius decrypted chart CSV (5 or 7 columns, no
+// header). The compact form omits gimmickType/scratchLength:
+//   startTime, endTime, type, leftLane, laneLength[, gimmickType, scratchLength]
 //
 // Column meanings (see also sonolus-sirius-engine/levelData.cpp::txt2data):
 //   startTime     — note/gimmick start in music seconds (beat≡second at BPM 60)

@@ -11,8 +11,13 @@
 
 namespace wds::chart_editor {
 
+// Playfield notes that box-select and convert-to-xx may touch. HoldEighth is
+// derived; split-lane gimmicks are edited only from the gutter picker.
+bool is_playfield_selectable(const NotationNote& note) noexcept;
+
 // Convert one note to any target type. Extra fields are dropped; missing fields
-// get defaults (non-hold → hold body duration is one beat).
+// get defaults (non-hold → hold body duration is one beat). Split-lane
+// gimmicks and HoldEighth are left unchanged.
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter);
 // Mirror lanes horizontally. Also negates scratch_length (flick / ScratchHold /
 // JumpScratch direction·span) so arrows and end covers flip with the body.
