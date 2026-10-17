@@ -46,6 +46,9 @@ wds::interaction::Color split_slot_color(int32_t color_id, int32_t world_index,
 // Official Initialize RGB×settings/100. Fade stays on sprite alpha separately.
 void apply_official_split_rgb_opacity(wds::interaction::Color& c) noexcept;
 
+// fadeIn direction of an effect as a UTF-8 arrow: "↑" (LineHight z=0, grows up) or "↓" (z=180).
+const char* split_fade_arrow_utf8(int32_t color_id) noexcept;
+
 // Official 1.96.0 SplitEffects IDs for the picker (no PNG / hardcoded fallback).
 std::vector<int32_t> split_picker_color_ids();
 
@@ -54,7 +57,7 @@ bool is_split_picker_search_text_valid(const std::string& text) noexcept;
 std::vector<int32_t> filter_split_picker_color_ids(const std::string& query);
 
 // Split coverage for default-lane-guide hiding. Fade windows are wall-clock
-// seconds (PreviewConfig: official fadeIn 1.0s / fadeOut 0.3s), never
+// seconds (PreviewConfig: official fadeIn 1.0s / fadeOut 1.0s from expire), never
 // BPM/subdivision ticks — edit and preview share the same real-time windows.
 struct SplitCoverageMs {
   int64_t fade_start_ms = 0;

@@ -4,13 +4,37 @@ _World Dai Star_ 的跨平台制谱器。
 
 ## Sirius 扩展谱面
 
-Qt 工具栏的「功能等级」可切换 **Original / Refresh**。Refresh 允许音符视觉超出 12 Lane，但每颗音符仍须覆盖至少一个可判定 Lane；「默认宽度」可以设置超宽音符。选中 Hold body 后，用仅在 Refresh 显示的「尾判定」复选框在有尾与无尾间切换；开启尾判定会清除该条手动添加的中继星星，关闭尾判定后默认没有中继点。
+谱面数据层支持 **Original / Refresh（磁盘标记 `Official` / `SiriusExtended`）**：Refresh 允许音符视觉超出 12 Lane（仍须覆盖至少一个可判定 Lane）；无尾 Hold、作者手写 `900` 判定点与 SV（HiSpeed）可写入格式并在预览中按分段积分滚动。BPM、音乐和判定时间保持原样。
 
-变速、无尾 Hold 和超界音符仅在 **Refresh** 下可编辑或导入；Original 会隐藏 SV 与无尾控件，并拒绝含这些扩展内容的外部谱面。无尾 Hold 默认不生成条内判定点；在条身内 **Shift+中键** 可逐个添加多个 `900` 判定点。每个点在编辑区显示为星星（紫条用紫星，蓝条用蓝星）：左键点中星星后按 **Delete**，或直接中键点星星，即可单独删除；撤销可恢复。保存重开和 CSV 导出只保留作者手动添加的 `900` 行。星星只是编辑器对 `900` 的可视化，客户端是否显示由客户端决定。
+编辑器 UI（功能等级切换、尾判定控件、SV 列表、Shift+中键加点等）尚未合入本分支，后续单独补。
 
-工具栏的 SV 点列表可选中事件、修改 Tick 与正倍率，或在当前时间新增事件。倍率只允许有限正数。编辑区用橙色 `SV` 标记显示变速，预览按分段积分滚动；BPM、音乐和判定时间保持原样。
+官方 CSV 仍使用 7 列：无尾类型为 `1100/1101/1110/1111`，SV 行使用 `type=-1`、`endTime=倍率`。`.wdschart` v6 保存 SV 与功能等级，旧版文件仍可读取。SUS 的 Sirius `#TIL00` 正倍率和终点 Damage 无尾标记会导入；Refresh SUS 往返使用 `#WDS_PROFILE` 与 `#WDS_LANE_OFFSET` 保留越界几何。ENC 打包仍由外部工具链负责。
 
-官方 CSV 仍使用 7 列：无尾类型为 `1100/1101/1110/1111`，SV 行使用 `type=-1`、`endTime=倍率`。`.wdschart` v6 保存 SV 与功能等级，旧版文件仍可读取。SUS 的 Sirius `#TIL00` 正倍率和终点 Damage 无尾标记会导入；Refresh SUS 往返使用 `#WDS_PROFILE` 与 `#WDS_LANE_OFFSET` 保留越界几何。磁盘标记仍使用 `Official` / `SiriusExtended` 以兼容已有工程。ENC 打包仍由外部工具链负责。
+## 本地分轨
+
+通过 **播放面板 → 生成分轨** 或 **文件 → 本地分轨…** 打开后台任务面板。导入音乐后点击「生成分轨」，
+完成后在**播放面板的「音轨选择」**中选择原曲、鼓、贝斯、人声、其他声部，直接使用原有播放控制试听。
+任务面板是非模态窗口，生成期间可继续编辑和播放；
+关闭面板会保留后台任务，取消按钮或退出编辑器会停止任务。
+
+首次使用需要 Python（推荐 3.12）。面板中的「安装分轨运行环境」会在用户数据目录创建独立虚拟环境，
+下载 PyTorch、Demucs 等依赖；也可直接选择已安装这些依赖的 Python，或设置 `WDS_STEM_PYTHON`。
+首次生成会下载约 80 MB 的 HTDemucs 权重，以后可以离线使用。
+自动设备选择顺序为 CUDA → Apple MPS → CPU；AMD/Intel 显卡当前使用 CPU。
+Windows/macOS/Linux 共用同一 Worker，已在 Linux + NVIDIA CUDA 实测，其他平台仍需运行时验证。
+
+默认使用单个 HTDemucs 四轨模型、25% 重叠、无随机移位增强；CUDA 启用 TF32 和固定形状卷积缓存。
+默认两条 CPU 线程，「优先保证编辑流畅」会限制 CUDA 分配预算并在推理块之间让出执行时间。
+整曲结果留在 CPU，每次仅把一个输入块送入 GPU。显存不足时会报告错误，可切换 CPU 重试。
+
+已落盘工程的分轨缓存写在工程根目录下的 `Stem/`；未保存工程时写入统一临时目录，退出编辑器后删除，面板会提示缓存将无法继续使用。
+输出是与原音频采样率、样本数一致的 float WAV；不会裁静音、逐轨归一化或添加谱面延迟。
+试听保留当前位置、速度和音量，保存/导出工程仍引用原曲。
+缓存按音源内容、权重、运行库和预处理实现校验；失败或取消不会发布半成品。
+当前支持 10 毫秒至 30 分钟的单声道或立体声音频。
+
+无需模型依赖的缓存/取消回归：`python3 -B -m unittest discover -s stem-worker`。
+原生 CTest 还包含 `wds_audition_tests` 和 `wds_stem_panel_tests`，验证切轨同步及后台进程生命周期。
 
 ---
 
@@ -41,7 +65,7 @@ xattr -cr "/Applications/WDS Editor.app"
 
 ## 从源码编译
 
-仓库包含编译、打包与运行所需内容：源码、CMake/脚本、BASS、Vulkan 头、UI 字体/图标，以及运行时 `skins/`、`effects/` 等。  
+仓库包含编译、打包与运行所需内容：源码、CMake/脚本、BASS、Vulkan 头、UI 字体/图标，以及运行时 `skins/`、`effects/`、`resources/` 等。  
 本地路径请放在 `scripts/env.local`（已忽略），勿提交。
 
 **已验证的主机 / 目标组合：**
@@ -138,7 +162,7 @@ ctest --test-dir build-macos-arm --output-on-failure
 ./scripts/build-target.sh --package-only macos-arm
 ```
 
-默认全开模块时会注册：`wds_common_tests`、`wds_core_tests`、`wds_split_index_tests`、`wds_audio_player_tests`、`wds_renderer_tests`、`wds_note_visual_policy_tests`、`wds_split_line_official_colors_tests`、`wds_interaction_tests`、`wds_ui_logic_tests`、`wds_note_draw_order_tests`。
+默认全开模块时会注册单元测试（各模块 `*/tests/`）以及系统测试（`tests/system/`：分割线颜色/几何、分割线粒子播放、OpenWDS 绑定 / hydrate / 资源 / 控制器生命周期）。
 
 **Linux 宿主交叉出的 Windows PE 不能在该宿主上运行。** 不要对 `build-win-x86_64` 跑 `ctest`（部分测试目标仍可能被编译，但宿主执行的是 PE）。交叉策略见 [`cmake/CROSS_COMPILE.md`](cmake/CROSS_COMPILE.md)。
 
@@ -161,6 +185,8 @@ wds-editor/
 ├── ui/                     # Qt Dock 壳层、QPainter 编辑器 + Vulkan 预览
 ├── cmake/                  # 平台默认值与交叉 toolchain
 ├── scripts/                # 构建 / 打包 / 图标
+├── tests/system/           # 跨模块系统测试
+├── resources/              # 分割线粒子运行时数据（objects.tsv / objects.jsonl），随包发布
 └── skins/ effects/ icons/  # 运行时资源
 ```
 
@@ -202,11 +228,20 @@ ui → core → common
 | ---------- | ------------------------------------------------------- |
 | 皮肤 PNG   | `skins/`                                                |
 | 打击音效   | `effects/`                                              |
+| 分割线粒子 | `resources/`                                            |
 | 着色器     | `renderer/shaders/`                                     |
 | BASS       | `audio-player/third_party/bass/{macos-arm,win-x86_64}/` |
 | 应用图标源 | `logo.png` → `scripts/generate-app-icons.sh`            |
 
-Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
+Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/`、`resources/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
+
+**`resources/` 的查找方式**：程序按以下顺序寻找分割线粒子数据，可执行文件中不编入任何绝对路径。
+
+- 发行包（Windows zip / MSI）：与 `wds_editor.exe` 同级的 `resources/`；
+- macOS：`WDS Editor.app/Contents/Resources/resources`（可执行文件位于 `Contents/MacOS`）；
+- 构建树：从可执行文件所在目录逐级向上搜索仓库的 `resources/`。
+
+因此编译后的构建树（如 `build-macos-arm/ui/wds_editor`）无需打包即可直接运行。`package-target.sh` / `package-qt-release.ps1` 缺少 `resources/` 时会直接报错，不会产出缺少分割线粒子的包。
 
 ### 预览每帧数据流
 

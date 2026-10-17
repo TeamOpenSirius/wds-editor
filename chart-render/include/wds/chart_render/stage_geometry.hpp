@@ -85,6 +85,9 @@ class StageGeometry {
   // Persistent BG_LaneBorder edge. Pass a logical edge (0 … lane_count);
   // visual 6-track borders use official_visual_border_edge_index (0,2,…,12).
   Quad lane_border_quad(int32_t edge_index) const;
+  // OpenWDS BGShadow child: sprite local rect × child localScale, z=12,
+  // through the identity Main Camera (same path as project_world).
+  Quad bg_shadow_quad(float scale_x, float scale_y) const;
   // Half note height along approach axis (percent units), same as note_quad span.
   float note_half_height_percent(int32_t lane, float percent) const;
   // Official tap visual (notation − 0.15) × 0.64 at the given percent.
@@ -114,8 +117,73 @@ class StageGeometry {
   // BomFlare: RenderAlignment=View, startSize=8, never scaled by note width.
   // Axis-aligned screen disc at the OnBomb midpoint.
   Quad bomb_flare_billboard_quad(int32_t lane, int32_t end_lane, float size_unity) const;
+  // Official Main-space projection (LaneGroup + FOV50).
+  Vec2 project_main(float local_x, float main_y, float local_z = 0.0f) const noexcept;
+  // World-space point through the identity Main Camera (FOV 50 at origin).
+  Vec2 project_world(float world_x, float world_y, float world_z) const noexcept;
+  // View-aligned billboard at a Main-space point. Size uses the same
+  // world→screen scale as bomb_flare_billboard_quad, measured at main_y.
+  Quad split_particle_billboard_quad(float world_x, float main_y, float size_unity,
+                                     float world_z = 0.0f) const;
+  // Official PSR: View (0) camera right/up + Z roll, and view-space 3D tumble
+  // when startRotation 3D is on; World (1) / Local (2) use LaneGroup axes.
+  // pivot is a fraction of size.
+  Quad split_particle_oriented_quad(float world_x, float main_y, float size_unity, float height_scale,
+                                    float pivot_y, float roll, float tilt_x, float tilt_y,
+                                    float world_z = 0.0f, uint8_t render_alignment = 0,
+                                    float pivot_x = 0.0f, float pivot_z = 0.0f) const;
+  // Main-space corners of that same quad, order lb, rb, rt, lt (Stretch UV).
+  // Preview draws Billboard/Stretch/Mesh/Trails through
+  // official_main_clip_poly_near_uv — Unity Camera clips
+  // ParticleSystemRenderer triangles at nearClipPlane 0.1
+  // (OpenWDS OfflineRhythmPreview.unity + N6 camera_volumes.json).
+  // Rotation by Speed / 3D
+  // startRotation / tall Local SOL Y can put a corner behind the camera;
+  // projecting first explodes NDC. False only if out pointers are null.
+  bool split_particle_oriented_world_corners(float world_x, float main_y, float size_unity,
+                                             float height_scale, float pivot_y, float roll,
+                                             float tilt_x, float tilt_y, float world_z,
+                                             uint8_t render_alignment, float pivot_x,
+                                             float pivot_z, float* out_x, float* out_y,
+                                             float* out_z) const;
+  // Stretch corners. Two exclusive branches (do not blend, not per-ID):
+  //   freeform==0: approved unofficial kettlewell 2025-02 strip (not 2022.3).
+  //     View-space start/end; width is the 2D cross of those points, not
+  //     Cross(cam_fwd, vel). endVS = pos - vel*(VS + (1/|v|)*LS*size.y).
+  //     cameraVelocityScale (approved unofficial, not 2022.3):
+  //       velocityVS -= cameraVel_vs * camera_velocity_scale.
+  //     cam_vel_* is Main-space camera velocity (official playfield is static
+  //     → 0,0,0). Preview may pass zeros and still keep the multiply.
+  //   freeform!=0: approved unofficial pcwalton particle-space basis
+  //     (gist/pcwalton, experimental, not Unity 2022.3 ops). Rotate With
+  //     Stretch only when rotate_with_stretch!=0 (2022.3: only if Freeform on).
+  // across = clamped Start Size width (hsize.x); along = size.y for the
+  // kettlewell LS term (3D height / non-3D startSize). World corners are
+  // lb, rb, rt, lt. lb→rb is +velocity (tail→head) on the kettlewell path.
+  // False when the active branch is degenerate (caller fallback).
+  bool split_particle_stretch_world_corners(float world_x, float main_y, float world_z, float vel_x,
+                                           float vel_y, float vel_z, float across, float along,
+                                           float pivot_y, float roll, float pivot_x, float* out_x,
+                                           float* out_y, float* out_z, float length_scale = 1.0f,
+                                           float velocity_scale = 0.0f,
+                                           float camera_velocity_scale = 0.0f,
+                                           float cam_vel_x = 0.0f, float cam_vel_y = 0.0f,
+                                           float cam_vel_z = 0.0f, uint8_t freeform_stretching = 0,
+                                           uint8_t rotate_with_stretch = 0) const;
+  Quad split_particle_stretch_quad(float world_x, float main_y, float world_z, float vel_x,
+                                   float vel_y, float vel_z, float across, float along,
+                                   float pivot_y, float roll, float pivot_x = 0.0f,
+                                   float length_scale = 1.0f, float velocity_scale = 0.0f,
+                                   float camera_velocity_scale = 0.0f, float cam_vel_x = 0.0f,
+                                   float cam_vel_y = 0.0f, float cam_vel_z = 0.0f,
+                                   uint8_t freeform_stretching = 0,
+                                   uint8_t rotate_with_stretch = 0) const;
   Quad split_line_quad(int32_t boundary_after_lane, float percent_start,
                        float percent_end, float length_override = -1.0f) const;
+  // Official SplitLine at a C# world X. u0/u1 are sprite UV (uvTransform);
+  // the tight mesh is kOfficialSplitLineMeshU0–U1, not the full m_Rect.
+  Quad split_line_quad_world_x(float world_x, float percent_start, float percent_end,
+                               float u0 = 0.0f, float u1 = 1.0f, float width_scale = 1.0f) const;
   Quad split_end_line_quad(float percent_start, float percent_end,
                            float length_override = -1.0f) const;
   // Upper spawn mask across all lanes, centered at percent (0=tip).
@@ -129,7 +197,6 @@ class StageGeometry {
   float content_aspect() const noexcept;
   Vec2 ndc_to_content(wds::chart_editor::OfficialNdc ndc) const noexcept;
   Vec2 project_judge(float local_x, float judge_y, float local_z = 0.0f) const noexcept;
-  Vec2 project_main(float local_x, float main_y, float local_z = 0.0f) const noexcept;
   float percent_to_judge_y(float percent) const noexcept;
   float judge_y_to_percent(float judge_y) const noexcept;
 

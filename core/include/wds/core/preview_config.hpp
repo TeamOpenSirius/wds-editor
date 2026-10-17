@@ -49,7 +49,7 @@ struct PreviewConfig {
   int64_t preview_tail_fallback_ms = 8000;
 
   // Split-line / STAGE_COVER fade windows (seconds).
-  // Official fadeIn clip 1.0s; fadeOut alpha keys 0→0.3s (OnExit is 1.0s).
+  // OpenWDS fadeIn clip 1.0s; runtime fadeOut clip 0.3s (1−smoothstep). Tick hides at EndMs.
   float split_line_animation_start_sec = 1.0f;
   float split_line_animation_end_sec = 0.3f;
 

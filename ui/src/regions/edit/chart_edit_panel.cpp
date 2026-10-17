@@ -100,13 +100,13 @@ void append_unique_notes(std::vector<NotationNote>& out, const NotationNote& not
 }
 
 // Mid-stars / eighths follow hold-body delete and mirror. Paired heads/bodies
-// never cascade. Copy keeps authored eighths but strips generated ones.
+// never cascade. Copy strips HoldEighth separately — eighths are always derived.
 std::vector<NotationNote> notes_with_hold_dependents(
     const wds::chart_editor::ChartDocument& doc, const std::vector<NotationNote>& roots) {
   std::vector<NotationNote> notes;
   for (const auto& note : roots) {
     append_unique_notes(notes, note);
-    if (!wds::chart_editor::is_bindable_hold_body(note.note_type)) continue;
+    if (!wds::chart_editor::is_hold_with_tail(note.note_type)) continue;
     for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, note)) {
       if (wds::chart_editor::is_hold_head_note(dep)) continue;
       append_unique_notes(notes, dep);
@@ -118,8 +118,7 @@ std::vector<NotationNote> notes_with_hold_dependents(
 void strip_clipboard_hold_eighths(std::vector<NotationNote>& notes) {
   notes.erase(std::remove_if(notes.begin(), notes.end(),
                              [](const NotationNote& n) {
-                               return n.note_type == NoteType::HoldEighth &&
-                                      !wds::chart_editor::is_authored_hold_eighth(n);
+                               return n.note_type == NoteType::HoldEighth;
                              }),
               notes.end());
 }
@@ -293,8 +292,7 @@ void ChartEditPanel::set_selected(std::unordered_set<int32_t> ids) {
   selected_.clear();
   for (const int32_t id : ids) {
     const auto note = engine_.document().find_note(id);
-    if (note && note->note_type == NoteType::HoldEighth &&
-        !is_visible_authored_hold_eighth(*note)) continue;
+    if (!note || !wds::chart_editor::is_playfield_selectable(*note)) continue;
     selected_.insert(id);
   }
   sync_hold_sel_focus_to_selection();
@@ -312,7 +310,6 @@ void ChartEditPanel::trace_snapshot(wds::common::CrashTraceSnap& snap) const {
 }
 
 void ChartEditPanel::set_grid(wds::chart_editor::EditGridConfig grid) {
-  grid.compatibility_profile = engine_.document().compatibility_profile();
   viewport_.set_grid(grid);
   if (curve_mode_active_) refresh_curve_ghosts();
 }
@@ -403,11 +400,7 @@ bool ChartEditPanel::pointer_in_edit_ghost_zone(wds::interaction::Vec2 point) co
 }
 
 void ChartEditPanel::set_default_width(int width) noexcept {
-  const int max_width = engine_.document().compatibility_profile() ==
-                                wds::chart_editor::ChartCompatibilityProfile::SiriusExtended
-                            ? 32
-                            : viewport_.grid().lane_count;
-  default_width_ = std::clamp(width, 1, max_width);
+  default_width_ = std::clamp(width, 1, viewport_.grid().lane_count);
   apply_width_to_locked_placement();
 }
 
@@ -509,11 +502,6 @@ bool ChartEditPanel::snap_hold_draft_chain_lane_and_sync(float desired_lane_f,
 }
 
 void ChartEditPanel::sync_viewport() const {
-  if (viewport_.grid().compatibility_profile != engine_.document().compatibility_profile()) {
-    auto grid = viewport_.grid();
-    grid.compatibility_profile = engine_.document().compatibility_profile();
-    viewport_.set_grid(grid);
-  }
   const auto panel = absolute_bounds();
   const float lgw = left_gutter_w();
   const float rgw = right_gutter_w();
@@ -696,107 +684,10 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
           }
         }
       } else {
-        priority = wds::chart_editor::is_bindable_hold_body(note.note_type) ? 1 : 0;
+        priority = wds::chart_editor::is_hold_with_tail(note.note_type) ? 1 : 0;
       }
     }
     consider(dist, priority, note);
-  }
-  return best;
-}
-
-bool ChartEditPanel::is_visible_authored_hold_eighth(const NotationNote& note) const {
-  if (!wds::chart_editor::is_authored_hold_eighth(note)) return false;
-  const auto parent = engine_.document().find_note(note.parent_hold_id);
-  return parent && wds::chart_editor::is_bindable_hold_body(parent->note_type);
-}
-
-bool ChartEditPanel::add_manual_hold_eighth_at(wds::interaction::Vec2 point) {
-  if (!engine_.is_editable() ||
-      engine_.document().compatibility_profile() !=
-          wds::chart_editor::ChartCompatibilityProfile::SiriusExtended ||
-      !playfield_.contains(point)) return false;
-  sync_viewport();
-  const int32_t tick = viewport_.tick_at(point.y);
-  std::optional<NotationNote> target;
-  for (const auto& note : engine_.document().notes()) {
-    if (!wds::chart_editor::is_nontail_hold_body(note.note_type) ||
-        tick <= note.start_tick || tick >= note.end_tick) continue;
-    const float x0 = viewport_.x_at(note.lane);
-    const float x1 = x0 + viewport_.lane_width(note.width);
-    if (point.x < x0 || point.x > x1) continue;
-    if (!target || selected_.count(note.id) != 0 || note.width < target->width) target = note;
-  }
-  if (!target || wds::chart_editor::hold_has_visible_star_at(
-                     engine_.document(), target->id, tick, wds::chart_editor::kNoBoundHoldId)) {
-    return false;
-  }
-  const auto before = engine_.document().notes();
-  auto after = before;
-  for (const auto& note : before) {
-    if (note.note_type != NoteType::HoldEighth || note.parent_hold_id != target->id ||
-        note.start_tick != tick) continue;
-    if (!wds::chart_editor::is_suppressed_hold_eighth(note)) return false;
-  }
-  after.erase(std::remove_if(after.begin(), after.end(), [&](const NotationNote& note) {
-                return wds::chart_editor::is_suppressed_hold_eighth(note) &&
-                       note.parent_hold_id == target->id && note.start_tick == tick;
-              }), after.end());
-  NotationNote point_note;
-  point_note.id = wds::chart_editor::kAutoNoteId;
-  point_note.note_type = NoteType::HoldEighth;
-  point_note.start_tick = tick;
-  point_note.end_tick = tick;
-  point_note.lane = target->lane;
-  point_note.width = target->width;
-  point_note.parent_hold_id = target->id;
-  point_note.scratch_length = wds::chart_editor::kAuthoredHoldEighthScratchLength;
-  after.push_back(point_note);
-  if (!engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-          before, std::move(after), "Add hold judgment point"))) return false;
-  selected_.clear();
-  for (const auto& note : engine_.document().notes()) {
-    if (wds::chart_editor::is_authored_hold_eighth(note) &&
-        note.parent_hold_id == target->id && note.start_tick == tick) {
-      selected_.insert(note.id);
-      break;
-    }
-  }
-  engine_.rebuild_snapshot();
-  return true;
-}
-
-std::optional<NotationNote> ChartEditPanel::hit_test_hold_eighth(
-    wds::interaction::Vec2 point) const {
-  sync_viewport();
-  std::optional<NotationNote> best;
-  float best_dist = std::numeric_limits<float>::max();
-  bool best_visible = false;
-  const float y_pad = viewport_.note_height_px() * 0.65f;
-  for (const auto& note : engine_.document().notes()) {
-    if (note.note_type != NoteType::HoldEighth ||
-        wds::chart_editor::is_suppressed_hold_eighth(note)) {
-      continue;
-    }
-    const float y = viewport_.y_at(note.start_tick);
-    if (is_visible_authored_hold_eighth(note)) {
-      if (!viewport_.authored_eighth_star_screen_rect(note).contains(point)) continue;
-      const float dist = std::abs(point.y - y);
-      if (!best_visible || dist < best_dist) {
-        best_dist = dist;
-        best = note;
-        best_visible = true;
-      }
-      continue;
-    }
-    if (best_visible) continue;
-    const float x0 = viewport_.x_at(note.lane);
-    const float x1 = x0 + viewport_.lane_width(std::max(1, note.width));
-    if (point.y < y - y_pad || point.y > y + y_pad || point.x < x0 || point.x > x1) continue;
-    const float dist = std::abs(point.y - y);
-    if (dist < best_dist) {
-      best_dist = dist;
-      best = note;
-    }
   }
   return best;
 }
@@ -910,7 +801,7 @@ void ChartEditPanel::update_hover_cursor(wds::interaction::Vec2 point) {
     set_hover_cursor(CursorKind::ResizeVertical);
     return;
   }
-  if (wds::chart_editor::is_bindable_hold_body(hit->note_type) &&
+  if (wds::chart_editor::is_hold_with_tail(hit->note_type) &&
       (near_start_time(*hit, point.y) || near_end_time(*hit, point.y))) {
     set_hover_cursor(CursorKind::ResizeVertical);
     return;
@@ -968,6 +859,29 @@ int32_t ChartEditPanel::active_split_highlight_id() const noexcept {
 bool ChartEditPanel::active_split_highlight_is_end() const noexcept {
   if (mode_ == Mode::DragSplitEdge && drag_split_note_id_ >= 0) return drag_split_is_end_;
   return hovered_split_is_end_;
+}
+
+std::optional<ChartEditPanel::SplitHoverHint> ChartEditPanel::active_split_hover() const {
+  const int32_t note_id = active_split_highlight_id();
+  if (note_id < 0) return std::nullopt;
+  const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
+  const bool highlight_is_end = active_split_highlight_is_end();
+  const GutterLabelHit* active_hit = nullptr;
+  for (const auto& hit : hits) {
+    if (hit.note_id == note_id && hit.is_start == !highlight_is_end) {
+      active_hit = &hit;
+      break;
+    }
+  }
+  if (active_hit == nullptr) return std::nullopt;
+  auto note = engine_.document().find_note(note_id);
+  if (!note) return std::nullopt;
+  SplitHoverHint hint;
+  hint.color_id = note->scratch_length;
+  hint.split_count = wds::chart_editor::get_split_count(note->gimmick_type);
+  hint.type = wds::chart_editor::get_split_lane_type(note->gimmick_type);
+  hint.chip_bounds = active_hit->bounds;
+  return hint;
 }
 
 void ChartEditPanel::update_gutter_ghost(wds::interaction::Vec2 point) {
@@ -1307,7 +1221,7 @@ void ChartEditPanel::sync_hold_sel_focus_to_selection() {
 }
 
 std::optional<NotationNote> ChartEditPanel::resolve_hold_body(const NotationNote& hit) const {
-  if (wds::chart_editor::is_bindable_hold_body(hit.note_type)) return hit;
+  if (wds::chart_editor::is_hold_with_tail(hit.note_type)) return hit;
   if (wds::chart_editor::is_hold_head_note(hit)) {
     return wds::chart_editor::paired_hold_body_for(engine_.document(), hit);
   }
@@ -1427,7 +1341,7 @@ bool ChartEditPanel::apply_hold_layered_click(const NotationNote& hit) {
       }
       // Body / head → back to Parts (no path to Whole/Chain from here).
       if (wds::chart_editor::is_hold_head_note(hit) ||
-          wds::chart_editor::is_bindable_hold_body(hit.note_type)) {
+          wds::chart_editor::is_hold_with_tail(hit.note_type)) {
         select_hold_part(hit, *body);
         return true;
       }
@@ -1726,7 +1640,7 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
         if (body && !wds::chart_editor::is_scratch_hold_body(body->note_type)) body.reset();
       }
     } else {
-      if (wds::chart_editor::is_bindable_hold_body(note->note_type) &&
+      if (wds::chart_editor::is_hold_with_tail(note->note_type) &&
           !wds::chart_editor::is_scratch_hold_body(note->note_type)) {
         body = *note;
       } else if (wds::chart_editor::is_hold_head_note(*note)) {
@@ -1966,7 +1880,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   {
     std::optional<NotationNote> new_hold;
     for (const auto& n : after) {
-      if (n.id == hold_draft_.id && wds::chart_editor::is_bindable_hold_body(n.note_type)) {
+      if (n.id == hold_draft_.id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
         new_hold = n;
         break;
       }
@@ -1999,7 +1913,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   std::optional<NotationNote> placed;
   for (auto it = engine_.document().notes().rbegin(); it != engine_.document().notes().rend();
        ++it) {
-    if (!wds::chart_editor::is_bindable_hold_body(it->note_type)) continue;
+    if (!wds::chart_editor::is_hold_with_tail(it->note_type)) continue;
     if (it->start_tick != hold_draft_.start_tick) continue;
     if (it->lane != hold_draft_.lane || it->width != hold_draft_.width) continue;
     placed = *it;
@@ -2023,7 +1937,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   for (const auto& n : engine_.document().notes()) {
     if (before_ids.count(n.id)) continue;
     if (wds::chart_editor::is_hold_head_note(n) ||
-        wds::chart_editor::is_bindable_hold_body(n.note_type)) {
+        wds::chart_editor::is_hold_with_tail(n.note_type)) {
       selected_.insert(n.id);
     }
   }
@@ -2158,7 +2072,7 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
   selected_.clear();
   clear_hold_sel_focus();
   for (const auto& note : engine_.document().notes()) {
-    if (note.note_type == NoteType::HoldEighth) continue;
+    if (!wds::chart_editor::is_playfield_selectable(note)) continue;
     if (note.start_tick >= std::min(t0, t1) && note.start_tick <= std::max(t0, t1) &&
         note.lane <= std::max(l0, l1) && note.end_lane() >= std::min(l0, l1)) {
       selected_.insert(note.id);
@@ -2220,9 +2134,7 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
       if (id == moving_orig->id) {
         n.lane = snapped;
       } else {
-        n.lane = wds::chart_editor::clamp_lane_for_width(
-            orig.lane + d_lane, orig.width, lane_count,
-            viewport_.grid().compatibility_profile);
+        n.lane = wds::chart_editor::clamp_lane_for_width(orig.lane + d_lane, orig.width, lane_count);
       }
       next[id] = n;
     }
@@ -2288,9 +2200,7 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
     const int32_t new_start = std::max(floor, orig.start_tick + applied_d_tick);
     n.start_tick = new_start;
     n.end_tick = duration > 0 ? n.start_tick + duration : n.start_tick;
-    n.lane = wds::chart_editor::clamp_lane_for_width(
-        orig.lane + d_lane, orig.width, lane_count,
-        viewport_.grid().compatibility_profile);
+    n.lane = wds::chart_editor::clamp_lane_for_width(orig.lane + d_lane, orig.width, lane_count);
     next[id] = n;
   }
   // Mid-stars / eighths: never free-drag laterally; lock to parent hold span.
@@ -2447,7 +2357,7 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   int32_t new_start = -1;
   for (const auto& [id, orig] : drag_originals_) {
     NotationNote n = orig;
-    if (!wds::chart_editor::is_bindable_hold_body(n.note_type)) continue;
+    if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
     // Only the anchor body changes for non-JumpScratch time edges (avoid collapsing a
     // multi-selected ScratchHold chain to one shared tick).
     if (wds::chart_editor::is_hold_chain_body(n.note_type) && id != anchor_note_id_) {
@@ -2510,8 +2420,8 @@ void ChartEditPanel::finish_move(bool refresh_eighths) {
         cur->scratch_length != before.scratch_length ||
         cur->gimmick_type != before.gimmick_type) {
       changes[id] = {before, *cur};
-      if ((wds::chart_editor::is_bindable_hold_body(before.note_type) ||
-           wds::chart_editor::is_bindable_hold_body(cur->note_type)) &&
+      if ((wds::chart_editor::is_hold_with_tail(before.note_type) ||
+           wds::chart_editor::is_hold_with_tail(cur->note_type)) &&
           (cur->start_tick != before.start_tick || cur->lane != before.lane ||
            cur->end_tick != before.end_tick || cur->width != before.width)) {
         eighth_hold_ids.push_back(id);
@@ -2543,7 +2453,7 @@ void ChartEditPanel::finish_move(bool refresh_eighths) {
     for (const int32_t id : eighth_hold_ids) {
       std::optional<NotationNote> body;
       for (const auto& n : after) {
-        if (n.id == id && wds::chart_editor::is_bindable_hold_body(n.note_type)) {
+        if (n.id == id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
           body = n;
           break;
         }
@@ -2578,7 +2488,7 @@ void ChartEditPanel::finish_hold_adjust() {
   // Include chain neighbors that may have been hinged but were not selected.
   std::vector<int32_t> hold_ids;
   for (const auto& [id, before] : drag_originals_) {
-    if (wds::chart_editor::is_bindable_hold_body(before.note_type)) hold_ids.push_back(id);
+    if (wds::chart_editor::is_hold_with_tail(before.note_type)) hold_ids.push_back(id);
   }
   resize_chain_peer_id_ = -1;
   resize_chain_next_id_ = -1;
@@ -2587,7 +2497,7 @@ void ChartEditPanel::finish_hold_adjust() {
     const auto before = engine_.document().notes();
     for (const int32_t id : hold_ids) {
       auto body = engine_.document().find_note(id);
-      if (!body || !wds::chart_editor::is_bindable_hold_body(body->note_type)) continue;
+      if (!body || !wds::chart_editor::is_hold_with_tail(body->note_type)) continue;
       wds::chart_editor::prune_hold_mid_stars(engine_.document(), *body);
     }
     auto after = engine_.document().notes();
@@ -2595,7 +2505,7 @@ void ChartEditPanel::finish_hold_adjust() {
     for (const int32_t id : hold_ids) {
       std::optional<NotationNote> body;
       for (const auto& n : after) {
-        if (n.id == id && wds::chart_editor::is_bindable_hold_body(n.note_type)) {
+        if (n.id == id && wds::chart_editor::is_hold_with_tail(n.note_type)) {
           body = n;
           break;
         }
@@ -2649,7 +2559,7 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
     auto after = before;
     bool touched = false;
     for (const auto& [id, converted] : planned.updates) {
-      if (!wds::chart_editor::is_bindable_hold_body(converted.note_type)) continue;
+      if (!wds::chart_editor::is_hold_with_tail(converted.note_type)) continue;
       std::optional<NotationNote> body;
       for (const auto& n : after) {
         if (n.id == id) {
@@ -2672,78 +2582,6 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
   return true;
 }
 
-bool ChartEditPanel::toggle_selected_hold_tail() {
-  if (!engine_.is_editable() || selected_.empty()) return false;
-  if (engine_.document().compatibility_profile() !=
-      wds::chart_editor::ChartCompatibilityProfile::SiriusExtended) return false;
-  std::unordered_map<int32_t, NoteType> targets;
-  const auto tailed_type = [](NoteType type) {
-    switch (type) {
-      case NoteType::NontailHold: return NoteType::Hold;
-      case NoteType::NontailCriticalHold: return NoteType::CriticalHold;
-      case NoteType::NontailScratchHold: return NoteType::ScratchHold;
-      case NoteType::NontailScratchCriticalHold: return NoteType::ScratchCriticalHold;
-      default: return type;
-    }
-  };
-  const auto nontail_type = [](NoteType type) {
-    switch (type) {
-      case NoteType::Hold: return NoteType::NontailHold;
-      case NoteType::CriticalHold: return NoteType::NontailCriticalHold;
-      case NoteType::ScratchHold: return NoteType::NontailScratchHold;
-      case NoteType::ScratchCriticalHold: return NoteType::NontailScratchCriticalHold;
-      default: return type;
-    }
-  };
-  for (const int32_t id : selected_) {
-    auto before = engine_.document().find_note(id);
-    if (before && wds::chart_editor::is_hold_head_note(*before)) {
-      before = wds::chart_editor::paired_hold_body_for(engine_.document(), *before);
-    }
-    if (!before || !wds::chart_editor::is_bindable_hold_body(before->note_type)) continue;
-    const NoteType target = wds::chart_editor::is_nontail_hold_body(before->note_type)
-                                ? tailed_type(before->note_type)
-                                : nontail_type(before->note_type);
-    if (target == before->note_type) continue;
-    targets[before->id] = target;
-  }
-  if (targets.empty()) return false;
-  const auto before = engine_.document().notes();
-  auto after = before;
-  for (auto& note : after) {
-    if (const auto it = targets.find(note.id); it != targets.end()) {
-      note.note_type = it->second;
-    }
-  }
-  // Toggling either way discards the previous body's type-900 points. The
-  // tailed version then rebuilds its derived points; nontail starts empty.
-  after.erase(std::remove_if(after.begin(), after.end(), [&](const NotationNote& note) {
-                return note.note_type == NoteType::HoldEighth &&
-                       targets.count(note.parent_hold_id) != 0;
-              }), after.end());
-  const int32_t tpq = engine_.document().timing().ticks_per_quarter;
-  for (const auto& [id, target] : targets) {
-    if (!wds::chart_editor::is_hold_with_tail(target)) continue;
-    const auto it = std::find_if(after.begin(), after.end(),
-                                 [id](const NotationNote& note) { return note.id == id; });
-    if (it != after.end()) {
-      const NotationNote hold = *it;
-      after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), hold, tpq);
-    }
-  }
-  if (!engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-          before, std::move(after), "Toggle hold tail"))) {
-    return false;
-  }
-  for (auto it = selected_.begin(); it != selected_.end();) {
-    if (!engine_.document().find_note(*it)) it = selected_.erase(it);
-    else ++it;
-  }
-  engine_.rebuild_snapshot();
-  sync_hold_sel_focus_to_selection();
-  return true;
-}
-
 bool ChartEditPanel::mirror_selected(bool about_center) {
   if (!engine_.is_editable() || selected_.empty()) return false;
   auto notes = selected_with_hold_dependents(engine_.document(), selected_);
@@ -2760,8 +2598,10 @@ bool ChartEditPanel::mirror_selected(bool about_center) {
 
 bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
   if (!engine_.is_editable() || selected_.empty()) return false;
-  std::vector<NotationNote> notes = selected_with_hold_dependents(engine_.document(), selected_);
-  strip_clipboard_hold_eighths(notes);
+  std::vector<NotationNote> notes;
+  for (const int32_t id : selected_) {
+    if (auto n = engine_.document().find_note(id)) notes.push_back(*n);
+  }
   auto before = notes;
   if (delta_tick != 0 &&
       !wds::chart_editor::nudge_notes_time(notes, delta_tick, first_legal_tick())) {
@@ -2778,7 +2618,7 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
 
 bool ChartEditPanel::copy_selected() {
   clipboard_ = selected_with_hold_dependents(engine_.document(), selected_);
-  // Preserve author-placed 900s with their parent hold; generated points rebuild.
+  // HoldEighth is derived from holds — clipboard must not carry authoritative copies.
   strip_clipboard_hold_eighths(clipboard_);
   return !clipboard_.empty();
 }
@@ -2789,7 +2629,7 @@ bool ChartEditPanel::paste_at_pointer() {
   const int32_t legal = first_legal_tick();
   const int32_t anchor = std::max(legal, viewport_.tick_at(pointer_.y));
   auto pasted = wds::chart_editor::paste_notes_aligned(clipboard_, anchor, viewport_.grid());
-  // Defensive: old clipboards / callers may still include generated eighths.
+  // Defensive: old clipboards / callers may still include eighths.
   strip_clipboard_hold_eighths(pasted);
   int32_t shift = 0;
   for (const auto& n : pasted) {
@@ -2830,7 +2670,7 @@ bool ChartEditPanel::paste_at_pointer() {
   after.insert(after.end(), pasted.begin(), pasted.end());
   const int32_t tpq = engine_.document().timing().ticks_per_quarter;
   for (const auto& n : pasted) {
-    if (!wds::chart_editor::is_bindable_hold_body(n.note_type)) continue;
+    if (!wds::chart_editor::is_hold_with_tail(n.note_type)) continue;
     after = wds::chart_editor::with_recomputed_hold_eighths(std::move(after), n, tpq);
   }
   if (!engine_.execute_command(
@@ -2845,8 +2685,7 @@ bool ChartEditPanel::paste_at_pointer() {
   }();
   selected_.clear();
   for (const auto& n : engine_.document().notes()) {
-    // Pasted hold bodies are selected; authored eighth markers remain visible.
-    if (!before_ids.count(n.id) && n.note_type != NoteType::HoldEighth) {
+    if (!before_ids.count(n.id) && wds::chart_editor::is_playfield_selectable(n)) {
       selected_.insert(n.id);
     }
   }
@@ -2876,10 +2715,9 @@ void collect_drag_originals(const wds::chart_editor::ChartDocument& doc,
   for (const int32_t id : selected) {
     auto n = doc.find_note(id);
     if (!n) continue;
-    if (wds::chart_editor::is_bindable_hold_body(n->note_type)) {
+    if (wds::chart_editor::is_hold_with_tail(n->note_type)) {
       for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *n)) {
-        if (dep.note_type == NoteType::HoldEighth &&
-            !wds::chart_editor::is_authored_hold_eighth(dep)) continue;
+        if (dep.note_type == NoteType::HoldEighth) continue;
         out.emplace(dep.id, dep);
       }
       if (auto head = wds::chart_editor::paired_hold_head_for(doc, *n)) {
@@ -2889,8 +2727,7 @@ void collect_drag_originals(const wds::chart_editor::ChartDocument& doc,
       if (auto body = wds::chart_editor::paired_hold_body_for(doc, *n)) {
         out.emplace(body->id, *body);
         for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *body)) {
-          if (dep.note_type == NoteType::HoldEighth &&
-              !wds::chart_editor::is_authored_hold_eighth(dep)) continue;
+          if (dep.note_type == NoteType::HoldEighth) continue;
           out.emplace(dep.id, dep);
         }
       }
@@ -2900,10 +2737,9 @@ void collect_drag_originals(const wds::chart_editor::ChartDocument& doc,
 
 void append_hold_attached(const wds::chart_editor::ChartDocument& doc, const NotationNote& hold,
                           std::unordered_map<int32_t, NotationNote>& out) {
-  if (!wds::chart_editor::is_bindable_hold_body(hold.note_type)) return;
+  if (!wds::chart_editor::is_hold_with_tail(hold.note_type)) return;
   for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, hold)) {
-    if (dep.note_type == NoteType::HoldEighth &&
-        !wds::chart_editor::is_authored_hold_eighth(dep)) continue;
+    if (dep.note_type == NoteType::HoldEighth) continue;
     out.emplace(dep.id, dep);
   }
 }
@@ -2935,7 +2771,7 @@ void append_scratch_hold_chain_snapshot(const wds::chart_editor::ChartDocument& 
 
 std::optional<NotationNote> hold_width_pair_partner(const wds::chart_editor::ChartDocument& doc,
                                                     const NotationNote& note) {
-  if (wds::chart_editor::is_bindable_hold_body(note.note_type)) {
+  if (wds::chart_editor::is_hold_with_tail(note.note_type)) {
     return wds::chart_editor::paired_hold_head_for(doc, note);
   }
   if (wds::chart_editor::is_hold_head_note(note)) {
@@ -2948,10 +2784,6 @@ std::optional<NotationNote> hold_width_pair_partner(const wds::chart_editor::Cha
 
 bool ChartEditPanel::delete_selected() {
   if (!engine_.is_editable() || selected_.empty()) return false;
-  if (selected_.size() == 1) {
-    const auto note = engine_.document().find_note(*selected_.begin());
-    if (note && is_visible_authored_hold_eighth(*note)) return suppress_hold_eighth(*note);
-  }
   const auto notes = selected_with_hold_dependents(engine_.document(), selected_);
   if (!engine_.execute_command(
           std::make_unique<wds::chart_editor::RemoveNotesCommand>(notes, "Delete"))) {
@@ -2961,34 +2793,8 @@ bool ChartEditPanel::delete_selected() {
   return true;
 }
 
-bool ChartEditPanel::suppress_hold_eighth(const NotationNote& note) {
-  if (!engine_.is_editable() || note.note_type != NoteType::HoldEighth ||
-      wds::chart_editor::is_suppressed_hold_eighth(note)) return false;
-  if (wds::chart_editor::is_authored_hold_eighth(note)) {
-    if (!engine_.execute_command(std::make_unique<wds::chart_editor::RemoveNotesCommand>(
-            std::vector<NotationNote>{note}, "Delete hold judgment point"))) return false;
-    selected_.erase(note.id);
-    sync_hold_sel_focus_to_selection();
-    return true;
-  }
-  auto after = note;
-  after.scratch_length = wds::chart_editor::kSuppressedHoldEighthScratchLength;
-  if (!engine_.execute_command(std::make_unique<wds::chart_editor::UpdateNotesCommand>(
-          std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair>{
-              {note.id, {note, after}}},
-          "Delete HoldEighth"))) {
-    return false;
-  }
-  selected_.erase(note.id);
-  sync_hold_sel_focus_to_selection();
-  return true;
-}
-
 bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {
   if (!engine_.is_editable()) return false;
-  if (const auto eighth = hit_test_hold_eighth(point)) {
-    return suppress_hold_eighth(*eighth);
-  }
   const auto hit = hit_test_note(point);
   if (!hit) return false;
   // Middle-click deletes only the hit note (+ hold mid dependents). Never the
@@ -3099,16 +2905,6 @@ void ChartEditPanel::paint(wds::interaction::UiPainter& painter) const {
                   show_timing_grid, active_split_highlight_id(), error_ticks_,
                   &offset_violation_ids_, offset_violation_strength(), waveform_,
                   spectrogram_ ? &spectrogram_ : nullptr, spectrum_mode_);
-  const auto playfield = viewport_.bounds();
-  for (const auto& point : engine_.document().scroll_speed_points()) {
-    const float y = viewport_.y_at(point.tick);
-    if (y < playfield.y || y > playfield.bottom()) continue;
-    painter.fill_rect({playfield.x, y - 0.5f, playfield.w, 1.0f},
-                      {0.95f, 0.68f, 0.20f, 0.58f}, 0.0f, 0.98f);
-    painter.label({playfield.x + 4.0f, y - 18.0f, 96.0f, 17.0f},
-                  "SV " + std::to_string(point.multiplier) + "x",
-                  {0.95f, 0.72f, 0.28f, 1.0f}, 0.8f, false, 0.0f, true);
-  }
   // Modals are painted last via paint_popups() from UiManager (above skins).
 }
 
@@ -3449,10 +3245,12 @@ void ChartEditPanel::open_split_picker(int32_t tick) {
   if (split_picker_memory_valid_) {
     split_picker_count_ = std::clamp(split_picker_memory_count_, 1, 6);
     split_picker_color_id_ = split_picker_memory_color_id_;
+    split_picker_type_ = split_picker_memory_type_;
     scroll_split_picker_to_color(split_picker_color_id_);
   } else {
     split_picker_count_ = 2;
     split_picker_color_id_ = 1;
+    split_picker_type_ = wds::chart_editor::SplitLaneType::Full;
   }
   close_timing_popup();
   hide_gutter_ghost();
@@ -3473,6 +3271,11 @@ void ChartEditPanel::remember_split_picker_count() {
 void ChartEditPanel::remember_split_picker_color() {
   split_picker_memory_valid_ = true;
   split_picker_memory_color_id_ = split_picker_color_id_;
+}
+
+void ChartEditPanel::remember_split_picker_type() {
+  split_picker_memory_valid_ = true;
+  split_picker_memory_type_ = split_picker_type_;
 }
 
 void ChartEditPanel::apply_split_search_text(const std::string& text) {
@@ -3525,6 +3328,7 @@ void ChartEditPanel::open_split_picker_for_edit(int32_t note_id) {
   split_scrollbar_dragging_ = false;
   split_picker_count_ = std::clamp(wds::chart_editor::get_split_count(note->gimmick_type), 1, 6);
   split_picker_color_id_ = note->scratch_length;
+  split_picker_type_ = wds::chart_editor::get_split_lane_type(note->gimmick_type);
   scroll_split_picker_to_color(split_picker_color_id_);
   close_timing_popup();
   hide_gutter_ghost();
@@ -3546,6 +3350,7 @@ bool ChartEditPanel::take_split_modal(SplitModalDraft& out) {
   out.edit_id = split_picker_edit_id_;
   out.count = split_picker_count_;
   out.color_id = split_picker_color_id_;
+  out.type = split_picker_type_;
   close_split_picker();
   return true;
 }
@@ -3575,13 +3380,14 @@ bool ChartEditPanel::take_timing_modal(TimingModalDraft& out) {
   return true;
 }
 
-bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color_id) {
+bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color_id,
+                                      wds::chart_editor::SplitLaneType type) {
   if (!engine_.is_editable()) return false;
   if (wds::chart_editor::tick_to_milliseconds(tick, engine_.document().timing()) < 0) return false;
   const int32_t tpq = std::max(1, engine_.document().timing().ticks_per_quarter);
   NotationNote note;
   note.note_type = NoteType::None;
-  note.gimmick_type = wds::chart_editor::split_gimmick_for_count(std::clamp(count, 1, 6));
+  note.gimmick_type = wds::chart_editor::split_gimmick_for(std::clamp(count, 1, 6), type);
   note.scratch_length = color_id;
   note.start_tick = tick;
   note.end_tick = note.start_tick + tpq;
@@ -3590,17 +3396,20 @@ bool ChartEditPanel::add_split_effect(int32_t tick, int32_t count, int32_t color
   if (!commit_notes({note}, "Add split")) return false;
   split_picker_count_ = std::clamp(count, 1, 6);
   split_picker_color_id_ = color_id;
+  split_picker_type_ = type;
   remember_split_picker_count();
   remember_split_picker_color();
+  remember_split_picker_type();
   return true;
 }
 
-bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t color_id) {
+bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t color_id,
+                                       wds::chart_editor::SplitLaneType type) {
   if (!engine_.is_editable()) return false;
   auto prev = engine_.document().find_note(note_id);
   if (!prev || !wds::chart_editor::is_split_lane_gimmick(prev->gimmick_type)) return false;
   NotationNote updated = *prev;
-  updated.gimmick_type = wds::chart_editor::split_gimmick_for_count(std::clamp(count, 1, 6));
+  updated.gimmick_type = wds::chart_editor::split_gimmick_for(std::clamp(count, 1, 6), type);
   updated.scratch_length = color_id;
   if (updated.gimmick_type != prev->gimmick_type ||
       updated.scratch_length != prev->scratch_length) {
@@ -3610,8 +3419,10 @@ bool ChartEditPanel::edit_split_effect(int32_t note_id, int32_t count, int32_t c
   }
   split_picker_count_ = std::clamp(count, 1, 6);
   split_picker_color_id_ = color_id;
+  split_picker_type_ = type;
   remember_split_picker_count();
   remember_split_picker_color();
+  remember_split_picker_type();
   return true;
 }
 
@@ -3673,9 +3484,11 @@ bool ChartEditPanel::apply_meter(int32_t tick, int32_t numerator, int32_t denomi
 
 void ChartEditPanel::confirm_split_picker() {
   if (split_picker_edit_id_ >= 0) {
-    (void)edit_split_effect(split_picker_edit_id_, split_picker_count_, split_picker_color_id_);
+    (void)edit_split_effect(split_picker_edit_id_, split_picker_count_, split_picker_color_id_,
+                            split_picker_type_);
   } else {
-    (void)add_split_effect(split_picker_tick_, split_picker_count_, split_picker_color_id_);
+    (void)add_split_effect(split_picker_tick_, split_picker_count_, split_picker_color_id_,
+                           split_picker_type_);
   }
   close_split_picker();
 }
@@ -3992,7 +3805,6 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
   const auto hits = build_split_label_hits(viewport_, left_gutter_, engine_.document().notes());
   const int32_t highlight_id = active_split_highlight_id();
   const bool highlight_is_end = active_split_highlight_is_end();
-  const GutterLabelHit* active_hit = nullptr;
   auto paint_leader = [&](const wds::interaction::Rect& bounds, float anchor_y, bool is_start,
                           int column, const wds::interaction::Color& c, float z) {
     const float natural_y =
@@ -4016,7 +3828,6 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
     auto note = engine_.document().find_note(hit.note_id);
     if (!note) continue;
     const bool active = hit.note_id == highlight_id && hit.is_start == !highlight_is_end;
-    if (active) active_hit = &hit;
     const wds::interaction::Color c =
         hit.is_start ? wds::interaction::Color{0.22f, 0.48f, 0.95f, 1.0f}
                      : wds::interaction::Color{0.92f, 0.28f, 0.28f, 1.0f};
@@ -4028,22 +3839,6 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
     painter.fill_rect(hit.bounds, c, th::kCornerRadiusSm, 0.979f);
     painter.fill_rect(hit.bounds.inset(th::px(0.5f), th::px(0.5f)), {0.08f, 0.08f, 0.10f, 0.40f},
                       th::px(1.0f), 0.98f);
-  }
-  if (active_hit) {
-    if (auto note = engine_.document().find_note(active_hit->note_id)) {
-      const std::string id_text = std::to_string(note->scratch_length);
-      const float card_px = th::kFontSizeGutter;
-      const float card_h = th::px(26.0f);
-      const float card_w = std::max(th::px(56.0f), card_px * 0.62f * static_cast<float>(id_text.size()) +
-                                                       th::px(10.0f));
-      float card_y = active_hit->bounds.y + (active_hit->bounds.h - card_h) * 0.5f;
-      card_y = std::clamp(card_y, playfield_.y, std::max(playfield_.y, playfield_.bottom() - card_h));
-      const wds::interaction::Rect card{playfield_.x + th::px(2.0f), card_y, card_w, card_h};
-      painter.fill_rect(card, {0.10f, 0.11f, 0.14f, 0.94f}, th::kCornerRadiusMd, 0.982f);
-      painter.fill_rect(card.inset(th::px(0.5f), th::px(0.5f)), {0.22f, 0.24f, 0.28f, 0.9f},
-                        th::kCornerRadiusSm, 0.983f);
-      painter.label(card, id_text, {1.0f, 1.0f, 1.0f, 1.0f}, 0.984f, false, card_px);
-    }
   }
   for (const auto& ghost : gutter_ghosts_) {
     if (ghost.draw_leader) {
@@ -4072,7 +3867,7 @@ std::vector<EditGhost> ChartEditPanel::skinned_ghosts() const {
     // Preview auto head for first-chain / disconnected-preview drafts (same rules as
     // finish_hold_body). Linked chain continuations stay headless.
     const bool preview_auto_head = hold_chain_prev_id_ < 0 || !hold_chain_link_preview_;
-    if (wds::chart_editor::is_bindable_hold_body(ghost_.note.note_type) &&
+    if (wds::chart_editor::is_hold_with_tail(ghost_.note.note_type) &&
         ghost_.note.end_tick > ghost_.note.start_tick && preview_auto_head) {
       if (auto head = wds::chart_editor::make_auto_hold_head(engine_.document(), ghost_.note)) {
         ghosts.push_back({*head, true, alpha});
@@ -4188,29 +3983,6 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     }
   }
 
-  // Shift+middle adds one explicit type-900 judgment inside a nontail hold.
-  // Consume the gesture even when invalid so it cannot delete a nearby note.
-  if (mode_ == Mode::Idle && event.button == wds::interaction::PointerButton::Middle &&
-      event.mods.shift && !event.mods.control && !event.mods.alt && !event.mods.super) {
-    add_manual_hold_eighth_at(event.position);
-    return;
-  }
-
-  // A visible eighth handle wins over its hold ribbon for selection. Delete
-  // then suppresses just this judgment point without removing the hold.
-  if (mode_ == Mode::Idle &&
-      (wds::interaction::is_select_or_edit_note(event) ||
-       wds::interaction::is_toggle_select(event))) {
-    if (const auto eighth = hit_test_hold_eighth(event.position);
-        eighth && is_visible_authored_hold_eighth(*eighth)) {
-      selected_.clear();
-      selected_.insert(eighth->id);
-      clear_hold_sel_focus();
-      hide_placement_ghost();
-      return;
-    }
-  }
-
   if (auto hit = hit_test_note(event.position)) {
     hide_placement_ghost();
     if (wds::interaction::is_delete_single_note(event)) {
@@ -4279,7 +4051,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
       const bool hitting_time_edge =
           !mid_star_hit && !hitting_scratch_end &&
           (in_jump_scratch_cap ||
-           (wds::chart_editor::is_bindable_hold_body(hit_note->note_type) &&
+           (wds::chart_editor::is_hold_with_tail(hit_note->note_type) &&
             (near_start_time(*hit_note, event.position.y) ||
              near_end_time(*hit_note, event.position.y))));
 
@@ -4287,7 +4059,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
       if (!alt_chain_part && !hitting_width_edge && !hitting_time_edge) {
         const bool direct_hold_part =
             wds::chart_editor::is_hold_head_note(*hit_note) ||
-            (wds::chart_editor::is_bindable_hold_body(hit_note->note_type) &&
+            (wds::chart_editor::is_hold_with_tail(hit_note->note_type) &&
              (near_start_time(*hit_note, event.position.y) ||
               near_end_time(*hit_note, event.position.y)));
         if (direct_hold_part) {
@@ -4351,7 +4123,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         } else {
           drag_originals_.clear();
           drag_originals_[hit_note->id] = *hit_note;
-          if (wds::chart_editor::is_bindable_hold_body(hit_note->note_type)) {
+          if (wds::chart_editor::is_hold_with_tail(hit_note->note_type)) {
             append_hold_attached(engine_.document(), *hit_note, drag_originals_);
             if (auto head =
                     wds::chart_editor::paired_hold_head_for(engine_.document(), *hit_note)) {
@@ -4488,13 +4260,6 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
       drag_start_lane_ = viewport_.lane_at(event.position.x, 1);
       return;
     }
-  }
-
-  // Also allow middle-click deletion when the marker is over empty canvas.
-  if (wds::interaction::is_delete_single_note(event) &&
-      delete_note_at(event.position)) {
-    mode_ = Mode::Idle;
-    return;
   }
 
   if (wds::interaction::is_marquee_select(event)) {
@@ -5132,7 +4897,7 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
     // Keep equal-width hold heads matched to a resized body.
     auto sync_equal_width_heads = [&](std::unordered_map<int32_t, NotationNote>& next) {
       for (const auto& [id, body_next] : next) {
-        if (!wds::chart_editor::is_bindable_hold_body(body_next.note_type)) continue;
+        if (!wds::chart_editor::is_hold_with_tail(body_next.note_type)) continue;
         auto body_orig_it = drag_originals_.find(id);
         if (body_orig_it == drag_originals_.end()) continue;
         const auto& body_orig = body_orig_it->second;
@@ -5875,7 +5640,7 @@ bool ChartEditPanel::commit_curve_fill() {
   for (const auto& note : engine_.document().notes()) {
     if (before_ids.count(note.id)) continue;
     if (wds::chart_editor::is_hold_head_note(note) ||
-        wds::chart_editor::is_bindable_hold_body(note.note_type)) {
+        wds::chart_editor::is_hold_with_tail(note.note_type)) {
       selected_.insert(note.id);
     }
   }

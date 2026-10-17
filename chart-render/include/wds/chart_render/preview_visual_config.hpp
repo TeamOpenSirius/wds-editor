@@ -19,6 +19,9 @@ struct PreviewVisualConfig {
   float extra_width = 1.0f;
   float stage_opacity = 0.8f;
   float stage_top_overscan = 0.0f;
+  // 1 = official FOV 50 + 1280×720 camera. Do not zoom: curtains / floor live
+  // outside the lane plate and vanish if view_zoom > 1.
+  float view_zoom = 1.0f;
 
   // Judgment line thickness in JudgeArea Y (img_ingame_judgment_area3 = 0.72).
   float judgeline_height = wds::chart_editor::kOfficialJudgeSpriteHeight;
@@ -47,9 +50,11 @@ struct PreviewVisualConfig {
   float sync_line_height = wds::chart_editor::kOfficialConcurrentLineSpriteHeight;
   // Slightly wider than stock so the gaussian glow skirts have screen-space room.
   float split_line_length = 0.048f;
-  // Official fadeIn 1.0s; fadeOut alpha 1→0 in 0.3s (Light: lines only).
+  // Official fadeIn 1.0s; runtime fadeOut alpha 1→0 in 0.3s from expire.
   float split_line_animation_start = 1.0f;
   float split_line_animation_end = 0.3f;
+  // Official SpritEffectSettingType: Rich=0, Normal=1, Light=2. Default Rich.
+  int split_effect_quality = wds::chart_editor::kOfficialSpritEffectRich;
   // Official Initialize: RGB *= settings/100. GameSettings default is 100.
   float split_line_opacity = 1.00f;
   // Mild additive body glow so overlaps with the judgeline brighten (beam, not matte).
@@ -88,31 +93,9 @@ struct PreviewVisualConfig {
   // Hold-body eighth pulses — Default Light Square matches HoldBomb (isStrong only
   // scales disabled Light modules; keep full opacity).
   float hold_body_effect_alpha = 1.0f;
-  // TimingEffect Auto (TimingEffect_anime m_StopTime ≈ 0.417s).
-  float judge_text_height = 0.15f;
-  float judge_auto_ratio = 216.0f / 76.0f;
-  float judge_text_duration = 0.1f;  // combo number pop window
+  // TimingEffect_anime m_StopTime ≈ 0.417s. Layout is OpenWDS Game/Effects + prefab.
   float timing_effect_duration = 0.417f;
-  // Centered on the stage (PreviewUI's local X=-0.87 is relative to an offset parent).
-  float timing_effect_unity_x = 0.0f;
-  float timing_effect_unity_half_width = 5.55f;  // LaneWidth 0.925 * 12 / 2
-  // Y: fraction from judgeline toward tip (lower → sits closer to judgeline).
-  float timing_effect_y_fraction = 0.34f;
-  float timing_effect_root_scale = 0.8f;
-
-  // Combo (Sirius Stage.cpp drawCombo AP branch)
-  float combo_scale = 1.12f;
   float combo_alpha = 1.0f;
-  float combo_ap_number_height = 0.238f;
-  float combo_ap_number_distance = -0.048f;
-  float combo_ap_text_height = 0.066f;
-  float combo_ap_text_distance = 0.003f;
-  float combo_ap_digit_ratio = 118.0f / 148.0f;
-  float combo_ap_text_ratio = 168.0f / 48.0f;
-  // Sirius drawCombo: cx = screen.w * factor (origin at screen center) → track right side.
-  float combo_center_x_factor = 0.4f;
-  // Lower baseline (toward judgeline) than stock 0.2.
-  float combo_baseline_y = 0.12f;
 
   // Official CalculateMoveSeconds = 7.4167 / note_speed.
   float appear_time_base = 7.4166667f;

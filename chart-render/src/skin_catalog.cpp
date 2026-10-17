@@ -142,6 +142,8 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     }
     cache.queue_rgba(kSoftSplitKey, std::move(px), kW, 1);
   }
+  constexpr const char* kSyurikenPlateKey = "__wds/syuriken_plate";
+  cache.queue_rgba(kSyurikenPlateKey, std::vector<unsigned char>{255, 255, 255, 255}, 1, 1);
   constexpr const char* kSoftDiskKey = "__wds/soft_disk";
   {
     constexpr int kN = 64;
@@ -179,6 +181,16 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     ingame_background = cache.load_standalone_png(p_ingame_bg);
   } else {
     ingame_background = {};
+  }
+
+  // Official img_game_common_bg_shadow — 960×540 textureRect, standalone like
+  // ingame_bg (too large for the note atlas, drawn as four world quads).
+  const std::string p_bg_shadow =
+      path_to_utf8(dir / "img_game_common_bg_shadow.png");
+  if (is_regular_file_utf8(p_bg_shadow)) {
+    bg_shadow = cache.load_standalone_png(p_bg_shadow);
+  } else {
+    bg_shadow = {};
   }
 
   // Official img_ingame_lane_border2 — 1115×640, same standalone path as ingame_bg.
@@ -224,6 +236,7 @@ bool SkinCatalog::load(TextureCache& cache, const std::string& skins_directory) 
     combo_ap_digit[i] = cache.get(p_combo_digit[i]);
   }
   soft_split_line = cache.get(kSoftSplitKey);
+  syuriken_plate = cache.get(kSyurikenPlateKey);
   soft_disk = cache.get(kSoftDiskKey);
 
   note_slice_border_l = wds::chart_render::kNoteSliceBorderL;

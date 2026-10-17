@@ -11,8 +11,6 @@
 #include "wds/ui/regions/settings/preview_settings_panel.hpp"
 #include "wds/ui/ui_manager.hpp"
 
-#include <wds/core/note_edit_ops.hpp>
-
 #include <wds/audio/transport.hpp>
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/editor_shortcuts.hpp>
@@ -307,6 +305,19 @@ PlaybackBar::PlaybackBar(UiManager* manager, QWidget* parent)
   refresh_settings_widgets();
 }
 
+void PlaybackBar::set_stem_handlers(std::function<void(int)> select, std::function<void()> open) {
+  on_select_stem_ = std::move(select);
+  on_open_stems_ = std::move(open);
+}
+
+void PlaybackBar::set_stem_tracks(const QStringList& names, int selected) {
+  const QSignalBlocker blocker(stem_track_);
+  stem_track_->clear();
+  stem_track_->addItems(names);
+  stem_track_->setCurrentIndex(selected);
+  stem_track_->setEnabled(names.size() > 1);
+}
+
 void PlaybackBar::seek_to_slider(int value) {
   auto* settings = manager_->settings_panel();
   if (settings == nullptr) return;
@@ -320,7 +331,7 @@ void PlaybackBar::seek_to_slider(int value) {
   // Queue only — poll() commits on the next preview tick, same as the
   // legacy Slider::on_change path. Do not latch audio.position() or
   // rewrite play_anchor_ms_ here; that was the pause-to-start creep.
-  manager_->chart_preview().transport().request_seek_ms(target);
+  manager_->chart_preview().request_seek_ms(target);
 }
 
 void PlaybackBar::build_ui() {
@@ -371,6 +382,29 @@ void PlaybackBar::build_ui() {
   seek_layout->addWidget(transport, 0);
   seek_row->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
+  auto* stems = new QWidget(block);
+  auto* stem_row = new QHBoxLayout(stems);
+  stem_row->setContentsMargins(0, 0, 0, 0);
+  stem_row->setSpacing(kLabelFieldGap);
+  stem_track_ = new QComboBox(stems);
+  stem_track_->setObjectName(QStringLiteral("playbackStemTrack"));
+  stem_track_->setToolTip(tr("音轨选择"));
+  auto* stem_label = new QLabel(tr("音轨选择"), stems);
+  stem_label->setBuddy(stem_track_);
+  auto* open_stems = new QPushButton(tr("生成分轨"), stems);
+  open_stems->setObjectName(QStringLiteral("playbackStems"));
+  open_stems->setToolTip(tr("生成分轨"));
+  stem_row->addWidget(stem_label);
+  stem_row->addWidget(stem_track_, 1);
+  stem_row->addWidget(open_stems);
+  set_stem_tracks({tr("原曲")}, 0);
+  connect(stem_track_, &QComboBox::activated, this, [this](int index) {
+    if (on_select_stem_) on_select_stem_(index);
+  });
+  connect(open_stems, &QPushButton::clicked, this, [this] {
+    if (on_open_stems_) on_open_stems_();
+  });
+
   auto* mix = new QWidget(block);
   mix->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   auto* mix_row = new QHBoxLayout(mix);
@@ -394,6 +428,8 @@ void PlaybackBar::build_ui() {
   mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("播放速度"), mix), rate_}));
   box->addStretch(1);
   box->addWidget(seek_row);
+  box->addStretch(1);
+  box->addWidget(stems);
   box->addStretch(1);
   box->addWidget(mix);
   box->addStretch(1);
@@ -584,17 +620,6 @@ void ConvertBar::build_ui(const std::string& skins_dir) {
       sync_place_checks();
     });
   }
-  hold_tail_ = new QCheckBox(tr("尾判定"), this);
-  hold_tail_->setToolTip(tr("Refresh：选中 Hold 后切换有尾/无尾"));
-  row->addSpacing(8);
-  row->addWidget(hold_tail_, 0);
-  connect(hold_tail_, &QCheckBox::clicked, this, [this] {
-    if (manager_ == nullptr) return;
-    if (auto* edit = manager_->edit_panel()) {
-      edit->toggle_selected_hold_tail();
-      sync_place_checks();
-    }
-  });
 }
 
 void ConvertBar::set_ribbon_mode() {
@@ -639,35 +664,6 @@ void ConvertBar::sync_place_checks() {
     const QSignalBlocker blocker(convert_buttons_[i]);
     convert_buttons_[i]->setChecked(enabled && kPlaceIntents[i] == current);
   }
-  if (hold_tail_ != nullptr) {
-    const bool refresh = edit != nullptr &&
-        edit->engine().document().compatibility_profile() ==
-            wds::chart_editor::ChartCompatibilityProfile::SiriusExtended;
-    bool has_body = false;
-    bool with_tail = false;
-    int32_t body_id = -1;
-    if (edit != nullptr) {
-      for (const int32_t id : edit->selected()) {
-        auto note = edit->engine().document().find_note(id);
-        if (note && wds::chart_editor::is_hold_head_note(*note)) {
-          note = wds::chart_editor::paired_hold_body_for(edit->engine().document(), *note);
-        }
-        if (!note || !wds::chart_editor::is_bindable_hold_body(note->note_type) ||
-            (body_id >= 0 && body_id != note->id)) {
-          has_body = false;
-          body_id = -1;
-          break;
-        }
-        body_id = note->id;
-        has_body = true;
-        with_tail = wds::chart_editor::is_hold_with_tail(note->note_type);
-      }
-    }
-    const QSignalBlocker blocker(hold_tail_);
-    hold_tail_->setVisible(refresh);
-    hold_tail_->setEnabled(editable && has_body && refresh);
-    hold_tail_->setChecked(with_tail);
-  }
 }
 
 // --- 工具栏 -----------------------------------------------------------------
@@ -679,7 +675,6 @@ EditorToolbarWidget::EditorToolbarWidget(UiManager* manager, QWidget* parent)
   refresh_grid_fields();
   refresh_flags();
   refresh_chart_selector();
-  refresh_sv_controls();
   refresh_enabled_states();
 }
 
@@ -743,42 +738,8 @@ void EditorToolbarWidget::build_ui() {
   auto* split_row = new CaptionCheckRow(tr("音符默认对齐分割线轨道"), content);
   split_width_follow_ = split_row->box();
 
-  compatibility_profile_ = new QComboBox(content);
-  compatibility_profile_->addItems({tr("Original"), tr("Refresh")});
-  apply_toolbar_field(compatibility_profile_);
-  note_width_ = new QSpinBox(content);
-  note_width_->setRange(1, 12);
-  apply_toolbar_field(note_width_);
-  auto* profile_cell = make_labeled_field(content, tr("功能等级"), compatibility_profile_);
-  auto* width_cell = make_labeled_field(content, tr("默认宽度"), note_width_);
-
-  sv_select_ = new QComboBox(content);
-  apply_toolbar_field(sv_select_);
-  sv_multiplier_ = new QLineEdit(content);
-  sv_multiplier_->setText(QStringLiteral("1"));
-  apply_toolbar_field(sv_multiplier_);
-  auto* sv_select_cell = make_labeled_field(content, tr("SV 点"), sv_select_);
-  auto* sv_rate_cell = make_labeled_field(content, tr("正向倍率"), sv_multiplier_);
-
-  sv_tick_ = new QSpinBox(content);
-  sv_tick_->setRange(0, std::numeric_limits<int32_t>::max());
-  apply_toolbar_field(sv_tick_);
-  sv_apply_ = new QPushButton(tr("设置 SV"), content);
-  sv_delete_ = new QPushButton(tr("删除 SV"), content);
-  sv_apply_->setToolTip(tr("仅 Refresh 可设置变速"));
-  auto* sv_actions = new QWidget(content);
-  auto* sv_actions_row = new QHBoxLayout(sv_actions);
-  sv_actions_row->setContentsMargins(0, 0, 0, 0);
-  sv_actions_row->setSpacing(4);
-  sv_actions_row->addWidget(sv_apply_);
-  sv_actions_row->addWidget(sv_delete_);
-  auto* sv_tick_cell = make_labeled_field(content, tr("SV Tick"), sv_tick_);
-  auto* sv_action_cell = make_labeled_field(content, QString(), sv_actions);
-
-  const int left_form_w = sync_min_width({delay_cell, visible_cell, curve_cell,
-                                          profile_cell, sv_select_cell, sv_tick_cell});
-  const int right_form_w = sync_min_width({chart_cell, subdiv_cell, ease_cell,
-                                           width_cell, sv_rate_cell, sv_action_cell});
+  const int left_form_w = sync_min_width({delay_cell, visible_cell, curve_cell});
+  const int right_form_w = sync_min_width({chart_cell, subdiv_cell, ease_cell});
   const int col_w = std::max({left_form_w, right_form_w, pause_row->sizeHint().width(),
                              split_row->sizeHint().width()});
 
@@ -786,11 +747,6 @@ void EditorToolbarWidget::build_ui() {
   stack->addWidget(make_pair_row(content, visible_cell, subdiv_cell, col_w));
   stack->addWidget(make_pair_row(content, curve_cell, ease_cell, col_w));
   stack->addWidget(make_pair_row(content, pause_row, split_row, col_w));
-  stack->addWidget(make_pair_row(content, profile_cell, width_cell, col_w));
-  sv_points_row_ = make_pair_row(content, sv_select_cell, sv_rate_cell, col_w);
-  sv_edit_row_ = make_pair_row(content, sv_tick_cell, sv_action_cell, col_w);
-  stack->addWidget(sv_points_row_);
-  stack->addWidget(sv_edit_row_);
 
   auto* scroll = new FillScrollArea(this);
   scroll->setWidget(content);
@@ -838,97 +794,6 @@ void EditorToolbarWidget::build_ui() {
       edit->set_split_width_follow(checked);
       manager_->request_save_ui_config(true);
     }
-  });
-  connect(compatibility_profile_, qOverload<int>(&QComboBox::activated), this,
-          [this](int index) {
-    if (manager_ == nullptr || syncing_) return;
-    auto* edit = manager_->edit_panel();
-    if (edit == nullptr) return;
-    auto& engine = edit->engine();
-    const auto before = engine.document().compatibility_profile();
-    const auto after = index == 1
-                           ? wds::chart_editor::ChartCompatibilityProfile::SiriusExtended
-                           : wds::chart_editor::ChartCompatibilityProfile::Official;
-    if (before != after && !engine.execute_command(
-                               std::make_unique<wds::chart_editor::SetCompatibilityProfileCommand>(
-                                   before, after))) {
-      manager_->set_status("当前谱面有 SV、无尾 Hold 或越界 Note，不能切换到 Original", StatusLevel::Error);
-    }
-    edit->set_grid(edit->viewport().grid());
-    edit->set_default_width(edit->default_width());
-    refresh_flags();
-    refresh_enabled_states();
-  });
-  connect(note_width_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
-    if (manager_ == nullptr || syncing_) return;
-    if (auto* edit = manager_->edit_panel()) edit->set_default_width(value);
-  });
-  connect(sv_select_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
-    if (manager_ == nullptr || syncing_) return;
-    auto* edit = manager_->edit_panel();
-    if (edit == nullptr) return;
-    const auto& points = edit->engine().document().scroll_speed_points();
-    sv_delete_->setEnabled(edit->engine().is_editable() &&
-                           edit->engine().document().compatibility_profile() ==
-                               wds::chart_editor::ChartCompatibilityProfile::SiriusExtended &&
-                           index > 0);
-    if (index <= 0 || static_cast<size_t>(index) > points.size()) {
-      sv_tick_->setValue(wds::chart_editor::milliseconds_to_tick(
-          edit->engine().timeline_ms(), edit->engine().document().timing()));
-      sv_multiplier_->setText(QStringLiteral("1"));
-      return;
-    }
-    const auto& point = points[static_cast<size_t>(index - 1)];
-    sv_tick_->setValue(point.tick);
-    sv_multiplier_->setText(QString::number(point.multiplier, 'g', 17));
-  });
-  connect(sv_apply_, &QPushButton::clicked, this, [this] {
-    if (manager_ == nullptr) return;
-    auto* edit = manager_->edit_panel();
-    if (edit == nullptr || !edit->engine().is_editable() ||
-        edit->engine().document().compatibility_profile() !=
-            wds::chart_editor::ChartCompatibilityProfile::SiriusExtended) return;
-    bool ok = false;
-    const double multiplier = sv_multiplier_->text().trimmed().toDouble(&ok);
-    if (!ok || !std::isfinite(multiplier) || !(multiplier > 0.0)) {
-      manager_->set_status("SV 倍率必须是有限正数", StatusLevel::Error);
-      return;
-    }
-    auto& engine = edit->engine();
-    const auto before = engine.document().scroll_speed_points();
-    auto after = before;
-    const int selected = sv_select_->currentIndex() - 1;
-    const int32_t tick = sv_tick_->value();
-    for (size_t i = 0; i < after.size(); ++i) {
-      if (static_cast<int>(i) != selected && after[i].tick == tick) {
-        manager_->set_status("该 Tick 已有 SV 点", StatusLevel::Error);
-        return;
-      }
-    }
-    if (selected >= 0 && static_cast<size_t>(selected) < after.size()) {
-      after[static_cast<size_t>(selected)] = {tick, multiplier};
-    } else {
-      after.push_back({tick, multiplier});
-    }
-    engine.execute_command(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
-        before, after));
-    refresh_sv_controls();
-    const int found = sv_select_->findData(tick);
-    if (found >= 0) sv_select_->setCurrentIndex(found);
-  });
-  connect(sv_delete_, &QPushButton::clicked, this, [this] {
-    if (manager_ == nullptr) return;
-    auto* edit = manager_->edit_panel();
-    if (edit == nullptr || !edit->engine().is_editable()) return;
-    const auto before = edit->engine().document().scroll_speed_points();
-    const int selected = sv_select_->currentIndex() - 1;
-    if (selected < 0 || static_cast<size_t>(selected) >= before.size()) return;
-    auto after = before;
-    after.erase(after.begin() + selected);
-    edit->engine().execute_command(
-        std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
-            before, after, "Delete scroll speed"));
-    refresh_sv_controls();
   });
 }
 
@@ -1008,57 +873,8 @@ void EditorToolbarWidget::refresh_flags() {
     pause_at_current_->setChecked(edit->pause_at_current());
     const QSignalBlocker w(split_width_follow_);
     split_width_follow_->setChecked(edit->split_width_follow());
-    if (compatibility_profile_ != nullptr) {
-      const QSignalBlocker profile_blocker(compatibility_profile_);
-      compatibility_profile_->setCurrentIndex(
-          edit->engine().document().compatibility_profile() ==
-                  wds::chart_editor::ChartCompatibilityProfile::SiriusExtended
-              ? 1
-              : 0);
-    }
-    if (note_width_ != nullptr) {
-      const QSignalBlocker width_blocker(note_width_);
-      note_width_->setMaximum(
-          edit->engine().document().compatibility_profile() ==
-                  wds::chart_editor::ChartCompatibilityProfile::SiriusExtended
-              ? 32
-              : 12);
-      note_width_->setValue(edit->default_width());
-    }
   }
   syncing_ = false;
-  refresh_sv_controls();
-}
-
-void EditorToolbarWidget::refresh_sv_controls() {
-  if (manager_ == nullptr || sv_select_ == nullptr) return;
-  auto* edit = manager_->edit_panel();
-  if (edit == nullptr) return;
-  const int old_tick = sv_select_->count() > 0 ? sv_select_->currentData().toInt() : -1;
-  const QSignalBlocker blocker(sv_select_);
-  sv_select_->clear();
-  sv_select_->addItem(tr("新增（当前时间）"), -1);
-  const auto& points = edit->engine().document().scroll_speed_points();
-  for (const auto& point : points) {
-    sv_select_->addItem(tr("Tick %1 · %2x")
-                            .arg(point.tick)
-                            .arg(QString::number(point.multiplier, 'g', 8)),
-                        point.tick);
-  }
-  const int index = old_tick >= 0 ? sv_select_->findData(old_tick) : 0;
-  sv_select_->setCurrentIndex(index >= 0 ? index : 0);
-  if (sv_select_->currentIndex() > 0) {
-    const auto& point = points[static_cast<size_t>(sv_select_->currentIndex() - 1)];
-    sv_tick_->setValue(point.tick);
-    sv_multiplier_->setText(QString::number(point.multiplier, 'g', 17));
-  } else if (!sv_tick_->hasFocus()) {
-    sv_tick_->setValue(wds::chart_editor::milliseconds_to_tick(
-        edit->engine().timeline_ms(), edit->engine().document().timing()));
-  }
-  sv_delete_->setEnabled(edit->engine().is_editable() &&
-                         edit->engine().document().compatibility_profile() ==
-                             wds::chart_editor::ChartCompatibilityProfile::SiriusExtended &&
-                         sv_select_->currentIndex() > 0);
 }
 
 void EditorToolbarWidget::refresh_chart_selector() {
@@ -1074,26 +890,12 @@ void EditorToolbarWidget::refresh_chart_selector() {
     const QSignalBlocker blocker(chart_select_);
     chart_select_->setCurrentIndex(static_cast<int>(session.active_chart_index()));
   }
-  refresh_flags();
 }
 
 void EditorToolbarWidget::refresh_enabled_states() {
   if (manager_ == nullptr) return;
   auto& session = manager_->session();
   const bool editable = !session.read_only();
-  const auto* edit = manager_->edit_panel();
-  const bool extended = edit != nullptr &&
-      edit->engine().document().compatibility_profile() ==
-          wds::chart_editor::ChartCompatibilityProfile::SiriusExtended;
-  if (sv_points_row_ != nullptr) sv_points_row_->setVisible(extended);
-  if (sv_edit_row_ != nullptr) sv_edit_row_->setVisible(extended);
-  if (compatibility_profile_ != nullptr) compatibility_profile_->setEnabled(editable);
-  if (note_width_ != nullptr) note_width_->setEnabled(editable);
-  if (sv_select_ != nullptr) sv_select_->setEnabled(editable && extended);
-  if (sv_tick_ != nullptr) sv_tick_->setEnabled(editable && extended);
-  if (sv_multiplier_ != nullptr) sv_multiplier_->setEnabled(editable && extended);
-  if (sv_apply_ != nullptr) sv_apply_->setEnabled(editable && extended);
-  if (sv_delete_ != nullptr) sv_delete_->setEnabled(editable && extended && sv_select_->currentIndex() > 0);
   if (delay_ms_ != nullptr) delay_ms_->setEnabled(session.delay_editable());
   if (chart_select_ != nullptr) {
     chart_select_->setEnabled(editable || session.chart_count() > 1);

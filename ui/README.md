@@ -146,6 +146,7 @@ ui.session();
 应用图标属于不可替换的 Qt chrome，编入 `wds_resources.qrc`。其余资源有意保留为发行包内的目录：
 
 - `skins/`、`effects/` 由 Vulkan/BASS 原生路径 API 使用，不能直接换成 `:/` URL；
+- `resources/`（分割线粒子 objects.tsv / objects.jsonl）体量约 80 MB，同样作为目录随包发布；
 - `theme/` 与字体保留外置，便于主题枚举、用户替换及许可证随包分发；
 - CMake/打包脚本负责把这些目录放到可执行文件旁（macOS 为 App Resources），业务代码统一通过 `resource_paths` 解析。
 

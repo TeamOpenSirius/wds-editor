@@ -5,6 +5,7 @@
 
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/edit_history.hpp>
+#include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
 #include <wds/core/types.hpp>
 
@@ -116,9 +117,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // ±width for equal-width tails. Pass nullopt for convert_note_type defaults.
   bool convert_selected(wds::chart_editor::NoteType target,
                         std::optional<int32_t> scratch_length = std::nullopt);
-  // Toggle the judged tail on selected hold bodies while preserving duration,
-  // geometry, heads, and in-body HoldEighth points.
-  bool toggle_selected_hold_tail();
   bool mirror_selected(bool about_center);
   bool nudge_selected(int32_t delta_tick, int32_t delta_lane);
   bool copy_selected();
@@ -172,6 +170,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void paint_overlays(wds::interaction::UiPainter& painter) const;
   // Qt canvas: split / BPM / meter / measure columns and chips (no form chrome).
   void paint_side_columns(wds::interaction::UiPainter& painter) const;
+  // Hovered or dragged split-label pair; -1 if none. Qt canvas glows those lines.
+  int32_t active_split_highlight_id() const noexcept;
+  struct SplitHoverHint {
+    int32_t color_id = 1;
+    int32_t split_count = 1;
+    wds::chart_editor::SplitLaneType type = wds::chart_editor::SplitLaneType::Full;
+    wds::interaction::Rect chip_bounds{};
+  };
+  std::optional<SplitHoverHint> active_split_hover() const;
   // Live Cmd/Ctrl drag-select rectangle in screen space; empty when idle.
   std::optional<wds::interaction::Rect> active_marquee_rect() const;
 
@@ -180,6 +187,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
     int32_t edit_id = -1;
     int32_t count = 2;
     int32_t color_id = 1;
+    wds::chart_editor::SplitLaneType type = wds::chart_editor::SplitLaneType::Full;
   };
   struct TimingModalDraft {
     bool bpm_mode = true;
@@ -191,8 +199,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // Snapshot + close an in-panel modal so a Qt dialog can own the form.
   bool take_split_modal(SplitModalDraft& out);
   bool take_timing_modal(TimingModalDraft& out);
-  bool add_split_effect(int32_t tick, int32_t count, int32_t color_id);
-  bool edit_split_effect(int32_t note_id, int32_t count, int32_t color_id);
+  bool add_split_effect(int32_t tick, int32_t count, int32_t color_id,
+                        wds::chart_editor::SplitLaneType type = wds::chart_editor::SplitLaneType::Full);
+  bool edit_split_effect(int32_t note_id, int32_t count, int32_t color_id,
+                         wds::chart_editor::SplitLaneType type = wds::chart_editor::SplitLaneType::Full);
   bool apply_bpm(int32_t tick, double bpm);
   bool apply_meter(int32_t tick, int32_t numerator, int32_t denominator);
 
@@ -212,6 +222,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void on_pointer_down(const wds::interaction::PointerDownEvent& event) override;
   void on_pointer_move(const wds::interaction::PointerMoveEvent& event) override;
   void on_pointer_up(const wds::interaction::PointerUpEvent& event) override;
+  void on_hover_leave() override;
   void on_double_click(const wds::interaction::DoubleClickEvent& event) override;
   void on_scroll(const wds::interaction::ScrollEvent& event) override;
   // Shared timeline scrub / visible-range zoom. PreviewHitWidget calls this
@@ -252,11 +263,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void apply_placement_lane_width(wds::interaction::Vec2 point, int32_t& lane,
                                   int32_t& width) const;
   std::optional<wds::chart_editor::NotationNote> hit_test_note(wds::interaction::Vec2 point) const;
-  bool is_visible_authored_hold_eighth(const wds::chart_editor::NotationNote& note) const;
-  bool add_manual_hold_eighth_at(wds::interaction::Vec2 point);
-  bool suppress_hold_eighth(const wds::chart_editor::NotationNote& note);
-  std::optional<wds::chart_editor::NotationNote> hit_test_hold_eighth(
-      wds::interaction::Vec2 point) const;
   float width_edge_px(const wds::chart_editor::NotationNote& note) const;
   float time_edge_px(const wds::chart_editor::NotationNote& note) const;
   bool near_left_edge(const wds::chart_editor::NotationNote& note, float x) const;
@@ -273,7 +279,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
 
   void hide_placement_ghost();
   void update_ghost(wds::interaction::Vec2 point);
-  void on_hover_leave() override;
   // True while placing a note (press-drag gesture or hold-body draft).
   bool is_note_drawing() const noexcept;
   // Edit pane plus a small leave slop — beyond this Idle ghosts must hide.
@@ -365,6 +370,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void scroll_split_picker_to_color(int32_t color_id);
   void remember_split_picker_count();
   void remember_split_picker_color();
+  void remember_split_picker_type();
   void apply_split_search_text(const std::string& text);
   void sync_split_scrollbar_from_pointer(float y);
   void close_split_picker();
@@ -381,7 +387,6 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void hide_gutter_ghost();
   void update_split_label_hover(wds::interaction::Vec2 point);
   void clear_split_label_hover();
-  int32_t active_split_highlight_id() const noexcept;
   bool active_split_highlight_is_end() const noexcept;
   void layout_popup_rects() const;
   wds::interaction::Rect overlay_host_bounds() const;
@@ -438,6 +443,7 @@ class ChartEditPanel final : public wds::interaction::Widget {
   int32_t split_picker_tick_ = 0;
   int32_t split_picker_count_ = 2;
   int32_t split_picker_color_id_ = 1;
+  wds::chart_editor::SplitLaneType split_picker_type_ = wds::chart_editor::SplitLaneType::Full;
   // >=0 while editing an existing split note; -1 when adding.
   int32_t split_picker_edit_id_ = -1;
   float split_color_scroll_ = 0.0f;
@@ -451,6 +457,8 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool split_picker_memory_valid_ = false;
   int32_t split_picker_memory_count_ = 2;
   int32_t split_picker_memory_color_id_ = 1;
+  wds::chart_editor::SplitLaneType split_picker_memory_type_ =
+      wds::chart_editor::SplitLaneType::Full;
 
   bool timing_popup_open_ = false;
   TimingPopupMode timing_popup_mode_ = TimingPopupMode::Bpm;

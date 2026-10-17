@@ -70,6 +70,10 @@ void Transport::set_chart_offset_ms(int64_t offset_ms) noexcept {
   chart_offset_ms_ = offset_ms;
 }
 
+void Transport::set_max_clock_error_us(int64_t us) noexcept {
+  max_clock_error_us_ = std::max<int64_t>(1000, us);
+}
+
 void Transport::set_playback_rate(float rate) {
   const float next = std::clamp(rate, 0.25f, 2.0f);
   const bool changed = std::fabs(next - playback_rate_) > 1.0e-4f;
@@ -150,6 +154,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
       filtered_audio_us_ = committed_position_.count();
       audio_filter_valid_ = true;
       music_seek_pending_ = false;
+      sought_this_poll_ = true;
       audio_.begin_timeline_control();
       return;
     }
@@ -157,8 +162,16 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
       audio_filter_valid_ = true;
       if (playing_ && !want_pause && target.count() >= 0) {
         music_start_pending_ = true;
+        audio_.pause_music();
       }
     } else {
+      // Stay-paused seek (capture / scrub): commit visual T even if mixer
+      // set_position failed. Play+seek still waits for the mixer (tests).
+      if (want_pause || (!playing_ && !want_play)) {
+        committed_position_ = target;
+        filtered_audio_us_ = target.count();
+        sought_this_poll_ = true;
+      }
       if (recovery_.try_acquire()) {
         recovery_.on_failure();
       }
@@ -180,6 +193,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     if (apply_music_seek(music_seek_target_)) {
       if (playing_ && !want_pause && music_seek_target_.count() >= 0) {
         music_start_pending_ = true;
+        audio_.pause_music();
       }
     } else {
       recovery_.on_failure();
@@ -195,12 +209,13 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
     const bool in_preroll = committed_position_.count() < 0;
     if (!want_pause && audio_.has_music() && !in_preroll) {
       const auto raw = clamp_time(audio_.position());
-      constexpr int64_t kHardSnapUs = 100000;
+      const int64_t max_err = max_clock_error_us_;
 #if defined(_WIN32)
       constexpr double kFilterTauUs = 30000.0;
 #else
       constexpr double kFilterTauUs = 22000.0;
 #endif
+      const int64_t prev_committed = committed_position_.count();
       if (music_seek_pending_) {
         audio_filter_valid_ = false;
       } else if (music_start_pending_ || !audio_filter_valid_) {
@@ -219,7 +234,9 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         }
 
         const int64_t err = raw.count() - filtered_audio_us_;
-        if (err >= kHardSnapUs || err <= -kHardSnapUs) {
+        // Bound residual to one display frame so a hitch cannot leave a
+        // permanent offset. EMA only absorbs sub-frame BASS jitter.
+        if (err >= max_err || err <= -max_err) {
           filtered_audio_us_ = raw.count();
         } else if (step_us > 0) {
           const double alpha =
@@ -231,6 +248,11 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         committed_position_ =
             clamp_time(wds::common::Microseconds{filtered_audio_us_});
         filtered_audio_us_ = committed_position_.count();
+      }
+      // Forward play never runs the committed cursor backwards except a seek.
+      if (!want_seek && !sought_this_poll_ && committed_position_.count() < prev_committed) {
+        committed_position_ = wds::common::Microseconds{prev_committed};
+        filtered_audio_us_ = prev_committed;
       }
 
       if (music_seek_pending_) {
@@ -261,9 +283,11 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
             if (recovery_.try_acquire()) {
               if (apply_music_seek(committed_position_)) {
                 music_start_pending_ = true;
+                audio_.pause_music();
               } else {
                 recovery_.on_failure();
                 music_start_pending_ = true;
+                audio_.pause_music();
               }
             }
           }

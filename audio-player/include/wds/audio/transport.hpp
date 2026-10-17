@@ -40,19 +40,25 @@ class Transport {
   // Preview clock rate (and BGM rate). Hit SFX locks to BASS music POS (1× samples);
   // the committed note timeline must stay phase-locked to that same music clock.
   void set_playback_rate(float rate);
+  // Bound |audio.position − committed| before a hard snap. Default one 60 Hz
+  // frame. Preview passes the measured display period so a hitch cannot leave
+  // a permanent offset larger than one presented frame.
+  void set_max_clock_error_us(int64_t us) noexcept;
 
   // Apply queued intents, advance committed timeline, drive music when present.
   // wall_delta_us is real frame elapsed time when Playing.
   // With music: audio-primary clock — wall*rate predicts between BASS updates, then
-  // an EMA (tau ~20–30ms) absorbs UPDATEPERIOD staircases so notes stay phase-locked
-  // to music / POS-synced hit SFX without hitchy catch-up. Seek/pause resets the filter.
+  // an EMA (tau ~20–30ms) absorbs UPDATEPERIOD staircases. Residual |raw−filtered|
+  // is clamped to one display frame (see set_max_clock_error_us) so a hitch cannot
+  // leave a permanent offset. Forward play never runs the committed cursor backwards
+  // except a seek. Seek/pause resets the filter.
   // Without music: wall clock advances the timeline directly (rate-scaled).
   // Pass real frame time in microseconds — millisecond truncation stalls wall-clock
   // playback under MAILBOX / high refresh (common on Windows).
   // Caller applies the returned snapshot to core/UI via engine.apply_timeline(snap).
   //
-  // On play, music start is deferred until start_pending_music() so the UI can arm
-  // POS SFX syncs against a still-paused stream (avoids first-frame catch-up).
+  // On play / seek-while-playing, music start is deferred until start_pending_music()
+  // so the UI can collect the first picture at t0, then start audible BGM at t0.
   wds::common::TimelineSnapshot poll(int64_t wall_delta_us);
 
   // Begin audible BGM after hit-SFX schedules have been armed for this play request.
@@ -75,6 +81,8 @@ class Transport {
   }
   bool pending_play() const noexcept { return pending_play_; }
   bool pending_pause() const noexcept { return pending_pause_; }
+  bool pending_seek() const noexcept { return pending_seek_; }
+  bool sought_this_poll() const noexcept { return sought_this_poll_; }
 
  private:
   wds::common::Microseconds clamp_time(wds::common::Microseconds time) const;
@@ -100,6 +108,7 @@ class Transport {
   wds::common::Microseconds pending_seek_time_{0};
   int64_t chart_offset_ms_ = 0;
   float playback_rate_ = 1.0f;
+  int64_t max_clock_error_us_ = 16666;
 };
 
 }  // namespace wds::audio
