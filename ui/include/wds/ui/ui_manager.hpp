@@ -161,6 +161,8 @@ class UiManager {
   // apply an edited config back through the same path as the old settings modal.
   void snapshot_ui_config_for_qt(EditorUiConfig& cfg);
   void apply_ui_config_from_qt(const EditorUiConfig& cfg);
+  void sync_extended_editing();
+  bool chart_has_extended_features() const;
   int backup_interval_min() const noexcept { return backup_interval_min_; }
   // Qt playback dock edited curve_template_state(): push selection to the edit panel.
   void push_curve_fill_selection_from_qt() { push_curve_fill_selection(); }

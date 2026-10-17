@@ -37,6 +37,29 @@ class EditViewport {
     note_height_level_ = wds::chart_editor::official_clamp_note_height_level(level);
   }
   int note_height_level() const noexcept { return note_height_level_; }
+  void set_extra_visible_lanes(int extra) noexcept {
+    extra_visible_lanes_ = std::clamp(extra, 0, 20);
+  }
+  int extra_visible_lanes() const noexcept { return extra_visible_lanes_; }
+  int32_t first_visible_lane() const noexcept { return -extra_visible_lanes_; }
+  int32_t visible_lane_count() const noexcept {
+    return std::max(1, grid_.lane_count) + extra_visible_lanes_ * 2;
+  }
+  int32_t clamp_lane(int32_t lane, int32_t width) const {
+    const int32_t w = std::max(1, width);
+    const int32_t first = first_visible_lane();
+    const int32_t vis = visible_lane_count();
+    if (w > vis) return first;
+    return std::clamp(lane, first, first + vis - w);
+  }
+  bool lane_span_visible(int32_t lane, int32_t width) const noexcept {
+    const int32_t first = first_visible_lane();
+    const int32_t vis = visible_lane_count();
+    return width > 0 && lane < first + vis && static_cast<int64_t>(lane) + width > first;
+  }
+  bool lane_fully_visible(int32_t lane, int32_t width) const {
+    return width > 0 && clamp_lane(lane, width) == lane;
+  }
 
   int32_t visible_ms() const noexcept {
     return wds::chart_editor::EditLeadIn::visible_ms_from_hectoms(grid_.visible_hectoms);
@@ -94,18 +117,24 @@ class EditViewport {
   // Continuous left-edge lane under `x` before integer snap (width-centered).
   float lane_left_at_f(float x, int32_t width = 1) const {
     const int32_t w = std::max(1, width);
+    const float vis = static_cast<float>(visible_lane_count());
     const float p =
-        (x - bounds_.x) * static_cast<float>(grid_.lane_count) / std::max(bounds_.w, 1.0f);
+        (x - bounds_.x) * vis / std::max(bounds_.w, 1.0f) + static_cast<float>(first_visible_lane());
     return p - static_cast<float>(w) * 0.5f;
   }
   // Left lane so the note's horizontal center snaps to the nearest track under `x`.
   int32_t lane_at(float x, int32_t width = 1) const {
     const int32_t w = std::max(1, width);
     const int32_t lane = wds::chart_editor::round_to_int_tick(lane_left_at_f(x, w));
-    return wds::chart_editor::clamp_lane_for_width(lane, w, grid_.lane_count);
+    return clamp_lane(lane, w);
   }
-  float x_at(int32_t lane) const { return bounds_.x + lane * bounds_.w / grid_.lane_count; }
-  float lane_width(int32_t width) const { return width * bounds_.w / grid_.lane_count; }
+  float x_at(int32_t lane) const {
+    return bounds_.x + static_cast<float>(lane - first_visible_lane()) * bounds_.w /
+                           static_cast<float>(visible_lane_count());
+  }
+  float lane_width(int32_t width) const {
+    return width * bounds_.w / static_cast<float>(visible_lane_count());
+  }
   float note_height_px() const {
     return wds::chart_editor::official_preview_note_height_px(note_height_level_,
                                                              kPreviewRefContentHeight);
@@ -117,6 +146,9 @@ class EditViewport {
   float judgeline_y() const {
     return bounds_.y + bounds_.h * (1.0f - kJudgelineMarginBottom);
   }
+  // 12-cell judgeline skin sits on authored lanes [0, lane_count), not extra columns.
+  float judgeline_x() const { return x_at(0); }
+  float judgeline_width_px() const { return lane_width(std::max(1, grid_.lane_count)); }
   float judgeline_height_px() const {
     // ~60% of prior thickness (notes keep kVerticalStretch unchanged).
     return std::clamp(bounds_.h * 0.133f * 0.35f * kVerticalStretch * 0.6f, 7.0f, 26.0f);
@@ -140,7 +172,7 @@ class EditViewport {
   wds::interaction::Rect mid_star_screen_rect(const wds::chart_editor::NotationNote& note) const {
     const float inset = note_inset_px(note.width);
     const float x = x_at(note.lane) + inset;
-    const float width = std::max(4.0f, lane_width(note.width) - inset * 2.0f);
+    const float width = std::max(0.0f, lane_width(note.width) - inset * 2.0f);
     const float y0 = y_at(note.start_tick);
     const float side = mid_star_size_px();
     const float cx = x + width * 0.5f;
@@ -175,6 +207,7 @@ class EditViewport {
   wds::chart_editor::EditGridConfig grid_{};
   wds::chart_editor::MusicTiming timing_{};
   int note_height_level_ = wds::chart_editor::kOfficialDefaultNoteHeightLevel;
+  int extra_visible_lanes_ = 0;
   // May be negative within [-judgeline_margin, +∞) for blank below the line.
   float scroll_ms_ = 0.0f;
 };

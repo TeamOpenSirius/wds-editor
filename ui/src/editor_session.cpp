@@ -848,7 +848,7 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
   loaded.reserve(chart_paths.size());
   for (const auto& chart_path : chart_paths) {
     wds::chart_editor::NotationChart chart;
-    if (!ok(wds::chart_editor::OfficialChartFormat::load_chart_with_music_config(
+    if (!ok(wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
             chart_path, music_config_path, chart))) {
       return false;
     }
@@ -1354,6 +1354,15 @@ bool EditorSession::dirty() const noexcept {
     if (slot.dirty) return true;
   }
   return false;
+}
+
+bool EditorSession::chart_has_extended() const {
+  return !wds::chart_editor::required_chart_features(engine().document().to_notation_chart())
+              .empty();
+}
+
+bool EditorSession::extended_editing_active() const {
+  return extended_features_ || chart_has_extended();
 }
 
 std::size_t EditorSession::chart_count() const noexcept { return charts_.size(); }

@@ -716,4 +716,61 @@ Rect meter_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_
   return {label_x, y + split_band_gap(), label_w, timing_label_h()};
 }
 
+std::string format_speed_label(double multiplier) { return format_bpm_label(multiplier) + "x"; }
+
+Rect speed_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
+  return bpm_label_bounds(viewport, gutter, tick);
+}
+
+std::vector<SpeedLabelHit> build_speed_label_hits(
+    const EditViewport& viewport, const Rect& gutter,
+    const std::vector<wds::chart_editor::ScrollSpeedPoint>& points) {
+  std::vector<SpeedLabelHit> out;
+  for (const auto& point : points) {
+    SpeedLabelHit hit;
+    hit.tick = point.tick;
+    hit.bounds = speed_label_bounds(viewport, gutter, point.tick);
+    if (rects_overlap(hit.bounds, gutter)) out.push_back(hit);
+  }
+  std::sort(out.begin(), out.end(), [](const SpeedLabelHit& a, const SpeedLabelHit& b) {
+    return a.tick < b.tick;
+  });
+  return out;
+}
+
+std::optional<int32_t> speed_tick_at(const EditViewport& viewport, const Rect& gutter,
+                                     const std::vector<wds::chart_editor::ScrollSpeedPoint>& points,
+                                     Vec2 point) {
+  if (!gutter.contains(point)) return std::nullopt;
+  const int32_t raw = viewport.tick_at(point.y);
+  const int32_t snapped = wds::chart_editor::snap_to_subdivision(
+      raw, viewport.timing(), viewport.grid().subdivisions_per_beat);
+  const float y = viewport.y_at(snapped);
+  if (std::abs(point.y - y) > kLineSnapPx) return std::nullopt;
+  for (const auto& p : points) {
+    if (p.tick == snapped) return std::nullopt;
+  }
+  return snapped;
+}
+
+void paint_speed_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
+                        const Rect& gutter,
+                        const std::vector<wds::chart_editor::ScrollSpeedPoint>& points,
+                        bool show_marks) {
+  if (gutter.w <= 0.5f) return;
+  painter.fill_rect(gutter, wds::interaction::theme::kEditGutter, 0.0f, 0.85f);
+  if (!show_marks) return;
+  paint_horizontal_grid(painter, viewport, gutter);
+  const auto hits = build_speed_label_hits(viewport, gutter, points);
+  for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
+    const auto found = std::find_if(points.begin(), points.end(), [&](const auto& p) {
+      return p.tick == it->tick;
+    });
+    if (found == points.end()) continue;
+    painter.fill_rect(it->bounds, kSpeedLabelColor, 2.0f, 0.93f);
+    painter.label(it->bounds, format_speed_label(found->multiplier), {0.95f, 0.90f, 1.0f, 1.0f},
+                  0.931f, false, gutter_font_px());
+  }
+}
+
 }  // namespace wds::ui

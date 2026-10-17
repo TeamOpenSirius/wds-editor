@@ -48,6 +48,28 @@ bool SetTimingCommand::execute(ChartDocument& doc) { return doc.set_timing(after
 bool SetTimingCommand::undo(ChartDocument& doc) { return doc.set_timing(before_); }
 std::string SetTimingCommand::label() const { return label_; }
 
+SetScrollSpeedPointsCommand::SetScrollSpeedPointsCommand(
+    std::vector<ScrollSpeedPoint> before, std::vector<ScrollSpeedPoint> after, std::string label)
+    : before_(std::move(before)), after_(std::move(after)), label_(std::move(label)) {}
+bool SetScrollSpeedPointsCommand::execute(ChartDocument& doc) {
+  return doc.set_scroll_speed_points(after_);
+}
+bool SetScrollSpeedPointsCommand::undo(ChartDocument& doc) {
+  return doc.set_scroll_speed_points(before_);
+}
+std::string SetScrollSpeedPointsCommand::label() const { return label_; }
+
+SetCompatibilityProfileCommand::SetCompatibilityProfileCommand(
+    ChartCompatibilityProfile before, ChartCompatibilityProfile after)
+    : before_(before), after_(after) {}
+bool SetCompatibilityProfileCommand::execute(ChartDocument& doc) {
+  return doc.set_compatibility_profile(after_);
+}
+bool SetCompatibilityProfileCommand::undo(ChartDocument& doc) {
+  return doc.set_compatibility_profile(before_);
+}
+std::string SetCompatibilityProfileCommand::label() const { return "Set compatibility profile"; }
+
 AddNotesCommand::AddNotesCommand(std::vector<NotationNote> notes, std::string label)
     : notes_(std::move(notes)), label_(std::move(label)) {}
 bool AddNotesCommand::execute(ChartDocument& doc) {

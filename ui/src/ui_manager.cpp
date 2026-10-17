@@ -156,6 +156,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     notify_ui_change(UiChange::Grid);
     request_save_ui_config(false);
   });
+  edit->set_extra_visible_lanes_changed_handler([this] { request_save_ui_config(false); });
   auto preview_hit = std::make_unique<PreviewHitWidget>();
   preview_hit_ = preview_hit.get();
   preview_hit_->set_scroll_handler([this](const wds::interaction::ScrollEvent& event) {
@@ -559,6 +560,10 @@ void UiManager::notify_ui_change(UiChange change) {
         app, [this, change] { notify_ui_change(change); }, Qt::QueuedConnection);
     return;
   }
+  if (change == UiChange::Document || change == UiChange::Charts ||
+      change == UiChange::History) {
+    sync_extended_editing();
+  }
   if (on_ui_change_) on_ui_change_(change);
 }
 
@@ -871,6 +876,7 @@ void UiManager::load_ui_config() {
   if (!load_editor_ui_config(config_path_, cfg)) return;
   wds::interaction::set_width_slot_values(cfg.width_slots);
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  session_->set_extended_features(cfg.extended_features);
   backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
@@ -883,6 +889,8 @@ void UiManager::load_ui_config() {
   }
   apply_display_to_preview(*chart_preview_, cfg);
   apply_display_to_edit(edit_panel_, cfg);
+  if (edit_panel_ != nullptr) edit_panel_->set_extra_visible_lanes(cfg.extra_visible_lanes);
+  sync_extended_editing();
   chart_preview_->set_lane_count(std::clamp(cfg.lane_count, 1, 32));
   set_new_note_place_logic(cfg.new_note_place_logic);
   capture_curve_template_state(cfg, curve_template_state_);
@@ -905,6 +913,8 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
   cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
   cfg.sus_auto_convert = session_->sus_auto_convert();
+  cfg.extended_features = session_->extended_features();
+  if (const auto* edit = edit_panel()) cfg.extra_visible_lanes = edit->extra_visible_lanes();
   cfg.backup_interval_min = backup_interval_min_;
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
@@ -921,8 +931,19 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
 
 void UiManager::snapshot_ui_config_for_qt(EditorUiConfig& cfg) { capture_live_ui_config(cfg); }
 
+void UiManager::sync_extended_editing() {
+  if (auto* edit = edit_panel()) {
+    edit->set_extended_editing_active(session_ != nullptr && session_->extended_editing_active());
+  }
+}
+
+bool UiManager::chart_has_extended_features() const {
+  return session_ != nullptr && session_->chart_has_extended();
+}
+
 void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  session_->set_extended_features(cfg.extended_features);
   backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
@@ -935,6 +956,8 @@ void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   }
   apply_display_to_preview(*chart_preview_, cfg);
   apply_display_to_edit(edit_panel_, cfg);
+  if (edit_panel_ != nullptr) edit_panel_->set_extra_visible_lanes(cfg.extra_visible_lanes);
+  sync_extended_editing();
   set_new_note_place_logic(cfg.new_note_place_logic);
   bind_editor_shortcuts();
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);

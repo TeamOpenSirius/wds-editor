@@ -3738,17 +3738,10 @@ void PlaybackPreviewView::draw_notes(DrawBatch& batch, const PreviewSnapshot& sn
       draw_arrows_at(batch, *note, static_cast<double>(note->end_ms) / 1000.0, now, now);
       continue;
     }
-    if (note->visual_state == PreviewNoteVisualState::Holding) {
-      continue;
-    }
-    if (is_hold_mid_star(note->note_type)) {
-      continue;
-    }
-    if (is_hold_start(note->note_type)) {
-      continue;
-    }
-    const NoteSprites sprites = sprites_for(skin_, note->note_type);
-    if (sprites.is_scratch_family || note->note_type == NoteType::Flick) {
+    // Only an actual Flick draws arrows at its start. ScratchHold arrows are
+    // handled at a judged tail above; nontail bodies have no arrow at either end.
+    if (wds::chart_render::preview_draws_start_scratch_arrows(note->note_type) &&
+        note->visual_state != PreviewNoteVisualState::Holding) {
       draw_arrows(batch, *note, now, now);
     }
   }
@@ -3981,11 +3974,12 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   }
 
   const float unit = geometry_.content_unit();
-  const float w = geometry_.lane_width(lane, p);
-  const float w_ref = std::max(geometry_.lane_width(lane, geometry_.judgeline_percent()), 1e-6f);
+  const float w = geometry_.authored_lane_width(lane, p);
+  const float w_ref =
+      std::max(geometry_.authored_lane_width(lane, geometry_.judgeline_percent()), 1e-6f);
   const float multiplier = w / w_ref;
-  const Vec2 c1 = geometry_.lane_position(lane, p);
-  const Vec2 c2 = geometry_.lane_position(end_lane, p);
+  const Vec2 c1 = geometry_.authored_lane_position(lane, p);
+  const Vec2 c2 = geometry_.authored_lane_position(end_lane, p);
   const float H = config_.arrow_height * unit * multiplier;
 
   // Match note_quad horizontal inset (note_move_length) so arrows sit inside the note.

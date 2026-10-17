@@ -88,6 +88,11 @@ struct EditorUiConfig {
   bool new_note_place_logic = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
+  // User preference for Sirius Extended editing (speed gutter, extra lanes, nontail).
+  // Forced-on display when a chart already has extended features is not written here.
+  bool extended_features = false;
+  // Extra visible columns on each side of the 12-lane playfield (0..20).
+  int extra_visible_lanes = 0;
   // Minutes between Auto backups of an on-disk project. One of 5/10/15/20/30/45/60.
   int backup_interval_min = 15;
   // When true, negate timeline-scrub wheel deltas (not Option+wheel visible range).
@@ -148,6 +153,9 @@ std::string resolve_editor_config_path(const char* argv0);
 // Legacy shortcut spellings (Cmd/Option/Shift+Ctrl) are rewritten to PortableText.
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out);
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg);
+
+int settings_section_count();
+const char* settings_section_journal_id(int index);
 
 // Copy curve-fill fields between persisted config and the live UiManager state
 // used by later dialog/toolbar code. Settings/toolbar capture must call apply

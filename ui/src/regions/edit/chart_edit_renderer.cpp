@@ -48,14 +48,18 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   }
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
+  const bool hold_ribbon =
+      note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
   const bool hold_body =
       note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
 
   if (pass == NoteVisualPass::HoldBody) {
-    if (!hold_body || !sprites.connection) return;
+    if (!hold_ribbon || !sprites.connection) return;
+    if (!viewport.lane_span_visible(note.lane, note.width)) return;
     const float hold_inset = viewport.hold_inset_px(note.width);
     const float hold_x = viewport.x_at(note.lane) + hold_inset;
-    const float hold_w = std::max(4.0f, viewport.lane_width(note.width) - hold_inset * 2.0f);
+    const float hold_w = std::max(0.0f, viewport.lane_width(note.width) - hold_inset * 2.0f);
+    if (hold_w < 0.5f) return;
     const float top = std::min(y0, y1);
     const float bottom = std::max(y0, y1);
     const auto body = wds::interaction::rect_to_quad(
@@ -125,7 +129,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
                              int32_t draw_width, bool with_arrow_art) {
     const float draw_inset = viewport.note_inset_px(draw_width);
     const float draw_x = viewport.x_at(draw_lane) + draw_inset;
-    const float draw_w = std::max(4.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
+    const float draw_w = std::max(0.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
     const auto head = wds::interaction::rect_to_quad({draw_x, y - note_h * 0.5f, draw_w, note_h},
                                                      fb_w, fb_h, screen);
     const float tap_world = viewport.tap_visual_world_width(draw_width);
@@ -290,10 +294,14 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const float clip_bot = std::min(bottom, b.bottom());
     const float h = std::max(0.0f, clip_bot - clip_top);
     if (h <= 0.0f) return;
-    painter.reserve_rects(static_cast<std::size_t>(grid.lane_count) + 1);
-    for (int lane = 0; lane <= grid.lane_count; ++lane) {
-      const bool edge = lane == 0 || lane == grid.lane_count;
-      const float thickness = edge ? 1.5f : 1.0f;
+    const int first = viewport.first_visible_lane();
+    const int vis = viewport.visible_lane_count();
+    const float lane_px = viewport.lane_width(1);
+    painter.reserve_rects(static_cast<std::size_t>(vis) + 1);
+    for (int lane = first; lane <= first + vis; ++lane) {
+      if (!lane_guide_visible(lane, lane_px)) continue;
+      const bool edge = lane == 0 || lane == 12;
+      const float thickness = lane_guide_thickness(lane);
       painter.fill_rect({viewport.x_at(lane) - thickness * 0.5f, clip_top, thickness, h},
                         edge ? wds::interaction::theme::kEditLaneEdge
                              : wds::interaction::theme::kEditLaneInner,
@@ -593,11 +601,12 @@ void ChartEditRenderer::append_skinned_backdrop(wds::renderer::DrawBatch& batch,
                                                 float /*stage_opacity*/) const {
   const auto& b = viewport.bounds();
   if (b.w <= 0.0f || b.h <= 0.0f) return;
-  // Judgeline must span the full edit width so its 12 cells line up with lane guides.
+  // 12-cell judgeline tracks authored lanes 0..N so cells stay on those guides.
   if (skin.judgeline) {
     const float jh = viewport.judgeline_height_px();
     const float jy = viewport.judgeline_y() - jh * 0.5f;
-    const auto jq = wds::interaction::rect_to_quad({b.x, jy, b.w, jh}, fb_w, fb_h, screen);
+    const auto jq = wds::interaction::rect_to_quad(
+        {viewport.judgeline_x(), jy, viewport.judgeline_width_px(), jh}, fb_w, fb_h, screen);
     batch.add_sprite(skin.judgeline, jq, depth_.judgeline, 1.0f);
   }
 }

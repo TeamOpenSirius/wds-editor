@@ -35,7 +35,9 @@ using wds::ui::SplitIndicatorClusterKey;
 // Median, 60 cached clusters at editor size (lane 40: ~100k px per cluster incl. transparent area, i.e. ~6-8 M px of
 // Plus / SourceOver blending plus a 1600x1000 clear). Generous on purpose: only a gross regression should fail.
 constexpr double kMaxCachedFrameMs = 12.0;
-constexpr double kMaxColdBuildMs = 50.0;    // any single cold build
+// Local Apple Silicon is well under 50 ms; GitHub macos-14 shared runners regularly
+// spike a single editor-size cold build just over that (CI saw 50.262 ms on 10791).
+constexpr double kMaxColdBuildMs = 100.0;  // any single cold build
 constexpr double kLruCapMb = 48.0;
 // Median GUI-thread time of a simulated editor frame (60 cluster requests + draws) while every cluster is cold.
 // The GUI thread must not build, so this is dominated by the 1600x1000 clear plus the draws of finished clusters.

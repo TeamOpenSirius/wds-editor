@@ -142,12 +142,13 @@ QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* par
 constexpr int kNavCollapsedW = 16;
 constexpr int kNavExpandedW = 104;
 constexpr int kNavItemH = 26;
-constexpr int kSettingsSectionCount = 9;
+constexpr int kSettingsSectionCount = 10;
 
 std::array<QString, kSettingsSectionCount> settings_section_titles() {
   return {
       QCoreApplication::translate("wds::ui", "外观"),
       QCoreApplication::translate("wds::ui", "文件"),
+      QCoreApplication::translate("wds::ui", "格式"),
       QCoreApplication::translate("wds::ui", "音频"),
       QCoreApplication::translate("wds::ui", "输入"),
       QCoreApplication::translate("wds::ui", "显示"),
@@ -161,6 +162,7 @@ std::array<QString, kSettingsSectionCount> settings_section_titles() {
 constexpr std::array<const char*, kSettingsSectionCount> kSettingsTabJournalIds = {{
     "settings.tab_appearance",
     "settings.tab_file",
+    "settings.tab_format",
     "settings.tab_audio",
     "settings.tab_input",
     "settings.tab_display",
@@ -394,7 +396,7 @@ void SettingsPanel::resizeEvent(QResizeEvent* event) {
       lay->activate();
     }
     content->updateGeometry();
-    fit_panel_to_layout(sections_[6]);
+    fit_panel_to_layout(sections_[7]);
     update_section_scroll_pad();
     sync_nav_from_scroll();
   });
@@ -506,11 +508,15 @@ void SettingsPanel::build_pages() {
   wrap_form(backupForm);
   file->addLayout(backupForm);
 
-  auto* audio = section_at(2);
+  auto* format = section_at(2);
+  auto* format_host = format->parentWidget();
+  extended_features_ = add_wrapping_check(format, tr("启用扩展功能"), format_host);
+
+  auto* audio = section_at(3);
   mute_hold_body_sfx_ =
       add_wrapping_check(audio, tr("关闭 Hold 体音效播放"), audio->parentWidget());
 
-  auto* input = section_at(3);
+  auto* input = section_at(4);
   auto* input_host = input->parentWidget();
   invert_scroll_wheel_ = add_wrapping_check(input, tr("反转时间轴滚轮方向"), input_host);
   invert_visible_range_scroll_ =
@@ -524,7 +530,7 @@ void SettingsPanel::build_pages() {
   wrap_form(speedForm);
   input->addLayout(speedForm);
 
-  auto* display = section_at(4);
+  auto* display = section_at(5);
   auto* display_host = display->parentWidget();
   show_judgment_text_ = add_wrapping_check(display, tr("开启判定文字显示"), display_host);
   auto* form = new QFormLayout;
@@ -556,7 +562,7 @@ void SettingsPanel::build_pages() {
   wrap_form(form);
   display->addLayout(form);
 
-  auto* width = section_at(5);
+  auto* width = section_at(6);
   auto* width_host = width->parentWidget();
   auto* widthLayout = new QFormLayout;
   static constexpr const char* kSlotLabels[6] = {"一档", "二档", "三档",
@@ -571,7 +577,7 @@ void SettingsPanel::build_pages() {
   wrap_form(widthLayout);
   width->addLayout(widthLayout);
 
-  auto* shortcuts = section_at(6);
+  auto* shortcuts = section_at(7);
   auto* open_shortcuts = new QPushButton(tr("设置快捷键"), shortcuts->parentWidget());
   open_shortcuts->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
   connect(open_shortcuts, &QPushButton::clicked, this, [this] {
@@ -583,7 +589,7 @@ void SettingsPanel::build_pages() {
   shortcuts->addWidget(open_shortcuts, 0, Qt::AlignLeft);
   fit_panel_to_layout(shortcuts->parentWidget());
 
-  auto* privacy = section_at(7);
+  auto* privacy = section_at(8);
   auto* privacy_host = privacy->parentWidget();
   allow_crash_log_sensitive_ = add_wrapping_check(
       privacy, tr("允许崩溃日志记录真实文本与文件路径"), privacy_host);
@@ -596,7 +602,7 @@ void SettingsPanel::build_pages() {
   });
   privacy->addWidget(open_logs, 0, Qt::AlignLeft);
 
-  auto* updates = section_at(8);
+  auto* updates = section_at(9);
   auto_check_updates_ =
       add_wrapping_check(updates, tr("启动时自动检查更新"), updates->parentWidget());
 
@@ -619,6 +625,7 @@ void SettingsPanel::build_pages() {
     }
   });
   connect(sus_auto_convert_, &QCheckBox::toggled, this, [live](bool) { live(); });
+  connect(extended_features_, &QCheckBox::toggled, this, [live](bool) { live(); });
   connect(backup_interval_, &QComboBox::currentIndexChanged, this, [live](int) { live(); });
   connect(mute_hold_body_sfx_, &QCheckBox::toggled, this, [live](bool) { live(); });
   connect(invert_scroll_wheel_, &QCheckBox::toggled, this, [live](bool) { live(); });
@@ -649,6 +656,20 @@ void SettingsPanel::build_pages() {
     journal_menu_action("settings.auto_check_updates");
     set_auto_check_updates_enabled(on);
   });
+}
+
+void SettingsPanel::refresh_extended_lock() {
+  if (extended_features_ == nullptr) return;
+  const bool forced = manager_ != nullptr && manager_->chart_has_extended_features();
+  applying_ = true;
+  if (forced) {
+    extended_features_->setChecked(true);
+    extended_features_->setEnabled(false);
+  } else {
+    extended_features_->setEnabled(true);
+    extended_features_->setChecked(cfg_.extended_features);
+  }
+  applying_ = false;
 }
 
 void SettingsPanel::load_from_config() {
@@ -691,10 +712,14 @@ void SettingsPanel::load_from_config() {
   allow_crash_log_sensitive_->setChecked(cfg_.allow_crash_log_sensitive);
   auto_check_updates_->setChecked(auto_check_updates_enabled());
   applying_ = false;
+  refresh_extended_lock();
 }
 
 bool SettingsPanel::capture_into_config() {
   cfg_.sus_auto_convert = sus_auto_convert_->isChecked();
+  if (extended_features_ != nullptr && extended_features_->isEnabled()) {
+    cfg_.extended_features = extended_features_->isChecked();
+  }
   cfg_.backup_interval_min =
       clamp_backup_interval_min(backup_interval_->currentData().toInt());
   cfg_.mute_hold_body_sfx = mute_hold_body_sfx_->isChecked();

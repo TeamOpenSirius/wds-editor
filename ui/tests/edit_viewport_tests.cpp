@@ -53,6 +53,38 @@ int main() {
   assert(viewport.lane_at(65, 3) == 5);
   assert(viewport.lane_at(119, 3) == 9);
 
+  {
+    const float x0 = viewport.x_at(0);
+    const float x6 = viewport.x_at(6);
+    const float x12 = viewport.x_at(12);
+    viewport.set_extra_visible_lanes(0);
+    assert(viewport.first_visible_lane() == 0);
+    assert(viewport.visible_lane_count() == 12);
+    assert(std::abs(viewport.x_at(0) - x0) < 1e-5f);
+    assert(std::abs(viewport.x_at(6) - x6) < 1e-5f);
+    assert(std::abs(viewport.x_at(12) - x12) < 1e-5f);
+    assert(std::abs(viewport.judgeline_x() - viewport.bounds().x) < 1e-5f);
+    assert(std::abs(viewport.judgeline_width_px() - viewport.bounds().w) < 1e-5f);
+    const float h0 = viewport.judgeline_height_px();
+    assert(viewport.clamp_lane(0, 1) == 0);
+    assert(viewport.clamp_lane(11, 1) == 11);
+
+    viewport.set_extra_visible_lanes(20);
+    assert(viewport.first_visible_lane() == -20);
+    assert(viewport.visible_lane_count() == 52);
+    assert(std::abs(viewport.x_at(-20) - viewport.bounds().x) < 1e-4f);
+    assert(std::abs(viewport.x_at(32) - (viewport.bounds().x + viewport.bounds().w)) < 1e-4f);
+    const float expected0 = viewport.bounds().x + 20.0f * viewport.bounds().w / 52.0f;
+    assert(std::abs(viewport.x_at(0) - expected0) < 1e-4f);
+    assert(std::abs(viewport.judgeline_x() - expected0) < 1e-4f);
+    assert(std::abs(viewport.judgeline_width_px() - 12.0f * viewport.bounds().w / 52.0f) < 1e-4f);
+    assert(std::abs(viewport.judgeline_height_px() - h0) < 1e-4f);
+    assert(viewport.lane_fully_visible(-20, 1));
+    assert(viewport.lane_fully_visible(31, 1));
+    assert(!viewport.lane_fully_visible(32, 1));
+    viewport.set_extra_visible_lanes(0);
+  }
+
   // Official tap/hold visual width: inset follows (notation − visual) / 2, not 1px.
   // Always-on (Release strips assert).
   {

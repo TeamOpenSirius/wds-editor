@@ -37,7 +37,8 @@ add_executable(wds_editor WIN32
   src/qt/split_picker_dialog.cpp
   src/qt/split_effect_snapshot.cpp
   src/qt/split_effect_snapshot_table.cpp
-  src/qt/timing_edit_dialog.cpp)
+  src/qt/timing_edit_dialog.cpp
+  src/qt/speed_edit_dialog.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
 target_link_libraries(wds_editor PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Svg Qt6::Network wds::ui)

@@ -2,6 +2,14 @@
 
 _World Dai Star_ 的跨平台制谱器。
 
+## Sirius 扩展谱面
+
+谱面数据层支持 **Original / Refresh（磁盘标记 `Official` / `SiriusExtended`）**：Refresh 允许音符视觉超出 12 Lane（仍须覆盖至少一个可判定 Lane）；无尾 Hold、作者手写 `900` 判定点与 SV（HiSpeed）可写入格式并在预览中按分段积分滚动。BPM、音乐和判定时间保持原样。
+
+编辑器 UI（功能等级切换、尾判定控件、SV 列表、Shift+中键加点等）尚未合入本分支，后续单独补。
+
+官方 CSV 仍使用 7 列：无尾类型为 `1100/1101/1110/1111`，SV 行使用 `type=-1`、`endTime=倍率`。`.wdschart` v6 保存 SV 与功能等级，旧版文件仍可读取。SUS 的 Sirius `#TIL00` 正倍率和终点 Damage 无尾标记会导入；Refresh SUS 往返使用 `#WDS_PROFILE` 与 `#WDS_LANE_OFFSET` 保留越界几何。ENC 打包仍由外部工具链负责。
+
 ## 本地分轨
 
 通过 **播放面板 → 生成分轨** 或 **文件 → 本地分轨…** 打开后台任务面板。导入音乐后点击「生成分轨」，
