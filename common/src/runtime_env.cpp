@@ -207,11 +207,26 @@ void log_runtime_environment(const char* argv0) {
   log_env_var("VK_DRIVER_FILES");
   log_env_var("VK_LAYER_PATH");
   log_env_var("VK_INSTANCE_LAYERS");
+  log_env_var("WDS_VK_VALIDATION");
   log_env_var("QT_PLUGIN_PATH");
   log_env_var("QT_MTL_NO_TRANSACTION");
   log_env_var("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS");
   log_env_var("WDS_CRASH_LOG_DIR");
   log_env_var("WDS_FRAME_DIAG");
+  log_env_var("WDS_FRAME_DIAG_PERF");
+  log_env_var("WDS_FRAME_DIAG_FRAMES");
+  log_env_var("WDS_PREVIEW_LEGACY_LANES");
+  log_env_var("WDS_PREVIEW_LEGACY_EMIT");
+  log_env_var("WDS_PREVIEW_VERTS_SELFTEST");
+  log_env_var("WDS_PREVIEW_PARALLEL_EMIT");
+  log_env_var("WDS_PREVIEW_STALL_MS");
+  log_env_var("WDS_PREVIEW_STALL_AT_SEC");
+  log_env_var("WDS_PREVIEW_NO_PRELOAD");
+  log_env_var("WDS_SPLIT_TRAIL_INDEXED");
+  log_env_var("WDS_DUMP_VERTS");
+  log_env_var("WDS_DUMP_VERTS_AT_US");
+  log_env_var("WDS_DUMP_VERTS_MIN_VERTS");
+  log_env_var("WDS_DUMP_VERTS_WHEN_PAUSED");
   log_env_var("WDS_CRASH_NO_DIALOG");
 }
 

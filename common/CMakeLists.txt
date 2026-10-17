@@ -5,6 +5,9 @@ add_library(wds_common STATIC
   src/crash_handler.cpp
   src/crash_input_journal.cpp
   src/log.cpp
+  src/minflt_stage.cpp
+  src/page_touch.cpp
+  src/perf_stages.cpp
   src/runtime_env.cpp
   src/utf8_path.cpp
 )
