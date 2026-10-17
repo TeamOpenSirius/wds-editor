@@ -280,7 +280,9 @@ if(NOT CMAKE_CROSSCOMPILING)
     set(_wds_test_path
       "${_wds_qt_root}/bin\\;${WDS_BASS_LIBRARY_DIR}\\;$ENV{PATH}")
     set_tests_properties(wds_stem_panel_tests wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
-      wds_split_effect_tags_tests wds_chart_validation_ui_tests wds_split_indicator_perf_tests wds_split_indicator_dump_tests PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
+      wds_split_effect_tags_tests wds_chart_validation_ui_tests
+      wds_split_indicator_perf_tests wds_split_indicator_dump_tests
+      PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
   endif()
 else()
   message(STATUS "Skipping ctest registration for ui tests (cross build)")
