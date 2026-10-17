@@ -215,6 +215,18 @@ Vec2 StageGeometry::lane_position(int32_t lane, float percent) const {
   return project_judge(x, percent_to_judge_y(percent));
 }
 
+Vec2 StageGeometry::authored_lane_position(int32_t lane, float percent) const {
+  const float x = official_span_center_x(lane, lane);
+  return project_judge(x, percent_to_judge_y(percent));
+}
+
+float StageGeometry::authored_lane_width(int32_t lane, float percent) const {
+  const float y = percent_to_judge_y(percent);
+  const Vec2 l = project_judge(official_lane_left_x(lane), y);
+  const Vec2 r = project_judge(official_lane_right_x(lane), y);
+  return std::fabs(r.x - l.x);
+}
+
 float StageGeometry::lane_width(int32_t lane, float percent) const {
   const int32_t n = std::max(1, config_.lane_count);
   const int32_t i = std::clamp(lane, 0, n - 1);

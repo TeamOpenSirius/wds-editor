@@ -5,6 +5,7 @@
 
 // chart_index.hpp is included for ChartNoteIndex member; it only forward-declares NotationNote.
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -107,12 +108,25 @@ inline bool is_authored_hold_eighth(const NotationNote& note) noexcept {
          note.scratch_length == kAuthoredHoldEighthScratchLength;
 }
 
-// Positive visual scroll-speed event. The event starts at tick and remains in
-// effect until the next point. A chart with no points has multiplier 1.0.
+// Visual scroll-speed event. The event starts at tick and remains in effect
+// until the next point. Multiplier 0 freezes notes; negative values are invalid.
+// A chart with no points has multiplier 1.0.
+inline bool is_valid_scroll_multiplier(double multiplier) noexcept {
+  return std::isfinite(multiplier) && multiplier >= 0.0;
+}
+
 struct ScrollSpeedPoint {
   int32_t tick = 0;
   double multiplier = 1.0;
 };
+
+inline bool operator==(const ScrollSpeedPoint& a, const ScrollSpeedPoint& b) noexcept {
+  return a.tick == b.tick && a.multiplier == b.multiplier;
+}
+
+inline bool operator!=(const ScrollSpeedPoint& a, const ScrollSpeedPoint& b) noexcept {
+  return !(a == b);
+}
 
 struct NotationChart {
   MusicTiming timing;
@@ -124,6 +138,7 @@ struct NotationChart {
 
 // Feature IDs for a packer to copy into custom-song requiredFeatures metadata.
 std::vector<std::string> required_chart_features(const NotationChart& chart);
+bool note_requires_sirius_extended(const NotationNote& note) noexcept;
 
 // Mutable chart document used by the editor UI.
 // All edits are in-memory only; no disk I/O (see ChartSerializer for save/load).

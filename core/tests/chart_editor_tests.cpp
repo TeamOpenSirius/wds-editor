@@ -8084,7 +8084,20 @@ void test_sirius_extended_csv_native_and_sus_scroll() {
   CHECK_EQ(overhang.notes[1].end_lane(), 15);
   CHECK_EQ(overhang.notes[2].width, 19);
   CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,14,3,0,0\n", overhang, extended).error ==
+        SerializeError::Ok);
+  CHECK_EQ(overhang.notes.front().lane, 13);
+  CHECK_EQ(overhang.notes.front().width, 3);
+  CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,-4,3,0,0\n", overhang, extended).error ==
+        SerializeError::Ok);
+  CHECK_EQ(overhang.notes.front().lane, -5);
+  CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,14,3,0,0\n", overhang).error ==
         SerializeError::ParseError);
+  CHECK(lane_span_overlaps_playfield(14, 3, 12, ChartCompatibilityProfile::SiriusExtended));
+  CHECK(lane_span_overlaps_playfield(-8, 2, 12, ChartCompatibilityProfile::SiriusExtended));
+  CHECK(!lane_span_overlaps_playfield(14, 3, 12, ChartCompatibilityProfile::Official));
+  CHECK_EQ(clamp_lane_for_width(14, 3, 12, ChartCompatibilityProfile::SiriusExtended), 14);
+  CHECK_EQ(clamp_lane_for_width(-8, 2, 12, ChartCompatibilityProfile::SiriusExtended), -8);
+  CHECK_EQ(clamp_lane_for_width(14, 3, 12, ChartCompatibilityProfile::Official), 9);
   for (const char* invalid : {"1.0,0,-1,0,0,0,0\n",
                               "1.0,-2,-1,0,0,0,0\n",
                               "1.0,nan,-1,0,0,0,0\n"}) {
@@ -8113,6 +8126,60 @@ void test_sirius_extended_csv_native_and_sus_scroll() {
   CHECK(loaded.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
   CHECK_EQ(static_cast<int>(loaded.scroll_speed_points.size()), 4);
   CHECK_EQ(loaded.notes.front().lane, -2);
+
+  {
+    NotationChart fully_out;
+    fully_out.timing = chart.timing;
+    fully_out.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+    NotationNote far_right = make_tap(0, 14);
+    far_right.id = 0;
+    far_right.width = 3;
+    NotationNote far_left = make_tap(480, -8);
+    far_left.id = 1;
+    far_left.width = 2;
+    fully_out.notes = {far_right, far_left};
+    const fs::path outside_native = temp_chart_path("fully_outside.wdschart");
+    CHECK(ChartSerializer::save_to_file(fully_out, outside_native.string()).error ==
+          SerializeError::Ok);
+    NotationChart outside_loaded;
+    CHECK(ChartSerializer::load_from_file(outside_native.string(), outside_loaded).error ==
+          SerializeError::Ok);
+    CHECK_EQ(static_cast<int>(outside_loaded.notes.size()), 2);
+    if (outside_loaded.notes.size() == 2) {
+      CHECK_EQ(outside_loaded.notes[0].lane, 14);
+      CHECK_EQ(outside_loaded.notes[1].lane, -8);
+    }
+
+    std::string outside_csv;
+    CHECK(OfficialChartFormat::serialize_chart(fully_out, outside_csv).error == SerializeError::Ok);
+    const fs::path outside_csv_file = temp_chart_path("fully_outside.csv");
+    {
+      std::ofstream output(outside_csv_file);
+      output << outside_csv;
+    }
+    NotationChart csv_auto;
+    CHECK(ChartSerializer::load_auto(outside_csv_file.string(), csv_auto).error ==
+          SerializeError::Ok);
+    CHECK(csv_auto.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(csv_auto.notes.size()), 2);
+
+    std::string outside_sus;
+    CHECK(SusChartFormat::serialize(fully_out, SusChartSaveOptions{}, outside_sus).error ==
+          SerializeError::Ok);
+    const fs::path outside_sus_file = temp_chart_path("fully_outside.sus");
+    {
+      std::ofstream output(outside_sus_file);
+      output << outside_sus;
+    }
+    SusChartLoadResult sus_outside;
+    CHECK(SusChartFormat::parse(outside_sus, sus_outside).error == SerializeError::Ok);
+    CHECK(sus_outside.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(sus_outside.chart.notes.size()), 2);
+    if (sus_outside.chart.notes.size() == 2) {
+      CHECK_EQ(sus_outside.chart.notes[0].lane, 14);
+      CHECK_EQ(sus_outside.chart.notes[1].lane, -8);
+    }
+  }
   {
     ChartEditorEngine editable;
     editable.load_chart(chart);
@@ -8177,11 +8244,30 @@ void test_sirius_extended_csv_native_and_sus_scroll() {
   CHECK(std::fabs(sus_loaded.chart.scroll_speed_points[2].multiplier - 0.5) < 1e-9);
   CHECK(SusChartFormat::parse("#TIL00: \"0'0:0\"\n", sus_loaded).error ==
         SerializeError::Ok);
-  CHECK(sus_loaded.chart.scroll_speed_points.empty());
-  CHECK(!sus_loaded.warnings.empty());
+  CHECK_EQ(static_cast<int>(sus_loaded.chart.scroll_speed_points.size()), 1);
+  if (!sus_loaded.chart.scroll_speed_points.empty()) {
+    CHECK(std::fabs(sus_loaded.chart.scroll_speed_points[0].multiplier) < 1e-9);
+  }
 }
 
-void test_sus_skips_nonpositive_scroll_speed_with_warning() {
+void test_scroll_speed_zero_freezes_preview_distance() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+  NotePositionCalculator positions;
+  // 120 BPM, TPQ 480: tick 480 = 500 ms (freeze), tick 960 = 1000 ms (resume).
+  positions.set_scroll_speed_points({{0, 1.0}, {480, 0.0}, {960, 1.0}}, timing);
+  CHECK(std::fabs(positions.scroll_distance_ms(1000, 500)) < 1e-6);
+  CHECK(std::fabs(positions.scroll_distance_ms(1500, 1000) - 500.0) < 1e-6);
+
+  ChartDocument doc;
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  CHECK(doc.set_scroll_speed_points({{0, 0.0}}));
+  CHECK_EQ(static_cast<int>(doc.scroll_speed_points().size()), 1);
+}
+
+void test_sus_skips_negative_scroll_speed_with_warning() {
   const std::string sus =
       "#REQUEST \"ticks_per_beat 480\"\n"
       "#BASEBPM 120\n"
@@ -8192,16 +8278,18 @@ void test_sus_skips_nonpositive_scroll_speed_with_warning() {
   CHECK(result.error == SerializeError::Ok);
   if (result.error != SerializeError::Ok) return;
   CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
-  CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 2);
-  if (loaded.chart.scroll_speed_points.size() == 2) {
+  CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 3);
+  if (loaded.chart.scroll_speed_points.size() == 3) {
     CHECK_EQ(loaded.chart.scroll_speed_points[0].tick, 0);
-    CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 360);
+    CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 240);
+    CHECK_EQ(loaded.chart.scroll_speed_points[2].tick, 360);
     CHECK(std::fabs(loaded.chart.scroll_speed_points[0].multiplier - 1.5) < 1e-9);
-    CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier - 2.0) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[2].multiplier - 2.0) < 1e-9);
   }
   CHECK_EQ(static_cast<int>(loaded.warnings.size()), 1);
   if (!loaded.warnings.empty()) {
-    CHECK(loaded.warnings[0].find("2") != std::string::npos);
+    CHECK(loaded.warnings[0].find("1") != std::string::npos);
     CHECK(loaded.warnings[0].find("SV") != std::string::npos);
   }
 }
@@ -8373,7 +8461,8 @@ int main() {
   test_authored_nontail_eighth_roundtrips();
   test_sirius_features_require_extended_profile();
   test_sirius_extended_csv_native_and_sus_scroll();
-  test_sus_skips_nonpositive_scroll_speed_with_warning();
+  test_scroll_speed_zero_freezes_preview_distance();
+  test_sus_skips_negative_scroll_speed_with_warning();
   test_deleted_hold_eighth_stays_suppressed();
   test_supplied_sus_repro_if_available();
   test_auto_note_id_starts_at_zero();

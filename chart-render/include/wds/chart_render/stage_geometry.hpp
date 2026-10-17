@@ -58,6 +58,9 @@ class StageGeometry {
   // Lane index is 0-based (core convention). Internally matches Sonolus lines[lane+1].
   Vec2 lane_position(int32_t lane, float percent) const;
   float lane_width(int32_t lane, float percent) const;
+  // Same projection as lane_position / lane_width without clamping to 0..n-1.
+  Vec2 authored_lane_position(int32_t lane, float percent) const;
+  float authored_lane_width(int32_t lane, float percent) const;
   Vec2 lane_full_position(int32_t lane, float percent) const;
   float lane_full_width(int32_t lane, float percent) const;
 

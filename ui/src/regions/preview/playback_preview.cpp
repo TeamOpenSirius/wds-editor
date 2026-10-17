@@ -3974,11 +3974,12 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   }
 
   const float unit = geometry_.content_unit();
-  const float w = geometry_.lane_width(lane, p);
-  const float w_ref = std::max(geometry_.lane_width(lane, geometry_.judgeline_percent()), 1e-6f);
+  const float w = geometry_.authored_lane_width(lane, p);
+  const float w_ref =
+      std::max(geometry_.authored_lane_width(lane, geometry_.judgeline_percent()), 1e-6f);
   const float multiplier = w / w_ref;
-  const Vec2 c1 = geometry_.lane_position(lane, p);
-  const Vec2 c2 = geometry_.lane_position(end_lane, p);
+  const Vec2 c1 = geometry_.authored_lane_position(lane, p);
+  const Vec2 c2 = geometry_.authored_lane_position(end_lane, p);
   const float H = config_.arrow_height * unit * multiplier;
 
   // Match note_quad horizontal inset (note_move_length) so arrows sit inside the note.

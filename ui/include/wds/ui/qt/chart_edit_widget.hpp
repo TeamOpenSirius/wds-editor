@@ -12,9 +12,13 @@
 
 class QEnterEvent;
 class QFocusEvent;
+class QGraphicsOpacityEffect;
 class QInputMethodEvent;
+class QLabel;
 class QPainter;
+class QPropertyAnimation;
 class QShowEvent;
+class QSlider;
 class QTimer;
 
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
@@ -60,8 +64,12 @@ class ChartEditWidget final : public QWidget {
   void keyPressEvent(QKeyEvent*) override;
   void keyReleaseEvent(QKeyEvent*) override;
   void inputMethodEvent(QInputMethodEvent*) override;
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
  private:
+  void sync_extra_lane_slider();
+  void fade_lane_slider(bool highlighted);
+  void update_extra_lane_slider_label();
   wds::interaction::Modifiers mods(Qt::KeyboardModifiers) const;
   wds::interaction::Vec2 point(const QPointF&) const;
   void paint_notes(QPainter& painter,
@@ -84,6 +92,10 @@ class ChartEditWidget final : public QWidget {
   int prefetch_band_q_ = 0;
   bool split_repaint_pending_ = false;  // an update() queued by a finished split cluster build has not painted yet
   ChartEditPanel* panel_ = nullptr;
+  QSlider* extra_lane_slider_ = nullptr;
+  QLabel* extra_lane_slider_label_ = nullptr;
+  QGraphicsOpacityEffect* extra_lane_slider_opacity_ = nullptr;
+  QPropertyAnimation* extra_lane_slider_fade_ = nullptr;
   bool qt_modal_open_ = false;
   QString skins_dir_;
   int split_effect_quality_ = 1;

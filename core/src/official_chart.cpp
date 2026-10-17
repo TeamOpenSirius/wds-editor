@@ -330,10 +330,9 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
               ? static_cast<int64_t>(left_lane) - 1
               : static_cast<int64_t>(left_lane);
       const int64_t end_exclusive = zero_based + static_cast<int64_t>(lane_length);
-      const bool overlaps_playfield = zero_based < 12 && end_exclusive > 0;
       if (options.compatibility_profile == ChartCompatibilityProfile::Official
               ? (zero_based < 0 || end_exclusive > 12)
-              : (lane_length < 1 || !overlaps_playfield)) {
+              : (lane_length < 1)) {
         return {SerializeError::ParseError,
                 "official chart: line " + std::to_string(line_no) + " has out-of-range lane/width"};
       }
@@ -349,9 +348,9 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
       if (options.skip_hispeed) {
         continue;
       }
-      if (!std::isfinite(end_sec) || !(end_sec > 0.0)) {
+      if (!is_valid_scroll_multiplier(end_sec)) {
         return {SerializeError::ParseError,
-                "official chart: HiSpeed multiplier must be positive (line " +
+                "official chart: HiSpeed multiplier must be non-negative (line " +
                     std::to_string(line_no) + ")"};
       }
       chart.scroll_speed_points.push_back(
@@ -513,7 +512,7 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     rows.push_back(CsvRow{note.start_tick, false, &note, 1.0});
   }
   for (const auto& point : chart.scroll_speed_points) {
-    if (point.tick < 0 || !std::isfinite(point.multiplier) || !(point.multiplier > 0.0)) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
       return {SerializeError::ParseError, "official chart: invalid HiSpeed multiplier"};
     }
     rows.push_back(CsvRow{point.tick, true, nullptr, point.multiplier});
@@ -543,12 +542,10 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
         is_split_lane_gimmick(note.gimmick_type) ||
         (note.note_type == NoteType::None && note.lane == 0 && note.width == 0);
     const int64_t end_exclusive = static_cast<int64_t>(note.lane) + note.width;
-    const bool overlaps_playfield = note.lane < 12 && end_exclusive > 0;
     if (!split_placeholder &&
         (note.width < 1 ||
-         (chart.compatibility_profile == ChartCompatibilityProfile::Official
-              ? (note.lane < 0 || note.width > 12 || end_exclusive > 12)
-              : !overlaps_playfield))) {
+         (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+          (note.lane < 0 || note.width > 12 || end_exclusive > 12)))) {
       return {SerializeError::ParseError, "official chart: note lane/width out of range"};
     }
     const double start_sec = tick_to_seconds(note.start_tick, chart.timing);

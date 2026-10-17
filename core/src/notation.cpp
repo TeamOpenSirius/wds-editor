@@ -103,14 +103,6 @@ bool chart_note_ids_keepable(const std::vector<NotationNote>& notes) {
   return plan_note_ids(notes, 0).ok;
 }
 
-bool note_requires_sirius_extended(const NotationNote& note) noexcept {
-  if (is_nontail_hold_body(note.note_type)) return true;
-  if (note.note_type == NoteType::HoldEighth || note.note_type == NoteType::None ||
-      is_split_lane_gimmick(note.gimmick_type)) return false;
-  return note.lane < 0 || note.width > 12 ||
-         static_cast<int64_t>(note.lane) + note.width > 12;
-}
-
 bool timing_points_are_normalized(const MusicTiming& timing) noexcept {
   if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) {
     return false;
@@ -738,6 +730,14 @@ ChartDocument::ChartDocument(MusicTiming timing) : timing_(std::move(timing)) {
   normalize_timing_points(timing_);
 }
 
+bool note_requires_sirius_extended(const NotationNote& note) noexcept {
+  if (is_nontail_hold_body(note.note_type)) return true;
+  if (note.note_type == NoteType::HoldEighth || note.note_type == NoteType::None ||
+      is_split_lane_gimmick(note.gimmick_type)) return false;
+  return note.lane < 0 || note.width > 12 ||
+         static_cast<int64_t>(note.lane) + note.width > 12;
+}
+
 std::vector<std::string> required_chart_features(const NotationChart& chart) {
   bool nontail = false;
   bool overhang = false;
@@ -757,7 +757,7 @@ bool ChartDocument::set_scroll_speed_points(std::vector<ScrollSpeedPoint> points
   if (is_read_only()) return false;
   if (compatibility_profile_ == ChartCompatibilityProfile::Official && !points.empty()) return false;
   for (const auto& point : points) {
-    if (point.tick < 0 || !std::isfinite(point.multiplier) || !(point.multiplier > 0.0)) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
       return false;
     }
   }

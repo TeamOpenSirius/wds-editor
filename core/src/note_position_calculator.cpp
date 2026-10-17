@@ -84,7 +84,7 @@ void NotePositionCalculator::set_scroll_speed_points(std::vector<ScrollSpeedPoin
   double previous_ms = 0.0;
   double previous_multiplier = 1.0;
   for (const auto& point : points) {
-    if (point.tick < 0 || !std::isfinite(point.multiplier) || !(point.multiplier > 0.0)) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
       continue;
     }
     const double start_ms = static_cast<double>(tick_to_milliseconds(point.tick, timing));

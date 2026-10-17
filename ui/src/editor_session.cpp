@@ -1356,6 +1356,15 @@ bool EditorSession::dirty() const noexcept {
   return false;
 }
 
+bool EditorSession::chart_has_extended() const {
+  return !wds::chart_editor::required_chart_features(engine().document().to_notation_chart())
+              .empty();
+}
+
+bool EditorSession::extended_editing_active() const {
+  return extended_features_ || chart_has_extended();
+}
+
 std::size_t EditorSession::chart_count() const noexcept { return charts_.size(); }
 
 const std::string& EditorSession::chart_path(std::size_t index) const noexcept {

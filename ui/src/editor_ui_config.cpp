@@ -364,6 +364,12 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "sus_auto_convert") {
     bool v = cfg.sus_auto_convert;
     if (parse_bool(value, v)) cfg.sus_auto_convert = v;
+  } else if (key == "extended_features") {
+    bool v = cfg.extended_features;
+    if (parse_bool(value, v)) cfg.extended_features = v;
+  } else if (key == "extra_visible_lanes") {
+    int32_t v = cfg.extra_visible_lanes;
+    if (parse_int(value, v)) cfg.extra_visible_lanes = std::clamp(static_cast<int>(v), 0, 20);
   } else if (key == "backup_interval_min") {
     int32_t v = cfg.backup_interval_min;
     if (parse_int(value, v)) cfg.backup_interval_min = clamp_backup_interval_min(static_cast<int>(v));
@@ -578,6 +584,8 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "lane_count: " << std::clamp(cfg.lane_count, 1, 32) << '\n'
       << "new_note_place_logic: " << emit_bool(cfg.new_note_place_logic) << '\n'
       << "sus_auto_convert: " << emit_bool(cfg.sus_auto_convert) << '\n'
+      << "extended_features: " << emit_bool(cfg.extended_features) << '\n'
+      << "extra_visible_lanes: " << std::clamp(cfg.extra_visible_lanes, 0, 20) << '\n'
       << "backup_interval_min: " << clamp_backup_interval_min(cfg.backup_interval_min) << '\n'
       << "invert_scroll_wheel: " << emit_bool(cfg.invert_scroll_wheel) << '\n'
       << "invert_visible_range_scroll: " << emit_bool(cfg.invert_visible_range_scroll) << '\n'
@@ -628,6 +636,19 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
 
   return wds::chart_editor::write_text_atomic(path, out.str()).error ==
          wds::chart_editor::SerializeError::Ok;
+}
+
+int settings_section_count() { return 10; }
+
+const char* settings_section_journal_id(int index) {
+  static constexpr const char* kIds[] = {
+      "settings.tab_appearance", "settings.tab_file",      "settings.tab_format",
+      "settings.tab_audio",      "settings.tab_input",     "settings.tab_display",
+      "settings.tab_width",      "settings.tab_shortcuts", "settings.tab_privacy",
+      "settings.tab_updates",
+  };
+  if (index < 0 || index >= 10) return "";
+  return kIds[index];
 }
 
 }  // namespace wds::ui
