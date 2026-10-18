@@ -26,6 +26,8 @@ class StemPanel final : public QDialog {
   explicit StemPanel(UiManager* manager, QWidget* parent = nullptr);
   ~StemPanel() override;
   void detach();
+  // Re-read session music / Stem cache (e.g. after open project) without showing the dialog.
+  void resync();
   QStringList track_names() const;
   int selected_track() const { return selected_track_; }
   bool select_track(int index);
@@ -49,6 +51,11 @@ class StemPanel final : public QDialog {
   bool prepare_job();
   void launch(const QString& python, const QStringList& arguments);
   void notify_tracks_changed();
+  // Populate tracks_ from an on-disk Stem manifest (schema 1, four wavs).
+  bool attach_from_manifest(const QString& manifest_path);
+  // Scan cache_dir_ for a complete entry whose spec.source_sha256 matches source_.
+  bool try_attach_cached_tracks();
+  static QString sha256_hex_file(const QString& path);
   void note_download_progress(const QString& text);
   void append_process_log(const QByteArray& bytes);
   void report_task_failure(const QString& title, const QString& summary);

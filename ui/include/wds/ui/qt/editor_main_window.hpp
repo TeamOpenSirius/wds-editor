@@ -84,6 +84,7 @@ class EditorMainWindow final : public QMainWindow {
   void remember_recent_project(const QString& path);
  private:
   void create_control_docks();
+  void ensure_stem_panel();
   void show_stem_panel();
   void reset_default_layout();
   void apply_default_dock_sizes();

@@ -69,6 +69,12 @@ struct StemPanelTestAccess {
   static bool tag(const QString& text, int* major, int* minor, bool* free_threaded) {
     return StemPanel::parse_python_tag(text, major, minor, free_threaded);
   }
+  static QString sha256(const QString& path) { return StemPanel::sha256_hex_file(path); }
+  static void inject_cache_source(StemPanel& panel, const QString& cache, const QString& source) {
+    panel.cache_dir_ = cache;
+    panel.source_ = source;
+  }
+  static bool try_cached(StemPanel& panel) { return panel.try_attach_cached_tracks(); }
 };
 }
 
@@ -281,6 +287,49 @@ int main(int argc, char** argv) {
     manager.chart_preview().load_music({}, false);
     expect(until([&] { return !Access::active(panel); }), "stale job finishes or cancels");
     expect(Access::tracks(panel) == 1, "old generation never attaches stems to new song");
+  }
+  {
+    // Opening a project with an existing Stem/ folder must expose tracks without running a job.
+    wds::ui::UiManager manager;
+    StemPanel panel(&manager);
+    QTemporaryDir project;
+    const QString source = project.filePath(QStringLiteral("song.bin"));
+    {
+      QFile file(source);
+      expect(file.open(QIODevice::WriteOnly) && file.write("fixture-audio") == 13, "source fixture written");
+    }
+    const QString hash = Access::sha256(source);
+    expect(!hash.isEmpty(), "source sha256");
+    const QString entry = project.filePath(QStringLiteral("Stem")) + QLatin1Char('/') + hash.left(16);
+    QDir().mkpath(entry);
+    QJsonObject tracks;
+    for (const auto* name : {"drums", "bass", "vocals", "other"}) {
+      const auto filename = QString::fromLatin1(name) + QStringLiteral(".wav");
+      QFile payload(entry + QLatin1Char('/') + filename);
+      expect(payload.open(QIODevice::WriteOnly) && payload.write(name) > 0, "stem wav written");
+      tracks[QLatin1String(name)] = QJsonObject{{QStringLiteral("file"), filename}};
+    }
+    QFile manifest(entry + QStringLiteral("/manifest.json"));
+    expect(manifest.open(QIODevice::WriteOnly), "manifest open");
+    manifest.write(QJsonDocument(QJsonObject{
+                                    {QStringLiteral("schema"), 1},
+                                    {QStringLiteral("spec"),
+                                     QJsonObject{{QStringLiteral("source_sha256"), hash}}},
+                                    {QStringLiteral("tracks"), tracks}})
+                       .toJson());
+    manifest.close();
+    Access::inject_cache_source(panel, project.filePath(QStringLiteral("Stem")), source);
+    expect(Access::try_cached(panel), "existing Stem cache attaches without a worker");
+    expect(Access::tracks(panel) == 5, "cached stems publish original plus four tracks");
+    {
+      StemPanel other_panel(&manager);
+      const QString other = project.filePath(QStringLiteral("other.bin"));
+      QFile file(other);
+      expect(file.open(QIODevice::WriteOnly) && file.write("different") > 0, "other source written");
+      Access::inject_cache_source(other_panel, project.filePath(QStringLiteral("Stem")), other);
+      expect(!Access::try_cached(other_panel), "cache for a different source is not attached");
+      expect(Access::tracks(other_panel) == 1, "mismatched source keeps original-only tracks");
+    }
   }
   {
     StemPanel panel(nullptr);

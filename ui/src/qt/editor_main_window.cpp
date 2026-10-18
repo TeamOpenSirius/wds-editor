@@ -580,7 +580,7 @@ void EditorMainWindow::export_video() {
   dialog.exec();
 }
 
-void EditorMainWindow::show_stem_panel() {
+void EditorMainWindow::ensure_stem_panel() {
   if (!ui_manager_) return;
   if (!stem_panel_) {
     stem_panel_ = new StemPanel(ui_manager_, this);
@@ -589,6 +589,13 @@ void EditorMainWindow::show_stem_panel() {
         playback_panel_->set_stem_tracks(stem_panel_->track_names(), stem_panel_->selected_track());
     });
   }
+  // Constructor syncs once; open/import after that must re-scan Stem/ for this song.
+  stem_panel_->resync();
+}
+
+void EditorMainWindow::show_stem_panel() {
+  ensure_stem_panel();
+  if (!stem_panel_) return;
   stem_panel_->show();
   stem_panel_->raise();
   stem_panel_->activateWindow();
@@ -874,6 +881,9 @@ void EditorMainWindow::handle_ui_change(UiChange change) {
       refresh_window_title();
       arm_backup_timer();
       if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
+      // Recognize project Stem/ cache as soon as music is on the session — do not
+      // wait for the user to open「本地分轨」and click「生成分轨」.
+      ensure_stem_panel();
       break;
     case UiChange::PlaceTool:
       sync_toolbox_place_checks();

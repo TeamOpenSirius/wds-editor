@@ -9,6 +9,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -519,8 +520,12 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
 
 void StemPanel::update_polling() {
   // Stat-ing the source can block on slow mounts, so only poll while someone
-  // can see the panel or a job/published stems depend on source changes.
-  const bool needed = manager_ && (isVisible() || active_ || !tracks_.isEmpty());
+  // can see the panel, a job/published stems depend on source changes, or the
+  // session already has music (so open/import can attach Stem cache without
+  // opening this dialog).
+  const bool needed =
+      manager_ && (isVisible() || active_ || !tracks_.isEmpty() ||
+                   !manager_->session().music_path().empty());
   if (needed) {
     if (!source_timer_.isActive()) source_timer_.start();
   } else {
@@ -626,6 +631,82 @@ void StemPanel::notify_tracks_changed() {
   if (on_tracks_changed_) on_tracks_changed_();
 }
 
+void StemPanel::resync() { sync_source(); }
+
+QString StemPanel::sha256_hex_file(const QString& path) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) return {};
+  QCryptographicHash hash(QCryptographicHash::Sha256);
+  while (!file.atEnd()) hash.addData(file.read(1 << 20));
+  return QString::fromLatin1(hash.result().toHex());
+}
+
+bool StemPanel::attach_from_manifest(const QString& manifest_path) {
+  QFile file(manifest_path);
+  if (!file.open(QIODevice::ReadOnly)) return false;
+  const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
+  const auto entries = manifest.value(QStringLiteral("tracks")).toObject();
+  QStringList paths;
+  const QDir dir = QFileInfo(manifest_path).absoluteDir();
+  for (const auto* name : {"drums", "bass", "vocals", "other"}) {
+    const auto filename = QString::fromLatin1(name) + QStringLiteral(".wav");
+    if (entries.value(QLatin1String(name)).toObject().value(QStringLiteral("file")).toString() !=
+            filename ||
+        !QFileInfo::exists(dir.filePath(filename))) {
+      return false;
+    }
+    paths << dir.filePath(filename);
+  }
+  if (manifest.value(QStringLiteral("schema")).toInt() != 1 || paths.size() != 4) return false;
+  tracks_ = paths;
+  notify_tracks_changed();
+  return true;
+}
+
+bool StemPanel::try_attach_cached_tracks() {
+  if (!manager_ || cache_dir_.isEmpty() || source_.isEmpty() || active_) return false;
+  const QString source_hash = sha256_hex_file(source_);
+  if (source_hash.isEmpty()) return false;
+  QString best_manifest;
+  QDateTime best_mtime;
+  const QDir root(cache_dir_);
+  const auto entries = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+  for (const auto& entry : entries) {
+    if (entry.fileName().startsWith(QLatin1Char('.'))) continue;
+    const QString manifest_path =
+        entry.absoluteFilePath() + QStringLiteral("/manifest.json");
+    QFile file(manifest_path);
+    if (!file.open(QIODevice::ReadOnly)) continue;
+    const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
+    if (manifest.value(QStringLiteral("schema")).toInt() != 1) continue;
+    const auto spec = manifest.value(QStringLiteral("spec")).toObject();
+    if (spec.value(QStringLiteral("source_sha256")).toString() != source_hash) continue;
+    const auto track_entries = manifest.value(QStringLiteral("tracks")).toObject();
+    bool complete = true;
+    for (const auto* name : {"drums", "bass", "vocals", "other"}) {
+      const auto filename = QString::fromLatin1(name) + QStringLiteral(".wav");
+      if (track_entries.value(QLatin1String(name))
+                  .toObject()
+                  .value(QStringLiteral("file"))
+                  .toString() != filename ||
+          !QFileInfo::exists(entry.absoluteFilePath() + QLatin1Char('/') + filename)) {
+        complete = false;
+        break;
+      }
+    }
+    if (!complete) continue;
+    const auto mtime = entry.lastModified();
+    if (best_manifest.isEmpty() || mtime > best_mtime) {
+      best_manifest = manifest_path;
+      best_mtime = mtime;
+    }
+  }
+  if (best_manifest.isEmpty() || !attach_from_manifest(best_manifest)) return false;
+  progress_->setValue(100);
+  status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
+  return true;
+}
+
 QString StemPanel::runtime_python() const {
 #ifdef Q_OS_WIN
   return runtime_dir_ + "/Scripts/python.exe";
@@ -674,6 +755,9 @@ void StemPanel::sync_source() {
     notify_tracks_changed();
     source_label_->setText(path.isEmpty() ? tr("请先导入音乐或打开工程") : tr("音源：%1").arg(info.fileName()));
     source_label_->setToolTip(path);
+    // Open project / import music must recognize an existing Stem folder without
+    // requiring the user to click「生成分轨」(worker cache hit).
+    if (!path.isEmpty()) try_attach_cached_tracks();
   }
   refresh_controls();
 }
@@ -988,28 +1072,13 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
     status_->setText(install_message_.isEmpty() ? tr("运行环境已安装，可以生成分轨。") : install_message_);
     progress_->setValue(100);
   } else if (manager_ && source_ == job_source_ && source_stamp_ == job_stamp_ && source_generation_ == job_generation_) {
-    QFile file(manifest_);
-    if (file.open(QIODevice::ReadOnly)) {
-      const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
-      const auto entries = manifest.value("tracks").toObject();
-      QStringList paths;
-      const auto dir = QFileInfo(manifest_).absoluteDir();
-      for (const auto* name : {"drums", "bass", "vocals", "other"}) {
-        const auto filename = QString::fromLatin1(name) + ".wav";
-        if (entries.value(name).toObject().value("file").toString() != filename ||
-            !QFileInfo::exists(dir.filePath(filename))) { paths.clear(); break; }
-        paths << dir.filePath(filename);
-      }
-      if (manifest.value("schema").toInt() == 1 && paths.size() == 4) {
-        tracks_ = paths;
-        notify_tracks_changed();
-        progress_->setValue(100);
-        status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
-      } else {
-        report_task_failure(tr("分轨失败"), tr("分轨结果不完整，请重新生成。"));
-      }
-    } else {
+    if (attach_from_manifest(manifest_)) {
+      progress_->setValue(100);
+      status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
+    } else if (manifest_.isEmpty() || !QFileInfo::exists(manifest_)) {
       report_task_failure(tr("分轨失败"), tr("未找到分轨结果。"));
+    } else {
+      report_task_failure(tr("分轨失败"), tr("分轨结果不完整，请重新生成。"));
     }
   } else {
     status_->setText(tr("分轨已缓存；当前音源已更换。"));
