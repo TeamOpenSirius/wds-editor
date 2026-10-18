@@ -167,6 +167,14 @@ void test_encode_choice_gop() {
   expect(wds::ui::bitrate_kbps_for_height(1080) == 20000, "1080p 20m");
   expect(wds::ui::bitrate_kbps_for_height(1440) == 40000, "2k 40m");
   expect(wds::ui::bitrate_kbps_for_height(2160) == 80000, "4k 80m");
+  expect(vt.extra_output.contains(QStringLiteral("-b:v")), "vt uses bitrate");
+  expect(vt.extra_output.contains(QStringLiteral("20000k")), "vt 1080p 20m");
+  const auto vt2k = wds::ui::encode_choice_for_codec(QStringLiteral("h264_videotoolbox"), 2560, 1440);
+  expect(vt2k.extra_output.contains(QStringLiteral("40000k")), "vt 2k 40m");
+  const auto vt4k = wds::ui::encode_choice_for_codec(QStringLiteral("h264_videotoolbox"), 3840, 2160);
+  expect(vt4k.extra_output.contains(QStringLiteral("80000k")), "vt 4k 80m");
+  const auto x264 = wds::ui::encode_choice_for_codec(QStringLiteral("libx264"), 3840, 2160);
+  expect(x264.extra_output.contains(QStringLiteral("80000k")), "x264 4k 80m");
 }
 
 void test_ffmpeg_video_args_scale_when_capture_differs() {
@@ -188,6 +196,8 @@ void test_ffmpeg_audio_input_before_video_codec() {
   const int wav_i = args.indexOf(wav);
   const int cv = args.indexOf(QStringLiteral("-c:v"));
   expect(pipe >= 0, "rawvideo pipe input");
+  const int tq = args.indexOf(QStringLiteral("-thread_queue_size"));
+  expect(tq >= 0 && tq < pipe, "thread_queue_size before pipe");
   expect(wav_i == pipe + 2, "wav is the second input");
   expect(wav_i > 0 && args.at(wav_i - 1) == QStringLiteral("-i"), "-i wav");
   expect(cv > wav_i, "video codec applies to the output, not the wav");

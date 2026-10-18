@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -313,23 +314,30 @@ void test_hold_gates_vs_control_thread(const FixturePaths& paths, bool region_lo
     unsigned long long handle;
   };
   std::mutex mu;
+  std::condition_variable cv;
   std::vector<Fire> queue;
   std::atomic<bool> stop{false};
   std::atomic<int> fired{0};
+  std::atomic<int> snapshotted{0};
 
   std::thread mixer([&] {
     std::vector<Fire> local;
-    while (!stop.load(std::memory_order_acquire)) {
+    for (;;) {
       {
-        std::lock_guard<std::mutex> lock(mu);
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait(lock, [&] {
+          return stop.load(std::memory_order_acquire) || !queue.empty();
+        });
         local.swap(queue);
+        if (stop.load(std::memory_order_acquire) && local.empty()) {
+          break;
+        }
       }
       for (const Fire& f : local) {
         engine.handle_sfx_sync(f.handle, f.slot, HitSfxClip::Hold);
         fired.fetch_add(1, std::memory_order_relaxed);
       }
       local.clear();
-      std::this_thread::yield();
     }
   });
 
@@ -341,12 +349,14 @@ void test_hold_gates_vs_control_thread(const FixturePaths& paths, bool region_lo
     void* slots[8]{};
     unsigned long long handles[8]{};
     const size_t n = engine.snapshot_pending_sfx_syncs(slots, handles, 8);
+    snapshotted.fetch_add(static_cast<int>(n), std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lock(mu);
       for (size_t k = 0; k < n; ++k) {
         queue.push_back(Fire{slots[k], handles[k]});
       }
     }
+    cv.notify_one();
     switch (i % 6) {
       case 0:
         engine.reconcile_hold_looping(true);
@@ -374,7 +384,13 @@ void test_hold_gates_vs_control_thread(const FixturePaths& paths, bool region_lo
 
   engine.stop_all_sfx();
   stop.store(true, std::memory_order_release);
+  cv.notify_one();
   mixer.join();
+  if (fired.load() <= 0) {
+    std::fprintf(stderr, "gate diag: snapshotted=%d fired=%d pending=%zu\n",
+                 snapshotted.load(), fired.load(), engine.pending_sfx_sync_count());
+  }
+  expect(snapshotted.load() > 0, "control thread snapshotted pending hold gates");
   expect(fired.load() > 0, "mixer-thread emulation delivered gate callbacks");
   expect(!engine.hold_looping(), "stop_all_sfx leaves Hold silent after gate traffic");
   expect(mixer_source_count(engine) == 2, "no extra Hold/one-shot streams after gate traffic");

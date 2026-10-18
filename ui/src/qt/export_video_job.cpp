@@ -56,8 +56,22 @@ bool write_all_stdin(QProcess* proc, const std::vector<uint8_t>& data) {
   if (proc == nullptr || proc->state() != QProcess::Running) return false;
   qint64 off = 0;
   const qint64 n = static_cast<qint64>(data.size());
+  // QIODevice::waitForBytesWritten returns after ≥1 byte. write() of a whole
+  // 4K BGRA frame (~33 MiB) would sit in Qt's userspace buffer; at 60 fps that
+  // grows by gigabytes per second until the encoder catches up.
+  constexpr qint64 kChunk = 256 * 1024;
+  constexpr qint64 kMaxQueued = 4 * 1024 * 1024;
+  auto drain = [&](qint64 max_queued, int timeout_ms) {
+    while (proc->bytesToWrite() > max_queued) {
+      if (proc->state() != QProcess::Running) return false;
+      if (!proc->waitForBytesWritten(timeout_ms)) return false;
+    }
+    return true;
+  };
   while (off < n) {
-    const qint64 w = proc->write(reinterpret_cast<const char*>(data.data() + off), n - off);
+    if (!drain(kMaxQueued, 15000)) return false;
+    const qint64 chunk = std::min(kChunk, n - off);
+    const qint64 w = proc->write(reinterpret_cast<const char*>(data.data() + off), chunk);
     if (w < 0) return false;
     if (w == 0) {
       if (!proc->waitForBytesWritten(5000)) return false;
@@ -65,7 +79,7 @@ bool write_all_stdin(QProcess* proc, const std::vector<uint8_t>& data) {
     }
     off += w;
   }
-  return proc->waitForBytesWritten(30000);
+  return drain(0, 30000);
 }
 
 }  // namespace
@@ -105,6 +119,7 @@ void ExportVideoJob::start(const ExportVideoRequest& req) {
   submitted_frames_ = 0;
   written_frames_ = 0;
   ema_us_ = 0;
+  progress_ui_clock_.invalidate();
   capture_w_ = 0;
   capture_h_ = 0;
   window_->set_export_session_busy(true);
@@ -232,7 +247,10 @@ void ExportVideoJob::finish_ok() {
 }
 
 void ExportVideoJob::emit_progress() {
-  if (total_frames_ <= 0) return;
+  if (total_frames_ <= 0 || written_frames_ <= 0) return;
+  // ~1 s of wall time (≈60 frames at 60 fps). Per-frame updates made the ETA flicker.
+  if (progress_ui_clock_.isValid() && progress_ui_clock_.elapsed() < 1000) return;
+  progress_ui_clock_.start();
   const int pct = static_cast<int>(std::clamp((written_frames_ * 100) / total_frames_, int64_t{0}, int64_t{99}));
   int64_t remain = 0;
   if (ema_us_ > 0 && written_frames_ < total_frames_) {
@@ -481,7 +499,8 @@ void ExportVideoJob::encode_next_frame() {
   QElapsedTimer frame_timer;
   frame_timer.start();
   constexpr int kSubmitAhead = 2;
-  if (submitted_frames_ < total_frames_ && submitted_frames_ - written_frames_ < kSubmitAhead) {
+  if (ffmpeg_->bytesToWrite() == 0 && submitted_frames_ < total_frames_ &&
+      submitted_frames_ - written_frames_ < kSubmitAhead) {
     preview.render();
     ++submitted_frames_;
     if (submitted_frames_ < total_frames_) preview.tick(0);
@@ -503,6 +522,8 @@ void ExportVideoJob::encode_next_frame() {
     return;
   }
 
+  const int64_t used = frame_timer.nsecsElapsed() / 1000;
+  ema_us_ = ema_us_ == 0 ? used : (ema_us_ * 7 + used) / 8;
   emit_progress();
   if (submitted_frames_ >= total_frames_) {
     while (written_frames_ < total_frames_ && vk.drain_export_bgra(frame_bgra_, w, h)) {
@@ -518,9 +539,6 @@ void ExportVideoJob::encode_next_frame() {
       return;
     }
   }
-
-  const int64_t used = frame_timer.nsecsElapsed() / 1000;
-  ema_us_ = ema_us_ == 0 ? used : (ema_us_ * 7 + used) / 8;
 }
 
 }  // namespace wds::ui

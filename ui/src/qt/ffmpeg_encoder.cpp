@@ -16,6 +16,7 @@ bool has_codec(const FfmpegProbe& probe, const QString& name) {
 }
 
 int bitrate_for_height(int height) {
+  // 1080p stays 20 Mbps. 2K/4K follow pixel-count steps (≈2× / 4×).
   if (height >= 2160) return 80000;
   if (height >= 1440) return 40000;
   return 20000;
@@ -64,8 +65,9 @@ H264EncodeChoice encode_choice_for_codec(const QString& codec, int width, int he
   if (codec == QLatin1String("h264_videotoolbox")) {
     c.kind = H264EncoderKind::VideoToolbox;
     c.hardware = true;
-    c.extra_output << QStringLiteral("-q:v") << QStringLiteral("65") << QStringLiteral("-g")
-                   << QStringLiteral("60") << QStringLiteral("-bf") << QStringLiteral("0");
+    // Same ABR table as the other encoders: 1080p 20 Mbps, 2K 40, 4K 80.
+    c.extra_output << QStringLiteral("-b:v") << br << QStringLiteral("-g") << QStringLiteral("60")
+                   << QStringLiteral("-bf") << QStringLiteral("0");
   } else if (codec == QLatin1String("h264_nvenc")) {
     c.kind = H264EncoderKind::Nvenc;
     c.hardware = true;
@@ -114,6 +116,9 @@ QStringList ffmpeg_video_args(const H264EncodeChoice& choice, int width, int hei
   const int dst_w = out_width > 0 ? out_width : width;
   const int dst_h = out_height > 0 ? out_height : height;
   args << choice.extra_input;
+  // Keep the rawvideo packet queue tiny. Default thread_queue_size (8) would
+  // hold eight 4K BGRA frames (~260 MiB) inside ffmpeg on top of our pipe.
+  args << QStringLiteral("-thread_queue_size") << QStringLiteral("2");
   args << QStringLiteral("-f") << QStringLiteral("rawvideo") << QStringLiteral("-pix_fmt")
        << QStringLiteral("bgra") << QStringLiteral("-s")
        << QStringLiteral("%1x%2").arg(width).arg(height) << QStringLiteral("-r")

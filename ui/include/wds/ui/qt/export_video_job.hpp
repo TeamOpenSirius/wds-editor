@@ -4,6 +4,7 @@
 #include "wds/ui/qt/ffmpeg_encoder.hpp"
 #include "wds/ui/qt/ffmpeg_resolve.hpp"
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <atomic>
@@ -74,6 +75,7 @@ class ExportVideoJob final : public QObject {
   int64_t submitted_frames_ = 0;
   int64_t written_frames_ = 0;
   int64_t ema_us_ = 0;
+  QElapsedTimer progress_ui_clock_;
   int capture_w_ = 0;
   int capture_h_ = 0;
   std::atomic<bool> pause_{false};
