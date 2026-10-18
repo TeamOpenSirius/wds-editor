@@ -522,6 +522,12 @@ void StemPanel::update_polling() {
 void StemPanel::showEvent(QShowEvent* event) {
   QDialog::showEvent(event);
   sync_source();
+  // First open with an empty field and nothing discoverable: tell the user before they click install.
+  if (!prompted_python_missing_ && resolve_python(python_->text()).isEmpty() &&
+      resolve_python(runtime_python()).isEmpty() && discover_system_python().isEmpty()) {
+    prompted_python_missing_ = true;
+    prompt_python_not_installed();
+  }
 }
 
 void StemPanel::hideEvent(QHideEvent* event) {
@@ -715,10 +721,19 @@ bool StemPanel::prepare_job() {
   QString python = resolve_python(python_->text());
   if (python.isEmpty()) python = resolve_python(runtime_python());
   if (python.isEmpty()) {
-    report_task_failure(tr("无法启动任务"),
-                       is_windows_store_python_alias(python_->text())
-                           ? tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请安装 Python 3.10 或更新版本，或用「选择…」指定 python.exe。")
-                           : tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境。"));
+    // Store python.exe under WindowsApps is a stub that cannot run; discovery already
+    // skips it, so "only Store aliases" looks the same as no Python at all.
+    if (discover_system_python().isEmpty()) {
+      prompted_python_missing_ = true;
+      prompt_python_not_installed();
+    } else if (is_windows_store_python_alias(python_->text())) {
+      report_task_failure(
+          tr("无法启动任务"),
+          tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请改用「选择…」指定已安装的 python.exe"));
+    } else {
+      report_task_failure(tr("无法启动任务"),
+                          tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境"));
+    }
     return false;
   }
   python_->setText(python);
@@ -845,6 +860,22 @@ void StemPanel::append_process_log(const QByteArray& bytes) {
   process_log_ += bytes;
   constexpr int kMax = 524288;
   if (process_log_.size() > kMax) process_log_ = process_log_.right(kMax);
+}
+
+void StemPanel::prompt_python_not_installed() {
+  const QString summary = tr("未检测到本机已安装的 Python，请安装 Python 3.10 或更新版本后再试");
+  status_->setText(summary);
+  if (!stem_error_ui_allowed()) return;
+  QMessageBox box(this);
+  box.setIcon(QMessageBox::Warning);
+  box.setWindowTitle(tr("未安装 Python"));
+  box.setText(summary);
+  box.addButton(tr("确定"), QMessageBox::AcceptRole);
+  auto* download = box.addButton(tr("前往下载"), QMessageBox::ActionRole);
+  box.exec();
+  if (box.clickedButton() == static_cast<QAbstractButton*>(download)) {
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.python.org/downloads/")));
+  }
 }
 
 void StemPanel::report_task_failure(const QString& title, const QString& summary) {

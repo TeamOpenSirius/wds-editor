@@ -52,6 +52,8 @@ class StemPanel final : public QDialog {
   void note_download_progress(const QString& text);
   void append_process_log(const QByteArray& bytes);
   void report_task_failure(const QString& title, const QString& summary);
+  // No usable interpreter on the machine: offer the official download page.
+  void prompt_python_not_installed();
   QString runtime_python() const;
   // Windows Store python.exe / python3.exe under WindowsApps is an App Execution
   // Alias and opens the Store; the real Store package lives in a subdirectory.
@@ -99,6 +101,7 @@ class StemPanel final : public QDialog {
   bool cancelled_ = false;
   bool downloading_model_ = false;
   bool installing_ = false;
+  bool prompted_python_missing_ = false;
   int selected_track_ = 0;
   QLabel* source_label_;
   QLabel* unsaved_warning_;
