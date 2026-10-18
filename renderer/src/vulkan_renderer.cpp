@@ -282,6 +282,41 @@ uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPro
   throw std::runtime_error("No suitable Vulkan memory type");
 }
 
+uint32_t pick_readback_memory_type(VkPhysicalDevice phys, uint32_t type_bits,
+                                   VkMemoryPropertyFlags* out_flags) {
+  VkPhysicalDeviceMemoryProperties mem{};
+  vkGetPhysicalDeviceMemoryProperties(phys, &mem);
+  VkMemoryPropertyFlags flags[32] = {};
+  const uint32_t n = mem.memoryTypeCount > 32u ? 32u : mem.memoryTypeCount;
+  for (uint32_t i = 0; i < n; ++i) {
+    flags[i] = mem.memoryTypes[i].propertyFlags;
+  }
+  const uint32_t idx = wds::renderer::pick_host_visible_readback_type(flags, n, type_bits);
+  if (idx >= n) {
+    throw std::runtime_error("No suitable Vulkan memory type");
+  }
+  if (out_flags != nullptr) {
+    *out_flags = mem.memoryTypes[idx].propertyFlags;
+  }
+  return idx;
+}
+
+void invalidate_mapped_if_needed(VkDevice device, VkDeviceMemory memory, bool coherent,
+                                 VkDeviceSize atom, VkDeviceSize bytes, VkDeviceSize alloc) {
+  if (coherent || device == VK_NULL_HANDLE || memory == VK_NULL_HANDLE || bytes == 0) {
+    return;
+  }
+  const MappedFlushRange r = mapped_flush_range(0, bytes, atom, alloc);
+  if (r.size == 0) {
+    return;
+  }
+  VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+  range.memory = memory;
+  range.offset = r.offset;
+  range.size = r.size;
+  vkInvalidateMappedMemoryRanges(device, 1, &range);
+}
+
 struct HostVisiblePick {
   uint32_t type_index = 0;
   VkMemoryPropertyFlags flags = 0;
@@ -756,6 +791,7 @@ struct VulkanRenderer::Impl {
     uint32_t height = 0;
     uint32_t fence_slot = UINT32_MAX;
     bool pending = false;
+    bool coherent = true;
   };
   std::array<ExportStaging, 3> export_ring{};
   int export_write = 0;
@@ -2183,10 +2219,9 @@ bool VulkanRenderer::Impl::create_export_staging(uint32_t width, uint32_t height
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(device, slot.buffer, &req);
     uint32_t mem_type = 0;
+    VkMemoryPropertyFlags mem_flags = 0;
     try {
-      mem_type = find_memory_type(physical, req.memoryTypeBits,
-                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+      mem_type = pick_readback_memory_type(physical, req.memoryTypeBits, &mem_flags);
     } catch (...) {
       destroy_export_staging();
       return false;
@@ -2204,6 +2239,7 @@ bool VulkanRenderer::Impl::create_export_staging(uint32_t width, uint32_t height
     slot.size = buf_bytes;
     slot.width = width;
     slot.height = height;
+    slot.coherent = (mem_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
   }
   export_write = 0;
   export_read = 0;
@@ -2230,6 +2266,8 @@ bool VulkanRenderer::Impl::wait_export_slot(int slot) {
   if (vkWaitForFences(device, 1, &in_flight[fence_slot], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
     return false;
   }
+  invalidate_mapped_if_needed(device, staged.memory, staged.coherent, non_coherent_atom, staged.size,
+                              staged.size);
   staged.pending = false;
   if (export_pending > 0) {
     --export_pending;
@@ -7454,10 +7492,9 @@ bool VulkanRenderer::readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& ou
   VkMemoryRequirements req{};
   vkGetBufferMemoryRequirements(impl_->device, buffer, &req);
   uint32_t mem_type = 0;
+  VkMemoryPropertyFlags mem_flags = 0;
   try {
-    mem_type = find_memory_type(impl_->physical, req.memoryTypeBits,
-                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    mem_type = pick_readback_memory_type(impl_->physical, req.memoryTypeBits, &mem_flags);
   } catch (...) {
     vkDestroyBuffer(impl_->device, buffer, nullptr);
     return false;
@@ -7529,6 +7566,9 @@ bool VulkanRenderer::readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& ou
     vkDestroyBuffer(impl_->device, buffer, nullptr);
     return false;
   }
+  invalidate_mapped_if_needed(impl_->device, memory,
+                              (mem_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0,
+                              impl_->non_coherent_atom, buf_bytes, req.size);
 
   const bool bgra = impl_->swapchain_format == VK_FORMAT_B8G8R8A8_UNORM ||
                     impl_->swapchain_format == VK_FORMAT_B8G8R8A8_SRGB ||
@@ -7628,52 +7668,28 @@ void VulkanRenderer::end_export_capture() {
 
 bool VulkanRenderer::export_capture_active() const noexcept { return export_active_; }
 
-namespace {
-
-bool pack_mapped_bgra(const void* mapped, uint32_t width, uint32_t height, VkDeviceSize row_pitch,
-                      VkFormat format, std::vector<std::uint8_t>& out, int& out_w, int& out_h) {
-  if (mapped == nullptr || width == 0 || height == 0) {
-    return false;
+bool publish_export_bgra(void* mapped, uint32_t width, uint32_t height, VkDeviceSize row_pitch,
+                         VkFormat format, std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h,
+                         const std::uint8_t** aliased) {
+  if (aliased != nullptr && export_bgra_can_alias_mapped(format, row_pitch, width) &&
+      mapped != nullptr) {
+    *aliased = static_cast<const std::uint8_t*>(mapped);
+    out_bgra.clear();
+    out_w = static_cast<int>(width);
+    out_h = static_cast<int>(height);
+    return true;
   }
-  const bool src_bgra = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
-                        format == VK_FORMAT_B8G8R8A8_UINT;
-  const bool src_rgba = format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
-  out.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
-  const auto* src = static_cast<const std::uint8_t*>(mapped);
-  for (uint32_t y = 0; y < height; ++y) {
-    const std::uint8_t* row = src + static_cast<size_t>(y) * static_cast<size_t>(row_pitch);
-    std::uint8_t* dst = out.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 4u;
-    if (src_bgra) {
-      std::memcpy(dst, row, static_cast<size_t>(width) * 4u);
-    } else {
-      for (uint32_t x = 0; x < width; ++x) {
-        const std::uint8_t* p = row + static_cast<size_t>(x) * 4u;
-        if (src_rgba) {
-          dst[0] = p[2];
-          dst[1] = p[1];
-          dst[2] = p[0];
-          dst[3] = p[3];
-        } else {
-          dst[0] = p[0];
-          dst[1] = p[1];
-          dst[2] = p[2];
-          dst[3] = p[3];
-        }
-        dst += 4;
-      }
-    }
-  }
-  out_w = static_cast<int>(width);
-  out_h = static_cast<int>(height);
-  return true;
+  return pack_mapped_bgra(mapped, width, height, row_pitch, format, out_bgra, out_w, out_h);
 }
 
-}  // namespace
-
-bool VulkanRenderer::take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h) {
+bool VulkanRenderer::take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h,
+                                      const std::uint8_t** aliased) {
   out_bgra.clear();
   out_w = 0;
   out_h = 0;
+  if (aliased != nullptr) {
+    *aliased = nullptr;
+  }
   if (impl_ == nullptr || !impl_->export_active) {
     return false;
   }
@@ -7684,18 +7700,22 @@ bool VulkanRenderer::take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& 
     return false;
   }
   const auto& slot = impl_->export_ring[static_cast<size_t>(impl_->export_read)];
-  if (!pack_mapped_bgra(slot.mapped, slot.width, slot.height, slot.row_pitch, impl_->swapchain_format,
-                        out_bgra, out_w, out_h)) {
+  if (!publish_export_bgra(slot.mapped, slot.width, slot.height, slot.row_pitch,
+                           impl_->swapchain_format, out_bgra, out_w, out_h, aliased)) {
     return false;
   }
   impl_->export_read = (impl_->export_read + 1) % static_cast<int>(impl_->export_ring.size());
   return true;
 }
 
-bool VulkanRenderer::drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h) {
+bool VulkanRenderer::drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h,
+                                       const std::uint8_t** aliased) {
   out_bgra.clear();
   out_w = 0;
   out_h = 0;
+  if (aliased != nullptr) {
+    *aliased = nullptr;
+  }
   if (impl_ == nullptr || impl_->export_pending <= 0) {
     return false;
   }
@@ -7703,8 +7723,8 @@ bool VulkanRenderer::drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int&
     return false;
   }
   const auto& slot = impl_->export_ring[static_cast<size_t>(impl_->export_read)];
-  if (!pack_mapped_bgra(slot.mapped, slot.width, slot.height, slot.row_pitch, impl_->swapchain_format,
-                        out_bgra, out_w, out_h)) {
+  if (!publish_export_bgra(slot.mapped, slot.width, slot.height, slot.row_pitch,
+                           impl_->swapchain_format, out_bgra, out_w, out_h, aliased)) {
     return false;
   }
   impl_->export_read = (impl_->export_read + 1) % static_cast<int>(impl_->export_ring.size());

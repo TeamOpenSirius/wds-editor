@@ -670,6 +670,11 @@ void test_waveform_cancel_and_jobs(const FixturePaths& paths) {
     expect(wf.load(wf3.string()), "waveform: plain decode succeeds");
     expect(wf.duration_ms() >= 2999 && wf.duration_ms() <= 3001,
            "waveform: duration matches the decoded audio");
+    expect(!wf.has_spectrogram(), "waveform: default load is peaks-only");
+    expect(wf.load(wf3.string(), nullptr, true) && wf.has_spectrogram(),
+           "waveform: spectrogram decode on request");
+    expect(wf.duration_ms() >= 2999 && wf.duration_ms() <= 3001,
+           "waveform: spectrogram decode keeps duration");
 #if defined(WDS_AUDIO_FAKE_BASS)
     expect((fake_bass_last_open_flags() & BASS_STREAM_PRESCAN) == 0,
            "waveform: decode stream is opened without PRESCAN");
@@ -747,6 +752,23 @@ void test_waveform_cancel_and_jobs(const FixturePaths& paths) {
     expect(delivered == 1, "jobs: exactly one result delivered");
     expect(got.duration_ms() >= 2999 && got.duration_ms() <= 3001,
            "jobs: the delivered result is the newest generation's");
+    expect(!got.has_spectrogram(), "jobs: default restart is peaks-only");
+
+    (void)jobs.restart(wf3.string(), true);
+    delivered = 0;
+    got.clear();
+    const auto t_spec = Clock::now();
+    while ((jobs.in_flight() != 0) && ms_since(t_spec) < 15'000) {
+      wds::audio::WaveformOverview r;
+      if (jobs.poll(r)) {
+        ++delivered;
+        got = std::move(r);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    expect(jobs.in_flight() == 0, "jobs: spectrogram job reaped");
+    expect(delivered == 1, "jobs: spectrogram flag delivers one result");
+    expect(got.has_spectrogram(), "jobs: restart(..., true) has spectrogram");
 
     // cancel_all discards whatever is in flight.
     (void)jobs.restart(wf3.string());

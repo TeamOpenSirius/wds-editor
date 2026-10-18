@@ -17,9 +17,17 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace wds::ui {
+
+// Full-song GPU atlas is only for a paused Spectrogram view. Playing frames
+// use the Qt visible-row backdrop (and keep this false so tick cannot hitch).
+inline constexpr bool should_bake_full_spectrogram_atlas(bool want_spectrogram,
+                                                         bool intends_playing) noexcept {
+  return want_spectrogram && !intends_playing;
+}
 
 // Chart preview panel: Transport + ChartEditorEngine sync loop around PlaybackPreviewView.
 class ChartPreviewPanel {
@@ -91,6 +99,9 @@ class ChartPreviewPanel {
   std::uint64_t music_generation() const noexcept { return music_generation_; }
   const wds::audio::WaveformOverview& waveform() const noexcept { return waveform_; }
   wds::renderer::TextureInfo spectrogram_texture() const noexcept { return spectrogram_texture_; }
+  // Edit Spectrogram mode: decode FFT and (when paused) bake the GPU atlas.
+  void set_want_spectrogram(bool want);
+  bool want_spectrogram() const noexcept { return want_spectrogram_; }
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
   void reset_playback();
   // Join speculative collect, then queue a user seek (scrub / jump / CLI).
@@ -144,6 +155,10 @@ class ChartPreviewPanel {
   void collect_ready_waveforms();
   void destroy_spectrogram_texture();
   void bake_spectrogram_texture();
+  void maybe_bake_spectrogram_texture();
+  void store_waveform_cache(const std::string& path, const wds::audio::WaveformOverview& decoded);
+  const wds::audio::WaveformOverview* cached_waveform(const std::string& path,
+                                                      bool need_spectrogram) const;
   void maybe_inject_preview_stall(bool playing, double chart_sec);
   // Syuriken pulse clock: song/chart microseconds, no present-latency extra.
   int64_t pulse_now_us(bool playing, int64_t timeline_us) const noexcept;
@@ -154,6 +169,9 @@ class ChartPreviewPanel {
   wds::audio::WaveformOverview waveform_;
   // Declared after transport_ so it is destroyed (and joined) first.
   wds::audio::WaveformJobs waveform_jobs_;
+  std::unordered_map<std::string, wds::audio::WaveformOverview> waveform_cache_;
+  std::string waveform_path_;
+  bool want_spectrogram_ = false;
   std::uint64_t music_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;

@@ -1,3 +1,4 @@
+#include "wds/ui/qt/export_video_io.hpp"
 #include "wds/ui/qt/export_video_span.hpp"
 #include "wds/ui/qt/export_video_ui_state.hpp"
 #include "wds/ui/qt/ffmpeg_encoder.hpp"
@@ -106,6 +107,40 @@ void test_ffmpeg_parse() {
   expect(!wds::ui::ffmpeg_probe_qualified(p), "5.x unqualified");
 }
 
+void test_ranked_windows_covers_nv_amf_qsv() {
+  wds::ui::FfmpegProbe p;
+  p.h264_encoders = {QStringLiteral("h264_nvenc"), QStringLiteral("h264_amf"),
+                     QStringLiteral("h264_qsv"), QStringLiteral("h264_mf"),
+                     QStringLiteral("libx264")};
+#if defined(_WIN32)
+  const uint32_t vendors[] = {0x10DEu, 0x1002u, 0x8086u};
+  for (uint32_t vendor : vendors) {
+    const auto ranked = wds::ui::ranked_h264_codecs(p, vendor);
+    expect(ranked.contains(QStringLiteral("h264_nvenc")), "windows lists nvenc");
+    expect(ranked.contains(QStringLiteral("h264_amf")), "windows lists amf");
+    expect(ranked.contains(QStringLiteral("h264_qsv")), "windows lists qsv");
+    expect(ranked.contains(QStringLiteral("h264_mf")), "windows lists mf");
+  }
+  const auto nvidia = wds::ui::ranked_h264_codecs(p, 0x10DEu);
+  expect(!nvidia.isEmpty() && nvidia.front() == QStringLiteral("h264_nvenc"),
+         "nvidia vendor prefers nvenc");
+  const auto amd = wds::ui::ranked_h264_codecs(p, 0x1002u);
+  expect(!amd.isEmpty() && amd.front() == QStringLiteral("h264_amf"), "amd vendor prefers amf");
+  const auto intel = wds::ui::ranked_h264_codecs(p, 0x8086u);
+  expect(!intel.isEmpty() && intel.front() == QStringLiteral("h264_qsv"),
+         "intel vendor prefers qsv");
+#else
+  const auto ranked = wds::ui::ranked_h264_codecs(p, 0x10DEu);
+  expect(!ranked.isEmpty(), "non-windows ranking still resolves");
+#endif
+}
+
+void test_write_all_stdin_rejects_null() {
+  std::vector<std::uint8_t> frame(16, 0);
+  expect(!wds::ui::write_all_stdin(nullptr, frame), "null process");
+  expect(!wds::ui::write_all_stdin(nullptr, frame.data(), frame.size()), "null pointer overload");
+}
+
 void test_ranked_macos_prefers_vt() {
   wds::ui::FfmpegProbe p;
   p.h264_encoders = {QStringLiteral("libx264"), QStringLiteral("h264_videotoolbox"),
@@ -212,6 +247,8 @@ int main(int argc, char** argv) {
   test_ready_soft_and_hw();
   test_encode_pause_abort_done();
   test_ffmpeg_parse();
+  test_ranked_windows_covers_nv_amf_qsv();
+  test_write_all_stdin_rejects_null();
   test_ranked_macos_prefers_vt();
   test_download_spec_is_pinned();
   test_export_video_span_pads_music_and_chart();

@@ -60,6 +60,7 @@ void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& 
   preview.apply_display_settings(cfg.note_speed, cfg.note_start_offset, cfg.note_height_level,
                                  cfg.split_line_opacity, cfg.split_effect_quality);
   preview.preview().apply_msaa(cfg.msaa_samples);
+  preview.set_want_spectrogram(cfg.spectrum_display == EditSpectrumMode::Spectrogram);
 }
 
 void apply_display_to_edit(ChartEditPanel* edit, const EditorUiConfig& cfg) {

@@ -44,7 +44,10 @@ class WaveformOverview {
   // also checked before and right after the (uninterruptible) stream open, so a
   // job cancelled while opening frees its stream and returns without decoding.
   // The stream is opened without PRESCAN; the result covers what was decoded.
-  bool load(const std::string& path, const std::atomic<bool>* cancel = nullptr);
+  // `want_spectrogram` runs the hop FFT (edit Spectrogram mode). Envelope/None
+  // leave it false so a song switch does not compute an unused atlas.
+  bool load(const std::string& path, const std::atomic<bool>* cancel = nullptr,
+            bool want_spectrogram = false);
 
   // Max peak in half-open [ms_lo, ms_hi). 0 when empty or fully outside audio.
   float peak_in_range(double ms_lo, double ms_hi) const noexcept;

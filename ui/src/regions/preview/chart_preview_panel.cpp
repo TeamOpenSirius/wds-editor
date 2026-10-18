@@ -514,6 +514,7 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   }
   preview_.pump_split_effect_preload();
   collect_ready_waveforms();
+  maybe_bake_spectrogram_texture();
   last_tick_preload_us_ = lapse(t0);
 
   t0 = time_tick ? std::chrono::steady_clock::now() : t0;
@@ -758,23 +759,85 @@ void ChartPreviewPanel::join_waveform_workers() {
   waveform_jobs_.shutdown();
 }
 
+void ChartPreviewPanel::store_waveform_cache(const std::string& path,
+                                             const wds::audio::WaveformOverview& decoded) {
+  if (path.empty() || decoded.empty()) return;
+  const auto it = waveform_cache_.find(path);
+  if (it != waveform_cache_.end() && it->second.has_spectrogram() && !decoded.has_spectrogram()) {
+    return;
+  }
+  waveform_cache_[path] = decoded;
+}
+
+const wds::audio::WaveformOverview* ChartPreviewPanel::cached_waveform(
+    const std::string& path, bool need_spectrogram) const {
+  if (path.empty()) return nullptr;
+  const auto it = waveform_cache_.find(path);
+  if (it == waveform_cache_.end() || it->second.empty()) return nullptr;
+  if (need_spectrogram && !it->second.has_spectrogram()) return nullptr;
+  return &it->second;
+}
+
+void ChartPreviewPanel::set_want_spectrogram(bool want) {
+  if (want_spectrogram_ == want) return;
+  want_spectrogram_ = want;
+  if (!want) {
+    destroy_spectrogram_texture();
+    return;
+  }
+  if (waveform_path_.empty() || !transport_.audio().has_music()) return;
+  if (const auto* hit = cached_waveform(waveform_path_, true)) {
+    waveform_ = *hit;
+    destroy_spectrogram_texture();
+    maybe_bake_spectrogram_texture();
+    return;
+  }
+  if (waveform_.has_spectrogram()) {
+    maybe_bake_spectrogram_texture();
+    return;
+  }
+  (void)waveform_jobs_.restart(waveform_path_, true);
+}
+
 void ChartPreviewPanel::rebuild_waveform(const std::string& music_path) {
-  destroy_spectrogram_texture();
-  waveform_.clear();
-  // Decoding the full song and calculating two FFTs per hop is the expensive
-  // part of project opening. Keep it off the Qt/render thread; tick() installs
-  // only the newest completed result and performs the Vulkan upload there.
+  waveform_path_ = music_path;
+  // Decoding the full song (and, for Spectrogram mode, two FFTs per hop) stays
+  // off the Qt/render thread. Do not clear the previous overview here: the new
+  // BGM is already swapped, and an empty backdrop flashes for several seconds.
   // restart() cancels (never joins) any decode still running for a previous song.
   const bool decode = !music_path.empty() && transport_.audio().has_music();
-  (void)waveform_jobs_.restart(decode ? music_path : std::string{});
+  if (!decode) {
+    destroy_spectrogram_texture();
+    waveform_.clear();
+    (void)waveform_jobs_.restart({});
+    return;
+  }
+  if (const auto* hit = cached_waveform(music_path, want_spectrogram_)) {
+    waveform_ = *hit;
+    destroy_spectrogram_texture();
+    maybe_bake_spectrogram_texture();
+    return;
+  }
+  (void)waveform_jobs_.restart(music_path, want_spectrogram_);
 }
 
 void ChartPreviewPanel::collect_ready_waveforms() {
   wds::audio::WaveformOverview decoded;
   if (waveform_jobs_.poll(decoded)) {
+    store_waveform_cache(waveform_path_, decoded);
     waveform_ = std::move(decoded);
-    bake_spectrogram_texture();
+    destroy_spectrogram_texture();
+    maybe_bake_spectrogram_texture();
   }
+}
+
+void ChartPreviewPanel::maybe_bake_spectrogram_texture() {
+  if (!should_bake_full_spectrogram_atlas(want_spectrogram_, transport_.intends_playing())) {
+    if (!want_spectrogram_) destroy_spectrogram_texture();
+    return;
+  }
+  if (spectrogram_texture_ || !waveform_.has_spectrogram()) return;
+  bake_spectrogram_texture();
 }
 
 void ChartPreviewPanel::destroy_spectrogram_texture() {
