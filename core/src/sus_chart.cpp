@@ -258,6 +258,19 @@ bool hold_start_fully_covered_by_critical(const NotationNote& hold,
   return std::all_of(occupied.begin(), occupied.end(), [](char c) { return c != 0; });
 }
 
+// sus2txt #TIL00 / #TIL01: the number after `'` is a 1920ths-of-the-measure
+// index (levelData.cpp HS/SL use denominator 1920), not raw ticks_per_beat.
+int64_t sus2txt_til_tick(int64_t measure_start, int64_t measure_len, int subtick) {
+  if (measure_len <= 0) return measure_start;
+  return measure_start + measure_len * static_cast<int64_t>(subtick) / 1920;
+}
+
+int sus2txt_til_subtick(int64_t local, int64_t measure_len) {
+  if (measure_len <= 0) return 0;
+  const int64_t sub = (local * 1920 + measure_len / 2) / measure_len;
+  return static_cast<int>(std::clamp<int64_t>(sub, 0, 1919));
+}
+
 // sus2txt leftover #5: type 3 → -width, type 4 → +width, otherwise 0.
 int32_t leftover_air_scratch_length(int air_type, int width) {
   if (air_type == 3) return -std::max(1, width);
@@ -799,7 +812,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   chart.timing.offset_ms =
       static_cast<int64_t>(std::llround(meta.wave_offset_sec * 1000.0));
   for (const auto& point : til_speeds) {
-    const int64_t tick = measure_start_tick(point.measure) + point.subtick;
+    const int64_t tick =
+        sus2txt_til_tick(measure_start_tick(point.measure), measure_length_at(point.measure),
+                         point.subtick);
     if (tick < 0 || tick > INT32_MAX) {
       return {SerializeError::ParseError, "SUS #TIL00 tick out of range"};
     }
@@ -1205,9 +1220,14 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
 
       bool scratch = end_air.air != nullptr || !mid_airs.empty();
       bool add_start = !start_has_air;
+      const bool damage_at_start =
+          damage_markers.count(DamageKey{static_cast<int32_t>(t_start), body_lane, body_width}) !=
+          0;
+      // sus2txt shouldUnscratch: drop purple when the end has no #5, but keep
+      // addStart=false if the start was an intentional Damage headless mark.
       if (end_air.air == nullptr && start_has_air && mid_airs.empty()) {
         scratch = false;
-        add_start = true;
+        add_start = !damage_at_start;
       }
 
       if (!mid_airs.empty()) {
@@ -1287,9 +1307,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     };
     std::vector<OpenSplit> open;
     auto til_tick = [&](const TilSplitPoint& p) -> int64_t {
-      const int64_t mstart = measure_start_tick(p.measure);
-      const int64_t mlen = measure_length_at(p.measure);
-      return mstart + mlen * p.subtick / 1920;
+      return sus2txt_til_tick(measure_start_tick(p.measure), measure_length_at(p.measure),
+                              p.subtick);
     };
     std::sort(til_splits.begin(), til_splits.end(), [&](const TilSplitPoint& a,
                                                        const TilSplitPoint& b) {
@@ -1898,8 +1917,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       }
       if (i) ss << ", ";
       const auto loc = locate_tick(point.tick);
-      ss << loc.measure << '\'' << loc.local << ':' << std::defaultfloat
-         << std::setprecision(std::numeric_limits<double>::max_digits10)
+      ss << loc.measure << '\'' << sus2txt_til_subtick(loc.local, loc.measure_len) << ':'
+         << std::defaultfloat << std::setprecision(std::numeric_limits<double>::max_digits10)
          << point.multiplier << std::setprecision(4);
     }
     ss << "\"\n\n";
@@ -1910,8 +1929,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     std::vector<std::string> til_entries;
     auto fmt_til = [&](int64_t tick, int lines, int types) {
       const auto loc = locate_tick(tick);
-      const int sub = static_cast<int>(
-          std::clamp<int64_t>((loc.local * 1920 + loc.measure_len / 2) / loc.measure_len, 0, 1919));
+      const int sub = sus2txt_til_subtick(loc.local, loc.measure_len);
       char buf[64];
       std::snprintf(buf, sizeof(buf), "%d'%04d:%02d.%05d", loc.measure, sub, lines, types);
       til_entries.push_back(buf);
