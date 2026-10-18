@@ -17,8 +17,14 @@ _World Dai Star_ 的跨平台制谱器。
 任务面板是非模态窗口，生成期间可继续编辑和播放；
 关闭面板会保留后台任务，取消按钮或退出编辑器会停止任务。
 
-首次使用需要 Python（推荐 3.12）。面板中的「安装分轨运行环境」会在用户数据目录创建独立虚拟环境，
-下载 PyTorch、Demucs 等依赖；也可直接选择已安装这些依赖的 Python，或设置 `WDS_STEM_PYTHON`。
+首次使用需要 64 位 Python 3.10 或更新版本；不设版本上限，只要 PyTorch 已为该版本发布安装包即可（已实测 3.10、3.12、3.15，以及 free-threaded 3.15t）。
+面板会在 PATH、Homebrew、pyenv、conda、python.org 安装目录、Python 安装管理器（`pythoncore-*`）和 PEP 514 注册表中查找，
+默认选最新的非 free-threaded 版本；过旧、32 位或 Rosetta 下的 Python 会在安装时给出原因。
+「安装分轨运行环境」会在用户数据目录创建独立虚拟环境，按 NVIDIA 驱动与显卡算力从 PyTorch 官方源选择
+CUDA 13.0 / CUDA 12.6 / CPU 版（macOS 为 Apple MPS），官方源不可达时改用 pip 默认源；换用其他 Python 版本后再次安装会重建该环境。
+`WDS_STEM_TORCH_INDEX` 可指定 PyTorch 源：`cu126`、`rocm7.2` 等变体名、完整索引 URL，或 `default`（pip 默认源）。
+Demucs 以 `--no-deps` 安装，不引入推理用不到、且新版 Python 缺少安装包的 torchaudio / lameenc 等依赖。
+也可直接选择已安装这些依赖的 Python，或设置 `WDS_STEM_PYTHON`。
 首次生成会下载约 80 MB 的 HTDemucs 权重，以后可以离线使用。
 自动设备选择顺序为 CUDA → Apple MPS → CPU；AMD/Intel 显卡当前使用 CPU。
 Windows/macOS/Linux 共用同一 Worker，已在 Linux + NVIDIA CUDA 实测，其他平台仍需运行时验证。
@@ -33,7 +39,7 @@ Windows/macOS/Linux 共用同一 Worker，已在 Linux + NVIDIA CUDA 实测，�
 缓存按音源内容、权重、运行库和预处理实现校验；失败或取消不会发布半成品。
 当前支持 10 毫秒至 30 分钟的单声道或立体声音频。
 
-无需模型依赖的缓存/取消回归：`python3 -B -m unittest discover -s stem-worker`。
+无需模型依赖的缓存/取消/安装决策回归：`python3 -B -m unittest discover -s stem-worker`。
 原生 CTest 还包含 `wds_audition_tests` 和 `wds_stem_panel_tests`，验证切轨同步及后台进程生命周期。
 
 ---

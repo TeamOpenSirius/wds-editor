@@ -7,6 +7,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -58,6 +59,13 @@ struct StemPanelTestAccess {
   static void failed_launch(StemPanel& panel) { panel.launch("/nonexistent/wds-stem-python", {}); }
   static bool is_store_alias(const QString& path) { return StemPanel::is_windows_store_python_alias(path); }
   static QString resolve_python(const QString& path) { return StemPanel::resolve_python(path); }
+  static QString discover_python() { return StemPanel::discover_system_python(); }
+  static int rank(int major, int minor, bool free_threaded) {
+    return StemPanel::python_rank(major, minor, free_threaded);
+  }
+  static bool tag(const QString& text, int* major, int* minor, bool* free_threaded) {
+    return StemPanel::parse_python_tag(text, major, minor, free_threaded);
+  }
 };
 }
 
@@ -155,6 +163,54 @@ int main(int argc, char** argv) {
                .isEmpty(),
            "resolve rejects Store alias without launching it");
   }
+  {
+    expect(Access::rank(3, 16, false) > Access::rank(3, 15, false) &&
+               Access::rank(3, 15, false) > Access::rank(3, 10, false),
+           "discovery prefers the newest Python without an upper bound");
+    expect(Access::rank(3, 10, false) > Access::rank(3, 16, true),
+           "GIL builds beat free-threaded builds");
+    expect(Access::rank(3, 13, true) > Access::rank(-1, -1, false) &&
+               Access::rank(-1, -1, false) > Access::rank(3, 9, false),
+           "unknown versions beat too-old ones");
+    int major = 0, minor = 0;
+    bool free_threaded = true;
+    expect(Access::tag("3.15", &major, &minor, &free_threaded) && major == 3 && minor == 15 && !free_threaded,
+           "PEP 514 tag 3.15");
+    expect(Access::tag("3.13t-arm64", &major, &minor, &free_threaded) && minor == 13 && free_threaded,
+           "PEP 514 free-threaded ARM64 tag");
+    expect(Access::tag("3.14-64", &major, &minor, &free_threaded) && minor == 14 && !free_threaded,
+           "install manager 64-bit tag");
+    expect(!Access::tag("3.12-32", &major, &minor, &free_threaded), "32-bit tag is skipped");
+    expect(!Access::tag("ContinuumAnalytics", &major, &minor, &free_threaded), "non-version tag is skipped");
+  }
+#if !defined(_WIN32)
+  {
+    // Versions far above any real install so system interpreters cannot win.
+    QTemporaryDir bin;
+    auto make = [&](const QString& name, bool executable) {
+      QFile file(bin.filePath(name));
+      file.open(QIODevice::WriteOnly);
+      file.write("#!/bin/sh\n");
+      file.close();
+      file.setPermissions(executable ? QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
+                                     : QFile::ReadOwner | QFile::WriteOwner);
+    };
+    make("python3.97", true);
+    make("python3.98", true);
+    make("python3.99t", true);
+    make("python3.99-config", true);
+    make("python3.99", false);
+    // A free-threaded build installed under the plain name.
+    make("python3.100t", true);
+    QFile::link(bin.filePath("python3.100t"), bin.filePath("python3.100"));
+    const QByteArray saved_path = qgetenv("PATH");
+    qputenv("PATH", QFile::encodeName(bin.path()) + ":" + saved_path);
+    expect(Access::discover_python() == QFileInfo(bin.filePath("python3.98")).absoluteFilePath(),
+           "POSIX discovery scans versioned interpreters, skipping -config, free-threaded (even behind a plain-name "
+           "symlink) and non-executables");
+    qputenv("PATH", saved_path);
+  }
+#endif
   int ticks = 0;
   QTimer heartbeat;
   QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; });
