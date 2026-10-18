@@ -17,9 +17,9 @@ _World Dai Star_ 的跨平台制谱器。
 任务面板是非模态窗口，生成期间可继续编辑和播放；
 关闭面板会保留后台任务，取消按钮或退出编辑器会停止任务。
 
-首次使用需要 64 位 Python 3.10 或更新版本；不设版本上限，只要 PyTorch 已为该版本发布安装包即可（已实测 3.10、3.12、3.15，以及 free-threaded 3.15t）。
+首次使用需要 64 位 Python 3.10～3.14（已实测 3.10、3.12、3.14）。
 面板会在 PATH、Homebrew、pyenv、conda、python.org 安装目录、Python 安装管理器（`pythoncore-*`）和 PEP 514 注册表中查找，
-默认选最新的非 free-threaded 版本；过旧、32 位或 Rosetta 下的 Python 会在安装时给出原因。
+默认选该范围内最新的非 free-threaded 版本；过旧、过新、32 位或 Rosetta 下的 Python 会在安装时给出原因。
 「安装分轨运行环境」会在用户数据目录创建独立虚拟环境，按 NVIDIA 驱动与显卡算力从 PyTorch 官方源选择
 CUDA 13.0 / CUDA 12.6 / CPU 版（macOS 为 Apple MPS），官方源不可达时改用 pip 默认源；换用其他 Python 版本后再次安装会重建该环境。
 `WDS_STEM_TORCH_INDEX` 可指定 PyTorch 源：`cu126`、`rocm7.2` 等变体名、完整索引 URL，或 `default`（pip 默认源）。

@@ -88,12 +88,12 @@ bool parse_python_name(const QString& name, int* major, int* minor, bool* free_t
   return true;
 }
 
-// Newest GIL build first: free-threaded builds get wheels later and run some packages
-// (e.g. PyYAML) as pure-Python fallbacks. Unknown versions beat known-too-old ones;
-// both stay selectable so install.py can explain what is wrong.
+// Newest supported GIL build first: free-threaded builds get wheels later and run some
+// packages (e.g. PyYAML) as pure-Python fallbacks. Outside 3.10–3.14 and unknown builds
+// stay selectable so install.py can explain what is wrong; supported versions win discovery.
 int python_rank(int major, int minor, bool free_threaded) {
   if (major < 0) return 1;
-  if (major < 3 || (major == 3 && minor < 10)) return 0;
+  if (major != 3 || minor < 10 || minor > 14) return 0;
   return (free_threaded ? 2 : 3) * 1000000 + major * 1000 + minor;
 }
 
@@ -424,7 +424,7 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   if (python.isEmpty()) python = resolve_python(runtime_python());
   if (python.isEmpty()) python = discover_system_python();
   python_->setText(python);
-  python_->setPlaceholderText(tr("选择 Python 3.10 或更新版本"));
+  python_->setPlaceholderText(tr("选择 Python 3.10～3.14"));
   auto* interpreter = new QHBoxLayout;
   interpreter->addWidget(python_);
   browse_ = new QPushButton(tr("选择…"), this);
@@ -732,7 +732,7 @@ bool StemPanel::prepare_job() {
           tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请改用「选择…」指定已安装的 python.exe"));
     } else {
       report_task_failure(tr("无法启动任务"),
-                          tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境"));
+                          tr("请先选择 Python 3.10～3.14，再安装分轨运行环境"));
     }
     return false;
   }
@@ -863,7 +863,7 @@ void StemPanel::append_process_log(const QByteArray& bytes) {
 }
 
 void StemPanel::prompt_python_not_installed() {
-  const QString summary = tr("未检测到本机已安装的 Python，请安装 Python 3.10 或更新版本后再试");
+  const QString summary = tr("未检测到本机已安装的 Python，请安装 Python 3.10～3.14 后再试");
   status_->setText(summary);
   if (!stem_error_ui_allowed()) return;
   QMessageBox box(this);
@@ -874,7 +874,7 @@ void StemPanel::prompt_python_not_installed() {
   auto* download = box.addButton(tr("前往下载"), QMessageBox::ActionRole);
   box.exec();
   if (box.clickedButton() == static_cast<QAbstractButton*>(download)) {
-    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.python.org/downloads/")));
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.python.org/downloads/release/python-3148/")));
   }
 }
 
@@ -969,7 +969,7 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
                       " status=" + (status == QProcess::NormalExit ? "normal" : "crash") + "\n";
     }
     report_task_failure(installing_ ? tr("安装运行环境失败") : tr("分轨失败"),
-                        error_.isEmpty() ? (installing_ ? tr("安装失败。请确认所选 Python 为 3.10 或更新的 64 位版本。")
+                        error_.isEmpty() ? (installing_ ? tr("安装失败。请确认所选 Python 为 3.10～3.14 的 64 位版本。")
                                                         : tr("任务失败。"))
                                          : error_);
   } else if (installing_) {

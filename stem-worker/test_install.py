@@ -15,20 +15,21 @@ INDEX = install.TORCH_INDEX
 
 
 class InterpreterTests(unittest.TestCase):
-    def test_no_upper_python_bound(self):
-        for minor in (10, 13, 14, 15, 16, 20):
+    def test_supported_python_range(self):
+        for minor in (10, 13, 14):
             self.assertIsNone(install.interpreter_problem((3, minor), True, "Linux", "x86_64"))
-        self.assertIsNone(install.interpreter_problem((3, 15), True, "Darwin", "arm64"))
+        self.assertIsNone(install.interpreter_problem((3, 14), True, "Darwin", "arm64"))
         self.assertIsNone(install.interpreter_problem((3, 13), True, "Windows", "ARM64"))
 
     def test_unusable_interpreters_explain_why(self):
-        self.assertIn("3.10", install.interpreter_problem((3, 9), True, "Windows", "AMD64"))
+        self.assertIn("3.10～3.14", install.interpreter_problem((3, 9), True, "Windows", "AMD64"))
+        self.assertIn("3.10～3.14", install.interpreter_problem((3, 15), True, "Linux", "x86_64"))
         self.assertIn("32 位", install.interpreter_problem((3, 12), False, "Windows", "AMD64"))
         self.assertIn("arm64", install.interpreter_problem((3, 12), True, "Darwin", "x86_64"))
 
     def test_missing_venv_names_debian_package(self):
-        self.assertIn("python3.15-venv", install.venv_problem((3, 15), "Linux", False))
-        self.assertIsNone(install.venv_problem((3, 15), "Linux", True))
+        self.assertIn("python3.14-venv", install.venv_problem((3, 14), "Linux", False))
+        self.assertIsNone(install.venv_problem((3, 14), "Linux", True))
 
 
 class TorchIndexTests(unittest.TestCase):

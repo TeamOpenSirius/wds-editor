@@ -164,10 +164,13 @@ int main(int argc, char** argv) {
            "resolve rejects Store alias without launching it");
   }
   {
-    expect(Access::rank(3, 16, false) > Access::rank(3, 15, false) &&
-               Access::rank(3, 15, false) > Access::rank(3, 10, false),
-           "discovery prefers the newest Python without an upper bound");
-    expect(Access::rank(3, 10, false) > Access::rank(3, 16, true),
+    expect(Access::rank(3, 14, false) > Access::rank(3, 13, false) &&
+               Access::rank(3, 13, false) > Access::rank(3, 10, false),
+           "discovery prefers the newest Python within 3.10–3.14");
+    expect(Access::rank(3, 10, false) > Access::rank(3, 15, false) &&
+               Access::rank(3, 10, false) > Access::rank(3, 9, false),
+           "supported range beats too-new and too-old");
+    expect(Access::rank(3, 10, false) > Access::rank(3, 14, true),
            "GIL builds beat free-threaded builds");
     expect(Access::rank(3, 13, true) > Access::rank(-1, -1, false) &&
                Access::rank(-1, -1, false) > Access::rank(3, 9, false),
@@ -185,7 +188,7 @@ int main(int argc, char** argv) {
   }
 #if !defined(_WIN32)
   {
-    // Versions far above any real install so system interpreters cannot win.
+    // Isolated PATH prefix so system interpreters cannot win.
     QTemporaryDir bin;
     auto make = [&](const QString& name, bool executable) {
       QFile file(bin.filePath(name));
@@ -195,19 +198,20 @@ int main(int argc, char** argv) {
       file.setPermissions(executable ? QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
                                      : QFile::ReadOwner | QFile::WriteOwner);
     };
-    make("python3.97", true);
-    make("python3.98", true);
-    make("python3.99t", true);
-    make("python3.99-config", true);
-    make("python3.99", false);
+    make("python3.12", true);
+    make("python3.13", true);
+    make("python3.14t", true);
+    make("python3.14-config", true);
+    make("python3.14", false);
+    make("python3.15", true);
     // A free-threaded build installed under the plain name.
-    make("python3.100t", true);
-    QFile::link(bin.filePath("python3.100t"), bin.filePath("python3.100"));
+    make("python3.11t", true);
+    QFile::link(bin.filePath("python3.11t"), bin.filePath("python3.11"));
     const QByteArray saved_path = qgetenv("PATH");
     qputenv("PATH", QFile::encodeName(bin.path()) + ":" + saved_path);
-    expect(Access::discover_python() == QFileInfo(bin.filePath("python3.98")).absoluteFilePath(),
-           "POSIX discovery scans versioned interpreters, skipping -config, free-threaded (even behind a plain-name "
-           "symlink) and non-executables");
+    expect(Access::discover_python() == QFileInfo(bin.filePath("python3.13")).absoluteFilePath(),
+           "POSIX discovery scans versioned interpreters in 3.10–3.14, skipping -config, free-threaded "
+           "(even behind a plain-name symlink), too-new, and non-executables");
     qputenv("PATH", saved_path);
   }
 #endif
