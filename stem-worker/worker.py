@@ -68,6 +68,12 @@ def read_cached(folder, spec, job):
         return None
 
 
+def download_checkpoint(torch, url, path):
+    # Same file and hash-prefix check as demucs' legacy RemoteRepo; progress goes to stderr.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.hub.download_url_to_file(url, str(path), hash_prefix=path.stem.rsplit("-", 1)[-1], progress=True)
+
+
 def ffmpeg_command(exe, source, path):
     # -protocol_whitelist must precede -i so a crafted input (playlist/URL
     # references inside the "audio" file) cannot make ffmpeg open network or other protocols.
@@ -134,7 +140,8 @@ def separate(args):
         import yaml
         from filelock import FileLock
         from demucs.apply import apply_model, TensorChunk
-        from demucs.pretrained import get_model, REMOTE_ROOT, _parse_remote_files
+        from demucs.pretrained import REMOTE_ROOT, _parse_remote_files
+        from demucs.states import load_model
 
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
@@ -156,14 +163,19 @@ def separate(args):
     precision = "tf32" if device == "cuda" else "fp32"
     emit("progress", percent=2, message="正在校验音源和模型…", device=device)
     audio_hash = digest(source, job)
+    # demucs 4.1 get_model() prefers HuggingFace safetensors (other files, network on every
+    # load). Load the legacy checkpoint directly: same weights and cache keys on 4.0.x and 4.1.x.
     urls = _parse_remote_files(REMOTE_ROOT / "files.txt")
-    signatures = yaml.safe_load((REMOTE_ROOT / "htdemucs.yaml").read_text())["models"]
+    signatures = yaml.safe_load((REMOTE_ROOT / "htdemucs.yaml").read_text(encoding="utf-8"))["models"]
+    if len(signatures) != 1:
+        raise RuntimeError("不兼容的 HTDemucs 权重")
     checkpoints = [Path(torch.hub.get_dir()) / "checkpoints" / urls[s].rsplit("/", 1)[-1] for s in signatures]
-    bag = None
-    if not all(p.is_file() for p in checkpoints):
+    missing = [(urls[s], p) for s, p in zip(signatures, checkpoints) if not p.is_file()]
+    if missing:
         emit("progress", percent=3, message="首次使用：正在下载 HTDemucs 模型…")
-        with contextlib.redirect_stdout(sys.stderr):
-            bag = get_model("htdemucs")
+        for url, path in missing:
+            check_cancel(job)
+            download_checkpoint(torch, url, path)
     check_cancel(job)
     spec = {"source_sha256": audio_hash, "model": "htdemucs",
             "weights": [digest(p, job) for p in checkpoints],
@@ -189,11 +201,11 @@ def separate(args):
         if raw.shape[1] == 1:
             raw = np.repeat(raw, 2, axis=1)
         with contextlib.redirect_stdout(sys.stderr):
-            if bag is None:
-                bag = get_model("htdemucs")
-        if len(bag.models) != 1 or set(bag.sources) != set(SOURCES):
+            # The package pickles its model class, so it cannot use torch.load's weights_only default.
+            model = load_model(torch.load(checkpoints[0], map_location="cpu", weights_only=False))
+        if set(model.sources) != set(SOURCES):
             raise RuntimeError("不兼容的 HTDemucs 权重")
-        model = bag.models[0].eval().to(device)
+        model = model.eval().to(device)
         model.requires_grad_(False)
         check_cancel(job)
         start = time.monotonic()
@@ -266,15 +278,28 @@ def separate(args):
         emit("complete", manifest=str(folder / "manifest.json"), cached=False)
 
 
+def check_runtime():
+    """Import what separate() needs, so a broken install fails before the first song."""
+    with contextlib.redirect_stdout(sys.stderr):
+        import numpy, torch, julius, soundfile, yaml, filelock, imageio_ffmpeg  # noqa: F401
+        import demucs.apply, demucs.pretrained, demucs.states  # noqa: F401
+    mps = getattr(torch.backends, "mps", None)
+    emit("runtime", torch=torch.__version__, cuda=torch.cuda.is_available(),
+         mps=bool(mps and mps.is_available()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--cache", type=Path, required=True)
-    parser.add_argument("--job", type=Path, required=True)
+    parser.add_argument("--check", action="store_true", help="only verify that the runtime imports")
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--cache", type=Path)
+    parser.add_argument("--job", type=Path)
     parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--background", action="store_true")
     args = parser.parse_args()
+    if not args.check and not (args.input and args.cache and args.job):
+        parser.error("--input, --cache and --job are required")
     if not 1 <= args.threads <= 16:
         parser.error("threads must be between 1 and 16")
     # Turn SIGTERM into an exception so decode()'s finally block kills ffmpeg.
@@ -283,7 +308,10 @@ def main():
     except (ValueError, OSError):
         pass
     try:
-        separate(args)
+        if args.check:
+            check_runtime()
+        else:
+            separate(args)
         return 0
     except Cancelled:
         emit("cancelled")

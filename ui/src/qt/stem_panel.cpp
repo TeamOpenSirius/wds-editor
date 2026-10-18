@@ -64,16 +64,53 @@ bool windows_store_python_alias(const QString& path) {
   return info.dir().dirName().compare(QLatin1String("WindowsApps"), Qt::CaseInsensitive) == 0;
 }
 
-#ifdef Q_OS_WIN
-bool parse_python_version(const QString& text, int* major, int* minor) {
-  static const QRegularExpression re(QStringLiteral(R"(^(\d+)\.(\d+))"));
-  const auto match = re.match(text);
+// Keeps the highest-ranked candidate; ties keep the first one found (PATH order).
+struct PythonPick {
+  QString path;
+  int rank = -1;
+  void offer(const QString& candidate, int candidate_rank) {
+    if (candidate_rank > rank) {
+      rank = candidate_rank;
+      path = candidate;
+    }
+  }
+};
+
+// "python3.12", "python3.13t", "python3.14.exe"; rejects python3.12-config and friends.
+bool parse_python_name(const QString& name, int* major, int* minor, bool* free_threaded) {
+  static const QRegularExpression re(QStringLiteral(R"(^python(\d+)\.(\d+)(t?)(?:\.exe)?$)"),
+                                     QRegularExpression::CaseInsensitiveOption);
+  const auto match = re.match(name);
   if (!match.hasMatch()) return false;
   *major = match.captured(1).toInt();
   *minor = match.captured(2).toInt();
+  *free_threaded = !match.captured(3).isEmpty();
   return true;
 }
 
+// Newest GIL build first: free-threaded builds get wheels later and run some packages
+// (e.g. PyYAML) as pure-Python fallbacks. Unknown versions beat known-too-old ones;
+// both stay selectable so install.py can explain what is wrong.
+int python_rank(int major, int minor, bool free_threaded) {
+  if (major < 0) return 1;
+  if (major < 3 || (major == 3 && minor < 10)) return 0;
+  return (free_threaded ? 2 : 3) * 1000000 + major * 1000 + minor;
+}
+
+// PEP 514 tag such as "3.12", "3.13t", "3.14-64", "3.13-arm64"; 32-bit ("3.12-32") is rejected
+// because PyTorch publishes 64-bit wheels only.
+bool parse_python_tag(const QString& tag, int* major, int* minor, bool* free_threaded) {
+  static const QRegularExpression re(QStringLiteral(R"(^(\d+)\.(\d+)(t?)(?:-(\w+))?$)"),
+                                     QRegularExpression::CaseInsensitiveOption);
+  const auto match = re.match(tag);
+  if (!match.hasMatch() || match.captured(4) == QLatin1String("32")) return false;
+  *major = match.captured(1).toInt();
+  *minor = match.captured(2).toInt();
+  *free_threaded = !match.captured(3).isEmpty();
+  return true;
+}
+
+#ifdef Q_OS_WIN
 QStringList path_dirs_without_windowsapps() {
   QStringList dirs;
   const auto path = qEnvironmentVariable("PATH");
@@ -119,89 +156,146 @@ QString python_from_py_launcher() {
   return QFileInfo(resolved).absoluteFilePath();
 }
 
-void collect_pep514(QStringList* out, QSettings::Scope scope, QSettings::Format format) {
+QString windows_python_exe(const QString& dir, int major, int minor, bool free_threaded) {
+  return QDir(dir).filePath(free_threaded ? QStringLiteral("python%1.%2t.exe").arg(major).arg(minor)
+                                          : QStringLiteral("python.exe"));
+}
+
+void offer_windows_python(PythonPick* pick, const QString& exe, int major, int minor, bool free_threaded) {
+  const QFileInfo info(exe);
+  if (!info.exists() || !info.isFile() || windows_store_python_alias(info.absoluteFilePath())) return;
+  pick->offer(info.absoluteFilePath(), python_rank(major, minor, free_threaded));
+}
+
+void collect_pep514(PythonPick* pick, QSettings::Scope scope, QSettings::Format format) {
   QSettings root(format, scope, QStringLiteral("Python"), QStringLiteral("PythonCore"));
-  for (const auto& ver : root.childGroups()) {
+  for (const auto& tag : root.childGroups()) {
     int major = 0;
     int minor = 0;
-    if (parse_python_version(ver, &major, &minor)) {
-      if (major < 3 || (major == 3 && minor < 10)) continue;
-    }
-    root.beginGroup(ver);
+    bool free_threaded = false;
+    if (!parse_python_tag(tag, &major, &minor, &free_threaded)) continue;
+    root.beginGroup(tag);
+    const bool is_32bit = root.value(QStringLiteral("SysArchitecture")).toString() == QLatin1String("32bit");
     root.beginGroup(QStringLiteral("InstallPath"));
     QString exe = root.value(QStringLiteral("ExecutablePath")).toString();
     if (exe.isEmpty()) {
       QString dir = root.value(QStringLiteral(".")).toString();
       if (dir.isEmpty()) dir = root.value(QString()).toString();
-      if (!dir.isEmpty()) exe = QDir(dir).filePath(QStringLiteral("python.exe"));
+      if (!dir.isEmpty()) exe = windows_python_exe(dir, major, minor, free_threaded);
     }
     root.endGroup();
     root.endGroup();
-    if (exe.isEmpty()) continue;
-    const QFileInfo info(exe);
-    if (!info.exists() || !info.isFile() || windows_store_python_alias(info.absoluteFilePath())) continue;
-    out->append(info.absoluteFilePath());
+    if (!is_32bit && !exe.isEmpty()) offer_windows_python(pick, exe, major, minor, free_threaded);
   }
 }
 
-QString python_from_pep514() {
-  QStringList found;
-  collect_pep514(&found, QSettings::UserScope, QSettings::Registry64Format);
-  collect_pep514(&found, QSettings::SystemScope, QSettings::Registry64Format);
-  collect_pep514(&found, QSettings::UserScope, QSettings::Registry32Format);
-  collect_pep514(&found, QSettings::SystemScope, QSettings::Registry32Format);
-  QString best;
-  int best_key = -1;
-  for (const auto& exe : found) {
-    int major = 3;
-    int minor = 10;
-    const QFileInfo info(exe);
-    parse_python_version(info.dir().dirName(), &major, &minor);
-    const int key = major * 1000 + minor;
-    if (key >= best_key) {
-      best_key = key;
-      best = exe;
+// Directories named after a tag: python.org's "Python313t-arm64" and the Python install
+// manager's "pythoncore-3.14-64" (the only installer for Python 3.16+).
+void collect_tagged_dirs(PythonPick* pick, const QString& root, const QRegularExpression& name_re) {
+  const QDir dir(root);
+  if (!dir.exists()) return;
+  for (const auto& name : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+    const auto match = name_re.match(name);
+    int major = 0;
+    int minor = 0;
+    bool free_threaded = false;
+    if (!match.hasMatch() || !parse_python_tag(match.captured(1), &major, &minor, &free_threaded)) {
+      continue;
     }
+    offer_windows_python(pick, windows_python_exe(dir.filePath(name), major, minor, free_threaded), major, minor,
+                         free_threaded);
   }
-  return best;
 }
 
-QString python_from_standard_dirs() {
-  QStringList roots;
+PythonPick python_from_installs() {
+  PythonPick pick;
+  collect_pep514(&pick, QSettings::UserScope, QSettings::Registry64Format);
+  collect_pep514(&pick, QSettings::SystemScope, QSettings::Registry64Format);
+  collect_pep514(&pick, QSettings::UserScope, QSettings::Registry32Format);
+  collect_pep514(&pick, QSettings::SystemScope, QSettings::Registry32Format);
+  static const QRegularExpression legacy_re(QStringLiteral(R"(^Python(\d)(\d+.*)$)"),
+                                            QRegularExpression::CaseInsensitiveOption);
+  static const QRegularExpression manager_re(QStringLiteral(R"(^pythoncore-(.+)$)"),
+                                             QRegularExpression::CaseInsensitiveOption);
   const QString local = qEnvironmentVariable("LOCALAPPDATA");
-  if (!local.isEmpty()) roots << local + QLatin1String("/Programs/Python");
-  const QString pf = qEnvironmentVariable("ProgramFiles");
-  if (!pf.isEmpty()) roots << pf;
-  const QString pf86 = qEnvironmentVariable("ProgramFiles(x86)");
-  if (!pf86.isEmpty()) roots << pf86;
-  QString best;
-  int best_key = -1;
-  static const QRegularExpression dir_re(QStringLiteral(R"(^Python(\d)(\d+)$)"),
-                                         QRegularExpression::CaseInsensitiveOption);
-  for (const auto& root : roots) {
-    QDir dir(root);
+  if (!local.isEmpty()) collect_tagged_dirs(&pick, local + QLatin1String("/Python"), manager_re);
+  QStringList legacy_roots;
+  if (!local.isEmpty()) legacy_roots << local + QLatin1String("/Programs/Python");
+  // ProgramFiles(x86) only holds 32-bit Pythons, which PyTorch does not support.
+  if (const QString pf = qEnvironmentVariable("ProgramFiles"); !pf.isEmpty()) legacy_roots << pf;
+  for (const auto& root : legacy_roots) {
+    const QDir dir(root);
     if (!dir.exists()) continue;
-    const auto entries = dir.entryList(QStringList{QStringLiteral("Python3*")},
-                                       QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const auto& name : entries) {
-      const QString exe = dir.filePath(name + QLatin1String("/python.exe"));
-      const QFileInfo info(exe);
-      if (!info.exists() || !info.isFile() || windows_store_python_alias(info.absoluteFilePath())) continue;
-      int key = 0;
-      const auto match = dir_re.match(name);
-      if (match.hasMatch()) {
-        const int major = match.captured(1).toInt();
-        const int minor = match.captured(2).toInt();
-        if (major < 3 || (major == 3 && minor < 10)) continue;
-        key = major * 1000 + minor;
+    for (const auto& name : dir.entryList({QStringLiteral("Python3*")}, QDir::Dirs | QDir::NoDotAndDotDot)) {
+      const auto match = legacy_re.match(name);
+      int major = 0;
+      int minor = 0;
+      bool free_threaded = false;
+      // "Python313t-arm64" -> tag "3.13t-arm64".
+      if (!match.hasMatch() ||
+          !parse_python_tag(match.captured(1) + QLatin1Char('.') + match.captured(2), &major, &minor,
+                            &free_threaded)) {
+        continue;
       }
-      if (key >= best_key) {
-        best_key = key;
-        best = info.absoluteFilePath();
-      }
+      offer_windows_python(&pick, windows_python_exe(dir.filePath(name), major, minor, free_threaded), major,
+                           minor, free_threaded);
     }
   }
-  return best;
+  return pick;
+}
+#else
+QStringList posix_python_dirs() {
+  QStringList dirs = qEnvironmentVariable("PATH").split(QDir::listSeparator(), Qt::SkipEmptyParts);
+  const QString home = QDir::homePath();
+  // Desktop launchers do not source shell rc files, so conda/pyenv/Homebrew are often off PATH.
+#ifdef Q_OS_MACOS
+  dirs << QStringLiteral("/opt/homebrew/bin");
+#endif
+  dirs << home + QLatin1String("/.local/bin") << QStringLiteral("/usr/local/bin") << QStringLiteral("/usr/bin");
+  const QDir pyenv(home + QLatin1String("/.pyenv/versions"));
+  for (const auto& version : pyenv.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+    dirs << pyenv.filePath(version + QLatin1String("/bin"));
+  }
+  for (const auto* conda : {"/miniforge3/bin", "/miniconda3/bin", "/anaconda3/bin"}) {
+    dirs << home + QLatin1String(conda);
+  }
+  dirs << QStringLiteral("/opt/miniconda3/bin") << QStringLiteral("/opt/anaconda3/bin");
+  dirs.removeDuplicates();
+  return dirs;
+}
+
+int posix_python_rank(const QFileInfo& info) {
+  int major = 0;
+  int minor = 0;
+  bool free_threaded = false;
+  // The link target names the real build: python3 -> python3.12, and some distributions
+  // ship python3.15 -> python3.15t for their free-threaded build.
+  if (parse_python_name(QFileInfo(info.canonicalFilePath()).fileName(), &major, &minor, &free_threaded) ||
+      parse_python_name(info.fileName(), &major, &minor, &free_threaded)) {
+    return python_rank(major, minor, free_threaded);
+  }
+  return python_rank(-1, -1, false);
+}
+
+QString python_from_posix_dirs() {
+  PythonPick pick;
+  for (const auto& path : posix_python_dirs()) {
+    const QDir dir(path);
+    QStringList names = dir.entryList({QStringLiteral("python3.*")}, QDir::Files | QDir::Executable);
+    names << QStringLiteral("python3") << QStringLiteral("python");
+    for (const auto& name : names) {
+      const QFileInfo info(dir.filePath(name));
+      if (!info.isFile() || !info.isExecutable()) continue;
+      int major = 0;
+      int minor = 0;
+      bool free_threaded = false;
+      if (name.startsWith(QLatin1String("python3.")) && !parse_python_name(name, &major, &minor, &free_threaded)) {
+        continue;  // python3.12-config, python3.12-gdb.py, ...
+      }
+      pick.offer(info.absoluteFilePath(), posix_python_rank(info));
+    }
+  }
+  return pick.path;
 }
 #endif
 
@@ -209,6 +303,14 @@ QString python_from_standard_dirs() {
 
 bool StemPanel::is_windows_store_python_alias(const QString& path) {
   return windows_store_python_alias(path);
+}
+
+int StemPanel::python_rank(int major, int minor, bool free_threaded) {
+  return wds::ui::python_rank(major, minor, free_threaded);
+}
+
+bool StemPanel::parse_python_tag(const QString& tag, int* major, int* minor, bool* free_threaded) {
+  return wds::ui::parse_python_tag(tag, major, minor, free_threaded);
 }
 
 QString StemPanel::resolve_python(const QString& path) {
@@ -282,15 +384,15 @@ void reveal_in_file_manager(const QString& path) {
 
 QString StemPanel::discover_system_python() {
 #ifdef Q_OS_WIN
-  if (const auto pep = python_from_pep514(); !pep.isEmpty()) return pep;
-  if (const auto local = python_from_standard_dirs(); !local.isEmpty()) return local;
+  const PythonPick installed = python_from_installs();
+  // A known-too-old install loses to an unversioned PATH/py.exe interpreter.
+  if (installed.rank > python_rank(-1, -1, false)) return installed.path;
   if (const auto named = find_named_python(QStringLiteral("python")); !named.isEmpty()) return named;
   if (const auto named = find_named_python(QStringLiteral("python3")); !named.isEmpty()) return named;
-  return python_from_py_launcher();
+  if (const auto launcher = python_from_py_launcher(); !launcher.isEmpty()) return launcher;
+  return installed.path;
 #else
-  QString found = QStandardPaths::findExecutable(QStringLiteral("python3"));
-  if (found.isEmpty()) found = QStandardPaths::findExecutable(QStringLiteral("python"));
-  return found;
+  return python_from_posix_dirs();
 #endif
 }
 
@@ -548,7 +650,7 @@ void StemPanel::sync_source() {
   const auto stamp = path + ':' + QString::number(info.size()) + ':' + QString::number(info.lastModified().toMSecsSinceEpoch());
   const auto generation = manager_->chart_preview().music_generation();
   if (stamp != source_stamp_ || generation != source_generation_) {
-    if (active_ && !install_step_) cancel();
+    if (active_ && !installing_) cancel();
     source_ = path;
     source_stamp_ = stamp;
     source_generation_ = generation;
@@ -626,6 +728,7 @@ bool StemPanel::prepare_job() {
   }
   job_ = std::make_unique<QTemporaryDir>(cache_dir_ + "/.job-XXXXXX");
   if (!job_->isValid() || !QFile::copy(":/wds/stem-worker.py", job_->filePath("worker.py")) ||
+      !QFile::copy(":/wds/stem-install.py", job_->filePath("install.py")) ||
       !QFile::copy(":/wds/stem-requirements.txt", job_->filePath("requirements.txt"))) {
     job_.reset();
     report_task_failure(tr("无法启动任务"), tr("无法创建分轨任务目录"));
@@ -634,6 +737,7 @@ bool StemPanel::prepare_job() {
   cancelled_ = false;
   downloading_model_ = false;
   error_.clear();
+  install_message_.clear();
   manifest_.clear();
   output_.clear();
   process_log_.clear();
@@ -653,6 +757,10 @@ void StemPanel::launch(const QString& python, const QStringList& arguments) {
   environment.insert("PYTHONUNBUFFERED", "1");
   environment.insert("PYTHONUTF8", "1");
   environment.insert("PYTHONDONTWRITEBYTECODE", "1");
+  // A global PYTHONHOME/PYTHONPATH (left by other tools' installers) belongs to some
+  // other interpreter and makes the selected one fail at startup or import foreign packages.
+  environment.remove("PYTHONHOME");
+  environment.remove("PYTHONPATH");
   process_.setProcessEnvironment(environment);
   process_.setWorkingDirectory(job_->path());
   process_.start(python, arguments);
@@ -661,7 +769,7 @@ void StemPanel::launch(const QString& python, const QStringList& arguments) {
 void StemPanel::start() {
   sync_source();
   if (active_ || source_.isEmpty() || !prepare_job()) return;
-  install_step_ = 0;
+  installing_ = false;
   job_source_ = source_;
   job_stamp_ = source_stamp_;
   job_generation_ = source_generation_;
@@ -682,7 +790,7 @@ void StemPanel::cancel() {
     QFile marker(job_->filePath("cancel"));
     if (!marker.open(QIODevice::WriteOnly)) qWarning("StemPanel: cannot write cancel marker");
   }
-  if (install_step_) process_.terminate();
+  if (installing_) process_.terminate();
   kill_timer_.start();
   status_->setText(tr("正在取消…"));
   refresh_controls();
@@ -691,15 +799,14 @@ void StemPanel::cancel() {
 void StemPanel::install_runtime() {
   refresh_cache_dir();
   if (active_ || !prepare_job()) return;
-  install_step_ = 1;
-  status_->setText(tr("正在创建独立运行环境…"));
+  installing_ = true;
+  status_->setText(tr("正在准备运行环境…"));
   progress_->setRange(0, 0);
-  if (QFileInfo::exists(runtime_python())) {
-    install_step_ = 2;
-    launch(runtime_python(), {"-m", "pip", "install", "--disable-pip-version-check", "-r", job_->filePath("requirements.txt")});
-  } else {
-    launch(python_->text().trimmed(), {"-m", "venv", runtime_dir_});
-  }
+  // install.py checks the interpreter, (re)builds the venv for it and picks the PyTorch
+  // build for the GPU; selecting the runtime's own python repairs it in place.
+  launch(python_->text().trimmed(),
+         {"-u", job_->filePath("install.py"), "--runtime", runtime_dir_, "--job", job_->path(),
+          "--requirements", job_->filePath("requirements.txt"), "--worker", job_->filePath("worker.py")});
 }
 
 void StemPanel::note_download_progress(const QString& text) {
@@ -726,7 +833,7 @@ void StemPanel::note_download_progress(const QString& text) {
   if (percent < 0) return;
   progress_->setRange(0, 100);
   progress_->setValue(percent);
-  if (install_step_) {
+  if (installing_) {
     status_->setText(tr("正在下载并安装推理依赖… %1%").arg(percent));
   } else if (downloading_model_) {
     status_->setText(tr("正在下载 HTDemucs 模型… %1%").arg(percent));
@@ -776,10 +883,6 @@ void StemPanel::report_task_failure(const QString& title, const QString& summary
 void StemPanel::read_output() {
   const auto bytes = process_.readAllStandardOutput();
   append_process_log(bytes);
-  if (install_step_) {
-    note_download_progress(QString::fromUtf8(bytes));
-    return;
-  }
   output_ += bytes;
   if (output_.size() > 65536) { error_ = tr("分轨进程返回了过长的消息"); cancel(); return; }
   while (true) {
@@ -795,12 +898,17 @@ void StemPanel::read_output() {
     const auto event = object.value("event").toString();
     if (event == "progress" && !cancelled_) {
       const auto message = object.value("message").toString();
-      downloading_model_ = message.contains(QStringLiteral("下载"));
-      progress_->setValue(object.value("percent").toInt());
+      downloading_model_ = !installing_ && message.contains(QStringLiteral("下载"));
+      // Installer steps carry no percentage; keep the busy indicator for them.
+      if (object.contains("percent")) {
+        progress_->setRange(0, 100);
+        progress_->setValue(object.value("percent").toInt());
+      }
       status_->setText(message);
     } else if (event == "complete") {
       downloading_model_ = false;
-      manifest_ = object.value("manifest").toString();
+      manifest_ = installing_ ? QString() : object.value("manifest").toString();
+      if (installing_) install_message_ = object.value("message").toString();
     } else if (event == "error") {
       downloading_model_ = false;
       error_ = object.value("message").toString();
@@ -817,13 +925,6 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
   kill_timer_.stop();
   close_job_object();
   const bool success = code == 0 && status == QProcess::NormalExit && !cancelled_;
-  if (success && install_step_ == 1) {
-    process_log_ += QByteArrayLiteral("\n--- pip install ---\n");
-    install_step_ = 2;
-    status_->setText(tr("正在下载并安装推理依赖，可继续编辑…"));
-    launch(runtime_python(), {"-m", "pip", "install", "--disable-pip-version-check", "-r", job_->filePath("requirements.txt")});
-    return;
-  }
   active_ = false;
   downloading_model_ = false;
   progress_->setRange(0, 100);
@@ -836,13 +937,15 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
       process_log_ += QByteArray("code=") + QByteArray::number(code) +
                       " status=" + (status == QProcess::NormalExit ? "normal" : "crash") + "\n";
     }
-    report_task_failure(install_step_ ? tr("安装运行环境失败") : tr("分轨失败"),
-                        error_.isEmpty() ? tr("任务失败。") : error_);
-  } else if (install_step_) {
+    report_task_failure(installing_ ? tr("安装运行环境失败") : tr("分轨失败"),
+                        error_.isEmpty() ? (installing_ ? tr("安装失败。请确认所选 Python 为 3.10 或更新的 64 位版本。")
+                                                        : tr("任务失败。"))
+                                         : error_);
+  } else if (installing_) {
     python_->setText(runtime_python());
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
     settings.setValue("stems/python", runtime_python());
-    status_->setText(tr("运行环境已安装，可以生成分轨。"));
+    status_->setText(install_message_.isEmpty() ? tr("运行环境已安装，可以生成分轨。") : install_message_);
     progress_->setValue(100);
   } else if (manager_ && source_ == job_source_ && source_stamp_ == job_stamp_ && source_generation_ == job_generation_) {
     QFile file(manifest_);
@@ -871,7 +974,7 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
   } else {
     status_->setText(tr("分轨已缓存；当前音源已更换。"));
   }
-  install_step_ = 0;
+  installing_ = false;
   job_.reset();
   refresh_controls();
 }

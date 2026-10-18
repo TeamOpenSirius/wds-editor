@@ -58,6 +58,9 @@ class StemPanel final : public QDialog {
   static bool is_windows_store_python_alias(const QString& path);
   static QString resolve_python(const QString& path);
   static QString discover_system_python();
+  // Discovery preference; no upper version bound, install.py reports unsupported versions.
+  static int python_rank(int major, int minor, bool free_threaded);
+  static bool parse_python_tag(const QString& tag, int* major, int* minor, bool* free_threaded);
   // Kill the worker and everything it spawned (ffmpeg): process group on POSIX,
   // Job Object on Windows. Always finishes with QProcess::kill().
   void kill_process_tree();
@@ -85,6 +88,7 @@ class StemPanel final : public QDialog {
   std::uint64_t job_generation_ = 0;
   QString manifest_;
   QString error_;
+  QString install_message_;
   QString last_python_;
   QStringList last_arguments_;
   QStringList tracks_;
@@ -94,7 +98,7 @@ class StemPanel final : public QDialog {
   bool active_ = false;
   bool cancelled_ = false;
   bool downloading_model_ = false;
-  int install_step_ = 0;
+  bool installing_ = false;
   int selected_track_ = 0;
   QLabel* source_label_;
   QLabel* unsaved_warning_;

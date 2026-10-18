@@ -2,6 +2,7 @@
   <qresource prefix="/wds">
     <file alias="app_icon.png">assets/app_icon/wds.png</file>
     <file alias="stem-worker.py">../stem-worker/worker.py</file>
+    <file alias="stem-install.py">../stem-worker/install.py</file>
     <file alias="stem-requirements.txt">../stem-worker/requirements.txt</file>
   </qresource>
 </RCC>
