@@ -60,7 +60,9 @@ class StemPanel final : public QDialog {
   static bool is_windows_store_python_alias(const QString& path);
   static QString resolve_python(const QString& path);
   static QString discover_system_python();
-  // Discovery preference; no upper version bound, install.py reports unsupported versions.
+  // Scan only these directories (tests). Full discovery also walks Homebrew / pyenv / conda.
+  static QString discover_system_python_in(const QStringList& dirs);
+  // Discovery preference; versions outside 3.10–3.14 lose to supported installs.
   static int python_rank(int major, int minor, bool free_threaded);
   static bool parse_python_tag(const QString& tag, int* major, int* minor, bool* free_threaded);
   // Kill the worker and everything it spawned (ffmpeg): process group on POSIX,

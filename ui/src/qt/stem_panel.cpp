@@ -277,9 +277,9 @@ int posix_python_rank(const QFileInfo& info) {
   return python_rank(-1, -1, false);
 }
 
-QString python_from_posix_dirs() {
+QString python_from_posix_dirs(const QStringList& dirs) {
   PythonPick pick;
-  for (const auto& path : posix_python_dirs()) {
+  for (const auto& path : dirs) {
     const QDir dir(path);
     QStringList names = dir.entryList({QStringLiteral("python3.*")}, QDir::Files | QDir::Executable);
     names << QStringLiteral("python3") << QStringLiteral("python");
@@ -392,7 +392,16 @@ QString StemPanel::discover_system_python() {
   if (const auto launcher = python_from_py_launcher(); !launcher.isEmpty()) return launcher;
   return installed.path;
 #else
-  return python_from_posix_dirs();
+  return python_from_posix_dirs(posix_python_dirs());
+#endif
+}
+
+QString StemPanel::discover_system_python_in(const QStringList& dirs) {
+#ifdef Q_OS_WIN
+  Q_UNUSED(dirs);
+  return {};
+#else
+  return python_from_posix_dirs(dirs);
 #endif
 }
 

@@ -60,6 +60,9 @@ struct StemPanelTestAccess {
   static bool is_store_alias(const QString& path) { return StemPanel::is_windows_store_python_alias(path); }
   static QString resolve_python(const QString& path) { return StemPanel::resolve_python(path); }
   static QString discover_python() { return StemPanel::discover_system_python(); }
+  static QString discover_python_in(const QStringList& dirs) {
+    return StemPanel::discover_system_python_in(dirs);
+  }
   static int rank(int major, int minor, bool free_threaded) {
     return StemPanel::python_rank(major, minor, free_threaded);
   }
@@ -188,7 +191,7 @@ int main(int argc, char** argv) {
   }
 #if !defined(_WIN32)
   {
-    // Isolated PATH prefix so system interpreters cannot win.
+    // Full discover also walks /opt/homebrew/bin; a real 3.14 there outranks this fixture.
     QTemporaryDir bin;
     auto make = [&](const QString& name, bool executable) {
       QFile file(bin.filePath(name));
@@ -207,12 +210,9 @@ int main(int argc, char** argv) {
     // A free-threaded build installed under the plain name.
     make("python3.11t", true);
     QFile::link(bin.filePath("python3.11t"), bin.filePath("python3.11"));
-    const QByteArray saved_path = qgetenv("PATH");
-    qputenv("PATH", QFile::encodeName(bin.path()) + ":" + saved_path);
-    expect(Access::discover_python() == QFileInfo(bin.filePath("python3.13")).absoluteFilePath(),
+    expect(Access::discover_python_in({bin.path()}) == QFileInfo(bin.filePath("python3.13")).absoluteFilePath(),
            "POSIX discovery scans versioned interpreters in 3.10–3.14, skipping -config, free-threaded "
            "(even behind a plain-name symlink), too-new, and non-executables");
-    qputenv("PATH", saved_path);
   }
 #endif
   int ticks = 0;
