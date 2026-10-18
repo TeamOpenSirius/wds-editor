@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QIcon>
+#include <QStringList>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -28,6 +29,8 @@ class PlaybackBar final : public QWidget {
   explicit PlaybackBar(UiManager* manager, QWidget* parent = nullptr);
   void sync_position();
   void refresh_settings_widgets();
+  void set_stem_handlers(std::function<void(int)> select, std::function<void()> open);
+  void set_stem_tracks(const QStringList& names, int selected);
 
  private:
   void build_ui();
@@ -49,6 +52,9 @@ class PlaybackBar final : public QWidget {
   QComboBox* sfx_volume_ = nullptr;
   QCheckBox* sfx_mute_ = nullptr;
   QComboBox* rate_ = nullptr;
+  QComboBox* stem_track_ = nullptr;
+  std::function<void(int)> on_select_stem_;
+  std::function<void()> on_open_stems_;
   bool syncing_ = false;
   std::optional<int64_t> last_scrub_ms_;
 };

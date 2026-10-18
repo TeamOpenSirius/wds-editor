@@ -19,19 +19,6 @@ NotationChart with_derived_eighths(NotationChart chart) {
   return chart;
 }
 
-bool looks_like_sus_import(const std::string& path) {
-  if (SusChartFormat::looks_like_sus_path(path)) {
-    return true;
-  }
-  SerializeResult peek;
-  const std::string bytes = read_text_file(path, peek);
-  if (peek.error != SerializeError::Ok || bytes.empty()) {
-    return false;
-  }
-  const std::string sample = bytes.substr(0, std::min<std::size_t>(bytes.size(), 512));
-  return SusChartFormat::looks_like_sus_text(sample);
-}
-
 }  // namespace
 
 ChartEditorEngine::ChartEditorEngine(PreviewConfig preview_config)
@@ -52,14 +39,11 @@ void ChartEditorEngine::set_preview_lead_in_visible_ms(int64_t visible_ms) noexc
 }
 
 void ChartEditorEngine::load_chart(const NotationChart& chart, ChartEditMode mode) {
-  // Official preview cannot be edited — keep file eighths (CSV type 900) as-is.
-  // Editable loads still derive eighths from holds (wdschart never stores them).
-  if (mode == ChartEditMode::OfficialPreviewOnly) {
-    NotationChart prepared = chart;
-    normalize_timing_points(prepared.timing);
-    document_.load_from_chart(prepared, mode);
-  } else {
-    document_.load_from_chart(with_derived_eighths(chart), mode);
+  // CSV import sets keep_file_eighths: the file's type-900 rows stay. Every other
+  // source drops incoming eighths and rebuilds the tpq/2 grid (SUS / .wdschart
+  // have BPM; CSV does not, and it is not edited or exported).
+  document_.load_from_chart(chart.keep_file_eighths ? chart : with_derived_eighths(chart), mode);
+  if (mode != ChartEditMode::OfficialPreviewOnly) {
     repair_legacy_hold_heads(document_);
   }
   history_.clear();
@@ -160,7 +144,7 @@ SerializeResult ChartEditorEngine::load_official_from_file(const std::string& ch
                                                            const std::string& music_config_path) {
   NotationChart chart;
   const auto result =
-      OfficialChartFormat::load_chart_with_music_config(chart_path, music_config_path, chart);
+      OfficialChartFormat::load_chart_auto_profile(chart_path, music_config_path, chart);
   if (result.error != SerializeError::Ok) {
     return result;
   }
@@ -177,8 +161,8 @@ SerializeResult ChartEditorEngine::load_sus_from_file(const std::string& path,
   if (result.error != SerializeError::Ok) {
     return result;
   }
-  // SUS has no type-900 notes; derive eighths for preview from hold spans.
-  load_chart(with_derived_eighths(loaded.chart), ChartEditMode::OfficialPreviewOnly);
+  // load_chart derives HoldEighth from the hold spans (SUS has no type-900 notes).
+  load_chart(loaded.chart, ChartEditMode::OfficialPreviewOnly);
   if (out_meta != nullptr) {
     *out_meta = std::move(loaded.meta);
   }
@@ -197,11 +181,7 @@ SerializeResult ChartEditorEngine::load_auto_from_file(const std::string& path,
     return result;
   }
 
-  if (mode == ChartEditMode::OfficialPreviewOnly && looks_like_sus_import(path)) {
-    load_chart(with_derived_eighths(chart), mode);
-  } else {
-    load_chart(chart, mode);
-  }
+  load_chart(chart, mode);
   return result;
 }
 
@@ -314,6 +294,11 @@ const PreviewSnapshot& ChartEditorEngine::publish_snapshot() {
       EditLeadIn::preview_chart_us(clock_us, preview_lead_in_visible_ms_);
   const int64_t preview_ms = visual_us / 1000;
   const uint64_t snapshot_rev = document_.content_generation();
+  snapshot_builder_.set_compatibility_profile(document_.compatibility_profile());
+  if (scroll_points_revision_ != snapshot_rev) {
+    snapshot_builder_.set_scroll_speed_points(document_.scroll_speed_points(), document_.timing());
+    scroll_points_revision_ = snapshot_rev;
+  }
   snapshot_builder_.rebuild_or_update(snapshot_, document_.notes(), document_.timing(),
                                       document_.concurrent_lines(), document_.index(),
                                       preview_ms, clock_.playback_state(), snapshot_rev);

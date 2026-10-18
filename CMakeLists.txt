@@ -2,27 +2,35 @@ cmake_minimum_required(VERSION 3.16)
 
 # Optional convenience: -DWDS_TARGET=win-x86_64 selects a toolchain when none was passed.
 # Prefer: cmake --toolchain cmake/toolchains/<target>.cmake
-# macos-arm: native only (no cross toolchain file).
+# macos-arm / linux-x86_64: native only (no cross toolchain file).
 if(NOT CMAKE_TOOLCHAIN_FILE AND DEFINED WDS_TARGET AND NOT WDS_TARGET STREQUAL "")
   set(_wds_tc "${CMAKE_SOURCE_DIR}/cmake/toolchains/${WDS_TARGET}.cmake")
   if(EXISTS "${_wds_tc}")
     set(CMAKE_TOOLCHAIN_FILE "${_wds_tc}" CACHE FILEPATH "WDS toolchain" FORCE)
-  elseif(WDS_TARGET STREQUAL "macos-arm")
-    message(STATUS "WDS_TARGET=macos-arm: native Apple Silicon build (no cross toolchain)")
+  elseif(WDS_TARGET STREQUAL "macos-arm" OR WDS_TARGET STREQUAL "linux-x86_64")
+    message(STATUS "WDS_TARGET=${WDS_TARGET}: native build (no cross toolchain)")
   else()
     message(FATAL_ERROR "Unknown WDS_TARGET='${WDS_TARGET}'. Supported targets: "
-      "win-x86_64 macos-arm (see cmake/CROSS_COMPILE.md).")
+      "win-x86_64 macos-arm linux-x86_64 (see cmake/CROSS_COMPILE.md).")
   endif()
 endif()
 
-project(wds VERSION 1.1.1 LANGUAGES CXX)
+project(wds VERSION 2.0.0 LANGUAGES CXX)
 # CMake project() VERSION is numeric only. About, crash reports, and packages
 # use this marketing string (may include a prerelease suffix).
-set(WDS_APP_VERSION "1.1.1-stable")
+set(WDS_APP_VERSION "2.0.0-beta.0")
 
 include("${CMAKE_SOURCE_DIR}/cmake/WdsPlatform.cmake")
 
 enable_testing()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME wds_linux_scripts_tests
+      COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/scripts/tests/linux_scripts_tests.py")
+  endif()
+endif()
 
 # Chart editor monorepo entry. Layers sit beside each other under the repo root.
 #

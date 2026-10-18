@@ -6,6 +6,7 @@
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
+#include <wds/core/split_fade.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/ui/note_skin_mapping.hpp>
 #include "wds/ui/regions/edit/edit_gutters.hpp"
@@ -47,14 +48,20 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   }
 
   const NoteSprites sprites = sprites_for(skin, note.note_type);
-  const bool hold_body =
+  // Ribbon includes nontail bodies; with_tail is only the end-cap / chain-span path.
+  // Match preview: bindable bodies never invent a start head (paired HoldStart owns it).
+  const bool hold_ribbon =
+      note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
+  const bool with_tail =
       note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
 
   if (pass == NoteVisualPass::HoldBody) {
-    if (!hold_body || !sprites.connection) return;
+    if (!hold_ribbon || !sprites.connection) return;
+    if (!viewport.lane_span_visible(note.lane, note.width)) return;
     const float hold_inset = viewport.hold_inset_px(note.width);
     const float hold_x = viewport.x_at(note.lane) + hold_inset;
-    const float hold_w = std::max(4.0f, viewport.lane_width(note.width) - hold_inset * 2.0f);
+    const float hold_w = std::max(0.0f, viewport.lane_width(note.width) - hold_inset * 2.0f);
+    if (hold_w < 0.5f) return;
     const float top = std::min(y0, y1);
     const float bottom = std::max(y0, y1);
     const auto body = wds::interaction::rect_to_quad(
@@ -83,7 +90,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
   // ScratchHold / JumpScratch end span (shared with preview snapshot).
   int32_t end_lane = note.lane;
   int32_t end_width = note.width;
-  if (hold_body && wds::chart_editor::is_hold_chain_body(note.note_type)) {
+  if (with_tail && wds::chart_editor::is_hold_chain_body(note.note_type)) {
     const auto span = wds::chart_editor::resolve_end_lane_span(note);
     end_lane = span.first;
     end_width = span.second;
@@ -102,7 +109,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     params.arrow_w = arrow_w;
     params.scratch_length = note.scratch_length;
     params.official_one_direction =
-        note.note_type == wds::chart_editor::NoteType::Flick &&
+        wds::chart_editor::is_flick_like(note.note_type) &&
         wds::chart_editor::is_one_direction(note.gimmick_type);
     for (const auto& inst : wds::chart_render::layout_static_scratch_arrows(params)) {
       wds::renderer::Quad q = wds::interaction::rect_to_quad(
@@ -124,7 +131,7 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
                              int32_t draw_width, bool with_arrow_art) {
     const float draw_inset = viewport.note_inset_px(draw_width);
     const float draw_x = viewport.x_at(draw_lane) + draw_inset;
-    const float draw_w = std::max(4.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
+    const float draw_w = std::max(0.0f, viewport.lane_width(draw_width) - draw_inset * 2.0f);
     const auto head = wds::interaction::rect_to_quad({draw_x, y - note_h * 0.5f, draw_w, note_h},
                                                      fb_w, fb_h, screen);
     const float tap_world = viewport.tap_visual_world_width(draw_width);
@@ -149,8 +156,8 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
 
   NoteSprites head = sprites;
   NoteSprites tail = sprites;
-  const bool scratch_hold = hold_body && wds::chart_editor::is_scratch_hold_body(note.note_type);
-  if (hold_body) {
+  const bool scratch_hold = with_tail && wds::chart_editor::is_scratch_hold_body(note.note_type);
+  if (with_tail) {
     // Hold body never draws a start head — paired head notes own that art.
     apply_hold_tail_sprites(tail, skin, scratch_hold);
     tail.connection = sprites.connection;
@@ -159,8 +166,9 @@ void draw_skinned_note(wds::renderer::DrawBatch& batch, const wds::renderer::Ski
     tail.connection_b = sprites.connection_b;
   }
 
-  if (hold_body) {
-    if (note.end_tick > note.start_tick) {
+  if (hold_ribbon) {
+    // Tailed: end cap only. Nontail: ribbon only (no invented start/end flats).
+    if (with_tail) {
       draw_flat(tail, y1, end_lane, end_width, tail.is_scratch_family);
     }
   } else {
@@ -198,13 +206,13 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
                               const std::optional<wds::interaction::Rect>& marquee,
                               const wds::renderer::SkinCatalog* skin,
               bool show_beat_grid,
-              int32_t highlighted_split_note_id,
               const std::vector<int32_t>& error_ticks,
               const std::unordered_set<int32_t>* violation_note_ids,
               float violation_strength,
               const wds::audio::WaveformOverview* waveform,
               const wds::renderer::TextureInfo* spectrogram,
-              EditSpectrumMode spectrum_mode) const {
+              EditSpectrumMode spectrum_mode,
+              const wds::chart_editor::ChartDocument* doc) const {
   const auto& b = viewport.bounds();
   painter.fill_rect(b, wds::interaction::theme::kEditCanvas, 0.0f, 0.86f);
   const bool drew_spectrogram = spectrum_mode == EditSpectrumMode::Spectrogram &&
@@ -289,10 +297,14 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const float clip_bot = std::min(bottom, b.bottom());
     const float h = std::max(0.0f, clip_bot - clip_top);
     if (h <= 0.0f) return;
-    painter.reserve_rects(static_cast<std::size_t>(grid.lane_count) + 1);
-    for (int lane = 0; lane <= grid.lane_count; ++lane) {
-      const bool edge = lane == 0 || lane == grid.lane_count;
-      const float thickness = edge ? 1.5f : 1.0f;
+    const int first = viewport.first_visible_lane();
+    const int vis = viewport.visible_lane_count();
+    const float lane_px = viewport.lane_width(1);
+    painter.reserve_rects(static_cast<std::size_t>(vis) + 1);
+    for (int lane = first; lane <= first + vis; ++lane) {
+      if (!lane_guide_visible(lane, lane_px)) continue;
+      const bool edge = lane == 0 || lane == 12;
+      const float thickness = lane_guide_thickness(lane);
       painter.fill_rect({viewport.x_at(lane) - thickness * 0.5f, clip_top, thickness, h},
                         edge ? wds::interaction::theme::kEditLaneEdge
                              : wds::interaction::theme::kEditLaneInner,
@@ -308,7 +320,7 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const float view_ms_lo = viewport.scroll_ms();
     const float view_ms_hi = view_ms_lo + static_cast<float>(viewport.visible_ms());
     const auto merged =
-        merged_split_hide_ranges_ms(notes, timing, preview, view_ms_lo, view_ms_hi);
+        merged_split_hide_ranges_ms(notes, timing, preview, view_ms_lo, view_ms_hi, doc);
     float cursor = view_ms_lo;
     for (const auto& seg : merged) {
       if (seg.first > cursor) {
@@ -334,11 +346,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
     const int64_t appear_ms = std::max<int64_t>(
         1, static_cast<int64_t>(
                std::llround(static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
-    const int64_t disappear_ms = std::max<int64_t>(
-        1, static_cast<int64_t>(
-               std::llround(static_cast<double>(preview.split_line_animation_end_sec) * 1000.0)));
     const int64_t fade_start_ms = start_ms - appear_ms;
-    const int64_t fade_end_ms = end_ms + disappear_ms;
+    const int64_t fade_end_ms = wds::chart_editor::official_split_destroy_ms(start_ms, end_ms);
 
     const float view_ms_lo = viewport.scroll_ms();
     const float view_ms_hi = view_ms_lo + static_cast<float>(viewport.visible_ms());
@@ -428,12 +437,12 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
 
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id == highlighted_split_note_id) continue;
+    if (selected.count(note.id)) continue;
     paint_one_split(note, kSplitLineW, false);
   }
   for (const auto& note : notes) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
-    if (note.id != highlighted_split_note_id) continue;
+    if (!selected.count(note.id)) continue;
     paint_one_split(note, kSplitLineHighlightW, true);
   }
 
@@ -458,7 +467,8 @@ void ChartEditRenderer::paint_overlays(
     wds::interaction::UiPainter& painter, const EditViewport& viewport,
     const std::vector<wds::chart_editor::NotationNote>& notes,
     const std::unordered_set<int32_t>& selected,
-    const std::optional<wds::interaction::Rect>& marquee) const {
+    const std::optional<wds::interaction::Rect>& marquee,
+    const wds::chart_editor::ChartDocument* doc) const {
   using wds::chart_editor::NotationNote;
   const auto& b = viewport.bounds();
   const float note_h = viewport.note_height_px();
@@ -473,17 +483,35 @@ void ChartEditRenderer::paint_overlays(
   const wds::interaction::Color solo_outline = th::kEditSelection;
   const wds::interaction::Color solo_inner = th::kEditSelectionInner;
 
-  auto paired_head = [&](const NotationNote& hold) -> const NotationNote* {
-    for (const auto& n : notes) {
-      if (n.id != hold.id && wds::chart_editor::hold_head_pairs_with_body(n, hold)) return &n;
+  // Pairing only holds at the same start_tick, so both lookups examine just the equal
+  // start_tick range (first match in notes() order, identical to a full scan).
+  // `doc` (when given) must be the document whose notes() is `notes`.
+  thread_local std::vector<std::size_t> pair_scratch;
+  auto for_each_starting_at = [&](int32_t tick, auto&& fn) -> const NotationNote* {
+    if (doc != nullptr) {
+      doc->note_indices_starting_at(tick, pair_scratch);
+      for (const std::size_t i : pair_scratch) {
+        if (fn(notes[i])) return &notes[i];
+      }
+      return nullptr;
+    }
+    auto it = std::partition_point(notes.begin(), notes.end(), [tick](const NotationNote& n) {
+      return n.start_tick < tick;
+    });
+    for (; it != notes.end() && it->start_tick == tick; ++it) {
+      if (fn(*it)) return &*it;
     }
     return nullptr;
   };
+  auto paired_head = [&](const NotationNote& hold) -> const NotationNote* {
+    return for_each_starting_at(hold.start_tick, [&](const NotationNote& n) {
+      return n.id != hold.id && wds::chart_editor::hold_head_pairs_with_body(n, hold);
+    });
+  };
   auto paired_body = [&](const NotationNote& head) -> const NotationNote* {
-    for (const auto& n : notes) {
-      if (wds::chart_editor::hold_head_pairs_with_body(head, n)) return &n;
-    }
-    return nullptr;
+    return for_each_starting_at(head.start_tick, [&](const NotationNote& n) {
+      return wds::chart_editor::hold_head_pairs_with_body(head, n);
+    });
   };
 
   auto stroke_rect = [&](const wds::interaction::Rect& r, float thickness,
@@ -501,23 +529,23 @@ void ChartEditRenderer::paint_overlays(
     stroke_rect(box.inset(kBorder, kBorder), 1.0f, solo_inner);
   };
 
-  for (const auto& note : notes) {
-    if (!selected.count(note.id)) continue;
+  auto paint_selected = [&](const NotationNote& note) {
     // HoldEighth is derived and never selectable — skip any leaked selection ids.
-    if (note.note_type == NoteType::HoldEighth) continue;
-    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
+    if (note.note_type == NoteType::HoldEighth) return;
+    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
 
     // Mid-stars: selection box matches the tight square hit / draw size.
     if (note.note_type == NoteType::Sound || note.note_type == NoteType::ScratchSound) {
       auto star = viewport.mid_star_screen_rect(note);
       star = {star.x - kPad, star.y - kPad, star.w + kPad * 2.0f, star.h + kPad * 2.0f};
-      if (star.bottom() < b.y || star.y > b.bottom()) continue;
+      if (star.bottom() < b.y || star.y > b.bottom()) return;
       paint_box(star, false);
-      continue;
+      return;
     }
 
+    // Include nontail ribbons so selection spans the body, not a tap-sized head.
     const bool hold_body =
-        note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type);
+        note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
     bool paired = false;
     bool clear_head_zone = false;
     if (hold_body) {
@@ -530,7 +558,7 @@ void ChartEditRenderer::paint_overlays(
         paired = selected.count(body->id) != 0;
         // When both are selected the body draws the full chain box; skip the
         // head-only box so outlines don't stack into one muddy frame.
-        if (paired) continue;
+        if (paired) return;
       }
     }
 
@@ -551,7 +579,7 @@ void ChartEditRenderer::paint_overlays(
         top = std::max(top, head_hi + kPad);
       }
     }
-    if (bottom < b.y || top > b.bottom() || bottom - top < 2.0f) continue;
+    if (bottom < b.y || top > b.bottom() || bottom - top < 2.0f) return;
 
     // Cover body span and (possibly wider) hold-tail lanes.
     int32_t end_lane = note.lane;
@@ -566,9 +594,8 @@ void ChartEditRenderer::paint_overlays(
     const float x1 = std::max(viewport.x_at(note.lane) + viewport.lane_width(note.width),
                               viewport.x_at(end_lane) + viewport.lane_width(end_width));
     const float inset =
-        (note.end_tick > note.start_tick && wds::chart_editor::is_hold_with_tail(note.note_type))
-            ? viewport.hold_inset_px(std::max(note.width, end_width))
-            : viewport.note_inset_px(std::max(note.width, end_width));
+        hold_body ? viewport.hold_inset_px(std::max(note.width, end_width))
+                  : viewport.note_inset_px(std::max(note.width, end_width));
     const wds::interaction::Rect box{x0 + inset - kPad, top, (x1 - x0) - inset * 2.0f + kPad * 2.0f,
                                      bottom - top};
     paint_box(box, paired);
@@ -580,6 +607,33 @@ void ChartEditRenderer::paint_overlays(
       painter.fill_rect({box.x - 2.0f, jy - 1.5f, tick, 3.0f}, solo_outline, 0.0f, kZ + 0.002f);
       painter.fill_rect({box.right() - tick + 2.0f, jy - 1.5f, tick, 3.0f}, solo_outline, 0.0f,
                         kZ + 0.002f);
+    }
+  };
+
+  // Selected notes in notes() order. With a document and a small selection, resolve
+  // each id through the start-tick index instead of scanning every note.
+  if (doc != nullptr && !selected.empty() && selected.size() * 4 < notes.size()) {
+    thread_local std::vector<std::size_t> sel_idx;
+    thread_local std::vector<std::size_t> at_tick;
+    sel_idx.clear();
+    for (const int32_t id : selected) {
+      const auto found = doc->find_note(id);
+      if (!found) continue;
+      doc->note_indices_starting_at(found->start_tick, at_tick);
+      for (const std::size_t i : at_tick) {
+        if (notes[i].id == id) {
+          sel_idx.push_back(i);
+          break;
+        }
+      }
+    }
+    std::sort(sel_idx.begin(), sel_idx.end());
+    sel_idx.erase(std::unique(sel_idx.begin(), sel_idx.end()), sel_idx.end());
+    // paint_selected only touches pair_scratch, never sel_idx/at_tick.
+    for (const std::size_t i : sel_idx) paint_selected(notes[i]);
+  } else {
+    for (const auto& note : notes) {
+      if (selected.count(note.id)) paint_selected(note);
     }
   }
   if (marquee) {
@@ -595,11 +649,12 @@ void ChartEditRenderer::append_skinned_backdrop(wds::renderer::DrawBatch& batch,
                                                 float /*stage_opacity*/) const {
   const auto& b = viewport.bounds();
   if (b.w <= 0.0f || b.h <= 0.0f) return;
-  // Judgeline must span the full edit width so its 12 cells line up with lane guides.
+  // 12-cell judgeline tracks authored lanes 0..N so cells stay on those guides.
   if (skin.judgeline) {
     const float jh = viewport.judgeline_height_px();
     const float jy = viewport.judgeline_y() - jh * 0.5f;
-    const auto jq = wds::interaction::rect_to_quad({b.x, jy, b.w, jh}, fb_w, fb_h, screen);
+    const auto jq = wds::interaction::rect_to_quad(
+        {viewport.judgeline_x(), jy, viewport.judgeline_width_px(), jh}, fb_w, fb_h, screen);
     batch.add_sprite(skin.judgeline, jq, depth_.judgeline, 1.0f);
   }
 }

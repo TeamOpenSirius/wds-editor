@@ -77,6 +77,7 @@ inline NoteSprites sprites_for(const wds::renderer::SkinCatalog& skin,
     case NoteType::NontailScratchHold:
     case NoteType::NontailScratchCriticalHold:
     case NoteType::Flick:
+    case NoteType::Scratch:
       s.top = skin.note_purple_top;
       use_purple_hold();
       s.is_scratch_family = true;

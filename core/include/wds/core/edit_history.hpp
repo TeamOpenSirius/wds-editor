@@ -2,6 +2,8 @@
 
 #include <wds/core/notation.hpp>
 
+#include <cstddef>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -16,6 +18,10 @@ class IEditCommand {
   virtual bool execute(ChartDocument& doc) = 0;
   virtual bool undo(ChartDocument& doc) = 0;
   virtual std::string label() const = 0;
+  // Estimated heap + object bytes this command retains while it sits in the
+  // history. Used by EditHistory to cap memory; an estimate, not exact.
+  // Evaluated once when the command is pushed, so it must not change afterwards.
+  virtual size_t size_bytes() const { return 64; }
 };
 
 class CompositeCommand final : public IEditCommand {
@@ -25,6 +31,7 @@ class CompositeCommand final : public IEditCommand {
   bool execute(ChartDocument& doc) override;
   bool undo(ChartDocument& doc) override;
   std::string label() const override;
+  size_t size_bytes() const override;
 
  private:
   std::string label_;
@@ -38,8 +45,12 @@ class SetNotesCommand final : public IEditCommand {
   bool execute(ChartDocument& doc) override;
   bool undo(ChartDocument& doc) override;
   std::string label() const override;
+  size_t size_bytes() const override;
 
  private:
+  // Full before/after copies. A diff representation was deliberately not used:
+  // set_notes() is independent of the current document state, so a diff would
+  // add a "document must equal the recorded state" precondition.
   std::vector<NotationNote> before_;
   std::vector<NotationNote> after_;
   std::string label_;
@@ -51,11 +62,41 @@ class SetTimingCommand final : public IEditCommand {
   bool execute(ChartDocument& doc) override;
   bool undo(ChartDocument& doc) override;
   std::string label() const override;
+  size_t size_bytes() const override;
 
  private:
   MusicTiming before_;
   MusicTiming after_;
   std::string label_;
+};
+
+class SetScrollSpeedPointsCommand final : public IEditCommand {
+ public:
+  SetScrollSpeedPointsCommand(std::vector<ScrollSpeedPoint> before,
+                             std::vector<ScrollSpeedPoint> after,
+                             std::string label = "Set scroll speed");
+  bool execute(ChartDocument& doc) override;
+  bool undo(ChartDocument& doc) override;
+  std::string label() const override;
+  size_t size_bytes() const override;
+
+ private:
+  std::vector<ScrollSpeedPoint> before_;
+  std::vector<ScrollSpeedPoint> after_;
+  std::string label_;
+};
+
+class SetCompatibilityProfileCommand final : public IEditCommand {
+ public:
+  SetCompatibilityProfileCommand(ChartCompatibilityProfile before,
+                                 ChartCompatibilityProfile after);
+  bool execute(ChartDocument& doc) override;
+  bool undo(ChartDocument& doc) override;
+  std::string label() const override;
+
+ private:
+  ChartCompatibilityProfile before_;
+  ChartCompatibilityProfile after_;
 };
 
 class AddNotesCommand final : public IEditCommand {
@@ -64,6 +105,7 @@ class AddNotesCommand final : public IEditCommand {
   bool execute(ChartDocument& doc) override;
   bool undo(ChartDocument& doc) override;
   std::string label() const override;
+  size_t size_bytes() const override;
 
  private:
   std::vector<NotationNote> notes_;
@@ -77,6 +119,7 @@ class RemoveNotesCommand final : public IEditCommand {
   bool execute(ChartDocument& doc) override;
   bool undo(ChartDocument& doc) override;
   std::string label() const override;
+  size_t size_bytes() const override;
 
  private:
   std::vector<NotationNote> notes_;
@@ -91,6 +134,7 @@ class UpdateNotesCommand final : public IEditCommand {
   bool execute(ChartDocument& doc) override;
   bool undo(ChartDocument& doc) override;
   std::string label() const override;
+  size_t size_bytes() const override;
 
  private:
   bool apply(ChartDocument& doc, bool after);
@@ -98,8 +142,33 @@ class UpdateNotesCommand final : public IEditCommand {
   std::string label_;
 };
 
+// Undo history cap: after each execute() the oldest undo entries are dropped while
+// the count exceeds kMaxUndoEntries or the estimated retained bytes exceed
+// kMaxUndoBytes, but the newest kMinUndoEntriesKept entries are always kept
+// (so a single huge edit can still be undone). The redo stack is cleared by
+// execute() and only ever holds entries that came out of the (capped) undo stack.
+inline constexpr size_t kMaxUndoEntries = 1000;
+inline constexpr size_t kMaxUndoBytes = size_t{512} * 1024 * 1024;
+inline constexpr size_t kMinUndoEntriesKept = 32;
+
+struct EditHistoryLimits {
+  size_t max_entries = kMaxUndoEntries;
+  size_t max_bytes = kMaxUndoBytes;
+  size_t min_keep = kMinUndoEntriesKept;
+};
+
 class EditHistory {
  public:
+  EditHistory() = default;
+  explicit EditHistory(EditHistoryLimits limits) : limits_(limits) {}
+  // Entry holds unique_ptr — history is move-only. Mark moves noexcept so
+  // containers (e.g. vector<ChartSlot>) reallocate by move instead of copy
+  // (libstdc++ move_if_noexcept; MinGW reserve otherwise tries to copy).
+  EditHistory(EditHistory&&) noexcept = default;
+  EditHistory& operator=(EditHistory&&) noexcept = default;
+  EditHistory(const EditHistory&) = delete;
+  EditHistory& operator=(const EditHistory&) = delete;
+
   bool execute(std::unique_ptr<IEditCommand> cmd, ChartDocument& doc);
   bool undo(ChartDocument& doc);
   bool redo(ChartDocument& doc);
@@ -107,9 +176,25 @@ class EditHistory {
   bool can_undo() const noexcept { return !undo_.empty(); }
   bool can_redo() const noexcept { return !redo_.empty(); }
 
+  size_t undo_count() const noexcept { return undo_.size(); }
+  size_t redo_count() const noexcept { return redo_.size(); }
+  // Sum of the size_bytes() estimates of the undo / redo entries.
+  size_t undo_bytes() const noexcept;
+  size_t redo_bytes() const noexcept;
+  const EditHistoryLimits& limits() const noexcept { return limits_; }
+  void set_limits(EditHistoryLimits limits);
+
  private:
-  std::vector<std::unique_ptr<IEditCommand>> undo_;
-  std::vector<std::unique_ptr<IEditCommand>> redo_;
+  struct Entry {
+    std::unique_ptr<IEditCommand> command;
+    size_t bytes = 0;
+  };
+
+  void trim_undo();
+
+  std::deque<Entry> undo_;
+  std::deque<Entry> redo_;
+  EditHistoryLimits limits_;
 };
 
 }  // namespace wds::chart_editor

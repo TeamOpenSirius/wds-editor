@@ -1,4 +1,5 @@
 #include <wds/chart_render/note_visual_policy.hpp>
+#include <wds/chart_render/openwds_hud_layout.hpp>
 #include <wds/chart_render/skin_catalog.hpp>
 
 #include <algorithm>
@@ -73,6 +74,13 @@ void test_concurrent_line_sliced_caps_stay_four_pixels() {
 }
 
 void test_scratch_arrow_sides() {
+  using wds::chart_editor::NoteType;
+  using wds::chart_render::preview_draws_start_scratch_arrows;
+  CHECK(preview_draws_start_scratch_arrows(NoteType::Flick));
+  CHECK(preview_draws_start_scratch_arrows(NoteType::Scratch));
+  CHECK(!preview_draws_start_scratch_arrows(NoteType::ScratchHold));
+  CHECK(!preview_draws_start_scratch_arrows(NoteType::NontailScratchHold));
+  CHECK(!preview_draws_start_scratch_arrows(NoteType::NontailScratchCriticalHold));
   assert(scratch_arrow_sides(-3).draw_left && !scratch_arrow_sides(-3).draw_right);
   assert(!scratch_arrow_sides(4).draw_left && scratch_arrow_sides(4).draw_right);
   assert(scratch_arrow_sides(0).draw_left && scratch_arrow_sides(0).draw_right);
@@ -217,6 +225,50 @@ void test_hold_tail_layers() {
   assert(scratch.is_scratch_family);
 }
 
+void test_combo_count_anim_matches_openwds_clip() {
+  using wds::chart_render::kOpenWdsComboCountAnimDuration;
+  using wds::chart_render::kOpenWdsComboFireAnimDuration;
+  using wds::chart_render::openwds_combo_count_scale;
+  using wds::chart_render::openwds_combo_fire_alpha;
+  using wds::chart_render::openwds_combo_fire_scale;
+  using wds::chart_render::openwds_scale_about;
+
+  const auto at0 = openwds_combo_count_scale(0.0f);
+  CHECK(std::fabs(at0.x - 0.8f) < 1e-6f);
+  CHECK(std::fabs(at0.y - 0.8f) < 1e-6f);
+  const auto at_frame1 = openwds_combo_count_scale(0.016666668f);
+  CHECK(std::fabs(at_frame1.x - 0.88980734f) < 1e-6f);
+  CHECK(std::fabs(at_frame1.y - 0.888729f) < 1e-6f);
+  const auto at_end = openwds_combo_count_scale(kOpenWdsComboCountAnimDuration);
+  CHECK(std::fabs(at_end.x - 1.1f) < 1e-6f);
+  CHECK(std::fabs(at_end.y - 1.1f) < 1e-6f);
+  const auto held = openwds_combo_count_scale(1.0f);
+  CHECK(std::fabs(held.x - 1.1f) < 1e-6f);
+  CHECK(std::fabs(held.y - 1.1f) < 1e-6f);
+  const auto mid = openwds_combo_count_scale(0.08f);
+  CHECK(mid.x > 0.8f && mid.x < 1.1f);
+  CHECK(mid.y > 0.8f && mid.y < 1.1f);
+
+  CHECK(std::fabs(openwds_combo_fire_alpha(0.0f)) < 1e-5f);
+  CHECK(std::fabs(openwds_combo_fire_alpha(0.05f) - 1.0f) < 1e-5f);
+  CHECK(std::fabs(openwds_combo_fire_alpha(kOpenWdsComboFireAnimDuration)) < 1e-5f);
+  const auto fire0 = openwds_combo_fire_scale(0.0f);
+  CHECK(std::fabs(fire0.x - 1.0f) < 1e-6f);
+  const auto fire_end = openwds_combo_fire_scale(kOpenWdsComboFireAnimDuration);
+  CHECK(std::fabs(fire_end.x - 2.0f) < 1e-6f);
+
+  float x = 10.0f;
+  float y = 20.0f;
+  openwds_scale_about(10.0f, 20.0f, 2.0f, 3.0f, x, y);
+  CHECK(std::fabs(x - 10.0f) < 1e-6f);
+  CHECK(std::fabs(y - 20.0f) < 1e-6f);
+  x = 12.0f;
+  y = 24.0f;
+  openwds_scale_about(10.0f, 20.0f, 2.0f, 0.5f, x, y);
+  CHECK(std::fabs(x - 14.0f) < 1e-6f);
+  CHECK(std::fabs(y - 22.0f) < 1e-6f);
+}
+
 }  // namespace
 
 int main() {
@@ -230,6 +282,7 @@ int main() {
   test_one_way_fills_without_tail_or_uv_clip();
   test_official_scratch_arrow_table();
   test_hold_tail_layers();
+  test_combo_count_anim_matches_openwds_clip();
   std::puts("note_visual_policy_tests OK");
   return 0;
 }

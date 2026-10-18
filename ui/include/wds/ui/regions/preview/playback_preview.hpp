@@ -35,23 +35,51 @@ bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
 #include "wds/renderer/texture.hpp"
 #include "wds/renderer/vulkan_renderer.hpp"
 
+#include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/core/preview_snapshot.hpp>
 
 #include <wds/audio/hit_sfx.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace wds::ui {
 
+// Play-time split-lane plate cache: one projected quad per Line. The official
+// SplitEffectSyuriken shading runs per fragment on the GPU; each frame only
+// rewrites the fade-dependent V span and LineHight world Y scale.
+struct PreviewLaneGeomCell {
+  wds::renderer::Quad quad{};
+  float pa = 0.0f;
+  float pb = 0.0f;
+  float sr = 1.0f;
+  float sg = 1.0f;
+  float sb = 1.0f;
+  float sa = 1.0f;
+  int32_t color_id = 1;
+};
+
+struct PreviewLaneGeomSplit {
+  std::vector<PreviewLaneGeomCell> cells;
+  float play_sec = 0.0f;
+  // Last pump/draw seq that used this key. Seek keeps the pool; eviction
+  // drops entries not touched for several seconds, or the oldest when
+  // the pool is over the bounded cap.
+  uint32_t last_hit_seq = 0;
+};
+
 // Chart playback preview surface. The UI host supplies the Vulkan instance/surface
 // through VulkanHostSurface; this class owns the renderer and consumes snapshots.
 class PlaybackPreviewView {
  public:
-  PlaybackPreviewView() = default;
+  PlaybackPreviewView();
   ~PlaybackPreviewView();
 
   PlaybackPreviewView(const PlaybackPreviewView&) = delete;
@@ -91,6 +119,66 @@ class PlaybackPreviewView {
 
   void resize(int framebuffer_width, int framebuffer_height);
 
+  // Last draw_split_particles diagnostics (frame-diag / pause-memo).
+  struct SplitFrameDiag {
+    uint64_t revision = 0;
+    int64_t now_us = 0;
+    int quality = 0;
+    int splits = 0;
+    int particles = 0;
+    uint32_t cache_epoch = 0;
+    int pool_cap = 0;
+    int pool_participants = 0;
+    int pool_last = 0;
+    int pool_p_cores = 0;
+    int pool_e_cores = 0;
+    const char* simd_path = "";
+    uint32_t cache_entries = 0;
+    uint64_t cache_lookup_ops = 0;
+    uint64_t cache_lookup_hits = 0;
+    uint64_t cache_lookup_contend = 0;
+    uint64_t cache_store_ops = 0;
+    uint64_t cache_store_contend = 0;
+    int cleared = 0;
+    int collect_memo = 0;
+    int verts_memo = 0;
+    int playing = 0;
+    int64_t collect_us = 0;
+    int64_t verts_us = 0;
+    int64_t lanes_us = 0;
+    int lanes_geom_miss = 0;
+    int64_t tex_us = 0;
+    int64_t upload_us = 0;
+    int64_t submit_us = 0;
+    int64_t total_us = 0;
+  };
+  const SplitFrameDiag& last_split_frame_diag() const noexcept { return split_frame_diag_; }
+
+  // Decode UV/trail on a worker; GPU upload on pump/ensure (render thread).
+  void request_split_effect_preload();
+  void pump_split_effect_preload();
+  // Idle-build split-lane plate corners (steady percents). First seek then
+  // only recolors. Call from the panel tick when lanes/effects/view change.
+  // Full clear: geometry / texture / document changed. Recycles cells.
+  void invalidate_lane_geom_cache();
+  // Seek: drop pause/playback memos and the current frame list. Keep
+  // lane_geom_pool_ (keys are split-line parameters, not chart time).
+  void reset_lane_geom_time_state();
+  bool lane_geom_cache_empty() const noexcept { return lane_geom_pool_.empty(); }
+  // High-water request (no touch). Idle pump commits pages off the edit frame.
+  void request_buffer_precommit(const wds::chart_render::SplitEffectPrecommitPlan& plan,
+                                bool fill_now);
+  void pump_buffer_precommit(int budget_us);
+  const wds::chart_render::SplitEffectPrecommitStats& last_precommit() const noexcept {
+    return last_precommit_;
+  }
+  void pump_lane_geom_preload(
+      const std::vector<wds::chart_editor::PreviewSplitLaneInstance>& splits,
+      int64_t now_us = 0, bool retain_colored_batch = false);
+
+  // No-op leftover: speculative collect pipeline was removed.
+  void join_speculative_split_collect();
+
   // Update hit SFX from the latest snapshot. Call after apply_timeline; still
   // before Transport::start_pending_music() so the first playing frame sees a
   // paused BGM clock when marking past hits.
@@ -98,14 +186,15 @@ class PlaybackPreviewView {
 
   // ui_solid_texture: 1×1 white used by UiPainter panels. Overlay solids are drawn
   // under the stage; overlay sprites (and edit-area skins) go through mid_overlay
-  // so they stay above SplitEffect. modal_overlay / modal_chrome use post passes
-  // so sticky DrawBatch bucket indices cannot bury them. Chrome draws last.
+  // with notes (sort 10). modal_overlay / modal_chrome use post passes so sticky
+  // DrawBatch bucket indices cannot bury them. Chrome draws last. Combo / AUTO
+  // HUD is a later playfield_hud pass (TimingEffect 99, then ScreenSpaceOverlay).
   void render(const wds::chart_editor::PreviewSnapshot& snapshot,
               const wds::renderer::DrawBatch* ui_overlay = nullptr,
               wds::renderer::TextureId ui_solid_texture = wds::renderer::kInvalidTextureId,
               const wds::renderer::DrawBatch* modal_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_chrome = nullptr,
-              int64_t visual_lead_us = 0);
+              int64_t visual_lead_us = 0, int64_t pulse_now_us = 0);
 
   // Render an editor-only batch into this surface. This intentionally skips
   // preview stage, notes and timing effects so the editor viewport cannot
@@ -128,6 +217,8 @@ class PlaybackPreviewView {
   float spawn_clip_percent() const noexcept;
   void draw_split_lanes(wds::renderer::DrawBatch& batch,
                         const wds::chart_editor::PreviewSnapshot& snapshot);
+  void draw_split_particles(const wds::chart_editor::PreviewSnapshot& snapshot,
+                             wds::renderer::TextureId solid_texture);
   void draw_concurrent_lines(wds::renderer::DrawBatch& batch,
                              const wds::chart_editor::PreviewSnapshot& snapshot);
   void draw_notes(wds::renderer::DrawBatch& batch,
@@ -176,6 +267,10 @@ class PlaybackPreviewView {
   // clock_us: filtered monotonic audible clock (µs).
   void collect_due_hit_sfx(const wds::chart_editor::PreviewSnapshot& snapshot, bool arm,
                            int64_t clock_us);
+  void ensure_split_effect_textures();
+  void assign_split_effect_texture(const std::string& path, const wds::renderer::TextureInfo& info);
+  void finish_split_effect_preload_upload();
+  void pump_draw_precommit_slice(bool all);
   void collect_hold_intervals(const wds::chart_editor::PreviewSnapshot& snapshot,
                               std::vector<wds::audio::HoldInterval>& out) const;
   void sync_hold_loop(const wds::chart_editor::PreviewSnapshot& snapshot, int64_t clock_us,
@@ -185,6 +280,8 @@ class PlaybackPreviewView {
                                  int64_t raw_us, bool playing);
   // Rebuild GenerateNoteId-reversed draw index for the current visible set.
   void prepare_note_draw_order(const wds::chart_editor::PreviewSnapshot& snapshot);
+  // After present: copy mapped-VB / CPU parts into pause memo (not tess time).
+  void persist_split_pause_vert_memo();
 
   wds::renderer::PreviewVisualConfig config_;
   wds::renderer::StageGeometry geometry_;
@@ -194,7 +291,15 @@ class PlaybackPreviewView {
   wds::audio::HitSfxPlayer hit_sfx_;
   wds::renderer::DrawBatch batch_;
   wds::renderer::DrawBatch notes_batch_;
+  wds::renderer::DrawBatch glow_batch_;
+  // All split-effect particles (Alpha / Additive / Trail), ordered by
+  // renderer sortingOrder. Blitted onto the resolved HDR scene (SortingGroup
+  // 20 after notes 10 and line 0). Hits stay additive_batch_ (Bomb group 30)
+  // and are not counted against kSplitEffectParticlePool. Combo / AUTO go to
+  // hud_batch_ after bombs (TimingEffect 99, Combo ScreenSpaceOverlay).
+  wds::renderer::DrawBatch split_late_batch_;
   wds::renderer::DrawBatch additive_batch_;
+  wds::renderer::DrawBatch hud_batch_;
   // Indices into snapshot.notes: GenerateNoteId order reversed (bottom-most first).
   std::vector<size_t> notes_draw_indices_;
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
@@ -205,6 +310,8 @@ class PlaybackPreviewView {
   int64_t preview_lead_in_visible_ms_ = 0;
   // Present-only visual lead (µs). SFX / engine snapshot stay on the committed clock.
   int64_t visual_lead_us_ = 0;
+  // Syuriken pulse clock (µs). Independent of visual_lead extra. See pulse_now_us hop.
+  int64_t pulse_now_us_ = 0;
   // Monotonic SFX clock (µs). Advances with BASS/Timeline; ignores small backwards
   // glitches. Released (reset) on pause / seek / scrub via control generation.
   int64_t sfx_mono_us_ = -1;
@@ -217,6 +324,80 @@ class PlaybackPreviewView {
   wds::audio::SfxInstantBudget sfx_budget_;
   uint64_t hold_gates_generation_ = std::numeric_limits<uint64_t>::max();
   uint64_t hold_gates_revision_ = std::numeric_limits<uint64_t>::max();
+  // Continuous SplitEffect playback boundary. Paused/seek snapshots use the
+  // stateless collector; this state is reset on Play/pause, seek, and edits.
+  wds::chart_render::SplitEffectPlaybackState split_playback_state_;
+  wds::chart_render::SplitEffectFrameCollect split_effect_collect_;
+  bool split_playback_was_playing_ = false;
+  uint64_t split_playback_revision_ = std::numeric_limits<uint64_t>::max();
+  // Paused collect/vert memo: reuse last frame when every collect input (and
+  // the viewport, for verts) is unchanged. Playing always recollects.
+  // Glow/notes/late memos are particle-only — lane plates live in
+  // split_pause_lanes_glow_ and must not be replayed with the particle glow.
+  bool split_pause_collect_valid_ = false;
+  bool split_pause_verts_valid_ = false;
+  bool split_pause_verts_pending_ = false;
+  uint64_t split_pause_revision_ = std::numeric_limits<uint64_t>::max();
+  int64_t split_pause_now_us_ = std::numeric_limits<int64_t>::min();
+  int split_pause_quality_ = -1;
+  uint64_t split_pause_splits_hash_ = 0;
+  uint64_t split_pause_view_hash_ = 0;
+  uint32_t split_pause_seed_epoch_ = 0;
+  int split_pause_drawn_ = 0;
+  int64_t split_pause_vert_count_ = 0;
+  wds::renderer::DrawBatch split_pause_notes_;
+  wds::renderer::DrawBatch split_pause_glow_;
+  wds::renderer::DrawBatch split_pause_late_;
+  // Sticky particle-only emit dests + ordered-merge parts. clear() keeps
+  // capacity so 10660-class late (~1.1M verts) does not realloc every frame.
+  wds::renderer::DrawBatch split_emit_notes_;
+  wds::renderer::DrawBatch split_emit_glow_;
+  wds::renderer::DrawBatch split_emit_late_;
+  struct SplitEmitPart {
+    wds::renderer::DrawBatch notes;
+    wds::renderer::DrawBatch glow;
+    wds::renderer::DrawBatch late;
+    int drawn = 0;
+  };
+  std::vector<SplitEmitPart> split_emit_parts_;
+  size_t split_emit_reserve_hint_ = 0;
+  // Split line plate geometry (Syuriken CPU tess) kept separate from particle glow.
+  wds::renderer::DrawBatch split_lanes_glow_;
+  bool split_pause_lanes_valid_ = false;
+  uint64_t split_pause_lanes_hash_ = 0;
+  wds::renderer::DrawBatch split_pause_lanes_glow_;
+  // Per-split plate cache: one projected quad per Line (not now_us / fade).
+  // Keyed by identity + percents + view. Idle preload fills steady plates;
+  // each frame only rewrites the fade-dependent V span and world Y scale.
+  std::unordered_map<uint64_t, PreviewLaneGeomSplit> lane_geom_pool_;
+  std::vector<PreviewLaneGeomSplit> lane_geom_free_;
+  std::vector<const PreviewLaneGeomSplit*> lane_geom_frame_;
+  uint32_t lane_geom_hit_seq_ = 1;
+  std::vector<wds::renderer::DrawBatch> lane_color_parts_;
+  wds::renderer::DrawBatch lane_color_warmup_;
+  uint64_t lane_color_warmup_hash_ = 0;
+  bool lane_color_warmup_valid_ = false;
+  std::vector<uint32_t> emit_notes_cap_;
+  std::vector<uint32_t> emit_glow_cap_;
+  std::vector<uint32_t> emit_late_cap_;
+  // Particle tessellation parts written straight into the mapped VB (no
+  // append_from into the main glow/notes/late batches). Fallback merges.
+  bool split_emit_direct_ = false;
+  size_t split_emit_direct_n_ = 0;
+  bool split_emit_in_vb_ = false;
+  uint32_t split_emit_vb_low_ = 0;
+  std::vector<const wds::renderer::DrawBatch*> split_emit_early_ptrs_;
+  std::vector<const wds::renderer::DrawBatch*> split_emit_mid_ptrs_;
+  std::vector<const wds::renderer::DrawBatch*> split_emit_carve_ptrs_;
+  SplitFrameDiag split_frame_diag_{};
+  struct SplitTexPreloadState;
+  std::unique_ptr<SplitTexPreloadState> split_tex_preload_;
+  int64_t last_ensure_tex_us_ = 0;
+  int64_t last_lanes_us_ = 0;
+  int last_lanes_geom_miss_ = 0;
+  wds::chart_render::SplitEffectPrecommitStats last_precommit_{};
+  std::size_t draw_precommit_verts_ = 0;
+  int draw_precommit_step_ = 0;
 };
 
 }  // namespace wds::ui

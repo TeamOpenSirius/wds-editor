@@ -63,6 +63,13 @@ void HitSfxPlayer::set_hold_looping(bool enabled) {
   audio_->set_hold_looping(enabled);
 }
 
+void HitSfxPlayer::reconcile_hold_looping(bool desired_by_clock) {
+  if (audio_ == nullptr) {
+    return;
+  }
+  audio_->reconcile_hold_looping(desired_by_clock);
+}
+
 bool HitSfxPlayer::hold_looping() const noexcept {
   return audio_ != nullptr && audio_->hold_looping();
 }

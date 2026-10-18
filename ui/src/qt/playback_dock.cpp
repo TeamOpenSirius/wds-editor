@@ -13,7 +13,6 @@
 
 #include <wds/audio/transport.hpp>
 #include <wds/interaction/editor_input.hpp>
-#include <wds/interaction/editor_shortcuts.hpp>
 
 #include <QAbstractSlider>
 #include <QCheckBox>
@@ -305,6 +304,19 @@ PlaybackBar::PlaybackBar(UiManager* manager, QWidget* parent)
   refresh_settings_widgets();
 }
 
+void PlaybackBar::set_stem_handlers(std::function<void(int)> select, std::function<void()> open) {
+  on_select_stem_ = std::move(select);
+  on_open_stems_ = std::move(open);
+}
+
+void PlaybackBar::set_stem_tracks(const QStringList& names, int selected) {
+  const QSignalBlocker blocker(stem_track_);
+  stem_track_->clear();
+  stem_track_->addItems(names);
+  stem_track_->setCurrentIndex(selected);
+  stem_track_->setEnabled(names.size() > 1);
+}
+
 void PlaybackBar::seek_to_slider(int value) {
   auto* settings = manager_->settings_panel();
   if (settings == nullptr) return;
@@ -318,7 +330,7 @@ void PlaybackBar::seek_to_slider(int value) {
   // Queue only — poll() commits on the next preview tick, same as the
   // legacy Slider::on_change path. Do not latch audio.position() or
   // rewrite play_anchor_ms_ here; that was the pause-to-start creep.
-  manager_->chart_preview().transport().request_seek_ms(target);
+  manager_->chart_preview().request_seek_ms(target);
 }
 
 void PlaybackBar::build_ui() {
@@ -369,6 +381,29 @@ void PlaybackBar::build_ui() {
   seek_layout->addWidget(transport, 0);
   seek_row->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
+  auto* stems = new QWidget(block);
+  auto* stem_row = new QHBoxLayout(stems);
+  stem_row->setContentsMargins(0, 0, 0, 0);
+  stem_row->setSpacing(kLabelFieldGap);
+  stem_track_ = new QComboBox(stems);
+  stem_track_->setObjectName(QStringLiteral("playbackStemTrack"));
+  stem_track_->setToolTip(tr("音轨选择"));
+  auto* stem_label = new QLabel(tr("音轨选择"), stems);
+  stem_label->setBuddy(stem_track_);
+  auto* open_stems = new QPushButton(tr("生成分轨"), stems);
+  open_stems->setObjectName(QStringLiteral("playbackStems"));
+  open_stems->setToolTip(tr("生成分轨"));
+  stem_row->addWidget(stem_label);
+  stem_row->addWidget(stem_track_, 1);
+  stem_row->addWidget(open_stems);
+  set_stem_tracks({tr("原曲")}, 0);
+  connect(stem_track_, &QComboBox::activated, this, [this](int index) {
+    if (on_select_stem_) on_select_stem_(index);
+  });
+  connect(open_stems, &QPushButton::clicked, this, [this] {
+    if (on_open_stems_) on_open_stems_();
+  });
+
   auto* mix = new QWidget(block);
   mix->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   auto* mix_row = new QHBoxLayout(mix);
@@ -392,6 +427,8 @@ void PlaybackBar::build_ui() {
   mix_row->addWidget(make_hbox_group(mix, {new QLabel(tr("播放速度"), mix), rate_}));
   box->addStretch(1);
   box->addWidget(seek_row);
+  box->addStretch(1);
+  box->addWidget(stems);
   box->addStretch(1);
   box->addWidget(mix);
   box->addStretch(1);
@@ -613,16 +650,7 @@ void ConvertBar::sync_place_checks() {
     if (convert_buttons_[i] == nullptr) continue;
     convert_buttons_[i]->setEnabled(editable);
     const QString name = QString::fromUtf8(kConvertSpecs[i].name);
-    const auto id = static_cast<wds::interaction::EditorShortcut>(
-        static_cast<int>(wds::interaction::EditorShortcut::PlaceType0) +
-        static_cast<int>(i));
-    const auto chord = wds::interaction::editor_shortcut(id);
-    const std::string chord_text = wds::interaction::format_shortcut_chord(chord);
-    const QString labeled =
-        enabled ? name : tr("转换为%1").arg(name);
-    convert_buttons_[i]->setToolTip(
-        chord_text.empty() ? labeled
-                           : tr("%1（%2）").arg(labeled, QString::fromStdString(chord_text)));
+    convert_buttons_[i]->setToolTip(enabled ? name : tr("转换为%1").arg(name));
     const QSignalBlocker blocker(convert_buttons_[i]);
     convert_buttons_[i]->setChecked(enabled && kPlaceIntents[i] == current);
   }

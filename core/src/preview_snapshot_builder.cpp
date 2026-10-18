@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <utility>
 
 namespace wds::chart_editor {
 namespace {
@@ -35,7 +36,7 @@ void query_preview_split_candidates(const ChartNoteIndex& index, int64_t preview
                                     const PreviewConfig& config,
                                     std::vector<int32_t>& out_note_ids) {
   const int64_t appear_ms = split_fade_sec_to_ms(config.split_line_animation_start_sec);
-  const int64_t disappear_ms = split_fade_sec_to_ms(config.split_line_animation_end_sec);
+  const int64_t disappear_ms = official_split_hide_tail_ms(config.split_line_animation_end_sec);
   const int64_t lower_ms =
       sat_sub_nonneg(sat_sub_nonneg(preview_time_ms, index.max_split_span_ms()), disappear_ms);
   const int64_t upper_ms = sat_add_nonneg(preview_time_ms, appear_ms);
@@ -55,6 +56,21 @@ void PreviewSnapshotBuilder::set_config(PreviewConfig config) {
   position_calculator_.set_config(config);
   auto_judge_.set_config(config);
   split_lane_simulator_.set_config(config);
+}
+
+void PreviewSnapshotBuilder::set_scroll_speed_points(std::vector<ScrollSpeedPoint> points,
+                                                     const MusicTiming& timing) {
+  minimum_scroll_multiplier_ = 1.0;
+  for (const auto& point : points) {
+    if (std::isfinite(point.multiplier) && point.multiplier > 0.0) {
+      minimum_scroll_multiplier_ = std::min(minimum_scroll_multiplier_, point.multiplier);
+    }
+  }
+  position_calculator_.set_scroll_speed_points(std::move(points), timing);
+}
+
+void PreviewSnapshotBuilder::set_compatibility_profile(ChartCompatibilityProfile profile) {
+  position_calculator_.set_compatibility_profile(profile);
 }
 
 bool PreviewSnapshotBuilder::is_spawn_visible(const NotationNote& note, int64_t preview_time_ms,
@@ -120,7 +136,9 @@ int32_t PreviewSnapshotBuilder::resolve_active_lane_count(
 }
 
 int64_t PreviewSnapshotBuilder::spawn_lead_ms() const {
-  return static_cast<int64_t>(position_calculator_.move_seconds() * 1000.0f);
+  const double lead = static_cast<double>(position_calculator_.move_seconds()) * 1000.0 /
+                      minimum_scroll_multiplier_;
+  return static_cast<int64_t>(std::min(lead, static_cast<double>(INT64_MAX / 4)));
 }
 
 int64_t PreviewSnapshotBuilder::tail_ms(const ChartNoteIndex& index) const {
@@ -520,6 +538,7 @@ void PreviewSnapshotBuilder::build_into(
   const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   out.combo_count = combo.combo;
   out.last_judge_ms = combo.last_judge_ms;
+  out.last_combo_fire_ms = combo.last_combo_fire_ms;
 }
 
 void PreviewSnapshotBuilder::update_incremental(
@@ -545,6 +564,7 @@ void PreviewSnapshotBuilder::update_incremental(
   const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
   inout.combo_count = combo.combo;
   inout.last_judge_ms = combo.last_judge_ms;
+  inout.last_combo_fire_ms = combo.last_combo_fire_ms;
 }
 
 void PreviewSnapshotBuilder::rebuild_or_update(

@@ -1,5 +1,7 @@
 #include "wds/ui/qt/settings_dialog.hpp"
 
+#include <wds/core/official_playfield.hpp>
+
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/qt/shortcut_settings_dialog.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
@@ -140,12 +142,13 @@ QCheckBox* add_wrapping_check(QLayout* layout, const QString& text, QWidget* par
 constexpr int kNavCollapsedW = 16;
 constexpr int kNavExpandedW = 104;
 constexpr int kNavItemH = 26;
-constexpr int kSettingsSectionCount = 9;
+constexpr int kSettingsSectionCount = 10;
 
 std::array<QString, kSettingsSectionCount> settings_section_titles() {
   return {
       QCoreApplication::translate("wds::ui", "外观"),
       QCoreApplication::translate("wds::ui", "文件"),
+      QCoreApplication::translate("wds::ui", "格式"),
       QCoreApplication::translate("wds::ui", "音频"),
       QCoreApplication::translate("wds::ui", "输入"),
       QCoreApplication::translate("wds::ui", "显示"),
@@ -159,6 +162,7 @@ std::array<QString, kSettingsSectionCount> settings_section_titles() {
 constexpr std::array<const char*, kSettingsSectionCount> kSettingsTabJournalIds = {{
     "settings.tab_appearance",
     "settings.tab_file",
+    "settings.tab_format",
     "settings.tab_audio",
     "settings.tab_input",
     "settings.tab_display",
@@ -392,7 +396,7 @@ void SettingsPanel::resizeEvent(QResizeEvent* event) {
       lay->activate();
     }
     content->updateGeometry();
-    fit_panel_to_layout(sections_[6]);
+    fit_panel_to_layout(sections_[7]);
     update_section_scroll_pad();
     sync_nav_from_scroll();
   });
@@ -487,14 +491,32 @@ void SettingsPanel::build_pages() {
   appearance->addLayout(appearanceForm);
 
   auto* file = section_at(1);
-  sus_auto_convert_ =
-      add_wrapping_check(file, tr("导入 sus 谱面时自动转换"), file->parentWidget());
+  auto* file_host = file->parentWidget();
+  sus_auto_convert_ = add_wrapping_check(file, tr("导入 sus 谱面时自动转换"), file_host);
+  auto* backupForm = new QFormLayout;
+  backup_interval_ = new QComboBox(file_host);
+  backup_interval_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  const struct {
+    const char* label;
+    int minutes;
+  } kBackupIntervals[] = {{"5分钟", 5},   {"10分钟", 10}, {"15分钟", 15}, {"20分钟", 20},
+                          {"30分钟", 30}, {"45分钟", 45}, {"1小时", 60}};
+  for (const auto& option : kBackupIntervals) {
+    backup_interval_->addItem(tr(option.label), option.minutes);
+  }
+  backupForm->addRow(tr("备份间隔"), backup_interval_);
+  wrap_form(backupForm);
+  file->addLayout(backupForm);
 
-  auto* audio = section_at(2);
+  auto* format = section_at(2);
+  auto* format_host = format->parentWidget();
+  extended_features_ = add_wrapping_check(format, tr("启用扩展功能"), format_host);
+
+  auto* audio = section_at(3);
   mute_hold_body_sfx_ =
       add_wrapping_check(audio, tr("关闭 Hold 体音效播放"), audio->parentWidget());
 
-  auto* input = section_at(3);
+  auto* input = section_at(4);
   auto* input_host = input->parentWidget();
   invert_scroll_wheel_ = add_wrapping_check(input, tr("反转时间轴滚轮方向"), input_host);
   invert_visible_range_scroll_ =
@@ -508,7 +530,7 @@ void SettingsPanel::build_pages() {
   wrap_form(speedForm);
   input->addLayout(speedForm);
 
-  auto* display = section_at(4);
+  auto* display = section_at(5);
   auto* display_host = display->parentWidget();
   show_judgment_text_ = add_wrapping_check(display, tr("开启判定文字显示"), display_host);
   auto* form = new QFormLayout;
@@ -524,6 +546,11 @@ void SettingsPanel::build_pages() {
   note_height_level_ = new QSpinBox(display_host);
   note_height_level_->setRange(1, 10);
   form->addRow(tr("note厚度"), note_height_level_);
+  split_effect_quality_ = make_combo({tr("轻量"), tr("普通"), tr("最多")}, display_host);
+  split_effect_quality_->setItemData(0, wds::chart_editor::kOfficialSpritEffectLight);
+  split_effect_quality_->setItemData(1, wds::chart_editor::kOfficialSpritEffectNormal);
+  split_effect_quality_->setItemData(2, wds::chart_editor::kOfficialSpritEffectRich);
+  form->addRow(tr("分割线特效"), split_effect_quality_);
   split_line_opacity_ = new QSpinBox(display_host);
   split_line_opacity_->setRange(10, 100);
   split_line_opacity_->setSingleStep(10);
@@ -535,7 +562,7 @@ void SettingsPanel::build_pages() {
   wrap_form(form);
   display->addLayout(form);
 
-  auto* width = section_at(5);
+  auto* width = section_at(6);
   auto* width_host = width->parentWidget();
   auto* widthLayout = new QFormLayout;
   static constexpr const char* kSlotLabels[6] = {"一档", "二档", "三档",
@@ -550,7 +577,7 @@ void SettingsPanel::build_pages() {
   wrap_form(widthLayout);
   width->addLayout(widthLayout);
 
-  auto* shortcuts = section_at(6);
+  auto* shortcuts = section_at(7);
   auto* open_shortcuts = new QPushButton(tr("设置快捷键"), shortcuts->parentWidget());
   open_shortcuts->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
   connect(open_shortcuts, &QPushButton::clicked, this, [this] {
@@ -562,7 +589,7 @@ void SettingsPanel::build_pages() {
   shortcuts->addWidget(open_shortcuts, 0, Qt::AlignLeft);
   fit_panel_to_layout(shortcuts->parentWidget());
 
-  auto* privacy = section_at(7);
+  auto* privacy = section_at(8);
   auto* privacy_host = privacy->parentWidget();
   allow_crash_log_sensitive_ = add_wrapping_check(
       privacy, tr("允许崩溃日志记录真实文本与文件路径"), privacy_host);
@@ -575,7 +602,7 @@ void SettingsPanel::build_pages() {
   });
   privacy->addWidget(open_logs, 0, Qt::AlignLeft);
 
-  auto* updates = section_at(8);
+  auto* updates = section_at(9);
   auto_check_updates_ =
       add_wrapping_check(updates, tr("启动时自动检查更新"), updates->parentWidget());
 
@@ -598,6 +625,8 @@ void SettingsPanel::build_pages() {
     }
   });
   connect(sus_auto_convert_, &QCheckBox::toggled, this, [live](bool) { live(); });
+  connect(extended_features_, &QCheckBox::toggled, this, [live](bool) { live(); });
+  connect(backup_interval_, &QComboBox::currentIndexChanged, this, [live](int) { live(); });
   connect(mute_hold_body_sfx_, &QCheckBox::toggled, this, [live](bool) { live(); });
   connect(invert_scroll_wheel_, &QCheckBox::toggled, this, [live](bool) { live(); });
   connect(invert_visible_range_scroll_, &QCheckBox::toggled, this, [live](bool) { live(); });
@@ -610,6 +639,7 @@ void SettingsPanel::build_pages() {
           [live](int) { live(); });
   connect(note_height_level_, qOverload<int>(&QSpinBox::valueChanged), this,
           [live](int) { live(); });
+  connect(split_effect_quality_, &QComboBox::currentIndexChanged, this, [live](int) { live(); });
   connect(split_line_opacity_, qOverload<int>(&QSpinBox::valueChanged), this,
           [live](int) { live(); });
   connect(spectrum_display_, &QComboBox::currentIndexChanged, this, [live](int) { live(); });
@@ -628,9 +658,29 @@ void SettingsPanel::build_pages() {
   });
 }
 
+void SettingsPanel::refresh_extended_lock() {
+  if (extended_features_ == nullptr) return;
+  const bool forced = manager_ != nullptr && manager_->chart_has_extended_features();
+  applying_ = true;
+  if (forced) {
+    extended_features_->setChecked(true);
+    extended_features_->setEnabled(false);
+  } else {
+    extended_features_->setEnabled(true);
+    extended_features_->setChecked(cfg_.extended_features);
+  }
+  applying_ = false;
+}
+
 void SettingsPanel::load_from_config() {
   applying_ = true;
   sus_auto_convert_->setChecked(cfg_.sus_auto_convert);
+  {
+    const int minutes = clamp_backup_interval_min(cfg_.backup_interval_min);
+    int idx = backup_interval_->findData(minutes);
+    if (idx < 0) idx = backup_interval_->findData(15);
+    backup_interval_->setCurrentIndex(std::max(0, idx));
+  }
   mute_hold_body_sfx_->setChecked(cfg_.mute_hold_body_sfx);
   invert_scroll_wheel_->setChecked(cfg_.invert_scroll_wheel);
   invert_visible_range_scroll_->setChecked(cfg_.invert_visible_range_scroll);
@@ -645,6 +695,13 @@ void SettingsPanel::load_from_config() {
   note_speed_->setValue(cfg_.note_speed);
   note_start_offset_->setValue(cfg_.note_start_offset);
   note_height_level_->setValue(cfg_.note_height_level);
+  {
+    const int q = wds::chart_editor::official_clamp_sprit_effect_setting(cfg_.split_effect_quality);
+    int idx = 1;
+    if (q == wds::chart_editor::kOfficialSpritEffectLight) idx = 0;
+    else if (q == wds::chart_editor::kOfficialSpritEffectRich) idx = 2;
+    split_effect_quality_->setCurrentIndex(idx);
+  }
   split_line_opacity_->setValue(cfg_.split_line_opacity);
   spectrum_display_->setCurrentIndex(static_cast<int>(cfg_.spectrum_display));
   msaa_samples_->setCurrentIndex(cfg_.msaa_samples >= 4 ? 2 : cfg_.msaa_samples >= 2 ? 1 : 0);
@@ -655,10 +712,16 @@ void SettingsPanel::load_from_config() {
   allow_crash_log_sensitive_->setChecked(cfg_.allow_crash_log_sensitive);
   auto_check_updates_->setChecked(auto_check_updates_enabled());
   applying_ = false;
+  refresh_extended_lock();
 }
 
 bool SettingsPanel::capture_into_config() {
   cfg_.sus_auto_convert = sus_auto_convert_->isChecked();
+  if (extended_features_ != nullptr && extended_features_->isEnabled()) {
+    cfg_.extended_features = extended_features_->isChecked();
+  }
+  cfg_.backup_interval_min =
+      clamp_backup_interval_min(backup_interval_->currentData().toInt());
   cfg_.mute_hold_body_sfx = mute_hold_body_sfx_->isChecked();
   cfg_.invert_scroll_wheel = invert_scroll_wheel_->isChecked();
   cfg_.invert_visible_range_scroll = invert_visible_range_scroll_->isChecked();
@@ -674,6 +737,11 @@ bool SettingsPanel::capture_into_config() {
   cfg_.note_speed = note_speed_->value();
   cfg_.note_start_offset = note_start_offset_->value();
   cfg_.note_height_level = note_height_level_->value();
+  {
+    const QVariant data = split_effect_quality_->currentData();
+    cfg_.split_effect_quality = wds::chart_editor::official_clamp_sprit_effect_setting(
+        data.isValid() ? data.toInt() : wds::chart_editor::kOfficialSpritEffectNormal);
+  }
   cfg_.split_line_opacity = split_line_opacity_->value();
   cfg_.spectrum_display = clamp_spectrum_display(spectrum_display_->currentIndex());
   cfg_.msaa_samples = msaa_samples_->currentIndex() == 0   ? 1

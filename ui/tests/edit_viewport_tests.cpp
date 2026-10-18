@@ -53,6 +53,38 @@ int main() {
   assert(viewport.lane_at(65, 3) == 5);
   assert(viewport.lane_at(119, 3) == 9);
 
+  {
+    const float x0 = viewport.x_at(0);
+    const float x6 = viewport.x_at(6);
+    const float x12 = viewport.x_at(12);
+    viewport.set_extra_visible_lanes(0);
+    assert(viewport.first_visible_lane() == 0);
+    assert(viewport.visible_lane_count() == 12);
+    assert(std::abs(viewport.x_at(0) - x0) < 1e-5f);
+    assert(std::abs(viewport.x_at(6) - x6) < 1e-5f);
+    assert(std::abs(viewport.x_at(12) - x12) < 1e-5f);
+    assert(std::abs(viewport.judgeline_x() - viewport.bounds().x) < 1e-5f);
+    assert(std::abs(viewport.judgeline_width_px() - viewport.bounds().w) < 1e-5f);
+    const float h0 = viewport.judgeline_height_px();
+    assert(viewport.clamp_lane(0, 1) == 0);
+    assert(viewport.clamp_lane(11, 1) == 11);
+
+    viewport.set_extra_visible_lanes(20);
+    assert(viewport.first_visible_lane() == -20);
+    assert(viewport.visible_lane_count() == 52);
+    assert(std::abs(viewport.x_at(-20) - viewport.bounds().x) < 1e-4f);
+    assert(std::abs(viewport.x_at(32) - (viewport.bounds().x + viewport.bounds().w)) < 1e-4f);
+    const float expected0 = viewport.bounds().x + 20.0f * viewport.bounds().w / 52.0f;
+    assert(std::abs(viewport.x_at(0) - expected0) < 1e-4f);
+    assert(std::abs(viewport.judgeline_x() - expected0) < 1e-4f);
+    assert(std::abs(viewport.judgeline_width_px() - 12.0f * viewport.bounds().w / 52.0f) < 1e-4f);
+    assert(std::abs(viewport.judgeline_height_px() - h0) < 1e-4f);
+    assert(viewport.lane_fully_visible(-20, 1));
+    assert(viewport.lane_fully_visible(31, 1));
+    assert(!viewport.lane_fully_visible(32, 1));
+    viewport.set_extra_visible_lanes(0);
+  }
+
   // Official tap/hold visual width: inset follows (notation − visual) / 2, not 1px.
   // Always-on (Release strips assert).
   {
@@ -359,12 +391,17 @@ int main() {
   {
     using wds::ui::frame_diag_enable_contract;
     using wds::ui::frame_diag_env_enabled;
+    using wds::ui::frame_diag_perf_env_enabled;
 
     assert(frame_diag_env_enabled("1"));
     const auto enabled = frame_diag_enable_contract("1");
     assert(enabled.sample_timing);
     assert(enabled.open_log_file);
     assert(enabled.emit_output);
+    assert(frame_diag_perf_env_enabled(nullptr));
+    assert(frame_diag_perf_env_enabled("1"));
+    assert(frame_diag_perf_env_enabled("off"));
+    assert(!frame_diag_perf_env_enabled("0"));
 
     const char* rejected[] = {
         nullptr, "",  "0",   "2",    "01",  "10",   "1 ",   " 1",    "1\n",  "1\t",
@@ -383,6 +420,11 @@ int main() {
     (void)WDS_ENABLE_LOGGING;
     assert(!frame_diag_env_enabled(nullptr));
     assert(frame_diag_env_enabled("1"));
+
+    assert(wds::ui::preview_stall_ms_from_env() >= 0);
+    assert(wds::ui::preview_stall_at_sec_from_env() <= 0.0 ||
+           wds::ui::preview_stall_at_sec_from_env() > 0.0);
+    assert(!wds::ui::preview_no_preload_from_env());
   }
 
   // Music-clock SFX: schedule factory runs only on first mark; failure erases for retry.

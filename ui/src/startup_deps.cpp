@@ -4,9 +4,11 @@
 #include "wds/ui/resource_paths.hpp"
 
 #include <wds/audio/audio_engine.hpp>
+#include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/common/log.hpp>
 #include <wds/common/utf8_path.hpp>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -82,8 +84,9 @@ void check_bass_runtime(StartupDependencyReport& report, const fs::path& exe_dir
     report.missing.push_back("libbass.dylib（应位于程序目录或 lib/）");
   }
 #else
-  if (!any_exists({exe_dir / "libbass.so", exe_dir / "lib" / "libbass.so"})) {
-    report.missing.push_back("libbass.so（应位于程序目录或 lib/）");
+  if (!any_exists({exe_dir / "libbass.so", exe_dir / "lib" / "libbass.so",
+                   exe_dir / ".." / "lib" / "libbass.so"})) {
+    report.missing.push_back("libbass.so（应位于程序目录、lib/ 或 ../lib/）");
   }
 #endif
 }
@@ -209,6 +212,18 @@ StartupDependencyReport check_startup_dependencies(const char* argv0) {
   require_resource_dir(report, resolve_effects_dir(argv0), "effects 音效资源",
                        looks_like_effects_dir);
 
+  {
+    std::error_code ec;
+    const fs::path cwd = fs::current_path(ec);
+    const std::string split_root = wds::chart_render::find_split_effects_resource_root(
+        exe_dir, ec ? fs::path{} : cwd);
+    if (split_root.empty()) {
+      report.missing.push_back("resources 分割线粒子资源（未找到可用目录）");
+    } else {
+      WDS_LOG("startup: split effects resources %s\n", split_root.c_str());
+    }
+  }
+
   const std::string icons = resolve_icons_dir(argv0);
   const fs::path icons_path = path_from_utf8(icons);
   if (icons.empty() || !is_dir(icons_path) ||
@@ -235,7 +250,11 @@ int fail_startup_dependencies(const StartupDependencyReport& report) {
   for (const auto& line : report.missing) {
     WDS_LOG("startup missing: %s\n", line.c_str());
   }
-  native_file_dialog::alert_error(title, message);
+  std::fprintf(stderr, "%s\n%s\n", title.c_str(), message.c_str());
+  std::fflush(stderr);
+  if (std::getenv("WDS_CRASH_NO_DIALOG") == nullptr) {
+    native_file_dialog::alert_error(title, message);
+  }
   return 1;
 }
 

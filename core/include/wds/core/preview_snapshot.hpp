@@ -95,8 +95,8 @@ struct PreviewSplitLaneInstance {
 
   // Official SplitEffect: fadeIn = LineHight scale.y grow; fadeOut = alpha only.
   float split_line_alpha = 1.0f;     // disappear fade (SpriteRenderer.a)
-  float split_percent_start = 0.0f;  // appear: judge-grow 1-scale, tip-grow 0
-  float split_percent_end = 1.0f;    // appear: judge-grow 1, tip-grow scale
+  float split_percent_start = 0.0f;  // appear: identity tip; z180 far
+  float split_percent_end = 1.0f;    // identity origin percent (>1); z180 tip
   // STAGE_COVER opacity: inverse of split presence (1 before appear, 0 while steady, …).
   float stage_cover_alpha = 1.0f;
   // 0=appear, 1=steady, 2=disappear (texture always base soft line in Light preview).
@@ -143,6 +143,7 @@ struct PreviewSnapshot {
   // Auto-preview combo (seek-safe); updated each snapshot rebuild.
   int32_t combo_count = 0;
   int64_t last_judge_ms = -1;
+  int64_t last_combo_fire_ms = -1;
 
   SnapshotUpdateStrategy last_update_strategy = SnapshotUpdateStrategy::FullRebuild;
 

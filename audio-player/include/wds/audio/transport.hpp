@@ -20,6 +20,11 @@ class Transport {
   Transport& operator=(const Transport&) = delete;
 
   bool initialize(const std::string& effects_directory, const std::string& music_path);
+  // Song switch that keeps the BASS device and SFX samples (AudioEngine::reload_music)
+  // and resets the transport to a fresh, paused t=0 like initialize(). False when
+  // an in-place reload is not possible; nothing is reset then and the caller
+  // should shutdown()/initialize().
+  bool reload_music(const std::string& effects_directory, const std::string& music_path);
   void shutdown();
 
   AudioEngine& audio() noexcept { return audio_; }
@@ -40,20 +45,33 @@ class Transport {
   // Preview clock rate (and BGM rate). Hit SFX locks to BASS music POS (1× samples);
   // the committed note timeline must stay phase-locked to that same music clock.
   void set_playback_rate(float rate);
+  // Bound |audio.position − committed| before a hard snap. Default one 60 Hz
+  // frame. Preview passes the measured display period so a hitch cannot leave
+  // a permanent offset larger than one presented frame.
+  void set_max_clock_error_us(int64_t us) noexcept;
 
   // Apply queued intents, advance committed timeline, drive music when present.
   // wall_delta_us is real frame elapsed time when Playing.
   // With music: audio-primary clock — wall*rate predicts between BASS updates, then
-  // an EMA (tau ~20–30ms) absorbs UPDATEPERIOD staircases so notes stay phase-locked
-  // to music / POS-synced hit SFX without hitchy catch-up. Seek/pause resets the filter.
+  // an EMA (tau ~20–30ms) absorbs UPDATEPERIOD staircases. Residual |raw−filtered|
+  // is clamped to one display frame (see set_max_clock_error_us) so a hitch cannot
+  // leave a permanent offset. Forward play never runs the committed cursor backwards
+  // except a seek. Seek/pause resets the filter.
   // Without music: wall clock advances the timeline directly (rate-scaled).
   // Pass real frame time in microseconds — millisecond truncation stalls wall-clock
   // playback under MAILBOX / high refresh (common on Windows).
   // Caller applies the returned snapshot to core/UI via engine.apply_timeline(snap).
   //
-  // On play, music start is deferred until start_pending_music() so the UI can arm
-  // POS SFX syncs against a still-paused stream (avoids first-frame catch-up).
+  // On play / seek-while-playing, music start is deferred until start_pending_music()
+  // so the UI can collect the first picture at t0, then start audible BGM at t0.
   wds::common::TimelineSnapshot poll(int64_t wall_delta_us);
+
+  // Offline 60 Hz export clock: poll() advances T = origin + n/60, ignores BASS
+  // and wall, does not clamp to music duration / chart start, and never starts
+  // the speaker mixer. Seek still applies once at the segment start.
+  void set_offline_export(bool on) noexcept;
+  bool offline_export() const noexcept { return offline_export_; }
+  int64_t offline_frame_index() const noexcept { return offline_frame_; }
 
   // Begin audible BGM after hit-SFX schedules have been armed for this play request.
   // True when there is nothing left to start (already started, or no pending work).
@@ -75,8 +93,11 @@ class Transport {
   }
   bool pending_play() const noexcept { return pending_play_; }
   bool pending_pause() const noexcept { return pending_pause_; }
+  bool pending_seek() const noexcept { return pending_seek_; }
+  bool sought_this_poll() const noexcept { return sought_this_poll_; }
 
  private:
+  void reset_runtime_state();
   wds::common::Microseconds clamp_time(wds::common::Microseconds time) const;
 
   AudioEngine audio_;
@@ -100,6 +121,10 @@ class Transport {
   wds::common::Microseconds pending_seek_time_{0};
   int64_t chart_offset_ms_ = 0;
   float playback_rate_ = 1.0f;
+  int64_t max_clock_error_us_ = 16666;
+  bool offline_export_ = false;
+  int64_t offline_frame_ = 0;
+  int64_t offline_origin_us_ = 0;
 };
 
 }  // namespace wds::audio

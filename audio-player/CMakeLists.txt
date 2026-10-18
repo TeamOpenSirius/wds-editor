@@ -41,10 +41,20 @@ elseif(WIN32)
   set(WDS_BASS_IMPLIB "${WDS_BASS_LIB_DIR}/bass.lib")
   set(WDS_BASSMIX_LIB "${WDS_BASS_LIB_DIR}/bassmix.dll")
   set(WDS_BASSMIX_IMPLIB "${WDS_BASS_LIB_DIR}/bassmix.lib")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" OR
+     NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Native Linux audio currently supports x86_64 only; select matching 64-bit BASS libraries.")
+  endif()
+  set(WDS_BASS_LINUX_DIR "" CACHE PATH "Directory containing Linux libbass.so and libbassmix.so")
+  if(NOT WDS_BASS_LINUX_DIR)
+    message(FATAL_ERROR "Set WDS_BASS_LINUX_DIR to the directory containing the BASS and BASSmix Linux shared libraries (https://www.un4seen.com/bass.html).")
+  endif()
+  set(WDS_BASS_LIB_DIR "${WDS_BASS_LINUX_DIR}")
+  set(WDS_BASS_LIB "${WDS_BASS_LIB_DIR}/libbass.so")
+  set(WDS_BASSMIX_LIB "${WDS_BASS_LIB_DIR}/libbassmix.so")
 else()
-  message(FATAL_ERROR
-    "Linux is not a supported product target (no BASS linux binary). "
-    "On Linux hosts, cross-compile win-x86_64 via cmake/toolchains/win-x86_64.cmake.")
+  message(FATAL_ERROR "Unsupported BASS platform: ${CMAKE_SYSTEM_NAME}")
 endif()
 
 if(NOT EXISTS "${WDS_BASS_LIB}")
@@ -81,6 +91,12 @@ else()
   )
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # Upstream BASS .so files have no SONAME. Link by library name so DT_NEEDED
+  # does not embed the developer's absolute SDK path in installed binaries.
+  set_target_properties(wds_bass wds_bassmix PROPERTIES IMPORTED_NO_SONAME TRUE)
+endif()
+
 target_link_libraries(wds_audio_player PRIVATE wds_bass wds_bassmix)
 message(STATUS "BASS: ${WDS_BASS_LIB}")
 message(STATUS "BASSmix: ${WDS_BASSMIX_LIB}")
@@ -101,6 +117,14 @@ set(WDS_BASSMIX_LIBRARY "${WDS_BASSMIX_LIB}" CACHE INTERNAL "BASSmix shared libr
 
 option(WDS_AUDIO_BUILD_TESTS "Build audio-player unit tests" ON)
 if(WDS_AUDIO_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
+  add_executable(wds_audition_tests tests/audition_tests.cpp)
+  target_link_libraries(wds_audition_tests PRIVATE wds::audio_player wds_bass wds_bassmix)
+  add_test(NAME wds_audition_tests COMMAND wds_audition_tests)
+  set_tests_properties(wds_audition_tests PROPERTIES SKIP_RETURN_CODE 77)
+  if(WIN32)
+    string(REPLACE ";" "\\;" _wds_audition_path "${WDS_BASS_LIB_DIR};$ENV{PATH}")
+    set_tests_properties(wds_audition_tests PROPERTIES ENVIRONMENT "PATH=${_wds_audition_path}")
+  endif()
   add_executable(wds_audio_player_tests tests/transport_tests.cpp)
   target_link_libraries(wds_audio_player_tests PRIVATE wds::audio_player)
   if(TARGET wds_bass)

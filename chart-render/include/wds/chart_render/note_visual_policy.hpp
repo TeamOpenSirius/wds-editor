@@ -2,6 +2,7 @@
 
 #include <wds/chart_render/skin_catalog.hpp>
 #include <wds/core/official_playfield.hpp>
+#include <wds/core/types.hpp>
 #include <wds/renderer/texture.hpp>
 
 #include <algorithm>
@@ -9,6 +10,11 @@
 #include <vector>
 
 namespace wds::chart_render {
+
+// A ScratchHold body only owns an end arrow when it has a judged tail.
+inline bool preview_draws_start_scratch_arrows(wds::chart_editor::NoteType type) noexcept {
+  return wds::chart_editor::is_flick_like(type);
+}
 
 // Cap scale for Unity-style Sliced holds/flats.
 // `flat_height` must be in the SAME units as the destination quad edges (NDC),

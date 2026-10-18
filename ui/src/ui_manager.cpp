@@ -15,6 +15,7 @@
 #include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 
+#include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/core/chart_validation.hpp>
 #include <wds/core/edit_grid.hpp>
 #include <wds/core/notation.hpp>
@@ -50,12 +51,14 @@ void capture_display_from_preview(const ChartPreviewPanel& preview, EditorUiConf
   cfg.note_height_level = visual.note_height_level;
   cfg.split_line_opacity =
       static_cast<int>(std::lround(static_cast<double>(visual.split_line_opacity) * 100.0));
+  cfg.split_effect_quality =
+      wds::chart_editor::official_clamp_sprit_effect_setting(visual.split_effect_quality);
   cfg.msaa_samples = visual.msaa_samples;
 }
 
 void apply_display_to_preview(ChartPreviewPanel& preview, const EditorUiConfig& cfg) {
   preview.apply_display_settings(cfg.note_speed, cfg.note_start_offset, cfg.note_height_level,
-                                 cfg.split_line_opacity);
+                                 cfg.split_line_opacity, cfg.split_effect_quality);
   preview.preview().apply_msaa(cfg.msaa_samples);
 }
 
@@ -145,7 +148,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit_panel_ = edit.get();
-  edit->set_seek_ms([this](int64_t ms) { chart_preview_->transport().request_seek_ms(ms); });
+  edit->set_seek_ms([this](int64_t ms) { chart_preview_->request_seek_ms(ms); });
   edit->set_visible_range_changed_handler([this] {
     if (auto* toolbar_panel = this->toolbar_panel()) {
       toolbar_panel->sync_visible_range_field();
@@ -153,6 +156,7 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     notify_ui_change(UiChange::Grid);
     request_save_ui_config(false);
   });
+  edit->set_extra_visible_lanes_changed_handler([this] { request_save_ui_config(false); });
   auto preview_hit = std::make_unique<PreviewHitWidget>();
   preview_hit_ = preview_hit.get();
   preview_hit_->set_scroll_handler([this](const wds::interaction::ScrollEvent& event) {
@@ -367,7 +371,7 @@ void UiManager::toggle_playback(bool shift_pause_variant) {
   // Checked: swap those two Space behaviors.
   const bool pause_here = pause_at_current ? !shift_pause_variant : shift_pause_variant;
   if (!pause_here) {
-    transport.request_seek_ms(play_anchor_ms_);
+    chart_preview_->request_seek_ms(play_anchor_ms_);
   }
   transport.request_pause();
 }
@@ -383,7 +387,10 @@ void UiManager::play_from_chart_start() {
   if (!transport.intends_playing()) {
     play_anchor_ms_ = transport.committed_ms();
   }
-  transport.request_seek_ms(transport.chart_start_ms());
+  // Unity 2022.3 useAutoRandomSeed: a new seed each Play(), not each seek.
+  chart_preview_->join_speculative_split_collect();
+  wds::chart_render::reset_split_effect_auto_seed_session();
+  chart_preview_->request_seek_ms(transport.chart_start_ms());
   transport.request_play();
 }
 
@@ -404,6 +411,7 @@ void UiManager::bind_editor_shortcuts() {
   using wds::interaction::chord_nudge_up;
   using wds::interaction::chord_open;
   using wds::interaction::chord_paste;
+  using wds::interaction::chord_paste_mirror;
   using wds::interaction::chord_redo;
   using wds::interaction::chord_save;
   using wds::interaction::chord_pause_playback;
@@ -454,6 +462,9 @@ void UiManager::bind_editor_shortcuts() {
   });
   editor.bind(chord_paste(), [this] {
     if (auto* panel = edit_panel()) panel->paste_at_pointer();
+  });
+  editor.bind(chord_paste_mirror(), [this] {
+    if (auto* panel = edit_panel()) panel->paste_at_pointer(true);
   });
   editor.bind(chord_mirror(), [this] {
     if (auto* panel = edit_panel()) panel->mirror_selected(false);
@@ -553,6 +564,10 @@ void UiManager::notify_ui_change(UiChange change) {
         app, [this, change] { notify_ui_change(change); }, Qt::QueuedConnection);
     return;
   }
+  if (change == UiChange::Document || change == UiChange::Charts ||
+      change == UiChange::History) {
+    sync_extended_editing();
+  }
   if (on_ui_change_) on_ui_change_(change);
 }
 
@@ -598,8 +613,8 @@ void UiManager::check_chart_errors() {
     const int32_t first_tick = result.error_ticks.front();
     const int64_t ms =
         wds::chart_editor::tick_to_milliseconds(first_tick, engine.document().timing());
+    chart_preview_->request_seek_ms(ms);
     chart_preview_->transport().request_pause();
-    chart_preview_->transport().request_seek_ms(ms);
     wds::common::TimelineSnapshot snap;
     snap.position = wds::common::ms_to_us(ms);
     snap.state = wds::common::PlaybackState::Paused;
@@ -626,8 +641,8 @@ std::vector<int32_t> UiManager::collect_chart_error_ticks() {
 void UiManager::jump_to_error_tick(int32_t tick) {
   auto& engine = session_->engine();
   const int64_t ms = wds::chart_editor::tick_to_milliseconds(tick, engine.document().timing());
+  chart_preview_->request_seek_ms(ms);
   chart_preview_->transport().request_pause();
-  chart_preview_->transport().request_seek_ms(ms);
   wds::common::TimelineSnapshot snap;
   snap.position = wds::common::ms_to_us(ms);
   snap.state = wds::common::PlaybackState::Paused;
@@ -865,6 +880,8 @@ void UiManager::load_ui_config() {
   if (!load_editor_ui_config(config_path_, cfg)) return;
   wds::interaction::set_width_slot_values(cfg.width_slots);
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  session_->set_extended_features(cfg.extended_features);
+  backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
@@ -876,6 +893,8 @@ void UiManager::load_ui_config() {
   }
   apply_display_to_preview(*chart_preview_, cfg);
   apply_display_to_edit(edit_panel_, cfg);
+  if (edit_panel_ != nullptr) edit_panel_->set_extra_visible_lanes(cfg.extra_visible_lanes);
+  sync_extended_editing();
   chart_preview_->set_lane_count(std::clamp(cfg.lane_count, 1, 32));
   set_new_note_place_logic(cfg.new_note_place_logic);
   capture_curve_template_state(cfg, curve_template_state_);
@@ -898,6 +917,9 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
   cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
   cfg.sus_auto_convert = session_->sus_auto_convert();
+  cfg.extended_features = session_->extended_features();
+  if (const auto* edit = edit_panel()) cfg.extra_visible_lanes = edit->extra_visible_lanes();
+  cfg.backup_interval_min = backup_interval_min_;
   cfg.invert_scroll_wheel = wds::interaction::invert_scroll_wheel();
   cfg.invert_visible_range_scroll = wds::interaction::invert_visible_range_scroll();
   cfg.scroll_wheel_speed = wds::interaction::scroll_wheel_speed();
@@ -913,8 +935,20 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
 
 void UiManager::snapshot_ui_config_for_qt(EditorUiConfig& cfg) { capture_live_ui_config(cfg); }
 
+void UiManager::sync_extended_editing() {
+  if (auto* edit = edit_panel()) {
+    edit->set_extended_editing_active(session_ != nullptr && session_->extended_editing_active());
+  }
+}
+
+bool UiManager::chart_has_extended_features() const {
+  return session_ != nullptr && session_->chart_has_extended();
+}
+
 void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   session_->set_sus_auto_convert(cfg.sus_auto_convert);
+  session_->set_extended_features(cfg.extended_features);
+  backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
@@ -926,6 +960,8 @@ void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   }
   apply_display_to_preview(*chart_preview_, cfg);
   apply_display_to_edit(edit_panel_, cfg);
+  if (edit_panel_ != nullptr) edit_panel_->set_extra_visible_lanes(cfg.extra_visible_lanes);
+  sync_extended_editing();
   set_new_note_place_logic(cfg.new_note_place_logic);
   bind_editor_shortcuts();
   wds::common::journal_set_allow_sensitive(cfg.allow_crash_log_sensitive);
@@ -1074,13 +1110,19 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   if (auto* edit = edit_panel()) {
     // Edit visible window for preview lead-in time mapping (not CHART_DELAY_MS).
     session_->engine().set_preview_lead_in_visible_ms(edit->viewport().visible_ms());
-    double sync_ms = session_->engine().timeline_us() / 1000.0;
-    if (chart_preview_ != nullptr &&
-        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
-      // Match preview present clock (committed + one display-frame lead).
-      sync_ms += static_cast<double>(chart_preview_->display_frame_lead_us()) / 1000.0;
+    const bool export_clock =
+        chart_preview_ != nullptr && chart_preview_->video_export_clock();
+    if (!export_clock) {
+      double sync_ms = session_->engine().timeline_us() / 1000.0;
+      if (chart_preview_ != nullptr &&
+          session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
+        // Match the preview draw clock (transport + one display-frame lead).
+        const int64_t lead = chart_preview_->last_visual_lead_us();
+        sync_ms += static_cast<double>(lead > 0 ? lead : chart_preview_->display_frame_lead_us()) /
+                   1000.0;
+      }
+      edit->sync_to_timeline_ms(sync_ms);
     }
-    edit->sync_to_timeline_ms(sync_ms);
     if (chart_preview_ != nullptr) {
       edit->set_waveform(&chart_preview_->waveform());
       edit->set_spectrogram(chart_preview_->spectrogram_texture());

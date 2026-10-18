@@ -8,20 +8,25 @@
 
 namespace wds::chart_editor {
 
-// Official World Dai Star / Sirius decrypted chart CSV (7 columns, no header):
-//   startTime, endTime, type, leftLane, laneLength, gimmickType, scratchLength
+// Official World Dai Star / Sirius decrypted chart CSV (5 or 7 columns, no
+// header). The compact form omits gimmickType/scratchLength:
+//   startTime, endTime, type, leftLane, laneLength[, gimmickType, scratchLength]
 //
 // Column meanings (see also sonolus-sirius-engine/levelData.cpp::txt2data):
 //   startTime     — note/gimmick start in music seconds (beat≡second at BPM 60)
 //   endTime       — hold/split end in seconds; -1 = instantaneous (no duration)
 //   type          — AppConst.NoteType (10/20/80/100/900/…); 0 = gimmick-only (split);
-//                   900 (HoldEighth) is kept on import (preview-only, not recomputed)
-//                   and generated on export from editable charts (always gimmick 0 /
+//                   900 (HoldEighth) rows are kept on CSV import. Official CSV has no
+//                   BPM, so the editor cannot rebuild the eighth grid; file times stay.
+//                   Export of an editable chart still generates type 900 (gimmick 0 /
 //                   scratch 0). Export rows are sorted by startTime then type;
-//                   -1 = HiSpeed (endTime holds speed value; not stored in NotationNote);
-//                   31 = ScratchSound (purple mid-star); 40 = SoundPurple (mid scratch,
-//                   editor imports as JumpScratch split / orphan Flick — never stored as 40)
-//   leftLane      — leftmost lane, official 1..12; split rows use -1
+//                   -1 = HiSpeed (endTime holds non-negative multiplier; stored in
+//                   scroll_speed_points, never in NotationNote);
+//                   31 = ScratchSound (purple mid-star); 40 = Scratch (kept as-is;
+//                   looks like Flick; the editor cannot author it);
+//                   split rows always export type 0, leftLane -1, laneLength 0
+//   leftLane      — leftmost lane, official 1..12; Extended may overhang;
+//                   split rows use -1
 //   laneLength    — width in lanes; split rows use 0
 //   gimmickType   — numeric GimmickType, or "JumpScratch" / "OneDirection"
 //                   Official Flick: None = both arrows; OneDirection / JumpScratch
@@ -65,8 +70,10 @@ struct OfficialChartLoadOptions {
   // Official lanes are 1-based (1..12); editor NotationNote uses 0-based (0..11).
   bool convert_lane_to_zero_based = true;
 
-  // Skip HiSpeed (type == -1) rows — no timescale channel in preview yet.
-  bool skip_hispeed = true;
+  // Skip HiSpeed (type == -1) rows for legacy callers. Leave false so
+  // non-negative SV events are retained in scroll_speed_points.
+  bool skip_hispeed = false;
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 };
 
 struct OfficialChartSaveOptions {
@@ -92,6 +99,11 @@ class OfficialChartFormat {
   static SerializeResult load_chart_with_music_config(
       const std::string& chart_path, const std::string& music_config_path,
       NotationChart& out_chart, OfficialChartLoadOptions options = {});
+  // Import UI convenience: retry as Sirius Extended only when strict lane
+  // validation rejects an otherwise valid CSV.
+  static SerializeResult load_chart_auto_profile(const std::string& chart_path,
+                                                 const std::string& music_config_path,
+                                                 NotationChart& out_chart);
 
   static SerializeResult serialize_chart(const NotationChart& chart, std::string& out_text,
                                          const OfficialChartSaveOptions& options = {});

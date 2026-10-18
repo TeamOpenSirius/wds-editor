@@ -24,6 +24,8 @@ class SettingsPanel final : public QWidget {
  public:
   SettingsPanel(UiManager* manager, QString theme_dir, QWidget* parent = nullptr);
   void set_on_applied(std::function<void()> handler) { on_applied_ = std::move(handler); }
+  // Recheck the Format checkbox from the live chart without writing config.yml.
+  void refresh_extended_lock();
 
  private:
   void build_pages();
@@ -48,11 +50,13 @@ class SettingsPanel final : public QWidget {
 
   QWidget* sidebar_ = nullptr;
   QScrollArea* scroll_ = nullptr;
-  std::array<QWidget*, 9> sections_{};
+  std::array<QWidget*, 10> sections_{};
   QWidget* scroll_pad_ = nullptr;
   QComboBox* theme_combo_ = nullptr;
 
   QCheckBox* sus_auto_convert_ = nullptr;
+  QCheckBox* extended_features_ = nullptr;
+  QComboBox* backup_interval_ = nullptr;
   QCheckBox* mute_hold_body_sfx_ = nullptr;
   QCheckBox* invert_scroll_wheel_ = nullptr;
   QCheckBox* invert_visible_range_scroll_ = nullptr;
@@ -62,6 +66,7 @@ class SettingsPanel final : public QWidget {
   QDoubleSpinBox* note_speed_ = nullptr;
   QSpinBox* note_start_offset_ = nullptr;
   QSpinBox* note_height_level_ = nullptr;
+  QComboBox* split_effect_quality_ = nullptr;
   QSpinBox* split_line_opacity_ = nullptr;
   QComboBox* spectrum_display_ = nullptr;
   QComboBox* msaa_samples_ = nullptr;

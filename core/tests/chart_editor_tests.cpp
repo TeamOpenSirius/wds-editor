@@ -22,6 +22,7 @@
 #include <wds/core/core.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -30,6 +31,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -69,6 +71,93 @@ fs::path temp_chart_path(const char* name) {
   const fs::path dir = fs::temp_directory_path() / "wds_chart_editor_tests";
   fs::create_directories(dir);
   return dir / name;
+}
+
+fs::path temp_chart_path(const std::string& name) {
+  return temp_chart_path(name.c_str());
+}
+
+bool timing_points_equal(const MusicTiming& a, const MusicTiming& b) {
+  if (a.bpm != b.bpm || a.ticks_per_quarter != b.ticks_per_quarter) {
+    return false;
+  }
+  if (a.points.size() != b.points.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.points.size(); ++i) {
+    const auto& x = a.points[i];
+    const auto& y = b.points[i];
+    if (x.tick != y.tick || x.bpm != y.bpm || x.numerator != y.numerator ||
+        x.denominator != y.denominator || x.has_bpm != y.has_bpm ||
+        x.has_meter != y.has_meter) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool notation_note_wdschart_equal(const NotationNote& a, const NotationNote& b) {
+  return a.id == b.id && a.start_tick == b.start_tick && a.end_tick == b.end_tick &&
+         a.lane == b.lane && a.width == b.width && a.note_type == b.note_type &&
+         a.gimmick_type == b.gimmick_type && a.scratch_length == b.scratch_length;
+}
+
+std::vector<NotationNote> notes_without_hold_eighths(const std::vector<NotationNote>& notes) {
+  std::vector<NotationNote> out;
+  out.reserve(notes.size());
+  for (const auto& n : notes) {
+    if (n.note_type != NoteType::HoldEighth) {
+      out.push_back(n);
+    }
+  }
+  return out;
+}
+
+bool charts_wdschart_persisted_equal(const NotationChart& a, const NotationChart& b) {
+  if (!timing_points_equal(a.timing, b.timing)) {
+    return false;
+  }
+  if (a.concurrent_lines.size() != b.concurrent_lines.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.concurrent_lines.size(); ++i) {
+    const auto& x = a.concurrent_lines[i];
+    const auto& y = b.concurrent_lines[i];
+    if (x.milliseconds != y.milliseconds || x.start_lane != y.start_lane ||
+        x.width != y.width) {
+      return false;
+    }
+  }
+  const auto na = notes_without_hold_eighths(a.notes);
+  const auto nb = notes_without_hold_eighths(b.notes);
+  if (na.size() != nb.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < na.size(); ++i) {
+    if (!notation_note_wdschart_equal(na[i], nb[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+SerializeResult wdschart_file_roundtrip(const NotationChart& in, NotationChart& out,
+                                        const fs::path& path) {
+  NotationChart to_save = in;
+  to_save.timing.offset_ms = 0;
+  const auto save = ChartSerializer::save_to_file(to_save, path.string());
+  if (save.error != SerializeError::Ok) {
+    return save;
+  }
+  return ChartSerializer::load_from_file(path.string(), out);
+}
+
+int32_t min_persisted_start_tick(const NotationChart& chart) {
+  int32_t min_tick = INT32_MAX;
+  for (const auto& n : notes_without_hold_eighths(chart.notes)) {
+    min_tick = std::min(min_tick, n.start_tick);
+  }
+  return min_tick;
 }
 
 void test_auto_note_id_starts_at_zero() {
@@ -1277,7 +1366,7 @@ void test_split_gimmick_range_and_combo_includes_heads() {
     body.id = 3;
     body.note_type = NoteType::Hold;
     notes.push_back(body);
-    // Soft body judge must be authored as HoldEighth (not synthesized).
+    // compute_preview_combo reads HoldEighth rows as given (the model derives them).
     NotationNote eighth = hs;
     eighth.id = 4;
     eighth.start_tick = 1200;
@@ -1290,6 +1379,31 @@ void test_split_gimmick_range_and_combo_includes_heads() {
   const PreviewComboState combo = compute_preview_combo(notes, timing, at);
   // 2 taps + HoldStart + HoldEighth + Hold tail
   CHECK_EQ(combo.combo, 5);
+  CHECK_EQ(combo.last_combo_fire_ms, static_cast<int64_t>(-1));
+}
+
+void test_combo_hundreds_fire_ms_is_crossing_hit() {
+  std::vector<int64_t> hits;
+  hits.reserve(250);
+  for (int i = 0; i < 250; ++i) {
+    hits.push_back(static_cast<int64_t>(i) * 10);
+  }
+  const PreviewComboState at99 = combo_from_sorted_hits(hits, 980);
+  CHECK_EQ(at99.combo, 99);
+  CHECK_EQ(at99.last_combo_fire_ms, static_cast<int64_t>(-1));
+
+  const PreviewComboState at100 = combo_from_sorted_hits(hits, 990);
+  CHECK_EQ(at100.combo, 100);
+  CHECK_EQ(at100.last_judge_ms, static_cast<int64_t>(990));
+  CHECK_EQ(at100.last_combo_fire_ms, static_cast<int64_t>(990));
+
+  const PreviewComboState at150 = combo_from_sorted_hits(hits, 1490);
+  CHECK_EQ(at150.combo, 150);
+  CHECK_EQ(at150.last_combo_fire_ms, static_cast<int64_t>(990));
+
+  const PreviewComboState at200 = combo_from_sorted_hits(hits, 1990);
+  CHECK_EQ(at200.combo, 200);
+  CHECK_EQ(at200.last_combo_fire_ms, static_cast<int64_t>(1990));
 }
 
 void test_split_appear_phase_before_start_ms() {
@@ -1368,14 +1482,15 @@ void test_split_fadein_direction_from_linehight_z180() {
   };
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
-  const int64_t mid = start_ms - 500;  // t=0.5 → tilt+FOV projected tips
-  const float kTip = official_split_fade_in_from_tip_end(0.5f);
-  const float kId = official_split_fade_in_from_judge_start(0.5f);
+  const int64_t mid = start_ms - 500;  // play_t=0.5; LineHight lag 1/60
+  const float kMidT = 0.5f - (1.0f / 60.0f);
+  const float kTip = official_split_fade_in_from_tip_end(kMidT);
+  const float kId = official_split_fade_in_from_judge_start(kMidT);
 
   PreviewSplitLaneInstance bottom;
   sim.fill_instance(bottom, make_split(10390, GimmickType::Split4), timing, mid);
   CHECK(std::fabs(bottom.split_percent_start - kId) < 0.02f);
-  CHECK(std::fabs(bottom.split_percent_end - 1.0f) < 0.02f);
+  CHECK(std::fabs(bottom.split_percent_end - official_split_identity_origin_percent()) < 0.02f);
   CHECK(bottom.split_percent_start < 0.10f);
 
   PreviewSplitLaneInstance tip;
@@ -1387,7 +1502,8 @@ void test_split_fadein_direction_from_linehight_z180() {
   PreviewSplitLaneInstance id_11611;
   sim.fill_instance(id_11611, make_split(11611, GimmickType::Split6), timing, mid);
   CHECK(id_11611.split_percent_start < 0.10f);
-  CHECK(std::fabs(id_11611.split_percent_end - 1.0f) < 0.02f);
+  CHECK(std::fabs(id_11611.split_percent_end - official_split_identity_origin_percent()) <
+        0.02f);
 
   PreviewSplitLaneInstance id_11612;
   sim.fill_instance(id_11612, make_split(11612, GimmickType::Split6), timing, mid);
@@ -1423,9 +1539,8 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   // Not the old ease-out quad (0.75 at t=0.5).
   CHECK(std::fabs(official_split_fade_in_scale(0.5f) - 0.75f) > 0.02f);
 
-  // Official scheduler: fadeIn at start−1s; fadeOut at EndTickCount.
-  // MinimumShowingMilliseconds is unused. Zero-length still gets the 1s show
-  // window, then hide starts immediately at start==end (no start+1500 pad).
+  // OpenWDS: fadeIn at start−1s. Tick hides at EndTickCount. Destroy 0.5s.
+  // Zero-length therefore plays fadeIn then immediately fadeOut.
   PreviewConfig cfg;
   SplitLaneSimulator sim(cfg);
   MusicTiming timing;
@@ -1439,6 +1554,8 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   note.scratch_length = 10390;
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  const int64_t expire_ms = official_split_expire_ms(start_ms, start_ms);
+  CHECK_EQ(expire_ms, start_ms);
   CHECK(sim.is_split_active(note, timing, start_ms - 1000));
   CHECK(!sim.is_split_active(note, timing, start_ms - 1001));
 
@@ -1446,19 +1563,20 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   sim.fill_instance(mid_in, note, timing, start_ms - 500);
   CHECK_EQ(mid_in.split_anim_phase, 0);
   CHECK(std::fabs(mid_in.split_line_alpha - 1.0f) < 0.02f);
-  CHECK(std::fabs(mid_in.split_percent_start - official_split_fade_in_from_judge_start(0.5f)) <
-        0.02f);
+  CHECK(std::fabs(mid_in.split_percent_start -
+                  official_split_fade_in_from_judge_start(0.5f - (1.0f / 60.0f))) < 0.02f);
 
   PreviewSplitLaneInstance at_end;
   sim.fill_instance(at_end, note, timing, start_ms);
-  CHECK_EQ(at_end.split_anim_phase, 1);
+  CHECK_EQ(at_end.split_anim_phase, 2);
+  CHECK(std::fabs(at_end.split_line_alpha - 1.0f) < 0.02f);
 
   PreviewSplitLaneInstance fade_out;
-  sim.fill_instance(fade_out, note, timing, start_ms + 75);
+  sim.fill_instance(fade_out, note, timing, expire_ms + 250);
   CHECK_EQ(fade_out.split_anim_phase, 2);
-  CHECK(std::fabs(fade_out.split_line_alpha - 0.84375f) < 0.02f);
-  CHECK(!sim.is_split_active(note, timing, start_ms + 300));
-  CHECK(!sim.is_split_active(note, timing, start_ms + 1500));
+  CHECK(std::fabs(fade_out.split_line_alpha - 0.0740741f) < 0.005f);
+  CHECK(sim.is_split_active(note, timing, expire_ms + 499));
+  CHECK(!sim.is_split_active(note, timing, expire_ms + 500));
 }
 
 void test_official_playfield_visual_lanes_are_six() {
@@ -1476,7 +1594,8 @@ void test_official_playfield_visual_lanes_are_six() {
   CHECK_EQ(official_visual_border_edge_index(1), 2);
   CHECK_EQ(official_visual_border_edge_index(3), 6);
   CHECK_EQ(official_visual_border_edge_index(6), 12);
-  CHECK(std::fabs(official_lane_border_alpha(100) - 51.0f / 255.0f) < 1e-5f);
+  CHECK(std::fabs(official_lane_border_alpha(100) - 43.6f / 255.0f) < 1e-5f);
+  CHECK(std::fabs(official_lane_border_alpha(10) - official_lane_border_alpha(100)) < 1e-6f);
 }
 
 void test_official_judge_sprite_pink_peaks_sit_on_track_edges() {
@@ -1691,7 +1810,12 @@ void test_official_split_fade_in_visible_hits_screen_before_clip_end() {
   CHECK(official_split_fade_in_from_tip_end(0.50f) > 0.28f);
   CHECK(official_split_fade_in_from_tip_end(0.50f) < 0.45f);
   CHECK(official_split_fade_in_from_tip_end(0.83f) >= 0.99f);
-  CHECK(std::fabs(official_split_fade_in_from_tip_end(1.0f) - 1.0f) < 1e-5f);
+  CHECK(std::fabs(official_split_fade_in_from_tip_end(1.0f) - official_split_z180_near_percent()) <
+        1e-4f);
+  CHECK(official_split_fade_in_from_tip_end(1.0f) > 1.0f);
+  CHECK(std::fabs(official_split_fade_in_from_judge_start(0.0f) -
+                  official_split_identity_origin_percent()) < 1e-4f);
+  CHECK(official_split_identity_origin_percent() > official_judgeline_percent());
   const float first =
       official_split_fade_in_from_tip_end(0.2f) - official_split_fade_in_from_tip_end(0.0f);
   const float last =
@@ -1735,9 +1859,10 @@ void test_official_split_fade_in_visible_hits_screen_before_clip_end() {
   PreviewSplitLaneInstance mid_tip;
   sim.fill_instance(mid_id, identity, timing, start_ms - 500);
   sim.fill_instance(mid_tip, tip, timing, start_ms - 500);
-  CHECK(std::fabs(mid_id.split_percent_start - official_split_fade_in_from_judge_start(0.5f)) <
-        0.01f);
-  CHECK(std::fabs(mid_tip.split_percent_end - official_split_fade_in_from_tip_end(0.5f)) < 0.01f);
+  CHECK(std::fabs(mid_id.split_percent_start -
+                  official_split_fade_in_from_judge_start(0.5f - (1.0f / 60.0f))) < 0.01f);
+  CHECK(std::fabs(mid_tip.split_percent_end -
+                  official_split_fade_in_from_tip_end(0.5f - (1.0f / 60.0f))) < 0.01f);
   CHECK(mid_tip.split_percent_end > mid_id.split_percent_start);
 
   PreviewSplitLaneInstance late_id;
@@ -1771,14 +1896,15 @@ void test_official_split_fade_in_scale_is_playfield_coverage() {
   sim.fill_instance(tip_mid, tip, timing, start_ms - 500);  // t=0.5
   CHECK_EQ(tip_mid.split_anim_phase, 0);
   CHECK(tip_mid.split_percent_start < 0.02f);
-  CHECK(std::fabs(tip_mid.split_percent_end - official_split_fade_in_visible(0.5f)) < 0.02f);
+  CHECK(std::fabs(tip_mid.split_percent_end -
+                  official_split_fade_in_visible(0.5f - (1.0f / 60.0f))) < 0.02f);
 }
 
-void test_official_split_fade_out_is_300ms_smoothstep_from_end() {
-  // Official SplitEffect_fadeOut_anim (1.96.0 animators.bundle): m_Color.a keys
-  // at t=0 (1) and t=0.3 (0). Cubic is 1 - smoothstep(u), u=t/0.3.
-  // Hide starts at EndMilliseconds — not start+1500.
+void test_official_split_fade_out_is_0_3s_smoothstep_from_expire() {
+  // Runtime animators.bundle fadeOut keys a at t=0 / t=0.3 (1−smoothstep).
+  // Tick starts fadeOut at EndMs; Destroy 0.5s.
   CHECK(std::fabs(PreviewConfig{}.split_line_animation_end_sec - 0.3f) < 1e-5f);
+  CHECK(std::fabs(kOfficialSplitFadeOutSec - 0.3f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.0f) - 1.0f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.25f) - 0.84375f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.5f) - 0.5f) < 1e-5f);
@@ -1793,32 +1919,38 @@ void test_official_split_fade_out_is_300ms_smoothstep_from_end() {
 
   NotationNote note;
   note.start_tick = 4800;  // 10s
-  note.end_tick = 5280;    // 11s — 1000ms span, below the old 1500ms pad
+  note.end_tick = 5280;    // 11s
   note.gimmick_type = GimmickType::Split3;
   note.scratch_length = 10390;
 
   const int64_t start_ms = tick_to_milliseconds(4800, timing);
   const int64_t end_ms = tick_to_milliseconds(5280, timing);
   CHECK_EQ(end_ms - start_ms, 1000);
+  const int64_t expire_ms = official_split_expire_ms(start_ms, end_ms);
+  CHECK_EQ(expire_ms, end_ms);
 
-  PreviewSplitLaneInstance at_end;
-  sim.fill_instance(at_end, note, timing, end_ms);
-  CHECK_EQ(at_end.split_anim_phase, 1);
-  CHECK(std::fabs(at_end.split_line_alpha - 1.0f) < 0.02f);
+  PreviewSplitLaneInstance before_end;
+  sim.fill_instance(before_end, note, timing, end_ms - 1);
+  CHECK_EQ(before_end.split_anim_phase, 1);
+  CHECK(std::fabs(before_end.split_line_alpha - 1.0f) < 0.02f);
+  CHECK(std::fabs(before_end.split_percent_end - official_split_identity_origin_percent()) <
+        1e-4f);
+
+  PreviewSplitLaneInstance at_expire;
+  sim.fill_instance(at_expire, note, timing, expire_ms);
+  CHECK_EQ(at_expire.split_anim_phase, 2);
+  CHECK(std::fabs(at_expire.split_line_alpha - 1.0f) < 0.02f);
 
   PreviewSplitLaneInstance quarter;
-  sim.fill_instance(quarter, note, timing, end_ms + 75);
+  sim.fill_instance(quarter, note, timing, expire_ms + 250);
   CHECK_EQ(quarter.split_anim_phase, 2);
-  CHECK(std::fabs(quarter.split_line_alpha - 0.84375f) < 0.02f);
+  // align2-n5 Unity effect 3 at E+0.255: line a 0.0753.
+  CHECK(std::fabs(quarter.split_line_alpha - 0.0740741f) < 0.005f);
+  CHECK(std::fabs(quarter.split_percent_end - official_split_identity_origin_percent()) <
+        1e-4f);
 
-  PreviewSplitLaneInstance mid;
-  sim.fill_instance(mid, note, timing, end_ms + 150);
-  CHECK_EQ(mid.split_anim_phase, 2);
-  CHECK(std::fabs(mid.split_line_alpha - 0.5f) < 0.02f);
-
-  CHECK(sim.is_split_active(note, timing, end_ms + 299));
-  CHECK(!sim.is_split_active(note, timing, end_ms + 300));
-  CHECK(!sim.is_split_active(note, timing, start_ms + 1500));
+  CHECK(sim.is_split_active(note, timing, expire_ms + 499));
+  CHECK(!sim.is_split_active(note, timing, expire_ms + 500));
 }
 
 void test_split_color_slot_mirrors_linehight_z180() {
@@ -1947,6 +2079,8 @@ void test_official_chart_import_and_roundtrip() {
     else ++authored;
   }
   CHECK_EQ(authored, 12);
+  // The sample's single type-900 row is kept. CSV has no BPM, so eighths are not
+  // rebuilt from the hold spans.
   CHECK_EQ(eighths, 1);
 
   // Document sorts by start time — first note is the split at t=0, not CSV row 0.
@@ -1959,7 +2093,7 @@ void test_official_chart_import_and_roundtrip() {
   bool found_split = false;
   bool found_jump = false;
   bool found_flick = false;
-  bool found_orphan_as_flick = false;
+  bool found_official_scratch = false;
   for (const auto& n : notes) {
     if (n.note_type == NoteType::Critical && n.width == 4 && n.lane == 0) {
       found_critical = true;
@@ -1987,9 +2121,9 @@ void test_official_chart_import_and_roundtrip() {
       found_flick = true;
       CHECK_EQ(n.lane, 3);  // official 4
     }
-    // Official sample orphan type=40 (Sirius SoundPurple) → Flick.
-    if (n.note_type == NoteType::Flick && n.width == 3 && n.lane == 3) {
-      found_orphan_as_flick = true;
+    // Official sample type=40 Scratch stays Scratch (looks like Flick).
+    if (n.note_type == NoteType::Scratch && n.width == 3 && n.lane == 3) {
+      found_official_scratch = true;
       MusicTiming local = timing;
       local.offset_ms = 0;
       CHECK_EQ(n.start_tick,
@@ -2000,7 +2134,7 @@ void test_official_chart_import_and_roundtrip() {
   CHECK(found_split);
   CHECK(found_jump);
   CHECK(found_flick);
-  CHECK(found_orphan_as_flick);
+  CHECK(found_official_scratch);
 
   const fs::path out_path = temp_chart_path("official_roundtrip.csv");
   const auto save = engine.export_official_to_file(out_path.string());
@@ -2020,12 +2154,180 @@ void test_official_chart_load_auto() {
   NotationChart chart;
   const auto result = ChartSerializer::load_auto(chart_path.string(), chart);
   CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(static_cast<int32_t>(chart.notes.size()), 13);
   int eighths = 0;
   for (const auto& n : chart.notes) {
     if (n.note_type == NoteType::HoldEighth) ++eighths;
   }
+  // 12 CSV rows plus the file's one type-900 row, kept as-is.
   CHECK_EQ(eighths, 1);
+  CHECK_EQ(static_cast<int32_t>(chart.notes.size()), 13);
+  CHECK(chart.keep_file_eighths);
+}
+
+void test_official_chart_five_column_form_matches_openwds() {
+  // OpenWDS StandardNotation.Parse accepts compact 5-column rows and fills
+  // gimmick type/value with zero. This form is useful for a hand-authored
+  // baseline chart that contains ordinary notes next to 7-column splits.
+  const std::string csv =
+      "0.0,-1.0,10,1,1\n"
+      "1.0,2.0,100,2,2,\n";  // six columns must still be rejected
+  NotationChart chart;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart).error),
+           static_cast<int>(SerializeError::ParseError));
+
+  const std::string compact = "0.0,-1.0,10,1,1\n";
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(compact, chart).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(chart.notes.size(), static_cast<size_t>(1));
+  if (!chart.notes.empty()) {
+    CHECK_EQ(static_cast<int>(chart.notes[0].gimmick_type),
+             static_cast<int>(GimmickType::None));
+    CHECK_EQ(chart.notes[0].scratch_length, 0);
+    CHECK_EQ(chart.notes[0].lane, 0);  // official lane 1 → editor lane 0
+  }
+  CHECK(OfficialChartFormat::looks_like_official_chart_text(compact));
+}
+
+void test_official_chart_accepts_negative_start_seconds() {
+  // OpenWDS StandardNotation.Parse has no lower bound on start/end seconds.
+  const std::string csv =
+      "-0.0487,-1.0,10,1,1\n"
+      "1.0,-1.0,10,2,1\n";
+  NotationChart chart;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(chart.notes.size(), static_cast<size_t>(2));
+
+  MusicTiming local = chart.timing;
+  local.offset_ms = 0;
+  const int64_t csv_ms = static_cast<int64_t>(std::llround(-0.0487 * 1000.0));
+  CHECK_EQ(chart.notes[0].start_tick, milliseconds_to_tick(csv_ms, local));
+  CHECK_EQ(chart.notes[0].start_ms(local),
+           tick_to_milliseconds(chart.notes[0].start_tick, local));
+
+  std::string exported;
+  CHECK_EQ(static_cast<int>(
+               OfficialChartFormat::serialize_chart(chart, exported).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(exported.front() == '-');
+  NotationChart roundtrip;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(exported, roundtrip).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(roundtrip.notes[0].start_tick, chart.notes[0].start_tick);
+
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart("nan,-1.0,10,1,1\n", chart).error),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_wdschart_accepts_negative_note_ticks() {
+  NotationChart chart;
+  normalize_timing_points(chart.timing);
+  NotationNote early = make_tap(-24, 0);
+  early.id = 0;
+  early.end_tick = -24;
+  chart.notes.push_back(early);
+
+  NotationNote split = make_tap(-400, 0);
+  split.id = 1;
+  split.end_tick = -100;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.width = 0;
+  chart.notes.push_back(split);
+
+  const fs::path path = temp_chart_path("negative_ticks_roundtrip.wdschart");
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(wdschart_file_roundtrip(chart, loaded, path).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(charts_wdschart_persisted_equal(chart, loaded));
+  CHECK_EQ(loaded.notes[0].start_tick, -24);
+  CHECK_EQ(loaded.notes[1].end_tick, -100);
+
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "neg_tick_reject.wdschart",
+               "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\nN 0 0 -2147484000.0 10 0 1 0 0 "
+               "-1\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_official_standard_charts_wdschart_and_csv_roundtrip() {
+  const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path() /
+                        "wds-resources/SongResources/OpenWDS/StandardCharts";
+  if (!fs::exists(root)) {
+    return;
+  }
+
+  const fs::path sample_paths[] = {
+      root / "10068/1/5.csv",
+      root / "265/1/5.csv",
+  };
+  for (const auto& csv_path : sample_paths) {
+    if (!fs::exists(csv_path)) {
+      continue;
+    }
+    NotationChart official;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::load_chart_file(csv_path.string(), official).error),
+             static_cast<int>(SerializeError::Ok));
+
+    bool has_negative_start = false;
+    for (const auto& n : official.notes) {
+      if (n.start_tick < 0) {
+        has_negative_start = true;
+        break;
+      }
+    }
+    CHECK(has_negative_start);
+
+    const fs::path wds_path =
+        temp_chart_path("std_" + csv_path.parent_path().parent_path().filename().string() + "_" +
+                        csv_path.filename().string() + ".wdschart");
+    NotationChart from_wds;
+    CHECK_EQ(static_cast<int>(wdschart_file_roundtrip(official, from_wds, wds_path).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(charts_wdschart_persisted_equal(official, from_wds));
+
+    std::string csv_out;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(official, csv_out).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(csv_out.find('-') != std::string::npos);
+    NotationChart from_csv;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv_out, from_csv).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK_EQ(notes_without_hold_eighths(official.notes).size(),
+             notes_without_hold_eighths(from_csv.notes).size());
+    CHECK_EQ(min_persisted_start_tick(official), min_persisted_start_tick(from_csv));
+    CHECK(min_persisted_start_tick(from_csv) < 0);
+  }
+
+  int roundtrip_ok = 0;
+  int roundtrip_fail = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".csv") {
+      continue;
+    }
+    if (entry.path().filename() == "music_config.csv") {
+      continue;
+    }
+    NotationChart official;
+    if (OfficialChartFormat::load_chart_file(entry.path().string(), official).error !=
+        SerializeError::Ok) {
+      ++roundtrip_fail;
+      continue;
+    }
+    const fs::path wds_path = temp_chart_path(
+        "scan_" + std::to_string(roundtrip_ok + roundtrip_fail) + ".wdschart");
+    NotationChart reloaded;
+    const auto rt = wdschart_file_roundtrip(official, reloaded, wds_path);
+    if (rt.error != SerializeError::Ok || !charts_wdschart_persisted_equal(official, reloaded)) {
+      ++roundtrip_fail;
+    } else {
+      ++roundtrip_ok;
+    }
+  }
+  std::fprintf(stderr, "StandardCharts wdschart roundtrip: ok=%d fail=%d\n", roundtrip_ok,
+               roundtrip_fail);
+  CHECK_EQ(roundtrip_fail, 0);
+  CHECK_EQ(roundtrip_ok, 1466);
 }
 
 void test_load_repo_test_official_charts() {
@@ -2447,6 +2749,25 @@ int count_doc_note_type(const ChartDocument& doc, NoteType type) {
   return n;
 }
 
+std::size_t count_substring(const std::string& text, const std::string& needle) {
+  std::size_t count = 0;
+  for (std::size_t pos = text.find(needle); pos != std::string::npos;
+       pos = text.find(needle, pos + needle.size())) {
+    ++count;
+  }
+  return count;
+}
+
+// Sorted start ticks of every HoldEighth in `notes`.
+std::vector<int32_t> eighth_ticks_of(const std::vector<NotationNote>& notes) {
+  std::vector<int32_t> ticks;
+  for (const auto& n : notes) {
+    if (n.note_type == NoteType::HoldEighth) ticks.push_back(n.start_tick);
+  }
+  std::sort(ticks.begin(), ticks.end());
+  return ticks;
+}
+
 // HoldEighth is derived (tpq/2). wdschart never stores it; old files are ignored.
 void test_wdschart_omits_and_ignores_eighths() {
   NotationChart chart;
@@ -2475,6 +2796,8 @@ void test_wdschart_omits_and_ignores_eighths() {
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(text.find(" 900 ") == std::string::npos);
     CHECK(text.find("NOTES 1\n") != std::string::npos);
+    CHECK(text.find("SUPPRESSED_EIGHTHS") == std::string::npos);
+    CHECK(text.find("\nX ") == std::string::npos);
   }
 
   const fs::path legacy = temp_chart_path("legacy_eighth.wdschart");
@@ -2489,9 +2812,13 @@ void test_wdschart_omits_and_ignores_eighths() {
   NotationChart loaded;
   CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(legacy.string(), loaded).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(count_chart_note_type(loaded, NoteType::HoldEighth), 0);
+  // The loader drops the off-grid file eighth (120) and recomputes 240/480/720.
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::HoldEighth), 3);
   CHECK_EQ(count_chart_note_type(loaded, NoteType::Hold), 1);
-  CHECK_EQ(static_cast<int>(loaded.notes.size()), 2);
+  CHECK_EQ(static_cast<int>(loaded.notes.size()), 5);
+  for (const auto& n : loaded.notes) {
+    if (n.note_type == NoteType::HoldEighth) CHECK(n.start_tick != 120);
+  }
 
   ChartEditorEngine engine;
   CHECK_EQ(static_cast<int>(engine.load_from_file(legacy.string()).error),
@@ -2504,7 +2831,7 @@ void test_wdschart_omits_and_ignores_eighths() {
   }
 }
 
-void test_official_keeps_file_eighth_and_export_generates() {
+void test_official_csv_keeps_file_eighths() {
   const std::string csv =
       "0.0,2.0,100,1,2,0,0\n"
       "0.25,-1.0,900,1,2,0,0\n";  // 0.25s is off the tpq/2 grid from 0
@@ -2513,17 +2840,34 @@ void test_official_keeps_file_eighth_and_export_generates() {
   load_opt.convert_lane_to_zero_based = true;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, parsed, load_opt).error),
            static_cast<int>(SerializeError::Ok));
+  CHECK(parsed.keep_file_eighths);
+  // The file row is kept. CSV has no BPM, so 240/480/720 are not generated.
   CHECK_EQ(count_chart_note_type(parsed, NoteType::HoldEighth), 1);
   CHECK_EQ(count_chart_note_type(parsed, NoteType::Hold), 1);
+  MusicTiming local = parsed.timing;
+  local.offset_ms = 0;
+  const int32_t file_tick =
+      milliseconds_to_tick(static_cast<int64_t>(std::llround(0.25 * 1000.0)), local);
+  CHECK_EQ(file_tick, 120);
+  for (const auto& n : parsed.notes) {
+    if (n.note_type == NoteType::HoldEighth) {
+      CHECK_EQ(n.start_tick, file_tick);
+      CHECK_EQ(n.lane, 0);
+      CHECK_EQ(n.width, 2);
+    }
+  }
 
   ChartEditorEngine engine;
   engine.load_chart(parsed, ChartEditMode::OfficialPreviewOnly);
   CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 1);
   for (const auto& n : engine.document().notes()) {
     if (n.note_type == NoteType::HoldEighth) {
-      CHECK_EQ(n.start_tick, 120);
+      CHECK_EQ(n.start_tick, file_tick);
     }
   }
+  // Switching the read-only chart must not regenerate the grid.
+  engine.load_chart(engine.document().to_notation_chart(), ChartEditMode::OfficialPreviewOnly);
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 1);
 
   NotationChart hold_only;
   hold_only.timing.bpm = 60.0;
@@ -2631,7 +2975,7 @@ void test_official_export_jump_scratch_eighths_stay_plain() {
   }
 }
 
-void test_sus_ignores_file_eighth_and_export_generates() {
+void test_sus_recomputes_eighths_and_export_generates() {
   NotationChart chart;
   chart.timing.bpm = 120.0;
   chart.timing.ticks_per_quarter = 480;
@@ -2669,8 +3013,15 @@ void test_sus_ignores_file_eighth_and_export_generates() {
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::HoldEighth), 0);
+  // The exported type-5 invisible mids are ignored on import (never Sound); the
+  // import recomputes exactly the tpq/2 grid of the hold (240/480/720).
+  CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::HoldEighth), 3);
   CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Sound), 0);
+  for (const auto& n : loaded.chart.notes) {
+    if (n.note_type == NoteType::HoldEighth) {
+      CHECK(n.start_tick == 240 || n.start_tick == 480 || n.start_tick == 720);
+    }
+  }
 
   const fs::path path = temp_chart_path("eighth.sus");
   CHECK_EQ(static_cast<int>(SusChartFormat::save_file(chart, path.string(), options).error),
@@ -2893,9 +3244,8 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   }
 }
 
-// Sirius type 40 mid-scratch splits purple holds; HoldEighth/Split export match sus2txt.
-void test_official_sound_purple_split_and_row_semantics() {
-  // ScratchHold 1..3s lanes 1-3 width 3; mid SoundPurple at 2s with scratchLength=3.
+// Official type 40 is Scratch (kept). Split rows export type 0 / lane -1 / width 0.
+void test_official_scratch_and_split_row_semantics() {
   const std::string csv =
       "1.0,3.0,110,1,3,0,0\n"
       "2.0,-1.0,40,1,3,0,3\n"
@@ -2915,23 +3265,38 @@ void test_official_sound_purple_split_and_row_semantics() {
   int eighths = 0;
   int type40 = 0;
   for (const auto& n : chart.notes) {
-    if (static_cast<int32_t>(n.note_type) == 40) ++type40;
+    if (n.note_type == NoteType::Scratch) {
+      ++type40;
+      CHECK_EQ(n.start_tick, 960);
+      CHECK_EQ(n.end_tick, n.start_tick);
+      CHECK_EQ(n.lane, 0);
+      CHECK_EQ(n.width, 3);
+      CHECK_EQ(n.scratch_length, 3);
+    }
     if (n.note_type == NoteType::ScratchHold) {
       ++scratch_holds;
-      if (n.gimmick_type == GimmickType::JumpScratch) {
-        ++jump;
-        CHECK_EQ(n.scratch_length, 3);
-        CHECK_EQ(n.end_tick, 960);
-      }
+      CHECK_EQ(n.start_tick, 480);
+      CHECK_EQ(n.end_tick, 1440);
+      CHECK_EQ(static_cast<int>(n.gimmick_type), static_cast<int>(GimmickType::None));
     }
     if (n.note_type == NoteType::ScratchSound) ++stars;
     if (n.note_type == NoteType::HoldEighth) ++eighths;
   }
-  CHECK_EQ(type40, 0);
-  CHECK_EQ(scratch_holds, 2);
-  CHECK_EQ(jump, 1);
+  CHECK_EQ(type40, 1);
+  CHECK_EQ(scratch_holds, 1);
+  CHECK_EQ(jump, 0);
   CHECK_EQ(stars, 1);
+  // The CSV's 900 row at 1.25s is kept. The hold does not grow a tpq/2 grid.
   CHECK_EQ(eighths, 1);
+  for (const auto& n : chart.notes) {
+    if (n.note_type != NoteType::HoldEighth) continue;
+    CHECK_EQ(n.start_tick, 600);
+    CHECK_EQ(n.lane, 0);
+    CHECK_EQ(n.width, 3);
+  }
+
+  CHECK_EQ(static_cast<int>(convert_note_type(chart.notes[0], NoteType::Scratch, 480).note_type),
+           static_cast<int>(chart.notes[0].note_type));
 
   // Export: HoldEighth endTime=-1; Split leftLane=-1; JumpScratch name when scratch≠0.
   NotationChart export_chart;
@@ -3007,6 +3372,37 @@ void test_official_sound_purple_split_and_row_semantics() {
   }
   CHECK(out.find("-1,0,12,") != std::string::npos || out.find("-1,0,Split2,") != std::string::npos);
   CHECK(out.find("JumpScratch,2") != std::string::npos);
+
+  // Critical+Split3 covering 12 lanes still exports the official placeholder.
+  {
+    NotationChart split_chart;
+    split_chart.timing.bpm = 60.0;
+    split_chart.timing.ticks_per_quarter = 480;
+    NotationNote split;
+    split.id = 0;
+    split.start_tick = 0;
+    split.end_tick = 960;
+    split.note_type = NoteType::Critical;
+    split.lane = 0;
+    split.width = 12;
+    split.gimmick_type = GimmickType::Split3;
+    split.scratch_length = 3;
+    split_chart.notes.push_back(split);
+    std::string split_out;
+    CHECK_EQ(static_cast<int>(
+                 OfficialChartFormat::serialize_chart(split_chart, split_out, save_opt).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(split_out.find(",0,-1,0,") != std::string::npos);
+    CHECK(split_out.find(",20,") == std::string::npos);
+  }
+
+  {
+    std::string scratch_out;
+    CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, scratch_out).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(scratch_out.find(",40,") != std::string::npos);
+    CHECK(scratch_out.find(",110,") != std::string::npos);
+  }
 }
 
 void test_migrate_wdschart_scratch_to_flick_script() {
@@ -3037,9 +3433,11 @@ void test_migrate_wdschart_scratch_to_flick_script() {
   CHECK_EQ(static_cast<int>(chart.notes.size()), 2);
   CHECK(chart.notes[1].note_type == NoteType::Flick);
 
-  NotationChart rejected;
-  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(src.string(), rejected).error),
-           static_cast<int>(SerializeError::ParseError));
+  NotationChart raw;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(src.string(), raw).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(raw.notes.size()), 2);
+  CHECK(raw.notes[1].note_type == NoteType::Scratch);
 }
 
 void test_save_failure_preserves_note_ids() {
@@ -3858,8 +4256,10 @@ void test_official_and_wdschart_roundtrip_hold_chain_fragment() {
   NotationChart from_wds;
   CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), from_wds).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK_EQ(static_cast<int>(from_wds.notes.size()), static_cast<int>(chart.notes.size()));
-  auto c = from_wds.notes;
+  // .wdschart reloads regenerate HoldEighth; CSV import keeps only file rows (none here).
+  auto authored_from_wds = drop_eighths(from_wds.notes);
+  CHECK_EQ(static_cast<int>(authored_from_wds.size()), static_cast<int>(authored_chart.size()));
+  auto c = authored_from_wds;
   std::sort(c.begin(), c.end(), [&](const auto& l, const auto& r) { return key(l) < key(r); });
   for (size_t i = 0; i < a.size(); ++i) {
     CHECK_EQ(static_cast<int>(a[i].note_type), static_cast<int>(c[i].note_type));
@@ -5370,7 +5770,10 @@ void test_wdschart_export_import_preserves_chart() {
   CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
            static_cast<int>(SerializeError::Ok));
 
-  CHECK_EQ(static_cast<int>(loaded.notes.size()), static_cast<int>(chart.notes.size()));
+  // The loader recomputes HoldEighth from the holds; persisted notes must match exactly.
+  CHECK_EQ(static_cast<int>(notes_without_hold_eighths(loaded.notes).size()),
+           static_cast<int>(chart.notes.size()));
+  CHECK(count_chart_note_type(loaded, NoteType::HoldEighth) > 0);
   CHECK(std::abs(loaded.timing.bpm - chart.timing.bpm) < 1e-6);
   CHECK_EQ(loaded.timing.ticks_per_quarter, chart.timing.ticks_per_quarter);
 
@@ -5380,7 +5783,7 @@ void test_wdschart_export_import_preserves_chart() {
                       n.scratch_length};
   };
   std::vector<NotationNote> a = chart.notes;
-  std::vector<NotationNote> b = loaded.notes;
+  std::vector<NotationNote> b = notes_without_hold_eighths(loaded.notes);
   std::sort(a.begin(), a.end(), [&](const NotationNote& x, const NotationNote& y) {
     return key(x) < key(y);
   });
@@ -5793,6 +6196,7 @@ NotationNote make_head(NoteType type, int32_t id, int32_t tick, int32_t lane, in
 // (legacy Scratch no longer exists; Nontail→tailed Hold, partial head→full auto head).
 void test_sus_comprehensive_roundtrip_all_cases() {
   NotationChart chart;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
   chart.timing.bpm = 185.0;
   chart.timing.ticks_per_quarter = 480;
   chart.timing.points = {
@@ -5972,10 +6376,32 @@ void test_sus_comprehensive_roundtrip_all_cases() {
     CHECK(lane9_normal);
   }
   CHECK(count_type(loaded.chart, NoteType::Sound) >= 1);
-  CHECK_EQ(count_type(loaded.chart, NoteType::HoldEighth), 0);
-  // ScratchSound on a blue Hold has no Ched encoding → imports as Sound; Nontail → tailed.
+  // HoldEighth is always derived on import: every generated row hangs on an imported
+  // hold body, sits on the tpq/2 grid strictly inside it and copies its lane/width.
+  CHECK(count_type(loaded.chart, NoteType::HoldEighth) > 0);
+  {
+    std::unordered_map<int32_t, const NotationNote*> body_by_id;
+    for (const auto& n : loaded.chart.notes) {
+      if (n.note_type != NoteType::HoldEighth && n.id >= 0) body_by_id[n.id] = &n;
+    }
+    for (const auto& n : loaded.chart.notes) {
+      if (n.note_type != NoteType::HoldEighth) continue;
+      const auto it = body_by_id.find(n.parent_hold_id);
+      CHECK(it != body_by_id.end());
+      if (it == body_by_id.end()) continue;
+      const NotationNote& body = *it->second;
+      CHECK(is_bindable_hold_body(body.note_type));
+      CHECK(n.start_tick > body.start_tick);
+      CHECK(n.start_tick < body.end_tick);
+      CHECK_EQ((n.start_tick - body.start_tick) % 240, 0);
+      CHECK_EQ(n.lane, body.lane);
+      CHECK_EQ(n.width, body.width);
+    }
+  }
+  // ScratchSound on a blue Hold has no Ched encoding → imports as Sound;
+  // endpoint Damage preserves Nontail.
   CHECK_EQ(count_type(loaded.chart, NoteType::ScratchSound), 0);
-  CHECK_EQ(count_type(loaded.chart, NoteType::NontailHold), 0);
+  CHECK_EQ(count_type(loaded.chart, NoteType::NontailHold), 1);
 
   // High lanes stay in WDS space under ched padding
   {
@@ -6292,6 +6718,39 @@ void test_convert_notes_in_selection_hold_stars() {
   CHECK(to_hold.updates.at(11).note_type == NoteType::HoldStart);
   CHECK(to_hold.updates.at(12).note_type == NoteType::Sound);
   CHECK_EQ(to_hold.updates.at(12).parent_hold_id, 10);
+}
+
+void test_convert_skips_split_lane_gimmicks() {
+  ChartDocument doc;
+  NotationNote tap = make_tap(0, 3);
+  tap.id = 1;
+  tap.width = 2;
+  CHECK(doc.add_note(tap) == 1);
+  NotationNote split;
+  split.id = 2;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.scratch_length = 10120;
+  split.start_tick = 0;
+  split.end_tick = 480;
+  split.lane = 0;
+  split.width = 12;
+  CHECK(doc.add_note(split) == 2);
+
+  CHECK(!is_playfield_selectable(*doc.find_note(2)));
+  CHECK(is_playfield_selectable(*doc.find_note(1)));
+
+  const NotationNote before = *doc.find_note(2);
+  const NotationNote converted = convert_note_type(before, NoteType::Normal, 480);
+  CHECK_EQ(converted.note_type, NoteType::None);
+  CHECK(converted.gimmick_type == GimmickType::Split3);
+  CHECK_EQ(converted.scratch_length, 10120);
+  CHECK_EQ(converted.width, 12);
+
+  const auto planned = convert_notes_in_selection(doc, {1, 2}, NoteType::Flick);
+  CHECK(planned.updates.find(2) == planned.updates.end());
+  CHECK(planned.updates.at(1).note_type == NoteType::Flick);
+  CHECK(planned.removals.empty());
 }
 
 NotationNote note_with_id(int32_t id, int32_t start_tick, int32_t lane) {
@@ -6725,6 +7184,7 @@ bool reference_is_combo_head_note(const NotationNote& note) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
+    case NoteType::Scratch:
     case NoteType::BlueTap:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
@@ -7623,6 +8083,70 @@ void test_scratch_hold_curve_commit_hold_eighths_one_command() {
   CHECK(note_vectors_eq(doc.notes(), after_notes));
 }
 
+// Regression: an overhang note elsewhere in the chart must not make the curve head
+// ignore the taps occupying the first body's start lanes.
+void test_scratch_hold_curve_commit_head_ignores_unrelated_overhang_note() {
+  const MusicTiming timing = make_curve_timing_4_4();
+  ScratchHoldCurveRequest req;
+  req.start_tick = 0;
+  req.end_tick = 480;
+  req.start_center = 3.0;
+  req.end_center = 3.0;
+  req.width = 3;  // lanes 2..4
+  req.lane_count = 12;
+  req.subdivisions_per_beat = 1;
+  const auto bodies = generate_scratch_hold_curve(req, timing);
+  CHECK_EQ(static_cast<int32_t>(bodies.size()), 1);
+  if (bodies.empty()) return;
+  CHECK_EQ(bodies.front().lane, 2);
+
+  NotationNote tap;
+  tap.id = 1;
+  tap.start_tick = 0;
+  tap.end_tick = 0;
+  tap.lane = 2;
+  tap.width = 1;
+  tap.note_type = NoteType::Normal;
+
+  NotationNote overhang = tap;
+  overhang.id = 2;
+  overhang.start_tick = 960;
+  overhang.end_tick = 960;
+  overhang.lane = 12;  // lane + width > 12: needs Sirius Extended
+  CHECK(note_requires_sirius_extended(overhang));
+
+  const auto head_of = [&](const std::vector<NotationNote>& notes)
+      -> std::vector<NotationNote> {
+    ScratchHoldCurveCommitInput input;
+    input.notes = notes;
+    input.generated_bodies = bodies;
+    input.include_head = true;
+    input.ticks_per_quarter = 480;
+    input.next_id = 10;
+    const auto commit = build_scratch_hold_curve_commit(input);
+    CHECK(commit.has_value());
+    std::vector<NotationNote> heads;
+    if (!commit) return heads;
+    for (const auto& note : commit->after) {
+      if (note.note_type == NoteType::ScratchHoldStart) heads.push_back(note);
+    }
+    return heads;
+  };
+
+  const auto plain = head_of({tap});
+  const auto with_overhang = head_of({tap, overhang});
+  CHECK_EQ(static_cast<int>(plain.size()), 1);
+  CHECK_EQ(static_cast<int>(with_overhang.size()), 1);
+  if (plain.size() == 1 && with_overhang.size() == 1) {
+    CHECK_EQ(plain.front().lane, 3);
+    CHECK_EQ(plain.front().width, 2);
+    CHECK_EQ(with_overhang.front().lane, plain.front().lane);
+    CHECK_EQ(with_overhang.front().width, plain.front().width);
+    CHECK_EQ(with_overhang.front().start_tick, 0);
+    CHECK_EQ(with_overhang.front().end_tick, 0);
+  }
+}
+
 void test_scratch_hold_curve_normalizes_hold_top_centers_not_mouse() {
   const MusicTiming timing = make_curve_timing_4_4();
   ScratchHoldCurveRequest req;
@@ -7724,7 +8248,1791 @@ void test_public_mutation_generation_semantics_unchanged() {
   CHECK_EQ(doc.content_generation(), g4 + 1);
 }
 
+void test_sirius_extended_csv_native_and_sus_scroll() {
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationNote body = make_tap(0, -2);
+  body.id = 0;
+  body.width = 5;
+  body.end_tick = 960;
+  body.note_type = NoteType::NontailHold;
+  chart.notes.push_back(body);
+  chart.scroll_speed_points = {{0, 1.0}, {480, 2.0}, {960, 0.5}, {1440, 1.0}};
+  const auto features = required_chart_features(chart);
+  CHECK_EQ(static_cast<int>(features.size()), 3);
+  CHECK(features[0] == "nontail-hold-v1");
+  CHECK(features[1] == "positive-sv-v1");
+  CHECK(features[2] == "lane-overhang-v1");
+
+  // Eighths are derived for nontail holds too: hold 0..960 @ tpq 480 -> 240, 480, 720.
+  const auto generated = with_all_hold_eighths_recomputed(chart.notes, 480);
+  CHECK_EQ(count_chart_note_type(NotationChart{chart.timing, generated}, NoteType::HoldEighth), 3);
+  for (const NoteType type : {NoteType::NontailHold, NoteType::NontailCriticalHold,
+                              NoteType::NontailScratchHold,
+                              NoteType::NontailScratchCriticalHold}) {
+    NotationNote variant = body;
+    variant.note_type = type;
+    const auto ticks = with_all_hold_eighths_recomputed({variant}, 480);
+    CHECK_EQ(count_chart_note_type(NotationChart{chart.timing, ticks}, NoteType::HoldEighth), 3);
+    CHECK(!is_hold_with_tail(type));
+    CHECK(is_bindable_hold_body(type));
+  }
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::Ok);
+  CHECK(csv.find(",1100,") != std::string::npos);
+  // Export derives the 3 eighths of the nontail body and writes them as type 900.
+  {
+    int eighth_rows = 0;
+    for (size_t pos = csv.find(",900,"); pos != std::string::npos;
+         pos = csv.find(",900,", pos + 1)) {
+      ++eighth_rows;
+    }
+    CHECK_EQ(eighth_rows, 3);
+  }
+  CHECK(csv.find(",-1,0,0,0,0") != std::string::npos);
+
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationChart parsed;
+  CHECK(OfficialChartFormat::parse_chart(csv, parsed, extended).error == SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(parsed.scroll_speed_points.size()), 4);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::HiSpeed), 0);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::NontailHold), 1);
+  CHECK_EQ(parsed.notes.front().lane, -2);
+  const std::string overhang_csv =
+      "1.0,-1.0,10,-1,5,0,0\n"
+      "2.0,-1.0,10,11,6,0,0\n"
+      "3.0,-1.0,10,-2,19,0,0\n";
+  NotationChart overhang;
+  CHECK(OfficialChartFormat::parse_chart(overhang_csv, overhang, extended).error ==
+        SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(overhang.notes.size()), 3);
+  CHECK_EQ(overhang.notes[1].end_lane(), 15);
+  CHECK_EQ(overhang.notes[2].width, 19);
+  CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,14,3,0,0\n", overhang, extended).error ==
+        SerializeError::Ok);
+  CHECK_EQ(overhang.notes.front().lane, 13);
+  CHECK_EQ(overhang.notes.front().width, 3);
+  CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,-4,3,0,0\n", overhang, extended).error ==
+        SerializeError::Ok);
+  CHECK_EQ(overhang.notes.front().lane, -5);
+  CHECK(OfficialChartFormat::parse_chart("1.0,-1.0,10,14,3,0,0\n", overhang).error ==
+        SerializeError::ParseError);
+  CHECK(lane_span_overlaps_playfield(14, 3, 12, ChartCompatibilityProfile::SiriusExtended));
+  CHECK(lane_span_overlaps_playfield(-8, 2, 12, ChartCompatibilityProfile::SiriusExtended));
+  CHECK(!lane_span_overlaps_playfield(14, 3, 12, ChartCompatibilityProfile::Official));
+  CHECK_EQ(clamp_lane_for_width(14, 3, 12, ChartCompatibilityProfile::SiriusExtended), 14);
+  CHECK_EQ(clamp_lane_for_width(-8, 2, 12, ChartCompatibilityProfile::SiriusExtended), -8);
+  CHECK_EQ(clamp_lane_for_width(14, 3, 12, ChartCompatibilityProfile::Official), 9);
+  for (const char* invalid : {"1.0,0,-1,0,0,0,0\n",
+                              "1.0,-2,-1,0,0,0,0\n",
+                              "1.0,nan,-1,0,0,0,0\n"}) {
+    NotationChart rejected_speed;
+    CHECK(OfficialChartFormat::parse_chart(invalid, rejected_speed).error ==
+          SerializeError::ParseError);
+  }
+  NotationChart strict;
+  CHECK(OfficialChartFormat::parse_chart(csv, strict).error == SerializeError::ParseError);
+  const fs::path csv_file = temp_chart_path("sirius_extended.csv");
+  {
+    std::ofstream output(csv_file);
+    output << csv;
+  }
+  NotationChart auto_loaded;
+  ChartEditMode auto_mode = ChartEditMode::Editable;
+  CHECK(ChartSerializer::load_auto(csv_file.string(), auto_loaded, {}, &auto_mode).error ==
+        SerializeError::Ok);
+  CHECK(auto_loaded.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+  CHECK(auto_mode == ChartEditMode::OfficialPreviewOnly);
+
+  const fs::path native = temp_chart_path("sirius_extended_v6.wdschart");
+  CHECK(ChartSerializer::save_to_file(chart, native.string()).error == SerializeError::Ok);
+  NotationChart loaded;
+  CHECK(ChartSerializer::load_from_file(native.string(), loaded).error == SerializeError::Ok);
+  CHECK(loaded.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+  CHECK_EQ(static_cast<int>(loaded.scroll_speed_points.size()), 4);
+  CHECK_EQ(loaded.notes.front().lane, -2);
+
+  {
+    NotationChart fully_out;
+    fully_out.timing = chart.timing;
+    fully_out.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+    NotationNote far_right = make_tap(0, 14);
+    far_right.id = 0;
+    far_right.width = 3;
+    NotationNote far_left = make_tap(480, -8);
+    far_left.id = 1;
+    far_left.width = 2;
+    fully_out.notes = {far_right, far_left};
+    const fs::path outside_native = temp_chart_path("fully_outside.wdschart");
+    CHECK(ChartSerializer::save_to_file(fully_out, outside_native.string()).error ==
+          SerializeError::Ok);
+    NotationChart outside_loaded;
+    CHECK(ChartSerializer::load_from_file(outside_native.string(), outside_loaded).error ==
+          SerializeError::Ok);
+    CHECK_EQ(static_cast<int>(outside_loaded.notes.size()), 2);
+    if (outside_loaded.notes.size() == 2) {
+      CHECK_EQ(outside_loaded.notes[0].lane, 14);
+      CHECK_EQ(outside_loaded.notes[1].lane, -8);
+    }
+
+    std::string outside_csv;
+    CHECK(OfficialChartFormat::serialize_chart(fully_out, outside_csv).error == SerializeError::Ok);
+    const fs::path outside_csv_file = temp_chart_path("fully_outside.csv");
+    {
+      std::ofstream output(outside_csv_file);
+      output << outside_csv;
+    }
+    NotationChart csv_auto;
+    CHECK(ChartSerializer::load_auto(outside_csv_file.string(), csv_auto).error ==
+          SerializeError::Ok);
+    CHECK(csv_auto.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(csv_auto.notes.size()), 2);
+
+    std::string outside_sus;
+    CHECK(SusChartFormat::serialize(fully_out, SusChartSaveOptions{}, outside_sus).error ==
+          SerializeError::Ok);
+    const fs::path outside_sus_file = temp_chart_path("fully_outside.sus");
+    {
+      std::ofstream output(outside_sus_file);
+      output << outside_sus;
+    }
+    SusChartLoadResult sus_outside;
+    CHECK(SusChartFormat::parse(outside_sus, sus_outside).error == SerializeError::Ok);
+    CHECK(sus_outside.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(sus_outside.chart.notes.size()), 2);
+    if (sus_outside.chart.notes.size() == 2) {
+      CHECK_EQ(sus_outside.chart.notes[0].lane, 14);
+      CHECK_EQ(sus_outside.chart.notes[1].lane, -8);
+    }
+  }
+  {
+    ChartEditorEngine editable;
+    editable.load_chart(chart);
+    CHECK(!editable.document().set_compatibility_profile(ChartCompatibilityProfile::Official));
+    const auto before = editable.document().scroll_speed_points();
+    auto after = before;
+    after.push_back({1920, 1.25});
+    CHECK(editable.execute_command(std::make_unique<SetScrollSpeedPointsCommand>(before, after)));
+    CHECK_EQ(static_cast<int>(editable.document().scroll_speed_points().size()), 5);
+    CHECK(editable.undo());
+    CHECK_EQ(static_cast<int>(editable.document().scroll_speed_points().size()), 4);
+  }
+
+  std::string sus_extended_text;
+  CHECK(SusChartFormat::serialize(chart, SusChartSaveOptions{}, sus_extended_text).error ==
+        SerializeError::Ok);
+  CHECK(sus_extended_text.find("#WDS_PROFILE SiriusExtended") != std::string::npos);
+  CHECK(sus_extended_text.find("#TIL00:") != std::string::npos);
+  SusChartLoadResult sus_extended_loaded;
+  CHECK(SusChartFormat::parse(sus_extended_text, sus_extended_loaded).error ==
+        SerializeError::Ok);
+  CHECK(sus_extended_loaded.chart.compatibility_profile ==
+        ChartCompatibilityProfile::SiriusExtended);
+  CHECK_EQ(count_chart_note_type(sus_extended_loaded.chart, NoteType::NontailHold), 1);
+  CHECK_EQ(sus_extended_loaded.chart.notes.front().lane, -2);
+  CHECK_EQ(static_cast<int>(sus_extended_loaded.chart.scroll_speed_points.size()), 4);
+  {
+    NotationChart scratch_chart;
+    scratch_chart.timing = chart.timing;
+    scratch_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+    NotationNote scratch = make_tap(0, 2);
+    scratch.id = 0;
+    scratch.width = 2;
+    scratch.end_tick = 960;
+    scratch.note_type = NoteType::NontailScratchHold;
+    scratch_chart.notes.push_back(scratch);
+    std::string scratch_sus;
+    CHECK(SusChartFormat::serialize(scratch_chart, SusChartSaveOptions{}, scratch_sus).error ==
+          SerializeError::Ok);
+    SusChartLoadResult scratch_loaded;
+    CHECK(SusChartFormat::parse(scratch_sus, scratch_loaded).error == SerializeError::Ok);
+    CHECK_EQ(count_chart_note_type(scratch_loaded.chart, NoteType::NontailScratchHold), 1);
+  }
+
+  NotePositionCalculator positions;
+  positions.set_scroll_speed_points(chart.scroll_speed_points, chart.timing);
+  CHECK(std::fabs(positions.scroll_distance_ms(1500, 500) - 1500.0) < 1e-6);
+  CHECK(std::fabs(positions.calculate_position_y(1500, 999) -
+                  positions.calculate_position_y(1500, 1000)) < 0.1f);
+  positions.clear_scroll_speed_points();
+  CHECK(std::fabs(positions.calculate_position_y(1500, 500) -
+                  official_note_local_y(1500, 500, 5.0)) < 1e-5f);
+
+  const std::string sus =
+      "#REQUEST \"ticks_per_beat 480\"\n"
+      "#BASEBPM 120\n"
+      "#TIL00: \"0'0:1.0, 0'960:2.0, 1'0:0.5\"\n";
+  SusChartLoadResult sus_loaded;
+  CHECK(SusChartFormat::parse(sus, sus_loaded).error == SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(sus_loaded.chart.scroll_speed_points.size()), 3);
+  CHECK_EQ(sus_loaded.chart.scroll_speed_points[1].tick, 960);
+  CHECK(std::fabs(sus_loaded.chart.scroll_speed_points[2].multiplier - 0.5) < 1e-9);
+  CHECK(SusChartFormat::parse("#TIL00: \"0'0:0\"\n", sus_loaded).error ==
+        SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(sus_loaded.chart.scroll_speed_points.size()), 1);
+  if (!sus_loaded.chart.scroll_speed_points.empty()) {
+    CHECK(std::fabs(sus_loaded.chart.scroll_speed_points[0].multiplier) < 1e-9);
+  }
+}
+
+void test_scroll_speed_zero_freezes_preview_distance() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+  NotePositionCalculator positions;
+  // 120 BPM, TPQ 480: tick 480 = 500 ms (freeze), tick 960 = 1000 ms (resume).
+  positions.set_scroll_speed_points({{0, 1.0}, {480, 0.0}, {960, 1.0}}, timing);
+  CHECK(std::fabs(positions.scroll_distance_ms(1000, 500)) < 1e-6);
+  CHECK(std::fabs(positions.scroll_distance_ms(1500, 1000) - 500.0) < 1e-6);
+
+  ChartDocument doc;
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  CHECK(doc.set_scroll_speed_points({{0, 0.0}}));
+  CHECK_EQ(static_cast<int>(doc.scroll_speed_points().size()), 1);
+}
+
+void test_sus_skips_negative_scroll_speed_with_warning() {
+  const std::string sus =
+      "#REQUEST \"ticks_per_beat 480\"\n"
+      "#BASEBPM 120\n"
+      "#TIL00: \"0'0:1.5, 0'120:-2.0, 0'240:0, 0'360:2.0\"\n"
+      "#00012: 14\n";
+  SusChartLoadResult loaded;
+  const auto result = SusChartFormat::parse(sus, loaded);
+  CHECK(result.error == SerializeError::Ok);
+  if (result.error != SerializeError::Ok) return;
+  CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
+  CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 3);
+  if (loaded.chart.scroll_speed_points.size() == 3) {
+    CHECK_EQ(loaded.chart.scroll_speed_points[0].tick, 0);
+    CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 240);
+    CHECK_EQ(loaded.chart.scroll_speed_points[2].tick, 360);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[0].multiplier - 1.5) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[2].multiplier - 2.0) < 1e-9);
+  }
+  CHECK_EQ(static_cast<int>(loaded.warnings.size()), 1);
+  if (!loaded.warnings.empty()) {
+    CHECK(loaded.warnings[0].find("1") != std::string::npos);
+    CHECK(loaded.warnings[0].find("SV") != std::string::npos);
+  }
+}
+
+// Former suppression tombstones / authored markers (scratch_length sentinels INT32_MIN and
+// INT32_MIN + 1) no longer exist: recompute drops every HoldEighth and regenerates it.
+void test_legacy_eighth_markers_are_dropped_and_recomputed() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+
+  NotationNote body = make_tap(0, 2);
+  body.id = 7;
+  body.width = 3;
+  body.end_tick = 480;
+  body.note_type = NoteType::NontailScratchHold;
+  NotationNote tombstone = body;
+  tombstone.id = 8;
+  tombstone.start_tick = 240;
+  tombstone.end_tick = 240;
+  tombstone.note_type = NoteType::HoldEighth;
+  tombstone.parent_hold_id = body.id;
+  tombstone.scratch_length = std::numeric_limits<int32_t>::min();
+  NotationNote authored = tombstone;
+  authored.id = 9;
+  authored.start_tick = 120;
+  authored.end_tick = 120;
+  authored.scratch_length = std::numeric_limits<int32_t>::min() + 1;
+
+  // The deleted point at 240 comes back, the authored off-grid point at 120 is gone.
+  const auto notes = with_all_hold_eighths_recomputed({body, tombstone, authored}, 480);
+  CHECK_EQ(static_cast<int>(notes.size()), 2);
+  CHECK_EQ(count_chart_note_type(NotationChart{{}, notes}, NoteType::HoldEighth), 1);
+  if (notes.size() == 2) {
+    const NotationNote& eighth = notes[1];
+    CHECK_EQ(static_cast<int>(eighth.note_type), static_cast<int>(NoteType::HoldEighth));
+    CHECK_EQ(eighth.start_tick, 240);
+    CHECK_EQ(eighth.end_tick, 240);
+    CHECK_EQ(eighth.scratch_length, 0);
+    CHECK_EQ(static_cast<int>(eighth.gimmick_type), static_cast<int>(GimmickType::None));
+    CHECK_EQ(eighth.parent_hold_id, 7);
+    CHECK_EQ(eighth.lane, 2);
+    CHECK_EQ(eighth.width, 3);
+  }
+  // The per-hold generator drops them too.
+  const auto per_hold = with_recomputed_hold_eighths({body, tombstone, authored}, body, 480);
+  CHECK_EQ(count_chart_note_type(NotationChart{{}, per_hold}, NoteType::HoldEighth), 1);
+
+  // Preview combo: the nontail body now judges through its derived eighth.
+  std::vector<int64_t> combo_hits;
+  collect_preview_combo_hits(notes, timing, combo_hits);
+  CHECK_EQ(static_cast<int>(combo_hits.size()), 1);
+  if (combo_hits.size() == 1) CHECK_EQ(combo_hits[0], tick_to_milliseconds(240, timing));
+
+  NotationChart chart;
+  chart.timing = timing;
+  chart.notes = notes;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::Ok);
+  CHECK(csv.find(",1110,") != std::string::npos);
+  CHECK_EQ(static_cast<int>(count_substring(csv, ",900,")), 1);
+
+  const fs::path path = temp_chart_path("derived_hold_eighth.wdschart");
+  CHECK(ChartSerializer::save_to_file(chart, path.string()).error == SerializeError::Ok);
+  SerializeResult io;
+  const std::string text = read_text_file(path.string(), io);
+  CHECK(io.error == SerializeError::Ok);
+  CHECK(text.find("NOTES 1\n") != std::string::npos);
+  CHECK(text.find(" 900 ") == std::string::npos);
+  CHECK(text.find("SUPPRESSED_EIGHTHS") == std::string::npos);
+  CHECK(text.find("\nX ") == std::string::npos);
+
+  NotationChart loaded;
+  CHECK(ChartSerializer::load_from_file(path.string(), loaded).error == SerializeError::Ok);
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::HoldEighth), 1);
+  for (const auto& n : loaded.notes) {
+    if (n.note_type != NoteType::HoldEighth) continue;
+    CHECK_EQ(n.start_tick, 240);
+    CHECK_EQ(n.scratch_length, 0);
+    CHECK_EQ(n.parent_hold_id, 7);
+  }
+}
+
+// Nontail bodies derive exactly the eighths a tailed hold of the same span derives
+// (tpq/2 grid, exclusive end, visible stars take their tick) - before and after
+// convert_note_type in either direction.
+void test_nontail_holds_generate_same_eighths_as_tailed() {
+  constexpr int32_t kTpq = 480;
+  struct TypePair {
+    NoteType tailed;
+    NoteType nontail;
+    NoteType star;
+  };
+  const TypePair pairs[] = {
+      {NoteType::Hold, NoteType::NontailHold, NoteType::Sound},
+      {NoteType::CriticalHold, NoteType::NontailCriticalHold, NoteType::Sound},
+      {NoteType::ScratchHold, NoteType::NontailScratchHold, NoteType::ScratchSound},
+      {NoteType::ScratchCriticalHold, NoteType::NontailScratchCriticalHold,
+       NoteType::ScratchSound},
+  };
+  struct Span {
+    int32_t start;
+    int32_t end;
+  };
+  const Span spans[] = {{0, 240}, {0, 241}, {0, 960}, {0, 2400}, {100, 1300}, {480, 1441}};
+
+  for (const auto& pair : pairs) {
+    for (const auto& span : spans) {
+      for (const bool with_star : {false, true}) {
+        NotationNote tailed = make_tap(span.start, 2);
+        tailed.id = 0;
+        tailed.width = 3;
+        tailed.end_tick = span.end;
+        tailed.note_type = pair.tailed;
+        NotationNote nontail = tailed;
+        nontail.note_type = pair.nontail;
+
+        std::vector<NotationNote> tailed_notes = {tailed};
+        std::vector<NotationNote> nontail_notes = {nontail};
+        const int32_t star_tick = span.start + 2 * (kTpq / 2);  // second grid slot
+        const bool star_inside = with_star && star_tick < span.end;
+        if (with_star) {
+          NotationNote star = make_tap(star_tick, 2);
+          star.id = 1;
+          star.width = 3;
+          star.end_tick = star_tick;
+          star.note_type = pair.star;
+          star.parent_hold_id = 0;
+          tailed_notes.push_back(star);
+          nontail_notes.push_back(star);
+        }
+
+        // Expected: span.start + k * 240 strictly inside (start, end), minus the star tick.
+        std::vector<int32_t> expected;
+        for (int32_t t = span.start + kTpq / 2; t < span.end; t += kTpq / 2) {
+          if (star_inside && t == star_tick) continue;
+          expected.push_back(t);
+        }
+
+        const auto from_tailed = with_all_hold_eighths_recomputed(tailed_notes, kTpq);
+        const auto from_nontail = with_all_hold_eighths_recomputed(nontail_notes, kTpq);
+        CHECK(eighth_ticks_of(from_tailed) == expected);
+        CHECK(eighth_ticks_of(from_nontail) == expected);
+        for (const auto& n : from_nontail) {
+          if (n.note_type != NoteType::HoldEighth) continue;
+          CHECK_EQ(n.end_tick, n.start_tick);
+          CHECK_EQ(n.lane, 2);
+          CHECK_EQ(n.width, 3);
+          CHECK_EQ(n.parent_hold_id, 0);
+          CHECK_EQ(n.scratch_length, 0);
+          CHECK_EQ(static_cast<int>(n.gimmick_type), static_cast<int>(GimmickType::None));
+        }
+        CHECK_EQ(static_cast<int>(eighth_ticks_of(from_nontail).size()) +
+                     (star_inside ? 1 : 0),
+                 static_cast<int>(hold_eighth_slot_count(nontail, kTpq)));
+        CHECK_EQ(hold_eighth_slot_count(nontail, kTpq), hold_eighth_slot_count(tailed, kTpq));
+
+        // Single-hold generator agrees.
+        CHECK(eighth_ticks_of(with_recomputed_hold_eighths(nontail_notes, nontail, kTpq)) ==
+              expected);
+
+        // tailed -> nontail: convert the body, then recompute for the converted type.
+        {
+          NotationNote converted = convert_note_type(tailed, pair.nontail, kTpq);
+          CHECK_EQ(static_cast<int>(converted.note_type), static_cast<int>(pair.nontail));
+          auto notes = from_tailed;
+          for (auto& n : notes) {
+            if (n.id == converted.id) n = converted;
+          }
+          notes = with_recomputed_hold_eighths(std::move(notes), converted, kTpq);
+          CHECK(eighth_ticks_of(notes) == expected);
+        }
+        // nontail -> tailed.
+        {
+          NotationNote converted = convert_note_type(nontail, pair.tailed, kTpq);
+          CHECK_EQ(static_cast<int>(converted.note_type), static_cast<int>(pair.tailed));
+          auto notes = from_nontail;
+          for (auto& n : notes) {
+            if (n.id == converted.id) n = converted;
+          }
+          notes = with_recomputed_hold_eighths(std::move(notes), converted, kTpq);
+          CHECK(eighth_ticks_of(notes) == expected);
+        }
+      }
+    }
+  }
+
+  // Document level: recompute after editing a nontail hold's span replaces its eighths.
+  ChartDocument doc;
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  NotationNote nontail = make_tap(0, 2);
+  nontail.id = 0;
+  nontail.width = 2;
+  nontail.end_tick = 960;
+  nontail.note_type = NoteType::NontailHold;
+  CHECK(doc.set_notes({nontail}));
+  CHECK(recompute_hold_eighths(doc));
+  CHECK_EQ(count_doc_note_type(doc, NoteType::HoldEighth), 3);
+  CHECK_EQ(static_cast<int>(hold_eighths_for(doc, nontail).size()), 3);
+  NotationNote shorter = nontail;
+  shorter.end_tick = 480;
+  CHECK(recompute_hold_eighths(doc, shorter));
+  CHECK_EQ(count_doc_note_type(doc, NoteType::HoldEighth), 1);
+  CHECK(recompute_hold_eighths(doc));
+  CHECK_EQ(count_doc_note_type(doc, NoteType::HoldEighth), 3);  // doc body is still 0..960
+}
+
+// Official CSV: type-900 rows are kept at their file times, including off-grid,
+// other lanes, and rows outside any hold. Nontail bodies do not grow a tpq/2 grid.
+void test_official_csv_nontail_import_keeps_file_eighths() {
+  const std::string csv =
+      "0.0,2.0,1100,1,2,0,0\n"      // NontailHold 0..960 ticks, lane 1 (0-based after import)
+      "0.25,-1.0,900,1,2,0,0\n"     // off-grid, inside the body
+      "0.5,-1.0,900,1,2,0,0\n"      // on the grid (480)
+      "1.9,-1.0,900,3,1,0,0\n"      // elsewhere in lane / time
+      "9.0,-1.0,900,1,2,0,0\n";     // outside any hold
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  extended.convert_lane_to_zero_based = true;
+  NotationChart parsed;
+  CHECK(OfficialChartFormat::parse_chart(csv, parsed, extended).error == SerializeError::Ok);
+  CHECK(parsed.keep_file_eighths);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::NontailHold), 1);
+  CHECK_EQ(count_chart_note_type(parsed, NoteType::HoldEighth), 4);
+  CHECK_EQ(static_cast<int>(parsed.notes.size()), 5);
+  CHECK(eighth_ticks_of(parsed.notes) == (std::vector<int32_t>{120, 240, 912, 4320}));
+  bool saw_other_lane = false;
+  for (const auto& n : parsed.notes) {
+    if (n.note_type != NoteType::HoldEighth) continue;
+    CHECK_EQ(n.scratch_length, 0);
+    CHECK_EQ(n.parent_hold_id, kNoBoundHoldId);
+    if (n.start_tick == 912) {
+      saw_other_lane = true;
+      CHECK_EQ(n.lane, 2);
+      CHECK_EQ(n.width, 1);
+    }
+  }
+  CHECK(saw_other_lane);
+
+  // Preview-only engine load keeps the file rows.
+  ChartEditorEngine engine;
+  engine.load_chart(parsed, ChartEditMode::OfficialPreviewOnly);
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 4);
+
+  // Export of an editable-style chart still writes the derived eighths (CSV import
+  // itself cannot be exported). serialize_chart ignores keep_file_eighths.
+  std::string out;
+  CHECK(OfficialChartFormat::serialize_chart(parsed, out).error == SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(count_substring(out, ",900,")), 3);
+}
+
+// SUS: slide type-5 (invisible mid) data in the file never becomes an eighth; the import
+// recomputes the hold's tpq/2 grid, for tailed and for nontail (Damage at the end) bodies.
+void test_sus_import_ignores_file_eighths_and_recomputes() {
+  const std::string header = "#REQUEST \"ticks_per_beat 480\"\n#BPM01: 120\n";
+  // Hold 0 -> 1440 on SUS lane 4 / width 2 with an off-grid type-5 mid at tick 120
+  // (slot 1 of 16). The tpq/2 grid yields 240, 480, 720, 960, 1200.
+  const std::string slide = "#000340: 1252" + std::string(20, '0') + "22" + "000000\n";
+  const std::vector<int32_t> expected = {240, 480, 720, 960, 1200};
+
+  for (const bool nontail : {false, true}) {
+    const std::string text = header + slide + (nontail ? "#00014: 42000042\n" : "");
+    SusChartLoadResult loaded;
+    const auto result = SusChartFormat::parse(text, loaded);
+    CHECK(result.error == SerializeError::Ok);
+    if (result.error != SerializeError::Ok) continue;
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Sound), 0);
+    CHECK_EQ(count_chart_note_type(loaded.chart, nontail ? NoteType::NontailHold : NoteType::Hold),
+             1);
+    CHECK(eighth_ticks_of(loaded.chart.notes) == expected);
+    for (const auto& n : loaded.chart.notes) {
+      if (n.note_type != NoteType::HoldEighth) continue;
+      CHECK_EQ(n.lane, 2);
+      CHECK_EQ(n.width, 2);
+      CHECK_EQ(n.scratch_length, 0);
+      CHECK(n.parent_hold_id >= 0);
+    }
+  }
+
+  // Export -> import with a bound mid star: the star's tick stays empty, nothing else
+  // is taken from the exported type-5 rows.
+  NotationChart chart;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  NotationNote body = make_tap(0, 2);
+  body.id = 0;
+  body.width = 2;
+  body.end_tick = 960;
+  body.note_type = NoteType::NontailHold;
+  NotationNote star = make_tap(480, 2);
+  star.id = 1;
+  star.width = 2;
+  star.end_tick = 480;
+  star.note_type = NoteType::Sound;
+  star.parent_hold_id = 0;
+  chart.notes = {body, star};
+  SusChartSaveOptions options;
+  options.ched_lane_padding = false;
+  std::string sus_text;
+  CHECK(SusChartFormat::serialize(chart, options, sus_text).error == SerializeError::Ok);
+  SusChartLoadResult reloaded;
+  CHECK(SusChartFormat::parse(sus_text, reloaded).error == SerializeError::Ok);
+  CHECK_EQ(count_chart_note_type(reloaded.chart, NoteType::Sound), 1);
+  CHECK(eighth_ticks_of(reloaded.chart.notes) == (std::vector<int32_t>{240, 720}));
+}
+
+// Old .wdschart files: authored / suppressed HoldEighth rows and X tombstones still load,
+// are ignored, and the eighths are recomputed. Saving never writes them back.
+void test_legacy_wdschart_eighth_rows_load_ignored_and_roundtrip() {
+  const fs::path legacy = temp_chart_path("legacy_authored_suppressed_eighths.wdschart");
+  {
+    std::ofstream out(legacy);
+    out << "WDSCHART 6\nBPM 120\nTPQ 480\nTIMING 1\nT 0 120 4 4 3\nPROFILE SiriusExtended\n"
+           "NOTES 3\n"
+           "N 0 0 960 1100 2 2 0 0 -1\n"            // NontailHold
+           "N 1 120 120 900 2 2 0 -2147483647 0\n"  // authored marker (off-grid)
+           "N 2 480 480 900 2 2 0 -2147483648 0\n"  // suppressed marker as an N row
+           "SUPPRESSED_EIGHTHS 2\nX 0 240 2 2\nX 0 720 2 2\n"
+           "SPEEDS 0\nCONCURRENT 0\nEND\n";
+  }
+  NotationChart loaded;
+  CHECK(ChartSerializer::load_from_file(legacy.string(), loaded).error == SerializeError::Ok);
+  CHECK_EQ(count_chart_note_type(loaded, NoteType::NontailHold), 1);
+  CHECK(eighth_ticks_of(loaded.notes) == (std::vector<int32_t>{240, 480, 720}));
+  for (const auto& n : loaded.notes) {
+    if (n.note_type != NoteType::HoldEighth) continue;
+    CHECK_EQ(n.scratch_length, 0);
+    CHECK_EQ(n.parent_hold_id, 0);
+  }
+
+  ChartEditorEngine engine;
+  CHECK(engine.load_from_file(legacy.string()).error == SerializeError::Ok);
+  CHECK_EQ(count_doc_note_type(engine.document(), NoteType::HoldEighth), 3);
+
+  // Save -> load: no HoldEighth rows / tombstones written, same derived result.
+  const fs::path saved = temp_chart_path("legacy_eighths_resaved.wdschart");
+  CHECK(ChartSerializer::save_to_file(loaded, saved.string()).error == SerializeError::Ok);
+  SerializeResult io;
+  const std::string text = read_text_file(saved.string(), io);
+  CHECK(io.error == SerializeError::Ok);
+  CHECK(text.find("NOTES 1\n") != std::string::npos);
+  CHECK(text.find(" 900 ") == std::string::npos);
+  CHECK(text.find("SUPPRESSED_EIGHTHS") == std::string::npos);
+  CHECK(text.find("\nX ") == std::string::npos);
+  NotationChart again;
+  CHECK(ChartSerializer::load_from_file(saved.string(), again).error == SerializeError::Ok);
+  CHECK(eighth_ticks_of(again.notes) == (std::vector<int32_t>{240, 480, 720}));
+  CHECK_EQ(static_cast<int>(again.notes.size()), static_cast<int>(loaded.notes.size()));
+
+  // Malformed legacy tombstones are still rejected (no silent skipping of garbage).
+  const fs::path bad = temp_chart_path("legacy_bad_tombstone.wdschart");
+  {
+    std::ofstream out(bad);
+    out << "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 0\n"
+           "SUPPRESSED_EIGHTHS 1\nX 0 240 0 100\nCONCURRENT 0\nEND\n";
+  }
+  NotationChart rejected;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(bad.string(), rejected).error),
+           static_cast<int>(SerializeError::ParseError));
+}
+
+void test_sirius_features_require_extended_profile() {
+  ChartDocument doc;
+  NotationNote normal = make_tap(0, 2);
+  normal.id = 1;
+  CHECK_EQ(doc.add_note(normal), 1);
+
+  NotationNote nontail = make_tap(480, 2);
+  nontail.id = 2;
+  nontail.end_tick = 960;
+  nontail.note_type = NoteType::NontailScratchHold;
+  CHECK_EQ(doc.add_note(nontail), -1);
+  CHECK(!doc.set_notes({normal, nontail}));
+  CHECK(!doc.update_note(1, nontail));
+  CHECK(!doc.set_scroll_speed_points({{0, 1.5}}));
+
+  NotationNote overhang = make_tap(480, -1);
+  overhang.id = 3;
+  overhang.width = 2;
+  CHECK_EQ(doc.add_note(overhang), -1);
+
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  CHECK_EQ(doc.add_note(nontail), 2);
+  CHECK_EQ(doc.add_note(overhang), 3);
+  CHECK(doc.set_scroll_speed_points({{0, 1.5}}));
+  CHECK(!doc.set_compatibility_profile(ChartCompatibilityProfile::Official));
+
+  NotationChart chart = doc.to_notation_chart();
+  chart.compatibility_profile = ChartCompatibilityProfile::Official;
+  std::string csv;
+  CHECK(OfficialChartFormat::serialize_chart(chart, csv).error == SerializeError::ParseError);
+  CHECK(SusChartFormat::serialize(chart, SusChartSaveOptions{}, csv).error == SerializeError::ParseError);
+  CHECK(ChartSerializer::save_to_file(chart,
+      temp_chart_path("invalid_official_features.wdschart").string()).error ==
+      SerializeError::ParseError);
+
+  const std::string speed_only_csv = "0.0,1.5,-1,0,0,0,0\n";
+  NotationChart parsed;
+  CHECK(OfficialChartFormat::parse_chart(speed_only_csv, parsed).error == SerializeError::ParseError);
+  const fs::path speed_path = temp_chart_path("extended_speed_only.csv");
+  {
+    std::ofstream output(speed_path);
+    output << speed_only_csv;
+  }
+  CHECK(OfficialChartFormat::load_chart_auto_profile(speed_path.string(), {}, parsed).error ==
+        SerializeError::Ok);
+  CHECK(parsed.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+
+  CHECK(doc.set_notes({normal}));
+  CHECK(doc.set_scroll_speed_points({}));
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::Official));
+}
+
+void test_supplied_sus_repro_if_available() {
+  const char* path = std::getenv("WDS_SUS_REPRO_PATH");
+  if (path == nullptr || *path == '\0') return;
+  SusChartLoadResult loaded;
+  const auto result = SusChartFormat::load_file(path, loaded);
+  if (result.error != SerializeError::Ok) {
+    std::printf("SUS repro import error: %s\n", result.message.c_str());
+  }
+  CHECK(result.error == SerializeError::Ok);
+  if (result.error != SerializeError::Ok) return;
+  CHECK(!loaded.chart.notes.empty());
+  CHECK(!loaded.chart.scroll_speed_points.empty());
+  CHECK(!loaded.warnings.empty());
+}
+
+// ---- Hostile-input robustness: hold eighth cap, SUS numeric validation ----
+
+// Verbatim copy of the pre-fix O(E*N) generator, kept as a reference oracle.
+static std::vector<NotationNote> reference_recomputed_hold_eighths(
+    std::vector<NotationNote> notes, const NotationNote& hold, int32_t ticks_per_quarter) {
+  auto overlaps_ref = [](const NotationNote& a, const NotationNote& b) {
+    return a.lane <= b.end_lane() && b.lane <= a.end_lane();
+  };
+  auto visible_star = [](NoteType type) {
+    return type == NoteType::Sound || type == NoteType::ScratchSound;
+  };
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return notes;
+  notes.erase(std::remove_if(notes.begin(), notes.end(),
+                             [&](const NotationNote& note) {
+                               if (note.note_type != NoteType::HoldEighth) return false;
+                               if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
+                               if (note.parent_hold_id >= 0) return false;
+                               return note.start_tick > hold.start_tick &&
+                                      note.start_tick < hold.end_tick && overlaps_ref(note, hold);
+                             }),
+              notes.end());
+  const int32_t step = std::max(1, ticks_per_quarter / 2);
+  for (int64_t tick64 = static_cast<int64_t>(hold.start_tick) + step; tick64 < hold.end_tick;
+       tick64 += step) {
+    const int32_t tick = static_cast<int32_t>(tick64);
+    const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
+      if (!visible_star(note.note_type) || note.start_tick != tick) {
+        return false;
+      }
+      if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
+      return note.parent_hold_id < 0 && overlaps_ref(note, hold);
+    });
+    if (!occupied) {
+      NotationNote eighth = hold;
+      eighth.id = kAutoNoteId;
+      eighth.start_tick = tick;
+      eighth.end_tick = tick;
+      eighth.note_type = NoteType::HoldEighth;
+      eighth.gimmick_type = GimmickType::None;
+      eighth.scratch_length = 0;
+      eighth.parent_hold_id = hold.id >= 0 ? hold.id : kNoBoundHoldId;
+      notes.push_back(eighth);
+    }
+  }
+  return notes;
+}
+
+static std::vector<NotationNote> reference_all_hold_eighths(std::vector<NotationNote> notes,
+                                                            int32_t tpq) {
+  strip_hold_eighths(notes);
+  std::vector<NotationNote> holds;
+  for (const auto& note : notes) {
+    if (is_bindable_hold_body(note.note_type)) holds.push_back(note);
+  }
+  for (const auto& hold : holds) {
+    notes = reference_recomputed_hold_eighths(std::move(notes), hold, tpq);
+  }
+  return notes;
+}
+
+static bool notes_identical(const std::vector<NotationNote>& a, const std::vector<NotationNote>& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (a[i].id != b[i].id || a[i].start_tick != b[i].start_tick ||
+        a[i].end_tick != b[i].end_tick || a[i].lane != b[i].lane || a[i].width != b[i].width ||
+        a[i].note_type != b[i].note_type || a[i].gimmick_type != b[i].gimmick_type ||
+        a[i].scratch_length != b[i].scratch_length ||
+        a[i].parent_hold_id != b[i].parent_hold_id) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static NotationNote make_fixture_note(int32_t id, NoteType type, int32_t start, int32_t end,
+                                      int32_t lane, int32_t width, int32_t parent = kNoBoundHoldId,
+                                      int32_t scratch_length = 0) {
+  NotationNote n;
+  n.id = id;
+  n.note_type = type;
+  n.start_tick = start;
+  n.end_tick = end;
+  n.lane = lane;
+  n.width = width;
+  n.parent_hold_id = parent;
+  n.scratch_length = scratch_length;
+  return n;
+}
+
+static double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+static void test_hold_eighths_match_reference_oracle() {
+  std::vector<NotationNote> fixture = {
+      make_fixture_note(0, NoteType::Hold, 0, 2400, 2, 4),
+      make_fixture_note(1, NoteType::Sound, 720, 720, 2, 4, 0),
+      // Legacy authored / suppressed markers are plain stale eighths now.
+      make_fixture_note(2, NoteType::HoldEighth, 480, 480, 2, 4, 0,
+                        std::numeric_limits<int32_t>::min() + 1),
+      make_fixture_note(3, NoteType::HoldEighth, 960, 960, 2, 4, 0,
+                        std::numeric_limits<int32_t>::min()),
+      make_fixture_note(4, NoteType::ScratchHold, 480, 1920, 4, 4),
+      make_fixture_note(5, NoteType::Sound, 960, 960, 5, 1),  // unbound star, overlaps both
+      make_fixture_note(6, NoteType::HoldEighth, 1200, 1200, 0, 12, kNoBoundHoldId,
+                        std::numeric_limits<int32_t>::min()),  // unbound legacy tombstone
+      make_fixture_note(7, NoteType::Normal, 240, 240, 2, 1),
+      make_fixture_note(8, NoteType::HoldEighth, 1440, 1440, 3, 1),  // stale generated eighth
+      make_fixture_note(9, NoteType::CriticalHold, 100, 777, 8, 2),
+      make_fixture_note(10, NoteType::NontailHold, 0, 5000, 0, 2),
+  };
+  for (const int32_t tpq : {1, 2, 3, 7, 480, 481, 960}) {
+    // Shorten the long fixture at tiny tpq so the O(E*N) oracle stays cheap.
+    std::vector<NotationNote> notes = fixture;
+    if (tpq < 8) {
+      for (auto& n : notes) {
+        if (n.note_type == NoteType::HoldEighth || n.note_type == NoteType::Sound) {
+          n.start_tick = n.end_tick = n.start_tick % 211;
+        } else {
+          n.start_tick %= 97;
+          n.end_tick = n.start_tick + 60;
+        }
+      }
+    }
+    CHECK(notes_identical(with_all_hold_eighths_recomputed(notes, tpq),
+                          reference_all_hold_eighths(notes, tpq)));
+    for (const auto& n : notes) {
+      if (!is_bindable_hold_body(n.note_type)) continue;  // tailed and nontail
+      CHECK(notes_identical(with_recomputed_hold_eighths(notes, n, tpq),
+                            reference_recomputed_hold_eighths(notes, n, tpq)));
+    }
+    // Hold without a stable id (id < 0) takes the overlap-based occupied path.
+    NotationNote unbound = make_fixture_note(kAutoNoteId, NoteType::Hold, 0, 2400, 2, 4);
+    CHECK(notes_identical(with_recomputed_hold_eighths(notes, unbound, tpq),
+                          reference_recomputed_hold_eighths(notes, unbound, tpq)));
+  }
+  // Sanity: the fixture really produces eighths (nontail body included), honours the
+  // star, and no stale eighth (legacy marker or not) survives.
+  const auto out = with_all_hold_eighths_recomputed(fixture, 480);
+  CHECK(out.size() > fixture.size());
+  for (const auto& n : out) {
+    if (n.note_type == NoteType::HoldEighth) {
+      CHECK_EQ(n.scratch_length, 0);
+      CHECK(n.parent_hold_id >= 0);
+    }
+  }
+  const auto nontail_it = std::find_if(out.begin(), out.end(), [](const NotationNote& n) {
+    return n.note_type == NoteType::HoldEighth && n.parent_hold_id == 10;
+  });
+  CHECK(nontail_it != out.end());
+}
+
+static void test_hold_eighth_limit_helpers_and_generation_cap() {
+  NotationNote hold = make_fixture_note(0, NoteType::Hold, 0, 2400, 0, 2);
+  CHECK_EQ(hold_eighth_slot_count(hold, 480), static_cast<std::size_t>(9));  // 240..2160
+  hold.end_tick = 241;
+  CHECK_EQ(hold_eighth_slot_count(hold, 480), static_cast<std::size_t>(1));
+  hold.end_tick = 240;
+  CHECK_EQ(hold_eighth_slot_count(hold, 480), static_cast<std::size_t>(0));
+  // Nontail bodies count like tailed ones: (9999 - 1) / 240 = 41 slots.
+  CHECK_EQ(hold_eighth_slot_count(make_fixture_note(0, NoteType::NontailHold, 0, 9999, 0, 1), 480),
+           static_cast<std::size_t>(41));
+  CHECK_EQ(hold_eighth_slot_count(make_fixture_note(0, NoteType::NontailScratchCriticalHold, 0,
+                                                    9999, 0, 1), 480),
+           hold_eighth_slot_count(make_fixture_note(0, NoteType::ScratchCriticalHold, 0, 9999, 0, 1),
+                                  480));
+  CHECK_EQ(hold_eighth_slot_count(make_fixture_note(0, NoteType::Normal, 0, 9999, 0, 1), 480),
+           static_cast<std::size_t>(0));
+
+  // Full int32 span: counted in int64, no overflow, over the limit.
+  NotationNote huge = make_fixture_note(1, NoteType::Hold, INT32_MIN + 1, INT32_MAX, 0, 1);
+  CHECK(hold_eighth_slot_count(huge, 1) > kMaxAutoHoldEighths);
+  CHECK(!hold_eighths_within_limit({huge}, 480));
+
+  // Generators clamp instead of hanging even if a caller skips the loader check.
+  const auto t0 = std::chrono::steady_clock::now();
+  NotationNote big = make_fixture_note(2, NoteType::Hold, 0, 3'000'000, 0, 1);
+  const auto one = with_recomputed_hold_eighths({big}, big, 1);
+  CHECK_EQ(one.size(), static_cast<std::size_t>(1 + kMaxAutoHoldEighths));
+  const auto all = with_all_hold_eighths_recomputed({big, make_fixture_note(3, NoteType::Hold, 0, 3'000'000, 4, 1)}, 1);
+  CHECK_EQ(all.size(), static_cast<std::size_t>(2 + kMaxAutoHoldEighths));  // total budget
+  CHECK(seconds_since(t0) < 5.0);
+
+  // Nontail bodies count toward the same cap and share the same total budget.
+  const auto t1 = std::chrono::steady_clock::now();
+  const NotationNote big_nontail = make_fixture_note(4, NoteType::NontailHold, 0, 3'000'000, 0, 1);
+  const auto nontail_one = with_recomputed_hold_eighths({big_nontail}, big_nontail, 1);
+  CHECK_EQ(nontail_one.size(), static_cast<std::size_t>(1 + kMaxAutoHoldEighths));
+  const auto mixed = with_all_hold_eighths_recomputed(
+      {big, make_fixture_note(5, NoteType::NontailScratchHold, 0, 3'000'000, 4, 1)}, 1);
+  CHECK_EQ(mixed.size(), static_cast<std::size_t>(2 + kMaxAutoHoldEighths));  // total budget
+  const NotationNote half_a = make_fixture_note(6, NoteType::NontailHold, 0, 700'000, 0, 1);
+  const NotationNote half_b = make_fixture_note(7, NoteType::NontailCriticalHold, 0, 700'000, 2, 1);
+  CHECK(hold_eighths_within_limit({half_a}, 1));
+  CHECK(!hold_eighths_within_limit({half_a, half_b}, 1));
+  CHECK(seconds_since(t1) < 5.0);
+}
+
+static void test_load_rejects_hostile_hold_span_wdschart() {
+  auto load = [](const char* name, const std::string& body, NotationChart& chart) {
+    const fs::path path = temp_chart_path(name);
+    {
+      std::ofstream out(path);
+      out << body;
+    }
+    return ChartSerializer::load_from_file(path.string(), chart);
+  };
+  NotationChart chart;
+
+  auto t0 = std::chrono::steady_clock::now();
+  CHECK_EQ(static_cast<int>(load("hostile_hold_max.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\n"
+                                 "N 0 0 2147483647 100 0 4 0 0\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load("hostile_hold_tpq1.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 1\nTIMING 0\nNOTES 1\n"
+                                 "N 0 0 5000000 100 0 4 0 0\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  // Many holds each below the cap but together above it.
+  {
+    std::string body = "WDSCHART 4\nBPM 120\nTPQ 1\nTIMING 0\nNOTES 3\n";
+    for (int i = 0; i < 3; ++i) {
+      body += "N " + std::to_string(i) + " 0 500000 100 " + std::to_string(i * 2) + " 2 0 0\n";
+    }
+    body += "CONCURRENT 0\nEND\n";
+    CHECK_EQ(static_cast<int>(load("hostile_hold_total.wdschart", body, chart).error),
+             static_cast<int>(SerializeError::ParseError));
+  }
+  CHECK(seconds_since(t0) < 1.0);
+
+  // Normal holds still load.
+  CHECK_EQ(static_cast<int>(load("normal_hold.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 1\nTIMING 0\nNOTES 1\n"
+                                 "N 0 0 1000 100 0 4 0 0\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::Ok));
+
+  // Suppressed rows get the same lane/width bounds as note rows.
+  CHECK_EQ(static_cast<int>(load("x_row_wide.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 0\n"
+                                 "SUPPRESSED_EIGHTHS 1\nX 0 240 0 100\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load("x_row_neg_lane.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 0\n"
+                                 "SUPPRESSED_EIGHTHS 1\nX 0 240 -5 2\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load("x_row_overflow.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 0\n"
+                                 "SUPPRESSED_EIGHTHS 1\nX 0 240 2000000000 2000000000\n"
+                                 "CONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load("x_row_ok.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 0\n"
+                                 "SUPPRESSED_EIGHTHS 1\nX 0 240 2 4\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::Ok));
+  // Legacy tombstones no longer allocate note ids, so a high id with X rows just loads.
+  CHECK_EQ(static_cast<int>(load("x_row_id_wrap.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 1\n"
+                                 "N 2147483646 0 0 10 0 1 0 0\n"
+                                 "SUPPRESSED_EIGHTHS 2\nX 0 240 2 4\nX 0 480 2 4\n"
+                                 "CONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(chart.notes.size()), 1);
+  // A count mismatch in the legacy section is still a parse error.
+  CHECK_EQ(static_cast<int>(load("x_row_count_mismatch.wdschart",
+                                 "WDSCHART 4\nBPM 120\nTPQ 480\nTIMING 0\nNOTES 0\n"
+                                 "SUPPRESSED_EIGHTHS 2\nX 0 240 2 4\nCONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+
+  // Nontail holds are bounded by the same eighth cap.
+  const auto t1 = std::chrono::steady_clock::now();
+  CHECK_EQ(static_cast<int>(load("hostile_nontail_hold.wdschart",
+                                 "WDSCHART 6\nBPM 120\nTPQ 480\nTIMING 0\nPROFILE SiriusExtended\n"
+                                 "NOTES 1\nN 0 0 2147483647 1100 0 4 0 0 -1\nSPEEDS 0\n"
+                                 "CONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load("normal_nontail_hold.wdschart",
+                                 "WDSCHART 6\nBPM 120\nTPQ 480\nTIMING 0\nPROFILE SiriusExtended\n"
+                                 "NOTES 1\nN 0 0 960 1100 0 4 0 0 -1\nSPEEDS 0\n"
+                                 "CONCURRENT 0\nEND\n",
+                                 chart)
+                                .error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(eighth_ticks_of(chart.notes).size()), 3);
+
+  // Official CSV does not generate eighths, so a long nontail body is not an
+  // auto-eighth explosion. The file row is the whole chart.
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationChart csv_chart;
+  CHECK_EQ(static_cast<int>(
+               OfficialChartFormat::parse_chart("0.0,1000000.0,1100,1,2,0,0\n", csv_chart, extended)
+                   .error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(count_chart_note_type(csv_chart, NoteType::HoldEighth), 0);
+  CHECK_EQ(count_chart_note_type(csv_chart, NoteType::NontailHold), 1);
+  CHECK(seconds_since(t1) < 1.0);
+}
+
+static void test_sus_rejects_hostile_numbers() {
+  auto parse_error = [](const std::string& text) {
+    SusChartLoadResult loaded;
+    return SusChartFormat::parse(text, loaded).error;
+  };
+  const int parse_err = static_cast<int>(SerializeError::ParseError);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  CHECK_EQ(static_cast<int>(parse_error("#BASEBPM inf\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#BASEBPM nan\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#WAVEOFFSET inf\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#WAVEOFFSET -nan\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#WAVEOFFSET 1e300\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#BPM01: inf\n#00008: 01\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#00002: inf\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#00002: nan\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#00002: 1e300\n#00010: 11\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#REQUEST \"ticks_per_beat 1000000000\"\n#00010: 11\n")),
+           parse_err);
+  CHECK_EQ(static_cast<int>(
+               parse_error("#REQUEST \"ticks_per_beat 99999999999999999999999\"\n#00010: 11\n")),
+           parse_err);
+  // Largest legal TPQ with a normal measure still parses (no int32 overflow in ticks).
+  CHECK_EQ(static_cast<int>(parse_error("#REQUEST \"ticks_per_beat " +
+                                        std::to_string(kMaxTicksPerQuarter) +
+                                        "\"\n#00010: 11\n")),
+           static_cast<int>(SerializeError::Ok));
+  // Huge TPQ x many measures: ticks exceed int32 -> rejected rather than truncated.
+  CHECK_EQ(static_cast<int>(parse_error("#REQUEST \"ticks_per_beat " +
+                                        std::to_string(kMaxTicksPerQuarter) +
+                                        "\"\n#MEASUREBS 1000\n#00010: 11\n")),
+           parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#00002: 1000000\n#REQUEST \"ticks_per_beat 100000\"\n"
+                                        "#00010: 11\n#MEASUREBS 5\n#00010: 11\n")),
+           parse_err);
+  // TIL01 measure index must not overflow `measure + measure_base`.
+  CHECK_EQ(static_cast<int>(parse_error("#MEASUREBS 50\n#TIL01: \"2147483647'0:1.0\"\n"
+                                        "#00010: 11\n")),
+           parse_err);
+
+  // More than 65535 slots on one data line (data rows and BPM-change rows).
+  std::string many_slots;
+  many_slots.reserve(140'000);
+  for (int i = 0; i < 70'000; ++i) many_slots += "10";
+  CHECK_EQ(static_cast<int>(parse_error("#00010: " + many_slots + "\n")), parse_err);
+  CHECK_EQ(static_cast<int>(parse_error("#BPM01: 120\n#00008: " + many_slots + "\n")), parse_err);
+  std::string max_slots;
+  for (int i = 0; i < 0xFFFF; ++i) max_slots += "00";
+  CHECK_EQ(static_cast<int>(parse_error("#00010: " + max_slots + "\n")),
+           static_cast<int>(SerializeError::Ok));
+
+  // 20000-measure hold: parses fast, generated eighths stay inside the cap.
+  {
+    const std::string text =
+        "#REQUEST \"ticks_per_beat 480\"\n#00020a: 14\n#MEASUREBS 19000\n#99920a: 24\n";
+    SusChartLoadResult loaded;
+    const auto t1 = std::chrono::steady_clock::now();
+    CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
+             static_cast<int>(SerializeError::Ok));
+    const NotationNote* hold = nullptr;
+    for (const auto& n : loaded.chart.notes) {
+      if (is_hold_with_tail(n.note_type)) hold = &n;
+    }
+    CHECK(hold != nullptr);
+    if (hold != nullptr) {
+      CHECK_EQ(hold->end_tick, 19999 * 1920);
+      const auto eighths = with_all_hold_eighths_recomputed(loaded.chart.notes, 480);
+      size_t count = 0;
+      for (const auto& n : eighths) {
+        if (n.note_type == NoteType::HoldEighth) ++count;
+      }
+      CHECK_EQ(count, hold_eighth_slot_count(*hold, 480));
+      CHECK(count <= kMaxAutoHoldEighths);
+    }
+    CHECK(seconds_since(t1) < 1.0);
+  }
+  // 8-beat bars x ~100k measures = ~1.6M eighths, over the cap -> rejected.
+  {
+    const std::string text =
+        "#REQUEST \"ticks_per_beat 480\"\n#00002: 8\n#00020a: 14\n#MEASUREBS 99000\n"
+        "#99920a: 24\n";
+    SusChartLoadResult loaded;
+    CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error), parse_err);
+  }
+  CHECK(seconds_since(t0) < 5.0);
+}
+
+// ---------------------------------------------------------------------------
+// tick <-> ms: cached "normalized" verdict vs. the pre-optimisation behaviour
+// ---------------------------------------------------------------------------
+namespace old_timing {
+// Verbatim copy of the pre-optimisation conversion path (O(P) normalized scan on
+// every call). Used as an oracle and as the "before" side of the micro-benchmark.
+int64_t sat_sub_i64(int64_t a, int64_t b) {
+  if (b >= 0) {
+    if (a < std::numeric_limits<int64_t>::min() + b) return std::numeric_limits<int64_t>::min();
+  } else if (a > std::numeric_limits<int64_t>::max() + b) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return a - b;
+}
+int64_t sat_llround_i64(double value) {
+  if (!std::isfinite(value)) {
+    if (std::isnan(value)) return 0;
+    return value > 0.0 ? std::numeric_limits<int64_t>::max() : std::numeric_limits<int64_t>::min();
+  }
+  constexpr double kMax = static_cast<double>(std::numeric_limits<int64_t>::max());
+  constexpr double kMin = static_cast<double>(std::numeric_limits<int64_t>::min());
+  if (value >= kMax) return std::numeric_limits<int64_t>::max();
+  if (value <= kMin) return std::numeric_limits<int64_t>::min();
+  return std::llround(value);
+}
+int32_t sat_tick_from_double(double value) {
+  if (std::isnan(value)) return 0;
+  if (!std::isfinite(value)) {
+    return value > 0.0 ? std::numeric_limits<int32_t>::max() : std::numeric_limits<int32_t>::min();
+  }
+  constexpr double kMax = static_cast<double>(std::numeric_limits<int32_t>::max());
+  constexpr double kMin = static_cast<double>(std::numeric_limits<int32_t>::min());
+  if (value >= kMax) return std::numeric_limits<int32_t>::max();
+  if (value <= kMin) return std::numeric_limits<int32_t>::min();
+  return static_cast<int32_t>(std::llround(value));
+}
+bool points_are_normalized(const MusicTiming& timing) {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) return false;
+  if (timing.points.front().tick != 0) return false;
+  for (size_t i = 1; i < timing.points.size(); ++i) {
+    if (timing.points[i].tick <= timing.points[i - 1].tick) return false;
+  }
+  return true;
+}
+void ensure_prefix(const MusicTiming& timing) {
+  if (timing.prefix_ms.size() == timing.points.size() && !timing.points.empty()) return;
+  rebuild_timing_prefix_ms(timing);
+}
+size_t last_index_tick_le(const std::vector<TimingPoint>& pts, int32_t target) {
+  size_t lo = 0, hi = pts.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (pts[mid].tick <= target) lo = mid + 1; else hi = mid;
+  }
+  return lo == 0 ? 0 : lo - 1;
+}
+size_t last_index_prefix_le(const std::vector<double>& prefix, double remain) {
+  size_t lo = 0, hi = prefix.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (prefix[mid] <= remain) lo = mid + 1; else hi = mid;
+  }
+  return lo == 0 ? 0 : lo - 1;
+}
+int64_t tick_to_ms_normalized(int32_t tick, const MusicTiming& timing) {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) {
+    return timing.offset_ms;
+  }
+  ensure_prefix(timing);
+  const auto& pts = timing.points;
+  const size_t i = last_index_tick_le(pts, tick);
+  const double tpq = static_cast<double>(timing.ticks_per_quarter);
+  const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
+  const double rate = 60000.0 / (bpm * tpq);
+  const int64_t dt = static_cast<int64_t>(tick) - static_cast<int64_t>(pts[i].tick);
+  const double ms = static_cast<double>(timing.offset_ms) + timing.prefix_ms[i] +
+                    static_cast<double>(dt) * rate;
+  return sat_llround_i64(ms);
+}
+int32_t ms_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
+  if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) return 0;
+  const double remain = static_cast<double>(sat_sub_i64(ms, timing.offset_ms));
+  if (!std::isfinite(remain)) return 0;
+  if (remain == 0.0) return 0;
+  ensure_prefix(timing);
+  const auto& pts = timing.points;
+  const size_t i = last_index_prefix_le(timing.prefix_ms, remain);
+  const double tpq = static_cast<double>(timing.ticks_per_quarter);
+  const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
+  const double ms_per_tick = 60000.0 / (bpm * tpq);
+  const double into = remain - timing.prefix_ms[i];
+  const int32_t tick = sat_tick_from_double(static_cast<double>(pts[i].tick) + into / ms_per_tick);
+  if (tick == std::numeric_limits<int32_t>::min()) return 0;
+  return tick;
+}
+int64_t tick_to_ms(int32_t tick, const MusicTiming& timing) {
+  if (points_are_normalized(timing)) return tick_to_ms_normalized(tick, timing);
+  MusicTiming t = timing;
+  normalize_timing_points(t);
+  return tick_to_ms_normalized(tick, t);
+}
+int32_t ms_to_tick(int64_t ms, const MusicTiming& timing) {
+  if (points_are_normalized(timing)) return ms_to_tick_normalized(ms, timing);
+  MusicTiming t = timing;
+  normalize_timing_points(t);
+  return ms_to_tick_normalized(ms, t);
+}
+}  // namespace old_timing
+
+MusicTiming random_timing(std::mt19937& rng, size_t point_count, bool structurally_normalized) {
+  static const int32_t kTpqs[] = {1, 48, 96, 192, 480, 960};
+  MusicTiming t;
+  t.ticks_per_quarter = kTpqs[rng() % 6];
+  t.offset_ms = static_cast<int64_t>(rng() % 6001) - 3000;
+  t.bpm = 60.0 + static_cast<double>(rng() % 120);
+  int32_t tick = 0;
+  for (size_t i = 0; i < point_count; ++i) {
+    TimingPoint p;
+    p.tick = tick;
+    tick += 1 + static_cast<int32_t>(rng() % 3000);
+    p.bpm = 30.0 + static_cast<double>(rng() % 3000) / 10.0;
+    p.numerator = 1 + static_cast<int32_t>(rng() % 8);
+    p.denominator = 1 << (rng() % 4);
+    if (!structurally_normalized) {
+      p.has_bpm = (rng() % 3) != 0;
+      p.has_meter = (rng() % 3) != 0;
+    }
+    t.points.push_back(p);
+  }
+  if (!structurally_normalized && !t.points.empty()) {
+    switch (rng() % 5) {
+      case 0:  // shuffled
+        std::shuffle(t.points.begin(), t.points.end(), rng);
+        break;
+      case 1:  // no tick-0 anchor
+        t.points.front().tick = 1 + static_cast<int32_t>(rng() % 100);
+        break;
+      case 2:  // duplicate ticks
+        if (t.points.size() > 1) t.points[1].tick = t.points[0].tick;
+        break;
+      case 3:  // negative tick + weird bpm
+        t.points.back().tick = -5;
+        t.points.back().bpm = (rng() & 1) ? 0.0 : std::numeric_limits<double>::quiet_NaN();
+        break;
+      default:  // empty
+        t.points.clear();
+        break;
+    }
+  }
+  return t;
+}
+
+void compare_conversions(std::mt19937& rng, const MusicTiming& new_side,
+                         const MusicTiming& old_side, const char* what) {
+  int32_t last_tick = 0;
+  for (const auto& p : old_side.points) last_tick = std::max(last_tick, p.tick);
+  std::vector<int32_t> ticks = {0, 1, -1, -100, last_tick, last_tick + 1, 1 << 20,
+                                std::numeric_limits<int32_t>::max(),
+                                std::numeric_limits<int32_t>::min()};
+  std::vector<int64_t> mss = {0, 1, -1, -5000, 123456789,
+                              std::numeric_limits<int64_t>::max(),
+                              std::numeric_limits<int64_t>::min()};
+  for (int i = 0; i < 40; ++i) {
+    ticks.push_back(static_cast<int32_t>(rng() % static_cast<uint32_t>(last_tick + 5000)));
+    mss.push_back(static_cast<int64_t>(rng() % 4000000) - 20000);
+  }
+  bool tick_ok = true;
+  bool ms_ok = true;
+  for (const int32_t tick : ticks) {
+    tick_ok = tick_ok && tick_to_milliseconds(tick, new_side) == old_timing::tick_to_ms(tick, old_side);
+  }
+  for (const int64_t ms : mss) {
+    ms_ok = ms_ok && milliseconds_to_tick(ms, new_side) == old_timing::ms_to_tick(ms, old_side);
+  }
+  if (!tick_ok || !ms_ok) std::fprintf(stderr, "  mismatch in case: %s\n", what);
+  CHECK(tick_ok);
+  CHECK(ms_ok);
+}
+
+void test_tick_ms_cached_verdict_matches_old_function() {
+  std::mt19937 rng(0xC0FFEE);
+  for (int iter = 0; iter < 400; ++iter) {
+    const size_t count = 1 + rng() % 40;
+    const bool structural = (iter % 2) == 0;
+    const MusicTiming raw = random_timing(rng, count, structural);
+
+    // 1. Raw timing, caches cold (covers non-normalized -> copy+normalize path).
+    MusicTiming a = raw;
+    MusicTiming b = raw;
+    compare_conversions(rng, a, b, "raw");
+    // 2. Same objects again: the verdict/prefix are now cached on `a`.
+    compare_conversions(rng, a, b, "raw-warm");
+
+    // 3. Normalize in place (what ChartDocument does), then compare.
+    MusicTiming na = raw;
+    normalize_timing_points(na);
+    MusicTiming nb = na;
+    compare_conversions(rng, na, nb, "normalized");
+
+    // 4. In-place edit that changes points.size() without normalizing: the size
+    //    rule invalidates the cache, so results must still match the old function.
+    if (!na.points.empty()) {
+      TimingPoint extra = na.points.back();
+      extra.tick += 777;
+      extra.bpm += 13.0;
+      na.points.push_back(extra);
+      nb.points.push_back(extra);
+      compare_conversions(rng, na, nb, "push_back");
+      // 5. A non-normalizing append of an out-of-order point (non-normalized).
+      TimingPoint bad = extra;
+      bad.tick = 3;
+      na.points.push_back(bad);
+      nb.points.push_back(bad);
+      compare_conversions(rng, na, nb, "unsorted append");
+      // 6. Re-normalize after the edits; both sides agree again.
+      normalize_timing_points(na);
+      nb = na;
+      compare_conversions(rng, na, nb, "renormalized");
+    }
+    // 7. Copies carry caches along and stay consistent.
+    MusicTiming copy = na;
+    compare_conversions(rng, copy, nb, "copy");
+  }
+
+  // Manually seeded prefix cache (existing tests rely on this): verdict is derived
+  // from the points, prefix is used as given.
+  MusicTiming seeded;
+  seeded.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  seeded.prefix_ms = {std::numeric_limits<double>::infinity()};
+  CHECK_EQ(tick_to_milliseconds(0, seeded), std::numeric_limits<int64_t>::max());
+  seeded.prefix_ms = {-std::numeric_limits<double>::infinity()};
+  CHECK_EQ(tick_to_milliseconds(0, seeded), std::numeric_limits<int64_t>::min());
+
+  // Invalid ticks_per_quarter edited in place is still honoured live.
+  MusicTiming tpq;
+  tpq.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  normalize_timing_points(tpq);
+  CHECK_EQ(tick_to_milliseconds(480, tpq), 500);
+  tpq.ticks_per_quarter = 0;
+  MusicTiming tpq_old = tpq;
+  CHECK_EQ(tick_to_milliseconds(480, tpq), old_timing::tick_to_ms(480, tpq_old));
+}
+
+void test_timing_conversion_microbench() {
+  using Clock = std::chrono::steady_clock;
+  volatile int64_t sink = 0;
+  for (const size_t points : {size_t{10}, size_t{1000}}) {
+    std::mt19937 rng(7);
+    MusicTiming t = random_timing(rng, points, true);
+    normalize_timing_points(t);
+    const int32_t last = t.points.back().tick + 2000;
+    const int calls = points >= 1000 ? 100000 : 400000;
+    std::vector<int32_t> ticks(1024);
+    std::vector<int64_t> mss(1024);
+    for (size_t i = 0; i < ticks.size(); ++i) {
+      ticks[i] = static_cast<int32_t>(rng() % static_cast<uint32_t>(last));
+      mss[i] = tick_to_milliseconds(ticks[i], t);
+    }
+    auto run = [&](auto&& fn) {
+      int64_t acc = 0;
+      const auto start = Clock::now();
+      for (int i = 0; i < calls; ++i) acc += fn(static_cast<size_t>(i) & 1023u);
+      const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start);
+      sink = sink + acc;
+      return std::make_pair(static_cast<double>(ns.count()) / calls, acc);
+    };
+    const auto old_t = run([&](size_t i) { return old_timing::tick_to_ms(ticks[i], t); });
+    const auto new_t = run([&](size_t i) { return tick_to_milliseconds(ticks[i], t); });
+    const auto old_m = run([&](size_t i) {
+      return static_cast<int64_t>(old_timing::ms_to_tick(mss[i], t));
+    });
+    const auto new_m = run([&](size_t i) {
+      return static_cast<int64_t>(milliseconds_to_tick(mss[i], t));
+    });
+    CHECK_EQ(old_t.second, new_t.second);
+    CHECK_EQ(old_m.second, new_m.second);
+    std::printf(
+        "timing_bench P=%-4zu tick_to_ms before=%7.1f ns after=%7.1f ns | "
+        "ms_to_tick before=%7.1f ns after=%7.1f ns\n",
+        points, old_t.first, new_t.first, old_m.first, new_m.first);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Undo history cap
+// ---------------------------------------------------------------------------
+std::vector<NotationNote> tap_run(int count) {
+  std::vector<NotationNote> out;
+  for (int i = 0; i < count; ++i) out.push_back(make_tap(i * 10, i % 12));
+  return out;
+}
+
+void test_history_cap_by_entry_count() {
+  ChartDocument doc;
+  EditHistory history;
+  constexpr int kEdits = static_cast<int>(kMaxUndoEntries) + 50;
+  for (int i = 0; i < kEdits; ++i) {
+    CHECK(history.execute(
+        std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(i, i % 12)}), doc));
+  }
+  CHECK_EQ(doc.notes().size(), static_cast<size_t>(kEdits));
+  CHECK_EQ(history.undo_count(), kMaxUndoEntries);
+  CHECK(!history.can_redo());
+  size_t undone = 0;
+  while (history.can_undo()) {
+    CHECK(history.undo(doc));
+    ++undone;
+  }
+  CHECK_EQ(undone, kMaxUndoEntries);
+  // The 50 oldest edits were dropped from history and can no longer be undone.
+  CHECK_EQ(doc.notes().size(), size_t{50});
+  CHECK_EQ(history.redo_count(), kMaxUndoEntries);
+  while (history.can_redo()) CHECK(history.redo(doc));
+  CHECK_EQ(doc.notes().size(), static_cast<size_t>(kEdits));
+  CHECK_EQ(history.undo_count(), kMaxUndoEntries);
+
+  // execute() after undo clears redo and keeps the cap.
+  CHECK(history.undo(doc));
+  CHECK(history.can_redo());
+  CHECK(history.execute(
+      std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(99999, 0)}), doc));
+  CHECK(!history.can_redo());
+  CHECK_EQ(history.undo_count(), kMaxUndoEntries);
+  CHECK_EQ(history.redo_bytes(), size_t{0});
+}
+
+void test_history_cap_by_bytes_and_min_keep() {
+  // Probe: every command below retains the same number of bytes.
+  const size_t cmd_bytes = SetNotesCommand(tap_run(100), tap_run(100)).size_bytes();
+  CHECK(cmd_bytes >= 2 * 100 * sizeof(NotationNote));
+
+  {
+    EditHistoryLimits limits;
+    limits.max_bytes = cmd_bytes * 5 + cmd_bytes / 2;  // room for exactly five
+    limits.min_keep = 2;
+    EditHistory history(limits);
+    ChartDocument doc;
+    for (int i = 0; i < 20; ++i) {
+      CHECK(history.execute(std::make_unique<SetNotesCommand>(tap_run(100), tap_run(100)), doc));
+    }
+    CHECK_EQ(history.undo_count(), size_t{5});
+    CHECK(history.undo_bytes() <= limits.max_bytes);
+    CHECK_EQ(history.undo_bytes(), cmd_bytes * 5);
+    // Undo/redo still work after trimming.
+    CHECK(history.undo(doc));
+    CHECK(history.undo(doc));
+    CHECK_EQ(history.redo_count(), size_t{2});
+    CHECK_EQ(history.redo_bytes(), cmd_bytes * 2);
+    CHECK(history.redo(doc));
+    CHECK(history.redo(doc));
+    CHECK_EQ(history.undo_count(), size_t{5});
+  }
+  {
+    // A byte budget smaller than one command still keeps the newest min_keep.
+    EditHistoryLimits limits;
+    limits.max_bytes = 1;
+    limits.min_keep = 3;
+    EditHistory history(limits);
+    ChartDocument doc;
+    for (int i = 0; i < 10; ++i) {
+      CHECK(history.execute(std::make_unique<AddNotesCommand>(
+                                std::vector<NotationNote>{make_tap(i * 5, i % 12)}),
+                            doc));
+    }
+    CHECK_EQ(history.undo_count(), size_t{3});
+    CHECK_EQ(doc.notes().size(), size_t{10});
+    CHECK(history.undo(doc));
+    CHECK(history.undo(doc));
+    CHECK(history.undo(doc));
+    CHECK(!history.can_undo());
+    CHECK_EQ(doc.notes().size(), size_t{7});
+    CHECK(history.redo(doc));
+    CHECK_EQ(doc.notes().size(), size_t{8});
+    // New edit with a non-empty redo stack: redo is dropped, newest entries kept.
+    CHECK(history.execute(
+        std::make_unique<AddNotesCommand>(std::vector<NotationNote>{make_tap(777, 1)}), doc));
+    CHECK_EQ(history.redo_count(), size_t{0});
+    CHECK_EQ(history.undo_count(), size_t{2});  // 1 left after 3 undos + 1 redo, plus the new one
+    CHECK(history.undo(doc));
+    CHECK_EQ(doc.notes().size(), size_t{8});
+    // Shrinking the limits trims immediately, never below min_keep.
+    EditHistoryLimits tight = history.limits();
+    tight.max_entries = 1;
+    tight.min_keep = 2;
+    history.set_limits(tight);
+    CHECK(history.undo_count() <= size_t{2});
+  }
+  {
+    // Composite: size covers the children; trimmed like any other entry.
+    auto composite = std::make_unique<CompositeCommand>("c");
+    composite->add(std::make_unique<SetNotesCommand>(tap_run(50), tap_run(60)));
+    composite->add(std::make_unique<AddNotesCommand>(tap_run(10)));
+    const size_t child_bytes = SetNotesCommand(tap_run(50), tap_run(60)).size_bytes() +
+                               AddNotesCommand(tap_run(10)).size_bytes();
+    CHECK(composite->size_bytes() >= child_bytes);
+    EditHistoryLimits limits;
+    limits.max_bytes = composite->size_bytes() + 1;
+    limits.min_keep = 1;
+    EditHistory history(limits);
+    ChartDocument doc;
+    CHECK(history.execute(std::move(composite), doc));
+    auto second = std::make_unique<CompositeCommand>("c2");
+    second->add(std::make_unique<SetNotesCommand>(tap_run(50), tap_run(60)));
+    CHECK(history.execute(std::move(second), doc));
+    CHECK_EQ(history.undo_count(), size_t{1});
+    CHECK(history.undo(doc));
+    CHECK(!history.can_undo());
+  }
+  // Default constants are the documented ones.
+  CHECK_EQ(kMaxUndoEntries, size_t{1000});
+  CHECK_EQ(kMaxUndoBytes, size_t{512} * 1024 * 1024);
+  CHECK_EQ(kMinUndoEntriesKept, size_t{32});
+  EditHistory defaults;
+  CHECK_EQ(defaults.limits().max_entries, kMaxUndoEntries);
+  CHECK_EQ(defaults.limits().min_keep, kMinUndoEntriesKept);
+}
+
+// ---------------------------------------------------------------------------
+// Bulk add / remove vs sequential
+// ---------------------------------------------------------------------------
+bool same_note(const NotationNote& a, const NotationNote& b) {
+  return a.id == b.id && a.start_tick == b.start_tick && a.end_tick == b.end_tick &&
+         a.note_type == b.note_type && a.lane == b.lane && a.width == b.width &&
+         a.gimmick_type == b.gimmick_type && a.scratch_length == b.scratch_length &&
+         a.parent_hold_id == b.parent_hold_id;
+}
+
+bool docs_identical(const ChartDocument& a, const ChartDocument& b) {
+  if (a.notes().size() != b.notes().size() || a.next_note_id() != b.next_note_id() ||
+      a.concurrent_lines().size() != b.concurrent_lines().size() ||
+      a.is_dirty() != b.is_dirty()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.notes().size(); ++i) {
+    if (!same_note(a.notes()[i], b.notes()[i])) return false;
+    if (!b.find_note(a.notes()[i].id).has_value()) return false;
+  }
+  for (size_t i = 1; i < a.notes().size(); ++i) {  // sorted by (start_tick, id)
+    const auto& p = a.notes()[i - 1];
+    const auto& q = a.notes()[i];
+    if (!(p.start_tick < q.start_tick || (p.start_tick == q.start_tick && p.id < q.id))) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < a.concurrent_lines().size(); ++i) {
+    const auto& x = a.concurrent_lines()[i];
+    const auto& y = b.concurrent_lines()[i];
+    if (x.milliseconds != y.milliseconds || x.start_lane != y.start_lane || x.width != y.width) {
+      return false;
+    }
+  }
+  if (a.index().max_hold_span_ms() != b.index().max_hold_span_ms() ||
+      a.index().max_split_span_ms() != b.index().max_split_span_ms() ||
+      a.index().hold_span_stale() != b.index().hold_span_stale()) {
+    return false;
+  }
+  for (int64_t t = -500; t < 40000; t += 700) {
+    std::vector<int32_t> qa;
+    std::vector<int32_t> qb;
+    a.index().query_candidates(t, 800, 800, qa);
+    b.index().query_candidates(t, 800, 800, qb);
+    std::sort(qa.begin(), qa.end());
+    std::sort(qb.begin(), qb.end());
+    if (qa != qb) return false;
+  }
+  return true;
+}
+
+std::vector<NotationNote> random_batch(std::mt19937& rng, size_t count, int32_t first_explicit_id) {
+  std::vector<NotationNote> batch;
+  int32_t explicit_id = first_explicit_id;
+  for (size_t i = 0; i < count; ++i) {
+    NotationNote n = make_tap(static_cast<int32_t>(rng() % 6000), static_cast<int32_t>(rng() % 12));
+    switch (rng() % 4) {
+      case 0:  // hold body with a span
+        n.note_type = NoteType::Hold;
+        n.end_tick = n.start_tick + 1 + static_cast<int32_t>(rng() % 2000);
+        break;
+      case 1:  // split gimmick
+        n.note_type = NoteType::None;
+        n.gimmick_type = GimmickType::Split2;
+        n.end_tick = n.start_tick + 1 + static_cast<int32_t>(rng() % 960);
+        n.lane = 0;
+        n.width = 12;
+        break;
+      default:
+        break;
+    }
+    // Explicit ids descend so they never meet ids the auto counter already used.
+    if ((rng() % 3) == 0) n.id = explicit_id--;  // else auto id (-1)
+    batch.push_back(n);
+  }
+  return batch;
+}
+
+void test_bulk_add_remove_matches_sequential() {
+  std::mt19937 rng(424242);
+  for (int iter = 0; iter < 60; ++iter) {
+    ChartDocument seq;
+    ChartDocument bulk;
+    // Common starting state.
+    const auto seed = random_batch(rng, 5 + rng() % 30, 1000);
+    for (const auto& n : seed) CHECK(seq.add_note(n) >= 0);
+    std::vector<int32_t> seed_ids;
+    CHECK(bulk.add_notes(seed, &seed_ids));
+    CHECK(docs_identical(seq, bulk));
+    CHECK_EQ(seed_ids.size(), seed.size());
+
+    // Bulk add vs sequential add_note: identical ids / ordering / derived data.
+    const auto batch = random_batch(rng, 1 + rng() % 60, 5000);
+    std::vector<int32_t> seq_ids;
+    for (const auto& n : batch) seq_ids.push_back(seq.add_note(n));
+    std::vector<int32_t> bulk_ids;
+    CHECK(bulk.add_notes(batch, &bulk_ids));
+    CHECK(seq_ids == bulk_ids);
+    CHECK(docs_identical(seq, bulk));
+
+    // Bulk remove vs sequential remove_note (random subset, random order).
+    std::vector<int32_t> all_ids;
+    for (const auto& n : seq.notes()) all_ids.push_back(n.id);
+    std::shuffle(all_ids.begin(), all_ids.end(), rng);
+    all_ids.resize(1 + rng() % all_ids.size());
+    for (const int32_t id : all_ids) CHECK(seq.remove_note(id));
+    CHECK(bulk.remove_notes(all_ids));
+    CHECK(docs_identical(seq, bulk));
+  }
+
+  // Command level: execute / undo / redo produce the same document as before.
+  {
+    ChartDocument doc;
+    ChartDocument ref;
+    std::vector<NotationNote> batch = {make_tap(10, 0), make_tap(10, 1), make_tap(5, 2)};
+    batch[1].id = 7;
+    EditHistory history;
+    CHECK(history.execute(std::make_unique<AddNotesCommand>(batch), doc));
+    for (const auto& n : batch) CHECK(ref.add_note(n) >= 0);
+    CHECK(docs_identical(ref, doc));
+    CHECK(history.undo(doc));
+    CHECK(doc.notes().empty());
+    CHECK(history.redo(doc));
+    CHECK(docs_identical(ref, doc));  // redo re-adds with the same ids
+    // Remove command round-trip.
+    const std::vector<NotationNote> to_remove = {doc.notes()[0], doc.notes()[2]};
+    CHECK(history.execute(std::make_unique<RemoveNotesCommand>(to_remove), doc));
+    CHECK_EQ(doc.notes().size(), size_t{1});
+    CHECK(history.undo(doc));
+    CHECK(docs_identical(ref, doc));
+  }
+
+  // Failure behaviour: all-or-nothing, same ids/next_id_ as the sequential path.
+  {
+    ChartDocument doc;
+    CHECK(doc.add_notes({make_tap(0, 0)}));  // id 0
+    const std::vector<NotationNote> before(doc.notes().begin(), doc.notes().end());
+    NotationNote dup = make_tap(30, 3);
+    dup.id = 0;  // collides with the existing note
+    std::vector<int32_t> ids;
+    const std::vector<NotationNote> batch = {make_tap(10, 1), make_tap(20, 2), dup,
+                                             make_tap(40, 4)};
+    CHECK(!doc.add_notes(batch, &ids));
+    CHECK_EQ(doc.notes().size(), before.size());
+    CHECK(same_note(doc.notes()[0], before[0]));
+    CHECK_EQ(ids.size(), size_t{2});  // prefix processed before the failing note
+    CHECK_EQ(ids[0], 1);
+    CHECK_EQ(ids[1], 2);
+    // Sequential reference with the old rollback: next_id_ stays advanced.
+    ChartDocument ref;
+    CHECK(ref.add_note(make_tap(0, 0)) == 0);
+    CHECK(ref.add_note(batch[0]) == 1);
+    CHECK(ref.add_note(batch[1]) == 2);
+    CHECK(ref.remove_note(1));
+    CHECK(ref.remove_note(2));
+    CHECK_EQ(doc.next_note_id(), ref.next_note_id());
+
+    // Duplicate explicit ids inside one batch are rejected, like sequential add_note.
+    NotationNote a = make_tap(1, 0);
+    a.id = 50;
+    NotationNote b = make_tap(2, 1);
+    b.id = 50;
+    ChartDocument fresh;
+    CHECK(!fresh.add_notes({a, b}));
+    CHECK(fresh.notes().empty());
+    // An explicit id equal to an earlier auto-assigned id in the batch collides too.
+    NotationNote c = make_tap(3, 2);
+    c.id = 0;
+    ChartDocument fresh2;
+    CHECK(!fresh2.add_notes({make_tap(1, 0), c}));
+    CHECK(fresh2.notes().empty());
+
+    // remove_notes: unknown / repeated ids leave the document untouched.
+    const uint64_t generation = doc.content_generation();
+    CHECK(!doc.remove_notes({0, 12345}));
+    CHECK(!doc.remove_notes({0, 0}));
+    CHECK_EQ(doc.notes().size(), size_t{1});
+    CHECK_EQ(doc.content_generation(), generation);
+    CHECK(doc.remove_notes({}));
+    CHECK(doc.add_notes({}));
+
+    // Read-only documents reject both.
+    doc.set_edit_mode(ChartEditMode::OfficialPreviewOnly);
+    CHECK(!doc.add_notes({make_tap(1, 1)}));
+    CHECK(!doc.remove_notes({0}));
+  }
+
+  // Official profile rejects Sirius-extended notes (width > 12) for the whole batch.
+  {
+    ChartDocument doc;
+    NotationNote wide = make_tap(5, 0);
+    wide.width = 20;
+    std::vector<int32_t> ids;
+    CHECK(!doc.add_notes({make_tap(1, 0), wide}, &ids));
+    CHECK(doc.notes().empty());
+    CHECK_EQ(ids.size(), size_t{1});
+  }
+}
+
+void test_apply_note_updates_is_atomic() {
+  ChartDocument doc;  // Official profile by default
+  CHECK(doc.add_notes({make_tap(0, 0), make_tap(10, 1), make_tap(20, 2)}));
+  doc.mark_saved();
+  const std::vector<NotationNote> snapshot(doc.notes().begin(), doc.notes().end());
+  const uint64_t generation = doc.content_generation();
+
+  NotationNote moved = snapshot[0];
+  moved.start_tick = 500;
+  NotationNote invalid = snapshot[1];
+  invalid.width = 20;  // Sirius-extended: rejected under the Official profile
+  NotationNote moved_too = snapshot[2];
+  moved_too.lane = 9;
+
+  // Invalid update in the middle: nothing is applied.
+  CHECK(!doc.apply_note_updates({NoteUpdate{snapshot[0].id, moved},
+                                 NoteUpdate{snapshot[1].id, invalid},
+                                 NoteUpdate{snapshot[2].id, moved_too}}));
+  CHECK_EQ(doc.notes().size(), snapshot.size());
+  for (size_t i = 0; i < snapshot.size(); ++i) CHECK(same_note(doc.notes()[i], snapshot[i]));
+  CHECK(!doc.is_dirty());
+  CHECK_EQ(doc.content_generation(), generation);
+  // Index still agrees with the (unchanged) notes.
+  std::vector<int32_t> hits;
+  doc.index().query_candidates(0, 0, 0, hits);
+  CHECK(std::find(hits.begin(), hits.end(), snapshot[0].id) != hits.end());
+
+  // Unknown id / duplicate id: also nothing applied.
+  CHECK(!doc.apply_note_updates({NoteUpdate{snapshot[0].id, moved}, NoteUpdate{999, moved_too}}));
+  CHECK(!doc.apply_note_updates({NoteUpdate{snapshot[0].id, moved},
+                                 NoteUpdate{snapshot[0].id, moved_too}}));
+  for (size_t i = 0; i < snapshot.size(); ++i) CHECK(same_note(doc.notes()[i], snapshot[i]));
+  CHECK(!doc.is_dirty());
+
+  // A fully valid batch still applies and keeps (start_tick, id) ordering.
+  CHECK(doc.apply_note_updates({NoteUpdate{snapshot[0].id, moved},
+                                NoteUpdate{snapshot[2].id, moved_too}}));
+  CHECK(doc.is_dirty());
+  CHECK_EQ(doc.notes().back().start_tick, 500);
+  CHECK_EQ(doc.find_note(snapshot[2].id)->lane, 9);
+}
+
 int main() {
+  test_tick_ms_cached_verdict_matches_old_function();
+  test_timing_conversion_microbench();
+  test_history_cap_by_entry_count();
+  test_history_cap_by_bytes_and_min_keep();
+  test_bulk_add_remove_matches_sequential();
+  test_apply_note_updates_is_atomic();
+  test_hold_eighths_match_reference_oracle();
+  test_hold_eighth_limit_helpers_and_generation_cap();
+  test_load_rejects_hostile_hold_span_wdschart();
+  test_sus_rejects_hostile_numbers();
+  test_nontail_holds_generate_same_eighths_as_tailed();
+  test_official_csv_nontail_import_keeps_file_eighths();
+  test_sus_import_ignores_file_eighths_and_recomputes();
+  test_legacy_wdschart_eighth_rows_load_ignored_and_roundtrip();
+  test_sirius_features_require_extended_profile();
+  test_sirius_extended_csv_native_and_sus_scroll();
+  test_scroll_speed_zero_freezes_preview_distance();
+  test_sus_skips_negative_scroll_speed_with_warning();
+  test_legacy_eighth_markers_are_dropped_and_recomputed();
+  test_supplied_sus_repro_if_available();
   test_auto_note_id_starts_at_zero();
   test_concurrent_lines_multi_press_only();
   test_hold_head_pairs_but_attached_excludes_head();
@@ -7747,6 +10055,7 @@ int main() {
   test_scratch_hold_curve_commit_new_chain_head_and_tail();
   test_scratch_hold_curve_commit_extend_updates_prev_no_second_head();
   test_scratch_hold_curve_commit_hold_eighths_one_command();
+  test_scratch_hold_curve_commit_head_ignores_unrelated_overhang_note();
   test_scratch_hold_segment_horizontal_move_keeps_chain();
   test_scratch_chain_joint_direction();
   test_scratch_hold_chain_requires_exact_jump_scratch_cover();
@@ -7768,6 +10077,7 @@ int main() {
   test_hold_head_pairs_exact_span_and_family();
   test_resolve_convert_target_is_identity();
   test_convert_notes_in_selection_hold_stars();
+  test_convert_skips_split_lane_gimmicks();
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
   test_normalize_remaps_and_rebinds_star_parents();
@@ -7806,6 +10116,7 @@ int main() {
   test_snapshot_large_seek_full_rebuild();
   test_snapshot_sub_ms_timeline_us_survives_rebuild_and_patch();
   test_split_gimmick_range_and_combo_includes_heads();
+  test_combo_hundreds_fire_ms_is_crossing_hit();
   test_hold_combo_reference_fixed_cases();
   test_hold_combo_sabotage_detects_wrong_oracle();
   test_hold_combo_production_matches_reference_random();
@@ -7823,12 +10134,16 @@ int main() {
   test_official_split_fade_in_cubic_and_zero_length();
   test_official_split_fade_in_visible_hits_screen_before_clip_end();
   test_official_split_fade_in_scale_is_playfield_coverage();
-  test_official_split_fade_out_is_300ms_smoothstep_from_end();
+  test_official_split_fade_out_is_0_3s_smoothstep_from_expire();
   test_split_color_slot_mirrors_linehight_z180();
   test_hold_start_visible_with_zero_end_tick();
   test_load_legacy_v1_wdschart();
   test_official_chart_import_and_roundtrip();
   test_official_chart_load_auto();
+  test_official_chart_five_column_form_matches_openwds();
+  test_official_chart_accepts_negative_start_seconds();
+  test_wdschart_accepts_negative_note_ticks();
+  test_official_standard_charts_wdschart_and_csv_roundtrip();
   test_load_repo_test_official_charts();
   test_wdsproject_format_roundtrip_and_relative_paths();
   test_edit_grid_and_note_operations();
@@ -7836,13 +10151,13 @@ int main() {
   test_timing_bpm_meter_split_and_prune();
   test_truncated_wdschart_rejected();
   test_wdschart_omits_and_ignores_eighths();
-  test_official_keeps_file_eighth_and_export_generates();
+  test_official_csv_keeps_file_eighths();
   test_official_export_sanitizes_eighths_and_sorts_by_time();
   test_official_export_jump_scratch_eighths_stay_plain();
-  test_sus_ignores_file_eighth_and_export_generates();
+  test_sus_recomputes_eighths_and_export_generates();
   test_official_csv_tempo_map_export();
   test_official_csv_flick_scratch_length_encodes_width();
-  test_official_sound_purple_split_and_row_semantics();
+  test_official_scratch_and_split_row_semantics();
   test_migrate_wdschart_scratch_to_flick_script();
   test_save_failure_preserves_note_ids();
   test_sus_meter_and_mid_measure_bpm_roundtrip();

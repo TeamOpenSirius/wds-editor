@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,6 +58,9 @@ struct EditorUiConfig {
   int note_height_level = 8;
   // Official SplitEffectLineOpacity (10..100 step 10).
   int split_line_opacity = 100;
+  // Official SpritEffectSettingType: Rich=0, Normal=1, Light=2.
+  // GameSettings default is Rich; BothEnds then plays as Full (center line included).
+  int split_effect_quality = 0;
   // Preferred Vulkan MSAA samples: 1 (低) / 2 (中) / 4 (高). Default matches app 2×.
   int msaa_samples = 2;
   // Edit-panel audio backdrop: none / envelope / frequency spectrogram.
@@ -84,6 +88,13 @@ struct EditorUiConfig {
   bool new_note_place_logic = false;
   // When true, importing .sus creates an editable in-memory WDS project.
   bool sus_auto_convert = false;
+  // User preference for Sirius Extended editing (speed gutter, extra lanes, nontail).
+  // Forced-on display when a chart already has extended features is not written here.
+  bool extended_features = false;
+  // Extra visible columns on each side of the 12-lane playfield (0..20).
+  int extra_visible_lanes = 0;
+  // Minutes between Auto backups of an on-disk project. One of 5/10/15/20/30/45/60.
+  int backup_interval_min = 15;
   // When true, negate timeline-scrub wheel deltas (not Option+wheel visible range).
   bool invert_scroll_wheel = false;
   // When true, invert Option+wheel visible-range adjust direction.
@@ -118,6 +129,20 @@ inline float clamp_playback_rate(float rate) noexcept {
   return std::clamp(rate, 0.25f, 2.0f);
 }
 
+inline int clamp_backup_interval_min(int minutes) noexcept {
+  static constexpr int kOptions[] = {5, 10, 15, 20, 30, 45, 60};
+  int best = 15;
+  int best_delta = 1000;
+  for (int option : kOptions) {
+    const int delta = std::abs(option - minutes);
+    if (delta < best_delta) {
+      best_delta = delta;
+      best = option;
+    }
+  }
+  return best;
+}
+
 // Resolves the platform config path (creates nothing; save may create dirs).
 // Prefers the OS data directory so app updates do not wipe preferences; if that
 // file is missing, may one-shot migrate from a legacy next-to-exe config.
@@ -128,6 +153,9 @@ std::string resolve_editor_config_path(const char* argv0);
 // Legacy shortcut spellings (Cmd/Option/Shift+Ctrl) are rewritten to PortableText.
 bool load_editor_ui_config(const std::string& path, EditorUiConfig& out);
 bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg);
+
+int settings_section_count();
+const char* settings_section_journal_id(int index);
 
 // Copy curve-fill fields between persisted config and the live UiManager state
 // used by later dialog/toolbar code. Settings/toolbar capture must call apply

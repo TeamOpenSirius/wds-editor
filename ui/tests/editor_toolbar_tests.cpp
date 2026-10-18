@@ -2,8 +2,11 @@
 #include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
+#include "wds/ui/editor_ui_config.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
 #include "wds/ui/toolbar_curve_selection.hpp"
+
+#include <wds/core/chart_serializer.hpp>
 
 #include <wds/interaction/events.hpp>
 #include <wds/interaction/font_atlas.hpp>
@@ -19,6 +22,10 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -713,6 +720,167 @@ void test_two_column_settings_and_aligned_curve_row() {
   assert_curve_row_readable(kToolbarTypicalWidth);
 }
 
+std::string read_all(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+int count_backup_dirs(const std::filesystem::path& root, const char* suffix) {
+  if (!std::filesystem::exists(root)) return 0;
+  int n = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    if (!entry.is_directory()) continue;
+    const auto name = entry.path().filename().string();
+    if (name.find(suffix) != std::string::npos) ++n;
+  }
+  return n;
+}
+
+std::filesystem::path first_backup_dir(const std::filesystem::path& root, const char* suffix) {
+  if (!std::filesystem::exists(root)) return {};
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    if (!entry.is_directory()) continue;
+    const auto name = entry.path().filename().string();
+    if (name.find(suffix) != std::string::npos) return entry.path();
+  }
+  return {};
+}
+
+void test_create_project_writes_first_chart() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_create_project_chart" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  CHECK(!session.add_chart());
+  CHECK(session.create_project(project.string()));
+  CHECK(session.project_path() == project.string());
+  CHECK(fs::exists(dir / "1.wdschart"));
+  CHECK(fs::exists(project));
+  CHECK(session.chart_path(0).find("1.wdschart") != std::string::npos);
+  CHECK(!session.dirty());
+  CHECK(session.add_chart());
+  CHECK(fs::exists(dir / "2.wdschart"));
+  CHECK_EQ(session.chart_count(), 2u);
+  CHECK(session.add_chart());
+  CHECK(fs::exists(dir / "3.wdschart"));
+  CHECK_EQ(session.chart_count(), 3u);
+  fs::remove_all(dir);
+}
+
+void test_first_save_skips_manual_backup() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_backup_first_save" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  session.set_backup_sink([&](std::vector<wds::ui::ChartBackupItem> items) {
+    (void)wds::ui::write_chart_backup_folder(session.auto_backup_directory(),
+                                             wds::ui::ChartBackupKind::Manual, items);
+  });
+  CHECK(session.new_project());
+  CHECK(session.save_as(project.string()));
+  CHECK(!fs::exists(dir / "AutoBackup"));
+  fs::remove_all(dir);
+}
+
+void test_second_save_manual_backup_keeps_previous_disk() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_backup_manual" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  session.set_backup_sink([&](std::vector<wds::ui::ChartBackupItem> items) {
+    (void)wds::ui::write_chart_backup_folder(session.auto_backup_directory(),
+                                             wds::ui::ChartBackupKind::Manual, items);
+  });
+  CHECK(session.new_project());
+  CHECK(session.save_as(project.string()));
+  const std::string before = read_all(dir / "1.wdschart");
+  CHECK(!before.empty());
+
+  wds::chart_editor::NotationNote note;
+  note.start_tick = 480;
+  note.lane = 0;
+  note.width = 2;
+  CHECK(session.engine().document().add_note(note) >= 0);
+  CHECK(session.save());
+
+  const auto backup_root = dir / "AutoBackup";
+  CHECK_EQ(count_backup_dirs(backup_root, "_Manual"), 1);
+  CHECK_EQ(count_backup_dirs(backup_root, "_Auto"), 0);
+  const auto manual = first_backup_dir(backup_root, "_Manual");
+  CHECK(!manual.empty());
+  CHECK(read_all(manual / "1.wdschart") == before);
+  CHECK(read_all(dir / "1.wdschart") != before);
+  fs::remove_all(dir);
+}
+
+void test_auto_backup_normalizes_ids_without_mutating_session() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_backup_auto" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  CHECK(session.new_project());
+  CHECK(session.save_as(project.string()));
+  const std::string bound_chart = session.chart_path(0);
+  const std::string bound_project = session.project_path();
+
+  wds::chart_editor::NotationChart chart;
+  wds::chart_editor::NotationNote a;
+  a.id = 50;
+  a.start_tick = 0;
+  a.lane = 0;
+  a.width = 1;
+  wds::chart_editor::NotationNote b;
+  b.id = 80;
+  b.start_tick = 480;
+  b.lane = 1;
+  b.width = 1;
+  chart.notes = {a, b};
+  session.engine().load_chart(chart);
+
+  std::vector<wds::ui::ChartBackupItem> items;
+  CHECK(session.capture_auto_backup(items));
+  CHECK_EQ(items.size(), 1u);
+  std::string out_dir;
+  CHECK(wds::ui::write_chart_backup_folder(session.auto_backup_directory(),
+                                           wds::ui::ChartBackupKind::Auto, items, &out_dir));
+  CHECK(session.project_path() == bound_project);
+  CHECK(session.chart_path(0) == bound_chart);
+
+  wds::chart_editor::NotationChart loaded;
+  const auto load =
+      wds::chart_editor::ChartSerializer::load_from_file(out_dir + "/1.wdschart", loaded);
+  CHECK(load.error == wds::chart_editor::SerializeError::Ok);
+  CHECK_EQ(loaded.notes.size(), 2u);
+  CHECK_EQ(loaded.notes[0].id, 0);
+  CHECK_EQ(loaded.notes[1].id, 1);
+  fs::remove_all(dir);
+}
+
+void test_settings_section_order_includes_format() {
+  CHECK_EQ(wds::ui::settings_section_count(), 10);
+  CHECK(std::string(wds::ui::settings_section_journal_id(0)) == "settings.tab_appearance");
+  CHECK(std::string(wds::ui::settings_section_journal_id(1)) == "settings.tab_file");
+  CHECK(std::string(wds::ui::settings_section_journal_id(2)) == "settings.tab_format");
+  CHECK(std::string(wds::ui::settings_section_journal_id(3)) == "settings.tab_audio");
+  CHECK(std::string(wds::ui::settings_section_journal_id(9)) == "settings.tab_updates");
+}
+
 }  // namespace
 
 int main() {
@@ -726,6 +894,11 @@ int main() {
   test_two_column_settings_and_aligned_curve_row();
   test_default_window_toolbar_uses_standard_gaps_and_curve_row_columns();
   test_crushed_toolbar_controls_do_not_overlap();
+  test_create_project_writes_first_chart();
+  test_first_save_skips_manual_backup();
+  test_second_save_manual_backup_keeps_previous_disk();
+  test_auto_backup_normalizes_ids_without_mutating_session();
+  test_settings_section_order_includes_format();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

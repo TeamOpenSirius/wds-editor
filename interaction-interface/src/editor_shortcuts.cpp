@@ -121,6 +121,8 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "copy";
     case EditorShortcut::Paste:
       return "paste";
+    case EditorShortcut::PasteMirror:
+      return "paste_mirror";
     case EditorShortcut::Mirror:
       return "mirror";
     case EditorShortcut::MirrorAboutCenter:
@@ -208,6 +210,8 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "复制";
     case EditorShortcut::Paste:
       return "粘贴";
+    case EditorShortcut::PasteMirror:
+      return "镜像粘贴";
     case EditorShortcut::Mirror:
       return "镜像";
     case EditorShortcut::MirrorAboutCenter:
@@ -297,6 +301,8 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return chord_primary(static_cast<KeyCode>('C'));
     case EditorShortcut::Paste:
       return chord_primary(static_cast<KeyCode>('V'));
+    case EditorShortcut::PasteMirror:
+      return chord_primary(static_cast<KeyCode>('V'), true);
     case EditorShortcut::Mirror:
       return chord_primary(static_cast<KeyCode>('M'));
     case EditorShortcut::MirrorAboutCenter:

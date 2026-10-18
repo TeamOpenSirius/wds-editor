@@ -9,15 +9,16 @@ namespace wds::chart_editor {
 // AppConst.NoteType (official CSV column "type" / dump.cs).
 // Instantaneous rows use end_tick == 0 in wdschart (official endTime == -1).
 enum class NoteType : int32_t {
-  // Official HiSpeed row: type=-1, endTime carries speed (not authored in editor).
+  // Official HiSpeed row: type=-1, endTime carries speed; stored separately.
   HiSpeed = -1,
   None = 0,
   Normal = 10,
   Critical = 20,
   Sound = 30,
   ScratchSound = 31,  // Purple hold mid-star (Sirius ScratchSound)
-  // Sirius CSV type 40 = SoundPurple (mid-hold scratch) — interchange only;
-  // editor imports as JumpScratch segments / Flick. Do not author type 40.
+  // Official AppConst.NoteType Scratch. CSV keeps 40 as-is. Looks like Flick
+  // in edit/preview (including hit FX). The editor cannot author this type.
+  Scratch = 40,
   Flick = 50,
   HoldStart = 80,
   CriticalHoldStart = 81,
@@ -95,9 +96,21 @@ enum class ChartEditMode {
   OfficialPreviewOnly,
 };
 
+// Lane geometry compatibility used by CSV and native chart boundaries.
+// Official keeps the game's 1..12 lane contract; SiriusExtended permits notes
+// to overhang the playfield as long as they still overlap a playable lane.
+enum class ChartCompatibilityProfile : uint8_t {
+  Official,
+  SiriusExtended,
+};
+
 // Sentinel for ChartDocument::add_note / set_notes when id should be auto-assigned.
 inline constexpr int32_t kAutoNoteId = -1;
 // Sound / ScratchSound / HoldEighth with no parent hold (official CSV, unmatched legacy).
 inline constexpr int32_t kNoBoundHoldId = -1;
+
+inline bool is_flick_like(NoteType type) noexcept {
+  return type == NoteType::Flick || type == NoteType::Scratch;
+}
 
 }  // namespace wds::chart_editor

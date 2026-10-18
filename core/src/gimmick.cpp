@@ -32,6 +32,13 @@ SplitLaneType get_split_lane_type(GimmickType gimmick) noexcept {
   return static_cast<SplitLaneType>(decade + (decade & 1) - 1);
 }
 
+GimmickType split_gimmick_for(int32_t split_count, SplitLaneType type) noexcept {
+  const int32_t n = std::clamp(split_count, 1, 6);
+  int32_t t = static_cast<int32_t>(type);
+  if (t != 1 && t != 3 && t != 5 && t != 7) t = 1;
+  return static_cast<GimmickType>(10 * t + n);
+}
+
 bool is_jump_scratch(GimmickType gimmick) noexcept {
   return gimmick == GimmickType::JumpScratch;
 }
@@ -65,7 +72,7 @@ int32_t official_flick_scratch_length(int32_t scratch_length, int32_t width) noe
 }
 
 void sync_flick_scratch_length_for_width(NotationNote& note, int32_t previous_width) noexcept {
-  if (note.note_type != NoteType::Flick || note.scratch_length == 0) return;
+  if (!is_flick_like(note.note_type) || note.scratch_length == 0) return;
   const int32_t abs_sl = std::abs(note.scratch_length);
   if (abs_sl == 1 || abs_sl == std::max(1, previous_width)) {
     note.scratch_length = encode_flick_scratch_length(note.scratch_length, note.width);

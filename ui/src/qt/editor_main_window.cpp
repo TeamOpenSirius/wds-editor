@@ -1,4 +1,6 @@
 #include "wds/ui/qt/editor_main_window.hpp"
+#include "wds/ui/qt/export_video_dialog.hpp"
+#include "wds/ui/qt/stem_panel.hpp"
 #include "wds/ui/qt/chart_edit_widget.hpp"
 #include "wds/ui/qt/playback_dock.hpp"
 #include "wds/ui/qt/qt_input_adapter.hpp"
@@ -176,6 +178,11 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   setDockOptions(AllowNestedDocks | AllowTabbedDocks);
   resize_settle_timer_.setSingleShot(true);
   resize_settle_timer_.setInterval(140);
+  backup_timer_.setSingleShot(true);
+  layout_save_timer_.setSingleShot(true);
+  layout_save_timer_.setInterval(400);
+  connect(&backup_timer_, &QTimer::timeout, this, [this] { fire_auto_backup(); });
+  connect(&layout_save_timer_, &QTimer::timeout, this, [this] { save_chrome_layout(); });
   connect(&resize_settle_timer_, &QTimer::timeout, this, [this] {
     if (native_resizing_) return;
     if (auto* window = static_cast<RealtimeVulkanWindow*>(preview_window_))
@@ -228,10 +235,17 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   open_action_ = addCommand(fileMenu, tr("打开工程"), QKeySequence::Open);
   save_action_ = addCommand(fileMenu, tr("保存工程"), QKeySequence::Save);
   music_action_ = addCommand(fileMenu, tr("导入音乐"), {});
+  auto* stems_action = fileMenu->addAction(tr("本地分轨…"));
+  stems_action->setObjectName(QStringLiteral("localStemsAction"));
+  connect(stems_action, &QAction::triggered, this, [this] { show_stem_panel(); });
   import_action_ = addCommand(fileMenu, tr("导入谱面"), {});
   export_action_ = addCommand(fileMenu, tr("导出谱面"), {});
   check_action_ = addCommand(fileMenu, tr("检查谱面"), {});
   clear_marks_action_ = addCommand(editMenu, tr("清除记号"), {});
+  export_video_action_ = addCommand(nullptr, tr("导出视频"), {});
+  if (export_action_ != nullptr && export_video_action_ != nullptr && fileMenu != nullptr) {
+    fileMenu->insertAction(check_action_, export_video_action_);
+  }
   undo_action_ = addCommand(editMenu, tr("撤销"), QKeySequence::Undo);
   redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
   if (auto* layout = command_toolbar_->layout()) layout->setSpacing(0);
@@ -248,6 +262,8 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   convert_toolbar_->setFloatable(true);
   convert_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
   convert_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  watch_chrome_layout(command_toolbar_);
+  watch_chrome_layout(convert_toolbar_);
   // AboutRole only takes effect when the action lives in a QMenu.
   // menuBar()->addAction() makes a top-level title and macOS ignores the role.
   about_action_ = new QAction(tr("关于"), this);
@@ -317,6 +333,7 @@ std::array<QDockWidget*, 6> EditorMainWindow::chrome_docks() const {
 
 void EditorMainWindow::add_dock_toggle(QDockWidget* dock) {
   if (dock == nullptr || fullscreen_action_ == nullptr) return;
+  watch_chrome_layout(dock);
   auto* viewMenu = menuBar()->actions().at(2)->menu();
   auto* action = dock->toggleViewAction();
   viewMenu->insertAction(fullscreen_action_, action);
@@ -405,8 +422,176 @@ void EditorMainWindow::restore_or_reset_layout() {
     return;
   }
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  const auto geometry = prefs.value("window/geometry").toByteArray();
+  if (!geometry.isEmpty()) restoreGeometry(geometry);
   const auto state = prefs.value("window/state-v16").toByteArray();
-  if (state.isEmpty() || !restoreState(state)) reset_default_layout();
+  if (state.isEmpty() || !restoreState(state)) {
+    reset_default_layout();
+    return;
+  }
+  // Recover the full editor chrome if a saved layout closed the edit / playback
+  // docks. Floating docks are hidden on purpose during the startup splash.
+  if (editor_dock_->isHidden() && playback_dock_->isHidden() &&
+      !editor_dock_->isFloating() && !playback_dock_->isFloating()) {
+    reset_default_layout();
+  }
+  if (preview_dock_->isHidden() && !preview_dock_->isFloating()) {
+    preview_dock_->show();
+  }
+  if (!chrome_revealed_) concealed_floating_chrome_.clear();
+  conceal_unrevealed_floating_chrome();
+}
+
+void EditorMainWindow::save_chrome_layout() {
+  layout_save_timer_.stop();
+  // CLI / capture mutates docks. The splash conceals floating chrome. Neither
+  // snapshot is the user's editor layout.
+  if (!persist_chrome_layout_ || !chrome_revealed_) return;
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  prefs.setValue("window/geometry", saveGeometry());
+  prefs.setValue("window/state-v16", saveState());
+  prefs.sync();
+}
+
+void EditorMainWindow::schedule_chrome_layout_save() {
+  if (!persist_chrome_layout_ || !chrome_revealed_) return;
+  layout_save_timer_.start();
+}
+
+void EditorMainWindow::watch_chrome_layout(QWidget* widget) {
+  if (widget == nullptr || widget->property("wdsLayoutWatched").toBool()) return;
+  widget->setProperty("wdsLayoutWatched", true);
+  if (auto* dock = qobject_cast<QDockWidget*>(widget)) {
+    connect(dock, &QDockWidget::dockLocationChanged, this,
+            &EditorMainWindow::schedule_chrome_layout_save);
+    connect(dock, &QDockWidget::topLevelChanged, this,
+            &EditorMainWindow::schedule_chrome_layout_save);
+    connect(dock, &QDockWidget::visibilityChanged, this,
+            &EditorMainWindow::schedule_chrome_layout_save);
+    return;
+  }
+  if (auto* bar = qobject_cast<QToolBar*>(widget)) {
+    connect(bar, &QToolBar::topLevelChanged, this,
+            &EditorMainWindow::schedule_chrome_layout_save);
+    connect(bar, &QToolBar::visibilityChanged, this,
+            &EditorMainWindow::schedule_chrome_layout_save);
+  }
+}
+
+void EditorMainWindow::conceal_unrevealed_floating_chrome() {
+  if (chrome_revealed_) return;
+  auto conceal = [this](QWidget* widget) {
+    if (widget == nullptr || widget->isHidden()) return;
+    if (std::find(concealed_floating_chrome_.begin(), concealed_floating_chrome_.end(), widget) ==
+        concealed_floating_chrome_.end()) {
+      concealed_floating_chrome_.push_back(widget);
+    }
+    widget->hide();
+  };
+  for (auto* dock : chrome_docks()) {
+    if (dock != nullptr && dock->isFloating()) conceal(dock);
+  }
+  for (auto* bar : {command_toolbar_, convert_toolbar_}) {
+    if (bar != nullptr && bar->isFloating()) conceal(bar);
+  }
+}
+
+void EditorMainWindow::reveal_concealed_floating_chrome() {
+  chrome_revealed_ = true;
+  for (auto* widget : concealed_floating_chrome_) {
+    if (widget != nullptr) widget->show();
+  }
+  concealed_floating_chrome_.clear();
+}
+
+void EditorMainWindow::ensure_preview_viewport_for_cli() {
+  persist_chrome_layout_ = false;
+  if (preview_dock_ == nullptr) return;
+  preview_dock_->show();
+  preview_dock_->raise();
+  if (preview_window_ != nullptr) {
+    preview_window_->create();
+    preview_window_->show();
+  }
+  apply_default_dock_sizes();
+}
+
+void EditorMainWindow::prepare_preview_capture_size(int pixel_w, int pixel_h) {
+  // CLI `capture-preview` only. Interactive export keeps the editor chrome.
+  persist_chrome_layout_ = false;
+  ensure_preview_viewport_for_cli();
+  if (preview_dock_ == nullptr || preview_window_ == nullptr || pixel_w <= 0 || pixel_h <= 0) {
+    return;
+  }
+  for (auto* dock : chrome_docks()) {
+    if (dock != nullptr && dock != preview_dock_) {
+      dock->hide();
+    }
+  }
+  if (editor_dock_ != nullptr) {
+    editor_dock_->hide();
+  }
+  if (menuBar() != nullptr) menuBar()->hide();
+  if (statusBar() != nullptr) statusBar()->hide();
+  preview_dock_->setFloating(true);
+  preview_dock_->setTitleBarWidget(new QWidget(preview_dock_));
+  preview_dock_->setContentsMargins(0, 0, 0, 0);
+  const qreal dpr = std::max<qreal>(1.0, preview_window_->devicePixelRatio());
+  const int logical_w = std::max(1, qRound(static_cast<qreal>(pixel_w) / dpr));
+  const int logical_h = std::max(1, qRound(static_cast<qreal>(pixel_h) / dpr));
+  if (auto* container = preview_dock_->widget()) {
+    container->setContentsMargins(0, 0, 0, 0);
+    container->setFixedSize(logical_w, logical_h);
+  }
+  preview_window_->setMinimumSize(QSize(logical_w, logical_h));
+  preview_window_->setMaximumSize(QSize(logical_w, logical_h));
+  preview_window_->resize(logical_w, logical_h);
+  preview_dock_->adjustSize();
+  preview_dock_->show();
+  preview_dock_->raise();
+  preview_window_->show();
+  preview_window_->requestUpdate();
+}
+
+void EditorMainWindow::restore_preview_after_export() {
+  persist_chrome_layout_ = true;
+  if (menuBar() != nullptr) menuBar()->show();
+  if (statusBar() != nullptr) statusBar()->show();
+  if (preview_window_ != nullptr) {
+    preview_window_->setMinimumSize(QSize(0, 0));
+    preview_window_->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+  }
+  if (preview_dock_ != nullptr) {
+    if (auto* container = preview_dock_->widget()) {
+      container->setMinimumSize(QSize(0, 0));
+      container->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+    }
+    preview_dock_->setTitleBarWidget(nullptr);
+  }
+  restore_or_reset_layout();
+  if (preview_window_ != nullptr) preview_window_->requestUpdate();
+}
+
+void EditorMainWindow::set_export_session_busy(bool on) { busy_active_ = on; }
+
+void EditorMainWindow::export_video() {
+  if (ui_manager_ == nullptr) return;
+  ExportVideoDialog dialog(ui_manager_, this, this);
+  dialog.exec();
+}
+
+void EditorMainWindow::show_stem_panel() {
+  if (!ui_manager_) return;
+  if (!stem_panel_) {
+    stem_panel_ = new StemPanel(ui_manager_, this);
+    stem_panel_->set_tracks_changed_handler([this] {
+      if (playback_panel_)
+        playback_panel_->set_stem_tracks(stem_panel_->track_names(), stem_panel_->selected_track());
+    });
+  }
+  stem_panel_->show();
+  stem_panel_->raise();
+  stem_panel_->activateWindow();
 }
 
 void EditorMainWindow::create_control_docks() {
@@ -417,6 +602,10 @@ void EditorMainWindow::create_control_docks() {
                               QDockWidget::DockWidgetFloatable |
                               QDockWidget::DockWidgetClosable);
   playback_panel_ = new PlaybackBar(ui_manager_, playback_dock_);
+  playback_panel_->set_stem_handlers([this](int index) {
+    if (stem_panel_ && !stem_panel_->select_track(index))
+      statusBar()->showMessage(tr("无法切换音轨，请检查音源或重新生成分轨。"), 5000);
+  }, [this] { show_stem_panel(); });
   playback_dock_->setWidget(playback_panel_);
   playback_dock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   playback_dock_->setMinimumHeight(0);
@@ -462,7 +651,10 @@ void EditorMainWindow::create_control_docks() {
   settings_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable |
                               QDockWidget::DockWidgetClosable);
   settings_panel_ = new SettingsPanel(ui_manager_, theme_dir_, settings_dock_);
-  settings_panel_->set_on_applied([this] { sync_toolbox_place_checks(); });
+  settings_panel_->set_on_applied([this] {
+    sync_toolbox_place_checks();
+    arm_backup_timer();
+  });
   settings_dock_->setWidget(settings_panel_);
   addDockWidget(Qt::RightDockWidgetArea, settings_dock_);
   add_dock_toggle(settings_dock_);
@@ -497,6 +689,8 @@ void EditorMainWindow::apply_command_icons() {
   if (check_action_ != nullptr) check_action_->setIcon(icon_for("check", fluent::Checklist));
   if (clear_marks_action_ != nullptr)
     clear_marks_action_->setIcon(icon_for("clear-marks", fluent::Eraser));
+  if (export_video_action_ != nullptr)
+    export_video_action_->setIcon(icon_for("export-video", fluent::Video));
 }
 
 void EditorMainWindow::refresh_history_actions() {
@@ -564,6 +758,9 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   });
   ui_manager_->set_open_project_handler([this] { open_project(); });
   ui_manager_->set_save_project_handler([this] { save_project(); });
+  ui_manager_->session().set_backup_sink([this](std::vector<ChartBackupItem> items) {
+    enqueue_backup_write(ChartBackupKind::Manual, std::move(items));
+  });
   connect(open_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.open");
     open_project();
@@ -591,6 +788,10 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   connect(export_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.export_chart");
     export_chart();
+  });
+  connect(export_video_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.export_video");
+    export_video();
   });
   connect(music_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.import_music");
@@ -628,7 +829,13 @@ EditorMainWindow::~EditorMainWindow() {
 }
 
 void EditorMainWindow::detach_ui_manager() {
+  backup_timer_.stop();
+  if (stem_panel_) {
+    delete stem_panel_;
+    stem_panel_ = nullptr;
+  }
   if (ui_manager_ != nullptr) {
+    ui_manager_->session().set_backup_sink({});
     ui_manager_->set_ui_change_handler({});
   }
   ui_manager_ = nullptr;
@@ -657,17 +864,58 @@ void EditorMainWindow::handle_ui_change(UiChange change) {
         toolbar_widget_->refresh_enabled_states();
       }
       refresh_window_title();
+      if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
       break;
     case UiChange::History:
       refresh_history_actions();
+      if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
       break;
     case UiChange::Document:
       refresh_window_title();
+      arm_backup_timer();
+      if (settings_panel_ != nullptr) settings_panel_->refresh_extended_lock();
       break;
     case UiChange::PlaceTool:
       sync_toolbox_place_checks();
       break;
   }
+}
+
+void EditorMainWindow::arm_backup_timer() {
+  backup_timer_.stop();
+  if (ui_manager_ == nullptr) return;
+  const auto& session = ui_manager_->session();
+  if (session.project_path().empty() || session.read_only()) return;
+  const int minutes = std::max(1, ui_manager_->backup_interval_min());
+  backup_timer_.start(minutes * 60 * 1000);
+}
+
+void EditorMainWindow::fire_auto_backup() {
+  if (ui_manager_ == nullptr) return;
+  auto& session = ui_manager_->session();
+  if (session.project_path().empty() || session.read_only()) return;
+  std::vector<ChartBackupItem> items;
+  if (!session.capture_auto_backup(items) || items.empty()) return;
+  enqueue_backup_write(ChartBackupKind::Auto, std::move(items));
+}
+
+void EditorMainWindow::enqueue_backup_write(ChartBackupKind kind,
+                                           std::vector<ChartBackupItem> items) {
+  if (ui_manager_ == nullptr || items.empty()) return;
+  const std::string root = ui_manager_->session().auto_backup_directory();
+  if (root.empty()) return;
+  arm_backup_timer();
+  auto* watcher = new QFutureWatcher<bool>(this);
+  connect(watcher, &QFutureWatcher<bool>::finished, this, [this, watcher] {
+    const bool ok = watcher->result();
+    watcher->deleteLater();
+    if (!ok && ui_manager_ != nullptr) {
+      ui_manager_->session().report_status("自动备份失败", StatusLevel::Error);
+    }
+  });
+  watcher->setFuture(QtConcurrent::run([root, kind, items = std::move(items)]() {
+    return write_chart_backup_folder(root, kind, items);
+  }));
 }
 
 void EditorMainWindow::refresh_window_title() {
@@ -719,20 +967,28 @@ void EditorMainWindow::track_open_watcher(QObject* watcher) {
 }
 
 void EditorMainWindow::untrack_open_watcher(QObject* watcher) {
-  open_watchers_.erase(std::remove(open_watchers_.begin(), open_watchers_.end(), watcher),
+  open_watchers_.erase(std::remove_if(open_watchers_.begin(), open_watchers_.end(),
+                                      [watcher](const QPointer<QObject>& p) {
+                                        return p.isNull() || p.data() == watcher;
+                                      }),
                        open_watchers_.end());
 }
 
 void EditorMainWindow::wait_open_project_watchers() {
   const auto watchers = open_watchers_;
-  for (auto* obj : watchers) {
+  for (const auto& p : watchers) {
+    QObject* obj = p.data();
     if (obj == nullptr) continue;
     static_cast<QFutureWatcher<PreparedWdsProject>*>(obj)->waitForFinished();
   }
+  open_watchers_.erase(std::remove_if(open_watchers_.begin(), open_watchers_.end(),
+                                      [](const QPointer<QObject>& p) { return p.isNull(); }),
+                       open_watchers_.end());
 }
 
 bool EditorMainWindow::show_startup_splash() {
   if (ui_manager_ == nullptr || !ui_manager_->session().project_path().empty()) return true;
+  conceal_unrevealed_floating_chrome();
   // Keep the chooser independent from the (still hidden) main window. This
   // avoids modality/activation quirks where accepting a child dialog leaves
   // the hidden parent as the active top-level window.
@@ -830,22 +1086,24 @@ bool EditorMainWindow::show_startup_splash() {
   actions->setSpacing(8);
   auto* open = new QPushButton(tr("打开工程"), &splash);
   auto* create = new QPushButton(tr("新建工程"), &splash);
+  auto* untitled = new QPushButton(tr("暂不需要工程"), &splash);
   auto* about = new QPushButton(tr("关于"), &splash);
   auto* version = new QLabel(tr("版本 %1").arg(QStringLiteral(WDS_APP_VERSION)), &splash);
   version->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   actions->addWidget(open);
   actions->addWidget(create);
+  actions->addWidget(untitled);
   actions->addStretch(1);
   actions->addWidget(about);
   root->addLayout(actions);
   root->addWidget(version);
 
   std::function<void(const QString&)> start_load;
-  start_load = [this, &splash, recent, open, create, about, loading,
+  start_load = [this, &splash, recent, open, create, untitled, about, loading,
                 progress](const QString& path) {
     if (path.isEmpty()) return;
     splash.setEnabled(false);
-    for (auto* button : {open, create, about}) button->setEnabled(false);
+    for (auto* button : {open, create, untitled, about}) button->setEnabled(false);
     recent->setEnabled(false);
     loading->setText(tr("正在加载工程…"));
     loading->setVisible(true);
@@ -854,7 +1112,7 @@ bool EditorMainWindow::show_startup_splash() {
     auto* watcher = new QFutureWatcher<PreparedWdsProject>(&splash);
     track_open_watcher(watcher);
     connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, &splash,
-            [this, &splash, path, recent, open, create, about,
+            [this, &splash, path, recent, open, create, untitled, about,
              loading, progress, watcher, gen] {
               if (gen != open_generation_ || ui_manager_ == nullptr) {
                 untrack_open_watcher(watcher);
@@ -866,7 +1124,7 @@ bool EditorMainWindow::show_startup_splash() {
                   future.takeResult());
               untrack_open_watcher(watcher);
               watcher->deleteLater();
-              for (auto* button : {open, create, about})
+              for (auto* button : {open, create, untitled, about})
                 button->setEnabled(true);
               recent->setEnabled(true);
               splash.setEnabled(true);
@@ -899,6 +1157,17 @@ bool EditorMainWindow::show_startup_splash() {
   });
   connect(create, &QPushButton::clicked, &splash, [this, &splash] {
     journal_menu_action("splash.new");
+    const QString path = pick_wdsproject_save_path(&splash);
+    if (path.isEmpty() || ui_manager_ == nullptr) return;
+    if (!ui_manager_->session().create_project(path.toStdString())) {
+      QMessageBox::warning(&splash, tr("保存失败"), tr("无法保存工程。"));
+      return;
+    }
+    remember_recent_project(path);
+    splash.accept();
+  });
+  connect(untitled, &QPushButton::clicked, &splash, [this, &splash] {
+    journal_menu_action("splash.untitled");
     ui_manager_->session().new_project();
     splash.accept();
   });
@@ -911,6 +1180,7 @@ bool EditorMainWindow::show_startup_splash() {
     ++open_generation_;
   }
   wait_open_project_watchers();
+  if (result == QDialog::Accepted) arm_backup_timer();
   // Closing the startup page means the user chose to exit, since the main
   // window has not been shown yet. The caller owns showing the editor.
   return result == QDialog::Accepted;
@@ -1063,6 +1333,11 @@ void EditorMainWindow::check_chart() {
   dialog.exec();
 }
 
+void EditorMainWindow::discard_unsaved_on_close() {
+  force_close_ = true;
+  persist_chrome_layout_ = false;
+}
+
 void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
   preview_window_ = preview;
   editor_window_ = editor;
@@ -1196,6 +1471,7 @@ void EditorMainWindow::open_project() {
               } else {
                 remember_recent_project(path);
                 clear_click_marks();
+                arm_backup_timer();
               }
             });
     const std::string native_path = path.toStdString();
@@ -1208,6 +1484,18 @@ void EditorMainWindow::open_project() {
 
 void EditorMainWindow::save_project() { save_project_then({}); }
 
+QString EditorMainWindow::pick_wdsproject_save_path(QWidget* parent) {
+  QString path = QFileDialog::getSaveFileName(parent, tr("保存 WDS 工程"),
+                                              QStringLiteral("untitled.wdsproject"),
+                                              tr("WDS 工程 (*.wdsproject)"));
+  if (path.isEmpty()) return {};
+  if (!path.endsWith(QStringLiteral(".wdsproject"), Qt::CaseInsensitive)) {
+    const QFileInfo info(path);
+    path = info.dir().filePath(info.completeBaseName() + QStringLiteral(".wdsproject"));
+  }
+  return path;
+}
+
 void EditorMainWindow::save_project_then(std::function<void()> done) {
   if (ui_manager_ == nullptr) return;
   auto& session = ui_manager_->session();
@@ -1217,9 +1505,7 @@ void EditorMainWindow::save_project_then(std::function<void()> done) {
   }
   QString path = QString::fromStdString(session.project_path());
   if (path.isEmpty()) {
-    path = QFileDialog::getSaveFileName(this, tr("保存 WDS 工程"),
-                                        QStringLiteral("untitled.wdsproject"),
-                                        tr("WDS 工程 (*.wdsproject)"));
+    path = pick_wdsproject_save_path(this);
   }
   if (path.isEmpty()) return;
   auto ok = std::make_shared<bool>(false);
@@ -1236,6 +1522,7 @@ void EditorMainWindow::save_project_then(std::function<void()> done) {
           QMessageBox::warning(this, tr("保存失败"), tr("无法保存工程。"));
         } else {
           remember_recent_project(path);
+          arm_backup_timer();
         }
         if (*ok && done) done();
       });
@@ -1255,6 +1542,7 @@ void EditorMainWindow::import_chart() {
         },
         [this, ok] {
           if (!*ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选谱面。"));
+          else arm_backup_timer();
         });
   });
 }
@@ -1276,17 +1564,34 @@ void EditorMainWindow::import_music() {
 }
 
 void EditorMainWindow::add_chart() {
-  if (ui_manager_->session().read_only()) return;
+  if (ui_manager_ == nullptr || ui_manager_->session().read_only()) return;
   QMessageBox box(QMessageBox::Question, tr("添加谱面"), tr("新建空白谱面，还是添加已有谱面文件？"), QMessageBox::NoButton, this);
   auto* create = box.addButton(tr("新建"), QMessageBox::AcceptRole);
   auto* existing = box.addButton(tr("添加已有"), QMessageBox::ActionRole);
   box.addButton(tr("取消"), QMessageBox::RejectRole);
   box.exec();
-  if (box.clickedButton() == create) { ui_manager_->session().add_chart(); return; }
-  if (box.clickedButton() == existing) {
+  const bool make_blank = box.clickedButton() == create;
+  const bool add_existing = box.clickedButton() == existing;
+  if (!make_blank && !add_existing) return;
+  auto proceed = [this, make_blank] {
+    if (ui_manager_ == nullptr) return;
+    if (make_blank) {
+      if (!ui_manager_->session().add_chart()) {
+        QMessageBox::warning(this, tr("添加失败"), tr("无法添加谱面。"));
+      }
+      return;
+    }
     const auto path = QFileDialog::getOpenFileName(this, tr("添加谱面"), {}, tr("WDS 谱面 (*.wdschart)"));
-    if (!path.isEmpty()) ui_manager_->session().add_chart_from_file(path.toStdString());
+    if (path.isEmpty()) return;
+    if (!ui_manager_->session().add_chart_from_file(path.toStdString())) {
+      QMessageBox::warning(this, tr("添加失败"), tr("无法添加所选谱面。"));
+    }
+  };
+  if (ui_manager_->session().project_path().empty()) {
+    save_project_then(std::move(proceed));
+    return;
   }
+  proceed();
 }
 
 void EditorMainWindow::export_chart() {
@@ -1350,9 +1655,7 @@ void EditorMainWindow::closeEvent(QCloseEvent* event) {
     });
     return;
   }
-  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
-  prefs.setValue("window/geometry", saveGeometry());
-  prefs.setValue("window/state-v16", saveState());
+  save_chrome_layout();
   ++open_generation_;
   wait_open_project_watchers();
   event->accept();
@@ -1360,17 +1663,31 @@ void EditorMainWindow::closeEvent(QCloseEvent* event) {
 
 void EditorMainWindow::hideEvent(QHideEvent* event) {
   QMainWindow::hideEvent(event);
-  // Floating docks are independent top-level windows. Keep them visible when
-  // the main shell is temporarily hidden (for example while switching apps).
+  // restoreState() shows floating docks/toolbars as top-level windows even
+  // while this shell is still hidden for the startup splash. Keep them
+  // concealed until the editor chrome is revealed.
+  if (!chrome_revealed_) {
+    conceal_unrevealed_floating_chrome();
+    return;
+  }
+  // After the editor is up, floating chrome stays visible when the main
+  // shell is temporarily hidden (for example while switching apps).
   for (auto* dock : chrome_docks()) {
     if (dock != nullptr && dock->isFloating()) dock->show();
+  }
+  for (auto* bar : {command_toolbar_, convert_toolbar_}) {
+    if (bar != nullptr && bar->isFloating()) bar->show();
   }
 }
 
 void EditorMainWindow::showEvent(QShowEvent* event) {
   QMainWindow::showEvent(event);
+  reveal_concealed_floating_chrome();
   for (auto* dock : chrome_docks()) {
     if (dock != nullptr && dock->isFloating() && !dock->isHidden()) dock->raise();
+  }
+  for (auto* bar : {command_toolbar_, convert_toolbar_}) {
+    if (bar != nullptr && bar->isFloating() && !bar->isHidden()) bar->raise();
   }
 }
 }

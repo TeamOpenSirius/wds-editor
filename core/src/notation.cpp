@@ -24,6 +24,17 @@ int64_t sat_sub_i64(int64_t a, int64_t b) noexcept {
   return a - b;
 }
 
+int64_t sat_add_i64(int64_t a, int64_t b) noexcept {
+  if (b >= 0) {
+    if (a > std::numeric_limits<int64_t>::max() - b) {
+      return std::numeric_limits<int64_t>::max();
+    }
+  } else if (a < std::numeric_limits<int64_t>::min() - b) {
+    return std::numeric_limits<int64_t>::min();
+  }
+  return a + b;
+}
+
 int64_t sat_llround_i64(double value) noexcept {
   if (!std::isfinite(value)) {
     if (std::isnan(value)) {
@@ -44,15 +55,20 @@ int64_t sat_llround_i64(double value) noexcept {
 }
 
 int32_t sat_tick_from_double(double value) noexcept {
-  if (std::isnan(value) || value <= 0.0) {
+  if (std::isnan(value)) {
     return 0;
   }
   if (!std::isfinite(value)) {
-    return std::numeric_limits<int32_t>::max();
+    return value > 0.0 ? std::numeric_limits<int32_t>::max()
+                       : std::numeric_limits<int32_t>::min();
   }
   constexpr double kMax = static_cast<double>(std::numeric_limits<int32_t>::max());
+  constexpr double kMin = static_cast<double>(std::numeric_limits<int32_t>::min());
   if (value >= kMax) {
     return std::numeric_limits<int32_t>::max();
+  }
+  if (value <= kMin) {
+    return std::numeric_limits<int32_t>::min();
   }
   return static_cast<int32_t>(std::llround(value));
 }
@@ -98,19 +114,27 @@ bool chart_note_ids_keepable(const std::vector<NotationNote>& notes) {
   return plan_note_ids(notes, 0).ok;
 }
 
-bool timing_points_are_normalized(const MusicTiming& timing) noexcept {
+// True when `timing` can be used as-is (no normalized copy needed). O(1) on the
+// hot path: the structural verdict is cached in MusicTiming::points_state under
+// the same validity rule as prefix_ms (size match). See the cache contract and
+// threading note on MusicTiming. ticks_per_quarter is checked live (O(1)).
+bool timing_points_are_normalized(const MusicTiming& timing) {
   if (!is_valid_ticks_per_quarter(timing.ticks_per_quarter) || timing.points.empty()) {
     return false;
   }
-  if (timing.points.front().tick != 0) {
-    return false;
+  const bool cache_valid = timing.prefix_ms.size() == timing.points.size();
+  if (cache_valid && timing.points_state != TimingPointsState::Unknown) {
+    return timing.points_state == TimingPointsState::Normalized;
   }
-  for (size_t i = 1; i < timing.points.size(); ++i) {
-    if (timing.points[i].tick <= timing.points[i - 1].tick) {
-      return false;
-    }
+  const bool normalized = timing_points_structurally_normalized(timing);
+  if (cache_valid) {
+    // Keep the existing prefix_ms as-is; only record the verdict.
+    timing.points_state =
+        normalized ? TimingPointsState::Normalized : TimingPointsState::NotNormalized;
   }
-  return true;
+  // Size mismatch: ensure_timing_prefix rebuilds prefix_ms (and the verdict) for
+  // normalized input; non-normalized input takes the copy path and is not cached.
+  return normalized;
 }
 
 void ensure_timing_prefix(const MusicTiming& timing) {
@@ -154,7 +178,7 @@ int64_t tick_to_milliseconds_normalized(int32_t tick, const MusicTiming& timing)
   }
   ensure_timing_prefix(timing);
   const auto& pts = timing.points;
-  const int32_t target = std::max(0, tick);
+  const int32_t target = tick;
   const size_t i = last_index_tick_le(pts, target);
   const double tpq = static_cast<double>(timing.ticks_per_quarter);
   const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
@@ -170,7 +194,10 @@ int32_t milliseconds_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
     return 0;
   }
   const double remain = static_cast<double>(sat_sub_i64(ms, timing.offset_ms));
-  if (!std::isfinite(remain) || remain <= 0.0) {
+  if (!std::isfinite(remain)) {
+    return 0;
+  }
+  if (remain == 0.0) {
     return 0;
   }
   ensure_timing_prefix(timing);
@@ -180,7 +207,13 @@ int32_t milliseconds_to_tick_normalized(int64_t ms, const MusicTiming& timing) {
   const double bpm = pts[i].bpm > 0.0 ? pts[i].bpm : 120.0;
   const double ms_per_tick = 60000.0 / (bpm * tpq);
   const double into = remain - timing.prefix_ms[i];
-  return sat_tick_from_double(static_cast<double>(pts[i].tick) + into / ms_per_tick);
+  const int32_t tick =
+      sat_tick_from_double(static_cast<double>(pts[i].tick) + into / ms_per_tick);
+  // Saturated int64 ms (e.g. INT64_MIN) must not map to INT32_MIN tick.
+  if (tick == std::numeric_limits<int32_t>::min()) {
+    return 0;
+  }
+  return tick;
 }
 
 }  // namespace
@@ -208,9 +241,10 @@ int64_t NotationNote::start_ms(const MusicTiming& timing) const {
 }
 
 int64_t NotationNote::end_ms(const MusicTiming& timing) const {
-  // Instantaneous notes (official endTime -1 → end_tick 0, or end <= start):
-  // use start as end so hold heads / taps never expire against a bogus early end_ms.
-  if (end_tick <= 0 || end_tick < start_tick) {
+  // Instantaneous notes (official endTime -1 → end_tick == start_tick; legacy
+  // .wdschart end_tick 0 with positive start): use start as end.
+  if (end_tick < start_tick || end_tick == start_tick ||
+      (end_tick <= 0 && start_tick > 0)) {
     return start_ms(timing);
   }
   return tick_to_milliseconds(end_tick, timing);
@@ -394,6 +428,7 @@ bool is_combo_head_note(const NotationNote& note) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
+    case NoteType::Scratch:
     case NoteType::BlueTap:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
@@ -619,6 +654,11 @@ PreviewComboState combo_from_sorted_hits(const std::vector<int64_t>& sorted_hits
   state.combo = static_cast<int32_t>(it - sorted_hits.begin());
   if (state.combo > 0) {
     state.last_judge_ms = *(it - 1);
+    const int32_t hundreds = state.combo / 100;
+    if (hundreds > 0) {
+      const size_t fire_i = static_cast<size_t>(hundreds * 100 - 1);
+      state.last_combo_fire_ms = sorted_hits[fire_i];
+    }
   }
   return state;
 }
@@ -638,6 +678,7 @@ bool contributes_to_concurrent_at_start(NoteType type) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
+    case NoteType::Scratch:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
     case NoteType::ScratchHoldStart:
@@ -714,6 +755,70 @@ ChartDocument::ChartDocument(MusicTiming timing) : timing_(std::move(timing)) {
   normalize_timing_points(timing_);
 }
 
+bool note_requires_sirius_extended(const NotationNote& note) noexcept {
+  if (is_nontail_hold_body(note.note_type)) return true;
+  if (note.note_type == NoteType::HoldEighth || note.note_type == NoteType::None ||
+      is_split_lane_gimmick(note.gimmick_type)) return false;
+  return note.lane < 0 || note.width > 12 ||
+         static_cast<int64_t>(note.lane) + note.width > 12;
+}
+
+std::vector<std::string> required_chart_features(const NotationChart& chart) {
+  bool nontail = false;
+  bool overhang = false;
+  for (const auto& note : chart.notes) {
+    nontail = nontail || is_nontail_hold_body(note.note_type);
+    if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
+    overhang = overhang || note.lane < 0 || static_cast<int64_t>(note.lane) + note.width > 12;
+  }
+  std::vector<std::string> features;
+  if (nontail) features.emplace_back("nontail-hold-v1");
+  if (!chart.scroll_speed_points.empty()) features.emplace_back("positive-sv-v1");
+  if (overhang) features.emplace_back("lane-overhang-v1");
+  return features;
+}
+
+bool ChartDocument::set_scroll_speed_points(std::vector<ScrollSpeedPoint> points) {
+  if (is_read_only()) return false;
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official && !points.empty()) return false;
+  for (const auto& point : points) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+      return false;
+    }
+  }
+  std::sort(points.begin(), points.end(), [](const auto& a, const auto& b) {
+    return a.tick < b.tick;
+  });
+  for (size_t i = 1; i < points.size(); ++i) {
+    if (points[i - 1].tick == points[i].tick) return false;
+  }
+  scroll_speed_points_ = std::move(points);
+  mark_dirty();
+  return true;
+}
+
+bool ChartDocument::set_compatibility_profile(ChartCompatibilityProfile profile) {
+  if (is_read_only()) return false;
+  if (profile == compatibility_profile_) return true;
+  if (profile == ChartCompatibilityProfile::Official) {
+    if (!scroll_speed_points_.empty()) return false;
+    for (const auto& note : notes_) {
+      if (note_requires_sirius_extended(note)) return false;
+      if (note.note_type == NoteType::HoldEighth || is_split_lane_gimmick(note.gimmick_type) ||
+          (note.note_type == NoteType::None && note.width == 0)) {
+        continue;
+      }
+      if (note.width < 1 || note.width > 12 || note.lane < 0 ||
+          static_cast<int64_t>(note.lane) + note.width > 12) {
+        return false;
+      }
+    }
+  }
+  compatibility_profile_ = profile;
+  mark_dirty();
+  return true;
+}
+
 bool ChartDocument::set_timing(MusicTiming timing) {
   if (is_read_only()) {
     return false;
@@ -752,6 +857,8 @@ int32_t ChartDocument::add_note(NotationNote note) {
   if (is_read_only()) {
     return -1;
   }
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official &&
+      note_requires_sirius_extended(note)) return -1;
   constexpr int32_t kMaxId = std::numeric_limits<int32_t>::max();
   if (note.id < 0) {
     if (next_id_ == kMaxId) {
@@ -774,6 +881,76 @@ int32_t ChartDocument::add_note(NotationNote note) {
   return note.id;
 }
 
+bool ChartDocument::add_notes(const std::vector<NotationNote>& notes,
+                              std::vector<int32_t>* out_ids) {
+  if (out_ids) {
+    out_ids->clear();
+  }
+  if (notes.empty()) {
+    return true;
+  }
+  if (is_read_only()) {
+    return false;
+  }
+
+  // Plan ids exactly as a sequence of add_note calls would (explicit ids may not
+  // collide with the document or with ids claimed earlier in this batch).
+  constexpr int32_t kMaxId = std::numeric_limits<int32_t>::max();
+  int32_t next_id = next_id_;
+  std::unordered_set<int32_t> claimed;
+  claimed.reserve(notes.size());
+  std::vector<NotationNote> staged;
+  staged.reserve(notes.size());
+  bool ok = true;
+  for (const auto& note : notes) {
+    if (compatibility_profile_ == ChartCompatibilityProfile::Official &&
+        note_requires_sirius_extended(note)) {
+      ok = false;
+      break;
+    }
+    NotationNote staged_note = note;
+    if (staged_note.id < 0) {
+      if (next_id == kMaxId) {
+        ok = false;
+        break;
+      }
+      staged_note.id = next_id++;
+    } else {
+      if (staged_note.id == kMaxId || id_to_index_.find(staged_note.id) != id_to_index_.end() ||
+          claimed.find(staged_note.id) != claimed.end()) {
+        ok = false;
+        break;
+      }
+      next_id = std::max(next_id, staged_note.id + 1);
+    }
+    claimed.insert(staged_note.id);
+    staged.push_back(staged_note);
+  }
+
+  if (out_ids) {
+    out_ids->reserve(staged.size());
+    for (const auto& n : staged) {
+      out_ids->push_back(n.id);
+    }
+  }
+  // Same id-counter side effect as the sequential version (which advances
+  // next_id_ for notes added before a failure and does not give the ids back).
+  next_id_ = next_id;
+  if (!ok) {
+    return false;
+  }
+
+  for (const auto& n : staged) {
+    index_.on_note_added(n, timing_);
+  }
+  notes_.insert(notes_.end(), staged.begin(), staged.end());
+  sort_notes_for_display();
+  rebuild_id_index();
+  rebuild_concurrent_lines();
+  mark_dirty();
+  return true;
+}
+
 bool ChartDocument::update_note(int32_t id, const NotationNote& note) {
   return apply_note_updates({NoteUpdate{id, note}});
 }
@@ -794,6 +971,14 @@ bool ChartDocument::apply_note_updates(const std::vector<NoteUpdate>& updates) {
     }
     if (id_to_index_.find(update.id) == id_to_index_.end()) {
       return false;
+    }
+  }
+
+  // Validate everything before touching any state: a mid-batch failure would
+  // leave a partially applied change that no history command records.
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official) {
+    for (const auto& update : updates) {
+      if (note_requires_sirius_extended(update.note)) return false;
     }
   }
 
@@ -838,6 +1023,51 @@ bool ChartDocument::remove_note(int32_t id) {
   return true;
 }
 
+bool ChartDocument::remove_notes(const std::vector<int32_t>& ids) {
+  if (ids.empty()) {
+    return true;
+  }
+  if (is_read_only()) {
+    return false;
+  }
+
+  // All-or-nothing: unknown or repeated ids reject the batch before any mutation.
+  std::unordered_set<int32_t> seen;
+  seen.reserve(ids.size());
+  for (const int32_t id : ids) {
+    if (!seen.insert(id).second || id_to_index_.find(id) == id_to_index_.end()) {
+      return false;
+    }
+  }
+
+  std::vector<char> drop(notes_.size(), 0);
+  for (const int32_t id : ids) {
+    const size_t idx = id_to_index_.find(id)->second;
+    index_.on_note_removed(notes_[idx], timing_);
+    drop[idx] = 1;
+  }
+  size_t write = 0;
+  for (size_t read = 0; read < notes_.size(); ++read) {
+    if (drop[read]) {
+      continue;
+    }
+    if (write != read) {
+      notes_[write] = notes_[read];
+    }
+    ++write;
+  }
+  notes_.resize(write);
+
+  sort_notes_for_display();
+  rebuild_id_index();
+  if (index_.hold_span_stale()) {
+    rebuild_index();
+  }
+  rebuild_concurrent_lines();
+  mark_dirty();
+  return true;
+}
+
 std::optional<NotationNote> ChartDocument::find_note(int32_t id) const {
   const auto it = id_to_index_.find(id);
   if (it == id_to_index_.end()) {
@@ -846,10 +1076,59 @@ std::optional<NotationNote> ChartDocument::find_note(int32_t id) const {
   return notes_[it->second];
 }
 
+void ChartDocument::note_indices_starting_in(int32_t lo_tick, int32_t hi_tick,
+                                             std::vector<size_t>& out) const {
+  out.clear();
+  if (lo_tick > hi_tick || notes_.empty()) {
+    return;
+  }
+  // tick->ms is monotonic non-decreasing, so [ms(lo), ms(hi)] contains every note
+  // whose start tick is in [lo, hi]; 1 ms of slack guards against double rounding.
+  const int64_t lower = sat_sub_i64(tick_to_milliseconds(lo_tick, timing_), 1);
+  const int64_t upper = sat_add_i64(tick_to_milliseconds(hi_tick, timing_), 1);
+  index_.for_each_start_in_range(lower, upper, [&](int32_t id) {
+    const auto it = id_to_index_.find(id);
+    if (it == id_to_index_.end()) return;
+    const int32_t tick = notes_[it->second].start_tick;
+    if (tick < lo_tick || tick > hi_tick) return;
+    out.push_back(it->second);
+  });
+  std::sort(out.begin(), out.end());
+}
+
+void ChartDocument::note_indices_starting_at(int32_t tick, std::vector<size_t>& out) const {
+  note_indices_starting_in(tick, tick, out);
+}
+
+void ChartDocument::tail_note_indices_ending_in(int32_t lo_tick, int32_t hi_tick,
+                                                std::vector<size_t>& out) const {
+  out.clear();
+  if (lo_tick > hi_tick || notes_.empty()) {
+    return;
+  }
+  const int64_t lower = sat_sub_i64(tick_to_milliseconds(lo_tick, timing_), 1);
+  const int64_t upper = sat_add_i64(tick_to_milliseconds(hi_tick, timing_), 1);
+  index_.for_each_end_in_range(lower, upper, [&](int32_t id) {
+    const auto it = id_to_index_.find(id);
+    if (it == id_to_index_.end()) return;
+    const NotationNote& note = notes_[it->second];
+    if (!is_hold_with_tail(note.note_type)) return;
+    if (note.end_tick < lo_tick || note.end_tick > hi_tick) return;
+    out.push_back(it->second);
+  });
+  std::sort(out.begin(), out.end());
+}
+
+void ChartDocument::tail_note_indices_ending_at(int32_t tick, std::vector<size_t>& out) const {
+  tail_note_indices_ending_in(tick, tick, out);
+}
+
 bool ChartDocument::set_notes(std::vector<NotationNote> notes) {
   if (is_read_only()) {
     return false;
   }
+  if (compatibility_profile_ == ChartCompatibilityProfile::Official &&
+      std::any_of(notes.begin(), notes.end(), note_requires_sirius_extended)) return false;
   const NoteIdPlan plan = plan_note_ids(notes, next_id_);
   if (!plan.ok || plan.ids.size() != notes.size()) {
     return false;
@@ -900,6 +1179,9 @@ NotationChart ChartDocument::to_notation_chart() const {
   chart.timing = timing_;
   chart.notes = notes_;
   chart.concurrent_lines = concurrent_lines_;
+  chart.scroll_speed_points = scroll_speed_points_;
+  chart.compatibility_profile = compatibility_profile_;
+  chart.keep_file_eighths = keep_file_eighths_;
   return chart;
 }
 
@@ -916,6 +1198,9 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
   normalize_timing_points(timing_);
   notes_ = chart.notes;
   concurrent_lines_ = chart.concurrent_lines;
+  scroll_speed_points_ = chart.scroll_speed_points;
+  compatibility_profile_ = chart.compatibility_profile;
+  keep_file_eighths_ = chart.keep_file_eighths;
   edit_mode_ = mode;
 
   if (!chart_note_ids_keepable(notes_)) {
@@ -1004,9 +1289,23 @@ void ChartDocument::sort_notes_for_display() {
 
 void ChartDocument::rebuild_id_index() {
   id_to_index_.clear();
+  children_by_parent_.clear();
   for (size_t i = 0; i < notes_.size(); ++i) {
     id_to_index_[notes_[i].id] = i;
+    // i ascends, so every bucket stays strictly ascending.
+    if (notes_[i].parent_hold_id >= 0) {
+      children_by_parent_[notes_[i].parent_hold_id].push_back(i);
+    }
   }
+}
+
+void ChartDocument::note_indices_with_parent(int32_t parent_hold_id,
+                                             std::vector<size_t>& out) const {
+  out.clear();
+  if (parent_hold_id < 0) return;
+  const auto it = children_by_parent_.find(parent_hold_id);
+  if (it == children_by_parent_.end()) return;
+  out.assign(it->second.begin(), it->second.end());
 }
 
 void ChartDocument::rebuild_index() { index_.rebuild(notes_, timing_); }

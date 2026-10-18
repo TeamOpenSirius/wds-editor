@@ -399,6 +399,18 @@ int main() {
          "ClickRecord3 default is J");
   expect(std::string(editor_shortcut_id(EditorShortcut::ClickRecord0)) == "click_record_0",
          "ClickRecord0 id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PasteMirror)) == "paste_mirror",
+         "PasteMirror id");
+  expect(std::string(editor_shortcut_label(EditorShortcut::PasteMirror)) == "镜像粘贴",
+         "PasteMirror label");
+  {
+    const ShortcutChord paste_mirror = default_editor_shortcut(EditorShortcut::PasteMirror);
+    expect(paste_mirror.key == static_cast<KeyCode>('V') && paste_mirror.mods.control &&
+               paste_mirror.mods.shift,
+           "PasteMirror default is Ctrl/Cmd+Shift+V");
+    expect(!editor_shortcut_conflicts(EditorShortcut::PasteMirror, paste_mirror),
+           "PasteMirror default does not collide");
+  }
   expect(is_click_record_shortcut(EditorShortcut::ClickRecord2), "ClickRecord2 is click-record");
   expect(!is_click_record_shortcut(EditorShortcut::PlaceType0), "PlaceType0 is not click-record");
   {

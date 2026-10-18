@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <unordered_map>
@@ -40,10 +42,23 @@ bool star_matches_hold_for_legacy_bind(const NotationNote& star,
   return star.lane == hold.lane && star.width == hold.width;
 }
 
+int32_t hold_eighth_step(int32_t ticks_per_quarter) noexcept {
+  return std::max(1, ticks_per_quarter / 2);
+}
+
+// Eighths are always derived: every HoldEighth bound to `hold` (and unbound ones
+// inside its span / lanes) is dropped, then the tpq/2 grid is regenerated for any
+// bindable hold body (tailed or nontail). Ticks occupied by a visible Sound /
+// ScratchSound star stay empty.
+// `max_new` clamps how many eighths this call may generate (see
+// kMaxAutoHoldEighths); `generated` (optional) reports how many were added.
 std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<NotationNote> notes,
                                                             const NotationNote& hold,
-                                                            int32_t ticks_per_quarter) {
-  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return notes;
+                                                            int32_t ticks_per_quarter,
+                                                            std::size_t max_new,
+                                                            std::size_t* generated = nullptr) {
+  if (generated != nullptr) *generated = 0;
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return notes;
   notes.erase(std::remove_if(notes.begin(), notes.end(),
                              [&](const NotationNote& note) {
                                if (note.note_type != NoteType::HoldEighth) return false;
@@ -53,18 +68,30 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
                                       note.start_tick < hold.end_tick && overlaps(note, hold);
                              }),
               notes.end());
-  const int32_t step = std::max(1, ticks_per_quarter / 2);
+  const int32_t step = hold_eighth_step(ticks_per_quarter);
+
+  // One pass over the existing notes builds the per-tick lookup, so each grid
+  // step is O(1) instead of scanning every note (generated eighths are never
+  // visible stars, so the lookup stays valid while new eighths are appended).
+  std::unordered_set<int32_t> occupied_ticks;
+  for (const auto& note : notes) {
+    if (note.start_tick <= hold.start_tick || note.start_tick >= hold.end_tick) continue;
+    if (is_visible_hold_mid_star(note.note_type)) {
+      if ((hold.id >= 0 && note.parent_hold_id == hold.id) ||
+          (note.parent_hold_id < 0 && overlaps(note, hold))) {
+        occupied_ticks.insert(note.start_tick);
+      }
+    }
+  }
+
+  std::size_t added = 0;
   for (int64_t tick64 = static_cast<int64_t>(hold.start_tick) + step; tick64 < hold.end_tick;
        tick64 += step) {
+    if (added >= max_new) break;
     const int32_t tick = static_cast<int32_t>(tick64);
-    const bool occupied = std::any_of(notes.begin(), notes.end(), [&](const NotationNote& note) {
-      if (!is_visible_hold_mid_star(note.note_type) || !same_tick(note.start_tick, tick)) {
-        return false;
-      }
-      if (hold.id >= 0 && note.parent_hold_id == hold.id) return true;
-      return note.parent_hold_id < 0 && overlaps(note, hold);
-    });
+    const bool occupied = occupied_ticks.count(tick) != 0;
     if (!occupied) {
+      ++added;
       NotationNote eighth = hold;
       eighth.id = kAutoNoteId;
       eighth.start_tick = tick;
@@ -78,15 +105,34 @@ std::vector<NotationNote> notes_with_recomputed_hold_eighths(std::vector<Notatio
       notes.push_back(eighth);
     }
   }
+  if (generated != nullptr) *generated = added;
   return notes;
 }
 
 }  // namespace
 
+std::size_t hold_eighth_slot_count(const NotationNote& hold, int32_t ticks_per_quarter) noexcept {
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return 0;
+  const int64_t span = static_cast<int64_t>(hold.end_tick) - hold.start_tick;
+  // Grid ticks start + k*step for k >= 1 with tick < end_tick.
+  return static_cast<std::size_t>((span - 1) / hold_eighth_step(ticks_per_quarter));
+}
+
+bool hold_eighths_within_limit(const std::vector<NotationNote>& notes,
+                               int32_t ticks_per_quarter) noexcept {
+  std::size_t total = 0;
+  for (const auto& note : notes) {
+    total += hold_eighth_slot_count(note, ticks_per_quarter);
+    if (total > kMaxAutoHoldEighths) return false;
+  }
+  return true;
+}
+
 std::vector<NotationNote> with_recomputed_hold_eighths(std::vector<NotationNote> notes,
                                                        const NotationNote& hold,
                                                        int32_t ticks_per_quarter) {
-  return notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
+  return notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter,
+                                            kMaxAutoHoldEighths);
 }
 
 void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept {
@@ -97,20 +143,126 @@ void strip_hold_eighths(std::vector<NotationNote>& notes) noexcept {
               notes.end());
 }
 
+namespace {
+
+// All holds have distinct non-negative ids (the precondition of the batched
+// eighth generation in with_all_hold_eighths_recomputed).
+bool holds_have_unique_bound_ids(const std::vector<NotationNote>& holds) {
+  std::unordered_set<int32_t> seen;
+  seen.reserve(holds.size());
+  for (const auto& hold : holds) {
+    if (hold.id < 0 || !seen.insert(hold.id).second) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 std::vector<NotationNote> with_all_hold_eighths_recomputed(std::vector<NotationNote> notes,
                                                            int32_t ticks_per_quarter) {
   strip_hold_eighths(notes);
   std::vector<NotationNote> holds;
   for (const auto& note : notes) {
-    if (is_hold_with_tail(note.note_type)) holds.push_back(note);
+    if (is_bindable_hold_body(note.note_type)) holds.push_back(note);
   }
+  // Total budget across all holds; callers that can report errors reject over-limit
+  // charts up front via hold_eighths_within_limit, so clamping here only protects
+  // paths with no error channel.
+  std::size_t budget = kMaxAutoHoldEighths;
+
+  // Fast path (O(N + generated)): with unique non-negative hold ids the per-hold
+  // erase step of notes_with_recomputed_hold_eighths is a no-op (strip_hold_eighths
+  // already removed every HoldEighth and generated rows of one hold never match
+  // another), and generated rows are never visible stars, so they do not influence
+  // later holds. The per-hold lookups are therefore built once from the notes that
+  // survived the strip. Output order is unchanged: surviving notes first, then
+  // generated eighths in hold order.
+  if (holds_have_unique_bound_ids(holds)) {
+    const int32_t step = hold_eighth_step(ticks_per_quarter);
+
+    struct UnboundOccupied {
+      int32_t tick = 0;
+      int32_t lane = 0;
+      int32_t end_lane = 0;
+    };
+    std::unordered_map<int32_t, std::vector<int32_t>> occupied_by_parent;
+    std::vector<UnboundOccupied> unbound_occupied;
+    for (const auto& note : notes) {
+      if (is_visible_hold_mid_star(note.note_type)) {
+        if (note.parent_hold_id >= 0) {
+          occupied_by_parent[note.parent_hold_id].push_back(note.start_tick);
+        } else {
+          unbound_occupied.push_back({note.start_tick, note.lane, note.end_lane()});
+        }
+      }
+    }
+    std::sort(unbound_occupied.begin(), unbound_occupied.end(),
+              [](const UnboundOccupied& a, const UnboundOccupied& b) { return a.tick < b.tick; });
+
+    for (const auto& hold : holds) {
+      if (budget == 0) break;
+      if (hold.end_tick <= hold.start_tick) continue;
+
+      std::unordered_set<int32_t> occupied_ticks;
+      const auto in_span = [&hold](int32_t tick) {
+        return tick > hold.start_tick && tick < hold.end_tick;
+      };
+      const auto occupied_it = occupied_by_parent.find(hold.id);
+      if (occupied_it != occupied_by_parent.end()) {
+        for (const int32_t tick : occupied_it->second) {
+          if (in_span(tick)) occupied_ticks.insert(tick);
+        }
+      }
+      auto unbound_it = std::upper_bound(
+          unbound_occupied.begin(), unbound_occupied.end(), hold.start_tick,
+          [](int32_t tick, const UnboundOccupied& u) { return tick < u.tick; });
+      for (; unbound_it != unbound_occupied.end() && unbound_it->tick < hold.end_tick;
+           ++unbound_it) {
+        if (unbound_it->lane <= hold.end_lane() && hold.lane <= unbound_it->end_lane) {
+          occupied_ticks.insert(unbound_it->tick);
+        }
+      }
+
+      std::size_t added = 0;
+      for (int64_t tick64 = static_cast<int64_t>(hold.start_tick) + step; tick64 < hold.end_tick;
+           tick64 += step) {
+        if (added >= budget) break;
+        const int32_t tick = static_cast<int32_t>(tick64);
+        if (occupied_ticks.count(tick) != 0) continue;
+        ++added;
+        NotationNote eighth = hold;
+        eighth.id = kAutoNoteId;
+        eighth.start_tick = tick;
+        eighth.end_tick = tick;
+        eighth.note_type = NoteType::HoldEighth;
+        eighth.gimmick_type = GimmickType::None;
+        eighth.scratch_length = 0;
+        eighth.parent_hold_id = hold.id;
+        notes.push_back(eighth);
+      }
+      budget -= added;
+    }
+    return notes;
+  }
+
   for (const auto& hold : holds) {
-    notes = notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter);
+    if (budget == 0) break;
+    std::size_t generated = 0;
+    notes = notes_with_recomputed_hold_eighths(std::move(notes), hold, ticks_per_quarter, budget,
+                                               &generated);
+    budget -= std::min(budget, generated);
   }
   return notes;
 }
 
+bool is_playfield_selectable(const NotationNote& note) noexcept {
+  if (note.note_type == NoteType::HoldEighth) return false;
+  return !is_split_lane_gimmick(note.gimmick_type);
+}
+
 NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks_per_quarter) {
+  if (!is_playfield_selectable(note)) return note;
+  if (target == NoteType::Scratch) return note;
   const bool was_hold = is_bindable_hold_body(note.note_type) && note.end_tick > note.start_tick;
   const bool target_hold = is_bindable_hold_body(target);
   const bool was_chain = is_hold_chain_body(note.note_type);
@@ -137,7 +289,7 @@ NotationNote convert_note_type(NotationNote note, NoteType target, int32_t ticks
   // Hold tail direction is computed from chain geometry unless authored; converting
   // a non-chain note always starts as equal-width bidirectional.
   if (!split) {
-    if (target == NoteType::Flick) {
+    if (is_flick_like(target)) {
       // Official Flick scratchLength is 0 / ±width. Keep authored |sl|>1 spans
       // (JumpScratch / converted hold tails); expand historic ±1 direction.
       note.scratch_length = official_flick_scratch_length(note.scratch_length, note.width);
@@ -160,7 +312,7 @@ namespace {
 // scratch_length. Horizontal mirror flips left↔right, so the sign must flip.
 // Split-lane gimmicks reuse scratch_length as a color id — leave those alone.
 void mirror_scratch_direction(NotationNote& note) noexcept {
-  if (is_split_lane_gimmick(note.gimmick_type)) return;
+  if (note.note_type == NoteType::HoldEighth || is_split_lane_gimmick(note.gimmick_type)) return;
   note.scratch_length = -note.scratch_length;
 }
 
@@ -311,11 +463,14 @@ std::optional<NotationNote> legacy_scratch_head_for(const ChartDocument& doc,
   if (!is_scratch_hold_body(hold.note_type) || !is_hold_with_tail(hold.note_type)) {
     return std::nullopt;
   }
-  for (const auto& note : doc.notes()) {
+  // Only notes starting at the hold's tick can qualify; first match in notes() order.
+  std::vector<std::size_t> starting;
+  doc.note_indices_starting_at(hold.start_tick, starting);
+  const auto& all = doc.notes();
+  for (const std::size_t index : starting) {
+    const NotationNote& note = all[index];
     if (note.id == hold.id || !is_legacy_scratch_hold_head(note)) continue;
-    if (!same_tick(note.start_tick, hold.start_tick) || !same_start_span(note, hold)) {
-      continue;
-    }
+    if (!same_start_span(note, hold)) continue;
     return note;
   }
   return std::nullopt;
@@ -323,9 +478,15 @@ std::optional<NotationNote> legacy_scratch_head_for(const ChartDocument& doc,
 
 }  // namespace
 
-std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
-                                                const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type) || hold.width < 1) return std::nullopt;
+namespace {
+
+// Shared occupancy model of both make_auto_hold_head overloads. `for_each_note`
+// receives a visitor and calls it once per note that may affect the hold start
+// (all notes for the ChartDocument overload, a candidate subset for the indexed one).
+template <typename ForEachNote>
+std::optional<NotationNote> make_auto_hold_head_impl(const NotationNote& hold,
+                                                     ForEachNote&& for_each_note) {
+  if (!is_bindable_hold_body(hold.note_type) || hold.width < 1) return std::nullopt;
 
   const auto mark_range = [&](std::vector<char>& occupied, int32_t lo, int32_t hi) {
     lo = std::max(lo, hold.lane);
@@ -340,22 +501,23 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
   // - hold tails of other holds that end here (ScratchHold uses end span)
   // Hold bodies (incl. nontail), eighths, and stars never force head shortening.
   std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
-  for (const auto& note : doc.notes()) {
-    if (note.id == hold.id) continue;
+  const auto visit = [&](const NotationNote& note) {
+    if (note.id == hold.id) return;
     if (is_hold_with_tail(note.note_type)) {
-      if (!same_tick(note.end_tick, hold.start_tick)) continue;
+      if (!same_tick(note.end_tick, hold.start_tick)) return;
       if (is_hold_chain_body(note.note_type)) {
         const auto [tail_lo, tail_hi] = get_scratch_end_lane_range(note);
         mark_range(occupied, tail_lo, tail_hi);
       } else {
         mark_range(occupied, note.lane, note.end_lane());
       }
-      continue;
+      return;
     }
-    if (!same_tick(note.start_tick, hold.start_tick)) continue;
-    if (is_hold_body(note.note_type) || is_hold_mid_star(note.note_type)) continue;
+    if (!same_tick(note.start_tick, hold.start_tick)) return;
+    if (is_hold_body(note.note_type) || is_hold_mid_star(note.note_type)) return;
     mark_range(occupied, note.lane, note.end_lane());
-  }
+  };
+  for_each_note(visit);
 
   // Collect continuous free runs inside the body span.
   std::vector<std::pair<int32_t, int32_t>> free_runs;  // (lane, width)
@@ -387,12 +549,57 @@ std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
   return head;
 }
 
+}  // namespace
+
+std::optional<NotationNote> make_auto_hold_head(const ChartDocument& doc,
+                                                 const NotationNote& hold) {
+  if (!is_bindable_hold_body(hold.note_type) || hold.width < 1) return std::nullopt;
+  // The occupancy rules only react to notes starting at hold.start_tick (non-tailed)
+  // and tailed notes ending there; every other note is a no-op in the visitor.
+  std::vector<std::size_t> starting;
+  std::vector<std::size_t> tails;
+  doc.note_indices_starting_at(hold.start_tick, starting);
+  doc.tail_note_indices_ending_at(hold.start_tick, tails);
+  std::vector<std::size_t> candidates;
+  candidates.reserve(starting.size() + tails.size());
+  std::set_union(starting.begin(), starting.end(), tails.begin(), tails.end(),
+                 std::back_inserter(candidates));
+  const auto& all = doc.notes();
+  return make_auto_hold_head_impl(hold, [&](const auto& visit) {
+    for (const std::size_t index : candidates) visit(all[index]);
+  });
+}
+
+std::optional<NotationNote> make_auto_hold_head(const NotationNote& hold,
+                                                 const std::vector<NotationNote>& notes,
+                                                 const std::vector<std::size_t>& candidates) {
+  return make_auto_hold_head_impl(hold, [&](const auto& visit) {
+    for (const std::size_t index : candidates) visit(notes[index]);
+  });
+}
+
+std::optional<NotationNote> make_auto_hold_head(const NotationNote& hold,
+                                                 const std::vector<NotationNote>& notes) {
+  // Unassigned ids (< 0) must not match notes that also carry an unassigned id.
+  NotationNote probe = hold;
+  if (probe.id < 0) probe.id = std::numeric_limits<int32_t>::min();
+  auto head = make_auto_hold_head_impl(probe, [&](const auto& visit) {
+    for (const auto& note : notes) visit(note);
+  });
+  return head;
+}
+
 std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
                                                  const NotationNote& hold) {
   if (!is_hold_with_tail(hold.note_type) && !is_nontail_hold_body(hold.note_type)) {
     return std::nullopt;
   }
-  for (const auto& note : doc.notes()) {
+  // A head pairs only at the body's own start tick; first match in notes() order.
+  std::vector<std::size_t> starting;
+  doc.note_indices_starting_at(hold.start_tick, starting);
+  const auto& all = doc.notes();
+  for (const std::size_t index : starting) {
+    const NotationNote& note = all[index];
     if (note.id == hold.id) continue;
     if (hold_head_pairs_with_body(note, hold)) return note;
   }
@@ -402,14 +609,17 @@ std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
 std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
                                                  const NotationNote& head) {
   if (!is_hold_head_note(head)) return std::nullopt;
-  for (const auto& note : doc.notes()) {
-    if (hold_head_pairs_with_body(head, note)) return note;
+  std::vector<std::size_t> starting;
+  doc.note_indices_starting_at(head.start_tick, starting);
+  const auto& all = doc.notes();
+  for (const std::size_t index : starting) {
+    if (hold_head_pairs_with_body(head, all[index])) return all[index];
   }
   return std::nullopt;
 }
 
 bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type)) return false;
+  if (!is_bindable_hold_body(hold.note_type)) return false;
   if (paired_hold_head_for(doc, hold)) return true;
   if (auto legacy = legacy_scratch_head_for(doc, hold)) {
     NotationNote fixed = *legacy;
@@ -466,7 +676,7 @@ void apply_convert_scratch_override(NotationNote& after,
                                     std::optional<int32_t> scratch_length) noexcept {
   if (!scratch_length.has_value()) return;
   const int32_t dir = *scratch_length;
-  if (after.note_type == NoteType::Flick) {
+  if (is_flick_like(after.note_type)) {
     after.scratch_length = encode_flick_scratch_length(dir, after.width);
   } else if (is_scratch_hold_body(after.note_type)) {
     after.scratch_length = dir < 0 ? -after.width : (dir > 0 ? after.width : 0);
@@ -480,7 +690,7 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
                                               NoteType target,
                                               std::optional<int32_t> scratch_length) {
   ConvertNotesResult result;
-  if (selected.empty()) return result;
+  if (selected.empty() || target == NoteType::Scratch) return result;
   const int32_t tpq = doc.timing().ticks_per_quarter;
   std::unordered_set<int32_t> handled;
   std::unordered_set<int32_t> remove_ids;
@@ -493,7 +703,9 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
   selected_bodies.reserve(selected.size());
   for (const int32_t id : selected) {
     auto note = doc.find_note(id);
-    if (note && is_bindable_hold_body(note->note_type)) selected_bodies.push_back(id);
+    if (note && is_playfield_selectable(*note) && is_bindable_hold_body(note->note_type)) {
+      selected_bodies.push_back(id);
+    }
   }
 
   for (const int32_t body_id : selected_bodies) {
@@ -508,10 +720,8 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
       const NoteType star_t = visible_star_type_for_hold(after.note_type);
       for (const auto& dep : hold_attached_notes_for(doc, *body)) {
         if (dep.note_type == NoteType::HoldEighth) {
-          if (is_nontail_hold_body(after.note_type)) {
-            queue_remove(dep);
-            handled.insert(dep.id);
-          }
+          // HoldEighth is an in-body judgment point and remains valid for both
+          // tailed and nontail bodies. Only a non-hold conversion removes it.
           continue;
         }
         if (!is_visible_hold_mid_star(dep.note_type)) continue;
@@ -552,7 +762,7 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
   for (const int32_t id : selected) {
     if (handled.count(id) || remove_ids.count(id)) continue;
     auto note = doc.find_note(id);
-    if (!note) continue;
+    if (!note || !is_playfield_selectable(*note)) continue;
     NotationNote after = convert_note_type(*note, target, tpq);
     apply_convert_scratch_override(after, scratch_length);
     result.updates[id] = after;
@@ -563,35 +773,49 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
 }
 
 bool recompute_hold_eighths(ChartDocument& doc, const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return false;
-  auto notes =
-      notes_with_recomputed_hold_eighths(doc.notes(), hold, doc.timing().ticks_per_quarter);
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return false;
+  auto notes = notes_with_recomputed_hold_eighths(doc.notes(), hold, doc.timing().ticks_per_quarter,
+                                                  kMaxAutoHoldEighths);
   return doc.set_notes(std::move(notes));
 }
 
 bool recompute_hold_eighths(ChartDocument& doc) {
-  std::vector<NotationNote> holds;
-  for (const auto& note : doc.notes()) if (is_hold_with_tail(note.note_type)) holds.push_back(note);
-  bool changed = false;
-  for (const auto& hold : holds) changed = recompute_hold_eighths(doc, hold) || changed;
-  return changed;
+  const bool has_derived_input = std::any_of(
+      doc.notes().begin(), doc.notes().end(), [](const NotationNote& note) {
+        return is_bindable_hold_body(note.note_type) || note.note_type == NoteType::HoldEighth;
+      });
+  if (!has_derived_input) return false;
+  return doc.set_notes(
+      with_all_hold_eighths_recomputed(doc.notes(), doc.timing().ticks_per_quarter));
 }
 
 std::vector<NotationNote> hold_eighths_for(const ChartDocument& doc, const NotationNote& hold) {
   std::vector<NotationNote> out;
-  if (!is_hold_with_tail(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
-  for (const auto& note : doc.notes()) {
-    if (note.note_type != NoteType::HoldEighth) continue;
-    if (hold.id >= 0 && note.parent_hold_id == hold.id) {
-      out.push_back(note);
-      continue;
-    }
-    if (note.parent_hold_id >= 0) continue;
+  if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
+  const auto& all = doc.notes();
+  // Bound eighths (any tick) plus unbound eighths strictly inside the hold's range;
+  // the two sets are disjoint (parent >= 0 vs < 0). Merge by index = notes() order.
+  std::vector<std::size_t> picked;
+  if (hold.id >= 0) {
+    doc.note_indices_with_parent(hold.id, picked);
+    picked.erase(std::remove_if(picked.begin(), picked.end(),
+                                [&](std::size_t i) {
+                                  return all[i].note_type != NoteType::HoldEighth;
+                                }),
+                 picked.end());
+  }
+  std::vector<std::size_t> in_range;
+  doc.note_indices_starting_in(hold.start_tick + 1, hold.end_tick - 1, in_range);
+  for (const std::size_t i : in_range) {
+    const NotationNote& note = all[i];
+    if (note.note_type != NoteType::HoldEighth || note.parent_hold_id >= 0) continue;
     if (note.start_tick > hold.start_tick && note.start_tick < hold.end_tick &&
         overlaps(note, hold)) {
-      out.push_back(note);
+      picked.push_back(i);
     }
   }
+  std::sort(picked.begin(), picked.end());
+  for (const std::size_t i : picked) out.push_back(all[i]);
   return out;
 }
 
@@ -608,8 +832,12 @@ std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
                                                   const NotationNote& hold) {
   std::vector<NotationNote> out;
   if (!is_bindable_hold_body(hold.note_type) || hold.end_tick <= hold.start_tick) return out;
-  for (const auto& note : doc.notes()) {
-    if (attached_to_hold_by_bind(note, hold)) out.push_back(note);
+  if (hold.id < 0) return out;  // attached_to_hold_by_bind requires hold.id >= 0
+  std::vector<std::size_t> children;
+  doc.note_indices_with_parent(hold.id, children);
+  const auto& all = doc.notes();
+  for (const std::size_t index : children) {
+    if (attached_to_hold_by_bind(all[index], hold)) out.push_back(all[index]);
   }
   return out;
 }
@@ -638,7 +866,19 @@ bool hold_has_visible_star_at(const std::vector<NotationNote>& notes, int32_t ho
 
 bool hold_has_visible_star_at(const ChartDocument& doc, int32_t hold_id, int32_t tick,
                               int32_t except_note_id) {
-  return hold_has_visible_star_at(doc.notes(), hold_id, tick, except_note_id);
+  if (hold_id < 0) return false;
+  // Same predicate as the vector overload, restricted to notes starting at `tick`.
+  std::vector<std::size_t> starting;
+  doc.note_indices_starting_at(tick, starting);
+  const auto& all = doc.notes();
+  for (const std::size_t index : starting) {
+    const NotationNote& note = all[index];
+    if (note.id == except_note_id) continue;
+    if (!is_visible_hold_mid_star(note.note_type)) continue;
+    if (note.parent_hold_id != hold_id) continue;
+    return true;
+  }
+  return false;
 }
 
 bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes) {
@@ -653,12 +893,57 @@ bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes) {
   return false;
 }
 
+namespace {
+
+// Candidate holds for the legacy star bind fallback, bucketed by exact (lane, width)
+// and sorted by start_tick. `max_span` (largest end - start in the bucket) bounds how
+// far back from a star's tick a hold can start and still cover it.
+struct LegacyBindHold {
+  int32_t start_tick = 0;
+  std::size_t position = 0;  // index into the notes vector (original order)
+};
+
+struct LegacyBindBucket {
+  std::vector<LegacyBindHold> by_start;
+  int64_t max_span = 0;
+};
+
+uint64_t legacy_bind_bucket_key(int32_t lane, int32_t width) noexcept {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(lane)) << 32) |
+         static_cast<uint64_t>(static_cast<uint32_t>(width));
+}
+
+}  // namespace
+
 void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes) {
   std::unordered_map<int32_t, const NotationNote*> by_id;
   by_id.reserve(notes.size());
   for (const auto& note : notes) {
     if (note.id >= 0) by_id[note.id] = &note;
   }
+
+  // Built on first use: most loads have no unbound visible star.
+  std::unordered_map<uint64_t, LegacyBindBucket> buckets;
+  bool buckets_built = false;
+  const auto build_buckets = [&]() {
+    buckets_built = true;
+    for (std::size_t i = 0; i < notes.size(); ++i) {
+      const NotationNote& hold = notes[i];
+      if (hold.id < 0 || !is_bindable_hold_body(hold.note_type)) continue;
+      if (hold.end_tick <= hold.start_tick) continue;
+      LegacyBindBucket& bucket = buckets[legacy_bind_bucket_key(hold.lane, hold.width)];
+      bucket.by_start.push_back({hold.start_tick, i});
+      bucket.max_span = std::max(bucket.max_span, static_cast<int64_t>(hold.end_tick) -
+                                                      static_cast<int64_t>(hold.start_tick));
+    }
+    for (auto& entry : buckets) {
+      auto& list = entry.second.by_start;
+      std::sort(list.begin(), list.end(), [](const LegacyBindHold& a, const LegacyBindHold& b) {
+        return a.start_tick < b.start_tick;
+      });
+    }
+  };
+
   for (auto& star : notes) {
     if (!is_visible_hold_mid_star(star.note_type)) continue;
     if (star.parent_hold_id >= 0) {
@@ -668,11 +953,32 @@ void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes) {
       }
     }
     if (star.parent_hold_id >= 0) continue;
-    for (const auto& hold : notes) {
-      if (hold.id < 0 || !star_matches_hold_for_legacy_bind(star, hold)) continue;
-      star.parent_hold_id = hold.id;
-      break;
+
+    // Old behaviour: first hold in vector order that matches. A match needs the star's
+    // exact lane/width and start < star.start < end, so only that bucket's holds with
+    // start_tick in (star.start - max_span, star.start) can qualify; take the lowest
+    // original position among them.
+    if (!buckets_built) build_buckets();
+    const auto bucket_it = buckets.find(legacy_bind_bucket_key(star.lane, star.width));
+    if (bucket_it == buckets.end()) continue;
+    const LegacyBindBucket& bucket = bucket_it->second;
+    const auto first_not_before = std::lower_bound(
+        bucket.by_start.begin(), bucket.by_start.end(), star.start_tick,
+        [](const LegacyBindHold& h, int32_t tick) { return h.start_tick < tick; });
+    bool found = false;
+    std::size_t best_position = 0;
+    for (auto it = first_not_before; it != bucket.by_start.begin();) {
+      --it;
+      if (static_cast<int64_t>(it->start_tick) + bucket.max_span <=
+          static_cast<int64_t>(star.start_tick)) {
+        break;  // this and every earlier hold ends at or before the star
+      }
+      if (found && it->position > best_position) continue;
+      if (!star_matches_hold_for_legacy_bind(star, notes[it->position])) continue;
+      found = true;
+      best_position = it->position;
     }
+    if (found) star.parent_hold_id = notes[best_position].id;
   }
 }
 
@@ -687,7 +993,12 @@ std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
   if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
-  for (const auto& note : doc.notes()) {
+  // Candidates start exactly at body.end_tick; first match in notes() order.
+  std::vector<std::size_t> starting;
+  doc.note_indices_starting_at(body.end_tick, starting);
+  const auto& all = doc.notes();
+  for (const std::size_t index : starting) {
+    const NotationNote& note = all[index];
     if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
     if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.start_tick, body.end_tick)) continue;
@@ -706,7 +1017,13 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
   }
   // A head on this body starts a new chain; it is not a continuation.
   if (paired_hold_head_for(doc, body)) return std::nullopt;
-  for (const auto& note : doc.notes()) {
+  // Hold-chain bodies are a subset of tailed types, so the end tree holds every
+  // candidate; first match in notes() order.
+  std::vector<std::size_t> ending;
+  doc.tail_note_indices_ending_at(body.start_tick, ending);
+  const auto& all = doc.notes();
+  for (const std::size_t index : ending) {
+    const NotationNote& note = all[index];
     if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
     if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.end_tick, body.start_tick)) continue;
@@ -720,15 +1037,31 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
 
 bool prune_hold_mid_stars(ChartDocument& doc, const NotationNote& hold) {
   if (!is_bindable_hold_body(hold.note_type)) return false;
-  std::vector<NotationNote> notes = doc.notes();
-  const auto end = std::remove_if(notes.begin(), notes.end(), [&](const NotationNote& note) {
+  // Stars are bound by parent_hold_id and may sit outside the hold's tick range
+  // (that is exactly what is pruned), so the time trees cannot narrow this scan.
+  // Check on the document first so the common nothing-to-prune case does not copy
+  // the whole note list.
+  const auto should_prune = [&](const NotationNote& note) {
     if (!is_visible_hold_mid_star(note.note_type)) return false;
     if (note.parent_hold_id != hold.id) return false;
     const bool same_lanes = note.lane == hold.lane && note.width == hold.width;
     if (!same_lanes) return true;
     return note.start_tick <= hold.start_tick || note.start_tick >= hold.end_tick;
-  });
-  if (end == notes.end()) return false;
+  };
+  const auto& current = doc.notes();
+  if (hold.id >= 0) {
+    // Only notes bound to this hold can match: ask the parent map.
+    std::vector<std::size_t> children;
+    doc.note_indices_with_parent(hold.id, children);
+    const bool any = std::any_of(children.begin(), children.end(), [&](std::size_t index) {
+      return should_prune(current[index]);
+    });
+    if (!any) return false;
+  } else if (!std::any_of(current.begin(), current.end(), should_prune)) {
+    return false;  // negative hold id matches unbound stars: keep the exact old scan
+  }
+  std::vector<NotationNote> notes = current;
+  const auto end = std::remove_if(notes.begin(), notes.end(), should_prune);
   notes.erase(end, notes.end());
   return doc.set_notes(std::move(notes));
 }

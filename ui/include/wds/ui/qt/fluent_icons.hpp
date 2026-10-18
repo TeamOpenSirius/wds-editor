@@ -39,6 +39,7 @@ constexpr char32_t Ruler = 0xE799;      // width/zoom
 constexpr char32_t Shield = 0xEA18;     // privacy
 constexpr char32_t Grid = 0xF0E2;       // subdivisions
 constexpr char32_t Timeline = 0xE81C;   // "Street"/timeline-ish
+constexpr char32_t Video = 0xE714;      // "Video"
 }  // namespace fluent
 
 // Loads the bundled Segoe Fluent Icons font. Returns the family name, or empty

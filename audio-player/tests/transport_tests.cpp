@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -219,6 +220,55 @@ void bind_fake_music(Transport& transport, TestDouble& fake) {
   fake.update_health_on_play = true;
   fake.last_play_error = 7;
   AudioEngineTestAccess::bind(transport.audio(), fake);
+}
+
+void test_offline_export_clock_steps_sixtieths() {
+  Transport transport;
+  TestDouble fake;
+  bind_fake_music(transport, fake);
+  transport.set_offline_export(true);
+  expect(transport.offline_export(), "offline flag on");
+  transport.request_seek_ms(0);
+  transport.request_play();
+  const auto first = transport.poll(999999);
+  expect(first.state == PlaybackState::Playing, "offline play");
+  expect(first.position.count() == 0, "seek+play same poll stays T=0");
+  expect(transport.music_start_pending() == false, "offline never pending speaker start");
+  expect(transport.start_pending_music(), "start_pending is a no-op");
+  expect(fake.play_music_calls == 0, "offline does not ChannelPlay");
+
+  const auto second = transport.poll(1);
+  expect(second.position.count() == 16666, "frame 1 is 1e6/60");
+  transport.poll(1);
+  transport.poll(1);
+  expect(transport.committed_position().count() == 50000, "frame 3 is 50000");
+  for (int i = 4; i <= 60; ++i) transport.poll(1);
+  expect(transport.committed_position().count() == 1'000'000, "frame 60 is 1s");
+  expect(fake.play_music_calls == 0, "still no speaker start after 1s");
+}
+
+void test_offline_export_clock_negative_origin_and_no_clamp() {
+  Transport transport;
+  TestDouble fake;
+  bind_fake_music(transport, fake);
+  transport.set_offline_export(true);
+  transport.request_seek_ms(-2000);
+  transport.request_play();
+  const auto first = transport.poll(1);
+  expect(first.position.count() == -2'000'000, "seek+play stays at -2s");
+  const auto second = transport.poll(1);
+  expect(second.position.count() == -2'000'000 + 16666, "frame 1 is origin + 1e6/60");
+  for (int i = 2; i <= 60; ++i) transport.poll(1);
+  expect(transport.committed_position().count() == -1'000'000, "frame 60 is -1s");
+
+  transport.request_pause();
+  transport.request_seek_ms(179000);
+  (void)transport.poll(1);
+  transport.request_play();
+  (void)transport.poll(1);
+  for (int i = 0; i < 180; ++i) transport.poll(1);
+  expect(transport.committed_position().count() > 180'000'000,
+         "offline clock is not clamped to music duration");
 }
 
 void test_uninitialized_bind_polls_without_bass() {
@@ -1204,6 +1254,37 @@ void test_waveform_peak_in_range() {
   expect(wf.peak_in_range(3.2, 1.8) > 0.99f, "swapped bounds still hit peak");
 }
 
+void test_spectrogram_sample_range_max() {
+  const int bins = 4;
+  const int frames = 3;
+  std::vector<std::uint8_t> mag(static_cast<std::size_t>(bins * frames), 0);
+  mag[0] = 40;
+  mag[static_cast<std::size_t>(bins + 2)] = 200;
+  mag[static_cast<std::size_t>(bins * 2)] = 30;
+  wds::audio::WaveformOverview wf;
+  wf.set_spectrogram_for_test(bins, frames, 10.0, mag);
+  std::vector<std::uint8_t> left(static_cast<std::size_t>(bins), 1);
+  std::vector<std::uint8_t> right(static_cast<std::size_t>(bins), 1);
+  expect(wf.sample_spectrogram_range(10.0, 20.0, left.data(), right.data()), "sample frame 1");
+  expect(left[2] == 200 && right[2] == 200, "frame 1 bin 2 is the window max");
+  expect(left[0] == 0 && left[1] == 0 && left[3] == 0, "other bins stay 0");
+  expect(wf.sample_spectrogram_range(0.0, 20.0, left.data(), right.data()), "sample frames 0-1");
+  expect(left[0] == 40 && left[2] == 200, "two-frame window takes per-bin max");
+  expect(wf.sample_spectrogram_range(25.0, 26.0, left.data(), right.data()), "sample frame 2");
+  expect(left[0] == 30 && left[2] == 0, "frame 2 only");
+  expect(wf.sample_spectrogram_range(-10.0, 0.0, left.data(), right.data()), "before audio");
+  expect(left[0] == 0 && left[2] == 0, "outside window is silent");
+  std::vector<unsigned char> row(static_cast<std::size_t>(bins * 2 * 4), 0);
+  expect(wf.rasterize_row_rgba(20.0, 30.0, row.data(), bins * 2), "row rasterize");
+  std::vector<unsigned char> atlas;
+  int w = 0;
+  int h = 0;
+  expect(wf.rasterize_rgba(atlas, w, h) && h == frames && w == bins * 2, "atlas for compare");
+  const std::size_t row_bytes = static_cast<std::size_t>(w) * 4u;
+  expect(std::memcmp(row.data(), atlas.data() + row_bytes * 2u, row_bytes) == 0,
+         "single-frame row matches atlas row");
+}
+
 void test_spectrogram_colors_low_vs_high_freq() {
   const int bins = 8;
   const int frames = 4;
@@ -1399,7 +1480,10 @@ int main() {
     fail_seek_t.shutdown();
   }
 
+  test_offline_export_clock_steps_sixtieths();
+  test_offline_export_clock_negative_origin_and_no_clamp();
   test_waveform_peak_in_range();
+  test_spectrogram_sample_range_max();
   test_spectrogram_colors_low_vs_high_freq();
   test_bass_sfx_sync_fixture();
 

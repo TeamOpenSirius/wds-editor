@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -209,6 +210,72 @@ float WaveformOverview::peak_in_range(double ms_lo, double ms_hi) const noexcept
   return peak;
 }
 
+bool WaveformOverview::sample_spectrogram_range(double ms_lo, double ms_hi, std::uint8_t* mag_l,
+                                                std::uint8_t* mag_r) const noexcept {
+  if (mag_l == nullptr || mag_r == nullptr) return false;
+  if (!has_spectrogram()) return false;
+  const int bins = spec_bins_;
+  std::memset(mag_l, 0, static_cast<std::size_t>(bins));
+  std::memset(mag_r, 0, static_cast<std::size_t>(bins));
+  if (!std::isfinite(ms_lo) || !std::isfinite(ms_hi) || spec_hop_ms_ <= 0.0) return true;
+  if (ms_hi < ms_lo) std::swap(ms_lo, ms_hi);
+  const double span = spec_hop_ms_ * static_cast<double>(spec_frames_);
+  if (ms_hi <= 0.0 || ms_lo >= span) return true;
+  int f0 = static_cast<int>(std::floor(std::max(0.0, ms_lo) / spec_hop_ms_));
+  int f1 = static_cast<int>(std::ceil(std::min(span, ms_hi) / spec_hop_ms_));
+  f0 = std::clamp(f0, 0, spec_frames_);
+  f1 = std::clamp(f1, 0, spec_frames_);
+  if (f1 <= f0) f1 = std::min(spec_frames_, f0 + 1);
+  const auto peak_bin = [&](const std::vector<std::uint8_t>& mag, int bin) {
+    std::uint8_t m = 0;
+    for (int f = f0; f < f1; ++f) {
+      const std::size_t idx =
+          static_cast<std::size_t>(f) * static_cast<std::size_t>(bins) + static_cast<std::size_t>(bin);
+      m = std::max(m, mag[idx]);
+    }
+    return m;
+  };
+  for (int bin = 0; bin < bins; ++bin) {
+    mag_l[bin] = peak_bin(spec_mag_l_, bin);
+    mag_r[bin] = peak_bin(spec_mag_r_, bin);
+  }
+  return true;
+}
+
+bool WaveformOverview::rasterize_row_rgba(double ms_lo, double ms_hi, unsigned char* rgba,
+                                          int width) const {
+  if (rgba == nullptr || width <= 0) return false;
+  if (!has_spectrogram()) return false;
+  const int bins = spec_bins_;
+  std::vector<std::uint8_t> mag_l(static_cast<std::size_t>(bins), 0);
+  std::vector<std::uint8_t> mag_r(static_cast<std::size_t>(bins), 0);
+  if (!sample_spectrogram_range(ms_lo, ms_hi, mag_l.data(), mag_r.data())) {
+    std::memset(rgba, 0, static_cast<std::size_t>(width) * 4u);
+    return false;
+  }
+  const int denom = std::max(1, bins - 1);
+  const int mid = width / 2;
+  for (int x = 0; x < width; ++x) {
+    int bin = 0;
+    std::uint8_t mag = 0;
+    if (x < mid) {
+      const int half = std::max(1, mid);
+      bin = (half <= 1) ? (bins - 1) : (bins - 1) - x * (bins - 1) / std::max(1, half - 1);
+      bin = std::clamp(bin, 0, bins - 1);
+      mag = mag_l[static_cast<std::size_t>(bin)];
+    } else {
+      const int xr = x - mid;
+      const int half = std::max(1, width - mid);
+      bin = (half <= 1) ? 0 : xr * (bins - 1) / std::max(1, half - 1);
+      bin = std::clamp(bin, 0, bins - 1);
+      mag = mag_r[static_cast<std::size_t>(bin)];
+    }
+    spec_color(static_cast<float>(mag) / 255.0f, static_cast<float>(bin) / static_cast<float>(denom),
+               rgba + static_cast<std::size_t>(x) * 4u);
+  }
+  return true;
+}
+
 bool WaveformOverview::rasterize_rgba(std::vector<unsigned char>& out, int& out_w,
                                       int& out_h) const {
   out.clear();
@@ -265,11 +332,22 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
     return false;
   }
 
-  const HSTREAM dec =
-      stream_from_file(path, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT | BASS_STREAM_PRESCAN);
+  // The open is a single blocking BASS call that cannot be interrupted, so the
+  // cancel flag is checked on both sides of it. No BASS_STREAM_PRESCAN: this
+  // stream is only ever decoded front to back, and PRESCAN reads the whole file
+  // once up front (seconds on slow storage for VBR MP3) just to make the length
+  // and seeking exact. The length below is only a sizing hint: peaks_ and the
+  // spectrogram grow as frames arrive, and an over-estimate is trimmed after the
+  // decode. (Playback keeps PRESCAN: it needs exact length and seeking.)
+  if (cancelled()) return false;
+  const HSTREAM dec = stream_from_file(path, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT);
   if (dec == 0) {
     WDS_LOG("WaveformOverview: decode open failed %s code=%d\n", path.c_str(),
             BASS_ErrorGetCode());
+    return false;
+  }
+  if (cancelled()) {
+    BASS_StreamFree(dec);
     return false;
   }
 
@@ -366,6 +444,7 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
 
   std::vector<float> buf(16384);
   std::uint64_t pcm_frame = 0;
+  std::size_t used_buckets = 0;  // highest bucket written + 1
   float max_peak = 0.0f;
 
   const auto abort_decode = [&]() -> bool {
@@ -400,6 +479,7 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
         peaks_[bucket] = mag;
         max_peak = std::max(max_peak, mag);
       }
+      used_buckets = std::max(used_buckets, std::min(bucket + 1, peaks_.size()));
 
       ring_l[ring_write] = left;
       ring_r[ring_write] = right;
@@ -418,6 +498,10 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
 
   if (cancelled()) return abort_decode();
   BASS_StreamFree(dec);
+
+  // The pre-sized bucket count came from an unverified length; keep exactly what
+  // was decoded so duration_ms() matches the audio.
+  if (peaks_.size() > used_buckets) peaks_.resize(used_buckets);
 
   if (max_peak > 1.0e-6f) {
     const float inv = 1.0f / max_peak;

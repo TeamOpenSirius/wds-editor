@@ -1,6 +1,7 @@
 #include <wds/core/chart_serializer.hpp>
 
 #include <wds/core/file_io.hpp>
+#include <wds/core/gimmick.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
 #include <wds/core/sus_chart.hpp>
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <cstdint>
+#include <iomanip>
 #include <locale>
 #include <sstream>
 #include <unordered_set>
@@ -20,6 +22,19 @@ namespace {
 
 constexpr std::size_t kMaxSerializedCount = 1'000'000;
 constexpr double kMaxTickRaw = static_cast<double>(INT32_MAX);
+constexpr double kMinTickRaw = -kMaxTickRaw;
+
+bool tick_field_in_range(double raw) noexcept {
+  return std::isfinite(raw) && raw >= kMinTickRaw && raw <= kMaxTickRaw;
+}
+
+bool parse_tick_field(double raw, int32_t& out) noexcept {
+  if (!tick_field_in_range(raw)) {
+    return false;
+  }
+  out = static_cast<int32_t>(std::llround(raw));
+  return true;
+}
 
 bool is_known_note_type(int32_t raw) noexcept {
   switch (static_cast<NoteType>(raw)) {
@@ -29,6 +44,7 @@ bool is_known_note_type(int32_t raw) noexcept {
     case NoteType::Critical:
     case NoteType::Sound:
     case NoteType::ScratchSound:
+    case NoteType::Scratch:
     case NoteType::Flick:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:
@@ -87,10 +103,15 @@ bool is_known_gimmick(int32_t raw) noexcept {
 
 SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
                                               const std::string& path) {
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    return {SerializeError::ParseError, "Sirius Extended profile required for SV, nontail holds or overhang"};
+  }
   MusicTiming timing = chart.timing;
   normalize_timing_points(timing);
 
   std::ostringstream ss;
+  ss << std::setprecision(std::numeric_limits<double>::max_digits10);
   // WDSCHART v5 — N rows include parent_hold_id (star ↔ hold bind).
   // Chart delay lives in .wdsproject (one song, many charts) — not in the chart file.
   ss << "WDSCHART " << kFormatVersion << '\n';
@@ -102,9 +123,26 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
     ss << "T " << p.tick << ' ' << p.bpm << ' ' << p.numerator << ' ' << p.denominator << ' '
        << flags << '\n';
   }
+  ss << "PROFILE "
+     << (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended
+             ? "SiriusExtended"
+             : "Official")
+     << '\n';
+  // HoldEighth is derived from its hold on load; it is never persisted.
   size_t persisted_notes = 0;
   for (const auto& note : chart.notes) {
-    if (note.note_type != NoteType::HoldEighth) ++persisted_notes;
+    if (note.note_type == NoteType::HoldEighth) continue;
+    ++persisted_notes;
+    const bool split_placeholder =
+        is_split_lane_gimmick(note.gimmick_type) ||
+        (note.note_type == NoteType::None && note.lane == 0 && note.width == 0);
+    const int64_t end_exclusive = static_cast<int64_t>(note.lane) + note.width;
+    if (!split_placeholder &&
+        (note.width < 1 ||
+         (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+          (note.lane < 0 || note.width > 12 || end_exclusive > 12)))) {
+      return {SerializeError::ParseError, "note lane/width out of range"};
+    }
   }
   ss << "NOTES " << persisted_notes << '\n';
 
@@ -116,6 +154,15 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
        << note.parent_hold_id << '\n';
   }
 
+  std::unordered_set<int32_t> speed_ticks;
+  ss << "SPEEDS " << chart.scroll_speed_points.size() << '\n';
+  for (const auto& point : chart.scroll_speed_points) {
+    if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier) ||
+        !speed_ticks.insert(point.tick).second) {
+      return {SerializeError::ParseError, "scroll speed point out of range"};
+    }
+    ss << "S " << point.tick << ' ' << point.multiplier << '\n';
+  }
   ss << "CONCURRENT " << chart.concurrent_lines.size() << '\n';
   for (const auto& line : chart.concurrent_lines) {
     ss << "C " << line.milliseconds << ' ' << line.start_lane << ' ' << line.width << '\n';
@@ -146,10 +193,18 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   size_t note_count = 0;
   size_t notes_seen = 0;
   size_t concurrent_count = 0;
+  size_t speed_count = 0;
+  // Legacy SUPPRESSED_EIGHTHS / X rows are validated and counted but otherwise ignored
+  // (HoldEighth is derived from its hold, so tombstones carry no information).
+  size_t suppressed_count = 0;
+  size_t suppressed_rows_seen = 0;
   size_t timing_count = 0;
   bool saw_timing = false;
   bool saw_notes = false;
   bool saw_concurrent = false;
+  bool saw_speeds = false;
+  bool saw_suppressed = false;
+  bool saw_profile = false;
   bool saw_end = false;
   std::unordered_set<int32_t> seen_ids;
 
@@ -253,16 +308,18 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       if (!is_known_gimmick(gimmick_raw)) {
         return {SerializeError::ParseError, "unknown gimmick type"};
       }
-      if (note.lane < 0 || note.width < 0 || note.width > 12 ||
-          static_cast<int64_t>(note.lane) + static_cast<int64_t>(note.width) > 12) {
+      const int64_t note_end = static_cast<int64_t>(note.lane) + note.width;
+      const bool split_placeholder = is_split_lane_gimmick(static_cast<GimmickType>(gimmick_raw)) ||
+                                     (note_type_raw == 0 && note.lane == 0 && note.width == 0);
+      if (!split_placeholder && (note.width < 1 ||
+          (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+           (note.lane < 0 || note.width > 12 || note_end > 12)))) {
         return {SerializeError::ParseError, "note lane/width out of range"};
       }
-      if (!std::isfinite(start_tick_raw) || !std::isfinite(end_tick_raw) || start_tick_raw < 0.0 ||
-          end_tick_raw < 0.0 || start_tick_raw > kMaxTickRaw || end_tick_raw > kMaxTickRaw) {
+      if (!parse_tick_field(start_tick_raw, note.start_tick) ||
+          !parse_tick_field(end_tick_raw, note.end_tick)) {
         return {SerializeError::ParseError, "note tick out of range"};
       }
-      note.start_tick = static_cast<int32_t>(std::llround(start_tick_raw));
-      note.end_tick = static_cast<int32_t>(std::llround(end_tick_raw));
       if (note.id == std::numeric_limits<int32_t>::max()) {
         return {SerializeError::ParseError, "note id out of range"};
       }
@@ -274,9 +331,38 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       note.note_type = static_cast<NoteType>(note_type_raw);
       note.gimmick_type = static_cast<GimmickType>(gimmick_raw);
       if (note.note_type == NoteType::HoldEighth) {
+        // Legacy file-provided eighth (derived, authored or suppressed marker): the
+        // row was fully validated above, then dropped. Eighths are recomputed below.
         continue;
       }
       chart.notes.push_back(note);
+    } else if (key == "SUPPRESSED_EIGHTHS") {
+      file >> suppressed_count;
+      if (!file) return {SerializeError::ParseError, "malformed SUPPRESSED_EIGHTHS count"};
+      if (suppressed_count > kMaxSerializedCount) {
+        return {SerializeError::ParseError, "SUPPRESSED_EIGHTHS count exceeds limit"};
+      }
+      saw_suppressed = true;
+    } else if (key == "X") {
+      // Legacy suppression tombstone: X parent_hold_id tick lane width.
+      int32_t parent_hold_id = -1;
+      int32_t tick = 0;
+      int32_t lane = 0;
+      int32_t width = 1;
+      file >> parent_hold_id >> tick >> lane >> width;
+      if (!file || parent_hold_id < 0 || tick < 0 || width < 1) {
+        return {SerializeError::ParseError, "malformed suppressed HoldEighth"};
+      }
+      // Same lane/width bounds as normal note rows.
+      const int64_t row_end = static_cast<int64_t>(lane) + width;
+      if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+          (lane < 0 || width > 12 || row_end > 12)) {
+        return {SerializeError::ParseError, "suppressed HoldEighth lane/width out of range"};
+      }
+      if (suppressed_rows_seen >= kMaxSerializedCount) {
+        return {SerializeError::ParseError, "SUPPRESSED_EIGHTHS count exceeds limit"};
+      }
+      ++suppressed_rows_seen;
     } else if (key == "CONCURRENT") {
       file >> concurrent_count;
       if (!file) return {SerializeError::ParseError, "malformed CONCURRENT count"};
@@ -285,6 +371,34 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       }
       saw_concurrent = true;
       chart.concurrent_lines.reserve(concurrent_count);
+    } else if (key == "SPEEDS") {
+      file >> speed_count;
+      if (!file) return {SerializeError::ParseError, "malformed SPEEDS count"};
+      if (speed_count > kMaxSerializedCount) {
+        return {SerializeError::ParseError, "SPEEDS count exceeds limit"};
+      }
+      saw_speeds = true;
+      chart.scroll_speed_points.reserve(speed_count);
+    } else if (key == "S") {
+      ScrollSpeedPoint point;
+      file >> point.tick >> point.multiplier;
+      if (!file || point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+        return {SerializeError::ParseError, "scroll speed point out of range"};
+      }
+      chart.scroll_speed_points.push_back(point);
+    } else if (key == "PROFILE") {
+      if (saw_profile) return {SerializeError::ParseError, "duplicate PROFILE"};
+      saw_profile = true;
+      std::string profile;
+      file >> profile;
+      if (!file) return {SerializeError::ParseError, "malformed PROFILE"};
+      if (profile == "Official") {
+        chart.compatibility_profile = ChartCompatibilityProfile::Official;
+      } else if (profile == "SiriusExtended") {
+        chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+      } else {
+        return {SerializeError::ParseError, "unknown chart compatibility profile"};
+      }
     } else if (key == "C") {
       ConcurrentLineNote line;
       file >> line.milliseconds >> line.start_lane >> line.width;
@@ -307,6 +421,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   if (!saw_end) {
     return {SerializeError::ParseError, "chart file missing END"};
   }
+  if (version >= 6 && (!saw_profile || !saw_speeds)) {
+    return {SerializeError::ParseError, "chart file missing v6 profile or speeds"};
+  }
   if (saw_timing && chart.timing.points.size() != timing_count) {
     return {SerializeError::ParseError, "TIMING count mismatch"};
   }
@@ -316,6 +433,25 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   if (saw_concurrent && chart.concurrent_lines.size() != concurrent_count) {
     return {SerializeError::ParseError, "CONCURRENT count mismatch"};
   }
+  if (saw_speeds && chart.scroll_speed_points.size() != speed_count) {
+    return {SerializeError::ParseError, "SPEEDS count mismatch"};
+  }
+  if (saw_suppressed && suppressed_rows_seen != suppressed_count) {
+    return {SerializeError::ParseError, "SUPPRESSED_EIGHTHS count mismatch"};
+  }
+  // A hold (tailed or nontail) whose tpq/2 grid would generate more than
+  // kMaxAutoHoldEighths eighths is rejected here, before any consumer tries to
+  // materialize them.
+  if (!hold_eighths_within_limit(chart.notes, chart.timing.ticks_per_quarter)) {
+    return {SerializeError::ParseError, "hold span exceeds auto HoldEighth limit"};
+  }
+  std::sort(chart.scroll_speed_points.begin(), chart.scroll_speed_points.end(),
+            [](const auto& a, const auto& b) { return a.tick < b.tick; });
+  for (size_t i = 1; i < chart.scroll_speed_points.size(); ++i) {
+    if (chart.scroll_speed_points[i - 1].tick == chart.scroll_speed_points[i].tick) {
+      return {SerializeError::ParseError, "duplicate scroll speed tick"};
+    }
+  }
 
   if (version >= 5) {
     for (auto& n : chart.notes) {
@@ -324,6 +460,17 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
     }
   }
   infer_legacy_star_hold_binds(chart.notes);
+  // Eighths are derived from the holds (stars must be bound first: they occupy ticks).
+  chart.notes = with_all_hold_eighths_recomputed(std::move(chart.notes),
+                                                 chart.timing.ticks_per_quarter);
+
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    if (version >= 6) {
+      return {SerializeError::ParseError, "Sirius Extended profile required for chart features"};
+    }
+    chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  }
 
   normalize_timing_points(chart.timing);
   out_chart = std::move(chart);
@@ -349,7 +496,7 @@ SerializeResult ChartSerializer::load_auto(const std::string& path, NotationChar
 
   if (OfficialChartFormat::looks_like_official_chart_path(path)) {
     set_mode(ChartEditMode::OfficialPreviewOnly);
-    return OfficialChartFormat::load_chart_with_music_config(path, music_config_path, out_chart);
+    return OfficialChartFormat::load_chart_auto_profile(path, music_config_path, out_chart);
   }
 
   {
@@ -366,7 +513,7 @@ SerializeResult ChartSerializer::load_auto(const std::string& path, NotationChar
       }
       if (OfficialChartFormat::looks_like_official_chart_text(sample)) {
         set_mode(ChartEditMode::OfficialPreviewOnly);
-        return OfficialChartFormat::load_chart_with_music_config(path, music_config_path, out_chart);
+        return OfficialChartFormat::load_chart_auto_profile(path, music_config_path, out_chart);
       }
     }
   }

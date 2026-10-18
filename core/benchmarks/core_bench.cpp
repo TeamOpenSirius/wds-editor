@@ -338,6 +338,7 @@ bool reference_is_combo_head_note(const NotationNote& note) noexcept {
     case NoteType::Normal:
     case NoteType::Critical:
     case NoteType::Flick:
+    case NoteType::Scratch:
     case NoteType::BlueTap:
     case NoteType::HoldStart:
     case NoteType::CriticalHoldStart:

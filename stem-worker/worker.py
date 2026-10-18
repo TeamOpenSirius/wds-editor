@@ -1,0 +1,332 @@
+"""Optional local HTDemucs worker. stdout is versioned JSONL; diagnostics use stderr.
+
+The editor launches one process per song. No Qt/BASS dependencies, chart data,
+training code, or network service. Only the first model download needs a network.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import importlib.metadata
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+SCHEMA = 1
+SOURCES = ("drums", "bass", "other", "vocals")
+
+
+class Cancelled(Exception):
+    pass
+
+
+def emit(event, **fields):
+    print(json.dumps({"protocol": SCHEMA, "event": event, **fields}, ensure_ascii=False), flush=True)
+
+
+def check_cancel(job):
+    if (job / "cancel").exists():
+        raise Cancelled()
+
+
+def digest(path, job=None):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        while data := f.read(1024 * 1024):
+            if job is not None:
+                check_cancel(job)
+            h.update(data)
+    return h.hexdigest()
+
+
+def cache_key(spec):
+    return hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def read_cached(folder, spec, job):
+    """A directory alone is not a cache hit. Verify every published payload."""
+    try:
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        if manifest["schema"] != SCHEMA or manifest["spec"] != spec:
+            return None
+        if set(manifest["tracks"]) != set(SOURCES):
+            return None
+        for name in SOURCES:
+            track = manifest["tracks"][name]
+            path = folder / (name + ".wav")
+            if track["file"] != path.name or digest(path, job) != track["sha256"]:
+                return None
+        return manifest
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def download_checkpoint(torch, url, path):
+    # Same file and hash-prefix check as demucs' legacy RemoteRepo; progress goes to stderr.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.hub.download_url_to_file(url, str(path), hash_prefix=path.stem.rsplit("-", 1)[-1], progress=True)
+
+
+def ffmpeg_command(exe, source, path):
+    # -protocol_whitelist must precede -i so a crafted input (playlist/URL
+    # references inside the "audio" file) cannot make ffmpeg open network or other protocols.
+    return [str(exe), "-nostdin", "-v", "error", "-y",
+            "-protocol_whitelist", "file",
+            "-i", str(source), "-map", "0:a:0", "-vn", "-ac", "2",
+            "-t", "1801", "-c:a", "pcm_f32le", str(path)]
+
+
+def decode(source, job, sf):
+    try:
+        info = sf.info(source)
+        path = source
+    except (RuntimeError, OSError):
+        import imageio_ffmpeg
+        path = job / "decoded.wav"
+        with (job / "decode.log").open("wb") as log:
+            proc = subprocess.Popen(
+                ffmpeg_command(imageio_ffmpeg.get_ffmpeg_exe(), source, path),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            try:
+                while proc.poll() is None:
+                    check_cancel(job)
+                    time.sleep(.05)
+                if proc.returncode:
+                    raise RuntimeError("音频解码失败：" + (job / "decode.log").read_text(errors="replace")[-2000:])
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+        info = sf.info(path)
+    if info.duration < .01 or info.duration > 1800 or info.channels not in (1, 2):
+        raise ValueError("支持 10 毫秒到 30 分钟的单声道或立体声音频")
+    check_cancel(job)
+    audio, rate = sf.read(path, dtype="float32", always_2d=True)
+    return audio, rate
+
+
+def separate(args):
+    job, cache, source = args.job.resolve(), args.cache.resolve(), args.input.resolve()
+    job.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    check_cancel(job)
+    emit("progress", percent=0, message="正在准备本地分轨…")
+    os.environ["OMP_NUM_THREADS"] = str(args.threads)
+    os.environ["MKL_NUM_THREADS"] = str(args.threads)
+    # Cooperative scheduling also works on platforms where process niceness is unavailable.
+    if args.background:
+        try:
+            if os.name == "posix":
+                os.nice(5)
+            elif os.name == "nt":
+                import ctypes
+                ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x4000)
+        except OSError:
+            pass
+    with contextlib.redirect_stdout(sys.stderr):
+        import numpy as np
+        import torch
+        import julius
+        import soundfile as sf
+        import yaml
+        from filelock import FileLock
+        from demucs.apply import apply_model, TensorChunk
+        from demucs.pretrained import REMOTE_ROOT, _parse_remote_files
+        from demucs.states import load_model
+
+    torch.set_num_threads(args.threads)
+    torch.set_num_interop_threads(1)
+    torch.manual_seed(42)
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("当前运行环境没有可用的 CUDA；请选择自动或 CPU")
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("当前运行环境没有可用的 Apple MPS；请选择自动或 CPU")
+    if device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        # Fixed shape chunks reuse cuDNN plans. Leave memory for the editor's Vulkan renderer.
+        torch.backends.cudnn.benchmark = True
+        if args.background:
+            torch.cuda.set_per_process_memory_fraction(.65)
+    precision = "tf32" if device == "cuda" else "fp32"
+    emit("progress", percent=2, message="正在校验音源和模型…", device=device)
+    audio_hash = digest(source, job)
+    # demucs 4.1 get_model() prefers HuggingFace safetensors (other files, network on every
+    # load). Load the legacy checkpoint directly: same weights and cache keys on 4.0.x and 4.1.x.
+    urls = _parse_remote_files(REMOTE_ROOT / "files.txt")
+    signatures = yaml.safe_load((REMOTE_ROOT / "htdemucs.yaml").read_text(encoding="utf-8"))["models"]
+    if len(signatures) != 1:
+        raise RuntimeError("不兼容的 HTDemucs 权重")
+    checkpoints = [Path(torch.hub.get_dir()) / "checkpoints" / urls[s].rsplit("/", 1)[-1] for s in signatures]
+    missing = [(urls[s], p) for s, p in zip(signatures, checkpoints) if not p.is_file()]
+    if missing:
+        emit("progress", percent=3, message="首次使用：正在下载 HTDemucs 模型…")
+        for url, path in missing:
+            check_cancel(job)
+            download_checkpoint(torch, url, path)
+    check_cancel(job)
+    spec = {"source_sha256": audio_hash, "model": "htdemucs",
+            "weights": [digest(p, job) for p in checkpoints],
+            "worker_sha256": digest(__file__), "device": device, "precision": precision,
+            "overlap": .25, "shifts": 0, "seed": 42,
+            "sndfile": sf.__libsndfile_version__,
+            "packages": {n: importlib.metadata.version(n) for n in
+                         ("torch", "demucs", "julius", "soundfile", "numpy")}}
+    key = cache_key(spec)
+    folder = cache / key
+    with FileLock(str(cache / (key + ".lock")), timeout=0):
+        cached = read_cached(folder, spec, job)
+        if cached is not None:
+            if digest(source, job) != audio_hash:
+                raise RuntimeError("音源在读取期间发生变化，请重新生成")
+            emit("complete", manifest=str(folder / "manifest.json"), cached=True)
+            return
+        emit("progress", percent=5, message="正在解码音频…", device=device)
+        raw, rate = decode(source, job, sf)
+        if not np.isfinite(raw).all():
+            raise ValueError("音频包含无效样本")
+        original_samples = len(raw)
+        if raw.shape[1] == 1:
+            raw = np.repeat(raw, 2, axis=1)
+        with contextlib.redirect_stdout(sys.stderr):
+            # The package pickles its model class, so it cannot use torch.load's weights_only default.
+            model = load_model(torch.load(checkpoints[0], map_location="cpu", weights_only=False))
+        if set(model.sources) != set(SOURCES):
+            raise RuntimeError("不兼容的 HTDemucs 权重")
+        model = model.eval().to(device)
+        model.requires_grad_(False)
+        check_cancel(job)
+        start = time.monotonic()
+        with torch.inference_mode():
+            wave = julius.resample_frac(torch.from_numpy(raw.T.copy()), rate, model.samplerate)
+            del raw
+            ref = wave.mean(0)
+            mean, scale = ref.mean(), ref.std()
+            if scale < 1e-8:
+                scale = wave.std().clamp_min(1e-8)
+            wave = (wave - mean) / scale
+            length = wave.shape[-1]
+            segment = float(model.segment)
+            size = int(segment * model.samplerate)
+            stride = int(size * .75)
+            # Whole-song storage stays on CPU. GPU memory only holds one fixed-size chunk.
+            result = torch.zeros(len(SOURCES), 2, length)
+            weights = torch.zeros(length)
+            window = torch.cat((torch.arange(1, size // 2 + 1), torch.arange(size - size // 2, 0, -1))).float()
+            window /= window.max()
+            count = math.ceil(length / stride)
+            for index, offset in enumerate(range(0, length, stride)):
+                check_cancel(job)
+                tick = time.monotonic()
+                # Use the upstream TensorChunk padding/center trimming, including end-of-song context.
+                part = apply_model(model, TensorChunk(wave[None], offset, size),
+                                   shifts=0, split=False, segment=segment, device=device)[0].cpu()
+                n = part.shape[-1]
+                if not torch.isfinite(part).all():
+                    raise RuntimeError("模型输出包含无效样本")
+                result[..., offset:offset+n].add_(part * window[:n])
+                weights[offset:offset+n].add_(window[:n])
+                del part
+                emit("progress", percent=10 + int(80 * (index + 1) / count),
+                     message=f"正在分轨 {index + 1}/{count}（{device.upper()}）", device=device)
+                if args.background:
+                    # CPU copy above synchronizes GPU work before yielding to the renderer.
+                    time.sleep(min(.15, (time.monotonic() - tick) * .15))
+            result.div_(weights.clamp_min(1e-12)).mul_(scale).add_(mean)
+            del wave, weights
+            stage = job / "result"
+            stage.mkdir(exist_ok=False)
+            tracks = {}
+            for index, name in enumerate(model.sources):
+                check_cancel(job)
+                # Preserve original duration exactly. No chart delay, trimming, or per-stem gain.
+                output = julius.resample_frac(result[index], model.samplerate, rate, full=True)
+                output = torch.nn.functional.pad(output, (0, max(0, original_samples - output.shape[-1])))
+                output = output[:, :original_samples].T.contiguous().numpy()
+                if not np.isfinite(output).all():
+                    raise RuntimeError("重采样输出包含无效样本")
+                path = stage / (name + ".wav")
+                sf.write(path, output, rate, subtype="FLOAT")
+                info = sf.info(path)
+                if info.frames != original_samples or info.samplerate != rate or info.channels != 2:
+                    raise RuntimeError("分轨文件长度校验失败")
+                tracks[name] = {"file": path.name, "sha256": digest(path, job)}
+        if digest(source, job) != audio_hash:
+            raise RuntimeError("音源在推理期间发生变化，请重新生成")
+        manifest = {"schema": SCHEMA, "spec": spec, "tracks": tracks,
+                    "source": str(source), "sample_rate": rate, "samples": original_samples,
+                    "channels": 2, "time_origin": "original_audio_sample_zero",
+                    "elapsed_seconds": round(time.monotonic() - start, 3)}
+        (stage / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        check_cancel(job)
+        # Only remove a corrupt entry under this exact key, while holding its lock.
+        if folder.exists():
+            shutil.rmtree(folder)
+        stage.rename(folder)  # job directory is created on the same filesystem as the cache
+        emit("complete", manifest=str(folder / "manifest.json"), cached=False)
+
+
+def check_runtime():
+    """Import what separate() needs, so a broken install fails before the first song."""
+    with contextlib.redirect_stdout(sys.stderr):
+        import numpy, torch, julius, soundfile, yaml, filelock, imageio_ffmpeg  # noqa: F401
+        import demucs.apply, demucs.pretrained, demucs.states  # noqa: F401
+    mps = getattr(torch.backends, "mps", None)
+    emit("runtime", torch=torch.__version__, cuda=torch.cuda.is_available(),
+         mps=bool(mps and mps.is_available()))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="only verify that the runtime imports")
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--cache", type=Path)
+    parser.add_argument("--job", type=Path)
+    parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
+    parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--background", action="store_true")
+    args = parser.parse_args()
+    if not args.check and not (args.input and args.cache and args.job):
+        parser.error("--input, --cache and --job are required")
+    if not 1 <= args.threads <= 16:
+        parser.error("threads must be between 1 and 16")
+    # Turn SIGTERM into an exception so decode()'s finally block kills ffmpeg.
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    except (ValueError, OSError):
+        pass
+    try:
+        if args.check:
+            check_runtime()
+        else:
+            separate(args)
+        return 0
+    except Cancelled:
+        emit("cancelled")
+        return 2
+    except Exception as exc:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        message = str(exc)
+        if isinstance(exc, ModuleNotFoundError):
+            message = "缺少分轨依赖，请先安装运行环境或选择已安装 Demucs 的 Python。" + message
+        if "out of memory" in message.lower():
+            message = "显存不足；可关闭其他 GPU 程序，或切换 CPU 后重试。"
+        emit("error", message=message)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

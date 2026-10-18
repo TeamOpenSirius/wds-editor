@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <wds/core/types.hpp>
 
 namespace wds::chart_editor {
 
@@ -48,7 +49,7 @@ struct PreviewConfig {
   int64_t preview_tail_fallback_ms = 8000;
 
   // Split-line / STAGE_COVER fade windows (seconds).
-  // Official fadeIn clip 1.0s; fadeOut alpha keys 0→0.3s (OnExit is 1.0s).
+  // OpenWDS fadeIn clip 1.0s; runtime fadeOut clip 0.3s (1−smoothstep). Tick hides at EndMs.
   float split_line_animation_start_sec = 1.0f;
   float split_line_animation_end_sec = 0.3f;
 
@@ -57,6 +58,8 @@ struct PreviewConfig {
   int64_t incremental_max_time_delta_ms = 500;
   // Prefer FullRebuild when estimated_churn / max(prev, candidates) exceeds this.
   float incremental_churn_ratio_threshold = 0.35f;
+
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 };
 
 }  // namespace wds::chart_editor

@@ -3,6 +3,8 @@
 #include "wds/renderer/upload_result.hpp"
 #include "wds/renderer/vulkan_renderer.hpp"
 
+#include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -28,6 +30,9 @@ int failures = 0;
     }                                                                         \
   } while (0)
 
+using wds::renderer::advance_completed_submit;
+using wds::renderer::render_finished_index_valid;
+using wds::renderer::texture_retire_gate_open;
 using wds::renderer::apply_msaa_failure_event;
 using wds::renderer::apply_msaa_may_teardown;
 using wds::renderer::apply_msaa_rebuild_failure_health;
@@ -59,6 +64,7 @@ using wds::renderer::draw_frame_waits_pending_uploads_before_sample;
 using wds::renderer::draw_frame_zero_extent_reap_applies_health;
 using wds::renderer::frames_in_flight_for_swapchain;
 using wds::renderer::preferred_swapchain_image_count;
+using wds::renderer::recover_surface_has_reacquire;
 using wds::renderer::create_texture_rgba_waits_upload_fence;
 using wds::renderer::wait_pending_uploads_is_noop;
 using wds::renderer::next_frame_recovers_swapchain;
@@ -78,6 +84,7 @@ using wds::renderer::pending_upload_occupied;
 using wds::renderer::PendingUploadCommitTrace;
 using wds::renderer::PendingUploadHold;
 using wds::renderer::retain_device_wait_idle_on_msaa_and_resize;
+using wds::renderer::ring_slot_capacity;
 using wds::renderer::resize_introduces_delay_semantics;
 using wds::renderer::resize_recreates_for_call;
 using wds::renderer::resize_same_extent_short_circuits;
@@ -105,6 +112,8 @@ using wds::renderer::upload_submit_failure_recycles_slot;
 using wds::renderer::wait_pending_uploads_holds_staging_on_failure;
 using wds::renderer::wait_pending_uploads_reaps_after_ok_wait;
 using wds::renderer::kHostVisibleMapChunkBytes;
+using wds::renderer::mapped_flush_range;
+using wds::renderer::mapped_flush_range_valid;
 using wds::renderer::texture_upload_defers_vertex_remap;
 using wds::renderer::staging_copy_chunk_bytes;
 using wds::renderer::staging_copy_chunk_count;
@@ -431,6 +440,120 @@ void test_staging_copy_chunks_cap_host_maps() {
   CHECK(texture_upload_defers_vertex_remap());
 }
 
+void test_mapped_flush_range_atom_align_and_clamp() {
+  constexpr VkDeviceSize atom = 256;
+  constexpr VkDeviceSize alloc = 4096;
+
+  const auto empty = mapped_flush_range(0, 0, atom, alloc);
+  CHECK(empty.size == 0);
+  CHECK(mapped_flush_range_valid(empty, atom, alloc));
+
+  const auto one = mapped_flush_range(0, 1, atom, alloc);
+  CHECK(one.offset == 0);
+  CHECK(one.size == 256);
+  CHECK(mapped_flush_range_valid(one, atom, alloc));
+
+  const auto mid = mapped_flush_range(100, 10, atom, alloc);
+  CHECK(mid.offset == 0);
+  CHECK(mid.size == 256);
+  CHECK(mapped_flush_range_valid(mid, atom, alloc));
+
+  const auto exact = mapped_flush_range(256, 256, atom, alloc);
+  CHECK(exact.offset == 256);
+  CHECK(exact.size == 256);
+  CHECK(mapped_flush_range_valid(exact, atom, alloc));
+
+  const auto tail = mapped_flush_range(4000, 90, atom, alloc);
+  CHECK(tail.offset == 3840);
+  CHECK(tail.size == VK_WHOLE_SIZE);
+  CHECK(mapped_flush_range_valid(tail, atom, alloc));
+
+  const auto full = mapped_flush_range(0, 4096, atom, alloc);
+  CHECK(full.offset == 0);
+  CHECK(full.size == VK_WHOLE_SIZE);
+  CHECK(mapped_flush_range_valid(full, atom, alloc));
+
+  const auto past = mapped_flush_range(5000, 16, atom, alloc);
+  CHECK(past.size == 0);
+  CHECK(mapped_flush_range_valid(past, atom, alloc));
+
+  const auto unknown = mapped_flush_range(16, 8, atom, 0);
+  CHECK(unknown.offset == 0);
+  CHECK(unknown.size == VK_WHOLE_SIZE);
+  CHECK(mapped_flush_range_valid(unknown, atom, 0));
+
+  const auto molten = mapped_flush_range(1, 15, 16, 64);
+  CHECK(molten.offset == 0);
+  CHECK(molten.size == 16);
+  CHECK(mapped_flush_range_valid(molten, 16, 64));
+}
+
+void test_ring_slot_capacity_never_doubles_previous_slot() {
+  constexpr size_t kMiB = 1024 * 1024;
+  // Fits in the ring: capacity is exactly the committed ring, independent of history.
+  CHECK(ring_slot_capacity(1, 64 * kMiB, 256 * kMiB) == 64 * kMiB);
+  CHECK(ring_slot_capacity(64 * kMiB, 64 * kMiB, 256 * kMiB) == 64 * kMiB);
+  // Ring above its maximum is clamped.
+  CHECK(ring_slot_capacity(1, 512 * kMiB, 256 * kMiB) == 256 * kMiB);
+  // Oversized request is honoured, rounded up to 1 MiB.
+  CHECK(ring_slot_capacity(300 * kMiB + 1, 64 * kMiB, 256 * kMiB) == 301 * kMiB);
+  // Unknown max (0) does not clamp.
+  CHECK(ring_slot_capacity(1, 80 * kMiB, 0) == 80 * kMiB);
+}
+
+void test_texture_retire_gate_waits_for_completed_submits() {
+  // Not retiring: never reapable by the gate, whatever the watermark.
+  CHECK(!texture_retire_gate_open(false, 0, 100));
+  // Destroyed with nothing ever submitted: immediately due.
+  CHECK(texture_retire_gate_open(true, 0, 0));
+  // Destroyed after submit 5: due only once submit 5 completed.
+  CHECK(!texture_retire_gate_open(true, 5, 4));
+  CHECK(texture_retire_gate_open(true, 5, 5));
+  CHECK(texture_retire_gate_open(true, 5, 6));
+
+  // Resize storm: draw_frame calls that bail before submitting do not touch
+  // submit_seq or the watermark, so the gate stays closed however many occur.
+  uint64_t submit_seq = 7;
+  uint64_t completed = 5;
+  std::array<uint64_t, 3> slot_submit{};
+  slot_submit[0] = 6;
+  slot_submit[1] = 7;
+  slot_submit[2] = 5;
+  const uint64_t retire_after = submit_seq;  // destroy_texture
+  for (int bailed = 0; bailed < 100; ++bailed) {
+    CHECK(!texture_retire_gate_open(true, retire_after, completed));
+  }
+  // Slot 0's fence returns (submit 6): submit 7 in slot 1 may still run.
+  completed = advance_completed_submit(completed, slot_submit[0]);
+  CHECK(completed == 6);
+  CHECK(!texture_retire_gate_open(true, retire_after, completed));
+  // Slot 1's fence returns (submit 7): now safe.
+  completed = advance_completed_submit(completed, slot_submit[1]);
+  CHECK(completed == 7);
+  CHECK(texture_retire_gate_open(true, retire_after, completed));
+  // The watermark never moves backwards (older slot observed afterwards).
+  completed = advance_completed_submit(completed, slot_submit[2]);
+  CHECK(completed == 7);
+  // A new submit after destroy does not delay the retired texture.
+  submit_seq = 8;
+  CHECK(texture_retire_gate_open(true, retire_after, completed));
+  CHECK(!texture_retire_gate_open(true, submit_seq, completed));
+  // Device idle: watermark jumps to submit_seq.
+  completed = advance_completed_submit(completed, submit_seq);
+  CHECK(texture_retire_gate_open(true, submit_seq, completed));
+}
+
+void test_render_finished_is_indexed_per_swapchain_image() {
+  // Semaphore count follows the swapchain image count, not frames in flight.
+  CHECK(render_finished_index_valid(0, 3));
+  CHECK(render_finished_index_valid(2, 3));
+  CHECK(!render_finished_index_valid(3, 3));
+  // No semaphores (torn-down swapchain): every index is invalid.
+  CHECK(!render_finished_index_valid(0, 0));
+  CHECK(render_finished_index_valid(UINT32_MAX - 1, static_cast<size_t>(UINT32_MAX)));
+  CHECK(!render_finished_index_valid(UINT32_MAX, static_cast<size_t>(UINT32_MAX)));
+}
+
 void test_draw_frame_drains_pending_uploads_before_sample() {
   CHECK(draw_frame_waits_pending_uploads_before_sample());
   CHECK(!create_texture_rgba_waits_upload_fence());
@@ -478,7 +601,11 @@ void run_upload_result_tests() {
   test_unsampled_destroyed_texture_frees_after_upload();
   test_atlas_rebake_and_font_replace_hold_async_upload();
   test_staging_copy_chunks_cap_host_maps();
+  test_mapped_flush_range_atom_align_and_clamp();
   test_draw_frame_drains_pending_uploads_before_sample();
+  test_ring_slot_capacity_never_doubles_previous_slot();
+  test_texture_retire_gate_waits_for_completed_submits();
+  test_render_finished_is_indexed_per_swapchain_image();
   test_stage_names_are_distinct_and_non_empty();
   test_failed_create_returns_invalid_texture_info();
 }
@@ -497,6 +624,15 @@ void test_wsi_classify_swapchain_rebuild() {
 void test_wsi_classify_surface_lost_rebuilds_surface() {
   CHECK(classify_wsi_result(VK_ERROR_SURFACE_LOST_KHR) ==
         WsiRecoverAction::RecreateSurfaceAndSwapchain);
+}
+
+void test_recover_surface_has_reacquire() {
+  CHECK(recover_surface_has_reacquire(true, false, true));
+  CHECK(!recover_surface_has_reacquire(false, true, true));
+  CHECK(recover_surface_has_reacquire(false, true, false));
+  CHECK(!recover_surface_has_reacquire(true, false, false));
+  CHECK(!recover_surface_has_reacquire(false, false, false));
+  CHECK(!recover_surface_has_reacquire(false, false, true));
 }
 
 void test_wsi_classify_device_lost_is_unrecoverable() {
@@ -975,10 +1111,111 @@ void test_frames_in_flight_leaves_one_image_for_present() {
   CHECK(frames_in_flight_for_swapchain(4, 2) == 2);
 }
 
+void test_draw_batch_external_arena_matches_cpu() {
+  wds::renderer::DrawBatch cpu;
+  wds::renderer::DrawBatch ext;
+  wds::renderer::DrawVertex store[16]{};
+  uint32_t idx_store[48]{};
+  ext.bind_external(store, 16, idx_store, 48);
+  const wds::renderer::TextureInfo tex{3, 8, 8, 0.0f, 0.0f, 1.0f, 1.0f};
+  const wds::renderer::Quad quad{{-1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, -1.0f}};
+  cpu.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  CHECK(ext.using_external());
+  CHECK(!ext.external_overflow());
+  std::vector<wds::renderer::DrawVertex> cpu_list;
+  std::vector<wds::renderer::DrawVertex> ext_list;
+  cpu.expand_list(cpu_list);
+  ext.expand_list(ext_list);
+  CHECK(cpu_list.size() == 6);
+  CHECK(ext_list.size() == 6);
+  CHECK(ext.ext_runs.size() == 1);
+  wds::renderer::DrawBatch rec;
+  rec.append_from(ext);
+  std::vector<wds::renderer::DrawVertex> rec_list;
+  rec.expand_list(rec_list);
+  CHECK(rec_list.size() == 6);
+  CHECK(rec.buckets.size() == 1);
+  CHECK(std::memcmp(rec_list.data(), cpu_list.data(), 6 * sizeof(wds::renderer::DrawVertex)) == 0);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  ext.add_sprite(tex, quad, 0.0f, 1.0f);
+  CHECK(ext.external_overflow());
+}
+
+void test_butterfly_bucket_disables_only_alpha_clip() {
+  wds::renderer::DrawBatch batch;
+  const wds::renderer::TextureInfo tex{7, 8, 8, 0.0f, 0.0f, 1.0f, 1.0f};
+  const wds::renderer::Quad quad{{-1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f},
+                                 {1.0f, -1.0f}};
+  batch.add_sprite(tex, quad, 0.0f, 1.0f);
+  batch.add_sprite_no_alpha_clip(tex, quad, 0.0f, 1.0f);
+  CHECK(batch.buckets.size() == 2);
+  CHECK(batch.buckets[0].texture == tex.id);
+  CHECK(!batch.buckets[0].disable_alpha_clip);
+  CHECK(batch.buckets[1].texture == tex.id);
+  CHECK(batch.buckets[1].disable_alpha_clip);
+}
+
+void test_extras_extent_is_max_of_offset_plus_used_not_sum() {
+  using wds::renderer::extras_extent_merge;
+  // Three parts spaced by reserved capacity 1000, used 10/20/30. The sum of
+  // used (60) puts the end at low+60; the real end is the last part's tail.
+  const uint64_t low = 262144;
+  uint64_t hi = 0;
+  hi = extras_extent_merge(hi, low + 0, 10);
+  hi = extras_extent_merge(hi, low + 1000, 20);
+  hi = extras_extent_merge(hi, low + 2000, 30);
+  CHECK(hi == low + 2030);
+  CHECK(hi > low + 60);
+  // Order independent, and an earlier larger end is kept.
+  CHECK(extras_extent_merge(low + 2030, low, 10) == low + 2030);
+  // Empty part at offset 0 leaves hi unchanged.
+  CHECK(extras_extent_merge(0, 0, 0) == 0);
+}
+
+void test_cpu_head_placement_never_overlaps_extras() {
+  using wds::renderer::HeadPlacement;
+  using wds::renderer::place_cpu_heads;
+  constexpr uint64_t kNoExtras = UINT64_MAX;
+  const uint64_t cap = 1u << 20;
+  // No extras: pack at 0 up to capacity, refuse past it.
+  HeadPlacement p = place_cpu_heads(1000, kNoExtras, 0, cap);
+  CHECK(p.fits && p.base == 0);
+  p = place_cpu_heads(cap, kNoExtras, 0, cap);
+  CHECK(p.fits && p.base == 0);
+  p = place_cpu_heads(cap + 1, kNoExtras, 0, cap);
+  CHECK(!p.fits);
+  // Extras from 262144: heads that end at/below it stay at 0.
+  p = place_cpu_heads(262144, 262144, 300000, cap);
+  CHECK(p.fits && p.base == 0);
+  // One more vertex would overwrite the first extra: moved after the extras.
+  p = place_cpu_heads(262145, 262144, 300000, cap);
+  CHECK(p.fits && p.base == 300000);
+  // Moved heads still must fit in the buffer; otherwise nothing is written.
+  p = place_cpu_heads(cap - 300000 + 1, 262144, 300000, cap);
+  CHECK(!p.fits);
+  p = place_cpu_heads(cap - 300000, 262144, 300000, cap);
+  CHECK(p.fits && p.base == 300000);
+  // Zero heads always fit, even in a zero-capacity buffer.
+  p = place_cpu_heads(0, 0, 0, 0);
+  CHECK(p.fits && p.base == 0);
+  // Heads that were never going to fit under `low` and have no capacity.
+  p = place_cpu_heads(1, 0, 0, 0);
+  CHECK(!p.fits);
+  // 32-bit index space is not wrapped.
+  p = place_cpu_heads(2, 0, 0xFFFFFFFFull, 0x200000000ull);
+  CHECK(!p.fits);
+}
+
 void run_wsi_health_tests() {
+  test_extras_extent_is_max_of_offset_plus_used_not_sum();
+  test_cpu_head_placement_never_overlaps_extras();
   test_wsi_classify_success_is_none();
   test_wsi_classify_swapchain_rebuild();
   test_wsi_classify_surface_lost_rebuilds_surface();
+  test_recover_surface_has_reacquire();
   test_wsi_classify_device_lost_is_unrecoverable();
   test_wsi_classify_other_errors_are_fatal();
   test_health_ready_flags();
@@ -1004,6 +1241,8 @@ void run_wsi_health_tests() {
   test_draw_frame_reaps_before_zero_extent_or_occluded_return();
   test_preferred_swapchain_image_count_requests_fif_plus_two();
   test_frames_in_flight_leaves_one_image_for_present();
+  test_draw_batch_external_arena_matches_cpu();
+  test_butterfly_bucket_disables_only_alpha_clip();
   test_descriptor_full_block_is_skipped_then_grows();
   test_descriptor_pool_growth_and_retry_policy();
   test_descriptor_chain_300_cross_block_alloc_and_recycle();

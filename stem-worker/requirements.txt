@@ -1,0 +1,14 @@
+# install.py installs PyTorch from the index matching the GPU first, then this file,
+# then demucs without its dependencies: demucs' torchaudio/openunmix/lameenc/sphn
+# requirements have no wheels for new Pythons and worker.py never imports them.
+# Lower bounds only: a cap on an unreleased major version would block every Python
+# whose wheels only exist in that version (the Python 3.15 failure mode).
+torch>=2.6
+numpy>=1.24
+soundfile>=0.13
+julius>=0.2.7
+filelock>=3
+imageio-ffmpeg>=0.6
+pyyaml>=6
+einops>=0.6
+tqdm>=4.40

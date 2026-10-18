@@ -2,6 +2,46 @@
 
 _World Dai Star_ 的跨平台制谱器。
 
+## Sirius 扩展谱面
+
+谱面数据层支持 **Original / Refresh（磁盘标记 `Official` / `SiriusExtended`）**：Refresh 允许音符视觉超出 12 Lane（仍须覆盖至少一个可判定 Lane）；无尾 Hold、作者手写 `900` 判定点与 SV（HiSpeed）可写入格式并在预览中按分段积分滚动。BPM、音乐和判定时间保持原样。
+
+编辑器 UI（功能等级切换、尾判定控件、SV 列表、Shift+中键加点等）尚未合入本分支，后续单独补。
+
+官方 CSV 仍使用 7 列：无尾类型为 `1100/1101/1110/1111`，SV 行使用 `type=-1`、`endTime=倍率`。`.wdschart` v6 保存 SV 与功能等级，旧版文件仍可读取。SUS 的 Sirius `#TIL00` 正倍率和终点 Damage 无尾标记会导入；Refresh SUS 往返使用 `#WDS_PROFILE` 与 `#WDS_LANE_OFFSET` 保留越界几何。ENC 打包仍由外部工具链负责。
+
+## 本地分轨
+
+通过 **播放面板 → 生成分轨** 或 **文件 → 本地分轨…** 打开后台任务面板。导入音乐后点击「生成分轨」，
+完成后在**播放面板的「音轨选择」**中选择原曲、鼓、贝斯、人声、其他声部，直接使用原有播放控制试听。
+任务面板是非模态窗口，生成期间可继续编辑和播放；
+关闭面板会保留后台任务，取消按钮或退出编辑器会停止任务。
+
+首次使用需要 64 位 Python 3.10 或更新版本；不设版本上限，只要 PyTorch 已为该版本发布安装包即可（已实测 3.10、3.12、3.15，以及 free-threaded 3.15t）。
+面板会在 PATH、Homebrew、pyenv、conda、python.org 安装目录、Python 安装管理器（`pythoncore-*`）和 PEP 514 注册表中查找，
+默认选最新的非 free-threaded 版本；过旧、32 位或 Rosetta 下的 Python 会在安装时给出原因。
+「安装分轨运行环境」会在用户数据目录创建独立虚拟环境，按 NVIDIA 驱动与显卡算力从 PyTorch 官方源选择
+CUDA 13.0 / CUDA 12.6 / CPU 版（macOS 为 Apple MPS），官方源不可达时改用 pip 默认源；换用其他 Python 版本后再次安装会重建该环境。
+`WDS_STEM_TORCH_INDEX` 可指定 PyTorch 源：`cu126`、`rocm7.2` 等变体名、完整索引 URL，或 `default`（pip 默认源）。
+Demucs 以 `--no-deps` 安装，不引入推理用不到、且新版 Python 缺少安装包的 torchaudio / lameenc 等依赖。
+也可直接选择已安装这些依赖的 Python，或设置 `WDS_STEM_PYTHON`。
+首次生成会下载约 80 MB 的 HTDemucs 权重，以后可以离线使用。
+自动设备选择顺序为 CUDA → Apple MPS → CPU；AMD/Intel 显卡当前使用 CPU。
+Windows/macOS/Linux 共用同一 Worker，已在 Linux + NVIDIA CUDA 实测，其他平台仍需运行时验证。
+
+默认使用单个 HTDemucs 四轨模型、25% 重叠、无随机移位增强；CUDA 启用 TF32 和固定形状卷积缓存。
+默认两条 CPU 线程，「优先保证编辑流畅」会限制 CUDA 分配预算并在推理块之间让出执行时间。
+整曲结果留在 CPU，每次仅把一个输入块送入 GPU。显存不足时会报告错误，可切换 CPU 重试。
+
+已落盘工程的分轨缓存写在工程根目录下的 `Stem/`；未保存工程时写入统一临时目录，退出编辑器后删除，面板会提示缓存将无法继续使用。
+输出是与原音频采样率、样本数一致的 float WAV；不会裁静音、逐轨归一化或添加谱面延迟。
+试听保留当前位置、速度和音量，保存/导出工程仍引用原曲。
+缓存按音源内容、权重、运行库和预处理实现校验；失败或取消不会发布半成品。
+当前支持 10 毫秒至 30 分钟的单声道或立体声音频。
+
+无需模型依赖的缓存/取消/安装决策回归：`python3 -B -m unittest discover -s stem-worker`。
+原生 CTest 还包含 `wds_audition_tests` 和 `wds_stem_panel_tests`，验证切轨同步及后台进程生命周期。
+
 ---
 
 ## 安装
@@ -31,7 +71,7 @@ xattr -cr "/Applications/WDS Editor.app"
 
 ## 从源码编译
 
-仓库包含编译、打包与运行所需内容：源码、CMake/脚本、BASS、Vulkan 头、UI 字体/图标，以及运行时 `skins/`、`effects/` 等。  
+仓库包含编译、打包与运行所需内容：源码、CMake/脚本、BASS、Vulkan 头、UI 字体/图标，以及运行时 `skins/`、`effects/`、`resources/` 等。  
 本地路径请放在 `scripts/env.local`（已忽略），勿提交。
 
 **已验证的主机 / 目标组合：**
@@ -40,6 +80,7 @@ xattr -cr "/Applications/WDS Editor.app"
 | ------------------- | ------------------------------ |
 | Linux x86_64        | `win-x86_64`（MinGW 交叉编译） |
 | macOS Apple Silicon | `macos-arm`（本机）            |
+| Linux Mint 22.3 / Ubuntu 24.04 x86_64 | `linux-x86_64`（本机，Qt 6.8.3） |
 
 Windows 本地可使用 Qt 6 + Visual Studio/CMake 构建；发行门禁仍以 CI 配置为准。
 
@@ -105,7 +146,91 @@ brew install cmake libpng glslang molten-vk vulkan-headers vulkan-loader qtbase 
 
 配置后可用标准 CMake workflow 构建 `wds_editor`；Qt 版 Release 打包入口为 `scripts/package-qt-release.ps1`。
 
+### D. Linux 本机编译（`linux-x86_64`）
+
+支持 Linux x86_64 原生开发构建；已在 Linux Mint 22.3（Ubuntu 24.04 基础）、X11、NVIDIA Vulkan 上验证。
+依赖 C++17 编译器、CMake、Ninja/Make、libpng/zlib、Vulkan loader/头文件、glslangValidator，
+以及 Qt **6.5 以上**的 Core/Gui/Widgets/Concurrent/Network/Svg。
+[Ubuntu 24.04 的 Qt 包](https://packages.ubuntu.com/noble/qt6-base-dev) 为 6.4 系列，需要另装较新 SDK；
+以下示例使用与现有构建一致的 Qt 6.8.3。
+
+Ubuntu 24.04 / Mint 22 的依赖准备：
+
+```bash
+sudo apt install build-essential ninja-build python3-venv libpng-dev zlib1g-dev \
+  libvulkan-dev glslang-tools libgl-dev libglx-dev libopengl-dev libegl-dev \
+  libxkbcommon-dev libxkbcommon-x11-0 libxcb-cursor0 libasound2t64 libpulse0
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wds-editor"
+python3 -m venv "$cache_dir/tools"
+"$cache_dir/tools/bin/pip" install aqtinstall cmake
+"$cache_dir/tools/bin/aqt" install-qt linux desktop 6.8.3 linux_gcc_64 \
+  -O "$cache_dir/qt" --archives qtbase qtsvg icu
+```
+
+从 [BASS 官方下载页](https://www.un4seen.com/bass.html) 分别下载 **BASS** 和 **BASSmix** 的 Linux 版本。
+将压缩包 `libs/x86_64/` 下的 `libbass.so`、`libbassmix.so` 放进
+`$cache_dir/deps/bass-linux/x86_64/`，保留随包许可文件。
+Linux 库由使用者提供，构建脚本不会自动下载或安装系统依赖；图形驱动还需提供可用的 Vulkan ICD。
+
+```bash
+./scripts/build-linux.sh
+"$cache_dir/tools/bin/ctest" --test-dir "$cache_dir/build-linux" --output-on-failure
+./scripts/run-linux.sh
+./scripts/run-linux.sh --open /absolute/path/song.wdsproject
+```
+
+构建产物默认位于用户缓存中。首次构建默认 `RelWithDebInfo`、4 个并行任务；后续构建保留已有
+生成器、构建类型及依赖配置。额外的 CMake `-D` / `-U` 参数可在 `--` 后传入，例如：
+
+```bash
+./scripts/build-linux.sh -- -DCMAKE_BUILD_TYPE=Debug
+```
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `WDS_LINUX_CACHE` | 缓存根目录，默认 `${XDG_CACHE_HOME:-$HOME/.cache}/wds-editor` |
+| `WDS_LINUX_BUILD_DIR` | 覆盖构建目录；构建和启动时使用相同值，不同 checkout 各用一个目录 |
+| `WDS_QT_LINUX_ROOT` | 自定义 Qt SDK 前缀，例如 `/opt/Qt/6.8.3/gcc_64` |
+| `WDS_BASS_LINUX_DIR` | 自定义 BASS/BASSmix `.so` 目录 |
+| `WDS_CMAKE` | 自定义 CMake 可执行文件 |
+| `CMAKE_BUILD_PARALLEL_LEVEL` | 编译并行数，默认 4 |
+| `CMAKE_GENERATOR` | 新构建的生成器；未指定时优先 Ninja |
+| `CMAKE_PREFIX_PATH` | 标准 CMake 搜索前缀；Linux 环境变量用冒号分隔，`-D` 参数用分号分隔 |
+
+脚本也识别缓存中的 Qt 6.8.3 SDK、`tools/bin`、`deps/sysroot/usr` 和可选的 `deps/runtime/lib`。
+显式设置的 SDK/工具优先；切换 Qt SDK 或编译器时请使用新的构建目录。
+脚本可从任意工作目录调用；带空格的路径请加引号。发现构建缓存属于另一 checkout 时会报错，避免启动旧版本。
+
+在有图形会话的机器上，可验证播放和截图：
+
+```bash
+./scripts/run-linux.sh --smoke-test --quit-after 6 --autoplay \
+  --open /absolute/path/song.wdsproject \
+  --screenshot /tmp/wds-editor-playing.png@4000
+```
+
+`--open` 直接打开工程；`--smoke-test` 跳过欢迎页和更新检查，默认 1.2 秒退出，
+显式 `--quit-after` 优先。工程应包含其引用的 `.wdschart` 与可解码音频。
+原生窗口运行已验证 X11；Wayland 尚未验证，可通过 `QT_QPA_PLATFORM=xcb` 使用 XWayland。
+
+也可用 CMake 安装到独立目录（Qt 6.8.3 的运行库部署已验证）：
+
+```bash
+"$cache_dir/tools/bin/cmake" --install "$cache_dir/build-linux" \
+  --prefix "$HOME/.local/opt/wds-editor"
+"$HOME/.local/opt/wds-editor/bin/wds_editor"
+```
+
+安装目录包含 `bin/`、`lib/`、Qt 插件及编辑器资源，可从其他工作目录启动；仍依赖宿主的图形/音频驱动。
+上面的系统依赖也需安装。若用缓存 `deps/runtime/lib` 临时代替系统 `libxcb-cursor0`，
+直接启动安装版时同样需设置相应的 `LD_LIBRARY_PATH`；`run-linux.sh` 会自动处理该开发环境兜底。
+本入口不生成 AppImage、deb 或 rpm，也不改变 Windows/macOS 的发布流程。
+脚本回归测试可单独运行：`python3 -B scripts/tests/linux_scripts_tests.py`，也会在找到 Python 3 的原生 Linux 构建中注册到 CTest。
+
 ### 构建模式速查
+
+以下为 `scripts/build-target.sh` 的发行构建模式；Linux 开发入口的默认值见上一节。
 
 | 模式              | 目录                    | 打包         | 日志           |
 | ----------------- | ----------------------- | ------------ | -------------- |
@@ -128,7 +253,7 @@ ctest --test-dir build-macos-arm --output-on-failure
 ./scripts/build-target.sh --package-only macos-arm
 ```
 
-默认全开模块时会注册：`wds_common_tests`、`wds_core_tests`、`wds_split_index_tests`、`wds_audio_player_tests`、`wds_renderer_tests`、`wds_note_visual_policy_tests`、`wds_split_line_official_colors_tests`、`wds_interaction_tests`、`wds_ui_logic_tests`、`wds_note_draw_order_tests`。
+默认全开模块时会注册单元测试（各模块 `*/tests/`）以及系统测试（`tests/system/`：分割线颜色/几何、分割线粒子播放、OpenWDS 绑定 / hydrate / 资源 / 控制器生命周期）。
 
 **Linux 宿主交叉出的 Windows PE 不能在该宿主上运行。** 不要对 `build-win-x86_64` 跑 `ctest`（部分测试目标仍可能被编译，但宿主执行的是 PE）。交叉策略见 [`cmake/CROSS_COMPILE.md`](cmake/CROSS_COMPILE.md)。
 
@@ -151,6 +276,8 @@ wds-editor/
 ├── ui/                     # Qt Dock 壳层、QPainter 编辑器 + Vulkan 预览
 ├── cmake/                  # 平台默认值与交叉 toolchain
 ├── scripts/                # 构建 / 打包 / 图标
+├── tests/system/           # 跨模块系统测试
+├── resources/              # 分割线粒子运行时数据（objects.tsv / objects.jsonl），随包发布
 └── skins/ effects/ icons/  # 运行时资源
 ```
 
@@ -192,11 +319,20 @@ ui → core → common
 | ---------- | ------------------------------------------------------- |
 | 皮肤 PNG   | `skins/`                                                |
 | 打击音效   | `effects/`                                              |
+| 分割线粒子 | `resources/`                                            |
 | 着色器     | `renderer/shaders/`                                     |
 | BASS       | `audio-player/third_party/bass/{macos-arm,win-x86_64}/` |
 | 应用图标源 | `logo.png` → `scripts/generate-app-icons.sh`            |
 
-Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
+Qt 应用图标通过 `ui/wds_resources.qrc` 内嵌；可替换主题、字体以及 Vulkan/BASS 需要真实文件路径的 `skins/`、`effects/`、`resources/` 由打包脚本放在发行目录中。详见 [`ui/README.md`](ui/README.md)。
+
+**`resources/` 的查找方式**：程序按以下顺序寻找分割线粒子数据，可执行文件中不编入任何绝对路径。
+
+- 发行包（Windows zip / MSI）：与 `wds_editor.exe` 同级的 `resources/`；
+- macOS：`WDS Editor.app/Contents/Resources/resources`（可执行文件位于 `Contents/MacOS`）；
+- 构建树：从可执行文件所在目录逐级向上搜索仓库的 `resources/`。
+
+因此编译后的构建树（如 `build-macos-arm/ui/wds_editor`）无需打包即可直接运行。`package-target.sh` / `package-qt-release.ps1` 缺少 `resources/` 时会直接报错，不会产出缺少分割线粒子的包。
 
 ### 预览每帧数据流
 

@@ -7,10 +7,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
+#include <cstddef>
+#include <iomanip>
+#include <limits>
 #include <cmath>
 #include <map>
 #include <numeric>
+#include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -58,14 +64,54 @@ bool parse_quoted(const std::string& raw, std::string& out) {
   return !out.empty() || t == "\"\"";
 }
 
-bool parse_double(const std::string& text, double& out) {
+enum class DoubleParse { Ok, Invalid, NonFinite };
+
+// std::stod also accepts "inf", "nan" and hex floats, so finiteness is checked here.
+// `out` is only written for Ok.
+DoubleParse parse_double_ex(const std::string& text, double& out) {
   try {
     size_t idx = 0;
-    out = std::stod(trim_copy(text), &idx);
-    return idx > 0;
+    const double value = std::stod(trim_copy(text), &idx);
+    if (idx == 0) return DoubleParse::Invalid;
+    if (!std::isfinite(value)) return DoubleParse::NonFinite;
+    out = value;
+    return DoubleParse::Ok;
   } catch (...) {
-    return false;
+    return DoubleParse::Invalid;
   }
+}
+
+// Finite doubles only (nan / inf are treated like malformed input).
+bool parse_double(const std::string& text, double& out) {
+  return parse_double_ex(text, out) == DoubleParse::Ok;
+}
+
+// Sanity bounds for parsed SUS numbers (real charts are orders of magnitude below).
+constexpr double kMaxSusBpm = 1e7;
+constexpr double kMaxSusMeasureBeats = 1e6;
+constexpr double kMaxSusWaveOffsetSec = 1e6;
+// Data rows pack the slot index and slot count into 16 bits each.
+constexpr size_t kMaxSusSlots = 0xFFFF;
+
+// Measure length in ticks; callers validate beats to (0, kMaxSusMeasureBeats] and
+// tpq to [1, kMaxTicksPerQuarter], so the product is far below int64 range.
+int64_t sus_measure_ticks(double beats, int32_t tpq) {
+  return static_cast<int64_t>(std::llround(beats * static_cast<double>(tpq)));
+}
+
+// Leading decimal digits of `text` (after optional '+'). Returns false when there are none
+// or a '-' sign is present; saturates at INT64_MAX/10 so callers can range-check.
+bool parse_leading_uint(const std::string& text, int64_t& out) {
+  size_t i = 0;
+  if (i < text.size() && text[i] == '+') ++i;
+  if (i >= text.size() || text[i] < '0' || text[i] > '9') return false;
+  int64_t value = 0;
+  constexpr int64_t kSaturate = std::numeric_limits<int64_t>::max() / 10;
+  for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i) {
+    if (value < kSaturate) value = value * 10 + (text[i] - '0');
+  }
+  out = value;
+  return true;
 }
 
 bool parse_int(const std::string& text, int& out) {
@@ -125,11 +171,41 @@ NoteType tap_type_from_sus(int type) {
 
 bool same_tick_i(int32_t a, int32_t b) { return a == b; }
 
+// Note indices bucketed by a tick, so per-hold start-occupancy checks only look at the
+// few notes sharing the hold's start tick instead of scanning every note.
+class TickBuckets {
+ public:
+  void add(int32_t tick, std::size_t index) { by_tick_[tick].push_back(index); }
+
+  const std::vector<std::size_t>& at(int32_t tick) const {
+    const auto it = by_tick_.find(tick);
+    return it == by_tick_.end() ? empty_ : it->second;
+  }
+
+ private:
+  std::unordered_map<int32_t, std::vector<std::size_t>> by_tick_;
+  std::vector<std::size_t> empty_;
+};
+
+// Tick under which `note` can occupy hold-start lanes (see hold_start_fully_covered /
+// make_auto_hold_head): tailed holds count at their end tick, any other note at its
+// start tick. Hold bodies without tail, HoldEighth and mid-stars never count.
+bool start_occupancy_key(const NotationNote& note, int32_t& key) noexcept {
+  if (is_hold_with_tail(note.note_type)) {
+    key = note.end_tick;
+    return true;
+  }
+  if (is_hold_body(note.note_type) || is_hold_mid_star(note.note_type)) return false;
+  key = note.start_tick;
+  return true;
+}
+
 // Start lanes fully occupied by blocking notes (or other hold tails ending
 // here). Hold bodies / HoldEighth / mid-stars never count — same occupancy
-// model as make_auto_hold_head.
-bool hold_start_fully_covered(const NotationNote& hold,
-                              const std::vector<NotationNote>& notes) {
+// model as make_auto_hold_head. `candidates` are indices into `notes` that must
+// include every note whose start_occupancy_key equals hold.start_tick.
+bool hold_start_fully_covered(const NotationNote& hold, const std::vector<NotationNote>& notes,
+                              const std::vector<std::size_t>& candidates) {
   if (hold.width < 1) return true;
   auto mark_range = [&](std::vector<char>& occupied, int32_t lo, int32_t hi) {
     lo = std::max(lo, hold.lane);
@@ -139,7 +215,8 @@ bool hold_start_fully_covered(const NotationNote& hold,
     }
   };
   std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
-  for (const auto& note : notes) {
+  for (const std::size_t index : candidates) {
+    const NotationNote& note = notes[index];
     if (note.id == hold.id) continue;
     if (is_hold_with_tail(note.note_type)) {
       if (!same_tick_i(note.end_tick, hold.start_tick)) continue;
@@ -158,23 +235,18 @@ bool hold_start_fully_covered(const NotationNote& hold,
   return std::all_of(occupied.begin(), occupied.end(), [](char c) { return c != 0; });
 }
 
-struct SusDamageMarker {
-  int32_t tick = 0;
-  int32_t lane = 0;
-  int32_t width = 1;
-};
-
-bool matches_damage_marker(const SusDamageMarker& dmg, const NotationNote& hold) {
-  return same_tick_i(dmg.tick, hold.start_tick) && dmg.lane == hold.lane &&
-         dmg.width == hold.width;
-}
+// Damage marker position: (tick, lane, width), matched against hold start / end spans.
+using DamageKey = std::tuple<int32_t, int32_t, int32_t>;
 
 // Critical tap that fully covers the hold start span (金头 marker on export).
+// `critical_at_start` are indices into `notes` of Critical notes at hold.start_tick.
 bool hold_start_fully_covered_by_critical(const NotationNote& hold,
-                                          const std::vector<NotationNote>& notes) {
+                                          const std::vector<NotationNote>& notes,
+                                          const std::vector<std::size_t>& critical_at_start) {
   if (hold.width < 1) return false;
   std::vector<char> occupied(static_cast<size_t>(hold.width), 0);
-  for (const auto& note : notes) {
+  for (const std::size_t index : critical_at_start) {
+    const NotationNote& note = notes[index];
     if (note.note_type != NoteType::Critical) continue;
     if (!same_tick_i(note.start_tick, hold.start_tick)) continue;
     const int32_t lo = std::max(note.lane, hold.lane);
@@ -291,7 +363,16 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     int types = 0;    // color id
   };
   std::vector<TilSplitPoint> til_splits;
-  bool saw_hispeed_til = false;
+  struct TilSpeedPoint {
+    int measure = 0;
+    int subtick = 0;
+    double multiplier = 1.0;
+  };
+  std::vector<TilSpeedPoint> til_speeds;
+  size_t skipped_nonpositive_speed_points = 0;
+  ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
+  bool saw_compatibility_profile = false;
+  int declared_lane_offset = -1;
 
   int measure_base = 0;
   std::istringstream stream(text);
@@ -324,6 +405,27 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     }
     const std::string header_l = to_lower_ascii(header);
 
+    if (header_l == "wds_profile") {
+      saw_compatibility_profile = true;
+      const std::string profile = to_lower_ascii(trim_copy(data));
+      if (profile == "siriusextended") {
+        compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+      } else if (profile == "official") {
+        compatibility_profile = ChartCompatibilityProfile::Official;
+      } else {
+        return {SerializeError::ParseError, "SUS unknown WDS_PROFILE"};
+      }
+      continue;
+    }
+    if (header_l == "wds_lane_offset") {
+      int offset = -1;
+      if (!parse_int(data, offset) || offset < 0 || offset > 35) {
+        return {SerializeError::ParseError, "SUS invalid WDS_LANE_OFFSET"};
+      }
+      declared_lane_offset = offset;
+      continue;
+    }
+
     auto set_meta_str = [&](const char* key, std::string& field) {
       if (to_lower_ascii(header) == key) {
         parse_quoted(data, field);
@@ -354,11 +456,22 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       continue;
     }
     if (header_l == "waveoffset") {
-      parse_double(data, meta.wave_offset_sec);
+      double value = 0.0;
+      const DoubleParse kind = parse_double_ex(data, value);
+      if (kind == DoubleParse::NonFinite ||
+          (kind == DoubleParse::Ok && std::fabs(value) > kMaxSusWaveOffsetSec)) {
+        return {SerializeError::ParseError, "SUS invalid WAVEOFFSET"};
+      }
+      if (kind == DoubleParse::Ok) meta.wave_offset_sec = value;
       continue;
     }
     if (header_l == "basebpm") {
-      parse_double(data, meta.base_bpm);
+      double value = 0.0;
+      const DoubleParse kind = parse_double_ex(data, value);
+      if (kind == DoubleParse::NonFinite || (kind == DoubleParse::Ok && value > kMaxSusBpm)) {
+        return {SerializeError::ParseError, "SUS invalid BASEBPM"};
+      }
+      if (kind == DoubleParse::Ok) meta.base_bpm = value;
       continue;
     }
     if (header_l == "request") {
@@ -368,8 +481,14 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       std::istringstream rs(req);
       std::string token;
       if (rs >> token && to_lower_ascii(token) == "ticks_per_beat") {
-        int tpq = 480;
-        if (rs >> tpq && tpq > 0) meta.ticks_per_beat = tpq;
+        std::string number;
+        int64_t tpq = 0;
+        if (rs >> number && parse_leading_uint(number, tpq)) {
+          if (tpq > kMaxTicksPerQuarter) {
+            return {SerializeError::ParseError, "SUS ticks_per_beat out of range"};
+          }
+          if (tpq > 0) meta.ticks_per_beat = static_cast<int32_t>(tpq);
+        }
       }
       continue;
     }
@@ -385,14 +504,49 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     if (header_l.rfind("bpm", 0) == 0 && header.size() >= 5) {
       const int id = base36_value(header[3]) * 36 + base36_value(header[4]);
       double bpm = 120.0;
-      if (id >= 0 && parse_double(data, bpm) && bpm > 0.0) bpm_defs[id] = bpm;
+      if (id >= 0) {
+        const DoubleParse kind = parse_double_ex(data, bpm);
+        if (kind == DoubleParse::NonFinite || (kind == DoubleParse::Ok && bpm > kMaxSusBpm)) {
+          return {SerializeError::ParseError, "SUS invalid BPM definition"};
+        }
+        if (kind == DoubleParse::Ok && bpm > 0.0) bpm_defs[id] = bpm;
+      }
       continue;
     }
-    // #TIL00 HiSpeed (ignored — editor cannot author). #TIL01 split lines.
+    // Sirius SUS #TIL00 global non-negative SV; #TIL01 split lines.
     if (header_l.rfind("til", 0) == 0) {
       const std::string til_id = header_l.size() >= 5 ? header_l.substr(3, 2) : "";
       if (til_id == "00") {
-        saw_hispeed_til = true;
+        std::string body = trim_copy(data);
+        if (body.size() >= 2 && body.front() == '"' && body.back() == '"') {
+          body = body.substr(1, body.size() - 2);
+        }
+        std::string entry;
+        std::istringstream es(body);
+        while (std::getline(es, entry, ',')) {
+          entry = trim_copy(entry);
+          if (entry.empty()) continue;
+          const size_t colon = entry.find(':');
+          const size_t quote = entry.find('\'');
+          if (colon == std::string::npos || quote == std::string::npos || quote >= colon) {
+            return {SerializeError::ParseError, "SUS #TIL00 malformed speed entry"};
+          }
+          int measure = 0;
+          int subtick = 0;
+          double multiplier = 0.0;
+          if (!parse_int(entry.substr(0, quote), measure) ||
+              !parse_int(entry.substr(quote + 1, colon - quote - 1), subtick) ||
+              !parse_double(entry.substr(colon + 1), multiplier) || measure < 0 ||
+              static_cast<int64_t>(measure) + measure_base > 200000 || subtick < 0 ||
+              !std::isfinite(multiplier)) {
+            return {SerializeError::ParseError, "SUS #TIL00 invalid speed entry"};
+          }
+          if (multiplier < 0.0) {
+            ++skipped_nonpositive_speed_points;
+            continue;
+          }
+          til_speeds.push_back({measure + measure_base, subtick, multiplier});
+        }
         continue;
       }
       if (til_id == "01") {
@@ -415,7 +569,11 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
           if (q == std::string::npos) continue;
           int measure = 0;
           int subtick = 0;
-          if (!parse_int(beat.substr(0, q), measure)) continue;
+          if (!parse_int(beat.substr(0, q), measure) || measure < 0) continue;
+          // Checked in int64: measure + measure_base must not overflow int.
+          if (static_cast<int64_t>(measure) + measure_base > 200000) {
+            return {SerializeError::ParseError, "SUS #TIL01 invalid split entry"};
+          }
           parse_int(beat.substr(q + 1), subtick);
           const size_t dot = type.find('.');
           if (dot == std::string::npos) continue;
@@ -464,7 +622,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         if (m > meas) break;
         beats = len;
       }
-      return static_cast<int64_t>(std::llround(beats * tpq));
+      return sus_measure_ticks(beats, tpq);
     };
 
     // Lazy absolute tick for measure start — computed after all measure lengths known;
@@ -475,12 +633,20 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
 
     if (rest == "02") {
       double beats = 4.0;
-      if (parse_double(data, beats) && beats > 0.0) measure_lengths[measure] = beats;
+      const DoubleParse kind = parse_double_ex(data, beats);
+      if (kind == DoubleParse::NonFinite ||
+          (kind == DoubleParse::Ok && beats > kMaxSusMeasureBeats)) {
+        return {SerializeError::ParseError, "SUS invalid measure length"};
+      }
+      if (kind == DoubleParse::Ok && beats > 0.0) measure_lengths[measure] = beats;
       continue;
     }
     if (rest == "08") {
       // BPM change: data is zz ids packed in pairs.
       const std::string cleaned = trim_copy(data);
+      if (cleaned.size() / 2 > kMaxSusSlots) {
+        return {SerializeError::ParseError, "SUS data line has too many slots"};
+      }
       const int n = static_cast<int>(cleaned.size() / 2);
       if (n <= 0) continue;
       for (int i = 0; i < n; ++i) {
@@ -492,7 +658,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         if (it == bpm_defs.end()) continue;
         // tick filled in pass 2
         bpm_changes.push_back({(static_cast<int64_t>(measure) << 32) |
-                                   static_cast<int64_t>((i << 16) | n),
+                                   (static_cast<int64_t>(i) << 16) | static_cast<int64_t>(n),
                                it->second});
       }
       continue;
@@ -520,6 +686,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
 
     const std::string cleaned = trim_copy(data);
     if (cleaned.size() < 2 || (cleaned.size() % 2) != 0) continue;
+    if (cleaned.size() / 2 > kMaxSusSlots) {
+      return {SerializeError::ParseError, "SUS data line has too many slots"};
+    }
     const int slots = static_cast<int>(cleaned.size() / 2);
     for (int i = 0; i < slots; ++i) {
       const int type = base36_value(cleaned[static_cast<size_t>(i) * 2]);
@@ -527,7 +696,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       if (type <= 0 || width <= 0) continue;
       RawEvent ev;
       // Encode measure/slot temporarily in tick; rewrite in pass 2.
-      ev.tick = (static_cast<int64_t>(measure) << 32) | static_cast<int64_t>((i << 16) | slots);
+      ev.tick = (static_cast<int64_t>(measure) << 32) | (static_cast<int64_t>(i) << 16) |
+                static_cast<int64_t>(slots);
       ev.lane = lane;
       ev.width = std::clamp(width, 1, 35);
       ev.type = type;
@@ -551,10 +721,16 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   for (const auto& p : til_splits) {
     max_measure_needed = std::max(max_measure_needed, p.measure);
   }
+  for (const auto& p : til_speeds) {
+    max_measure_needed = std::max(max_measure_needed, p.measure);
+  }
   if (max_measure_needed > kMaxMeasureIndex) {
     return {SerializeError::ParseError, "SUS measure index exceeds limit"};
   }
   std::vector<int64_t> measure_starts(static_cast<size_t>(max_measure_needed) + 2, 0);
+  // Length in ticks of measure m (0..max_measure_needed); lets decode_packed / til_tick
+  // avoid walking measure_lengths per event.
+  std::vector<int64_t> measure_len_ticks(static_cast<size_t>(max_measure_needed) + 1, 0);
   for (int m = 0; m <= max_measure_needed; ++m) {
     double beats = 4.0;
     auto it = measure_lengths.upper_bound(m);
@@ -562,9 +738,15 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       --it;
       beats = it->second;
     }
-    measure_starts[static_cast<size_t>(m) + 1] =
-        measure_starts[static_cast<size_t>(m)] +
-        static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+    const int64_t this_len = sus_measure_ticks(beats, meta.ticks_per_beat);
+    measure_len_ticks[static_cast<size_t>(m)] = this_len;
+    const int64_t next_start = measure_starts[static_cast<size_t>(m)] + this_len;
+    // Every event tick lies inside [0, measure_starts.back()], so this one bound makes
+    // the int32 tick casts below safe.
+    if (next_start > INT32_MAX) {
+      return {SerializeError::ParseError, "SUS tick out of range"};
+    }
+    measure_starts[static_cast<size_t>(m) + 1] = next_start;
   }
   auto measure_start_tick = [&](int measure) -> int64_t {
     if (measure <= 0) return 0;
@@ -574,35 +756,63 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     return measure_starts[static_cast<size_t>(measure)];
   };
 
+  // Length in ticks of the measure `measure` (last #mmm02 at or before it, default 4 beats).
+  auto measure_length_at = [&](int measure) -> int64_t {
+    if (measure >= 0 && measure <= max_measure_needed) {
+      return measure_len_ticks[static_cast<size_t>(measure)];
+    }
+    double beats = 4.0;
+    auto it = measure_lengths.upper_bound(measure);
+    if (it != measure_lengths.begin()) {
+      --it;
+      beats = it->second;
+    }
+    return sus_measure_ticks(beats, meta.ticks_per_beat);
+  };
+
   auto decode_packed = [&](int64_t packed, int64_t& out_tick) {
     const int measure = static_cast<int>(packed >> 32);
     const int slots = static_cast<int>(packed & 0xffff);
     const int index = static_cast<int>((packed >> 16) & 0xffff);
     const int64_t mstart = measure_start_tick(measure);
-    double beats = 4.0;
-    for (const auto& [mm, len] : measure_lengths) {
-      if (mm > measure) break;
-      beats = len;
-    }
-    const int64_t mlen = static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+    const int64_t mlen = measure_length_at(measure);
     out_tick = mstart + (slots > 0 ? mlen * index / slots : mstart);
   };
 
+  // Decoded ticks must fit int32: the later static_cast<int32_t>(tick) sites rely on it.
   for (auto& ev : events) {
     int64_t tick = 0;
     decode_packed(ev.tick, tick);
+    if (tick < 0 || tick > INT32_MAX) return {SerializeError::ParseError, "SUS tick out of range"};
     ev.tick = tick;
   }
   for (auto& ch : bpm_changes) {
     int64_t tick = 0;
     decode_packed(ch.tick, tick);
+    if (tick < 0 || tick > INT32_MAX) return {SerializeError::ParseError, "SUS tick out of range"};
     ch.tick = tick;
   }
 
   NotationChart chart;
+  chart.compatibility_profile = compatibility_profile;
   chart.timing.ticks_per_quarter = meta.ticks_per_beat;
   chart.timing.offset_ms =
       static_cast<int64_t>(std::llround(meta.wave_offset_sec * 1000.0));
+  for (const auto& point : til_speeds) {
+    const int64_t tick = measure_start_tick(point.measure) + point.subtick;
+    if (tick < 0 || tick > INT32_MAX) {
+      return {SerializeError::ParseError, "SUS #TIL00 tick out of range"};
+    }
+    chart.scroll_speed_points.push_back(
+        ScrollSpeedPoint{static_cast<int32_t>(tick), point.multiplier});
+  }
+  std::sort(chart.scroll_speed_points.begin(), chart.scroll_speed_points.end(),
+            [](const auto& a, const auto& b) { return a.tick < b.tick; });
+  for (size_t i = 1; i < chart.scroll_speed_points.size(); ++i) {
+    if (chart.scroll_speed_points[i - 1].tick == chart.scroll_speed_points[i].tick) {
+      return {SerializeError::ParseError, "SUS #TIL00 duplicate speed tick"};
+    }
+  }
 
   // Timing points from BPM changes + #mmm02 measure lengths.
   std::sort(bpm_changes.begin(), bpm_changes.end(),
@@ -636,14 +846,20 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     chart.timing.points.push_back(point);
   }
 
+  // tick -> index of the FIRST point with that tick (BPM changes may share a tick).
+  std::unordered_map<int32_t, size_t> timing_point_by_tick;
+  timing_point_by_tick.reserve(chart.timing.points.size() + measure_lengths.size());
+  for (size_t i = 0; i < chart.timing.points.size(); ++i) {
+    timing_point_by_tick.emplace(chart.timing.points[i].tick, i);
+  }
   auto upsert_meter = [&](int32_t tick, int32_t numerator, int32_t denominator) {
-    for (auto& p : chart.timing.points) {
-      if (p.tick == tick) {
-        p.numerator = numerator;
-        p.denominator = denominator;
-        p.has_meter = true;
-        return;
-      }
+    const auto found = timing_point_by_tick.find(tick);
+    if (found != timing_point_by_tick.end()) {
+      TimingPoint& p = chart.timing.points[found->second];
+      p.numerator = numerator;
+      p.denominator = denominator;
+      p.has_meter = true;
+      return;
     }
     TimingPoint point;
     point.tick = tick;
@@ -652,6 +868,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     point.denominator = denominator;
     point.has_bpm = false;
     point.has_meter = true;
+    timing_point_by_tick.emplace(tick, chart.timing.points.size());
     chart.timing.points.push_back(point);
   };
   auto beats_to_meter = [](double beats) -> std::pair<int32_t, int32_t> {
@@ -689,7 +906,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     max_end = std::max(max_end, ev.lane + ev.width);
   }
   int lane_offset = 0;
-  if (min_lane < 99 && min_lane >= 2 && max_end <= 14) {
+  if (declared_lane_offset >= 0) {
+    lane_offset = declared_lane_offset;
+  } else if (min_lane < 99 && min_lane >= 2 && max_end <= 14) {
     lane_offset = 2;
   } else if (min_lane < 99 && max_end > 12 && min_lane >= 2) {
     lane_offset = min_lane;
@@ -698,9 +917,13 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
 
   auto map_lane = [&](int lane) {
-    return std::clamp(lane - lane_offset, 0, 11);
+    const int mapped = lane - lane_offset;
+    return compatibility_profile == ChartCompatibilityProfile::SiriusExtended
+               ? mapped
+               : std::clamp(mapped, 0, 11);
   };
   auto map_width = [&](int lane, int width) {
+    if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) return width;
     const int left = map_lane(lane);
     return std::clamp(width, 1, 12 - left);
   };
@@ -728,19 +951,40 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     airs.push_back(air);
   }
 
-  auto air_matches_span = [](const AirEvent& air, int left, int right) {
-    return air.lane == left && air.lane + air.width - 1 == right;
+  // Airs grouped by exact span (lane, right edge); each group lists air indices sorted
+  // by (tick, index). `airs` is never resized after this point, so pointers stay valid.
+  std::map<std::pair<int, int>, std::vector<size_t>> airs_by_span;
+  for (size_t i = 0; i < airs.size(); ++i) {
+    airs_by_span[{airs[i].lane, airs[i].lane + airs[i].width - 1}].push_back(i);
+  }
+  for (auto& [span, indices] : airs_by_span) {
+    (void)span;
+    std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+      if (airs[a].tick != airs[b].tick) return airs[a].tick < airs[b].tick;
+      return a < b;
+    });
+  }
+  const std::vector<size_t> no_air_indices;
+  auto air_group = [&](int left, int right) -> const std::vector<size_t>& {
+    const auto it = airs_by_span.find({left, right});
+    return it == airs_by_span.end() ? no_air_indices : it->second;
+  };
+  // [first, last) of group entries with tick == `tick`.
+  auto air_tick_range = [&](const std::vector<size_t>& group, int64_t tick) {
+    const auto first = std::lower_bound(group.begin(), group.end(), tick,
+                                        [&](size_t idx, int64_t t) { return airs[idx].tick < t; });
+    const auto last = std::upper_bound(first, group.end(), tick,
+                                       [&](int64_t t, size_t idx) { return t < airs[idx].tick; });
+    return std::make_pair(first, last);
   };
 
   auto slide_start_has_air = [&](int64_t tick, int left, int right) -> bool {
-    for (int i = 0; i <= 11; ++i) {
+    for (int i = std::min(0, left); i <= std::max(11, right); ++i) {
       if (i > left && i < right) continue;
       const int al = (i <= left) ? i : left;
       const int ar = (i <= left) ? right : i;
-      for (const auto& air : airs) {
-        if (air.tick != tick) continue;
-        if (air_matches_span(air, al, ar)) return true;
-      }
+      const auto range = air_tick_range(air_group(al, ar), tick);
+      if (range.first != range.second) return true;
     }
     return false;
   };
@@ -749,34 +993,47 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     AirEvent* air = nullptr;
     int32_t scratch_type = 0;
   };
+  // Last unconsumed match wins: highest i, then highest air index at that span.
   auto find_slide_end_air = [&](int64_t tick, int left, int right) -> FoundAir {
     FoundAir found;
-    for (int i = 0; i <= 11; ++i) {
+    for (int i = std::min(0, left); i <= std::max(11, right); ++i) {
       if (i > left && i <= right) continue;
       const int al = (i <= left) ? i : left;
       const int ar = (i <= left) ? right : i;
-      for (auto& air : airs) {
-        if (air.consumed || air.tick != tick) continue;
-        if (!air_matches_span(air, al, ar)) continue;
+      const auto range = air_tick_range(air_group(al, ar), tick);
+      for (auto it = range.second; it != range.first;) {
+        --it;
+        AirEvent& air = airs[*it];
+        if (air.consumed) continue;
         found.air = &air;
         found.scratch_type = sus2txt_scratch_type(i, left, right, air.type);
+        break;
       }
     }
     return found;
   };
 
   // Taps except Flick (handled via pairs) and Damage markers.
-  std::vector<SusDamageMarker> damage_markers;
-  std::vector<SusDamageMarker> damage_end_markers;
+  // One set serves both the hold-start (headless) and hold-end (nontail) checks.
+  std::set<DamageKey> damage_markers;
+
+  // `notes` plus the lookups used while emitting holds: occupancy of hold-start lanes by
+  // tick (start_occupancy_key) and Critical taps by start tick. Every note appended before the hold phase goes through push_note.
+  TickBuckets start_occupancy;
+  TickBuckets critical_taps;
+  auto push_note = [&](const NotationNote& pushed) {
+    const size_t index = notes.size();
+    notes.push_back(pushed);
+    int32_t key = 0;
+    if (start_occupancy_key(pushed, key)) start_occupancy.add(key, index);
+    if (pushed.note_type == NoteType::Critical) critical_taps.add(pushed.start_tick, index);
+  };
+
   for (const auto& ev : events) {
     if (ev.category != 1) continue;
     if (ev.type == kSusTapDamage) {
-      SusDamageMarker dmg;
-      dmg.tick = static_cast<int32_t>(ev.tick);
-      dmg.lane = map_lane(ev.lane);
-      dmg.width = map_width(ev.lane, ev.width);
-      damage_markers.push_back(dmg);
-      damage_end_markers.push_back(dmg);  // end match checked against hold ends
+      damage_markers.emplace(static_cast<int32_t>(ev.tick), map_lane(ev.lane),
+                             map_width(ev.lane, ev.width));
       continue;
     }
     if (ev.type == kSusTapFlick) continue;  // only via pairs
@@ -790,7 +1047,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       note.note_type = tap_type_from_sus(ev.type);
       note.gimmick_type = GimmickType::None;
       note.scratch_length = 0;
-      notes.push_back(note);
+      push_note(note);
     }
   }
 
@@ -831,7 +1088,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       NotationNote cover_probe = body;
       cover_probe.id = -1;
       const bool critical_cover =
-          is_first_segment && hold_start_fully_covered_by_critical(cover_probe, notes);
+          is_first_segment && hold_start_fully_covered_by_critical(
+                                  cover_probe, notes, critical_taps.at(cover_probe.start_tick));
 
       if (scratch) {
         body.note_type =
@@ -843,7 +1101,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
           body.scratch_length = 0;
         }
         auto [lo, hi] = get_scratch_end_lane_range(body);
-        if (lo < 0 || hi > 11) {
+        if (compatibility_profile == ChartCompatibilityProfile::Official &&
+            (lo < 0 || hi > 11)) {
           lo = std::max(lo, 0);
           hi = std::min(hi, 11);
           set_scratch_hold_end_lanes(body, std::min(lo, body.lane),
@@ -853,36 +1112,35 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         body.note_type = critical_cover ? NoteType::CriticalHold : NoteType::Hold;
       }
 
-      SusDamageMarker start_probe;
-      start_probe.tick = static_cast<int32_t>(t0);
-      start_probe.lane = body_lane;
-      start_probe.width = body_width;
       const bool damage_headless =
           is_first_segment &&
-          std::any_of(damage_markers.begin(), damage_markers.end(),
-                      [&](const SusDamageMarker& d) {
-                        return matches_damage_marker(d, body);
-                      });
+          damage_markers.count(DamageKey{static_cast<int32_t>(t0), body_lane, body_width}) != 0;
 
-      // End Damage → Nontail degraded to tailed hold.
-      const bool end_damage = std::any_of(
-          damage_end_markers.begin(), damage_end_markers.end(), [&](const SusDamageMarker& d) {
-            return same_tick_i(d.tick, static_cast<int32_t>(t1)) && d.lane == body_lane &&
-                   d.width == body_width;
-          });
+      // End Damage marks a body with no judged tail in the Sirius extension.
+      const bool end_damage =
+          damage_markers.count(DamageKey{static_cast<int32_t>(t1), body_lane, body_width}) != 0;
       if (end_damage) {
-        push_unique_warning(warnings, "无尾 Hold（终点 Damage）已转为有尾 Hold");
+        switch (body.note_type) {
+          case NoteType::Hold: body.note_type = NoteType::NontailHold; break;
+          case NoteType::CriticalHold: body.note_type = NoteType::NontailCriticalHold; break;
+          case NoteType::ScratchHold: body.note_type = NoteType::NontailScratchHold; break;
+          case NoteType::ScratchCriticalHold:
+            body.note_type = NoteType::NontailScratchCriticalHold;
+            break;
+          default: break;
+        }
       }
 
-      notes.push_back(body);
+      push_note(body);
 
       if (is_first_segment && add_start && !critical_cover && !damage_headless &&
-          !hold_start_fully_covered(body, notes)) {
-        ChartDocument doc;
-        doc.set_notes(notes);
-        if (auto head = make_auto_hold_head(doc, body)) {
+          !hold_start_fully_covered(body, notes, start_occupancy.at(body.start_tick))) {
+        // Head is placed only on the body lanes free at the start tick; the candidates are
+        // every note already indexed at this tick, regardless of Sirius Extended notes
+        // elsewhere in the chart.
+        if (auto head = make_auto_hold_head(body, notes, start_occupancy.at(body.start_tick))) {
           head->id = next_id++;
-          notes.push_back(*head);
+          push_note(*head);
         }
       }
 
@@ -905,7 +1163,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         star.gimmick_type = GimmickType::None;
         star.scratch_length = 0;
         star.parent_hold_id = body.id;
-        notes.push_back(star);
+        push_note(star);
       }
     };
 
@@ -930,10 +1188,17 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
 
       std::vector<AirEvent*> mid_airs;
       if (!legacy_hold_channel) {
-        for (auto& air : airs) {
-          if (air.consumed || air.tick <= t_start || air.tick >= t_end) continue;
-          if (air_matches_span(air, body_l, body_r)) mid_airs.push_back(&air);
+        // Unconsumed airs strictly inside (t_start, t_end) on exactly this span, gathered
+        // in original air order so the (unstable) sort below sees the same input as before.
+        const std::vector<size_t>& group = air_group(body_l, body_r);
+        const auto mid_first = air_tick_range(group, t_start).second;
+        const auto mid_last = air_tick_range(group, t_end).first;
+        std::vector<size_t> mid_indices;
+        for (auto it = mid_first; it < mid_last; ++it) {
+          if (!airs[*it].consumed) mid_indices.push_back(*it);
         }
+        std::sort(mid_indices.begin(), mid_indices.end());
+        for (const size_t idx : mid_indices) mid_airs.push_back(&airs[idx]);
         std::sort(mid_airs.begin(), mid_airs.end(),
                   [](const AirEvent* a, const AirEvent* b) { return a->tick < b->tick; });
       }
@@ -1014,9 +1279,6 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
 
   // #TIL01 → split-lane gimmick notes (pair +lines start with -lines end).
-  if (saw_hispeed_til) {
-    push_unique_warning(warnings, "已忽略 #TIL00 HiSpeed（编辑器暂不支持）");
-  }
   {
     struct OpenSplit {
       int lines = 0;
@@ -1026,12 +1288,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     std::vector<OpenSplit> open;
     auto til_tick = [&](const TilSplitPoint& p) -> int64_t {
       const int64_t mstart = measure_start_tick(p.measure);
-      double beats = 4.0;
-      for (const auto& [mm, len] : measure_lengths) {
-        if (mm > p.measure) break;
-        beats = len;
-      }
-      const int64_t mlen = static_cast<int64_t>(std::llround(beats * meta.ticks_per_beat));
+      const int64_t mlen = measure_length_at(p.measure);
       return mstart + mlen * p.subtick / 1920;
     };
     std::sort(til_splits.begin(), til_splits.end(), [&](const TilSplitPoint& a,
@@ -1040,6 +1297,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     });
     for (const auto& p : til_splits) {
       const int64_t tick = til_tick(p);
+      if (tick < 0 || tick > INT32_MAX) {
+        return {SerializeError::ParseError, "SUS #TIL01 tick out of range"};
+      }
       if (p.lines > 0) {
         open.push_back({p.lines, p.types, tick});
       } else if (p.lines < 0) {
@@ -1064,15 +1324,42 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     }
   }
 
-  strip_hold_eighths(notes);
+  if (!hold_eighths_within_limit(notes, meta.ticks_per_beat)) {
+    return {SerializeError::ParseError, "SUS hold span exceeds auto HoldEighth limit"};
+  }
   std::sort(notes.begin(), notes.end(), [](const NotationNote& a, const NotationNote& b) {
     if (a.start_tick != b.start_tick) return a.start_tick < b.start_tick;
     if (a.lane != b.lane) return a.lane < b.lane;
     return a.id < b.id;
   });
   reassign_dense_ids_preserving_parent_binds(notes);
+  // Eighths are never read from the file (slide type 5 is ignored above): they are
+  // always recomputed from the imported holds (tailed and nontail). SUS carries BPM,
+  // so the tpq/2 grid is well defined. Generated rows follow the dense-id notes with
+  // kAutoNoteId; ChartDocument assigns their ids on load.
+  notes = with_all_hold_eighths_recomputed(std::move(notes), meta.ticks_per_beat);
 
   chart.notes = std::move(notes);
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    if (saw_compatibility_profile) {
+      return {SerializeError::ParseError, "SUS Sirius Extended profile required"};
+    }
+    chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  }
+  if (skipped_nonpositive_speed_points > 0) {
+    push_unique_warning(warnings,
+                        "已跳过 " + std::to_string(skipped_nonpositive_speed_points) +
+                            " 个负速 SV 点");
+  }
+  if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
+    for (const auto& note : chart.notes) {
+      if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
+      if (note.width < 1) {
+        return {SerializeError::ParseError, "SUS note width out of range"};
+      }
+    }
+  }
   chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
 
   out.chart = std::move(chart);
@@ -1090,12 +1377,36 @@ SerializeResult SusChartFormat::load_file(const std::string& path, SusChartLoadR
 SerializeResult SusChartFormat::serialize(const NotationChart& chart,
                                           const SusChartSaveOptions& options,
                                           std::string& out_text) {
+  if (chart.compatibility_profile == ChartCompatibilityProfile::Official &&
+      !required_chart_features(chart).empty()) {
+    return {SerializeError::ParseError, "Sirius Extended profile required for SV, nontail holds or overhang"};
+  }
   MusicTiming timing = chart.timing;
   normalize_timing_points(timing);
   const int tpq = std::max(1, timing.ticks_per_quarter);
-  const int lane_pad = options.ched_lane_padding ? 2 : 0;
+  if (!hold_eighths_within_limit(chart.notes, timing.ticks_per_quarter)) {
+    return {SerializeError::ParseError, "hold span exceeds auto HoldEighth limit"};
+  }
   const std::vector<NotationNote> export_notes =
       with_all_hold_eighths_recomputed(chart.notes, timing.ticks_per_quarter);
+
+  int lane_pad = options.ched_lane_padding ? 2 : 0;
+  if (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
+    int min_lane = 0;
+    int max_end = 0;
+    for (const auto& note : export_notes) {
+      if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
+      if (note.width < 1 || note.width > 35) {
+        return {SerializeError::ParseError, "SUS note lane/width out of range"};
+      }
+      min_lane = std::min(min_lane, note.lane);
+      max_end = std::max(max_end, note.end_lane());
+    }
+    lane_pad = std::max(lane_pad, -min_lane);
+    if (max_end + lane_pad > 35) {
+      return {SerializeError::ParseError, "SUS lane span exceeds base36 range"};
+    }
+  }
 
   auto sus_lane = [&](int32_t lane) { return std::clamp(lane + lane_pad, 0, 35); };
 
@@ -1107,6 +1418,9 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   for (const auto& n : export_notes) {
     max_tick = std::max(max_tick, static_cast<int64_t>(n.start_tick));
     max_tick = std::max(max_tick, static_cast<int64_t>(n.end_tick));
+  }
+  for (const auto& point : chart.scroll_speed_points) {
+    max_tick = std::max(max_tick, static_cast<int64_t>(point.tick));
   }
   std::vector<int32_t> measure_starts = measure_ticks_in_range(0, static_cast<int32_t>(max_tick), timing);
   if (measure_starts.empty()) measure_starts.push_back(0);
@@ -1162,6 +1476,9 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
 
   std::ostringstream ss;
   ss << "This file was generated by WDS Chart Editor.\n";
+  if (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
+    ss << "#WDS_PROFILE SiriusExtended\n#WDS_LANE_OFFSET " << lane_pad << "\n";
+  }
   const auto& meta = options.meta;
   auto emit_str = [&](const char* key, const std::string& value) {
     ss << '#' << key << " \"" << value << "\"\n";
@@ -1358,9 +1675,24 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     int channel = 0;
   };
   std::vector<HoldEmit> holds;
-  std::vector<const NotationNote*> mids;
-  std::vector<const NotationNote*> eighths;
+  // Mid-stars / eighths grouped by parent hold id (export order kept within a group).
+  std::unordered_map<int32_t, std::vector<const NotationNote*>> mids_by_parent;
+  std::unordered_map<int32_t, std::vector<const NotationNote*>> eighths_by_parent;
   std::vector<const NotationNote*> taps;
+
+  // Start-occupancy lookup over export_notes, built on first use (headless holds only).
+  TickBuckets export_occupancy;
+  bool export_occupancy_built = false;
+  auto export_occupancy_at = [&](int32_t tick) -> const std::vector<size_t>& {
+    if (!export_occupancy_built) {
+      for (size_t i = 0; i < export_notes.size(); ++i) {
+        int32_t key = 0;
+        if (start_occupancy_key(export_notes[i], key)) export_occupancy.add(key, i);
+      }
+      export_occupancy_built = true;
+    }
+    return export_occupancy.at(tick);
+  };
 
   // Collect heads first so bodies that appear earlier in `notes` still pair.
   for (const auto& n : export_notes) {
@@ -1371,9 +1703,9 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       h.head = &n;
       holds.push_back(h);
     } else if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) {
-      mids.push_back(&n);
+      mids_by_parent[n.parent_hold_id].push_back(&n);
     } else if (n.note_type == NoteType::HoldEighth) {
-      eighths.push_back(&n);
+      eighths_by_parent[n.parent_hold_id].push_back(&n);
     } else if (n.gimmick_type == GimmickType::None || !is_split_lane_gimmick(n.gimmick_type)) {
       // Nontail* bodies are hold ribbons (exported below), not taps — is_hold_with_tail
       // intentionally excludes them for combo/sync, so exclude explicitly here.
@@ -1382,6 +1714,23 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
         taps.push_back(&n);
       }
     }
+  }
+  // Each body pairs with the first still-unpaired head (export order) that
+  // hold_head_pairs_with_body accepts: same start tick / lane / width and head family
+  // (regular vs scratch). Heads are queued per that key, so pairing is O(1) per body.
+  using HeadKey = std::tuple<int32_t, int32_t, int32_t, bool>;
+  struct HeadQueue {
+    std::vector<size_t> hold_indices;
+    size_t next = 0;
+  };
+  std::map<HeadKey, HeadQueue> head_queues;
+  for (size_t i = 0; i < holds.size(); ++i) {
+    const NotationNote& head = *holds[i].head;
+    if (!is_hold_head_note(head)) continue;
+    const bool scratch_head = head.note_type == NoteType::ScratchHoldStart ||
+                              head.note_type == NoteType::ScratchCriticalHoldStart;
+    head_queues[HeadKey{head.start_tick, head.lane, head.width, scratch_head}]
+        .hold_indices.push_back(i);
   }
   for (const auto& n : export_notes) {
     if (!(n.note_type == NoteType::Hold || n.note_type == NoteType::CriticalHold ||
@@ -1392,13 +1741,13 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       continue;
     }
     bool attached = false;
-    for (auto& h : holds) {
-      if (h.body != nullptr || h.head == nullptr) continue;
-      if (hold_head_pairs_with_body(*h.head, n)) {
-        h.body = &n;
-        attached = true;
-        break;
-      }
+    const auto queue_it = head_queues.find(
+        HeadKey{n.start_tick, n.lane, n.width, is_scratch_hold_body(n.note_type)});
+    if (queue_it != head_queues.end() &&
+        queue_it->second.next < queue_it->second.hold_indices.size()) {
+      HeadQueue& queue = queue_it->second;
+      holds[queue.hold_indices[queue.next++]].body = &n;
+      attached = true;
     }
     if (!attached) {
       // Headless body still exports as a hold/slide using the body span.
@@ -1430,6 +1779,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
         body->note_type == NoteType::ScratchCriticalHold ||
         body->note_type == NoteType::NontailScratchHold ||
         body->note_type == NoteType::NontailScratchCriticalHold;
+    const bool nontail_body = is_nontail_hold_body(body->note_type);
 
     std::string suffix = "3";
     suffix.push_back(base36_digit(sl));
@@ -1440,6 +1790,11 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     end_suffix.push_back(base36_digit(sl));
     end_suffix.push_back(base36_digit(h.channel));
     place(end_suffix, t1, 2, channel_width);
+    if (nontail_body) {
+      std::string dmg_suffix = "1";
+      dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
+      place(dmg_suffix, t1, kSusTapDamage, channel_width);
+    }
 
     // Critical Hold* → Critical tap + slide channel (no separate HoldStart*).
     const bool critical_hold =
@@ -1462,7 +1817,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     // Truly headless (authored without head, start not fully covered) → Damage
     // marker of equal body lane/width. Fully covered / CriticalHold need no marker.
     if (authored_headless && !critical_hold &&
-        !hold_start_fully_covered(*body, export_notes)) {
+        !hold_start_fully_covered(*body, export_notes, export_occupancy_at(body->start_tick))) {
       std::string dmg_suffix = "1";
       dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
       place(dmg_suffix, t0, kSusTapDamage, std::clamp(body->width, 1, 35));
@@ -1474,34 +1829,40 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       const int cover_l = cover.first;
       const int cover_w = std::max(1, cover.second - cover.first + 1);
       const int air_dir = air_type_from_scratch_length(body->scratch_length);
-      std::string flick_suffix = "1";
-      flick_suffix.push_back(base36_digit(sus_lane(cover_l)));
-      place(flick_suffix, t1, kSusTapFlick, cover_w);
+      if (!nontail_body) {
+        std::string flick_suffix = "1";
+        flick_suffix.push_back(base36_digit(sus_lane(cover_l)));
+        place(flick_suffix, t1, kSusTapFlick, cover_w);
+      }
       std::string air_suffix = "5";
       air_suffix.push_back(base36_digit(sus_lane(cover_l)));
       place(air_suffix, t1, air_dir, cover_w);
     }
 
-    for (const NotationNote* mid : mids) {
-      if (mid->parent_hold_id != body->id) continue;
-      if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
-      std::string mid_suffix = "3";
-      mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
-      mid_suffix.push_back(base36_digit(h.channel));
-      place(mid_suffix, static_cast<int64_t>(mid->start_tick), 3,
-            std::clamp(mid->width, 1, 35));
+    const auto body_mids = mids_by_parent.find(body->id);
+    if (body_mids != mids_by_parent.end()) {
+      for (const NotationNote* mid : body_mids->second) {
+        if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
+        std::string mid_suffix = "3";
+        mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
+        mid_suffix.push_back(base36_digit(h.channel));
+        place(mid_suffix, static_cast<int64_t>(mid->start_tick), 3,
+              std::clamp(mid->width, 1, 35));
+      }
     }
     // Type 5 = invisible mid (already ignored on import; not Sound).
-    for (const NotationNote* eighth : eighths) {
-      if (eighth->parent_hold_id != body->id) continue;
-      if (eighth->start_tick <= body->start_tick || eighth->start_tick >= body->end_tick) {
-        continue;
+    const auto body_eighths = eighths_by_parent.find(body->id);
+    if (body_eighths != eighths_by_parent.end()) {
+      for (const NotationNote* eighth : body_eighths->second) {
+        if (eighth->start_tick <= body->start_tick || eighth->start_tick >= body->end_tick) {
+          continue;
+        }
+        std::string eighth_suffix = "3";
+        eighth_suffix.push_back(base36_digit(sus_lane(eighth->lane)));
+        eighth_suffix.push_back(base36_digit(h.channel));
+        place(eighth_suffix, static_cast<int64_t>(eighth->start_tick), 5,
+              std::clamp(eighth->width, 1, 35));
       }
-      std::string eighth_suffix = "3";
-      eighth_suffix.push_back(base36_digit(sus_lane(eighth->lane)));
-      eighth_suffix.push_back(base36_digit(h.channel));
-      place(eighth_suffix, static_cast<int64_t>(eighth->start_tick), 5,
-            std::clamp(eighth->width, 1, 35));
     }
   }
 
@@ -1509,7 +1870,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     const int64_t tick = static_cast<int64_t>(n->start_tick);
     const int sl = sus_lane(n->lane);
     const int w = std::clamp(n->width, 1, 35);
-    if (n->note_type == NoteType::Flick) {
+    if (is_flick_like(n->note_type)) {
       std::string tap_suffix = "1";
       tap_suffix.push_back(base36_digit(sl));
       place(tap_suffix, tick, kSusTapFlick, w);
@@ -1525,6 +1886,23 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
       suffix.push_back(base36_digit(sl));
       place(suffix, tick, type, w);
     }
+  }
+
+  // Sirius #TIL00 global non-negative SV events.
+  if (!chart.scroll_speed_points.empty()) {
+    ss << "#TIL00: \"";
+    for (size_t i = 0; i < chart.scroll_speed_points.size(); ++i) {
+      const auto& point = chart.scroll_speed_points[i];
+      if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+        return {SerializeError::ParseError, "SUS scroll speed must be non-negative"};
+      }
+      if (i) ss << ", ";
+      const auto loc = locate_tick(point.tick);
+      ss << loc.measure << '\'' << loc.local << ':' << std::defaultfloat
+         << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << point.multiplier << std::setprecision(4);
+    }
+    ss << "\"\n\n";
   }
 
   // #TIL01 split-lane gimmicks.
