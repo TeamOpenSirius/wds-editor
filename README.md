@@ -2,6 +2,15 @@
 
 _World Dai Star_ 的跨平台制谱器。
 
+## 许可证
+
+本项目以 **GNU Lesser General Public License v3.0（或后续版本）** 发布：
+
+- [`COPYING.LESSER`](COPYING.LESSER) — LGPLv3 附加条款  
+- [`COPYING`](COPYING) — LGPLv3 所引用的 GPLv3 全文  
+
+第三方组件（Qt、BASS、字体等）仍按其各自许可证授权，详见应用内「关于」。
+
 ## Sirius 扩展谱面
 
 谱面数据层支持 **Original / Refresh（磁盘标记 `Official` / `SiriusExtended`）**：Refresh 允许音符视觉超出 12 Lane（仍须覆盖至少一个可判定 Lane）；无尾 Hold、作者手写 `900` 判定点与 SV（HiSpeed）可写入格式并在预览中按分段积分滚动。BPM、音乐和判定时间保持原样。
