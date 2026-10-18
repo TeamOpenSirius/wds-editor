@@ -50,6 +50,8 @@ class StemPanel final : public QDialog {
   void launch(const QString& python, const QStringList& arguments);
   void notify_tracks_changed();
   void note_download_progress(const QString& text);
+  void append_process_log(const QByteArray& bytes);
+  void report_task_failure(const QString& title, const QString& summary);
   QString runtime_python() const;
   // Windows Store python.exe / python3.exe under WindowsApps is an App Execution
   // Alias and opens the Store; the real Store package lives in a subdirectory.
@@ -83,9 +85,12 @@ class StemPanel final : public QDialog {
   std::uint64_t job_generation_ = 0;
   QString manifest_;
   QString error_;
+  QString last_python_;
+  QStringList last_arguments_;
   QStringList tracks_;
   std::function<void()> on_tracks_changed_;
   QByteArray output_;
+  QByteArray process_log_;
   bool active_ = false;
   bool cancelled_ = false;
   bool downloading_model_ = false;

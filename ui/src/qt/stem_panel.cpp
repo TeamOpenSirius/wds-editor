@@ -1,11 +1,14 @@
 #include "wds/ui/qt/stem_panel.hpp"
 
+#include "wds/common/crash_handler.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/ui_manager.hpp"
 
+#include <QAbstractButton>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -13,11 +16,13 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QProgressBar>
 #include <QRegularExpression>
 #include <QPushButton>
@@ -232,6 +237,49 @@ QString StemPanel::resolve_python(const QString& path) {
 #endif
 }
 
+namespace {
+
+bool stem_error_ui_allowed() {
+  if (qEnvironmentVariableIsSet("WDS_CRASH_NO_DIALOG") || qEnvironmentVariableIsSet("WDS_STEM_NO_DIALOG")) {
+    return false;
+  }
+  const auto platform = QGuiApplication::platformName();
+  return platform != QLatin1String("offscreen") && platform != QLatin1String("minimal");
+}
+
+QString write_stem_error_log(const QString& body) {
+  const QString dir = QString::fromUtf8(wds::common::crash_log_directory());
+  if (dir.isEmpty() || !QDir().mkpath(dir)) return {};
+  const auto now = QDateTime::currentDateTime();
+  const QString name = QStringLiteral("error-%1-%2.log")
+                           .arg(now.toString(QStringLiteral("yyyyMMdd-HHmmss-zzz")))
+                           .arg(QCoreApplication::applicationPid());
+  const QString path = QDir(dir).filePath(name);
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return {};
+  file.write(body.toUtf8());
+  if (!body.endsWith(QLatin1Char('\n'))) file.write("\n");
+  return QFileInfo(file).absoluteFilePath();
+}
+
+void reveal_in_file_manager(const QString& path) {
+  const QFileInfo info(path);
+  if (!info.exists()) {
+    QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+    return;
+  }
+#if defined(Q_OS_WIN)
+  QProcess::startDetached(QStringLiteral("explorer.exe"),
+                          {QStringLiteral("/select,%1").arg(QDir::toNativeSeparators(info.absoluteFilePath()))});
+#elif defined(Q_OS_MACOS)
+  QProcess::startDetached(QStringLiteral("open"), {QStringLiteral("-R"), info.absoluteFilePath()});
+#else
+  QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+#endif
+}
+
+}  // namespace
+
 QString StemPanel::discover_system_python() {
 #ifdef Q_OS_WIN
   if (const auto pep = python_from_pep514(); !pep.isEmpty()) return pep;
@@ -331,7 +379,9 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   });
   connect(&process_, &QProcess::readyReadStandardOutput, this, [this] { read_output(); });
   connect(&process_, &QProcess::readyReadStandardError, this, [this] {
-    note_download_progress(QString::fromUtf8(process_.readAllStandardError()));
+    const auto err = process_.readAllStandardError();
+    append_process_log(err);
+    note_download_progress(QString::fromUtf8(err));
   });
   connect(&process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
           [this](int code, QProcess::ExitStatus status) { finished(code, status); });
@@ -563,21 +613,22 @@ bool StemPanel::prepare_job() {
   QString python = resolve_python(python_->text());
   if (python.isEmpty()) python = resolve_python(runtime_python());
   if (python.isEmpty()) {
-    status_->setText(is_windows_store_python_alias(python_->text())
-                         ? tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请安装 Python 3.10 或更新版本，或用「选择…」指定 python.exe。")
-                         : tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境。"));
+    report_task_failure(tr("无法启动任务"),
+                       is_windows_store_python_alias(python_->text())
+                           ? tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请安装 Python 3.10 或更新版本，或用「选择…」指定 python.exe。")
+                           : tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境。"));
     return false;
   }
   python_->setText(python);
   if (cache_dir_.isEmpty() || !QDir().mkpath(cache_dir_)) {
-    status_->setText(tr("无法创建分轨缓存目录"));
+    report_task_failure(tr("无法启动任务"), tr("无法创建分轨缓存目录"));
     return false;
   }
   job_ = std::make_unique<QTemporaryDir>(cache_dir_ + "/.job-XXXXXX");
   if (!job_->isValid() || !QFile::copy(":/wds/stem-worker.py", job_->filePath("worker.py")) ||
       !QFile::copy(":/wds/stem-requirements.txt", job_->filePath("requirements.txt"))) {
-    status_->setText(tr("无法创建分轨任务目录"));
     job_.reset();
+    report_task_failure(tr("无法启动任务"), tr("无法创建分轨任务目录"));
     return false;
   }
   cancelled_ = false;
@@ -585,6 +636,9 @@ bool StemPanel::prepare_job() {
   error_.clear();
   manifest_.clear();
   output_.clear();
+  process_log_.clear();
+  last_python_.clear();
+  last_arguments_.clear();
   progress_->setRange(0, 100);
   progress_->setValue(0);
   return true;
@@ -593,6 +647,8 @@ bool StemPanel::prepare_job() {
 void StemPanel::launch(const QString& python, const QStringList& arguments) {
   active_ = true;
   refresh_controls();
+  last_python_ = python;
+  last_arguments_ = arguments;
   auto environment = QProcessEnvironment::systemEnvironment();
   environment.insert("PYTHONUNBUFFERED", "1");
   environment.insert("PYTHONUTF8", "1");
@@ -677,8 +733,49 @@ void StemPanel::note_download_progress(const QString& text) {
   }
 }
 
+void StemPanel::append_process_log(const QByteArray& bytes) {
+  if (bytes.isEmpty()) return;
+  process_log_ += bytes;
+  constexpr int kMax = 524288;
+  if (process_log_.size() > kMax) process_log_ = process_log_.right(kMax);
+}
+
+void StemPanel::report_task_failure(const QString& title, const QString& summary) {
+  status_->setText(summary);
+  if (!stem_error_ui_allowed()) return;
+  QString body;
+  body += title + QLatin1Char('\n');
+  body += summary + QLatin1String("\n\n");
+  if (!last_python_.isEmpty()) {
+    body += QStringLiteral("python=%1\n").arg(last_python_);
+    body += QStringLiteral("args=%1\n").arg(last_arguments_.join(QLatin1Char(' ')));
+  }
+  if (job_) body += QStringLiteral("job=%1\n").arg(job_->path());
+  if (!runtime_dir_.isEmpty()) body += QStringLiteral("runtime=%1\n").arg(runtime_dir_);
+  if (!process_log_.isEmpty()) {
+    body += QLatin1String("\n--- process output ---\n");
+    body += QString::fromUtf8(process_log_);
+  }
+  const QString path = write_stem_error_log(body);
+  QMessageBox box(this);
+  box.setIcon(QMessageBox::Critical);
+  box.setWindowTitle(title);
+  box.setText(summary);
+  if (!path.isEmpty()) {
+    box.setInformativeText(tr("详细信息已写入日志：%1").arg(QDir::toNativeSeparators(path)));
+  }
+  box.addButton(tr("确定"), QMessageBox::AcceptRole);
+  auto* open = box.addButton(tr("打开日志位置"), QMessageBox::ActionRole);
+  box.exec();
+  if (box.clickedButton() == static_cast<QAbstractButton*>(open)) {
+    reveal_in_file_manager(path.isEmpty() ? QString::fromUtf8(wds::common::crash_log_directory())
+                                          : path);
+  }
+}
+
 void StemPanel::read_output() {
   const auto bytes = process_.readAllStandardOutput();
+  append_process_log(bytes);
   if (install_step_) {
     note_download_progress(QString::fromUtf8(bytes));
     return;
@@ -714,11 +811,14 @@ void StemPanel::read_output() {
 void StemPanel::finished(int code, QProcess::ExitStatus status) {
   if (!active_) return;
   read_output();
-  note_download_progress(QString::fromUtf8(process_.readAllStandardError()));
+  const auto err = process_.readAllStandardError();
+  append_process_log(err);
+  note_download_progress(QString::fromUtf8(err));
   kill_timer_.stop();
   close_job_object();
   const bool success = code == 0 && status == QProcess::NormalExit && !cancelled_;
   if (success && install_step_ == 1) {
+    process_log_ += QByteArrayLiteral("\n--- pip install ---\n");
     install_step_ = 2;
     status_->setText(tr("正在下载并安装推理依赖，可继续编辑…"));
     launch(runtime_python(), {"-m", "pip", "install", "--disable-pip-version-check", "-r", job_->filePath("requirements.txt")});
@@ -731,7 +831,13 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
   if (cancelled_) {
     status_->setText(tr("已取消"));
   } else if (!success) {
-    status_->setText(error_.isEmpty() ? tr("任务失败。") : error_);
+    if (!process_log_.isEmpty()) {
+      process_log_ += QByteArrayLiteral("\n--- exit ---\n");
+      process_log_ += QByteArray("code=") + QByteArray::number(code) +
+                      " status=" + (status == QProcess::NormalExit ? "normal" : "crash") + "\n";
+    }
+    report_task_failure(install_step_ ? tr("安装运行环境失败") : tr("分轨失败"),
+                        error_.isEmpty() ? tr("任务失败。") : error_);
   } else if (install_step_) {
     python_->setText(runtime_python());
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
@@ -757,10 +863,10 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
         progress_->setValue(100);
         status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
       } else {
-        status_->setText(tr("分轨结果不完整，请重新生成。"));
+        report_task_failure(tr("分轨失败"), tr("分轨结果不完整，请重新生成。"));
       }
     } else {
-      status_->setText(tr("未找到分轨结果。"));
+      report_task_failure(tr("分轨失败"), tr("未找到分轨结果。"));
     }
   } else {
     status_->setText(tr("分轨已缓存；当前音源已更换。"));
