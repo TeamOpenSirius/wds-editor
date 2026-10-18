@@ -721,16 +721,19 @@ class VulkanRenderer {
   };
 
   // Draw order (depth write off → later passes win):
-  //   batch (stage / ingame_bg) → mid_overlay (notes only) →
-  //   early_additive HDR (line plates, sort 0) → late additive HDR (hits) →
-  //   scene_carve (all split-effect particles, blit resolved scene into FP16,
-  //   per-bucket Alpha / Additive / Trail-clip, replace).
-  // OpenWDS prefab SortingGroup=20, Note m_SortingOrder=10, line SpriteRenderer
-  // 0. Unity 2022.3 Renderer.sortingOrder: higher draws later in the layer.
+  //   batch (stage / ingame_bg) → mid_overlay (notes, sort 10) →
+  //   early_additive HDR (line plates, SortingGroup 20) →
+  //   scene_carve (split-effect particles, same group 20, blit scene into FP16,
+  //   per-bucket Alpha / Additive / Trail-clip, replace) →
+  //   additive (Bomb SortingGroup 30) → playfield_hud (TimingEffect 99, then
+  //   Combo ScreenSpaceOverlay) → post overlays (editor chrome).
+  // OpenWDS: Note 10 < SplitEffect 20 < Bomb 30 < TimingEffect 99.
+  // Combo is GameHudCanvas ScreenSpaceOverlay, after all cameras.
+  // Unity 2022.3 Renderer.sortingOrder: higher draws later in the layer.
   // HDR carve is OfflineRhythmPreview m_HDR=1 + unclamped Additive Custom1,
   // not a sort≥1 convenience split. Trail clip 0.01 is ParticleTrailAdditive.
   // Post overlays after replace. One+One composite is only for cleared
-  // extracts (line / hits). scene_carve replace is One Zero of the carved HDR.
+  // extracts (line). scene_carve replace is One Zero of the carved HDR.
   // Mid overlay uses ParticleAlpha blend and clip(a-0.01) (kAlphaClip=1).
   // Additive / bloom extract use clip(a-0.001) (kAlphaClip=2) unless overlay
   // pipe selects Trail clip 0.01.
@@ -811,19 +814,33 @@ class VulkanRenderer {
                   const DrawBatch* mid_overlay = nullptr,
                   const DrawBatch* early_additive = nullptr,
                   const DrawBatch* scene_carve = nullptr,
+                  const DrawBatch* playfield_hud = nullptr,
                   const DrawFrameExtras* extras = nullptr,
                   DrawFrameDump* dump = nullptr);
 
   int framebuffer_width() const noexcept { return width_; }
   int framebuffer_height() const noexcept { return height_; }
+  uint32_t physical_vendor_id() const noexcept { return device_vendor_id_; }
 
   // Last presented swapchain image → tightly packed RGBA8 (top-left origin).
   // Needs a successful draw_frame and TRANSFER_SRC on the swapchain. Developer
   // capture path; not used by the live preview.
   bool readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& out_w, int& out_h);
 
+  // Offline video export: render to a dedicated offscreen image at `width`×`height`
+  // (no present, swapchain unchanged) and copy into a 3-slot host staging ring.
+  bool begin_export_capture(int width, int height);
+  void end_export_capture();
+  bool export_capture_active() const noexcept;
+  // Wait for the oldest finished staging copy and pack tightly packed BGRA8.
+  // Returns false when the ring has no completed frame yet.
+  bool take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h);
+  // Drain remaining queued copies after the last draw_frame.
+  bool drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h);
+
  private:
   void emit_health(RendererHealthEvent event, VkResult result = VK_SUCCESS) noexcept;
+  void sync_reported_size() noexcept;
   bool check_device_result(VkResult result) noexcept;
   bool apply_wsi_action(WsiRecoverAction action);
   bool apply_zero_extent_now() noexcept;
@@ -845,6 +862,8 @@ class VulkanRenderer {
   char device_name_[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
   uint32_t device_driver_version_ = 0;
   uint32_t device_api_version_ = 0;
+  uint32_t device_vendor_id_ = 0;
+  bool export_active_ = false;
 };
 
 // Enumerate physical devices on `instance`. When `surface` is non-null, also

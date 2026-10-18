@@ -321,6 +321,8 @@ struct AudioEngine::Impl {
   HSTREAM mixer = 0;
   HSTREAM music = 0;
   HSTREAM keep_alive = 0;
+  DWORD mix_freq = 44100;
+  std::string music_path;
   DWORD music_chans = 0;
   DWORD music_bpf = 0;  // bytes per frame
   std::array<HSAMPLE, static_cast<size_t>(HitSfxClip::Count)> samples{};
@@ -648,6 +650,8 @@ bool AudioEngine::initialize(const std::string& effects_directory, const std::st
         } else {
           impl->mixer = mixer;
           impl->music = music;
+          impl->mix_freq = mix_freq;
+          impl->music_path = music_path;
           music_ = static_cast<unsigned long long>(music);
           float freq = 0.0f;
           if (BASS_ChannelGetAttribute(music, BASS_ATTRIB_FREQ, &freq)) {
@@ -983,6 +987,7 @@ bool AudioEngine::reload_music(const std::string& effects_directory,
   music_ = static_cast<unsigned long long>(next);
   music_base_freq_ = freq;
   copy_basename(impl->music_basename, sizeof(impl->music_basename), music_path);
+  impl->music_path = music_path;
   cache_music_format();
   apply_music_rate();  // nothing from the new source is mixed yet: no flush needed
   apply_music_volume();  // lifts the mute used while adding
@@ -1033,6 +1038,191 @@ wds::common::Microseconds AudioEngine::duration() const {
     return wds::common::Microseconds{0};
   }
   return bytes_to_us(impl_->music, BASS_ChannelGetLength(impl_->music, BASS_POS_BYTE));
+}
+
+bool AudioEngine::bounce_mix_wav(const std::string& wav_path,
+                                 wds::common::Microseconds timeline_start,
+                                 wds::common::Microseconds duration,
+                                 const std::vector<BounceHit>& hits,
+                                 const std::vector<BounceHold>& holds, bool include_music,
+                                 bool include_sfx) {
+  if (test_double_ != nullptr) {
+    return false;
+  }
+  auto impl = std::atomic_load(&impl_);
+  if (impl == nullptr || !impl->device_ok || wav_path.empty() || duration.count() <= 0) {
+    return false;
+  }
+  const DWORD freq = impl->mix_freq != 0 ? impl->mix_freq : 44100u;
+  const HSTREAM mixer =
+      BASS_Mixer_StreamCreate(freq, 2, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT | BASS_MIXER_NONSTOP);
+  if (mixer == 0) {
+    WDS_LOG("AudioEngine: bounce mixer failed code=%d\n", BASS_ErrorGetCode());
+    return false;
+  }
+
+  std::vector<HSTREAM> owned;
+  auto adopt = [&](HSTREAM ch) {
+    if (ch != 0) {
+      owned.push_back(ch);
+    }
+    return ch;
+  };
+  auto cleanup = [&]() {
+    for (HSTREAM ch : owned) {
+      BASS_Mixer_ChannelRemove(ch);
+      BASS_StreamFree(ch);
+    }
+    owned.clear();
+    BASS_StreamFree(mixer);
+  };
+
+  const float music_vol = include_music ? music_gain_.load(std::memory_order_relaxed) : 0.0f;
+  const float sfx_vol = include_sfx ? sfx_gain_.load(std::memory_order_relaxed) : 0.0f;
+  const int64_t start_us = timeline_start.count();
+  const int64_t end_us = start_us + duration.count();
+
+  if (include_music && music_vol > 0.0f && !impl->music_path.empty()) {
+    const HSTREAM music =
+        adopt(stream_from_file(impl->music_path, BASS_STREAM_DECODE | BASS_STREAM_PRESCAN));
+    if (music != 0) {
+      BASS_ChannelSetAttribute(music, BASS_ATTRIB_VOL, music_vol);
+      QWORD delay = 0;
+      if (start_us < 0) {
+        delay = BASS_ChannelSeconds2Bytes(mixer, static_cast<double>(-start_us) / 1.0e6);
+      } else if (start_us > 0) {
+        const QWORD skip =
+            BASS_ChannelSeconds2Bytes(music, static_cast<double>(start_us) / 1.0e6);
+        BASS_ChannelSetPosition(music, skip, BASS_POS_BYTE);
+      }
+      if (!BASS_Mixer_StreamAddChannelEx(mixer, music, BASS_MIXER_CHAN_NORAMPIN, delay, 0)) {
+        WDS_LOG("AudioEngine: bounce add music failed code=%d\n", BASS_ErrorGetCode());
+      }
+    }
+  }
+
+  auto add_clip_at = [&](HitSfxClip clip, wds::common::Microseconds chart_at, QWORD length_bytes) {
+    if (!include_sfx || sfx_vol <= 0.0f || clip == HitSfxClip::Count) {
+      return;
+    }
+    const size_t idx = static_cast<size_t>(clip);
+    if (idx >= impl->samples.size() || !impl->sample_ok[idx] || impl->samples[idx] == 0) {
+      return;
+    }
+    const int64_t mixer_us = chart_at.count() - start_us;
+    if (mixer_us < 0 || mixer_us >= duration.count()) {
+      return;
+    }
+    const HCHANNEL ch =
+        BASS_SampleGetChannel(impl->samples[idx], BASS_SAMCHAN_STREAM | BASS_STREAM_DECODE);
+    if (ch == 0) {
+      return;
+    }
+    adopt(static_cast<HSTREAM>(ch));
+    BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, sfx_vol);
+    const QWORD start = BASS_ChannelSeconds2Bytes(mixer, static_cast<double>(mixer_us) / 1.0e6);
+    if (!BASS_Mixer_StreamAddChannelEx(mixer, ch, BASS_MIXER_CHAN_NORAMPIN, start, length_bytes)) {
+      WDS_LOG("AudioEngine: bounce add sfx failed code=%d\n", BASS_ErrorGetCode());
+    }
+  };
+
+  if (include_sfx && sfx_vol > 0.0f) {
+    for (const auto& hit : hits) {
+      add_clip_at(hit.clip, hit.at, 0);
+    }
+    for (const auto& hold : holds) {
+      int64_t hs = hold.start.count();
+      int64_t he = hold.end.count();
+      if (he <= hs || he <= start_us || hs >= end_us) {
+        continue;
+      }
+      if (hs < start_us) {
+        hs = start_us;
+      }
+      if (he > end_us) {
+        he = end_us;
+      }
+      if (he <= hs) {
+        continue;
+      }
+      const QWORD length =
+          BASS_ChannelSeconds2Bytes(mixer, static_cast<double>(he - hs) / 1.0e6);
+      add_clip_at(HitSfxClip::Hold, wds::common::Microseconds{hs}, length);
+    }
+  }
+
+  const QWORD want_bytes =
+      BASS_ChannelSeconds2Bytes(mixer, static_cast<double>(duration.count()) / 1.0e6);
+  const DWORD bpf = 8;  // float stereo
+  if (want_bytes < bpf) {
+    cleanup();
+    return false;
+  }
+
+  std::ofstream out(path_from_utf8(wav_path), std::ios::binary | std::ios::trunc);
+  if (!out) {
+    cleanup();
+    return false;
+  }
+
+  const uint32_t sample_rate = static_cast<uint32_t>(freq);
+  const uint16_t channels = 2;
+  const uint16_t bits = 16;
+  const uint32_t byte_rate = sample_rate * channels * (bits / 8);
+  const uint16_t block_align = channels * (bits / 8);
+  const uint32_t pcm_bytes = static_cast<uint32_t>((want_bytes / bpf) * block_align);
+  const uint32_t riff_size = 36u + pcm_bytes;
+  auto put_u16 = [&](uint16_t v) {
+    char b[2] = {static_cast<char>(v & 0xff), static_cast<char>((v >> 8) & 0xff)};
+    out.write(b, 2);
+  };
+  auto put_u32 = [&](uint32_t v) {
+    char b[4] = {static_cast<char>(v & 0xff), static_cast<char>((v >> 8) & 0xff),
+                 static_cast<char>((v >> 16) & 0xff), static_cast<char>((v >> 24) & 0xff)};
+    out.write(b, 4);
+  };
+  out.write("RIFF", 4);
+  put_u32(riff_size);
+  out.write("WAVEfmt ", 8);
+  put_u32(16);
+  put_u16(1);
+  put_u16(channels);
+  put_u32(sample_rate);
+  put_u32(byte_rate);
+  put_u16(block_align);
+  put_u16(bits);
+  out.write("data", 4);
+  put_u32(pcm_bytes);
+
+  std::vector<float> fbuf(8192);
+  std::vector<int16_t> ibuf;
+  QWORD got = 0;
+  while (got < want_bytes) {
+    const DWORD chunk = static_cast<DWORD>(
+        std::min<QWORD>(static_cast<QWORD>(fbuf.size() * sizeof(float)), want_bytes - got));
+    const DWORD n = BASS_ChannelGetData(mixer, fbuf.data(), chunk | BASS_DATA_FLOAT);
+    if (n == static_cast<DWORD>(-1) || n == 0) {
+      const size_t remain_frames = static_cast<size_t>((want_bytes - got) / bpf);
+      const size_t remain_samples = remain_frames * 2u;
+      ibuf.assign(remain_samples, 0);
+      out.write(reinterpret_cast<const char*>(ibuf.data()),
+                static_cast<std::streamsize>(remain_samples * sizeof(int16_t)));
+      break;
+    }
+    const size_t floats = n / sizeof(float);
+    ibuf.resize(floats);
+    for (size_t i = 0; i < floats; ++i) {
+      float s = fbuf[i];
+      if (s > 1.0f) s = 1.0f;
+      if (s < -1.0f) s = -1.0f;
+      ibuf[i] = static_cast<int16_t>(std::lrint(s * 32767.0f));
+    }
+    out.write(reinterpret_cast<const char*>(ibuf.data()),
+              static_cast<std::streamsize>(floats * sizeof(int16_t)));
+    got += n;
+  }
+  cleanup();
+  return static_cast<bool>(out);
 }
 
 void AudioEngine::begin_timeline_control() {

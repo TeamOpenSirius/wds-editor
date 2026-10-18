@@ -222,6 +222,55 @@ void bind_fake_music(Transport& transport, TestDouble& fake) {
   AudioEngineTestAccess::bind(transport.audio(), fake);
 }
 
+void test_offline_export_clock_steps_sixtieths() {
+  Transport transport;
+  TestDouble fake;
+  bind_fake_music(transport, fake);
+  transport.set_offline_export(true);
+  expect(transport.offline_export(), "offline flag on");
+  transport.request_seek_ms(0);
+  transport.request_play();
+  const auto first = transport.poll(999999);
+  expect(first.state == PlaybackState::Playing, "offline play");
+  expect(first.position.count() == 0, "seek+play same poll stays T=0");
+  expect(transport.music_start_pending() == false, "offline never pending speaker start");
+  expect(transport.start_pending_music(), "start_pending is a no-op");
+  expect(fake.play_music_calls == 0, "offline does not ChannelPlay");
+
+  const auto second = transport.poll(1);
+  expect(second.position.count() == 16666, "frame 1 is 1e6/60");
+  transport.poll(1);
+  transport.poll(1);
+  expect(transport.committed_position().count() == 50000, "frame 3 is 50000");
+  for (int i = 4; i <= 60; ++i) transport.poll(1);
+  expect(transport.committed_position().count() == 1'000'000, "frame 60 is 1s");
+  expect(fake.play_music_calls == 0, "still no speaker start after 1s");
+}
+
+void test_offline_export_clock_negative_origin_and_no_clamp() {
+  Transport transport;
+  TestDouble fake;
+  bind_fake_music(transport, fake);
+  transport.set_offline_export(true);
+  transport.request_seek_ms(-2000);
+  transport.request_play();
+  const auto first = transport.poll(1);
+  expect(first.position.count() == -2'000'000, "seek+play stays at -2s");
+  const auto second = transport.poll(1);
+  expect(second.position.count() == -2'000'000 + 16666, "frame 1 is origin + 1e6/60");
+  for (int i = 2; i <= 60; ++i) transport.poll(1);
+  expect(transport.committed_position().count() == -1'000'000, "frame 60 is -1s");
+
+  transport.request_pause();
+  transport.request_seek_ms(179000);
+  (void)transport.poll(1);
+  transport.request_play();
+  (void)transport.poll(1);
+  for (int i = 0; i < 180; ++i) transport.poll(1);
+  expect(transport.committed_position().count() > 180'000'000,
+         "offline clock is not clamped to music duration");
+}
+
 void test_uninitialized_bind_polls_without_bass() {
   Transport transport;
   expect(!transport.audio().ready(), "fresh transport is not ready");
@@ -1431,6 +1480,8 @@ int main() {
     fail_seek_t.shutdown();
   }
 
+  test_offline_export_clock_steps_sixtieths();
+  test_offline_export_clock_negative_origin_and_no_clamp();
   test_waveform_peak_in_range();
   test_spectrogram_sample_range_max();
   test_spectrogram_colors_low_vs_high_freq();

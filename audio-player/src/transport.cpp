@@ -44,6 +44,22 @@ void Transport::reset_runtime_state() {
   music_seek_target_ = wds::common::Microseconds{0};
   skip_stalled_recovery_once_ = false;
   recovery_.reset();
+  offline_frame_ = 0;
+  offline_origin_us_ = 0;
+}
+
+void Transport::set_offline_export(bool on) noexcept {
+  if (offline_export_ == on) {
+    return;
+  }
+  offline_export_ = on;
+  if (on) {
+    audio_.pause_music();
+    music_start_pending_ = false;
+    offline_origin_us_ = committed_position_.count();
+    offline_frame_ = 0;
+    audio_filter_valid_ = false;
+  }
 }
 
 void Transport::shutdown() {
@@ -132,6 +148,49 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
   pending_play_ = false;
   pending_pause_ = false;
   sought_this_poll_ = false;
+
+  if (offline_export_) {
+    auto apply_offline_seek = [&](wds::common::Microseconds target) {
+      committed_position_ = target;
+      offline_origin_us_ = target.count();
+      offline_frame_ = 0;
+      sought_this_poll_ = true;
+      audio_filter_valid_ = false;
+    };
+    if (want_pause) {
+      playing_ = false;
+      music_start_pending_ = false;
+      audio_.pause_music();
+      if (want_seek) {
+        apply_offline_seek(seek_time);
+      }
+      filtered_audio_us_ = committed_position_.count();
+      audio_filter_valid_ = false;
+      return committed_snapshot();
+    }
+    if (want_seek) {
+      apply_offline_seek(seek_time);
+      if (audio_.has_music()) {
+        audio_.pause_music();
+        (void)audio_.set_position(committed_position_.count() < 0 ? wds::common::Microseconds{0}
+                                                                  : committed_position_);
+      } else {
+        audio_.begin_timeline_control();
+      }
+    }
+    if (want_play) {
+      playing_ = true;
+      music_start_pending_ = false;
+      audio_.pause_music();
+    }
+    if (playing_ && !want_seek) {
+      ++offline_frame_;
+      committed_position_ = wds::common::Microseconds{
+          offline_origin_us_ + (offline_frame_ * 1'000'000LL) / 60};
+      filtered_audio_us_ = committed_position_.count();
+    }
+    return committed_snapshot();
+  }
 
   auto apply_music_seek = [&](wds::common::Microseconds target) {
     music_seek_target_ = target;
@@ -383,6 +442,10 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
 }
 
 bool Transport::start_pending_music() {
+  if (offline_export_) {
+    music_start_pending_ = false;
+    return true;
+  }
   if (!music_start_pending_) {
     return true;
   }

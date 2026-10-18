@@ -57,6 +57,8 @@ class EditorMainWindow final : public QMainWindow {
   // Float the preview dock and size the Vulkan surface so the framebuffer is
   // `pixel_w` × `pixel_h` (device pixels). Developer capture; no new UI.
   void prepare_preview_capture_size(int pixel_w, int pixel_h);
+  void restore_preview_after_export();
+  void set_export_session_busy(bool on);
   QWindow* preview_viewport() const noexcept { return preview_window_; }
   QDockWidget* preview_dock() const noexcept { return preview_dock_; }
   // App-wide Space → transport toggle (except while typing / edit viewport focus).
@@ -76,6 +78,7 @@ class EditorMainWindow final : public QMainWindow {
   void run_with_busy(const QString& title, std::function<void()> work,
                      std::function<void()> done = {});
   void export_chart();
+  void export_video();
   void add_chart();
   void check_chart();
   void remember_recent_project(const QString& path);
@@ -129,6 +132,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* redo_action_ = nullptr;
   ::QAction* import_action_ = nullptr;
   ::QAction* export_action_ = nullptr;
+  ::QAction* export_video_action_ = nullptr;
   ::QAction* music_action_ = nullptr;
   ::QAction* check_action_ = nullptr;
   ::QAction* clear_marks_action_ = nullptr;

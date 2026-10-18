@@ -1,4 +1,5 @@
 #include "wds/ui/qt/editor_main_window.hpp"
+#include "wds/ui/qt/export_video_dialog.hpp"
 #include "wds/ui/qt/stem_panel.hpp"
 #include "wds/ui/qt/chart_edit_widget.hpp"
 #include "wds/ui/qt/playback_dock.hpp"
@@ -241,6 +242,10 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   export_action_ = addCommand(fileMenu, tr("导出谱面"), {});
   check_action_ = addCommand(fileMenu, tr("检查谱面"), {});
   clear_marks_action_ = addCommand(editMenu, tr("清除记号"), {});
+  export_video_action_ = addCommand(nullptr, tr("导出视频"), {});
+  if (export_action_ != nullptr && export_video_action_ != nullptr && fileMenu != nullptr) {
+    fileMenu->insertAction(check_action_, export_video_action_);
+  }
   undo_action_ = addCommand(editMenu, tr("撤销"), QKeySequence::Undo);
   redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
   if (auto* layout = command_toolbar_->layout()) layout->setSpacing(0);
@@ -512,6 +517,7 @@ void EditorMainWindow::ensure_preview_viewport_for_cli() {
 }
 
 void EditorMainWindow::prepare_preview_capture_size(int pixel_w, int pixel_h) {
+  // CLI `capture-preview` only. Interactive export keeps the editor chrome.
   persist_chrome_layout_ = false;
   ensure_preview_viewport_for_cli();
   if (preview_dock_ == nullptr || preview_window_ == nullptr || pixel_w <= 0 || pixel_h <= 0) {
@@ -545,6 +551,33 @@ void EditorMainWindow::prepare_preview_capture_size(int pixel_w, int pixel_h) {
   preview_dock_->raise();
   preview_window_->show();
   preview_window_->requestUpdate();
+}
+
+void EditorMainWindow::restore_preview_after_export() {
+  persist_chrome_layout_ = true;
+  if (menuBar() != nullptr) menuBar()->show();
+  if (statusBar() != nullptr) statusBar()->show();
+  if (preview_window_ != nullptr) {
+    preview_window_->setMinimumSize(QSize(0, 0));
+    preview_window_->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+  }
+  if (preview_dock_ != nullptr) {
+    if (auto* container = preview_dock_->widget()) {
+      container->setMinimumSize(QSize(0, 0));
+      container->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+    }
+    preview_dock_->setTitleBarWidget(nullptr);
+  }
+  restore_or_reset_layout();
+  if (preview_window_ != nullptr) preview_window_->requestUpdate();
+}
+
+void EditorMainWindow::set_export_session_busy(bool on) { busy_active_ = on; }
+
+void EditorMainWindow::export_video() {
+  if (ui_manager_ == nullptr) return;
+  ExportVideoDialog dialog(ui_manager_, this, this);
+  dialog.exec();
 }
 
 void EditorMainWindow::show_stem_panel() {
@@ -656,6 +689,8 @@ void EditorMainWindow::apply_command_icons() {
   if (check_action_ != nullptr) check_action_->setIcon(icon_for("check", fluent::Checklist));
   if (clear_marks_action_ != nullptr)
     clear_marks_action_->setIcon(icon_for("clear-marks", fluent::Eraser));
+  if (export_video_action_ != nullptr)
+    export_video_action_->setIcon(icon_for("export-video", fluent::Video));
 }
 
 void EditorMainWindow::refresh_history_actions() {
@@ -753,6 +788,10 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   connect(export_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.export_chart");
     export_chart();
+  });
+  connect(export_video_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.export_video");
+    export_video();
   });
   connect(music_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.import_music");

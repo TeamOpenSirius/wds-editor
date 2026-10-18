@@ -174,7 +174,7 @@ class PlaybackPreviewView {
   }
   void pump_lane_geom_preload(
       const std::vector<wds::chart_editor::PreviewSplitLaneInstance>& splits,
-      int64_t now_us = -1, bool retain_colored_batch = false);
+      int64_t now_us = 0, bool retain_colored_batch = false);
 
   // No-op leftover: speculative collect pipeline was removed.
   void join_speculative_split_collect();
@@ -186,8 +186,9 @@ class PlaybackPreviewView {
 
   // ui_solid_texture: 1×1 white used by UiPainter panels. Overlay solids are drawn
   // under the stage; overlay sprites (and edit-area skins) go through mid_overlay
-  // so they stay above SplitEffect. modal_overlay / modal_chrome use post passes
-  // so sticky DrawBatch bucket indices cannot bury them. Chrome draws last.
+  // with notes (sort 10). modal_overlay / modal_chrome use post passes so sticky
+  // DrawBatch bucket indices cannot bury them. Chrome draws last. Combo / AUTO
+  // HUD is a later playfield_hud pass (TimingEffect 99, then ScreenSpaceOverlay).
   void render(const wds::chart_editor::PreviewSnapshot& snapshot,
               const wds::renderer::DrawBatch* ui_overlay = nullptr,
               wds::renderer::TextureId ui_solid_texture = wds::renderer::kInvalidTextureId,
@@ -293,9 +294,12 @@ class PlaybackPreviewView {
   wds::renderer::DrawBatch glow_batch_;
   // All split-effect particles (Alpha / Additive / Trail), ordered by
   // renderer sortingOrder. Blitted onto the resolved HDR scene (SortingGroup
-  // 20 after notes 10 and line 0). Hits stay additive_batch_.
+  // 20 after notes 10 and line 0). Hits stay additive_batch_ (Bomb group 30)
+  // and are not counted against kSplitEffectParticlePool. Combo / AUTO go to
+  // hud_batch_ after bombs (TimingEffect 99, Combo ScreenSpaceOverlay).
   wds::renderer::DrawBatch split_late_batch_;
   wds::renderer::DrawBatch additive_batch_;
+  wds::renderer::DrawBatch hud_batch_;
   // Indices into snapshot.notes: GenerateNoteId order reversed (bottom-most first).
   std::vector<size_t> notes_draw_indices_;
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;

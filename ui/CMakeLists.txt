@@ -38,7 +38,11 @@ add_executable(wds_editor WIN32
   src/qt/split_effect_snapshot.cpp
   src/qt/split_effect_snapshot_table.cpp
   src/qt/timing_edit_dialog.cpp
-  src/qt/speed_edit_dialog.cpp)
+  src/qt/speed_edit_dialog.cpp
+  src/qt/export_video_dialog.cpp
+  src/qt/export_video_job.cpp
+  src/qt/ffmpeg_resolve.cpp
+  src/qt/ffmpeg_encoder.cpp)
 add_executable(wds_editor_qt ALIAS wds_editor)
 target_include_directories(wds_editor PRIVATE include ${CMAKE_SOURCE_DIR}/interaction-interface/include)
 target_link_libraries(wds_editor PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Svg Qt6::Network wds::ui)
@@ -274,6 +278,16 @@ endif()
 if(NOT CMAKE_CROSSCOMPILING)
   add_executable(wds_stem_panel_tests tests/stem_panel_tests.cpp src/qt/stem_panel.cpp wds_resources.qrc)
   target_link_libraries(wds_stem_panel_tests PRIVATE wds::ui Qt6::Widgets)
+  add_executable(wds_export_video_dialog_tests
+    tests/export_video_dialog_tests.cpp
+    src/qt/ffmpeg_resolve.cpp
+    src/qt/ffmpeg_encoder.cpp)
+  target_link_libraries(wds_export_video_dialog_tests PRIVATE wds::ui Qt6::Widgets Qt6::Network)
+  target_compile_definitions(wds_export_video_dialog_tests PRIVATE QT_NO_KEYWORDS)
+  if(MSVC)
+    target_compile_options(wds_export_video_dialog_tests PRIVATE /utf-8)
+  endif()
+  add_test(NAME wds_export_video_dialog_tests COMMAND wds_export_video_dialog_tests -platform offscreen)
   target_compile_definitions(wds_stem_panel_tests PRIVATE QT_NO_KEYWORDS)
   set_target_properties(wds_stem_panel_tests PROPERTIES AUTORCC ON)
   if(MSVC)
@@ -304,6 +318,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     set_tests_properties(wds_stem_panel_tests wds_editor_toolbar_tests wds_chart_edit_panel_curve_tests
       wds_split_effect_tags_tests wds_chart_validation_ui_tests
       wds_split_indicator_perf_tests wds_split_indicator_dump_tests
+      wds_export_video_dialog_tests
       PROPERTIES ENVIRONMENT "PATH=${_wds_test_path}")
   endif()
 else()

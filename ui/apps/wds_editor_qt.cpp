@@ -1558,6 +1558,10 @@ int main(int argc, char** argv) {
   };
 
   std::function<void(float)> finish_editor_frame = [&](float delta) {
+    if (editor.chart_preview().video_export_clock()) {
+      *last_editor_tick = std::chrono::steady_clock::now();
+      return;
+    }
     editor.resize_editor_viewport(editor_widget->width(), editor_widget->height(),
                                   editor_widget->width(), editor_widget->height());
     editor.update(delta, {});
@@ -1637,6 +1641,9 @@ int main(int argc, char** argv) {
       editor.set_status("ui资源加载完毕", wds::ui::StatusLevel::Info);
     }
     if (diag) frame_diag.enable_path_diagnostics(editor);
+    if (editor.chart_preview().video_export_clock()) {
+      return;
+    }
     editor.resize_preview_viewport(logical_w, logical_h, fb_w, fb_h);
     std::chrono::steady_clock::time_point phase_t0{};
     if (diag) phase_t0 = std::chrono::steady_clock::now();
@@ -1706,6 +1713,7 @@ int main(int argc, char** argv) {
                        return;
                      }
                      if (unexposed && ready) {
+                       if (editor.chart_preview().video_export_clock()) return;
                        if (now - *last_editor_tick < std::chrono::milliseconds(interval_ms - 2)) {
                          return;
                        }

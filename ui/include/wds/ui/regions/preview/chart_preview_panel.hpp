@@ -59,6 +59,13 @@ class ChartPreviewPanel {
               const wds::renderer::DrawBatch* modal_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_chrome = nullptr);
 
+  // Offline 60 Hz video export: T = n/60, visual lead = 0, no speaker BGM start.
+  // Seek still clears persist/carry — call only at the segment start.
+  void set_video_export_clock(bool on);
+  bool video_export_clock() const noexcept { return video_export_clock_; }
+  // Size the stage to the offscreen export framebuffer (full 16:9, no letterbox).
+  void apply_export_geometry(int pixel_w, int pixel_h);
+
   void set_content_bounds(int x, int y, int width, int height) noexcept;
   // Full preview column (may be wider than the aspect-locked stage content).
   void set_panel_bounds(int x, int y, int width, int height) noexcept;
@@ -186,6 +193,7 @@ class ChartPreviewPanel {
   int content_width_ = 0;
   int content_height_ = 0;
   bool ready_ = false;
+  bool video_export_clock_ = false;
 };
 
 }  // namespace wds::ui

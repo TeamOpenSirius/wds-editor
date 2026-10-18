@@ -57,6 +57,7 @@ struct SplitEffectParentMotion {
 // 16384 sits just above the official-chart peak ~15500.
 // apply_over_cap: first-come between splits, per-line share, then
 // birth-ordered selection (ribbon = one contiguous newest/head run).
+// Note hit VFX (BomSquare / BomFlare) are a separate uncapped list.
 inline constexpr int kSplitEffectParticlePool = 16384;
 // Preview seed window in now_t seconds (t=0 is fadeIn / OnFadeIn Play).
 // Official catalog: looping 0/1872; max non-loop wall-clock is 4s. 8s is a

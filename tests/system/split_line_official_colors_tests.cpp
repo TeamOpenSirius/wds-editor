@@ -2810,8 +2810,14 @@ void test_openwds_layer_table_not_2020_only() {
   CHECK(wds::chart_render::kOfficialSyurikenLineSortingOrder == 0);
   CHECK(wds::chart_render::kOfficialSplitEffectSortingGroupOrder == 20);
   CHECK(wds::chart_render::kOfficialNoteSpriteSortingOrder == 10);
+  CHECK(wds::chart_render::kOfficialBombSortingGroupOrder == 30);
+  CHECK(wds::chart_render::kOfficialTimingEffectSortingOrder == 99);
   CHECK(wds::chart_render::kOfficialSplitEffectSortingGroupOrder >
         wds::chart_render::kOfficialNoteSpriteSortingOrder);
+  CHECK(wds::chart_render::kOfficialBombSortingGroupOrder >
+        wds::chart_render::kOfficialSplitEffectSortingGroupOrder);
+  CHECK(wds::chart_render::kOfficialTimingEffectSortingOrder >
+        wds::chart_render::kOfficialBombSortingGroupOrder);
   CHECK(!official_split_effect_late_hdr(static_cast<uint8_t>(SplitEffectBlend::Additive), 0));
   CHECK(official_split_effect_late_hdr(static_cast<uint8_t>(SplitEffectBlend::Additive), 1));
   CHECK(official_split_effect_late_hdr(static_cast<uint8_t>(SplitEffectBlend::Additive), 2));

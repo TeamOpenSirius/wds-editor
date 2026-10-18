@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace wds::audio {
 
@@ -119,6 +120,23 @@ class AudioEngine {
   // --- volume (0..1) ---
   void set_music_gain(float gain);
   void set_sfx_gain(float gain);
+
+  struct BounceHit {
+    HitSfxClip clip = HitSfxClip::Count;
+    wds::common::Microseconds at{0};
+  };
+  struct BounceHold {
+    wds::common::Microseconds start{0};
+    wds::common::Microseconds end{0};
+  };
+  // DECODE mixer bounce of BGM + one-shot SFX (+ optional Hold loops) to a PCM WAV.
+  // Does not touch the live speaker mixer. Empty music or include_music=false is
+  // silence under the hits. `timeline_start` is chart time at WAV t=0 (may be
+  // negative: music/SFX are delayed; positive: music is seeked). Hits/holds use
+  // chart time. Returns false on I/O or mixer failure.
+  bool bounce_mix_wav(const std::string& wav_path, wds::common::Microseconds timeline_start,
+                      wds::common::Microseconds duration, const std::vector<BounceHit>& hits,
+                      const std::vector<BounceHold>& holds, bool include_music, bool include_sfx);
 
   // Playback rate for BGM only (pitch scales with rate via BASS_ATTRIB_FREQ). SFX stay at 1x.
   // A real change flushes already-mixed output and bumps position_generation_ so

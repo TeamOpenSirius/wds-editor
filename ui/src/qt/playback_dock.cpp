@@ -13,7 +13,6 @@
 
 #include <wds/audio/transport.hpp>
 #include <wds/interaction/editor_input.hpp>
-#include <wds/interaction/editor_shortcuts.hpp>
 
 #include <QAbstractSlider>
 #include <QCheckBox>
@@ -651,16 +650,7 @@ void ConvertBar::sync_place_checks() {
     if (convert_buttons_[i] == nullptr) continue;
     convert_buttons_[i]->setEnabled(editable);
     const QString name = QString::fromUtf8(kConvertSpecs[i].name);
-    const auto id = static_cast<wds::interaction::EditorShortcut>(
-        static_cast<int>(wds::interaction::EditorShortcut::PlaceType0) +
-        static_cast<int>(i));
-    const auto chord = wds::interaction::editor_shortcut(id);
-    const std::string chord_text = wds::interaction::format_shortcut_chord(chord);
-    const QString labeled =
-        enabled ? name : tr("转换为%1").arg(name);
-    convert_buttons_[i]->setToolTip(
-        chord_text.empty() ? labeled
-                           : tr("%1（%2）").arg(labeled, QString::fromStdString(chord_text)));
+    convert_buttons_[i]->setToolTip(enabled ? name : tr("转换为%1").arg(name));
     const QSignalBlocker blocker(convert_buttons_[i]);
     convert_buttons_[i]->setChecked(enabled && kPlaceIntents[i] == current);
   }

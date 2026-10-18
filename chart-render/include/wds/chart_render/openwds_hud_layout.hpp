@@ -158,6 +158,9 @@ inline constexpr float kOpenWdsEffectsWorldZ = 10.0f;
 inline constexpr int kOpenWdsTimingEffectOffsetDefault = 60;
 inline constexpr int kOpenWdsTimingEffectScaleTypeDefault = 1;
 
+// TimingEffect / TimingAssistEffect SpriteRenderer m_SortingOrder 99
+// (kOfficialTimingEffectSortingOrder). Combo.prefab is a child of
+// GameHudCanvas ScreenSpaceOverlay (GameHudRuntime), after all cameras.
 // TimingEffect / TimingAssistEffect SpriteRenderer is Simple (prefab
 // m_DrawMode=0, m_WasSpriteAssigned=0). Unity 2022.3 SpriteRenderer.size
 // only applies to Sliced/Tiled, so the empty prefab m_Size is not the

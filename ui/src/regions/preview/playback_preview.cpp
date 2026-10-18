@@ -1258,9 +1258,11 @@ void PlaybackPreviewView::pump_lane_geom_preload(
   sh.plate = plate;
   sh.rgb_k = std::clamp(config_.split_line_opacity, 0.10f, 1.00f);
   std::vector<const PreviewLaneGeomSplit*> frame;
+  // Chart time may be negative (delay, export −2s pad, official CSV start < 0).
+  // Corners-only is retain_colored_batch=false, not now_us < 0.
   ensure_lane_geom_pool(lane_geom_pool_, lane_geom_free_, splits, sh,
                         hash_preview_view(geometry_), lane_geom_hit_seq_,
-                        now_us >= 0 ? &frame : nullptr);
+                        retain_colored_batch ? &frame : nullptr);
   size_t max_cells = 0;
   for (const auto& kv : lane_geom_pool_) {
     max_cells = std::max(max_cells, kv.second.cells.size());
@@ -1276,7 +1278,7 @@ void PlaybackPreviewView::pump_lane_geom_preload(
   }
   split_lanes_glow_.reserve_quads(max_cells * std::max<size_t>(splits.size(), 1));
   lane_color_warmup_.reserve_quads(max_cells * std::max<size_t>(splits.size(), 1));
-  if (now_us < 0 || frame.empty()) {
+  if (!retain_colored_batch || frame.empty()) {
     return;
   }
   // First playing frame would otherwise pay the full static Syuriken + first
@@ -1421,6 +1423,7 @@ void PlaybackPreviewView::shutdown() {
   split_lanes_glow_.clear();
   split_late_batch_.clear();
   additive_batch_.clear();
+  hud_batch_.clear();
   notes_draw_indices_.clear();
   note_draw_order_.clear();
   vulkan_.destroy();
@@ -1447,12 +1450,14 @@ void PlaybackPreviewView::resize(int framebuffer_width, int framebuffer_height) 
   if (!ready_) {
     return;
   }
-  if (framebuffer_width == vulkan_.framebuffer_width() &&
-      framebuffer_height == vulkan_.framebuffer_height() &&
-      vulkan_.health() != wds::renderer::RendererHealth::SurfaceLost) {
-    return;
+  if (framebuffer_width != vulkan_.framebuffer_width() ||
+      framebuffer_height != vulkan_.framebuffer_height() ||
+      vulkan_.health() == wds::renderer::RendererHealth::SurfaceLost) {
+    vulkan_.resize(framebuffer_width, framebuffer_height);
   }
-  vulkan_.resize(framebuffer_width, framebuffer_height);
+  // Always sync stage pixels, even when the swapchain size did not change.
+  // Video export temporarily resizes geometry to 1080p/2K/4K without touching
+  // the live swapchain; a size-match early return would leave a tiny stage.
   geometry_.resize(vulkan_.framebuffer_width(), vulkan_.framebuffer_height());
   invalidate_lane_geom_cache();
 }
@@ -1504,16 +1509,19 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   split_late_batch_.overlay_ordered = true;
   split_late_batch_.clear();
   additive_batch_.clear();
+  hud_batch_.clear();
   batch_.reserve_quads(64 + snapshot.split_lanes.size() * 8);
   notes_batch_.reserve_quads(64 + snapshot.notes.size() * 4);
   glow_batch_.reserve_quads(16384);
   split_late_batch_.reserve_quads(1024);
   additive_batch_.reserve_quads(16 + snapshot.notes.size() * 4 + 512);
+  hud_batch_.reserve_quads(16);
 
   // Depth write is disabled; later draw calls / later draw_frame passes win.
   // DrawBatch::clear() keeps sticky per-texture bucket indices, so "merge later
   // in this function" does NOT move a texture later in the same batch — notes
-  // and edit skins go to mid_overlay so they stay above SplitEffect.
+  // and edit skins stay in mid_overlay (sort 10). Combo / AUTO are a later HUD
+  // pass (TimingEffect 99, Combo ScreenSpaceOverlay).
   auto merge_overlay = [&](DrawBatch& dest, const DrawBatch* overlay, bool solid_pass) {
     if (overlay == nullptr) {
       return;
@@ -1564,10 +1572,15 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
     notes_batch_.bucket_for(skin_.split_line_2.id);
   }
   draw_notes(notes_batch_, snapshot);
-  draw_timing_effect(notes_batch_, snapshot);
-  draw_combo(notes_batch_, snapshot);
   merge_overlay(notes_batch_, ui_overlay, false);
+  // Bombs are a separate uncapped list (not kSplitEffectParticlePool). Bomb
+  // SortingGroup 30 is after SplitEffect 20. The renderer stamps this batch
+  // after scene-carve so dest+signed Add cannot wipe the judgeline.
   draw_hit_effects(additive_batch_, snapshot);
+  // TimingEffect SpriteRenderer 99, then Combo on GameHudCanvas
+  // ScreenSpaceOverlay. Both must sit after bombs and split particles.
+  draw_timing_effect(hud_batch_, snapshot);
+  draw_combo(hud_batch_, snapshot);
 
   const DrawBatch* post =
       (modal_overlay != nullptr && modal_overlay->vertex_count() > 0) ? modal_overlay : nullptr;
@@ -1592,7 +1605,8 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   }
   const size_t known_verts = batch_.vertex_count() + glow_batch_.vertex_count() +
                              notes_batch_.vertex_count() + split_late_batch_.vertex_count() +
-                             additive_batch_.vertex_count() + (post ? post->vertex_count() : 0) +
+                             additive_batch_.vertex_count() + hud_batch_.vertex_count() +
+                             (post ? post->vertex_count() : 0) +
                              (post2 ? post2->vertex_count() : 0) + part_verts;
   const bool playing_now = snapshot.playback_state == PreviewPlaybackState::Playing;
   const int64_t now_us_dump = preview_now_us(snapshot, visual_lead_us_);
@@ -1642,7 +1656,7 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
                        wds::chart_editor::kOfficialCameraBackgroundR,
                        wds::chart_editor::kOfficialCameraBackgroundG,
                        wds::chart_editor::kOfficialCameraBackgroundB, &additive_batch_, post,
-                       post2, add_scissor_ptr, mid, early, carve,
+                       post2, add_scissor_ptr, mid, early, carve, &hud_batch_,
                        split_emit_direct_ ? &extras : nullptr, want_dump ? &dump : nullptr);
   }
   if (want_dump) {
@@ -3356,11 +3370,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       const size_t extra_bytes =
           static_cast<size_t>(extra_verts) * sizeof(wds::renderer::DrawVertex);
       wds::renderer::VulkanRenderer::PersistentVbLock lock{};
-      // Heads write from vertex 0 (scene + ~80k–120k lane glow). Place
-      // extras immediately after a head reserve big enough for that so
-      // renderer used_verts=extra_hi is a short prefix. Packing from the
-      // tail made extra_hi≈ring_n (used≈64MB / ~8ms). 65536 verts (2.5MB)
-      // is below glow (80640) and overlaps — draw_frame aborts unsignaled.
+      // Heads write from vertex 0 (scene + lane glow + notes + uncapped hit
+      // VFX). Place split extras after that reserve so they cannot overlap
+      // heads. Packing from the tail made extra_hi≈ring_n (used≈64MB / ~8ms).
+      // 65536 verts (2.5MB) is below glow (80640) and overlaps.
       constexpr uint32_t kHeadReserveVerts = 262144u;
       constexpr uint32_t kHeadReserveIdx = 524288u;
       const size_t head_bytes =
@@ -4040,6 +4053,8 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
   }
 }
 
+// Note bombs are a separate draw list from split-line particles. They do not
+// share kSplitEffectParticlePool / over_cap, and they are not the carve dest.
 void PlaybackPreviewView::draw_hit_effects(DrawBatch& batch, const PreviewSnapshot& snapshot) {
   const double now = preview_now_sec(snapshot, visual_lead_us_);
   const double duration_d = static_cast<double>(config_.effect_duration);
@@ -4395,7 +4410,7 @@ void PlaybackPreviewView::draw_hit_effect_at(DrawBatch& batch, int32_t lane, int
 }
 
 void PlaybackPreviewView::draw_timing_effect(DrawBatch& batch, const PreviewSnapshot& snapshot) {
-  if (!show_judgment_text_ || !skin_.judge_auto || snapshot.last_judge_ms < 0) {
+  if (!show_judgment_text_ || !skin_.judge_auto || snapshot.combo_count <= 0) {
     return;
   }
   const float age =
@@ -4449,6 +4464,8 @@ void PlaybackPreviewView::draw_timing_effect(DrawBatch& batch, const PreviewSnap
   const Vec2 rt = geometry_.project_world(local.x1, local.y1, kOpenWdsEffectsWorldZ);
   const Vec2 rb = geometry_.project_world(local.x1, local.y0, kOpenWdsEffectsWorldZ);
   Quad q{lb, lt, rt, rb};
+  // TimingEffect.prefab SpriteRenderer m_SortingOrder 99. Pass order, not z,
+  // puts this above Bomb 30 / SplitEffect 20 (depth write is off).
   batch.add_sprite(skin_.judge_auto, q, 0.97f, alpha);
 }
 
@@ -4535,7 +4552,7 @@ void PlaybackPreviewView::draw_combo(DrawBatch& batch, const PreviewSnapshot& sn
   const double now_sec = preview_now_sec(snapshot);
 
   // ComboCountPer100 is drawn under ComboCount (Combo.prefab sibling order).
-  if (snapshot.combo_count >= 100 && snapshot.last_combo_fire_ms >= 0) {
+  if (snapshot.combo_count >= 100) {
     const float fire_age =
         static_cast<float>(now_sec - static_cast<double>(snapshot.last_combo_fire_ms) / 1000.0);
     if (fire_age >= 0.0f && fire_age < kOpenWdsComboFireAnimDuration) {
@@ -4548,7 +4565,7 @@ void PlaybackPreviewView::draw_combo(DrawBatch& batch, const PreviewSnapshot& sn
   }
 
   float count_age = kOpenWdsComboCountAnimDuration;
-  if (snapshot.last_judge_ms >= 0) {
+  if (snapshot.combo_count > 0) {
     count_age =
         static_cast<float>(now_sec - static_cast<double>(snapshot.last_judge_ms) / 1000.0);
   }

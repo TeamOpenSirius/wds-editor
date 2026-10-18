@@ -44,9 +44,22 @@ inline bool official_split_effect_src_alpha_one(uint8_t blend) noexcept {
 // Custom1.x*0.5+1 unclamped; UNORM glow clamped 10160/10220 to white.
 // ParticleTrailAdditive trailMaterial stays Other / glow. ParticleAdd
 // trailMaterial (10220 1_1 class) uses the same late-HDR Additive bucket.
+// Same layer 0, later draw wins:
+//   Note 10 → SplitEffect SortingGroup 20 → Bomb SortingGroup 30 →
+//   TimingEffect SpriteRenderer 99. Combo lives on GameHudCanvas
+//   ScreenSpaceOverlay (after all cameras), not this world stack.
+// Bomb: Assets/Resources/Prefabs/Features/Game/Bomb/{Default,Notes,Sakura}/*
+//   SortingGroup m_SortingOrder 30.
+// TimingEffect / TimingAssistEffect.prefab SpriteRenderer m_SortingOrder 99.
+// GameHudRuntime Create: canvas.renderMode = RenderMode.ScreenSpaceOverlay.
+// https://docs.unity3d.com/2022.3/Documentation/ScriptReference/Renderer-sortingOrder.html
+// https://docs.unity3d.com/2022.3/Documentation/Manual/class-SortingGroup.html
+// https://docs.unity3d.com/2022.3/Documentation/ScriptReference/RenderMode.ScreenSpaceOverlay.html
 inline constexpr int8_t kOfficialSyurikenLineSortingOrder = 0;
 inline constexpr int16_t kOfficialSplitEffectSortingGroupOrder = 20;
 inline constexpr int16_t kOfficialNoteSpriteSortingOrder = 10;
+inline constexpr int16_t kOfficialBombSortingGroupOrder = 30;
+inline constexpr int16_t kOfficialTimingEffectSortingOrder = 99;
 
 inline bool official_split_effect_late_hdr(uint8_t blend, uint8_t sorting_order) noexcept {
   return blend == static_cast<uint8_t>(SplitEffectBlend::Additive) && sorting_order >= 1;

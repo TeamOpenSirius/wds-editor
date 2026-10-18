@@ -66,6 +66,13 @@ class Transport {
   // so the UI can collect the first picture at t0, then start audible BGM at t0.
   wds::common::TimelineSnapshot poll(int64_t wall_delta_us);
 
+  // Offline 60 Hz export clock: poll() advances T = origin + n/60, ignores BASS
+  // and wall, does not clamp to music duration / chart start, and never starts
+  // the speaker mixer. Seek still applies once at the segment start.
+  void set_offline_export(bool on) noexcept;
+  bool offline_export() const noexcept { return offline_export_; }
+  int64_t offline_frame_index() const noexcept { return offline_frame_; }
+
   // Begin audible BGM after hit-SFX schedules have been armed for this play request.
   // True when there is nothing left to start (already started, or no pending work).
   // False when start is still pending (play failed or backoff has not elapsed).
@@ -115,6 +122,9 @@ class Transport {
   int64_t chart_offset_ms_ = 0;
   float playback_rate_ = 1.0f;
   int64_t max_clock_error_us_ = 16666;
+  bool offline_export_ = false;
+  int64_t offline_frame_ = 0;
+  int64_t offline_origin_us_ = 0;
 };
 
 }  // namespace wds::audio

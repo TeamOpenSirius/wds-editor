@@ -810,6 +810,15 @@ copy_qt_win_runtime() {
   if [[ ! -f "${stage}/plugins/imageformats/qsvg.dll" ]]; then
     die "missing Qt SVG image plugin (qsvg.dll); install qtsvg into the MinGW Qt prefix"
   fi
+  if [[ -d "${qt_root}/plugins/tls" ]]; then
+    mkdir -p "${stage}/plugins/tls"
+    for plugin in "${qt_root}/plugins/tls/"*.dll; do
+      [[ -f "$plugin" ]] || continue
+      cp -a "$plugin" "${stage}/plugins/tls/"
+      chmod u+w "${stage}/plugins/tls/$(basename "$plugin")" 2>/dev/null || true
+      copy_pe_dlls_from_dir "${stage}/plugins/tls/$(basename "$plugin")" "$qt_bin" "$stage"
+    done
+  fi
 
   cat >"${stage}/qt.conf" <<'EOF'
 [Paths]
@@ -1787,7 +1796,7 @@ copy_qt_macos_plugins() {
 
   echo "Bundling Qt plugins from ${plugin_src}"
   mkdir -p "${payload}/lib/plugins/platforms" "${payload}/lib/plugins/styles" \
-    "${payload}/lib/plugins/imageformats"
+    "${payload}/lib/plugins/imageformats" "${payload}/lib/plugins/tls"
   dest="${payload}/lib/plugins/platforms/libqcocoa.dylib"
   cp -a "${plugin_src}/platforms/libqcocoa.dylib" "$dest"
   chmod u+w "$dest" 2>/dev/null || true
@@ -1809,6 +1818,10 @@ copy_qt_macos_plugins() {
 
   copy_macos_qt_plugin_dir "${plugin_src}/styles" "${payload}/lib/plugins/styles"
   copy_macos_qt_plugin_dir "${plugin_src}/imageformats" "${payload}/lib/plugins/imageformats"
+  copy_macos_qt_plugin_dir "${plugin_src}/tls" "${payload}/lib/plugins/tls"
+  if [[ ! -d "${payload}/lib/plugins/tls" ]] || ! ls "${payload}/lib/plugins/tls/"*.dylib >/dev/null 2>&1; then
+    die "missing Qt TLS plugins; HTTPS ffmpeg download needs plugins/tls (brew qtbase)"
+  fi
 
   local svg_plugins=""
   if command -v brew >/dev/null 2>&1; then

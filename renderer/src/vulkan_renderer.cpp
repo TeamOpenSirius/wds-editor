@@ -668,6 +668,7 @@ struct DrawPlanScratch {
   std::vector<GpuDrawBucket> carve;
   std::vector<GpuDrawBucket> post;
   std::vector<GpuDrawBucket> post2;
+  std::vector<GpuDrawBucket> hud;
   std::vector<GpuDrawBucket> head_packed;
   std::vector<TexKeyFix> order;
 };
@@ -716,6 +717,59 @@ struct VulkanRenderer::Impl {
   bool swapchain_occluded = false;
   uint32_t last_presented_image = UINT32_MAX;
   bool last_present_ok = false;
+
+  bool export_active = false;
+  VkExtent2D export_extent{};
+  VkImage export_image = VK_NULL_HANDLE;
+  VkDeviceMemory export_memory = VK_NULL_HANDLE;
+  VkImageView export_view = VK_NULL_HANDLE;
+  VkImage export_msaa_image = VK_NULL_HANDLE;
+  VkDeviceMemory export_msaa_memory = VK_NULL_HANDLE;
+  VkImageView export_msaa_view = VK_NULL_HANDLE;
+  VkImage export_depth_image = VK_NULL_HANDLE;
+  VkDeviceMemory export_depth_memory = VK_NULL_HANDLE;
+  VkImageView export_depth_view = VK_NULL_HANDLE;
+  VkFramebuffer export_fb = VK_NULL_HANDLE;
+  VkFramebuffer export_bloom_fb = VK_NULL_HANDLE;
+  // Export-sized HDR extract. Live bloom_* stays at swapchain size so preview
+  // hit VFX keep working after (and during) a capture session.
+  VkImage export_bloom_src_image = VK_NULL_HANDLE;
+  VkDeviceMemory export_bloom_src_memory = VK_NULL_HANDLE;
+  VkImageView export_bloom_src_view = VK_NULL_HANDLE;
+  VkFramebuffer export_bloom_extract_fb = VK_NULL_HANDLE;
+  VkDescriptorSet export_bloom_src_descriptor = VK_NULL_HANDLE;
+  VkDescriptorPool export_bloom_src_pool = VK_NULL_HANDLE;
+  VkImage export_hdr_late_image = VK_NULL_HANDLE;
+  VkDeviceMemory export_hdr_late_memory = VK_NULL_HANDLE;
+  VkImageView export_hdr_late_view = VK_NULL_HANDLE;
+  VkFramebuffer export_hdr_late_fb = VK_NULL_HANDLE;
+  VkDescriptorSet export_hdr_late_descriptor = VK_NULL_HANDLE;
+  VkDescriptorPool export_hdr_late_pool = VK_NULL_HANDLE;
+  bool export_hdr_ready = false;
+  struct ExportStaging {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapped = nullptr;
+    VkDeviceSize row_pitch = 0;
+    VkDeviceSize size = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fence_slot = UINT32_MAX;
+    bool pending = false;
+  };
+  std::array<ExportStaging, 3> export_ring{};
+  int export_write = 0;
+  int export_read = 0;
+  int export_pending = 0;
+  uint32_t export_copied_this_frame = UINT32_MAX;
+
+  bool create_export_target();
+  void destroy_export_target();
+  void destroy_export_hdr_resources();
+  bool create_export_staging(uint32_t width, uint32_t height);
+  void destroy_export_staging();
+  bool wait_export_slot(int slot);
+  void queue_export_copy(VkCommandBuffer cmd, uint32_t frame_slot);
 
   // Win VK_EXT_full_screen_exclusive (optional; acquired only while exclusive FS).
   bool fse_extension = false;
@@ -795,6 +849,9 @@ struct VulkanRenderer::Impl {
   VkPipeline pipeline_bloom_extract_alpha = VK_NULL_HANDLE;
   VkPipeline pipeline_hdr_composite = VK_NULL_HANDLE;
   VkPipeline pipeline_hdr_replace = VK_NULL_HANDLE;
+  // bloom_pass SrcAlpha+One for hit VFX after carve REPLACE. Main
+  // pipeline_additive cannot bind here (MSAA render_pass vs 1-sample).
+  VkPipeline pipeline_additive_1x = VK_NULL_HANDLE;
   VkPipeline pipeline_alpha_1x = VK_NULL_HANDLE;
   VkRenderPass bloom_pass = VK_NULL_HANDLE;
   VkRenderPass bloom_extract_pass = VK_NULL_HANDLE;
@@ -893,7 +950,7 @@ struct VulkanRenderer::Impl {
   void destroy_render_pass_and_pipelines();
   bool create_bloom_pipeline();
   void destroy_bloom_pipeline();
-  bool create_bloom_resources();
+  bool create_bloom_resources(VkExtent2D extent = {});
   void destroy_bloom_resources();
   void record_glow_extract(VkCommandBuffer cmd, const DrawBatch& early,
                            const std::vector<uint32_t>& first_vertex, VkBuffer vb,
@@ -902,7 +959,8 @@ struct VulkanRenderer::Impl {
   void record_glow_extract_gpu(VkCommandBuffer cmd, const GpuDrawBucket* buckets, size_t bucket_n,
                               uint32_t vert_count, VkBuffer vb, const float* mvp,
                               VkRect2D scissor_full, VkFramebuffer extract_fb,
-                              bool load_existing = false, VkBuffer ib = VK_NULL_HANDLE);
+                              bool load_existing = false, VkBuffer ib = VK_NULL_HANDLE,
+                              VkExtent2D extract_extent = {});
   void push_syuriken_pc(VkCommandBuffer cmd, const float* mvp) const;
   bool bucket_is_syuriken(const DrawBucket& bucket) const noexcept;
   void record_bloom(VkCommandBuffer cmd, uint32_t image_index);
@@ -1100,8 +1158,7 @@ bool VulkanRenderer::apply_msaa(int samples) {
   if (!impl_->create_swapchain(fb_w, fb_h)) {
     return fail_after_teardown();
   }
-  width_ = static_cast<int>(impl_->swapchain_extent.width);
-  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  sync_reported_size();
   return finish_msaa(true);
 }
 
@@ -1113,6 +1170,7 @@ void VulkanRenderer::Impl::cleanup_swapchain_resources_keep_handle() {
   }
   // Presentation may still own swapchain images; graphics fences are insufficient.
   (void)device_wait_idle_result();
+  destroy_export_target();
   destroy_gpu_timestamp_pools();
   destroy_bloom_resources();
   for (auto fb : framebuffers) {
@@ -1783,6 +1841,440 @@ bool VulkanRenderer::Impl::create_framebuffers() {
   return true;
 }
 
+void VulkanRenderer::Impl::destroy_export_hdr_resources() {
+  export_hdr_ready = false;
+  if (device == VK_NULL_HANDLE) {
+    export_bloom_extract_fb = VK_NULL_HANDLE;
+    export_bloom_src_descriptor = VK_NULL_HANDLE;
+    export_bloom_src_pool = VK_NULL_HANDLE;
+    export_bloom_src_view = VK_NULL_HANDLE;
+    export_bloom_src_image = VK_NULL_HANDLE;
+    export_bloom_src_memory = VK_NULL_HANDLE;
+    export_hdr_late_fb = VK_NULL_HANDLE;
+    export_hdr_late_descriptor = VK_NULL_HANDLE;
+    export_hdr_late_pool = VK_NULL_HANDLE;
+    export_hdr_late_view = VK_NULL_HANDLE;
+    export_hdr_late_image = VK_NULL_HANDLE;
+    export_hdr_late_memory = VK_NULL_HANDLE;
+    return;
+  }
+  auto free_hdr_desc = [&](VkDescriptorSet& desc, VkDescriptorPool& pool) {
+    if (desc != VK_NULL_HANDLE && pool != VK_NULL_HANDLE) {
+      vkFreeDescriptorSets(device, pool, 1, &desc);
+      for (auto& block : descriptor_blocks) {
+        if (block.pool == pool) {
+          block.live = descriptor_pool_live_after_free(block.live);
+          break;
+        }
+      }
+    }
+    desc = VK_NULL_HANDLE;
+    pool = VK_NULL_HANDLE;
+  };
+  if (export_bloom_extract_fb != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(device, export_bloom_extract_fb, nullptr);
+    export_bloom_extract_fb = VK_NULL_HANDLE;
+  }
+  if (export_hdr_late_fb != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(device, export_hdr_late_fb, nullptr);
+    export_hdr_late_fb = VK_NULL_HANDLE;
+  }
+  free_hdr_desc(export_bloom_src_descriptor, export_bloom_src_pool);
+  free_hdr_desc(export_hdr_late_descriptor, export_hdr_late_pool);
+  if (export_bloom_src_view != VK_NULL_HANDLE) {
+    vkDestroyImageView(device, export_bloom_src_view, nullptr);
+    export_bloom_src_view = VK_NULL_HANDLE;
+  }
+  if (export_hdr_late_view != VK_NULL_HANDLE) {
+    vkDestroyImageView(device, export_hdr_late_view, nullptr);
+    export_hdr_late_view = VK_NULL_HANDLE;
+  }
+  if (export_bloom_src_image != VK_NULL_HANDLE) {
+    vkDestroyImage(device, export_bloom_src_image, nullptr);
+    export_bloom_src_image = VK_NULL_HANDLE;
+  }
+  if (export_hdr_late_image != VK_NULL_HANDLE) {
+    vkDestroyImage(device, export_hdr_late_image, nullptr);
+    export_hdr_late_image = VK_NULL_HANDLE;
+  }
+  if (export_bloom_src_memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, export_bloom_src_memory, nullptr);
+    export_bloom_src_memory = VK_NULL_HANDLE;
+  }
+  if (export_hdr_late_memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, export_hdr_late_memory, nullptr);
+    export_hdr_late_memory = VK_NULL_HANDLE;
+  }
+}
+
+void VulkanRenderer::Impl::destroy_export_target() {
+  destroy_export_hdr_resources();
+  if (device == VK_NULL_HANDLE) {
+    export_fb = VK_NULL_HANDLE;
+    export_bloom_fb = VK_NULL_HANDLE;
+    export_view = VK_NULL_HANDLE;
+    export_image = VK_NULL_HANDLE;
+    export_memory = VK_NULL_HANDLE;
+    export_msaa_view = VK_NULL_HANDLE;
+    export_msaa_image = VK_NULL_HANDLE;
+    export_msaa_memory = VK_NULL_HANDLE;
+    export_depth_view = VK_NULL_HANDLE;
+    export_depth_image = VK_NULL_HANDLE;
+    export_depth_memory = VK_NULL_HANDLE;
+    return;
+  }
+  if (export_fb != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(device, export_fb, nullptr);
+    export_fb = VK_NULL_HANDLE;
+  }
+  if (export_bloom_fb != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(device, export_bloom_fb, nullptr);
+    export_bloom_fb = VK_NULL_HANDLE;
+  }
+  if (export_view != VK_NULL_HANDLE) {
+    vkDestroyImageView(device, export_view, nullptr);
+    export_view = VK_NULL_HANDLE;
+  }
+  if (export_image != VK_NULL_HANDLE) {
+    vkDestroyImage(device, export_image, nullptr);
+    export_image = VK_NULL_HANDLE;
+  }
+  if (export_memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, export_memory, nullptr);
+    export_memory = VK_NULL_HANDLE;
+  }
+  if (export_msaa_view != VK_NULL_HANDLE) {
+    vkDestroyImageView(device, export_msaa_view, nullptr);
+    export_msaa_view = VK_NULL_HANDLE;
+  }
+  if (export_msaa_image != VK_NULL_HANDLE) {
+    vkDestroyImage(device, export_msaa_image, nullptr);
+    export_msaa_image = VK_NULL_HANDLE;
+  }
+  if (export_msaa_memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, export_msaa_memory, nullptr);
+    export_msaa_memory = VK_NULL_HANDLE;
+  }
+  if (export_depth_view != VK_NULL_HANDLE) {
+    vkDestroyImageView(device, export_depth_view, nullptr);
+    export_depth_view = VK_NULL_HANDLE;
+  }
+  if (export_depth_image != VK_NULL_HANDLE) {
+    vkDestroyImage(device, export_depth_image, nullptr);
+    export_depth_image = VK_NULL_HANDLE;
+  }
+  if (export_depth_memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, export_depth_memory, nullptr);
+    export_depth_memory = VK_NULL_HANDLE;
+  }
+}
+
+void VulkanRenderer::Impl::destroy_export_staging() {
+  if (device == VK_NULL_HANDLE) {
+    export_ring = {};
+    export_write = 0;
+    export_read = 0;
+    export_pending = 0;
+    return;
+  }
+  for (auto& slot : export_ring) {
+    if (slot.mapped != nullptr && slot.memory != VK_NULL_HANDLE) {
+      vkUnmapMemory(device, slot.memory);
+      slot.mapped = nullptr;
+    }
+    if (slot.buffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, slot.buffer, nullptr);
+      slot.buffer = VK_NULL_HANDLE;
+    }
+    if (slot.memory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, slot.memory, nullptr);
+      slot.memory = VK_NULL_HANDLE;
+    }
+    slot = {};
+  }
+  export_write = 0;
+  export_read = 0;
+  export_pending = 0;
+}
+
+bool VulkanRenderer::Impl::create_export_target() {
+  destroy_export_target();
+  if (device == VK_NULL_HANDLE || render_pass == VK_NULL_HANDLE || export_extent.width == 0 ||
+      export_extent.height == 0) {
+    return false;
+  }
+
+  auto alloc_image = [&](VkFormat format, VkSampleCountFlagBits samples, VkImageUsageFlags usage,
+                         VkImage& image, VkDeviceMemory& memory) -> bool {
+    VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.extent = {export_extent.width, export_extent.height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.format = format;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    image_info.usage = usage;
+    image_info.samples = samples;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &image_info, nullptr, &image) != VK_SUCCESS) {
+      return false;
+    }
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(device, image, &req);
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    alloc.allocationSize = req.size;
+    try {
+      alloc.memoryTypeIndex =
+          find_memory_type(physical, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    } catch (...) {
+      return false;
+    }
+    if (vkAllocateMemory(device, &alloc, nullptr, &memory) != VK_SUCCESS) {
+      return false;
+    }
+    vkBindImageMemory(device, image, memory, 0);
+    return true;
+  };
+  auto make_view = [&](VkImage image, VkFormat format, VkImageAspectFlags aspect,
+                       VkImageView& view) -> bool {
+    VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.image = image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = aspect;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.layerCount = 1;
+    return vkCreateImageView(device, &view_info, nullptr, &view) == VK_SUCCESS;
+  };
+
+  const VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if (!alloc_image(swapchain_format, VK_SAMPLE_COUNT_1_BIT, color_usage, export_image,
+                   export_memory) ||
+      !make_view(export_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT, export_view)) {
+    destroy_export_target();
+    return false;
+  }
+  if (!alloc_image(depth_format, msaa_samples, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                   export_depth_image, export_depth_memory) ||
+      !make_view(export_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, export_depth_view)) {
+    destroy_export_target();
+    return false;
+  }
+  if (msaa_samples != VK_SAMPLE_COUNT_1_BIT) {
+    if (!alloc_image(swapchain_format, msaa_samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     export_msaa_image, export_msaa_memory) ||
+        !make_view(export_msaa_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT,
+                   export_msaa_view)) {
+      destroy_export_target();
+      return false;
+    }
+  }
+
+  VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+  fb.renderPass = render_pass;
+  fb.width = export_extent.width;
+  fb.height = export_extent.height;
+  fb.layers = 1;
+  if (msaa_samples == VK_SAMPLE_COUNT_1_BIT) {
+    std::array<VkImageView, 2> attachments = {export_view, export_depth_view};
+    fb.attachmentCount = static_cast<uint32_t>(attachments.size());
+    fb.pAttachments = attachments.data();
+    if (vkCreateFramebuffer(device, &fb, nullptr, &export_fb) != VK_SUCCESS) {
+      destroy_export_target();
+      return false;
+    }
+  } else {
+    std::array<VkImageView, 3> attachments = {export_msaa_view, export_depth_view, export_view};
+    fb.attachmentCount = static_cast<uint32_t>(attachments.size());
+    fb.pAttachments = attachments.data();
+    if (vkCreateFramebuffer(device, &fb, nullptr, &export_fb) != VK_SUCCESS) {
+      destroy_export_target();
+      return false;
+    }
+  }
+  if (bloom_pass != VK_NULL_HANDLE) {
+    VkFramebufferCreateInfo bloom_fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    bloom_fb.renderPass = bloom_pass;
+    bloom_fb.attachmentCount = 1;
+    bloom_fb.pAttachments = &export_view;
+    bloom_fb.width = export_extent.width;
+    bloom_fb.height = export_extent.height;
+    bloom_fb.layers = 1;
+    if (vkCreateFramebuffer(device, &bloom_fb, nullptr, &export_bloom_fb) != VK_SUCCESS) {
+      export_bloom_fb = VK_NULL_HANDLE;
+    }
+  }
+
+  export_hdr_ready = false;
+  if (bloom_extract_pass != VK_NULL_HANDLE && pipeline_hdr_composite != VK_NULL_HANDLE) {
+    const VkImageUsageFlags hdr_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    auto alloc_hdr = [&](VkImage& image, VkDeviceMemory& memory, VkImageView& view,
+                         VkFramebuffer& fb, VkDescriptorSet& desc, VkDescriptorPool& pool) -> bool {
+      if (!alloc_image(bloom_src_format, VK_SAMPLE_COUNT_1_BIT, hdr_usage, image, memory) ||
+          !make_view(image, bloom_src_format, VK_IMAGE_ASPECT_COLOR_BIT, view)) {
+        return false;
+      }
+      VkFramebufferCreateInfo hfb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+      hfb.renderPass = bloom_extract_pass;
+      hfb.attachmentCount = 1;
+      hfb.pAttachments = &view;
+      hfb.width = export_extent.width;
+      hfb.height = export_extent.height;
+      hfb.layers = 1;
+      if (vkCreateFramebuffer(device, &hfb, nullptr, &fb) != VK_SUCCESS) {
+        fb = VK_NULL_HANDLE;
+        return false;
+      }
+      GpuTexture probe{};
+      probe.view = view;
+      const UploadResult d = create_texture_descriptor(probe);
+      if (!d.ok() || probe.descriptor == VK_NULL_HANDLE) {
+        return false;
+      }
+      desc = probe.descriptor;
+      pool = probe.descriptor_pool;
+      return true;
+    };
+    if (alloc_hdr(export_bloom_src_image, export_bloom_src_memory, export_bloom_src_view,
+                  export_bloom_extract_fb, export_bloom_src_descriptor, export_bloom_src_pool) &&
+        alloc_hdr(export_hdr_late_image, export_hdr_late_memory, export_hdr_late_view,
+                  export_hdr_late_fb, export_hdr_late_descriptor, export_hdr_late_pool)) {
+      export_hdr_ready = true;
+    } else {
+      destroy_export_hdr_resources();
+      WDS_LOG("export HDR extract off (extent=%ux%u)\n", export_extent.width, export_extent.height);
+    }
+  }
+  return true;
+}
+
+bool VulkanRenderer::Impl::create_export_staging(uint32_t width, uint32_t height) {
+  if (device == VK_NULL_HANDLE || width == 0 || height == 0) {
+    return false;
+  }
+  VkPhysicalDeviceProperties props{};
+  vkGetPhysicalDeviceProperties(physical, &props);
+  VkDeviceSize row_align = props.limits.optimalBufferCopyRowPitchAlignment;
+  if (row_align < 4) {
+    row_align = 4;
+  }
+  const VkDeviceSize pixel_row = static_cast<VkDeviceSize>(width) * 4u;
+  const VkDeviceSize row_pitch = (pixel_row + row_align - 1u) / row_align * row_align;
+  const VkDeviceSize buf_bytes = row_pitch * static_cast<VkDeviceSize>(height);
+  if (!export_ring[0].buffer || export_ring[0].width != width || export_ring[0].height != height ||
+      export_ring[0].row_pitch != row_pitch) {
+    destroy_export_staging();
+  } else {
+    return true;
+  }
+  for (auto& slot : export_ring) {
+    VkBufferCreateInfo buf_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    buf_info.size = buf_bytes;
+    buf_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device, &buf_info, nullptr, &slot.buffer) != VK_SUCCESS) {
+      destroy_export_staging();
+      return false;
+    }
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(device, slot.buffer, &req);
+    uint32_t mem_type = 0;
+    try {
+      mem_type = find_memory_type(physical, req.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    } catch (...) {
+      destroy_export_staging();
+      return false;
+    }
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = mem_type;
+    if (vkAllocateMemory(device, &alloc, nullptr, &slot.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(device, slot.buffer, slot.memory, 0) != VK_SUCCESS ||
+        vkMapMemory(device, slot.memory, 0, VK_WHOLE_SIZE, 0, &slot.mapped) != VK_SUCCESS) {
+      destroy_export_staging();
+      return false;
+    }
+    slot.row_pitch = row_pitch;
+    slot.size = buf_bytes;
+    slot.width = width;
+    slot.height = height;
+  }
+  export_write = 0;
+  export_read = 0;
+  export_pending = 0;
+  return true;
+}
+
+bool VulkanRenderer::Impl::wait_export_slot(int slot) {
+  if (slot < 0 || slot >= static_cast<int>(export_ring.size())) {
+    return false;
+  }
+  auto& staged = export_ring[static_cast<size_t>(slot)];
+  if (!staged.pending) {
+    return true;
+  }
+  const uint32_t fence_slot = staged.fence_slot;
+  if (fence_slot >= in_flight.size() || in_flight[fence_slot] == VK_NULL_HANDLE) {
+    staged.pending = false;
+    if (export_pending > 0) {
+      --export_pending;
+    }
+    return true;
+  }
+  if (vkWaitForFences(device, 1, &in_flight[fence_slot], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+    return false;
+  }
+  staged.pending = false;
+  if (export_pending > 0) {
+    --export_pending;
+  }
+  return true;
+}
+
+void VulkanRenderer::Impl::queue_export_copy(VkCommandBuffer cmd, uint32_t frame_slot) {
+  export_copied_this_frame = UINT32_MAX;
+  if (!export_active || export_image == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE) {
+    return;
+  }
+  auto& slot = export_ring[static_cast<size_t>(export_write)];
+  if (slot.buffer == VK_NULL_HANDLE || slot.width != export_extent.width ||
+      slot.height != export_extent.height) {
+    return;
+  }
+  if (slot.pending) {
+    (void)wait_export_slot(export_write);
+  }
+  image_barrier(cmd, export_image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+  VkBufferImageCopy region{};
+  region.bufferRowLength = static_cast<uint32_t>(slot.row_pitch / 4u);
+  region.bufferImageHeight = slot.height;
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.layerCount = 1;
+  region.imageExtent.width = slot.width;
+  region.imageExtent.height = slot.height;
+  region.imageExtent.depth = 1;
+  vkCmdCopyImageToBuffer(cmd, export_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot.buffer, 1,
+                         &region);
+  image_barrier(cmd, export_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+  slot.fence_slot = frame_slot;
+  slot.pending = true;
+  export_copied_this_frame = static_cast<uint32_t>(export_write);
+  export_write = (export_write + 1) % static_cast<int>(export_ring.size());
+  ++export_pending;
+}
+
 VkSampleCountFlagBits VulkanRenderer::Impl::pick_msaa_samples() const {
   VkPhysicalDeviceProperties props{};
   vkGetPhysicalDeviceProperties(physical, &props);
@@ -2189,9 +2681,13 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
 
   // Success — wait for in-flight frames before retiring old swapchain / bloom.
   (void)device_wait_idle_result();
+  if (export_active && export_extent.width > 0 && export_extent.height > 0) {
+    (void)create_export_target();
+    (void)create_export_staging(export_extent.width, export_extent.height);
+  }
   destroy_render_finished(old_render_finished);
   destroy_gpu_timestamp_pools();
-  if (!create_bloom_resources()) {
+  if (!create_bloom_resources(swapchain_extent)) {
     WDS_LOG("bloom off (extent=%ux%u blit=%d)\n", swapchain_extent.width, swapchain_extent.height,
             swapchain_can_blit ? 1 : 0);
   } else {
@@ -3562,6 +4058,7 @@ void VulkanRenderer::Impl::destroy_bloom_pipeline() {
     pipeline_bloom_extract_alpha = VK_NULL_HANDLE;
     pipeline_syuriken_extract = VK_NULL_HANDLE;
     pipeline_hdr_replace = VK_NULL_HANDLE;
+    pipeline_additive_1x = VK_NULL_HANDLE;
     pipeline_alpha_1x = VK_NULL_HANDLE;
     bloom_pass = VK_NULL_HANDLE;
     bloom_extract_pass = VK_NULL_HANDLE;
@@ -3591,6 +4088,10 @@ void VulkanRenderer::Impl::destroy_bloom_pipeline() {
   if (pipeline_hdr_replace) {
     vkDestroyPipeline(device, pipeline_hdr_replace, nullptr);
     pipeline_hdr_replace = VK_NULL_HANDLE;
+  }
+  if (pipeline_additive_1x) {
+    vkDestroyPipeline(device, pipeline_additive_1x, nullptr);
+    pipeline_additive_1x = VK_NULL_HANDLE;
   }
   if (pipeline_alpha_1x) {
     vkDestroyPipeline(device, pipeline_alpha_1x, nullptr);
@@ -4039,7 +4540,7 @@ bool VulkanRenderer::Impl::create_bloom_pipeline() {
     VkShaderModule a_vert = create_shader_module(device, a_vert_code);
     VkShaderModule a_frag = create_shader_module(device, a_frag_code);
     if (a_vert && a_frag) {
-      int32_t clip = 1;
+      int32_t clip = 2;
       VkSpecializationMapEntry clip_e{};
       clip_e.size = sizeof(int32_t);
       VkSpecializationInfo clip_i{};
@@ -4057,6 +4558,17 @@ bool VulkanRenderer::Impl::create_bloom_pipeline() {
       a_stages[1].module = a_frag;
       a_stages[1].pName = "main";
       a_stages[1].pSpecializationInfo = &clip_i;
+      VkGraphicsPipelineCreateInfo a_info = qinfo;
+      a_info.pStages = a_stages;
+      a_info.pColorBlendState = &qblend;
+      a_info.pVertexInputState = &qvertex;
+      a_info.layout = pipeline_layout;
+      a_info.renderPass = bloom_pass;
+      if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &a_info, nullptr,
+                                    &pipeline_additive_1x) != VK_SUCCESS) {
+        pipeline_additive_1x = VK_NULL_HANDLE;
+      }
+      clip = 1;
       VkPipelineColorBlendAttachmentState alpha_att = qblend_att;
       alpha_att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
       alpha_att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -4064,11 +4576,7 @@ bool VulkanRenderer::Impl::create_bloom_pipeline() {
       alpha_att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
       VkPipelineColorBlendStateCreateInfo alpha_blend = qblend;
       alpha_blend.pAttachments = &alpha_att;
-      VkGraphicsPipelineCreateInfo a_info = qinfo;
-      a_info.pStages = a_stages;
       a_info.pColorBlendState = &alpha_blend;
-      a_info.layout = pipeline_layout;
-      a_info.renderPass = bloom_pass;
       if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &a_info, nullptr,
                                     &pipeline_alpha_1x) != VK_SUCCESS) {
         pipeline_alpha_1x = VK_NULL_HANDLE;
@@ -4084,19 +4592,24 @@ bool VulkanRenderer::Impl::create_bloom_pipeline() {
   return true;
 }
 
-bool VulkanRenderer::Impl::create_bloom_resources() {
+bool VulkanRenderer::Impl::create_bloom_resources(VkExtent2D extent) {
   destroy_bloom_resources();
   // OpenWDS OfflineRhythmPreview camera: HDR on (m_HDR=1), post-processing
   // off. Official Add is SrcAlpha+One on that camera. sort≤1 extracts stay
   // cleared (fog) and One+One composite after notes. sort≥2 blits the
-  // resolved scene into hdr_late, dest+signed Add, then One Zero replace.
-  // Hits use the second cleared extract. Do not run record_bloom.
+  // resolved scene into bloom_src (early extract is already composited),
+  // dest+signed Add, then One Zero replace. hdr_late is the carve dest
+  // (second FP16 buffer). Hit VFX stamp as UNORM additive quads after
+  // replace, not as an hdr_late extract. Do not run record_bloom.
+  if (extent.width == 0 || extent.height == 0) {
+    extent = swapchain_extent;
+  }
   if (device == VK_NULL_HANDLE || bloom_extract_pass == VK_NULL_HANDLE ||
       pipeline_bloom_extract == VK_NULL_HANDLE || pipeline_hdr_composite == VK_NULL_HANDLE ||
-      swapchain_extent.width == 0 || swapchain_extent.height == 0) {
+      extent.width == 0 || extent.height == 0) {
     return false;
   }
-  bloom_extent = swapchain_extent;
+  bloom_extent = extent;
 
   VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -4166,8 +4679,8 @@ bool VulkanRenderer::Impl::create_bloom_resources() {
   bloom_src_pool = probe.descriptor_pool;
   bloom_ready = true;
 
-  // Second FP16 target: hit VFX extract, then reused as the scene-carve dest
-  // (blit swapchain, official sort≥2 Add). Official camera HDR is camera-wide.
+  // Second FP16 target: kept for scene-carve capability / export HDR. Hit VFX
+  // stamp as swapchain additive quads (dest+signed Add must not hide bombs).
   auto alloc_late = [&]() -> bool {
     if (vkCreateImage(device, &image_info, nullptr, &hdr_late_image) != VK_SUCCESS) {
       return false;
@@ -4229,7 +4742,9 @@ bool VulkanRenderer::Impl::create_bloom_resources() {
   }
 
   hdr_can_scene_carve = false;
-  if (bloom_pass != VK_NULL_HANDLE && !swapchain_views.empty()) {
+  const bool bloom_matches_swapchain = bloom_extent.width == swapchain_extent.width &&
+                                       bloom_extent.height == swapchain_extent.height;
+  if (bloom_pass != VK_NULL_HANDLE && !swapchain_views.empty() && bloom_matches_swapchain) {
     bloom_framebuffers.assign(swapchain_views.size(), VK_NULL_HANDLE);
     VkFramebufferCreateInfo tail_fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     tail_fb.renderPass = bloom_pass;
@@ -4255,7 +4770,8 @@ bool VulkanRenderer::Impl::create_bloom_resources() {
     }
   }
   if (hdr_late_ready && swapchain_can_blit && pipeline_hdr_replace != VK_NULL_HANDLE &&
-      bloom_extract_load_pass != VK_NULL_HANDLE && !bloom_framebuffers.empty()) {
+      bloom_extract_load_pass != VK_NULL_HANDLE &&
+      (bloom_matches_swapchain ? !bloom_framebuffers.empty() : true)) {
     VkFormatProperties sw{};
     VkFormatProperties hdr{};
     vkGetPhysicalDeviceFormatProperties(physical, swapchain_format, &sw);
@@ -4653,11 +5169,13 @@ void VulkanRenderer::Impl::record_glow_extract_gpu(VkCommandBuffer cmd, const Gp
                                                   size_t bucket_n, uint32_t vert_count, VkBuffer vb,
                                                   const float* mvp, VkRect2D scissor_full,
                                                   VkFramebuffer extract_fb, bool load_existing,
-                                                  VkBuffer ib) {
+                                                  VkBuffer ib, VkExtent2D extract_extent) {
   const VkRenderPass pass = load_existing ? bloom_extract_load_pass : bloom_extract_pass;
-  if (!bloom_ready || extract_fb == VK_NULL_HANDLE || pipeline_bloom_extract == VK_NULL_HANDLE ||
-      pass == VK_NULL_HANDLE || bloom_extent.width == 0 || bloom_extent.height == 0 ||
-      vert_count == 0 || buckets == nullptr || bucket_n == 0) {
+  const VkExtent2D extent = (extract_extent.width > 0 && extract_extent.height > 0) ? extract_extent
+                                                                                    : bloom_extent;
+  if (extract_fb == VK_NULL_HANDLE || pipeline_bloom_extract == VK_NULL_HANDLE ||
+      pass == VK_NULL_HANDLE || extent.width == 0 || extent.height == 0 || vert_count == 0 ||
+      buckets == nullptr || bucket_n == 0) {
     return;
   }
 
@@ -4665,7 +5183,7 @@ void VulkanRenderer::Impl::record_glow_extract_gpu(VkCommandBuffer cmd, const Gp
   VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
   rp.renderPass = pass;
   rp.framebuffer = extract_fb;
-  rp.renderArea.extent = bloom_extent;
+  rp.renderArea.extent = extent;
   if (!load_existing) {
     rp.clearValueCount = 1;
     rp.pClearValues = &clear;
@@ -4675,29 +5193,21 @@ void VulkanRenderer::Impl::record_glow_extract_gpu(VkCommandBuffer cmd, const Gp
 
   VkViewport viewport{};
   viewport.x = 0.0f;
-  viewport.y = static_cast<float>(bloom_extent.height);
-  viewport.width = static_cast<float>(bloom_extent.width);
-  viewport.height = -static_cast<float>(bloom_extent.height);
+  viewport.y = static_cast<float>(extent.height);
+  viewport.width = static_cast<float>(extent.width);
+  viewport.height = -static_cast<float>(extent.height);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &viewport);
 
   VkRect2D scissor{};
-  if (swapchain_extent.width > 0 && swapchain_extent.height > 0) {
-    const float sx = static_cast<float>(bloom_extent.width) /
-                     static_cast<float>(swapchain_extent.width);
-    const float sy = static_cast<float>(bloom_extent.height) /
-                     static_cast<float>(swapchain_extent.height);
-    const int x0 = static_cast<int>(static_cast<float>(scissor_full.offset.x) * sx);
-    const int y0 = static_cast<int>(static_cast<float>(scissor_full.offset.y) * sy);
-    const int x1 = static_cast<int>(
-        static_cast<float>(scissor_full.offset.x + static_cast<int32_t>(scissor_full.extent.width)) *
-        sx);
-    const int y1 = static_cast<int>(
-        static_cast<float>(scissor_full.offset.y + static_cast<int32_t>(scissor_full.extent.height)) *
-        sy);
-    const int bw = static_cast<int>(bloom_extent.width);
-    const int bh = static_cast<int>(bloom_extent.height);
+  {
+    const int bw = static_cast<int>(extent.width);
+    const int bh = static_cast<int>(extent.height);
+    const int x0 = scissor_full.offset.x;
+    const int y0 = scissor_full.offset.y;
+    const int x1 = x0 + static_cast<int>(scissor_full.extent.width);
+    const int y1 = y0 + static_cast<int>(scissor_full.extent.height);
     const int cx0 = std::clamp(x0, 0, bw);
     const int cy0 = std::clamp(y0, 0, bh);
     const int cx1 = std::clamp(x1, 0, bw);
@@ -4706,8 +5216,6 @@ void VulkanRenderer::Impl::record_glow_extract_gpu(VkCommandBuffer cmd, const Gp
     scissor.offset.y = static_cast<int32_t>(cy0);
     scissor.extent.width = static_cast<uint32_t>(std::max(0, cx1 - cx0));
     scissor.extent.height = static_cast<uint32_t>(std::max(0, cy1 - cy0));
-  } else {
-    scissor.extent = bloom_extent;
   }
   vkCmdSetScissor(cmd, 0, 1, &scissor);
   VkDeviceSize offset = 0;
@@ -5014,6 +5522,7 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     device_name_[sizeof(device_name_) - 1] = '\0';
     device_driver_version_ = props.driverVersion;
     device_api_version_ = props.apiVersion;
+    device_vendor_id_ = props.vendorID;
     impl_->non_coherent_atom =
         props.limits.nonCoherentAtomSize > 0 ? props.limits.nonCoherentAtomSize : 1;
     impl_->persistent_ring_bytes =
@@ -5205,8 +5714,7 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   if (!impl_->create_swapchain(fb_w, fb_h)) {
     return false;
   }
-  width_ = static_cast<int>(impl_->swapchain_extent.width);
-  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  sync_reported_size();
 
   VkCommandBufferAllocateInfo cmd_alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
   cmd_alloc.commandPool = impl_->command_pool;
@@ -5272,6 +5780,9 @@ void VulkanRenderer::destroy() {
     }
 
     impl_->cleanup_swapchain();  // also destroys the per-image render_finished semaphores
+    impl_->destroy_export_staging();
+    impl_->export_active = false;
+    export_active_ = false;
     impl_->destroy_render_finished(impl_->render_finished);  // no-op normally
     impl_->destroy_gpu_timestamp_pools();
     impl_->destroy_bloom_pipeline();
@@ -5582,8 +6093,7 @@ bool VulkanRenderer::recover_swapchain() {
   if (impl_->swapchain_occluded) {
     return apply_zero_extent_now();
   }
-  width_ = static_cast<int>(impl_->swapchain_extent.width);
-  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  sync_reported_size();
   emit_health(RendererHealthEvent::RecoveredExtent);
   return true;
 }
@@ -5652,8 +6162,7 @@ bool VulkanRenderer::recover_surface_and_swapchain() {
   if (impl_->swapchain_occluded || impl_->swapchain == VK_NULL_HANDLE) {
     return apply_zero_extent_now();
   }
-  width_ = static_cast<int>(impl_->swapchain_extent.width);
-  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  sync_reported_size();
   emit_health(RendererHealthEvent::SurfaceRecovered);
   return true;
 }
@@ -5681,8 +6190,7 @@ bool VulkanRenderer::resize(int width, int height) {
   if (impl_->swapchain_occluded) {
     return apply_zero_extent_now();
   }
-  width_ = static_cast<int>(impl_->swapchain_extent.width);
-  height_ = static_cast<int>(impl_->swapchain_extent.height);
+  sync_reported_size();
   emit_health(RendererHealthEvent::RecoveredExtent);
   return true;
 }
@@ -5903,7 +6411,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                 const DrawBatch* post_overlay, const DrawBatch* post_overlay2,
                                 const ScissorRect* additive_scissor, const DrawBatch* mid_overlay,
                                 const DrawBatch* early_additive, const DrawBatch* scene_carve,
-                                const DrawFrameExtras* extras, DrawFrameDump* dump) {
+                                const DrawBatch* playfield_hud, const DrawFrameExtras* extras,
+                                DrawFrameDump* dump) {
   if (impl_ == nullptr || renderer_health_unrecoverable(health_)) {
     if (impl_ != nullptr) {
       impl_->persistent_vb_locked = false;
@@ -5992,61 +6501,78 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->reap_retired_textures();
 
   uint32_t image_index = 0;
-  const auto acquire_t0 = clock::now();
-  VkResult acquire = vkAcquireNextImageKHR(impl_->device, impl_->swapchain, UINT64_MAX,
-                                           impl_->image_available[frame], VK_NULL_HANDLE,
-                                           &image_index);
-  impl_->last_acquire_wait_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - acquire_t0).count();
-  impl_->note_fullscreen_exclusive_lost("vkAcquireNextImageKHR", acquire);
-  impl_->note_wsi_result("acquire", acquire, &impl_->have_logged_acquire, &impl_->logged_acquire);
-  const WsiRecoverAction acquire_action = classify_wsi_result(acquire);
+  const bool export_offscreen = impl_->export_active && impl_->export_fb != VK_NULL_HANDLE &&
+                                impl_->export_image != VK_NULL_HANDLE;
+  const VkExtent2D draw_extent =
+      export_offscreen ? impl_->export_extent : impl_->swapchain_extent;
+  if (export_offscreen && (draw_extent.width == 0 || draw_extent.height == 0)) {
+    impl_->note_draw_stopped("export-extent");
+    return false;
+  }
   bool recreate_swapchain_after_present = false;
-  if (acquire_action == WsiRecoverAction::RecreateSwapchain && acquire == VK_SUBOPTIMAL_KHR) {
-    recreate_swapchain_after_present = true;
-  } else if (acquire_action != WsiRecoverAction::None) {
-    impl_->note_draw_stopped("acquire");
-    return apply_wsi_action(acquire_action);
+  VkResult acquire = VK_SUCCESS;
+  if (!export_offscreen) {
+    const auto acquire_t0 = clock::now();
+    acquire = vkAcquireNextImageKHR(impl_->device, impl_->swapchain, UINT64_MAX,
+                                    impl_->image_available[frame], VK_NULL_HANDLE, &image_index);
+    impl_->last_acquire_wait_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - acquire_t0).count();
+    impl_->note_fullscreen_exclusive_lost("vkAcquireNextImageKHR", acquire);
+    impl_->note_wsi_result("acquire", acquire, &impl_->have_logged_acquire, &impl_->logged_acquire);
+    const WsiRecoverAction acquire_action = classify_wsi_result(acquire);
+    if (acquire_action == WsiRecoverAction::RecreateSwapchain && acquire == VK_SUBOPTIMAL_KHR) {
+      recreate_swapchain_after_present = true;
+    } else if (acquire_action != WsiRecoverAction::None) {
+      impl_->note_draw_stopped("acquire");
+      return apply_wsi_action(acquire_action);
+    }
+  } else {
+    impl_->last_acquire_wait_us = 0;
   }
 
-  // From here on an image is acquired and image_available[frame] is signalled.
-  // Any failure return must go through this: it consumes the semaphore with a
-  // command-buffer-less submit and, when vkResetFences already ran, passes the
-  // fence so it is signalled again (the next vkWaitForFences is UINT64_MAX and
-  // would hang the UI forever on an unsignalled fence). The acquired image can
-  // never be presented without a render, so the swapchain is rebuilt to
-  // release it; otherwise repeated failures exhaust the images and acquire
-  // blocks.
+  // From here on an image is acquired and image_available[frame] is signalled
+  // (live path). Export offscreen never acquires; drain must not wait on that
+  // semaphore. Any failure return must go through this: it consumes the
+  // semaphore with a command-buffer-less submit and, when vkResetFences already
+  // ran, passes the fence so it is signalled again (the next vkWaitForFences is
+  // UINT64_MAX and would hang the UI forever on an unsignalled fence). The
+  // acquired image can never be presented without a render, so the swapchain is
+  // rebuilt to release it; otherwise repeated failures exhaust the images and
+  // acquire blocks.
   auto abort_after_acquire = [&](bool fence_was_reset) -> bool {
     VkPipelineStageFlags drain_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkSubmitInfo drain{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    drain.waitSemaphoreCount = 1;
-    drain.pWaitSemaphores = &impl_->image_available[frame];
-    drain.pWaitDstStageMask = &drain_stage;
+    if (!export_offscreen) {
+      drain.waitSemaphoreCount = 1;
+      drain.pWaitSemaphores = &impl_->image_available[frame];
+      drain.pWaitDstStageMask = &drain_stage;
+    }
     const VkResult drain_r = vkQueueSubmit(impl_->graphics_queue, 1, &drain,
                                            fence_was_reset ? impl_->in_flight[frame]
                                                            : VK_NULL_HANDLE);
     if (!check_device_result(drain_r)) {
       return false;
     }
-    // recover_swapchain() idles the device, which also advances the completed
-    // watermark. The drain submit never signals render_finished.
     vkQueueWaitIdle(impl_->graphics_queue);
-    (void)recover_swapchain();
+    if (!export_offscreen) {
+      (void)recover_swapchain();
+    }
     return false;
   };
 
-  // Do not reuse a swapchain image that is still referenced by an in-flight submit.
-  if (image_index < impl_->images_in_flight.size() &&
-      impl_->images_in_flight[image_index] != VK_NULL_HANDLE) {
-    if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->images_in_flight[image_index],
-                                            VK_TRUE, UINT64_MAX))) {
+  if (!export_offscreen) {
+    // Do not reuse a swapchain image that is still referenced by an in-flight submit.
+    if (image_index < impl_->images_in_flight.size() &&
+        impl_->images_in_flight[image_index] != VK_NULL_HANDLE) {
+      if (!check_device_result(vkWaitForFences(impl_->device, 1, &impl_->images_in_flight[image_index],
+                                              VK_TRUE, UINT64_MAX))) {
+        return abort_after_acquire(false);
+      }
+    }
+    if (!render_finished_index_valid(image_index, impl_->render_finished.size())) {
+      impl_->note_draw_stopped("render-finished-missing");
       return abort_after_acquire(false);
     }
-  }
-  if (!render_finished_index_valid(image_index, impl_->render_finished.size())) {
-    impl_->note_draw_stopped("render-finished-missing");
-    return abort_after_acquire(false);
   }
 
   auto extra_vert_count = [](const DrawBatch* const* xs, size_t n) -> size_t {
@@ -6075,11 +6601,12 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   };
   const size_t early_extra_n = extras != nullptr ? extras->early_extra_n : 0;
   const size_t mid_prefix_n = extras != nullptr ? extras->mid_prefix_n : 0;
-  const size_t carve_prefix_n = extras != nullptr ? extras->carve_prefix_n : 0;
+  size_t carve_prefix_n = extras != nullptr ? extras->carve_prefix_n : 0;
   const DrawBatch* const* early_extra = extras != nullptr ? extras->early_extra : nullptr;
   const DrawBatch* const* mid_prefix = extras != nullptr ? extras->mid_prefix : nullptr;
-  const DrawBatch* const* carve_prefix = extras != nullptr ? extras->carve_prefix : nullptr;
-  const bool extras_in_place = extras != nullptr && extras->extras_in_mapped_vb;
+  const DrawBatch* const* carve_prefix_in = extras != nullptr ? extras->carve_prefix : nullptr;
+  const DrawBatch* const* carve_prefix = carve_prefix_in;
+  bool extras_in_place = extras != nullptr && extras->extras_in_mapped_vb;
   const uint32_t mapped_extra_low = extras != nullptr ? extras->mapped_extra_low : 0;
   const size_t early_verts = (early_additive ? early_additive->vertex_count() : 0) +
                              extra_vert_count(early_extra, early_extra_n);
@@ -6090,8 +6617,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                              (scene_carve ? scene_carve->vertex_count() : 0);
   const size_t post_verts = post_overlay ? post_overlay->vertex_count() : 0;
   const size_t post2_verts = post_overlay2 ? post_overlay2->vertex_count() : 0;
+  const size_t hud_verts = playfield_hud ? playfield_hud->vertex_count() : 0;
   const size_t total_verts = batch.vertex_count() + early_verts + mid_verts + additive_verts +
-                            carve_verts + post_verts + post2_verts;
+                            carve_verts + hud_verts + post_verts + post2_verts;
   const size_t ring_bytes = impl_->persistent_ring_bytes > 0 ? impl_->persistent_ring_bytes
                                                              : kPersistentVertexRingBytes;
   const size_t packed_bytes = total_verts * sizeof(DrawVertex);
@@ -6127,7 +6655,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       extra_index_count(mid_prefix, mid_prefix_n) +
       (mid_overlay ? mid_overlay->index_count() : 0) +
       (additive ? additive->index_count() : 0) + extra_index_count(carve_prefix, carve_prefix_n) +
-      (scene_carve ? scene_carve->index_count() : 0) + (post_overlay ? post_overlay->index_count() : 0) +
+      (scene_carve ? scene_carve->index_count() : 0) +
+      (playfield_hud ? playfield_hud->index_count() : 0) +
+      (post_overlay ? post_overlay->index_count() : 0) +
       (post_overlay2 ? post_overlay2->index_count() : 0);
   const size_t packed_idx_bytes = packed_idx * sizeof(uint32_t);
   auto& grow_ib = impl_->frame_indices[frame];
@@ -6207,6 +6737,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   count_head(mid_overlay, false);
   count_head(additive, false);
   count_head(scene_carve, false);
+  count_head(playfield_hud, false);
   count_head(post_overlay, false);
   count_head(post_overlay2, false);
   for (size_t i = 0; early_extra != nullptr && i < early_extra_n; ++i) {
@@ -6226,11 +6757,25 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       extras_layout_ok = false;
     }
   }
-  const HeadPlacement vert_place = place_cpu_heads(head_verts, ext_v_low, ext_v_hi, vb_cap_verts);
+  HeadPlacement vert_place = place_cpu_heads(head_verts, ext_v_low, ext_v_hi, vb_cap_verts);
   // Without a mapped IB the plan functions skip index writes entirely.
-  const HeadPlacement idx_place =
+  HeadPlacement idx_place =
       ib.mapped != nullptr ? place_cpu_heads(head_idx, ext_i_low, ext_i_hi, ib_cap_idx)
                            : HeadPlacement{true, 0};
+  if (extras_in_place && (!extras_layout_ok || !vert_place.fits || !idx_place.fits)) {
+    // Split extras lost this frame; notes + uncapped hit VFX still pack at 0.
+    extras_in_place = false;
+    extras_layout_ok = true;
+    carve_prefix = nullptr;
+    carve_prefix_n = 0;
+    ext_v_low = UINT64_MAX;
+    ext_v_hi = 0;
+    ext_i_low = UINT64_MAX;
+    ext_i_hi = 0;
+    vert_place = place_cpu_heads(head_verts, ext_v_low, ext_v_hi, vb_cap_verts);
+    idx_place = ib.mapped != nullptr ? place_cpu_heads(head_idx, ext_i_low, ext_i_hi, ib_cap_idx)
+                                     : HeadPlacement{true, 0};
+  }
   if (!extras_layout_ok || !vert_place.fits || !idx_place.fits) {
     // Nothing written, fence not reset yet: still signalled.
     impl_->note_draw_stopped("vb-head-overflow");
@@ -6251,11 +6796,13 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   std::vector<GpuDrawBucket>& carve_gpu = scratch.carve;
   std::vector<GpuDrawBucket>& post_gpu = scratch.post;
   std::vector<GpuDrawBucket>& post2_gpu = scratch.post2;
+  std::vector<GpuDrawBucket>& hud_gpu = scratch.hud;
   scene_gpu.clear();
   early_gpu.clear();
   mid_gpu.clear();
   additive_gpu.clear();
   carve_gpu.clear();
+  hud_gpu.clear();
   post_gpu.clear();
   post2_gpu.clear();
   {
@@ -6275,6 +6822,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                  false, dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_ordered_draws(carve_gpu, scene_carve, carve_prefix, carve_prefix_n, cursor, dst,
                                    extras_in_place, dst, idx_dst, &idx_cursor);
+    cursor = vb_plan_layer_draws(hud_gpu, playfield_hud, true, true, nullptr, 0, cursor, dst, false,
+                                 dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_layer_draws(post_gpu, post_overlay, true, true, nullptr, 0, cursor, dst,
                                  false, dst, idx_dst, &idx_cursor, scratch);
     cursor = vb_plan_layer_draws(post2_gpu, post_overlay2, true, true, nullptr, 0, cursor, dst,
@@ -6330,6 +6879,7 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     coalesce_contiguous_gpu_buckets(mid_gpu);
     coalesce_contiguous_gpu_buckets(additive_gpu);
     coalesce_contiguous_gpu_buckets(carve_gpu);
+    coalesce_contiguous_gpu_buckets(hud_gpu);
     coalesce_contiguous_gpu_buckets(post_gpu);
     coalesce_contiguous_gpu_buckets(post2_gpu);
     const VkDeviceMemory flush_mem = vb.uses_staging ? vb.staging_memory : vb.memory;
@@ -6402,10 +6952,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   float mvp[16];
   ortho_rh(screen.l, screen.r, screen.b, screen.t, -1.0f, 1.0f, mvp);
   VkRect2D glow_scissor{};
-  glow_scissor.extent = impl_->swapchain_extent;
+  glow_scissor.extent = draw_extent;
   if (additive_scissor != nullptr && additive_scissor->valid()) {
-    const int fb_w = static_cast<int>(impl_->swapchain_extent.width);
-    const int fb_h = static_cast<int>(impl_->swapchain_extent.height);
+    const int fb_w = static_cast<int>(draw_extent.width);
+    const int fb_h = static_cast<int>(draw_extent.height);
     const int x0 = std::clamp(additive_scissor->x, 0, fb_w);
     const int y0 = std::clamp(additive_scissor->y, 0, fb_h);
     const int x1 = std::clamp(additive_scissor->x + additive_scissor->w, 0, fb_w);
@@ -6415,18 +6965,50 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     glow_scissor.extent.width = static_cast<uint32_t>(std::max(0, x1 - x0));
     glow_scissor.extent.height = static_cast<uint32_t>(std::max(0, y1 - y0));
   }
-  if (impl_->bloom_ready && early_verts > 0) {
+  const bool use_export_hdr = export_offscreen && impl_->export_hdr_ready;
+  const bool use_live_hdr = !export_offscreen && impl_->bloom_ready;
+  const VkExtent2D extract_extent = use_export_hdr ? impl_->export_extent : impl_->bloom_extent;
+  const VkFramebuffer early_extract_fb =
+      use_export_hdr ? impl_->export_bloom_extract_fb : impl_->bloom_extract_fb;
+  const VkDescriptorSet early_desc =
+      use_export_hdr ? impl_->export_bloom_src_descriptor : impl_->bloom_src_descriptor;
+  const VkDescriptorSet late_desc =
+      use_export_hdr ? impl_->export_hdr_late_descriptor : impl_->hdr_late_descriptor;
+  const VkFramebuffer late_extract_fb =
+      use_export_hdr ? impl_->export_hdr_late_fb : impl_->hdr_late_fb;
+  const VkImage carve_image = use_export_hdr ? impl_->export_hdr_late_image : impl_->hdr_late_image;
+  const VkFramebuffer carve_extract_fb = late_extract_fb;
+  const VkDescriptorSet carve_desc = late_desc;
+  if ((use_export_hdr || use_live_hdr) && early_verts > 0) {
     impl_->record_glow_extract_gpu(cmd, early_gpu.data(), early_gpu.size(),
                                   static_cast<uint32_t>(early_verts), vb.buffer, mvp, glow_scissor,
-                                  impl_->bloom_extract_fb, false, ib.buffer);
+                                  early_extract_fb, false, ib.buffer, extract_extent);
   }
   gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-  if (impl_->bloom_ready && impl_->hdr_late_ready && additive_verts > 0) {
-    impl_->record_glow_extract_gpu(cmd, additive_gpu.data(), additive_gpu.size(),
-                                  static_cast<uint32_t>(additive_verts), vb.buffer, mvp,
-                                  glow_scissor, impl_->hdr_late_fb, false, ib.buffer);
-  }
   gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+  VkImage color_img = VK_NULL_HANDLE;
+  VkFramebuffer main_fb = VK_NULL_HANDLE;
+  VkFramebuffer bloom_fb = VK_NULL_HANDLE;
+  if (export_offscreen) {
+    color_img = impl_->export_image;
+    main_fb = impl_->export_fb;
+    bloom_fb = impl_->export_bloom_fb;
+  } else {
+    if (image_index < impl_->swapchain_images.size()) {
+      color_img = impl_->swapchain_images[image_index];
+    }
+    if (image_index < impl_->framebuffers.size()) {
+      main_fb = impl_->framebuffers[image_index];
+    }
+    if (image_index < impl_->bloom_framebuffers.size()) {
+      bloom_fb = impl_->bloom_framebuffers[image_index];
+    }
+  }
+  if (main_fb == VK_NULL_HANDLE || color_img == VK_NULL_HANDLE) {
+    impl_->note_draw_stopped("color-target-missing");
+    return abort_after_acquire(true);
+  }
 
   std::array<VkClearValue, 2> clears{};
   clears[0].color = {{clear_r, clear_g, clear_b, 1.0f}};
@@ -6434,8 +7016,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
 
   VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
   rp.renderPass = impl_->render_pass;
-  rp.framebuffer = impl_->framebuffers[image_index];
-  rp.renderArea.extent = impl_->swapchain_extent;
+  rp.framebuffer = main_fb;
+  rp.renderArea.extent = draw_extent;
   rp.clearValueCount = static_cast<uint32_t>(clears.size());
   rp.pClearValues = clears.data();
   vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
@@ -6445,14 +7027,14 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   // (VK_KHR_maintenance1 / Vulkan 1.1). Cull is disabled, so winding stays fine.
   VkViewport viewport{};
   viewport.x = 0.0f;
-  viewport.y = static_cast<float>(impl_->swapchain_extent.height);
-  viewport.width = static_cast<float>(impl_->swapchain_extent.width);
-  viewport.height = -static_cast<float>(impl_->swapchain_extent.height);
+  viewport.y = static_cast<float>(draw_extent.height);
+  viewport.width = static_cast<float>(draw_extent.width);
+  viewport.height = -static_cast<float>(draw_extent.height);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &viewport);
   VkRect2D scissor{};
-  scissor.extent = impl_->swapchain_extent;
+  scissor.extent = draw_extent;
   vkCmdSetScissor(cmd, 0, 1, &scissor);
 
   vkCmdPushConstants(cmd, impl_->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mvp), mvp);
@@ -6543,8 +7125,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   auto apply_additive_scissor = [&]() {
     VkRect2D add_scissor = scissor;
     if (additive_scissor != nullptr && additive_scissor->valid()) {
-      const int fb_w = static_cast<int>(impl_->swapchain_extent.width);
-      const int fb_h = static_cast<int>(impl_->swapchain_extent.height);
+      const int fb_w = static_cast<int>(draw_extent.width);
+      const int fb_h = static_cast<int>(draw_extent.height);
       const int x0 = std::clamp(additive_scissor->x, 0, fb_w);
       const int y0 = std::clamp(additive_scissor->y, 0, fb_h);
       const int x1 = std::clamp(additive_scissor->x + additive_scissor->w, 0, fb_w);
@@ -6563,8 +7145,8 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       return;
     }
     VkViewport hdr_vp{};
-    hdr_vp.width = static_cast<float>(impl_->swapchain_extent.width);
-    hdr_vp.height = static_cast<float>(impl_->swapchain_extent.height);
+    hdr_vp.width = static_cast<float>(draw_extent.width);
+    hdr_vp.height = static_cast<float>(draw_extent.height);
     hdr_vp.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &hdr_vp);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -6582,36 +7164,49 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                                                 : impl_->pipeline,
                     mid_gpu);
   }
-  const bool hdr_early = impl_->bloom_ready && impl_->pipeline_hdr_composite != VK_NULL_HANDLE &&
-                         impl_->bloom_src_descriptor != VK_NULL_HANDLE && early_verts > 0;
+  const bool hdr_early = (use_export_hdr || use_live_hdr) &&
+                         impl_->pipeline_hdr_composite != VK_NULL_HANDLE &&
+                         early_desc != VK_NULL_HANDLE && early_verts > 0;
   if (hdr_early) {
-    composite_hdr(impl_->bloom_src_descriptor, impl_->pipeline_hdr_composite);
+    composite_hdr(early_desc, impl_->pipeline_hdr_composite);
   } else if (early_verts > 0 && impl_->pipeline_additive) {
     apply_additive_scissor();
     draw_gpu_buckets(impl_->pipeline_additive, early_gpu, impl_->pipeline_syuriken_add,
                      impl_->pipeline_additive_no_clip);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
-  const bool hdr_late = impl_->bloom_ready && impl_->hdr_late_ready &&
-                        impl_->pipeline_hdr_composite != VK_NULL_HANDLE &&
-                        impl_->hdr_late_descriptor != VK_NULL_HANDLE && additive_verts > 0;
-  if (hdr_late) {
-    composite_hdr(impl_->hdr_late_descriptor, impl_->pipeline_hdr_composite);
-  } else if (additive_verts > 0 && impl_->pipeline_additive) {
+  const bool scene_carve_ok = carve_verts > 0 && impl_->hdr_can_scene_carve &&
+                              (use_export_hdr || use_live_hdr) && carve_image != VK_NULL_HANDLE &&
+                              carve_extract_fb != VK_NULL_HANDLE && carve_desc != VK_NULL_HANDLE &&
+                              color_img != VK_NULL_HANDLE && bloom_fb != VK_NULL_HANDLE;
+  // Hit VFX are not in the split-particle pool. dest+signed Add on the carved
+  // HDR dest can zero the judgeline, and a leftover hdr_late sample stays
+  // black after the split is deleted. Stamp the bomb quads onto the swapchain
+  // in the last color pass instead (main UNORM, or bloom_pass after replace).
+  // Official world stack: SplitEffect 20, Bomb 30, TimingEffect 99; Combo is
+  // ScreenSpaceOverlay after cameras. Fallback particles therefore sit before
+  // bombs, and HUD after bombs.
+  const bool hits_in_tail = scene_carve_ok && additive_verts > 0 &&
+                            impl_->pipeline_additive_1x != VK_NULL_HANDLE;
+  if (!scene_carve_ok && carve_verts > 0 && impl_->pipeline_additive) {
+    apply_additive_scissor();
+    draw_gpu_buckets(impl_->pipeline_additive, carve_gpu, impl_->pipeline_syuriken_add,
+                     impl_->pipeline_additive_no_clip);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+  }
+  if (!hits_in_tail && additive_verts > 0 && impl_->pipeline_additive) {
     apply_additive_scissor();
     draw_gpu_buckets(impl_->pipeline_additive, additive_gpu, VK_NULL_HANDLE,
                      impl_->pipeline_additive_no_clip);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
-  const bool scene_carve_ok = carve_verts > 0 && impl_->hdr_can_scene_carve &&
-                              impl_->hdr_late_image != VK_NULL_HANDLE &&
-                              image_index < impl_->swapchain_images.size() &&
-                              image_index < impl_->bloom_framebuffers.size() &&
-                              impl_->bloom_framebuffers[image_index] != VK_NULL_HANDLE;
-  const bool posts_after_carve = scene_carve_ok && impl_->pipeline_alpha_1x != VK_NULL_HANDLE;
-  // Modal / top overlays stay after the carved HDR replace so bats do not
-  // dest-blend editor chrome. Without carve they stay in this pass.
-  if (!posts_after_carve) {
+  const bool overlays_after_carve = scene_carve_ok && impl_->pipeline_alpha_1x != VK_NULL_HANDLE;
+  // Timing/combo HUD and editor chrome stay after carve REPLACE so dest+signed
+  // Add cannot cover them. Without carve they stay in this pass, after bombs.
+  if (!overlays_after_carve) {
+    if (hud_verts > 0) {
+      draw_gpu_buckets(impl_->pipeline, hud_gpu);
+    }
     if (post_verts > 0) {
       draw_gpu_buckets(impl_->pipeline, post_gpu);
     }
@@ -6619,25 +7214,16 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       draw_gpu_buckets(impl_->pipeline, post2_gpu);
     }
   }
-  // ParticleAdd sort≥1 lives in scene_carve. If HDR blit/carve cannot run,
-  // those verts used to vanish (no else). Draw them SrcAlpha+One here so
-  // Additive Stretch/Billboard still appear on UNORM.
-  if (!scene_carve_ok && carve_verts > 0 && impl_->pipeline_additive) {
-    apply_additive_scissor();
-    draw_gpu_buckets(impl_->pipeline_additive, carve_gpu, impl_->pipeline_syuriken_add,
-                     impl_->pipeline_additive_no_clip);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-  }
 
   vkCmdEndRenderPass(cmd);
   gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
   if (scene_carve_ok) {
-    image_barrier(cmd, impl_->swapchain_images[image_index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    image_barrier(cmd, color_img, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                   VK_PIPELINE_STAGE_TRANSFER_BIT);
-    image_barrier(cmd, impl_->hdr_late_image, VK_IMAGE_LAYOUT_UNDEFINED,
+    image_barrier(cmd, carve_image, VK_IMAGE_LAYOUT_UNDEFINED,
                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
                   VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkImageBlit blit{};
@@ -6645,45 +7231,58 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     blit.srcSubresource.layerCount = 1;
     blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.dstSubresource.layerCount = 1;
-    blit.srcOffsets[1].x = static_cast<int32_t>(impl_->swapchain_extent.width);
-    blit.srcOffsets[1].y = static_cast<int32_t>(impl_->swapchain_extent.height);
+    blit.srcOffsets[1].x = static_cast<int32_t>(draw_extent.width);
+    blit.srcOffsets[1].y = static_cast<int32_t>(draw_extent.height);
     blit.srcOffsets[1].z = 1;
-    blit.dstOffsets[1].x = static_cast<int32_t>(impl_->bloom_extent.width);
-    blit.dstOffsets[1].y = static_cast<int32_t>(impl_->bloom_extent.height);
+    blit.dstOffsets[1].x = static_cast<int32_t>(extract_extent.width);
+    blit.dstOffsets[1].y = static_cast<int32_t>(extract_extent.height);
     blit.dstOffsets[1].z = 1;
-    vkCmdBlitImage(cmd, impl_->swapchain_images[image_index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   impl_->hdr_late_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                   VK_FILTER_LINEAR);
-    image_barrier(cmd, impl_->hdr_late_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    vkCmdBlitImage(cmd, color_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, carve_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    image_barrier(cmd, carve_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                   VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     impl_->record_glow_extract_gpu(cmd, carve_gpu.data(), carve_gpu.size(),
                                   static_cast<uint32_t>(carve_verts), vb.buffer, mvp, glow_scissor,
-                                  impl_->hdr_late_fb, true, ib.buffer);
-    image_barrier(cmd, impl_->swapchain_images[image_index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  carve_extract_fb, true, ib.buffer, extract_extent);
+    image_barrier(cmd, color_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     VkRenderPassBeginInfo tail{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     tail.renderPass = impl_->bloom_pass;
-    tail.framebuffer = impl_->bloom_framebuffers[image_index];
-    tail.renderArea.extent = impl_->swapchain_extent;
+    tail.framebuffer = bloom_fb;
+    tail.renderArea.extent = draw_extent;
     vkCmdBeginRenderPass(cmd, &tail, VK_SUBPASS_CONTENTS_INLINE);
     ++impl_->last_render_passes;
     VkViewport tail_vp{};
-    tail_vp.width = static_cast<float>(impl_->swapchain_extent.width);
-    tail_vp.height = static_cast<float>(impl_->swapchain_extent.height);
+    tail_vp.width = static_cast<float>(draw_extent.width);
+    tail_vp.height = static_cast<float>(draw_extent.height);
     tail_vp.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &tail_vp);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    composite_hdr(impl_->hdr_late_descriptor, impl_->pipeline_hdr_replace);
-    if (posts_after_carve) {
+    composite_hdr(carve_desc, impl_->pipeline_hdr_replace);
+    if (hits_in_tail || overlays_after_carve) {
       {
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &vb.buffer, &offset);
         ++impl_->last_vb_binds;
+        if (ib.buffer != VK_NULL_HANDLE) {
+          vkCmdBindIndexBuffer(cmd, ib.buffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+      }
+      vkCmdSetViewport(cmd, 0, 1, &viewport);
+    }
+    if (hits_in_tail) {
+      apply_additive_scissor();
+      draw_gpu_buckets(impl_->pipeline_additive_1x, additive_gpu, VK_NULL_HANDLE, VK_NULL_HANDLE);
+      vkCmdSetScissor(cmd, 0, 1, &scissor);
+    }
+    if (overlays_after_carve) {
+      if (hud_verts > 0) {
+        draw_gpu_buckets(impl_->pipeline_alpha_1x, hud_gpu);
       }
       if (post_verts > 0) {
         draw_gpu_buckets(impl_->pipeline_alpha_1x, post_gpu);
@@ -6702,21 +7301,27 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   impl_->last_vk_draws += vk_draws;
   WDS_PERF_COUNT("vk.draws", vk_draws);
 
+  if (export_offscreen) {
+    impl_->queue_export_copy(cmd, frame);
+  }
+
   vkEndCommandBuffer(cmd);
-  impl_->last_bloom_pass = (hdr_early || hdr_late) ? 1 : 0;
+  impl_->last_bloom_pass = hdr_early ? 1 : 0;
   impl_->last_carve_pass = scene_carve_ok ? 1 : 0;
   impl_->last_draw_record_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - record_t0).count();
 
   VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  submit.waitSemaphoreCount = 1;
-  submit.pWaitSemaphores = &impl_->image_available[frame];
-  submit.pWaitDstStageMask = &wait_stage;
+  if (!export_offscreen) {
+    submit.waitSemaphoreCount = 1;
+    submit.pWaitSemaphores = &impl_->image_available[frame];
+    submit.pWaitDstStageMask = &wait_stage;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &impl_->render_finished[image_index];
+  }
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &cmd;
-  submit.signalSemaphoreCount = 1;
-  submit.pSignalSemaphores = &impl_->render_finished[image_index];
   const auto submit_t0 = clock::now();
   const VkResult submit_r =
       vkQueueSubmit(impl_->graphics_queue, 1, &submit, impl_->in_flight[frame]);
@@ -6729,7 +7334,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     // Fence was reset but not submitted — signal it via drain so the next frame wait returns.
     return abort_after_acquire(true);
   }
-  impl_->images_in_flight[image_index] = impl_->in_flight[frame];
+  if (!export_offscreen && image_index < impl_->images_in_flight.size()) {
+    impl_->images_in_flight[image_index] = impl_->in_flight[frame];
+  }
   // Real frame submitted: remember which submit this slot's fence now guards.
   ++impl_->submit_seq;
   impl_->slot_submit_seq[frame] = impl_->submit_seq;
@@ -6738,6 +7345,19 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   }
   impl_->last_gpu_submit_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - submit_t0).count();
+
+  if (export_offscreen) {
+    impl_->last_present_us = 0;
+    impl_->draw_stop_reason = nullptr;
+    impl_->last_presented_image = UINT32_MAX;
+    impl_->last_present_ok = true;
+    (void)drawn_verts;
+    (void)skipped_buckets;
+    (void)skipped_verts;
+    const uint32_t fif = static_cast<uint32_t>(std::max(1, impl_->frames_in_flight));
+    impl_->frame_index = (frame + 1) % fif;
+    return true;
+  }
 
   VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
   present.waitSemaphoreCount = 1;
@@ -6946,6 +7566,148 @@ bool VulkanRenderer::readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& ou
 
   out_w = static_cast<int>(width);
   out_h = static_cast<int>(height);
+  return true;
+}
+
+void VulkanRenderer::sync_reported_size() noexcept {
+  if (impl_ == nullptr) return;
+  if (export_active_ && impl_->export_extent.width > 0 && impl_->export_extent.height > 0) {
+    width_ = static_cast<int>(impl_->export_extent.width);
+    height_ = static_cast<int>(impl_->export_extent.height);
+  } else {
+    width_ = static_cast<int>(impl_->swapchain_extent.width);
+    height_ = static_cast<int>(impl_->swapchain_extent.height);
+  }
+}
+
+bool VulkanRenderer::begin_export_capture(int width, int height) {
+  if (impl_ == nullptr || !ready_ || impl_->device == VK_NULL_HANDLE) {
+    return false;
+  }
+  const int w = width & ~1;
+  const int h = height & ~1;
+  if (w < 16 || h < 16) {
+    return false;
+  }
+  VkPhysicalDeviceProperties props{};
+  vkGetPhysicalDeviceProperties(impl_->physical, &props);
+  if (static_cast<uint32_t>(w) > props.limits.maxFramebufferWidth ||
+      static_cast<uint32_t>(h) > props.limits.maxFramebufferHeight) {
+    return false;
+  }
+  (void)impl_->device_wait_idle_result();
+  impl_->export_extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+  if (!impl_->create_export_target()) {
+    impl_->export_extent = {};
+    return false;
+  }
+  if (!impl_->create_export_staging(impl_->export_extent.width, impl_->export_extent.height)) {
+    impl_->destroy_export_target();
+    impl_->export_extent = {};
+    return false;
+  }
+  impl_->export_active = true;
+  export_active_ = true;
+  sync_reported_size();
+  return true;
+}
+
+void VulkanRenderer::end_export_capture() {
+  if (impl_ == nullptr) {
+    export_active_ = false;
+    return;
+  }
+  (void)impl_->device_wait_idle_result();
+  impl_->export_active = false;
+  export_active_ = false;
+  impl_->destroy_export_staging();
+  impl_->destroy_export_target();
+  impl_->export_extent = {};
+  sync_reported_size();
+}
+
+bool VulkanRenderer::export_capture_active() const noexcept { return export_active_; }
+
+namespace {
+
+bool pack_mapped_bgra(const void* mapped, uint32_t width, uint32_t height, VkDeviceSize row_pitch,
+                      VkFormat format, std::vector<std::uint8_t>& out, int& out_w, int& out_h) {
+  if (mapped == nullptr || width == 0 || height == 0) {
+    return false;
+  }
+  const bool src_bgra = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
+                        format == VK_FORMAT_B8G8R8A8_UINT;
+  const bool src_rgba = format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
+  out.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+  const auto* src = static_cast<const std::uint8_t*>(mapped);
+  for (uint32_t y = 0; y < height; ++y) {
+    const std::uint8_t* row = src + static_cast<size_t>(y) * static_cast<size_t>(row_pitch);
+    std::uint8_t* dst = out.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 4u;
+    if (src_bgra) {
+      std::memcpy(dst, row, static_cast<size_t>(width) * 4u);
+    } else {
+      for (uint32_t x = 0; x < width; ++x) {
+        const std::uint8_t* p = row + static_cast<size_t>(x) * 4u;
+        if (src_rgba) {
+          dst[0] = p[2];
+          dst[1] = p[1];
+          dst[2] = p[0];
+          dst[3] = p[3];
+        } else {
+          dst[0] = p[0];
+          dst[1] = p[1];
+          dst[2] = p[2];
+          dst[3] = p[3];
+        }
+        dst += 4;
+      }
+    }
+  }
+  out_w = static_cast<int>(width);
+  out_h = static_cast<int>(height);
+  return true;
+}
+
+}  // namespace
+
+bool VulkanRenderer::take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h) {
+  out_bgra.clear();
+  out_w = 0;
+  out_h = 0;
+  if (impl_ == nullptr || !impl_->export_active) {
+    return false;
+  }
+  if (impl_->export_pending < 2) {
+    return false;
+  }
+  if (!impl_->wait_export_slot(impl_->export_read)) {
+    return false;
+  }
+  const auto& slot = impl_->export_ring[static_cast<size_t>(impl_->export_read)];
+  if (!pack_mapped_bgra(slot.mapped, slot.width, slot.height, slot.row_pitch, impl_->swapchain_format,
+                        out_bgra, out_w, out_h)) {
+    return false;
+  }
+  impl_->export_read = (impl_->export_read + 1) % static_cast<int>(impl_->export_ring.size());
+  return true;
+}
+
+bool VulkanRenderer::drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h) {
+  out_bgra.clear();
+  out_w = 0;
+  out_h = 0;
+  if (impl_ == nullptr || impl_->export_pending <= 0) {
+    return false;
+  }
+  if (!impl_->wait_export_slot(impl_->export_read)) {
+    return false;
+  }
+  const auto& slot = impl_->export_ring[static_cast<size_t>(impl_->export_read)];
+  if (!pack_mapped_bgra(slot.mapped, slot.width, slot.height, slot.row_pitch, impl_->swapchain_format,
+                        out_bgra, out_w, out_h)) {
+    return false;
+  }
+  impl_->export_read = (impl_->export_read + 1) % static_cast<int>(impl_->export_ring.size());
   return true;
 }
 

@@ -1110,15 +1110,19 @@ void UiManager::update(float delta_seconds, const std::vector<wds::interaction::
   if (auto* edit = edit_panel()) {
     // Edit visible window for preview lead-in time mapping (not CHART_DELAY_MS).
     session_->engine().set_preview_lead_in_visible_ms(edit->viewport().visible_ms());
-    double sync_ms = session_->engine().timeline_us() / 1000.0;
-    if (chart_preview_ != nullptr &&
-        session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
-      // Match the preview draw clock (transport + one display-frame lead).
-      const int64_t lead = chart_preview_->last_visual_lead_us();
-      sync_ms += static_cast<double>(lead > 0 ? lead : chart_preview_->display_frame_lead_us()) /
-                 1000.0;
+    const bool export_clock =
+        chart_preview_ != nullptr && chart_preview_->video_export_clock();
+    if (!export_clock) {
+      double sync_ms = session_->engine().timeline_us() / 1000.0;
+      if (chart_preview_ != nullptr &&
+          session_->engine().playback_state() == wds::common::PlaybackState::Playing) {
+        // Match the preview draw clock (transport + one display-frame lead).
+        const int64_t lead = chart_preview_->last_visual_lead_us();
+        sync_ms += static_cast<double>(lead > 0 ? lead : chart_preview_->display_frame_lead_us()) /
+                   1000.0;
+      }
+      edit->sync_to_timeline_ms(sync_ms);
     }
-    edit->sync_to_timeline_ms(sync_ms);
     if (chart_preview_ != nullptr) {
       edit->set_waveform(&chart_preview_->waveform());
       edit->set_spectrogram(chart_preview_->spectrogram_texture());

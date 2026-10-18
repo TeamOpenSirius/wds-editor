@@ -1,0 +1,46 @@
+{
+  "note": "Pinned ffmpeg download specs. Runtime copy lives in ffmpeg_download_spec().",
+  "macos-arm64": {
+    "filename": "ffmpeg-darwin-arm64.gz",
+    "archive": "gz",
+    "sha256": "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa",
+    "urls": [
+      "https://cdn.npmmirror.com/binaries/ffmpeg-static/ffmpeg-darwin-arm64.gz",
+      "https://ghfast.top/https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz",
+      "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz"
+    ]
+  },
+  "win-x86_64": {
+    "filename": "ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
+    "archive": "zip",
+    "sha256": "0c6dc759eb1c70804ca04e11d83c583a6b03ae0630474f862e97400c715c6376",
+    "urls": [
+      "https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
+      "https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
+      "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"
+    ]
+  },
+  "linux-x86_64": {
+    "filename": "ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
+    "archive": "tar.xz",
+    "sha256": "759149752aab56335d3234f82e118c6f7d441e5b635467ff8bff307729b02e6b",
+    "urls": [
+      "https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
+      "https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
+      "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz"
+    ]
+  },
+  "linux-arm64": {
+    "filename": "ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
+    "archive": "tar.xz",
+    "sha256": "c9c7653babc8ae7191100fc570703fb6a4e7fe11a1696da6e94fbf3b71a5a4a6",
+    "urls": [
+      "https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
+      "https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
+      "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz"
+    ]
+  }
+}

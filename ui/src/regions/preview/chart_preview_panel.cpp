@@ -103,9 +103,10 @@ void pump_lane_geom_rendered(wds::ui::PlaybackPreviewView& preview,
   if (timeline_us == 0 && snap.timeline_ms != 0) {
     timeline_us = wds::common::ms_to_us(snap.timeline_ms).count();
   }
-  // Extra clocks build plate corners only (now_us=-1). Coloring T+2·lead
-  // would leave a warm-up batch for the wrong present time.
-  preview.pump_lane_geom_preload(snap.split_lanes, (!playing || lead_us <= 0) ? timeline_us : -1,
+  // Extra clocks build plate corners only (retain=false). Coloring T+2·lead
+  // would leave a warm-up batch for the wrong present time. Chart T may be
+  // negative; do not use now_us < 0 as that sentinel.
+  preview.pump_lane_geom_preload(snap.split_lanes, (!playing || lead_us <= 0) ? timeline_us : 0,
                                 !playing || lead_us <= 0);
   const int64_t lead_ms = (lead_us + 500) / 1000;
   const int64_t nominal_ms = (nominal_us + 500) / 1000;
@@ -250,7 +251,18 @@ int64_t ChartPreviewPanel::display_frame_lead_us() const noexcept {
   return 1'000'000 / std::max(hz, 1);
 }
 
+void ChartPreviewPanel::set_video_export_clock(bool on) {
+  video_export_clock_ = on;
+  transport_.set_offline_export(on);
+  if (on) {
+    last_present_latency_us_ = 0;
+  }
+}
+
 int64_t ChartPreviewPanel::playing_visual_lead_us() const noexcept {
+  if (video_export_clock_) {
+    return 0;
+  }
   const int64_t nominal = display_frame_lead_us();
   // Last snapshot→present cost (not vkQueuePresent alone), clamped to one
   // vsync: a hitch must not draw a second extra frame ahead. No EMA — the
@@ -261,6 +273,9 @@ int64_t ChartPreviewPanel::playing_visual_lead_us() const noexcept {
 }
 
 int64_t ChartPreviewPanel::pulse_now_us(bool playing, int64_t timeline_us) const noexcept {
+  if (video_export_clock_) {
+    return timeline_us;
+  }
   // hop / darkband-v2 2026-10-17. Pulse analog 43.06 Hz aliases at 60 fps
   // (−0.718 cyc/frame). Present-latency extra on the note lead (0–16.7 ms)
   // flipped the nearest wrap 22/540 frames (Δt std 2.39 ms). BASS decode
@@ -289,10 +304,27 @@ void ChartPreviewPanel::resize_framebuffer(int width, int height) {
   if (!ready_ || width <= 0 || height <= 0) {
     return;
   }
+  if (video_export_clock_) {
+    return;
+  }
   preview_.resize(width, height);
 }
 
+void ChartPreviewPanel::apply_export_geometry(int pixel_w, int pixel_h) {
+  if (pixel_w <= 0 || pixel_h <= 0) return;
+  preview_.geometry().resize(pixel_w, pixel_h);
+  preview_.geometry().set_content_rect(0, 0, pixel_w, pixel_h);
+  preview_.geometry().set_panel_rect(0, 0, pixel_w, pixel_h);
+  content_x_ = 0;
+  content_y_ = 0;
+  content_width_ = pixel_w;
+  content_height_ = pixel_h;
+  panel_fb_w_ = pixel_w;
+  preview_.invalidate_lane_geom_cache();
+}
+
 void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) noexcept {
+  if (video_export_clock_) return;
   const bool changed = x != content_x_ || y != content_y_ || width != content_width_ ||
                        height != content_height_;
   content_x_ = x;
@@ -306,6 +338,7 @@ void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) 
 }
 
 void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) noexcept {
+  if (video_export_clock_) return;
   panel_fb_w_ = std::max(0, width);
   preview_.geometry().set_panel_rect(x, y, width, height);
 }
@@ -416,7 +449,7 @@ void ChartPreviewPanel::request_seek_ms(int64_t time_ms) {
   // draw_split_lanes hashes snapshot lanes (committed T) with pictured now.
   // Pictured collect_splits_at percents differ during fade; color that pair last.
   preview_.pump_lane_geom_preload(engine_.snapshot().split_lanes, now_us + lead_us, true);
-  if (after_seek_prepare_) {
+  if (after_seek_prepare_ && !video_export_clock_) {
     after_seek_prepare_(time_ms);
   }
   last_seek_handle_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -522,7 +555,10 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   t0 = time_tick ? std::chrono::steady_clock::now() : t0;
   // Arm POS SFX on a still-paused stream. Audible start waits until render()
   // has collected the first picture at t0 (audio follows picture).
-  preview_.sync_hit_sfx(engine_.snapshot());
+  // Export bounce mixes SFX offline; do not arm the speaker mixer.
+  if (!video_export_clock_) {
+    preview_.sync_hit_sfx(engine_.snapshot());
+  }
   last_tick_sfx_us_ = lapse(t0);
   pump_buffer_precommit();
 }
@@ -584,7 +620,9 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   last_heard_vs_picture_us_ = last_bass_after_present_us_ - pictured_us;
   // Picture is at t0; start (or retry) audible BGM so a cold first frame does
   // not leave the picture behind a running clock. Seek-while-playing same path.
-  (void)transport_.start_pending_music();
+  if (!video_export_clock_) {
+    (void)transport_.start_pending_music();
+  }
 }
 
 void ChartPreviewPanel::set_lane_count(int lane_count) {

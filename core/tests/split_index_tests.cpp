@@ -363,6 +363,33 @@ void test_long_chart_early_long_split_stays_active_and_candidates_shrink() {
   CHECK(estimate.split_candidate_count >= expected.size());
 }
 
+void test_preview_negative_preroll_split_and_combo() {
+  MusicTiming timing;
+  NotationNote split = make_split(1, 0, 480);
+  NotationNote tap = make_tap(2, 0, 0);
+  const std::vector<NotationNote> notes{split, tap};
+  ChartNoteIndex index;
+  index.rebuild(notes, timing);
+  PreviewSnapshotBuilder builder(PreviewConfig{});
+
+  PreviewSnapshot pad;
+  builder.build_into(pad, notes, timing, {}, index, -2000, PreviewPlaybackState::Playing, 1);
+  CHECK_EQ(static_cast<int32_t>(pad.split_lanes.size()), 0);
+
+  PreviewSnapshot fade;
+  builder.build_into(fade, notes, timing, {}, index, -500, PreviewPlaybackState::Playing, 2);
+  CHECK_EQ(static_cast<int32_t>(fade.split_lanes.size()), 1);
+  CHECK(fade.split_lanes.front().should_show);
+
+  const PreviewComboState combo = combo_from_sorted_hits({-49, 0, 500}, -10);
+  CHECK_EQ(combo.combo, 1);
+  CHECK_EQ(combo.last_judge_ms, static_cast<int64_t>(-49));
+
+  const int32_t early_tick = milliseconds_to_tick(-2000, timing);
+  CHECK(early_tick != std::numeric_limits<int32_t>::min());
+  CHECK(early_tick <= 0);
+}
+
 void test_query_candidates_int64_extrema_and_negative_windows() {
   MusicTiming timing;
   const NotationNote tap0 = make_tap(1, 0, 0);
@@ -549,6 +576,7 @@ int main() {
   test_long_chart_early_long_split_stays_active_and_candidates_shrink();
   test_split_span_stale_via_chart_document();
   test_query_candidates_int64_extrema_and_negative_windows();
+  test_preview_negative_preroll_split_and_combo();
   test_full_and_incremental_snapshot_splits_match();
 
   const int failures = wds::chart_editor::test::failure_count();
