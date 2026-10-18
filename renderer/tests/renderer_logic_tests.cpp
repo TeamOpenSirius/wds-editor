@@ -112,8 +112,13 @@ using wds::renderer::upload_submit_failure_recycles_slot;
 using wds::renderer::wait_pending_uploads_holds_staging_on_failure;
 using wds::renderer::wait_pending_uploads_reaps_after_ok_wait;
 using wds::renderer::kHostVisibleMapChunkBytes;
+using wds::renderer::export_bgra_can_alias_mapped;
+using wds::renderer::host_visible_readback_needs_invalidate;
+using wds::renderer::host_visible_readback_rank;
 using wds::renderer::mapped_flush_range;
 using wds::renderer::mapped_flush_range_valid;
+using wds::renderer::pack_mapped_bgra;
+using wds::renderer::pick_host_visible_readback_type;
 using wds::renderer::texture_upload_defers_vertex_remap;
 using wds::renderer::staging_copy_chunk_bytes;
 using wds::renderer::staging_copy_chunk_count;
@@ -440,6 +445,79 @@ void test_staging_copy_chunks_cap_host_maps() {
   CHECK(texture_upload_defers_vertex_remap());
 }
 
+void test_host_visible_readback_rank_vendor_shapes() {
+  const VkMemoryPropertyFlags bar =
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  const VkMemoryPropertyFlags cached_host =
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  const VkMemoryPropertyFlags cached_host_nc =
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+  const VkMemoryPropertyFlags uma =
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+      VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  const VkMemoryPropertyFlags host_coherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  CHECK(host_visible_readback_rank(cached_host) > host_visible_readback_rank(bar));
+  CHECK(host_visible_readback_rank(cached_host) > host_visible_readback_rank(uma));
+  CHECK(host_visible_readback_rank(uma) > host_visible_readback_rank(bar));
+  CHECK(host_visible_readback_rank(cached_host_nc) > host_visible_readback_rank(bar));
+  CHECK(host_visible_readback_needs_invalidate(cached_host_nc));
+  CHECK(!host_visible_readback_needs_invalidate(cached_host));
+  CHECK(host_visible_readback_rank(0) == 0);
+
+  {
+    const VkMemoryPropertyFlags nvidia[] = {bar, cached_host};
+    CHECK(pick_host_visible_readback_type(nvidia, 2, 0x3u) == 1u);
+  }
+  {
+    const VkMemoryPropertyFlags amd[] = {bar, cached_host_nc, cached_host};
+    CHECK(pick_host_visible_readback_type(amd, 3, 0x7u) == 2u);
+  }
+  {
+    const VkMemoryPropertyFlags intel_igpu[] = {uma};
+    CHECK(pick_host_visible_readback_type(intel_igpu, 1, 0x1u) == 0u);
+  }
+  {
+    const VkMemoryPropertyFlags amd_igpu[] = {host_coherent, uma};
+    CHECK(pick_host_visible_readback_type(amd_igpu, 2, 0x3u) == 1u);
+  }
+}
+
+void test_pack_mapped_bgra_tight_and_padded() {
+  const uint32_t w = 2;
+  const uint32_t h = 2;
+  std::uint8_t tight[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  CHECK(export_bgra_can_alias_mapped(VK_FORMAT_B8G8R8A8_UNORM, 8, w));
+  CHECK(!export_bgra_can_alias_mapped(VK_FORMAT_R8G8B8A8_UNORM, 8, w));
+  CHECK(!export_bgra_can_alias_mapped(VK_FORMAT_B8G8R8A8_UNORM, 16, w));
+  std::vector<std::uint8_t> out;
+  int ow = 0;
+  int oh = 0;
+  CHECK(pack_mapped_bgra(tight, w, h, 8, VK_FORMAT_B8G8R8A8_UNORM, out, ow, oh));
+  CHECK(ow == 2 && oh == 2);
+  CHECK(out.size() == 16);
+  CHECK(out[0] == 1 && out[4] == 5 && out[8] == 9);
+
+  std::uint8_t rgba[16] = {10, 20, 30, 40, 11, 21, 31, 41, 12, 22, 32, 42, 13, 23, 33, 43};
+  CHECK(pack_mapped_bgra(rgba, w, h, 8, VK_FORMAT_R8G8B8A8_UNORM, out, ow, oh));
+  CHECK(out[0] == 30 && out[1] == 20 && out[2] == 10 && out[3] == 40);
+
+  std::uint8_t padded[32] = {};
+  padded[0] = 7;
+  padded[1] = 8;
+  padded[2] = 9;
+  padded[3] = 10;
+  padded[16] = 11;
+  padded[17] = 12;
+  padded[18] = 13;
+  padded[19] = 14;
+  CHECK(pack_mapped_bgra(padded, w, 2, 16, VK_FORMAT_B8G8R8A8_UNORM, out, ow, oh));
+  CHECK(out[0] == 7 && out[4] == 0);
+  CHECK(out[8] == 11 && out[12] == 0);
+}
+
 void test_mapped_flush_range_atom_align_and_clamp() {
   constexpr VkDeviceSize atom = 256;
   constexpr VkDeviceSize alloc = 4096;
@@ -602,6 +680,8 @@ void run_upload_result_tests() {
   test_atlas_rebake_and_font_replace_hold_async_upload();
   test_staging_copy_chunks_cap_host_maps();
   test_mapped_flush_range_atom_align_and_clamp();
+  test_host_visible_readback_rank_vendor_shapes();
+  test_pack_mapped_bgra_tight_and_padded();
   test_draw_frame_drains_pending_uploads_before_sample();
   test_ring_slot_capacity_never_doubles_previous_slot();
   test_texture_retire_gate_waits_for_completed_submits();

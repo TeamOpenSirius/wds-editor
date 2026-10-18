@@ -1,4 +1,5 @@
 #include "wds/ui/qt/export_video_job.hpp"
+#include "wds/ui/qt/export_video_io.hpp"
 
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/qt/editor_main_window.hpp"
@@ -50,36 +51,6 @@ QString format_eta(int64_t remain_us) {
   const int m = static_cast<int>(sec / 60);
   const int s = static_cast<int>(sec % 60);
   return QStringLiteral("约 %1:%2").arg(m).arg(s, 2, 10, QLatin1Char('0'));
-}
-
-bool write_all_stdin(QProcess* proc, const std::vector<uint8_t>& data) {
-  if (proc == nullptr || proc->state() != QProcess::Running) return false;
-  qint64 off = 0;
-  const qint64 n = static_cast<qint64>(data.size());
-  // QIODevice::waitForBytesWritten returns after ≥1 byte. write() of a whole
-  // 4K BGRA frame (~33 MiB) would sit in Qt's userspace buffer; at 60 fps that
-  // grows by gigabytes per second until the encoder catches up.
-  constexpr qint64 kChunk = 256 * 1024;
-  constexpr qint64 kMaxQueued = 4 * 1024 * 1024;
-  auto drain = [&](qint64 max_queued, int timeout_ms) {
-    while (proc->bytesToWrite() > max_queued) {
-      if (proc->state() != QProcess::Running) return false;
-      if (!proc->waitForBytesWritten(timeout_ms)) return false;
-    }
-    return true;
-  };
-  while (off < n) {
-    if (!drain(kMaxQueued, 15000)) return false;
-    const qint64 chunk = std::min(kChunk, n - off);
-    const qint64 w = proc->write(reinterpret_cast<const char*>(data.data() + off), chunk);
-    if (w < 0) return false;
-    if (w == 0) {
-      if (!proc->waitForBytesWritten(5000)) return false;
-      continue;
-    }
-    off += w;
-  }
-  return drain(0, 30000);
 }
 
 }  // namespace
@@ -508,9 +479,15 @@ void ExportVideoJob::encode_next_frame() {
 
   int w = 0;
   int h = 0;
-  while (written_frames_ < total_frames_ && vk.take_export_bgra(frame_bgra_, w, h)) {
+  while (written_frames_ < total_frames_) {
+    const std::uint8_t* aliased = nullptr;
+    if (!vk.take_export_bgra(frame_bgra_, w, h, &aliased)) break;
     if (w != capture_w_ || h != capture_h_) continue;
-    if (!write_all_stdin(ffmpeg_, frame_bgra_)) {
+    const std::uint8_t* data = aliased != nullptr ? aliased : frame_bgra_.data();
+    const std::size_t bytes = aliased != nullptr
+                                  ? static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u
+                                  : frame_bgra_.size();
+    if (!write_all_stdin(ffmpeg_, data, bytes)) {
       fail(with_ffmpeg_detail(QStringLiteral("编码失败")));
       return;
     }
@@ -526,9 +503,15 @@ void ExportVideoJob::encode_next_frame() {
   ema_us_ = ema_us_ == 0 ? used : (ema_us_ * 7 + used) / 8;
   emit_progress();
   if (submitted_frames_ >= total_frames_) {
-    while (written_frames_ < total_frames_ && vk.drain_export_bgra(frame_bgra_, w, h)) {
+    while (written_frames_ < total_frames_) {
+      const std::uint8_t* aliased = nullptr;
+      if (!vk.drain_export_bgra(frame_bgra_, w, h, &aliased)) break;
       if (w != capture_w_ || h != capture_h_) continue;
-      if (!write_all_stdin(ffmpeg_, frame_bgra_)) {
+      const std::uint8_t* data = aliased != nullptr ? aliased : frame_bgra_.data();
+      const std::size_t bytes = aliased != nullptr
+                                    ? static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u
+                                    : frame_bgra_.size();
+      if (!write_all_stdin(ffmpeg_, data, bytes)) {
         fail(with_ffmpeg_detail(QStringLiteral("编码失败")));
         return;
       }

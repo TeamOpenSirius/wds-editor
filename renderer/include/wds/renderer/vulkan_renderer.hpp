@@ -18,7 +18,9 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <cstring>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -470,6 +472,100 @@ inline constexpr bool mapped_flush_range_valid(MappedFlushRange range, VkDeviceS
   return ((range.size % atom) == 0) || (range.offset + range.size == alloc_size);
 }
 
+// CPU readback ranking. Higher is better. No vendor names: discrete BAR
+// (DEVICE_LOCAL|HOST_VISIBLE|COHERENT, not cached) ranks below cached host
+// and below UMA cached (DEVICE_LOCAL|CACHED).
+inline constexpr int host_visible_readback_rank(VkMemoryPropertyFlags flags) noexcept {
+  if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+    return 0;
+  }
+  const bool cached = (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
+  const bool coherent = (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+  const bool local = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+  if (cached && !local) {
+    return coherent ? 5 : 4;
+  }
+  if (cached) {
+    return coherent ? 3 : 2;
+  }
+  return 1;
+}
+
+inline constexpr bool host_visible_readback_needs_invalidate(
+    VkMemoryPropertyFlags flags) noexcept {
+  return (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+         (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0;
+}
+
+inline uint32_t pick_host_visible_readback_type(const VkMemoryPropertyFlags* flags, uint32_t count,
+                                                uint32_t type_bits) noexcept {
+  int best_rank = 0;
+  uint32_t best = std::numeric_limits<uint32_t>::max();
+  if (flags == nullptr) {
+    return best;
+  }
+  const uint32_t n = count > 32u ? 32u : count;
+  for (uint32_t i = 0; i < n; ++i) {
+    if ((type_bits & (1u << i)) == 0) {
+      continue;
+    }
+    const int rank = host_visible_readback_rank(flags[i]);
+    if (rank > best_rank) {
+      best_rank = rank;
+      best = i;
+    }
+  }
+  return best;
+}
+
+inline bool export_bgra_can_alias_mapped(VkFormat format, VkDeviceSize row_pitch,
+                                         uint32_t width) noexcept {
+  if (width == 0 || row_pitch != static_cast<VkDeviceSize>(width) * 4u) {
+    return false;
+  }
+  return format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
+         format == VK_FORMAT_B8G8R8A8_UINT;
+}
+
+inline bool pack_mapped_bgra(const void* mapped, uint32_t width, uint32_t height,
+                             VkDeviceSize row_pitch, VkFormat format,
+                             std::vector<std::uint8_t>& out, int& out_w, int& out_h) {
+  if (mapped == nullptr || width == 0 || height == 0) {
+    return false;
+  }
+  const bool src_bgra = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
+                        format == VK_FORMAT_B8G8R8A8_UINT;
+  const bool src_rgba = format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
+  out.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+  const auto* src = static_cast<const std::uint8_t*>(mapped);
+  for (uint32_t y = 0; y < height; ++y) {
+    const std::uint8_t* row = src + static_cast<size_t>(y) * static_cast<size_t>(row_pitch);
+    std::uint8_t* dst = out.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 4u;
+    if (src_bgra) {
+      std::memcpy(dst, row, static_cast<size_t>(width) * 4u);
+    } else {
+      for (uint32_t x = 0; x < width; ++x) {
+        const std::uint8_t* p = row + static_cast<size_t>(x) * 4u;
+        if (src_rgba) {
+          dst[0] = p[2];
+          dst[1] = p[1];
+          dst[2] = p[0];
+          dst[3] = p[3];
+        } else {
+          dst[0] = p[0];
+          dst[1] = p[1];
+          dst[2] = p[2];
+          dst[3] = p[3];
+        }
+        dst += 4;
+      }
+    }
+  }
+  out_w = static_cast<int>(width);
+  out_h = static_cast<int>(height);
+  return true;
+}
+
 // Byte capacity for one VB/IB ring slot. The committed ring size (already
 // grown and clamped by commit_ring_grow / next_ring_target) is the target,
 // bounded by `ring_max` (0 = unbounded). A request larger than that is
@@ -832,11 +928,13 @@ class VulkanRenderer {
   bool begin_export_capture(int width, int height);
   void end_export_capture();
   bool export_capture_active() const noexcept;
-  // Wait for the oldest finished staging copy and pack tightly packed BGRA8.
-  // Returns false when the ring has no completed frame yet.
-  bool take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h);
+  // Wait for the oldest finished staging copy. Tight BGRA with `aliased` set
+  // returns the mapped pointer (no extra pack). Otherwise packs into out_bgra.
+  bool take_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h,
+                        const std::uint8_t** aliased = nullptr);
   // Drain remaining queued copies after the last draw_frame.
-  bool drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h);
+  bool drain_export_bgra(std::vector<std::uint8_t>& out_bgra, int& out_w, int& out_h,
+                         const std::uint8_t** aliased = nullptr);
 
  private:
   void emit_health(RendererHealthEvent event, VkResult result = VK_SUCCESS) noexcept;

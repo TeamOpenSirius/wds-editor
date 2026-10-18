@@ -39,18 +39,18 @@ class WaveformJobs {
 
   // Cancel everything in flight (non-blocking) and, for a non-empty path, start
   // a new decode. Returns the generation of the new job (or the bumped
-  // generation when `path` is empty).
-  std::uint64_t restart(const std::string& path) {
+  // generation when `path` is empty). `want_spectrogram` is forwarded to load().
+  std::uint64_t restart(const std::string& path, bool want_spectrogram = false) {
     cancel_all();
     if (path.empty()) {
       return generation_;
     }
     auto cancel = std::make_shared<std::atomic<bool>>(false);
     jobs_.push_back(Job{generation_, cancel,
-                        std::async(std::launch::async, [path, cancel] {
+                        std::async(std::launch::async, [path, cancel, want_spectrogram] {
                           wds::common::install_thread_crash_stack();
                           WaveformOverview decoded;
-                          if (!decoded.load(path, cancel.get())) {
+                          if (!decoded.load(path, cancel.get(), want_spectrogram)) {
                             if (!cancel->load(std::memory_order_relaxed)) {
                               WDS_LOG("WaveformJobs: decode failed %s\n", path.c_str());
                             }

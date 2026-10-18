@@ -318,7 +318,8 @@ bool WaveformOverview::rasterize_rgba(std::vector<unsigned char>& out, int& out_
   return true;
 }
 
-bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* cancel) {
+bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* cancel,
+                            bool want_spectrogram) {
   clear();
   const auto cancelled = [cancel]() noexcept {
     return cancel != nullptr && cancel->load(std::memory_order_relaxed);
@@ -371,31 +372,40 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
 
   const int chans = static_cast<int>(info.chans);
   const double freq = static_cast<double>(info.freq);
-  spec_hop_ms_ = 1000.0 * static_cast<double>(kFftHop) / freq;
-  spec_bins_ = kSpecBins;
+  spec_hop_ms_ = want_spectrogram ? 1000.0 * static_cast<double>(kFftHop) / freq : 0.0;
+  spec_bins_ = want_spectrogram ? kSpecBins : 0;
 
-  std::vector<float> ring_l(static_cast<std::size_t>(kFftSize), 0.0f);
-  std::vector<float> ring_r(static_cast<std::size_t>(kFftSize), 0.0f);
+  std::vector<float> ring_l;
+  std::vector<float> ring_r;
   std::size_t ring_write = 0;
   std::uint64_t samples_seen = 0;
-  std::vector<float> re(static_cast<std::size_t>(kFftSize));
-  std::vector<float> im(static_cast<std::size_t>(kFftSize));
-  std::vector<float> hann(static_cast<std::size_t>(kFftSize));
-  for (int n = 0; n < kFftSize; ++n) {
-    hann[static_cast<std::size_t>(n)] =
-        0.5f * (1.0f - std::cos(2.0f * kPi * static_cast<float>(n) /
-                                static_cast<float>(kFftSize - 1)));
+  std::vector<float> re;
+  std::vector<float> im;
+  std::vector<float> hann;
+  if (want_spectrogram) {
+    ring_l.assign(static_cast<std::size_t>(kFftSize), 0.0f);
+    ring_r.assign(static_cast<std::size_t>(kFftSize), 0.0f);
+    re.resize(static_cast<std::size_t>(kFftSize));
+    im.resize(static_cast<std::size_t>(kFftSize));
+    hann.resize(static_cast<std::size_t>(kFftSize));
+    for (int n = 0; n < kFftSize; ++n) {
+      hann[static_cast<std::size_t>(n)] =
+          0.5f * (1.0f - std::cos(2.0f * kPi * static_cast<float>(n) /
+                                  static_cast<float>(kFftSize - 1)));
+    }
   }
   const int fft_bins = kFftSize / 2;
   const double nyquist = freq * 0.5;
   const double fmin = 40.0;
   constexpr std::size_t kMaxSpecFrames = 2ull * 60ull * 60ull * 200ull;
-  const std::size_t spec_reserve =
-      std::min(kMaxSpecFrames, buckets / std::max<std::size_t>(1, static_cast<std::size_t>(
-                                                                      spec_hop_ms_ + 0.5))) *
-      static_cast<std::size_t>(kSpecBins);
-  spec_mag_l_.reserve(spec_reserve);
-  spec_mag_r_.reserve(spec_reserve);
+  if (want_spectrogram) {
+    const std::size_t spec_reserve =
+        std::min(kMaxSpecFrames, buckets / std::max<std::size_t>(1, static_cast<std::size_t>(
+                                                                        spec_hop_ms_ + 0.5))) *
+        static_cast<std::size_t>(kSpecBins);
+    spec_mag_l_.reserve(spec_reserve);
+    spec_mag_r_.reserve(spec_reserve);
+  }
 
   auto fill_log_bins = [&](std::uint8_t* dst) {
     for (int col = 0; col < kSpecBins; ++col) {
@@ -481,16 +491,18 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
       }
       used_buckets = std::max(used_buckets, std::min(bucket + 1, peaks_.size()));
 
-      ring_l[ring_write] = left;
-      ring_r[ring_write] = right;
-      ring_write = (ring_write + 1) % static_cast<std::size_t>(kFftSize);
-      ++samples_seen;
-      if (samples_seen >= static_cast<std::uint64_t>(kFftSize) &&
-          (samples_seen - static_cast<std::uint64_t>(kFftSize)) %
-                  static_cast<std::uint64_t>(kFftHop) ==
-              0) {
-        if (cancelled()) return abort_decode();
-        emit_fft_frame();
+      if (want_spectrogram) {
+        ring_l[ring_write] = left;
+        ring_r[ring_write] = right;
+        ring_write = (ring_write + 1) % static_cast<std::size_t>(kFftSize);
+        ++samples_seen;
+        if (samples_seen >= static_cast<std::uint64_t>(kFftSize) &&
+            (samples_seen - static_cast<std::uint64_t>(kFftSize)) %
+                    static_cast<std::uint64_t>(kFftHop) ==
+                0) {
+          if (cancelled()) return abort_decode();
+          emit_fft_frame();
+        }
       }
       ++pcm_frame;
     }
@@ -508,8 +520,8 @@ bool WaveformOverview::load(const std::string& path, const std::atomic<bool>* ca
     for (float& p : peaks_) p *= inv;
   }
 
-  WDS_LOG("WaveformOverview: loaded %s buckets=%zu spec_frames=%d hop_ms=%.2f\n", path.c_str(),
-          peaks_.size(), spec_frames_, spec_hop_ms_);
+  WDS_LOG("WaveformOverview: loaded %s buckets=%zu spec_frames=%d hop_ms=%.2f spectrogram=%d\n",
+          path.c_str(), peaks_.size(), spec_frames_, spec_hop_ms_, want_spectrogram ? 1 : 0);
   return !peaks_.empty();
 }
 

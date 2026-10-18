@@ -26,6 +26,8 @@ class StemPanel final : public QDialog {
   explicit StemPanel(UiManager* manager, QWidget* parent = nullptr);
   ~StemPanel() override;
   void detach();
+  // Re-read session music / Stem cache (e.g. after open project) without showing the dialog.
+  void resync();
   QStringList track_names() const;
   int selected_track() const { return selected_track_; }
   bool select_track(int index);
@@ -49,6 +51,11 @@ class StemPanel final : public QDialog {
   bool prepare_job();
   void launch(const QString& python, const QStringList& arguments);
   void notify_tracks_changed();
+  // Populate tracks_ from an on-disk Stem manifest (schema 1, four wavs).
+  bool attach_from_manifest(const QString& manifest_path);
+  // Scan cache_dir_ for a complete entry whose spec.source_sha256 matches source_.
+  bool try_attach_cached_tracks();
+  static QString sha256_hex_file(const QString& path);
   void note_download_progress(const QString& text);
   void append_process_log(const QByteArray& bytes);
   void report_task_failure(const QString& title, const QString& summary);
@@ -60,7 +67,9 @@ class StemPanel final : public QDialog {
   static bool is_windows_store_python_alias(const QString& path);
   static QString resolve_python(const QString& path);
   static QString discover_system_python();
-  // Discovery preference; no upper version bound, install.py reports unsupported versions.
+  // Scan only these directories (tests). Full discovery also walks Homebrew / pyenv / conda.
+  static QString discover_system_python_in(const QStringList& dirs);
+  // Discovery preference; versions outside 3.10–3.14 lose to supported installs.
   static int python_rank(int major, int minor, bool free_threaded);
   static bool parse_python_tag(const QString& tag, int* major, int* minor, bool* free_threaded);
   // Kill the worker and everything it spawned (ffmpeg): process group on POSIX,

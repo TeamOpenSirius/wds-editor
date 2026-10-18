@@ -1,6 +1,7 @@
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
+#include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/ui_manager.hpp"
 
@@ -401,6 +402,13 @@ void test_spectrogram_uv_follows_viewport_ms() {
                   painter.behind_sprites().front().texture.v1) > 0.02f);
 }
 
+void test_playing_skips_full_spectrogram_atlas() {
+  CHECK(!wds::ui::should_bake_full_spectrogram_atlas(false, false));
+  CHECK(!wds::ui::should_bake_full_spectrogram_atlas(false, true));
+  CHECK(!wds::ui::should_bake_full_spectrogram_atlas(true, true));
+  CHECK(wds::ui::should_bake_full_spectrogram_atlas(true, false));
+}
+
 void test_spectrum_mode_selects_backdrop() {
   std::vector<float> peaks(4000, 0.2f);
   wds::audio::WaveformOverview waveform(std::move(peaks));
@@ -470,6 +478,7 @@ int main() {
   test_same_tick_multiple_notes_draw_one_yellow_line();
   test_waveform_aligns_with_viewport_ms_and_zoom();
   test_spectrogram_uv_follows_viewport_ms();
+  test_playing_skips_full_spectrogram_atlas();
   test_spectrum_mode_selects_backdrop();
 
   if (g_failures == 0) {

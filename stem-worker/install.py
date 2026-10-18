@@ -20,6 +20,7 @@ import time
 
 SCHEMA = 1
 MIN_PYTHON = (3, 10)
+MAX_PYTHON = (3, 14)
 TORCH = "torch>=2.6"
 # Pure Python, so pinning never blocks a Python version. Exact because it is installed
 # with --no-deps (see requirements.txt) and worker.py uses its loader internals.
@@ -80,8 +81,8 @@ def version_tuple(text):
 
 def interpreter_problem(version, is_64bit, system, machine):
     label = "%d.%d" % tuple(version[:2])
-    if tuple(version[:2]) < MIN_PYTHON:
-        return "所选 Python 为 %s；分轨运行环境需要 Python 3.10 或更新版本。" % label
+    if tuple(version[:2]) < MIN_PYTHON or tuple(version[:2]) > MAX_PYTHON:
+        return "所选 Python 为 %s；分轨运行环境需要 Python 3.10～3.14。" % label
     if not is_64bit:
         return "所选 Python %s 是 32 位版本，PyTorch 只提供 64 位安装包；请改用 64 位 Python。" % label
     if system == "Darwin" and machine != "arm64":

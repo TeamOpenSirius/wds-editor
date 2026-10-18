@@ -60,12 +60,21 @@ struct StemPanelTestAccess {
   static bool is_store_alias(const QString& path) { return StemPanel::is_windows_store_python_alias(path); }
   static QString resolve_python(const QString& path) { return StemPanel::resolve_python(path); }
   static QString discover_python() { return StemPanel::discover_system_python(); }
+  static QString discover_python_in(const QStringList& dirs) {
+    return StemPanel::discover_system_python_in(dirs);
+  }
   static int rank(int major, int minor, bool free_threaded) {
     return StemPanel::python_rank(major, minor, free_threaded);
   }
   static bool tag(const QString& text, int* major, int* minor, bool* free_threaded) {
     return StemPanel::parse_python_tag(text, major, minor, free_threaded);
   }
+  static QString sha256(const QString& path) { return StemPanel::sha256_hex_file(path); }
+  static void inject_cache_source(StemPanel& panel, const QString& cache, const QString& source) {
+    panel.cache_dir_ = cache;
+    panel.source_ = source;
+  }
+  static bool try_cached(StemPanel& panel) { return panel.try_attach_cached_tracks(); }
 };
 }
 
@@ -164,10 +173,13 @@ int main(int argc, char** argv) {
            "resolve rejects Store alias without launching it");
   }
   {
-    expect(Access::rank(3, 16, false) > Access::rank(3, 15, false) &&
-               Access::rank(3, 15, false) > Access::rank(3, 10, false),
-           "discovery prefers the newest Python without an upper bound");
-    expect(Access::rank(3, 10, false) > Access::rank(3, 16, true),
+    expect(Access::rank(3, 14, false) > Access::rank(3, 13, false) &&
+               Access::rank(3, 13, false) > Access::rank(3, 10, false),
+           "discovery prefers the newest Python within 3.10–3.14");
+    expect(Access::rank(3, 10, false) > Access::rank(3, 15, false) &&
+               Access::rank(3, 10, false) > Access::rank(3, 9, false),
+           "supported range beats too-new and too-old");
+    expect(Access::rank(3, 10, false) > Access::rank(3, 14, true),
            "GIL builds beat free-threaded builds");
     expect(Access::rank(3, 13, true) > Access::rank(-1, -1, false) &&
                Access::rank(-1, -1, false) > Access::rank(3, 9, false),
@@ -185,7 +197,7 @@ int main(int argc, char** argv) {
   }
 #if !defined(_WIN32)
   {
-    // Versions far above any real install so system interpreters cannot win.
+    // Full discover also walks /opt/homebrew/bin; a real 3.14 there outranks this fixture.
     QTemporaryDir bin;
     auto make = [&](const QString& name, bool executable) {
       QFile file(bin.filePath(name));
@@ -195,20 +207,18 @@ int main(int argc, char** argv) {
       file.setPermissions(executable ? QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
                                      : QFile::ReadOwner | QFile::WriteOwner);
     };
-    make("python3.97", true);
-    make("python3.98", true);
-    make("python3.99t", true);
-    make("python3.99-config", true);
-    make("python3.99", false);
+    make("python3.12", true);
+    make("python3.13", true);
+    make("python3.14t", true);
+    make("python3.14-config", true);
+    make("python3.14", false);
+    make("python3.15", true);
     // A free-threaded build installed under the plain name.
-    make("python3.100t", true);
-    QFile::link(bin.filePath("python3.100t"), bin.filePath("python3.100"));
-    const QByteArray saved_path = qgetenv("PATH");
-    qputenv("PATH", QFile::encodeName(bin.path()) + ":" + saved_path);
-    expect(Access::discover_python() == QFileInfo(bin.filePath("python3.98")).absoluteFilePath(),
-           "POSIX discovery scans versioned interpreters, skipping -config, free-threaded (even behind a plain-name "
-           "symlink) and non-executables");
-    qputenv("PATH", saved_path);
+    make("python3.11t", true);
+    QFile::link(bin.filePath("python3.11t"), bin.filePath("python3.11"));
+    expect(Access::discover_python_in({bin.path()}) == QFileInfo(bin.filePath("python3.13")).absoluteFilePath(),
+           "POSIX discovery scans versioned interpreters in 3.10–3.14, skipping -config, free-threaded "
+           "(even behind a plain-name symlink), too-new, and non-executables");
   }
 #endif
   int ticks = 0;
@@ -277,6 +287,49 @@ int main(int argc, char** argv) {
     manager.chart_preview().load_music({}, false);
     expect(until([&] { return !Access::active(panel); }), "stale job finishes or cancels");
     expect(Access::tracks(panel) == 1, "old generation never attaches stems to new song");
+  }
+  {
+    // Opening a project with an existing Stem/ folder must expose tracks without running a job.
+    wds::ui::UiManager manager;
+    StemPanel panel(&manager);
+    QTemporaryDir project;
+    const QString source = project.filePath(QStringLiteral("song.bin"));
+    {
+      QFile file(source);
+      expect(file.open(QIODevice::WriteOnly) && file.write("fixture-audio") == 13, "source fixture written");
+    }
+    const QString hash = Access::sha256(source);
+    expect(!hash.isEmpty(), "source sha256");
+    const QString entry = project.filePath(QStringLiteral("Stem")) + QLatin1Char('/') + hash.left(16);
+    QDir().mkpath(entry);
+    QJsonObject tracks;
+    for (const auto* name : {"drums", "bass", "vocals", "other"}) {
+      const auto filename = QString::fromLatin1(name) + QStringLiteral(".wav");
+      QFile payload(entry + QLatin1Char('/') + filename);
+      expect(payload.open(QIODevice::WriteOnly) && payload.write(name) > 0, "stem wav written");
+      tracks[QLatin1String(name)] = QJsonObject{{QStringLiteral("file"), filename}};
+    }
+    QFile manifest(entry + QStringLiteral("/manifest.json"));
+    expect(manifest.open(QIODevice::WriteOnly), "manifest open");
+    manifest.write(QJsonDocument(QJsonObject{
+                                    {QStringLiteral("schema"), 1},
+                                    {QStringLiteral("spec"),
+                                     QJsonObject{{QStringLiteral("source_sha256"), hash}}},
+                                    {QStringLiteral("tracks"), tracks}})
+                       .toJson());
+    manifest.close();
+    Access::inject_cache_source(panel, project.filePath(QStringLiteral("Stem")), source);
+    expect(Access::try_cached(panel), "existing Stem cache attaches without a worker");
+    expect(Access::tracks(panel) == 5, "cached stems publish original plus four tracks");
+    {
+      StemPanel other_panel(&manager);
+      const QString other = project.filePath(QStringLiteral("other.bin"));
+      QFile file(other);
+      expect(file.open(QIODevice::WriteOnly) && file.write("different") > 0, "other source written");
+      Access::inject_cache_source(other_panel, project.filePath(QStringLiteral("Stem")), other);
+      expect(!Access::try_cached(other_panel), "cache for a different source is not attached");
+      expect(Access::tracks(other_panel) == 1, "mismatched source keeps original-only tracks");
+    }
   }
   {
     StemPanel panel(nullptr);

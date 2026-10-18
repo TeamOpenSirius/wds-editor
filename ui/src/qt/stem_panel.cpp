@@ -9,6 +9,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -88,12 +89,12 @@ bool parse_python_name(const QString& name, int* major, int* minor, bool* free_t
   return true;
 }
 
-// Newest GIL build first: free-threaded builds get wheels later and run some packages
-// (e.g. PyYAML) as pure-Python fallbacks. Unknown versions beat known-too-old ones;
-// both stay selectable so install.py can explain what is wrong.
+// Newest supported GIL build first: free-threaded builds get wheels later and run some
+// packages (e.g. PyYAML) as pure-Python fallbacks. Outside 3.10–3.14 and unknown builds
+// stay selectable so install.py can explain what is wrong; supported versions win discovery.
 int python_rank(int major, int minor, bool free_threaded) {
   if (major < 0) return 1;
-  if (major < 3 || (major == 3 && minor < 10)) return 0;
+  if (major != 3 || minor < 10 || minor > 14) return 0;
   return (free_threaded ? 2 : 3) * 1000000 + major * 1000 + minor;
 }
 
@@ -277,9 +278,9 @@ int posix_python_rank(const QFileInfo& info) {
   return python_rank(-1, -1, false);
 }
 
-QString python_from_posix_dirs() {
+QString python_from_posix_dirs(const QStringList& dirs) {
   PythonPick pick;
-  for (const auto& path : posix_python_dirs()) {
+  for (const auto& path : dirs) {
     const QDir dir(path);
     QStringList names = dir.entryList({QStringLiteral("python3.*")}, QDir::Files | QDir::Executable);
     names << QStringLiteral("python3") << QStringLiteral("python");
@@ -392,7 +393,16 @@ QString StemPanel::discover_system_python() {
   if (const auto launcher = python_from_py_launcher(); !launcher.isEmpty()) return launcher;
   return installed.path;
 #else
-  return python_from_posix_dirs();
+  return python_from_posix_dirs(posix_python_dirs());
+#endif
+}
+
+QString StemPanel::discover_system_python_in(const QStringList& dirs) {
+#ifdef Q_OS_WIN
+  Q_UNUSED(dirs);
+  return {};
+#else
+  return python_from_posix_dirs(dirs);
 #endif
 }
 
@@ -424,7 +434,7 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   if (python.isEmpty()) python = resolve_python(runtime_python());
   if (python.isEmpty()) python = discover_system_python();
   python_->setText(python);
-  python_->setPlaceholderText(tr("选择 Python 3.10 或更新版本"));
+  python_->setPlaceholderText(tr("选择 Python 3.10～3.14"));
   auto* interpreter = new QHBoxLayout;
   interpreter->addWidget(python_);
   browse_ = new QPushButton(tr("选择…"), this);
@@ -510,8 +520,12 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
 
 void StemPanel::update_polling() {
   // Stat-ing the source can block on slow mounts, so only poll while someone
-  // can see the panel or a job/published stems depend on source changes.
-  const bool needed = manager_ && (isVisible() || active_ || !tracks_.isEmpty());
+  // can see the panel, a job/published stems depend on source changes, or the
+  // session already has music (so open/import can attach Stem cache without
+  // opening this dialog).
+  const bool needed =
+      manager_ && (isVisible() || active_ || !tracks_.isEmpty() ||
+                   !manager_->session().music_path().empty());
   if (needed) {
     if (!source_timer_.isActive()) source_timer_.start();
   } else {
@@ -617,6 +631,82 @@ void StemPanel::notify_tracks_changed() {
   if (on_tracks_changed_) on_tracks_changed_();
 }
 
+void StemPanel::resync() { sync_source(); }
+
+QString StemPanel::sha256_hex_file(const QString& path) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) return {};
+  QCryptographicHash hash(QCryptographicHash::Sha256);
+  while (!file.atEnd()) hash.addData(file.read(1 << 20));
+  return QString::fromLatin1(hash.result().toHex());
+}
+
+bool StemPanel::attach_from_manifest(const QString& manifest_path) {
+  QFile file(manifest_path);
+  if (!file.open(QIODevice::ReadOnly)) return false;
+  const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
+  const auto entries = manifest.value(QStringLiteral("tracks")).toObject();
+  QStringList paths;
+  const QDir dir = QFileInfo(manifest_path).absoluteDir();
+  for (const auto* name : {"drums", "bass", "vocals", "other"}) {
+    const auto filename = QString::fromLatin1(name) + QStringLiteral(".wav");
+    if (entries.value(QLatin1String(name)).toObject().value(QStringLiteral("file")).toString() !=
+            filename ||
+        !QFileInfo::exists(dir.filePath(filename))) {
+      return false;
+    }
+    paths << dir.filePath(filename);
+  }
+  if (manifest.value(QStringLiteral("schema")).toInt() != 1 || paths.size() != 4) return false;
+  tracks_ = paths;
+  notify_tracks_changed();
+  return true;
+}
+
+bool StemPanel::try_attach_cached_tracks() {
+  if (!manager_ || cache_dir_.isEmpty() || source_.isEmpty() || active_) return false;
+  const QString source_hash = sha256_hex_file(source_);
+  if (source_hash.isEmpty()) return false;
+  QString best_manifest;
+  QDateTime best_mtime;
+  const QDir root(cache_dir_);
+  const auto entries = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+  for (const auto& entry : entries) {
+    if (entry.fileName().startsWith(QLatin1Char('.'))) continue;
+    const QString manifest_path =
+        entry.absoluteFilePath() + QStringLiteral("/manifest.json");
+    QFile file(manifest_path);
+    if (!file.open(QIODevice::ReadOnly)) continue;
+    const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
+    if (manifest.value(QStringLiteral("schema")).toInt() != 1) continue;
+    const auto spec = manifest.value(QStringLiteral("spec")).toObject();
+    if (spec.value(QStringLiteral("source_sha256")).toString() != source_hash) continue;
+    const auto track_entries = manifest.value(QStringLiteral("tracks")).toObject();
+    bool complete = true;
+    for (const auto* name : {"drums", "bass", "vocals", "other"}) {
+      const auto filename = QString::fromLatin1(name) + QStringLiteral(".wav");
+      if (track_entries.value(QLatin1String(name))
+                  .toObject()
+                  .value(QStringLiteral("file"))
+                  .toString() != filename ||
+          !QFileInfo::exists(entry.absoluteFilePath() + QLatin1Char('/') + filename)) {
+        complete = false;
+        break;
+      }
+    }
+    if (!complete) continue;
+    const auto mtime = entry.lastModified();
+    if (best_manifest.isEmpty() || mtime > best_mtime) {
+      best_manifest = manifest_path;
+      best_mtime = mtime;
+    }
+  }
+  if (best_manifest.isEmpty() || !attach_from_manifest(best_manifest)) return false;
+  progress_->setValue(100);
+  status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
+  return true;
+}
+
 QString StemPanel::runtime_python() const {
 #ifdef Q_OS_WIN
   return runtime_dir_ + "/Scripts/python.exe";
@@ -665,6 +755,9 @@ void StemPanel::sync_source() {
     notify_tracks_changed();
     source_label_->setText(path.isEmpty() ? tr("请先导入音乐或打开工程") : tr("音源：%1").arg(info.fileName()));
     source_label_->setToolTip(path);
+    // Open project / import music must recognize an existing Stem folder without
+    // requiring the user to click「生成分轨」(worker cache hit).
+    if (!path.isEmpty()) try_attach_cached_tracks();
   }
   refresh_controls();
 }
@@ -732,7 +825,7 @@ bool StemPanel::prepare_job() {
           tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请改用「选择…」指定已安装的 python.exe"));
     } else {
       report_task_failure(tr("无法启动任务"),
-                          tr("请先选择 Python 3.10 或更新版本，再安装分轨运行环境"));
+                          tr("请先选择 Python 3.10～3.14，再安装分轨运行环境"));
     }
     return false;
   }
@@ -863,7 +956,7 @@ void StemPanel::append_process_log(const QByteArray& bytes) {
 }
 
 void StemPanel::prompt_python_not_installed() {
-  const QString summary = tr("未检测到本机已安装的 Python，请安装 Python 3.10 或更新版本后再试");
+  const QString summary = tr("未检测到本机已安装的 Python，请安装 Python 3.10～3.14 后再试");
   status_->setText(summary);
   if (!stem_error_ui_allowed()) return;
   QMessageBox box(this);
@@ -874,7 +967,7 @@ void StemPanel::prompt_python_not_installed() {
   auto* download = box.addButton(tr("前往下载"), QMessageBox::ActionRole);
   box.exec();
   if (box.clickedButton() == static_cast<QAbstractButton*>(download)) {
-    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.python.org/downloads/")));
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.python.org/downloads/release/python-3148/")));
   }
 }
 
@@ -969,7 +1062,7 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
                       " status=" + (status == QProcess::NormalExit ? "normal" : "crash") + "\n";
     }
     report_task_failure(installing_ ? tr("安装运行环境失败") : tr("分轨失败"),
-                        error_.isEmpty() ? (installing_ ? tr("安装失败。请确认所选 Python 为 3.10 或更新的 64 位版本。")
+                        error_.isEmpty() ? (installing_ ? tr("安装失败。请确认所选 Python 为 3.10～3.14 的 64 位版本。")
                                                         : tr("任务失败。"))
                                          : error_);
   } else if (installing_) {
@@ -979,28 +1072,13 @@ void StemPanel::finished(int code, QProcess::ExitStatus status) {
     status_->setText(install_message_.isEmpty() ? tr("运行环境已安装，可以生成分轨。") : install_message_);
     progress_->setValue(100);
   } else if (manager_ && source_ == job_source_ && source_stamp_ == job_stamp_ && source_generation_ == job_generation_) {
-    QFile file(manifest_);
-    if (file.open(QIODevice::ReadOnly)) {
-      const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
-      const auto entries = manifest.value("tracks").toObject();
-      QStringList paths;
-      const auto dir = QFileInfo(manifest_).absoluteDir();
-      for (const auto* name : {"drums", "bass", "vocals", "other"}) {
-        const auto filename = QString::fromLatin1(name) + ".wav";
-        if (entries.value(name).toObject().value("file").toString() != filename ||
-            !QFileInfo::exists(dir.filePath(filename))) { paths.clear(); break; }
-        paths << dir.filePath(filename);
-      }
-      if (manifest.value("schema").toInt() == 1 && paths.size() == 4) {
-        tracks_ = paths;
-        notify_tracks_changed();
-        progress_->setValue(100);
-        status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
-      } else {
-        report_task_failure(tr("分轨失败"), tr("分轨结果不完整，请重新生成。"));
-      }
-    } else {
+    if (attach_from_manifest(manifest_)) {
+      progress_->setValue(100);
+      status_->setText(tr("分轨已就绪，可在「播放」面板选择音轨试听。"));
+    } else if (manifest_.isEmpty() || !QFileInfo::exists(manifest_)) {
       report_task_failure(tr("分轨失败"), tr("未找到分轨结果。"));
+    } else {
+      report_task_failure(tr("分轨失败"), tr("分轨结果不完整，请重新生成。"));
     }
   } else {
     status_->setText(tr("分轨已缓存；当前音源已更换。"));
