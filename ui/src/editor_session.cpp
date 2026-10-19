@@ -448,6 +448,35 @@ const wds::chart_editor::ChartEditorEngine& EditorSession::engine() const noexce
   return preview_.engine();
 }
 
+std::string EditorSession::resolve_existing_relative_asset(const std::string& source_file,
+                                                          const std::string& stored) const {
+  if (stored.empty()) {
+    return {};
+  }
+  fs::path asset = path_from_utf8(stored);
+  if (!asset.is_absolute()) {
+    asset = path_from_utf8(source_file).parent_path() / asset;
+  }
+  const std::string utf8 = path_to_utf8(asset);
+  return file_is_regular_utf8(utf8) ? utf8 : std::string{};
+}
+
+void EditorSession::apply_preview_jacket(std::string* fail_note) {
+  if (!preview_.ready()) {
+    return;
+  }
+  if (jacket_path_.empty()) {
+    (void)preview_.load_jacket({});
+    return;
+  }
+  if (!preview_.load_jacket(jacket_path_)) {
+    if (fail_note != nullptr) {
+      *fail_note = "（曲绘未加载，可重新导入）";
+    }
+    (void)preview_.load_jacket({});
+  }
+}
+
 void EditorSession::reset_music_config_meta() {
   cue_sheet_name_ = "Music";
   cue_name_ = "1";
@@ -489,6 +518,9 @@ wds::chart_editor::SusChartSaveOptions EditorSession::make_sus_save_options() co
   options.meta.wave_offset_sec = static_cast<double>(offset_ms_) / 1000.0;
   if (!music_path_.empty()) {
     options.meta.wave_path = path_to_utf8(path_from_utf8(music_path_).filename());
+  }
+  if (!jacket_path_.empty()) {
+    options.meta.jacket_path = path_to_utf8(path_from_utf8(jacket_path_).filename());
   }
   options.ched_lane_padding = true;
   return options;
@@ -550,6 +582,7 @@ bool EditorSession::new_project() {
   engine().history().clear();
   project_path_.clear();
   music_path_.clear();
+  jacket_path_.clear();
   charts_.clear();
   charts_.push_back(ChartSlot{});
   charts_.back().chart = engine().document().to_notation_chart();
@@ -564,6 +597,7 @@ bool EditorSession::new_project() {
   // Opening a fresh project must not inherit the previous song's playhead —
   // preview only draws the current time window, so a late cursor looks empty.
   preview_.load_music({}, false);  // clear any previously imported BGM
+  apply_preview_jacket();
   if (preview_.ready()) {
     preview_.request_buffer_precommit();
   }
@@ -595,6 +629,8 @@ PreparedWdsProject EditorSession::prepare_wdsproject(const std::string& path) {
 
   prepared.music_path =
       wds::chart_editor::ProjectSerializer::resolve_path(path, project.music_path);
+  prepared.jacket_path =
+      wds::chart_editor::ProjectSerializer::resolve_path(path, project.jacket_path);
   prepared.chart_paths.reserve(project.chart_paths.size());
   prepared.charts.reserve(project.chart_paths.size());
   for (const auto& chart_rel : project.chart_paths) {
@@ -644,7 +680,9 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
 
   // Missing/unloadable music is non-fatal — charts still open.
   std::string loaded_music = std::move(prepared.music_path);
+  std::string loaded_jacket = std::move(prepared.jacket_path);
   std::string music_note;
+  std::string jacket_note;
   if (preview_.ready()) {
     if (!preview_.load_music(loaded_music, false)) {
       if (!loaded_music.empty()) {
@@ -656,6 +694,8 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
 
   project_path_ = std::move(prepared.project_path);
   music_path_ = loaded_music;
+  jacket_path_ = loaded_jacket;
+  apply_preview_jacket(&jacket_note);
   charts_ = std::move(loaded);
   active_chart_index_ = prepared.active_chart_index;
   offset_ms_ = prepared.offset_ms;
@@ -670,7 +710,7 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
     return false;
   }
   preview_.reset_playback();
-  status("已打开工程：" + project_path_ + music_note, StatusLevel::Info);
+  status("已打开工程：" + project_path_ + music_note + jacket_note, StatusLevel::Info);
   notify_project_reloaded();
   publish_crash_context();
   return true;
@@ -748,6 +788,7 @@ bool EditorSession::write_project_file(const std::string& project_path) {
   if (project_path.empty()) return false;
   wds::chart_editor::WdsProject project;
   project.music_path = music_path_;
+  project.jacket_path = jacket_path_;
   project.offset_ms = offset_ms_;
   project.active_chart_index = static_cast<int32_t>(active_chart_index_);
   project.chart_paths.clear();
@@ -864,6 +905,7 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
 
   project_path_.clear();
   music_path_ = audio;
+  jacket_path_.clear();
   charts_ = std::move(loaded);
   active_chart_index_ = 0;
   offset_ms_ = static_cast<int64_t>(std::llround(music.delay_seconds * 1000.0));
@@ -880,6 +922,7 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
     music_path_.clear();
     preview_.load_music({}, false);
   }
+  apply_preview_jacket();
   if (!activate_chart(0)) {
     publish_crash_context();
     status("导入失败：无法激活谱面", StatusLevel::Error);
@@ -925,6 +968,7 @@ bool EditorSession::import_official(const std::string& chart_path,
 
   project_path_.clear();
   music_path_.clear();
+  jacket_path_.clear();
   offset_ms_ = engine().document().timing().offset_ms;
   auto chart = engine().document().to_notation_chart();
   chart.timing.offset_ms = 0;
@@ -956,6 +1000,7 @@ bool EditorSession::import_official(const std::string& chart_path,
   }
   // single-chart official import does not bind a project BGM path
   preview_.load_music({}, false);
+  apply_preview_jacket();
   preview_.reset_playback();
   status("已导入官方谱面（只读预览）：" + chart_path, StatusLevel::Info);
   notify_project_reloaded();
@@ -989,8 +1034,9 @@ bool EditorSession::import_sus(const std::string& path) {
   reset_music_config_meta();
   sus_meta_ = meta;
 
-  // Resolve #WAVE relative to the .sus file when present.
+  // Resolve #WAVE / #JACKET relative to the .sus file when present.
   music_path_.clear();
+  jacket_path_.clear();
   if (!meta.wave_path.empty()) {
     fs::path wave = path_from_utf8(meta.wave_path);
     if (!wave.is_absolute()) {
@@ -1001,11 +1047,18 @@ bool EditorSession::import_sus(const std::string& path) {
       music_path_ = wave_utf8;
     }
   }
+  jacket_path_ = resolve_existing_relative_asset(path, meta.jacket_path);
   if (!music_path_.empty() && !preview_.load_music(music_path_, false)) {
     music_path_.clear();
     preview_.load_music({}, false);
   } else if (music_path_.empty()) {
     preview_.load_music({}, false);
+  }
+  if (!jacket_path_.empty() && !preview_.load_jacket(jacket_path_)) {
+    jacket_path_.clear();
+    (void)preview_.load_jacket({});
+  } else if (jacket_path_.empty()) {
+    (void)preview_.load_jacket({});
   }
   // Reload into Editable (convert) or keep OfficialPreviewOnly (preview-only).
   if (!activate_chart(0)) {
@@ -1201,6 +1254,21 @@ bool EditorSession::export_official_project(const std::string& directory) {
   }
   status("导出已跳过（存在冲突且未覆盖）", StatusLevel::Info);
   return false;
+}
+
+bool EditorSession::import_jacket(const std::string& path) {
+  // Allowed in official / SUS read-only preview — jacket is independent of chart authoring.
+  if (path.empty() || !preview_.load_jacket(path)) {
+    status("导入曲绘失败：无法加载文件", StatusLevel::Error);
+    return false;
+  }
+  jacket_path_ = path;
+  if (!read_only_) {
+    metadata_dirty_ = true;
+  }
+  status("已导入曲绘：" + path, StatusLevel::Info);
+  notify_ui_change(SessionUiChange::Document);
+  return true;
 }
 
 bool EditorSession::import_music(const std::string& path) {

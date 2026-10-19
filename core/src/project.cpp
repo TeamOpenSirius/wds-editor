@@ -120,6 +120,7 @@ SerializeResult ProjectSerializer::save_to_file(const WdsProject& project,
   std::ostringstream ss;
   ss << "WDSPROJECT " << kFormatVersion << '\n';
   ss << "MUSIC " << project.music_path << '\n';
+  ss << "JACKET " << project.jacket_path << '\n';
   ss << "CHART_DELAY_MS " << project.offset_ms << '\n';
   const int32_t active = project.chart_paths.empty()
                              ? 0
@@ -134,6 +135,7 @@ SerializeResult ProjectSerializer::save_to_file(const WdsProject& project,
 SerializeResult ProjectSerializer::save_relativized(WdsProject project,
                                                     const std::string& project_file_path) {
   project.music_path = make_relative_path(project_file_path, project.music_path);
+  project.jacket_path = make_relative_path(project_file_path, project.jacket_path);
   for (auto& chart_path : project.chart_paths)
     chart_path = make_relative_path(project_file_path, chart_path);
   return save_to_file(project, project_file_path);
@@ -164,6 +166,8 @@ SerializeResult ProjectSerializer::load_from_file(const std::string& path,
   while (file >> key) {
     if (key == "MUSIC") {
       project.music_path = read_rest_of_line(file);
+    } else if (key == "JACKET") {
+      project.jacket_path = read_rest_of_line(file);
     } else if (key == "CHART_DELAY_MS" || key == "OFFSET_MS") {
       // OFFSET_MS is a legacy alias for CHART_DELAY_MS (chart delay, not BGM delay).
       file >> project.offset_ms;

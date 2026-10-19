@@ -88,6 +88,28 @@ inline constexpr float kOfficialBgLaneAlpha = kOfficialBgLanePrefabAlpha * 80.0f
 // Texture2D/ingame_bg: 1920×1180. SpriteRendererScreenFitter cover-fits this to the camera.
 inline constexpr float kOfficialIngameBgWidth = 1920.0f;
 inline constexpr float kOfficialIngameBgHeight = 1180.0f;
+inline constexpr float kOfficialIngameBgPpu = 100.0f;
+inline constexpr float kOfficialIngameBgWorldWidth = kOfficialIngameBgWidth / kOfficialIngameBgPpu;
+inline constexpr float kOfficialIngameBgWorldHeight = kOfficialIngameBgHeight / kOfficialIngameBgPpu;
+// OpenWDS GameBackground/Jacket Sprite: 800×800 @ 100 ppu, pivot (0.5, 0.5),
+// textureRect = full image. CreateOfflineRhythmPreviewScene.PrepareMusicJacket
+// requires one 800×800 Sprite; jacket.bundle TypeTree m_PixelsToUnits=100,
+// m_Rect=800×800. World edge = 800/100 = 8.
+inline constexpr int kOfficialJacketPixelSize = 800;
+inline constexpr float kOfficialJacketPpu = 100.0f;
+inline constexpr float kOfficialJacketWorldSize =
+    static_cast<float>(kOfficialJacketPixelSize) / kOfficialJacketPpu;
+inline constexpr float kOfficialJacketPivotX = 0.5f;
+inline constexpr float kOfficialJacketPivotY = 0.5f;
+// GameBackground.prefab: parent sample local (0,0,12); child Jacket local
+// (0, 2, 0), localScale (0.6, 0.6, 1). sortingOrder Jacket −11, sample/ingame_bg
+// −10, BGShadow −9. Default sorting layer; Sprites-Default, color white.
+inline constexpr float kOfficialJacketParentLocalZ = 12.0f;
+inline constexpr float kOfficialJacketLocalY = 2.0f;
+inline constexpr float kOfficialJacketLocalScaleX = 0.6f;
+inline constexpr float kOfficialJacketLocalScaleY = 0.6f;
+inline constexpr int kOfficialJacketSortingOrder = -11;
+inline constexpr int kOfficialIngameBgSortingOrder = -10;
 // OpenWDS GameBackground.prefab BGShadow/{TopLeft,TopRight,BottomLeft,BottomRight}.
 // Sprite `img_game_common_bg_shadow`: m_Rect / textureRect (0,644,960,540),
 // ppu=100, pivot (1,0). RD mesh is 4 verts / 2 tris covering that rect
@@ -223,6 +245,20 @@ inline void official_gravity_lane_accel(float modifier, float& ay, float& az) no
 
 inline float official_camera_focal() noexcept {
   return 1.0f / std::tan(official_deg_to_rad(kOfficialCameraFovDeg) * 0.5f);
+}
+
+// OpenWDS SpriteRendererScreenFitter.Adjust: uniform cover
+// fit = max(visibleW / 19.2, visibleH / 11.8) with
+// visibleH = 2 * |dot(sample.pos − camera.pos, camera.forward)| * tan(fov/2)
+// and visibleW = visibleH * aspect. sample is at z=12 on the identity Main
+// Camera. Jacket world Z stays 12 (child local z=0); XY inherit sample scale.
+// 16:9 fit ≈ 1.03655; projected Jacket width is NDC 0.50 (half of the screen).
+inline float official_ingame_bg_cover_fit(float aspect) noexcept {
+  const float a = std::max(aspect, 1e-4f);
+  const float visible_h = 2.0f * kOfficialJacketParentLocalZ / official_camera_focal();
+  const float visible_w = visible_h * a;
+  return std::max(visible_w / kOfficialIngameBgWorldWidth,
+                  visible_h / kOfficialIngameBgWorldHeight);
 }
 
 inline bool official_note_speed_valid(double value) noexcept {

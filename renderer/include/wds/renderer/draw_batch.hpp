@@ -123,6 +123,12 @@ struct DrawBatch {
   // leftover slots for capacity; append reuses from the front.
   size_t overlay_used = 0;
 
+  static uint64_t bucket_lookup_key(TextureId texture, bool disable_alpha_clip,
+                                   uint8_t pipe) noexcept {
+    return static_cast<uint64_t>(texture) | (disable_alpha_clip ? (uint64_t{1} << 32) : 0u) |
+           (static_cast<uint64_t>(pipe) << 40);
+  }
+
   void bind_external(DrawVertex* dst, uint32_t cap, uint32_t* idx = nullptr, uint32_t idx_cap = 0,
                      uint32_t vert_base = 0) {
     ext_dst = dst;
@@ -394,9 +400,7 @@ struct DrawBatch {
       ++overlay_used;
       return buckets.back();
     }
-    const uint64_t key = static_cast<uint64_t>(texture) |
-                         (disable_alpha_clip ? (uint64_t{1} << 32) : 0u) |
-                         (static_cast<uint64_t>(overlay_pipe) << 40);
+    const uint64_t key = bucket_lookup_key(texture, disable_alpha_clip, overlay_pipe);
     const auto it = bucket_lookup.find(key);
     if (it != bucket_lookup.end()) {
       return buckets[it->second];
@@ -404,6 +408,33 @@ struct DrawBatch {
     bucket_lookup.emplace(key, buckets.size());
     buckets.push_back(DrawBucket{texture, disable_alpha_clip, {}, {}, overlay_pipe});
     return buckets.back();
+  }
+
+  // Sticky slots append on first use. A texture imported after the first
+  // frame would otherwise draw last (depth write off → later buckets win).
+  // Jacket sortingOrder −11 must stay in front of ingame_bg −10 / lanes.
+  void pin_bucket_front(TextureId texture, bool disable_alpha_clip = false) {
+    if (overlay_ordered) {
+      bucket_for(texture, disable_alpha_clip);
+      return;
+    }
+    bucket_for(texture, disable_alpha_clip);
+    const uint64_t key = bucket_lookup_key(texture, disable_alpha_clip, overlay_pipe);
+    const auto it = bucket_lookup.find(key);
+    if (it == bucket_lookup.end() || it->second == 0) {
+      return;
+    }
+    const size_t idx = it->second;
+    DrawBucket pinned = std::move(buckets[idx]);
+    for (size_t i = idx; i > 0; --i) {
+      buckets[i] = std::move(buckets[i - 1]);
+    }
+    buckets[0] = std::move(pinned);
+    bucket_lookup.clear();
+    for (size_t i = 0; i < buckets.size(); ++i) {
+      const auto& b = buckets[i];
+      bucket_lookup.emplace(bucket_lookup_key(b.texture, b.disable_alpha_clip, b.overlay_pipe), i);
+    }
   }
 
   // Appends non-empty buckets from `src`. Does not clear this batch first.

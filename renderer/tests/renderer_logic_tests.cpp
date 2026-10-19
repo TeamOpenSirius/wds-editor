@@ -1238,6 +1238,23 @@ void test_butterfly_bucket_disables_only_alpha_clip() {
   CHECK(batch.buckets[1].disable_alpha_clip);
 }
 
+void test_pin_bucket_front_moves_late_texture_to_index_zero() {
+  wds::renderer::DrawBatch batch;
+  const wds::renderer::TextureInfo first{3, 1, 1, 0.0f, 0.0f, 1.0f, 1.0f};
+  const wds::renderer::TextureInfo late{9, 1, 1, 0.0f, 0.0f, 1.0f, 1.0f};
+  const wds::renderer::Quad quad{{-1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, -1.0f}};
+  batch.add_sprite(first, quad, 0.0f, 1.0f);
+  batch.add_sprite(late, quad, 0.0f, 1.0f);
+  CHECK(batch.buckets.size() == 2);
+  CHECK(batch.buckets[0].texture == first.id);
+  CHECK(batch.buckets[1].texture == late.id);
+  batch.pin_bucket_front(late.id);
+  CHECK(batch.buckets[0].texture == late.id);
+  CHECK(batch.buckets[1].texture == first.id);
+  CHECK(&batch.bucket_for(late.id) == &batch.buckets[0]);
+  CHECK(&batch.bucket_for(first.id) == &batch.buckets[1]);
+}
+
 void test_extras_extent_is_max_of_offset_plus_used_not_sum() {
   using wds::renderer::extras_extent_merge;
   // Three parts spaced by reserved capacity 1000, used 10/20/30. The sum of
@@ -1323,6 +1340,7 @@ void run_wsi_health_tests() {
   test_frames_in_flight_leaves_one_image_for_present();
   test_draw_batch_external_arena_matches_cpu();
   test_butterfly_bucket_disables_only_alpha_clip();
+  test_pin_bucket_front_moves_late_texture_to_index_zero();
   test_descriptor_full_block_is_skipped_then_grows();
   test_descriptor_pool_growth_and_retry_policy();
   test_descriptor_chain_300_cross_block_alloc_and_recycle();

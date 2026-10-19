@@ -196,6 +196,9 @@ class PlaybackPreviewView {
               const wds::renderer::DrawBatch* modal_chrome = nullptr,
               int64_t visual_lead_us = 0, int64_t pulse_now_us = 0);
 
+  // Upload processed 800×800 RGBA8 under a fixed session key, or unload when empty.
+  bool load_jacket(const std::vector<unsigned char>& rgba);
+
   // Render an editor-only batch into this surface. This intentionally skips
   // preview stage, notes and timing effects so the editor viewport cannot
   // duplicate the adjacent realtime preview.
@@ -208,6 +211,7 @@ class PlaybackPreviewView {
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
  private:
+  void draw_jacket(wds::renderer::DrawBatch& batch);
   void draw_ingame_background(wds::renderer::DrawBatch& batch);
   void draw_stage(wds::renderer::DrawBatch& batch,
                   const wds::chart_editor::PreviewSnapshot& snapshot,
@@ -288,6 +292,7 @@ class PlaybackPreviewView {
   wds::renderer::VulkanRenderer vulkan_;
   wds::renderer::TextureCache textures_;
   wds::renderer::SkinCatalog skin_;
+  wds::renderer::TextureInfo jacket_{};
   wds::audio::HitSfxPlayer hit_sfx_;
   wds::renderer::DrawBatch batch_;
   wds::renderer::DrawBatch notes_batch_;

@@ -609,6 +609,24 @@ TextureInfo TextureCache::load_standalone_rgba(const std::string& path, const un
   return commit_standalone_gpu(path, info);
 }
 
+void TextureCache::unload_standalone(const std::string& path) {
+  if (path.empty() || standalone_keys_.find(path) == standalone_keys_.end()) {
+    return;
+  }
+  TextureId id = kInvalidTextureId;
+  const auto it = cache_.find(path);
+  if (it != cache_.end()) {
+    id = it->second.id;
+    cache_.erase(it);
+  }
+  standalone_keys_.erase(path);
+  if (id != kInvalidTextureId) {
+    standalone_ids_.erase(std::remove(standalone_ids_.begin(), standalone_ids_.end(), id),
+                          standalone_ids_.end());
+    gpu_destroy(id);
+  }
+}
+
 void TextureCache::bind_identity(TextureId id, std::string key) {
   if (id == kInvalidTextureId || key.empty()) {
     return;

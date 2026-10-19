@@ -79,6 +79,8 @@ class TextureCache {
   // Same as load_standalone_png but the caller already decoded RGBA8 (idle preload).
   TextureInfo load_standalone_rgba(const std::string& path, const unsigned char* pixels, int width,
                                    int height);
+  // Destroy the standalone GPU id for `path` (same-key load otherwise returns the old texture).
+  void unload_standalone(const std::string& path);
 
   // Valid after bake_atlas() / load_standalone_png().
   TextureInfo get(const std::string& path) const;

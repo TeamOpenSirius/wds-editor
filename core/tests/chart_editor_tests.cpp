@@ -9,6 +9,7 @@
 #include <wds/core/detail/start_ms_avl_index.hpp>
 #include <wds/core/file_io.hpp>
 #include <wds/core/gimmick.hpp>
+#include <wds/core/jacket_image.hpp>
 #include <wds/core/notation.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/official_chart.hpp>
@@ -1663,6 +1664,55 @@ void test_official_concurrent_line_is_full_notation_sliced() {
   CHECK(cap * 2.0f + 0.5f < 1.0f);
 }
 
+void test_center_square_crop_and_official_jacket_rgba() {
+  const auto landscape = center_square_crop(1000, 800);
+  CHECK_EQ(landscape.side, 800);
+  CHECK_EQ(landscape.x, 100);
+  CHECK_EQ(landscape.y, 0);
+
+  const auto portrait = center_square_crop(800, 1000);
+  CHECK_EQ(portrait.side, 800);
+  CHECK_EQ(portrait.x, 0);
+  CHECK_EQ(portrait.y, 100);
+
+  const auto square = center_square_crop(800, 800);
+  CHECK_EQ(square.side, 800);
+  CHECK_EQ(square.x, 0);
+  CHECK_EQ(square.y, 0);
+
+  std::vector<unsigned char> empty;
+  CHECK(!prepare_official_jacket_rgba(nullptr, 8, 8, empty));
+  CHECK(empty.empty());
+  const unsigned char one[] = {10, 20, 30, 255};
+  CHECK(!prepare_official_jacket_rgba(one, 0, 1, empty));
+  CHECK(empty.empty());
+
+  // 3×1 landscape: integer center crop keeps the middle green texel.
+  const unsigned char row[] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255};
+  std::vector<unsigned char> out;
+  CHECK(prepare_official_jacket_rgba(row, 3, 1, out));
+  CHECK_EQ(out.size(), static_cast<size_t>(kOfficialJacketPixelSize * kOfficialJacketPixelSize * 4));
+  CHECK_EQ(out[0], 0);
+  CHECK_EQ(out[1], 255);
+  CHECK_EQ(out[2], 0);
+  CHECK_EQ(out[3], 255);
+  const size_t last = out.size() - 4;
+  CHECK_EQ(out[last], 0);
+  CHECK_EQ(out[last + 1], 255);
+  CHECK_EQ(out[last + 2], 0);
+  CHECK_EQ(out[last + 3], 255);
+}
+
+void test_official_jacket_cover_fit_ndc_width() {
+  // OpenWDS SpriteRendererScreenFitter cover-fit × Jacket localScale 0.6 × 8 world
+  // (GameBackground.prefab + ingame_bg 19.2×11.8 @ 100 ppu) → NDC width 0.50 at 16:9.
+  const float fit = official_ingame_bg_cover_fit(kOfficialPreviewAspect);
+  const float half = kOfficialJacketWorldSize * 0.5f * kOfficialJacketLocalScaleX * fit;
+  const float ndc_half =
+      (half / kOfficialJacketParentLocalZ) * official_camera_focal() / kOfficialPreviewAspect;
+  CHECK(std::fabs(ndc_half * 2.0f - 0.50f) < 1e-4f);
+}
+
 void test_official_playfield_judge_ndc_and_perspective() {
   CHECK(std::fabs(kOfficialPreviewAspect - 16.0f / 9.0f) < 1e-6f);
   CHECK(kOfficialDefaultScreenWidth == 1280);
@@ -2372,6 +2422,7 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   const auto load = ProjectSerializer::load_from_file(project_path.string(), project);
   CHECK_EQ(static_cast<int>(load.error), static_cast<int>(SerializeError::Ok));
   CHECK_EQ(project.music_path, std::string("music.ogg"));
+  CHECK(project.jacket_path.empty());
   CHECK_EQ(project.offset_ms, 3019);
   CHECK_EQ(project.chart_path(), std::string("chart.wdschart"));
 
@@ -2415,6 +2466,7 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   CHECK_EQ(reloaded_meta.offset_ms, 1500);
   CHECK_EQ(reloaded_meta.chart_path(), std::string("notes.wdschart"));
   CHECK_EQ(reloaded_meta.music_path, std::string("bgm/track.ogg"));
+  CHECK(reloaded_meta.jacket_path.empty());
 
   ChartEditorEngine opened;
   WdsProject opened_meta;
@@ -2447,6 +2499,27 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
                          std::istreambuf_iterator<char>());
     CHECK(contents.find("CHART_DELAY_MS") != std::string::npos);
   }
+
+  const fs::path temp_jacket = temp_dir / "jacket.png";
+  {
+    std::ofstream touch(temp_jacket.string(), std::ios::binary | std::ios::trunc);
+    touch << "placeholder";
+  }
+  to_save.jacket_path = temp_jacket.string();
+  const auto jacket_save = ProjectSerializer::save_relativized(to_save, temp_project.string());
+  CHECK_EQ(static_cast<int>(jacket_save.error), static_cast<int>(SerializeError::Ok));
+  WdsProject with_jacket;
+  const auto jacket_load = ProjectSerializer::load_from_file(temp_project.string(), with_jacket);
+  CHECK_EQ(static_cast<int>(jacket_load.error), static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(with_jacket.jacket_path, std::string("jacket.png"));
+
+  to_save.jacket_path.clear();
+  const auto empty_jacket_save = ProjectSerializer::save_relativized(to_save, temp_project.string());
+  CHECK_EQ(static_cast<int>(empty_jacket_save.error), static_cast<int>(SerializeError::Ok));
+  WdsProject empty_jacket;
+  const auto empty_jacket_load = ProjectSerializer::load_from_file(temp_project.string(), empty_jacket);
+  CHECK_EQ(static_cast<int>(empty_jacket_load.error), static_cast<int>(SerializeError::Ok));
+  CHECK(empty_jacket.jacket_path.empty());
 
   // Standalone chart load leaves offset at 0; legacy OFFSET_MS in file is ignored.
   ChartEditorEngine legacy;
@@ -6308,7 +6381,7 @@ void test_sus_comprehensive_roundtrip_all_cases() {
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 6720, 5, 2));
   chart.notes.push_back(make_body(NoteType::Hold, nid(), 6720, 7680, 5, 3));
 
-  // NontailHold (SUS has no nontail bit → imports as tailed Hold)
+  // NontailHold (endpoint #1 type 4 Damage → Nontail, same as sus2txt)
   chart.notes.push_back(make_head(NoteType::HoldStart, nid(), 7680, 0, 1));
   chart.notes.push_back(make_body(NoteType::NontailHold, nid(), 7680, 8640, 0, 1));
 
@@ -8827,6 +8900,99 @@ void test_sus_import_ignores_file_eighths_and_recomputes() {
   CHECK(eighth_ticks_of(reloaded.chart.notes) == (std::vector<int32_t>{240, 720}));
 }
 
+// Official / Ched SUS (no #WDS_PROFILE) follows sus2txt: end Damage → Nontail,
+// leftover Damage is not a tap, #TIL00 is 1920ths of the measure, start Damage
+// survives shouldUnscratch (no invented pink head).
+void test_sus_official_import_matches_sus2txt_nontail_and_hispeed() {
+  const std::string header = "#REQUEST \"ticks_per_beat 480\"\n#BPM01: 120\n#00008: 01\n";
+  const std::string slide = "#000340: 12000022\n";  // SUS lane 4 w2 → editor 2, 0..1440
+
+  auto parse_ok = [&](const std::string& body, SusChartLoadResult& out) {
+    const auto result = SusChartFormat::parse(header + body, out);
+    CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
+    return result.error == SerializeError::Ok;
+  };
+  auto has_head_at = [](const NotationChart& chart, int32_t tick, int32_t lane) {
+    return std::any_of(chart.notes.begin(), chart.notes.end(), [&](const NotationNote& n) {
+      return is_hold_start(n.note_type) && n.start_tick == tick && n.lane == lane;
+    });
+  };
+
+  {
+    SusChartLoadResult loaded;
+    if (!parse_ok(slide + "#00014: 00000042\n", loaded)) return;
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailHold), 1);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Hold), 0);
+    CHECK(has_head_at(loaded.chart, 0, 2));
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Normal), 0);
+  }
+  {
+    SusChartLoadResult loaded;
+    if (!parse_ok(slide + "#00014: 22000042\n", loaded)) return;
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailCriticalHold), 1);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Critical), 1);
+    CHECK(!has_head_at(loaded.chart, 0, 2));
+  }
+  {
+    SusChartLoadResult loaded;
+    if (!parse_ok(slide + "#00054: 00000012\n#00014: 00000042\n", loaded)) return;
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailScratchHold), 1);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Flick), 0);
+  }
+  {
+    // Mid-slide Damage is not an end mark and is not emitted as a tap.
+    SusChartLoadResult loaded;
+    if (!parse_ok(slide + "#00014: 00420000\n", loaded)) return;
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Hold), 1);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailHold), 0);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Normal), 0);
+    CHECK(has_head_at(loaded.chart, 0, 2));
+  }
+  {
+    // Damage on another lane is unused leftover, not a tap and not a nontail mark.
+    SusChartLoadResult loaded;
+    if (!parse_ok(slide + "#00016: 00000041\n", loaded)) return;
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Hold), 1);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailHold), 0);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Normal), 0);
+  }
+  {
+    // Start Air + no end Air = shouldUnscratch. Start Damage keeps addStart=false.
+    SusChartLoadResult loaded;
+    if (!parse_ok(slide + "#00054: 12000000\n#00014: 42000000\n", loaded)) return;
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Hold), 1);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailHold), 0);
+    CHECK(!has_head_at(loaded.chart, 0, 2));
+  }
+  {
+    // sus2txt #TIL00: subtick / 1920 of the current measure (3/4 → 1440 ticks).
+    SusChartLoadResult loaded;
+    if (!parse_ok("#00002: 3\n#TIL00: \"0'0:1.0, 0'960:2.0, 1'0:0.5\"\n" + slide, loaded)) {
+      return;
+    }
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 3);
+    if (loaded.chart.scroll_speed_points.size() == 3) {
+      CHECK_EQ(loaded.chart.scroll_speed_points[0].tick, 0);
+      CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 720);
+      CHECK_EQ(loaded.chart.scroll_speed_points[2].tick, 1440);
+      CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier - 2.0) < 1e-9);
+    }
+    std::string exported;
+    CHECK(SusChartFormat::serialize(loaded.chart, SusChartSaveOptions{}, exported).error ==
+          SerializeError::Ok);
+    SusChartLoadResult roundtrip;
+    CHECK(SusChartFormat::parse(exported, roundtrip).error == SerializeError::Ok);
+    CHECK_EQ(static_cast<int>(roundtrip.chart.scroll_speed_points.size()), 3);
+    if (roundtrip.chart.scroll_speed_points.size() == 3) {
+      CHECK_EQ(roundtrip.chart.scroll_speed_points[1].tick, 720);
+    }
+    CHECK_EQ(count_chart_note_type(roundtrip.chart, NoteType::NontailHold), 0);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Hold), 1);
+  }
+}
+
 // Old .wdschart files: authored / suppressed HoldEighth rows and X tombstones still load,
 // are ignored, and the eighths are recomputed. Saving never writes them back.
 void test_legacy_wdschart_eighth_rows_load_ignored_and_roundtrip() {
@@ -10026,6 +10192,7 @@ int main() {
   test_nontail_holds_generate_same_eighths_as_tailed();
   test_official_csv_nontail_import_keeps_file_eighths();
   test_sus_import_ignores_file_eighths_and_recomputes();
+  test_sus_official_import_matches_sus2txt_nontail_and_hispeed();
   test_legacy_wdschart_eighth_rows_load_ignored_and_roundtrip();
   test_sirius_features_require_extended_profile();
   test_sirius_extended_csv_native_and_sus_scroll();
@@ -10125,6 +10292,8 @@ int main() {
   test_official_judge_sprite_pink_peaks_sit_on_track_edges();
   test_official_note_visual_width_subtracts_margin();
   test_official_concurrent_line_is_full_notation_sliced();
+  test_center_square_crop_and_official_jacket_rgba();
+  test_official_jacket_cover_fit_ndc_width();
   test_official_playfield_judge_ndc_and_perspective();
   test_official_calculate_position_y_matches_il2cpp();
   test_official_setting_value_ranges();

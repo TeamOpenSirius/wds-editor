@@ -1638,6 +1638,13 @@ int main(int argc, char** argv) {
           (void)editor.chart_preview().load_music(music, false);
         });
       }
+      {
+        const std::string jacket = editor.session().jacket_path();
+        QTimer::singleShot(0, &window, [ui_alive, &editor, jacket] {
+          if (!ui_alive->load()) return;
+          (void)editor.chart_preview().load_jacket(jacket);
+        });
+      }
       editor.set_status("ui资源加载完毕", wds::ui::StatusLevel::Info);
     }
     if (diag) frame_diag.enable_path_diagnostics(editor);
