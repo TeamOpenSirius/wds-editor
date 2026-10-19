@@ -208,8 +208,6 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   // Theme QToolBar spacing is ignored or stacked; pin item spacing to 0 so the
   // 4px spacers are the only gap (same as the convert ribbon).
   command_toolbar_->setStyleSheet(QStringLiteral("QToolBar#editorToolBar { spacing: 0px; }"));
-  // File/edit commands, then convert. A trailing gap keeps the convert ribbon
-  // from sitting flush against the last command button.
   bool first_command = true;
   auto addCommand = [this, &first_command](QMenu* menu, const QString& text,
                                            const QKeySequence& shortcut) {
@@ -235,6 +233,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   open_action_ = addCommand(fileMenu, tr("打开工程"), QKeySequence::Open);
   save_action_ = addCommand(fileMenu, tr("保存工程"), QKeySequence::Save);
   music_action_ = addCommand(fileMenu, tr("导入音乐"), {});
+  jacket_action_ = addCommand(fileMenu, tr("导入曲绘"), {});
   auto* stems_action = fileMenu->addAction(tr("本地分轨…"));
   stems_action->setObjectName(QStringLiteral("localStemsAction"));
   connect(stems_action, &QAction::triggered, this, [this] { show_stem_panel(); });
@@ -250,11 +249,6 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
   if (auto* layout = command_toolbar_->layout()) layout->setSpacing(0);
   apply_command_icons();
-  auto* convert_gap = new QWidget(command_toolbar_);
-  convert_gap->setObjectName(QStringLiteral("commandConvertGap"));
-  convert_gap->setFixedWidth(48);
-  convert_gap->setAttribute(Qt::WA_TransparentForMouseEvents);
-  command_toolbar_->addWidget(convert_gap);
   convert_toolbar_ = addToolBar(tr("转换"));
   convert_toolbar_->setObjectName(QStringLiteral("convertToolBar"));
   convert_toolbar_->setIconSize(QSize(26, 26));
@@ -693,6 +687,7 @@ void EditorMainWindow::apply_command_icons() {
   if (import_action_ != nullptr) import_action_->setIcon(icon_for("import", fluent::Import));
   if (export_action_ != nullptr) export_action_->setIcon(icon_for("export", fluent::Export));
   if (music_action_ != nullptr) music_action_->setIcon(icon_for("import-audio", fluent::Music));
+  if (jacket_action_ != nullptr) jacket_action_->setIcon(icon_for("import-image", fluent::Image));
   if (check_action_ != nullptr) check_action_->setIcon(icon_for("check", fluent::Checklist));
   if (clear_marks_action_ != nullptr)
     clear_marks_action_->setIcon(icon_for("clear-marks", fluent::Eraser));
@@ -803,6 +798,10 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   connect(music_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.import_music");
     import_music();
+  });
+  connect(jacket_action_, &QAction::triggered, this, [this] {
+    journal_menu_action("menu.import_jacket");
+    import_jacket();
   });
   connect(check_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.check_chart");
@@ -1570,6 +1569,22 @@ void EditorMainWindow::import_music() {
       },
       [this, ok] {
         if (!*ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选音乐。"));
+      });
+}
+
+void EditorMainWindow::import_jacket() {
+  const auto path = QFileDialog::getOpenFileName(this, tr("导入曲绘"), {},
+                                                  tr("图片文件 (*.jpg *.jpeg *.png)"));
+  if (path.isEmpty() || ui_manager_ == nullptr) return;
+  auto ok = std::make_shared<bool>(false);
+  run_with_busy(
+      tr("正在导入曲绘…"),
+      [this, path, ok] {
+        if (ui_manager_ == nullptr) return;
+        *ok = ui_manager_->session().import_jacket(path.toStdString());
+      },
+      [this, ok] {
+        if (!*ok) QMessageBox::warning(this, tr("导入失败"), tr("无法导入所选曲绘。"));
       });
 }
 

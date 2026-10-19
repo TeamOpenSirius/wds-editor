@@ -1416,6 +1416,7 @@ void PlaybackPreviewView::shutdown() {
     vulkan_.device_wait_idle();
   }
   textures_.clear();
+  jacket_ = {};
   skin_ = SkinCatalog{};
   batch_.clear();
   notes_batch_.clear();
@@ -1504,6 +1505,12 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   // Transport::start_pending_music() so POS syncs land on a still-paused stream.
 
   batch_.clear();
+  // Jacket is imported after skins, so its texture id is new. Sticky buckets
+  // would append it last and cover ingame_bg / lanes (depth write off).
+  // Official Jacket sortingOrder −11 is behind sample −10; pin it first.
+  if (jacket_) {
+    batch_.pin_bucket_front(jacket_.id);
+  }
   notes_batch_.clear();
   glow_batch_.clear();
   split_late_batch_.overlay_ordered = true;
@@ -1543,6 +1550,8 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   // Opaque ingame_bg must occupy an earlier DrawBatch bucket than the plate.
   // Depth write is off, so later buckets cover earlier ones. The plate shares
   // the UI 1×1 solid texture and must not be submitted before the background.
+  // Jacket sortingOrder −11, ingame_bg −10: submit jacket first so the starfield covers it.
+  draw_jacket(batch_);
   draw_ingame_background(batch_);
   merge_overlay(batch_, ui_overlay, true);
   draw_stage(batch_, snapshot, ui_solid_texture);
@@ -1692,6 +1701,43 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   split_frame_diag_.total_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::steady_clock::now() - render_t0)
                                   .count();
+}
+
+bool PlaybackPreviewView::load_jacket(const std::vector<unsigned char>& rgba) {
+  constexpr const char* kSessionJacketKey = "session/jacket";
+  textures_.unload_standalone(kSessionJacketKey);
+  jacket_ = {};
+  if (rgba.empty()) {
+    return true;
+  }
+  if (!ready_) {
+    return false;
+  }
+  const std::size_t expected = static_cast<std::size_t>(wds::chart_editor::kOfficialJacketPixelSize) *
+                               static_cast<std::size_t>(wds::chart_editor::kOfficialJacketPixelSize) *
+                               4u;
+  if (rgba.size() != expected) {
+    return false;
+  }
+  // load_png_rgba8 stores bottom-up; QImage / prepare_official_jacket_rgba are
+  // top-down. Flip so create_texture_rgba matches official skins.
+  const int n = wds::chart_editor::kOfficialJacketPixelSize;
+  const std::size_t row = static_cast<std::size_t>(n) * 4u;
+  std::vector<unsigned char> bottom_up(rgba.size());
+  for (int y = 0; y < n; ++y) {
+    std::memcpy(bottom_up.data() + static_cast<std::size_t>(n - 1 - y) * row,
+                rgba.data() + static_cast<std::size_t>(y) * row, row);
+  }
+  jacket_ = textures_.load_standalone_rgba(kSessionJacketKey, bottom_up.data(), n, n);
+  return static_cast<bool>(jacket_);
+}
+
+void PlaybackPreviewView::draw_jacket(DrawBatch& batch) {
+  if (!jacket_) {
+    return;
+  }
+  // GameBackgroundJacket.Initialize disables the renderer when there is no sprite.
+  batch.add_quad(jacket_.id, geometry_.jacket_quad(), -0.99f, 1.0f);
 }
 
 void PlaybackPreviewView::draw_ingame_background(DrawBatch& batch) {

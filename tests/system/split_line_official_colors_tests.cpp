@@ -461,6 +461,17 @@ void test_star_quad_ignores_note_height_level() {
   CHECK(height(nb) > height(na) + 1e-5f);
 }
 
+void test_jacket_quad_ndc_width_is_half_screen_at_16_9() {
+  // OpenWDS SpriteRendererScreenFitter cover-fit × Jacket localScale 0.6 × 8 world
+  // (GameBackground.prefab + ingame_bg 19.2×11.8 @ 100 ppu) → NDC width 0.50 at 16:9.
+  wds::renderer::StageGeometry geometry;
+  geometry.configure({});
+  geometry.resize(1280, 720);
+  const auto q = geometry.jacket_quad();
+  const float ndc_w = (q.rb.x - q.lb.x) / (geometry.content().w * 0.5f);
+  CHECK(std::fabs(ndc_w - 0.50f) < 1e-4f);
+}
+
 void test_content_aspect_is_official_16_9() {
   CHECK(std::fabs(wds::renderer::PreviewVisualConfig{}.target_aspect_ratio -
                   wds::chart_editor::kOfficialPreviewAspect) < 1e-6f);
@@ -4552,6 +4563,7 @@ int main() {
   test_adjacent_tap_notes_leave_official_margin_gap();
   test_star_quad_is_centered_official_size_not_span_width();
   test_star_quad_ignores_note_height_level();
+  test_jacket_quad_ndc_width_is_half_screen_at_16_9();
   test_content_aspect_is_official_16_9();
   test_split_view_billboard_uses_z_roll_and_pivot();
   test_2020_catalog_four_layers();

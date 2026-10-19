@@ -7,6 +7,7 @@
 #include <wds/common/minflt_stage.hpp>
 #include <wds/common/time.hpp>
 #include <wds/core/gimmick.hpp>
+#include <wds/core/jacket_image.hpp>
 #include <wds/core/official_playfield.hpp>
 #include <wds/core/preview_snapshot.hpp>
 #include <wds/core/split_fade.hpp>
@@ -15,11 +16,16 @@
 
 #include <wds/interaction/font_atlas.hpp>
 
+#include <QImage>
+#include <QImageReader>
+#include <QString>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -740,6 +746,39 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   }
   rebuild_waveform(music_path);
   return true;
+}
+
+bool ChartPreviewPanel::load_jacket(const std::string& jacket_path) {
+  if (!ready_) {
+    return false;
+  }
+  if (jacket_path.empty()) {
+    return preview_.load_jacket({});
+  }
+  QImageReader reader(
+      QString::fromUtf8(jacket_path.data(), static_cast<int>(jacket_path.size())));
+  reader.setAutoTransform(true);
+  QImage image = reader.read();
+  if (image.isNull()) {
+    return false;
+  }
+  image = image.convertToFormat(QImage::Format_RGBA8888);
+  const int width = image.width();
+  const int height = image.height();
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  std::vector<unsigned char> packed(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+                                    4u);
+  for (int y = 0; y < height; ++y) {
+    std::memcpy(packed.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u,
+                image.constScanLine(y), static_cast<std::size_t>(width) * 4u);
+  }
+  std::vector<unsigned char> jacket;
+  if (!wds::chart_editor::prepare_official_jacket_rgba(packed.data(), width, height, jacket)) {
+    return false;
+  }
+  return preview_.load_jacket(jacket);
 }
 
 bool ChartPreviewPanel::audition_music(const std::string& music_path) {

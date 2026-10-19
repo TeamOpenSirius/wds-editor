@@ -14,6 +14,7 @@
 #include <QLineEdit>
 #include <QProgressBar>
 #include <QPixmap>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QThread>
 #include <cstdio>
@@ -75,6 +76,14 @@ struct StemPanelTestAccess {
     panel.source_ = source;
   }
   static bool try_cached(StemPanel& panel) { return panel.try_attach_cached_tracks(); }
+  static void set_runtime_dir(StemPanel& panel, const QString& dir) { panel.runtime_dir_ = dir; }
+  static void refresh_python(StemPanel& panel, bool prefer_runtime) {
+    panel.refresh_python_selection(prefer_runtime);
+  }
+  static QString python_text(StemPanel& panel) { return panel.python_->text(); }
+  static QString pick_python(StemPanel& panel, bool prefer_runtime) {
+    return panel.pick_python(prefer_runtime);
+  }
 };
 }
 
@@ -330,6 +339,39 @@ int main(int argc, char** argv) {
       expect(!Access::try_cached(other_panel), "cache for a different source is not attached");
       expect(Access::tracks(other_panel) == 1, "mismatched source keeps original-only tracks");
     }
+  }
+  {
+    // Installed stem-runtime must win over a stale stems/python settings path without
+    // requiring the user to click「安装」again after an app update.
+    QTemporaryDir runtime_root;
+    QTemporaryDir other_root;
+#ifdef Q_OS_WIN
+    const QString runtime_py = runtime_root.filePath(QStringLiteral("Scripts/python.exe"));
+#else
+    const QString runtime_py = runtime_root.filePath(QStringLiteral("bin/python"));
+#endif
+    const QString stale_py = other_root.filePath(QStringLiteral("stale-python"));
+    QDir().mkpath(QFileInfo(runtime_py).absolutePath());
+    for (const auto& path : {runtime_py, stale_py}) {
+      QFile file(path);
+      expect(file.open(QIODevice::WriteOnly) && file.write("x") > 0, "python fixture written");
+      file.setPermissions(file.permissions() | QFileDevice::ExeUser);
+    }
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+    const QVariant previous = settings.value("stems/python");
+    settings.setValue("stems/python", stale_py);
+    StemPanel panel(nullptr);
+    Access::set_runtime_dir(panel, runtime_root.path());
+    expect(Access::pick_python(panel, true) == QFileInfo(runtime_py).absoluteFilePath(),
+           "prefer_installed_runtime selects stem-runtime over stale settings");
+    Access::refresh_python(panel, true);
+    expect(QFileInfo(Access::python_text(panel)).canonicalFilePath() ==
+               QFileInfo(runtime_py).canonicalFilePath(),
+           "refresh fills the field with the installed runtime");
+    expect(Access::status(panel).contains(QStringLiteral("运行环境已就绪")),
+           "status recognizes an existing runtime without reinstalling");
+    if (previous.isValid()) settings.setValue("stems/python", previous);
+    else settings.remove("stems/python");
   }
   {
     StemPanel panel(nullptr);

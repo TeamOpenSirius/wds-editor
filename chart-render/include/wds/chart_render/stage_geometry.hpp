@@ -91,6 +91,9 @@ class StageGeometry {
   // OpenWDS BGShadow child: sprite local rect × child localScale, z=12,
   // through the identity Main Camera (same path as project_world).
   Quad bg_shadow_quad(float scale_x, float scale_y) const;
+  // OpenWDS GameBackground/Jacket: identity camera, no LaneGroup Rx=60°.
+  // Center (0, 2*fit, 12), half-edge 4 * 0.6 * fit. fit is sample cover-fit.
+  Quad jacket_quad() const;
   // Half note height along approach axis (percent units), same as note_quad span.
   float note_half_height_percent(int32_t lane, float percent) const;
   // Official tap visual (notation − 0.15) × 0.64 at the given percent.

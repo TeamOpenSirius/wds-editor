@@ -27,6 +27,7 @@ class ChartPreviewPanel;
 struct PreparedWdsProject {
   std::string project_path;
   std::string music_path;
+  std::string jacket_path;
   std::vector<std::string> chart_paths;
   std::vector<wds::chart_editor::NotationChart> charts;
   std::string error;
@@ -110,6 +111,7 @@ class EditorSession {
   // Export each chart as a separate .sus into `directory` (1.sus .. N.sus).
   bool export_sus_project(const std::string& directory);
   bool import_music(const std::string& path);
+  bool import_jacket(const std::string& path);
   bool set_offset_ms(int64_t offset_ms);
   const std::vector<int32_t>& last_offset_violation_ids() const noexcept {
     return last_offset_violation_ids_;
@@ -136,6 +138,7 @@ class EditorSession {
 
   const std::string& project_path() const noexcept { return project_path_; }
   const std::string& music_path() const noexcept { return music_path_; }
+  const std::string& jacket_path() const noexcept { return jacket_path_; }
   int64_t offset_ms() const noexcept { return offset_ms_; }
   bool dirty() const noexcept;
   bool read_only() const noexcept { return read_only_; }
@@ -181,6 +184,9 @@ class EditorSession {
   bool import_official_pack(const std::string& music_config_path);
   bool import_sus(const std::string& path);
   void reset_music_config_meta();
+  void apply_preview_jacket(std::string* fail_note = nullptr);
+  std::string resolve_existing_relative_asset(const std::string& source_file,
+                                              const std::string& stored) const;
   wds::chart_editor::OfficialMusicConfig make_music_config() const;
   wds::chart_editor::SusChartSaveOptions make_sus_save_options() const;
   std::string official_audio_filename() const;
@@ -191,6 +197,7 @@ class EditorSession {
   std::function<void(std::vector<ChartBackupItem>)> backup_sink_;
   std::string project_path_;
   std::string music_path_;
+  std::string jacket_path_;
   std::vector<ChartSlot> charts_;
   std::size_t active_chart_index_ = 0;
   int64_t offset_ms_ = 0;

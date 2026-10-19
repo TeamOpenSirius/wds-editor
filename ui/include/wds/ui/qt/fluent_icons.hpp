@@ -14,6 +14,7 @@ constexpr char32_t Save = 0xE74E;
 constexpr char32_t Import = 0xE8B5;   // "ImportAll"
 constexpr char32_t Export = 0xEDE1;   // "Export"
 constexpr char32_t Music = 0xE8D6;    // "MusicInfo"
+constexpr char32_t Image = 0xE91B;    // "Image"
 constexpr char32_t Line = 0xE9E9;     // curve/line "InkingTool"-ish
 constexpr char32_t Curve = 0xF18D;    // "Line" style
 constexpr char32_t Checklist = 0xE9D5;  // "Checklist"

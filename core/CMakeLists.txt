@@ -18,6 +18,7 @@ add_library(wds_core STATIC
     src/chart_serializer.cpp
     src/file_io.cpp
     src/project.cpp
+    src/jacket_image.cpp
     src/official_chart.cpp
     src/sus_chart.cpp
     src/note_position_calculator.cpp

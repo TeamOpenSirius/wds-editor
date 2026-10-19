@@ -348,6 +348,23 @@ Quad StageGeometry::bg_shadow_quad(float scale_x, float scale_y) const {
   };
 }
 
+Quad StageGeometry::jacket_quad() const {
+  // GameBackground.prefab Jacket: parent sample at z=12 scaled by
+  // SpriteRendererScreenFitter cover-fit; child local (0,2,0) × (0.6,0.6,1).
+  // Sprite 800×800 @ 100 ppu, pivot (0.5,0.5) → world half-edge 4 before scale.
+  const float fit = wds::chart_editor::official_ingame_bg_cover_fit(content_aspect());
+  const float cy = wds::chart_editor::kOfficialJacketLocalY * fit;
+  const float z = wds::chart_editor::kOfficialJacketParentLocalZ;
+  const float half = wds::chart_editor::kOfficialJacketWorldSize * 0.5f *
+                     wds::chart_editor::kOfficialJacketLocalScaleX * fit;
+  return {
+      project_world(-half, cy - half, z),
+      project_world(-half, cy + half, z),
+      project_world(half, cy + half, z),
+      project_world(half, cy - half, z),
+  };
+}
+
 Quad StageGeometry::lane_border_quad(int32_t edge_index) const {
   const float x = official_lane_edge_x(edge_index, config_.lane_count);
   const float half = wds::chart_editor::kOfficialLaneBorderVisualWidth * 0.5f;

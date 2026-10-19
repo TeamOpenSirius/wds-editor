@@ -15,18 +15,21 @@ namespace wds::chart_editor {
 // Layout (v2), paths are relative to the .wdsproject directory when possible:
 //   WDSPROJECT 2
 //   MUSIC music.ogg
+//   JACKET jacket.png
 //   CHART_DELAY_MS 3019
 //   ACTIVE_CHART 0
 //   CHART chart-a.wdschart
 //   CHART chart-b.wdschart
 //   END
 //
-// MUSIC / CHART values are the remainder of the line (spaces allowed).
+// MUSIC / JACKET / CHART values are the remainder of the line (spaces allowed).
 // Empty MUSIC means no background music assigned yet.
+// Empty JACKET (or a missing JACKET token on old files) means no jacket assigned.
 // CHART_DELAY_MS is song-level chart delay (ms) — never stored in .wdschart.
 // Legacy key OFFSET_MS is accepted on load and treated as CHART_DELAY_MS.
 struct WdsProject {
   std::string music_path;
+  std::string jacket_path;
   int64_t offset_ms = 0;  // chart delay ms (CHART_DELAY_MS)
   std::vector<std::string> chart_paths;
   int32_t active_chart_index = 0;
@@ -57,7 +60,7 @@ class ProjectSerializer {
   static std::string make_relative_path(const std::string& project_file_path,
                                         const std::string& path);
 
-  // Rewrite music_path / chart_paths to be relative to `project_file_path`, then save.
+  // Rewrite music_path / jacket_path / chart_paths to be relative to `project_file_path`, then save.
   static SerializeResult save_relativized(WdsProject project, const std::string& project_file_path);
 };
 

@@ -75,6 +75,7 @@ class EditorMainWindow final : public QMainWindow {
   void save_project();
   void import_chart();
   void import_music();
+  void import_jacket();
   void run_with_busy(const QString& title, std::function<void()> work,
                      std::function<void()> done = {});
   void export_chart();
@@ -135,6 +136,7 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* export_action_ = nullptr;
   ::QAction* export_video_action_ = nullptr;
   ::QAction* music_action_ = nullptr;
+  ::QAction* jacket_action_ = nullptr;
   ::QAction* check_action_ = nullptr;
   ::QAction* clear_marks_action_ = nullptr;
   ::QAction* about_action_ = nullptr;

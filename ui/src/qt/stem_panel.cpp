@@ -428,12 +428,6 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   auto* form = new QFormLayout;
   python_ = new QLineEdit(this);
   python_->setObjectName("stemPython");
-  QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
-  QString python = resolve_python(qEnvironmentVariable("WDS_STEM_PYTHON"));
-  if (python.isEmpty()) python = resolve_python(settings.value("stems/python").toString());
-  if (python.isEmpty()) python = resolve_python(runtime_python());
-  if (python.isEmpty()) python = discover_system_python();
-  python_->setText(python);
   python_->setPlaceholderText(tr("选择 Python 3.10～3.14"));
   auto* interpreter = new QHBoxLayout;
   interpreter->addWidget(python_);
@@ -475,6 +469,9 @@ StemPanel::StemPanel(UiManager* manager, QWidget* parent)
   status_ = new QLabel(tr("就绪"), this);
   status_->setWordWrap(true);
   layout->addWidget(status_);
+  // Prefer the installed stem-runtime over a stale stems/python setting so an app
+  // update does not look like a missing runtime until the user clicks「安装」.
+  refresh_python_selection(true);
 
   connect(start_, &QPushButton::clicked, this, [this] { start(); });
   connect(cancel_, &QPushButton::clicked, this, [this] { cancel(); });
@@ -536,6 +533,7 @@ void StemPanel::update_polling() {
 void StemPanel::showEvent(QShowEvent* event) {
   QDialog::showEvent(event);
   sync_source();
+  refresh_python_selection(true);
   // First open with an empty field and nothing discoverable: tell the user before they click install.
   if (!prompted_python_missing_ && resolve_python(python_->text()).isEmpty() &&
       resolve_python(runtime_python()).isEmpty() && discover_system_python().isEmpty()) {
@@ -715,6 +713,40 @@ QString StemPanel::runtime_python() const {
 #endif
 }
 
+QString StemPanel::pick_python(bool prefer_installed_runtime) const {
+  if (const auto env = resolve_python(qEnvironmentVariable("WDS_STEM_PYTHON")); !env.isEmpty()) {
+    return env;
+  }
+  const QString runtime = resolve_python(runtime_python());
+  if (prefer_installed_runtime && !runtime.isEmpty()) return runtime;
+  QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  if (const auto saved = resolve_python(settings.value("stems/python").toString()); !saved.isEmpty()) {
+    return saved;
+  }
+  if (!runtime.isEmpty()) return runtime;
+  return discover_system_python();
+}
+
+void StemPanel::refresh_python_selection(bool prefer_installed_runtime) {
+  if (!prefer_installed_runtime) {
+    if (const auto typed = resolve_python(python_->text()); !typed.isEmpty()) {
+      python_->setText(typed);
+      return;
+    }
+  }
+  const QString python = pick_python(prefer_installed_runtime);
+  if (!python.isEmpty()) python_->setText(python);
+  const QString runtime = resolve_python(runtime_python());
+  if (runtime.isEmpty() || active_) return;
+  // Keep settings aligned with the venv we will actually launch after an update.
+  if (!python.isEmpty() &&
+      QFileInfo(python).canonicalFilePath() == QFileInfo(runtime).canonicalFilePath()) {
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+    settings.setValue("stems/python", runtime);
+  }
+  if (status_ && !active_) status_->setText(tr("运行环境已就绪，可以生成分轨。"));
+}
+
 void StemPanel::detach() {
   manager_ = nullptr;
   source_timer_.stop();
@@ -813,19 +845,17 @@ void StemPanel::refresh_controls() {
 bool StemPanel::prepare_job() {
   QString python = resolve_python(python_->text());
   if (python.isEmpty()) python = resolve_python(runtime_python());
+  if (python.isEmpty()) python = discover_system_python();
   if (python.isEmpty()) {
     // Store python.exe under WindowsApps is a stub that cannot run; discovery already
     // skips it, so "only Store aliases" looks the same as no Python at all.
-    if (discover_system_python().isEmpty()) {
-      prompted_python_missing_ = true;
-      prompt_python_not_installed();
-    } else if (is_windows_store_python_alias(python_->text())) {
+    if (is_windows_store_python_alias(python_->text())) {
       report_task_failure(
           tr("无法启动任务"),
           tr("当前 Python 是 Windows 商店占位程序，无法创建运行环境。请改用「选择…」指定已安装的 python.exe"));
     } else {
-      report_task_failure(tr("无法启动任务"),
-                          tr("请先选择 Python 3.10～3.14，再安装分轨运行环境"));
+      prompted_python_missing_ = true;
+      prompt_python_not_installed();
     }
     return false;
   }
@@ -876,6 +906,9 @@ void StemPanel::launch(const QString& python, const QStringList& arguments) {
 
 void StemPanel::start() {
   sync_source();
+  // Generation must use the stem venv when present; a stale settings/system path
+  // would miss torch/demucs until the user re-clicks「安装」.
+  refresh_python_selection(true);
   if (active_ || source_.isEmpty() || !prepare_job()) return;
   installing_ = false;
   job_source_ = source_;
@@ -906,6 +939,8 @@ void StemPanel::cancel() {
 
 void StemPanel::install_runtime() {
   refresh_cache_dir();
+  // Keep a user-selected bootstrap interpreter; only fill the field when empty.
+  refresh_python_selection(false);
   if (active_ || !prepare_job()) return;
   installing_ = true;
   status_->setText(tr("正在准备运行环境…"));

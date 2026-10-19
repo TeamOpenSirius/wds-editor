@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -156,7 +157,93 @@ bool path_ends_with_ci(const std::string& path, const std::string& suffix) {
   return true;
 }
 
+std::optional<int32_t> earliest_start_tick(const NotationChart& chart) {
+  std::optional<int32_t> min_tick;
+  auto consider = [&](int32_t tick) {
+    if (!min_tick.has_value() || tick < *min_tick) {
+      min_tick = tick;
+    }
+  };
+  // Notes include split-lane effects (gimmick rows); their start_tick is CSV startTime.
+  for (const auto& note : chart.notes) {
+    consider(note.start_tick);
+  }
+  for (const auto& point : chart.scroll_speed_points) {
+    consider(point.tick);
+  }
+  return min_tick;
+}
+
+void shift_chart_ticks(NotationChart& chart, int32_t shift) {
+  if (shift == 0) {
+    return;
+  }
+  for (auto& note : chart.notes) {
+    note.start_tick += shift;
+    note.end_tick += shift;
+  }
+  for (auto& point : chart.scroll_speed_points) {
+    point.tick += shift;
+  }
+}
+
+void apply_negative_time_fold(NotationChart& chart, int32_t min_tick) {
+  if (min_tick >= 0) {
+    return;
+  }
+  // INT32_MIN cannot be negated safely as int32.
+  if (min_tick == std::numeric_limits<int32_t>::min()) {
+    return;
+  }
+  MusicTiming local = chart.timing;
+  local.offset_ms = 0;
+  chart.timing.offset_ms += tick_to_milliseconds(min_tick, local);
+  shift_chart_ticks(chart, -min_tick);
+}
+
 }  // namespace
+
+void OfficialChartFormat::fold_negative_times_into_delay(NotationChart& chart) {
+  normalize_timing_points(chart.timing);
+  const auto min_tick = earliest_start_tick(chart);
+  if (!min_tick.has_value()) {
+    return;
+  }
+  apply_negative_time_fold(chart, *min_tick);
+}
+
+void OfficialChartFormat::fold_negative_times_into_delay(std::vector<NotationChart>& charts) {
+  if (charts.empty()) {
+    return;
+  }
+  for (auto& chart : charts) {
+    normalize_timing_points(chart.timing);
+  }
+  std::optional<int32_t> global_min;
+  for (const auto& chart : charts) {
+    const auto min_tick = earliest_start_tick(chart);
+    if (!min_tick.has_value()) {
+      continue;
+    }
+    if (!global_min.has_value() || *min_tick < *global_min) {
+      global_min = min_tick;
+    }
+  }
+  if (!global_min.has_value() || *global_min >= 0) {
+    return;
+  }
+  if (*global_min == std::numeric_limits<int32_t>::min()) {
+    return;
+  }
+  MusicTiming local = charts.front().timing;
+  local.offset_ms = 0;
+  const int64_t delta_ms = tick_to_milliseconds(*global_min, local);
+  const int32_t shift = -*global_min;
+  for (auto& chart : charts) {
+    chart.timing.offset_ms += delta_ms;
+    shift_chart_ticks(chart, shift);
+  }
+}
 
 SerializeResult OfficialChartFormat::parse_music_config(const std::string& text,
                                                         OfficialMusicConfig& out) {
@@ -364,6 +451,9 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
   }
 
   normalize_timing_points(chart.timing);
+  if (options.fold_negative_times_into_delay) {
+    fold_negative_times_into_delay(chart);
+  }
   // Official CSV has no BPM. Type 900 rows are the eighth positions; a tpq/2
   // grid from the default BPM-60 clock would not match the file. Editable
   // export still generates eighths in serialize_chart.
@@ -403,16 +493,16 @@ SerializeResult OfficialChartFormat::load_chart_with_music_config(
 
 SerializeResult OfficialChartFormat::load_chart_auto_profile(
     const std::string& chart_path, const std::string& music_config_path,
-    NotationChart& out_chart) {
-  auto result = load_chart_with_music_config(chart_path, music_config_path, out_chart);
+    NotationChart& out_chart, OfficialChartLoadOptions options) {
+  auto result =
+      load_chart_with_music_config(chart_path, music_config_path, out_chart, options);
   if (result.error == SerializeError::Ok ||
       (result.message.find("out-of-range lane/width") == std::string::npos &&
        result.message.find("Sirius Extended profile required") == std::string::npos)) {
     return result;
   }
-  OfficialChartLoadOptions extended;
-  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
-  return load_chart_with_music_config(chart_path, music_config_path, out_chart, extended);
+  options.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  return load_chart_with_music_config(chart_path, music_config_path, out_chart, options);
 }
 
 SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
@@ -468,9 +558,15 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
     return a.speed && !b.speed;
   });
 
+  const double delay_bias =
+      options.bake_delay_into_times
+          ? static_cast<double>(chart.timing.offset_ms) / 1000.0
+          : 0.0;
+
   for (const auto& row : rows) {
     if (row.speed) {
-      ss << tick_to_seconds(row.tick, chart.timing) << ',' << std::defaultfloat
+      ss << (tick_to_seconds(row.tick, chart.timing) + delay_bias) << ','
+         << std::defaultfloat
          << std::setprecision(std::numeric_limits<double>::max_digits10) << row.multiplier
          << ',' << kHiSpeedType << ",0,0,0,0\n";
       ss << std::fixed << std::setprecision(4);
@@ -487,14 +583,14 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
           (note.lane < 0 || note.width > 12 || end_exclusive > 12)))) {
       return {SerializeError::ParseError, "official chart: note lane/width out of range"};
     }
-    const double start_sec = tick_to_seconds(note.start_tick, chart.timing);
+    const double start_sec = tick_to_seconds(note.start_tick, chart.timing) + delay_bias;
 
     // Official: hold body / split write endTime; taps / heads / mid-stars / HoldEighth → -1.
     const bool writes_end =
         (is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type)) ||
         is_split_lane_gimmick(note.gimmick_type) || note.note_type == NoteType::None;
     const double end_sec =
-        writes_end ? tick_to_seconds(note.end_tick, chart.timing) : -1.0;
+        writes_end ? (tick_to_seconds(note.end_tick, chart.timing) + delay_bias) : -1.0;
 
     if (is_split_lane_gimmick(note.gimmick_type)) {
       ss << start_sec << ',';

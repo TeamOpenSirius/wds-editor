@@ -190,8 +190,12 @@ SerializeResult ChartEditorEngine::export_official_to_file(const std::string& pa
     return {SerializeError::ReadOnly, "imported official charts cannot be exported"};
   }
   // Export from a normalized copy — never mutates a read-only document.
+  // Single-chart CSV bakes chart delay into note/split/HiSpeed seconds so the
+  // file is self-contained without music_config.
   const NotationChart chart = document_.normalized_chart();
-  return OfficialChartFormat::save_chart_file(chart, path);
+  OfficialChartSaveOptions options;
+  options.bake_delay_into_times = true;
+  return OfficialChartFormat::save_chart_file(chart, path, options);
 }
 
 SerializeResult ChartEditorEngine::export_sus_to_file(const std::string& path,

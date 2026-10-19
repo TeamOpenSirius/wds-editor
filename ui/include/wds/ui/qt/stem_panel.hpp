@@ -56,6 +56,11 @@ class StemPanel final : public QDialog {
   // Scan cache_dir_ for a complete entry whose spec.source_sha256 matches source_.
   bool try_attach_cached_tracks();
   static QString sha256_hex_file(const QString& path);
+  // Env → (optional) installed stem-runtime → settings → runtime → system discovery.
+  QString pick_python(bool prefer_installed_runtime) const;
+  // Fill the Python field / status from pick_python. prefer_installed_runtime makes an
+  // existing stem-runtime win over a stale settings path (app update / prior system pick).
+  void refresh_python_selection(bool prefer_installed_runtime);
   void note_download_progress(const QString& text);
   void append_process_log(const QByteArray& bytes);
   void report_task_failure(const QString& title, const QString& summary);

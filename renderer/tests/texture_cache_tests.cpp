@@ -272,6 +272,22 @@ void test_standalone_survives_rebake() {
   CHECK(count_id(gpu.destroyed, stand_id) == 0);
 }
 
+void test_unload_standalone_destroys_and_allows_reload() {
+  FakeGpu gpu;
+  wds::renderer::TextureCache cache(gpu.backend());
+  auto first = cache.load_standalone_rgba("session/jacket", solid_rgba(2, 2, 1, 2, 3, 255).data(), 2, 2);
+  CHECK(first);
+  const wds::renderer::TextureId first_id = first.id;
+  cache.unload_standalone("session/jacket");
+  CHECK(!cache.get("session/jacket"));
+  CHECK_EQ(count_id(gpu.destroyed, first_id), 1);
+  auto second = cache.load_standalone_rgba("session/jacket", solid_rgba(2, 2, 9, 8, 7, 255).data(), 2, 2);
+  CHECK(second);
+  CHECK(second.id != first_id);
+  cache.unload_standalone("missing");
+  CHECK_EQ(count_id(gpu.destroyed, first_id), 1);
+}
+
 void test_clear_destroys_exactly_once() {
   FakeGpu gpu;
   wds::renderer::TextureCache cache(gpu.backend());
@@ -492,6 +508,7 @@ void run_texture_cache_tests() {
   test_create_fail_keeps_old_state();
   test_retry_success_swaps_then_destroys();
   test_standalone_survives_rebake();
+  test_unload_standalone_destroys_and_allows_reload();
   test_clear_destroys_exactly_once();
   test_pending_overwrite_and_overflow();
   test_first_atlas_create_failure();

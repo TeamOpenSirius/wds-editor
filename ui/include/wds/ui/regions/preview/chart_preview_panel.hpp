@@ -96,6 +96,9 @@ class ChartPreviewPanel {
   // When preserve_playback is false, seek to 0 and do not resume play (open/import).
   bool load_music(const std::string& music_path, bool preserve_playback = true);
   bool audition_music(const std::string& music_path);
+  // Decode jpg/png (EXIF auto-orient), center-crop 1:1, scale to 800×800, upload once.
+  // Empty path unloads the jacket. Missing/unloadable files return false.
+  bool load_jacket(const std::string& jacket_path);
   std::uint64_t music_generation() const noexcept { return music_generation_; }
   const wds::audio::WaveformOverview& waveform() const noexcept { return waveform_; }
   wds::renderer::TextureInfo spectrogram_texture() const noexcept { return spectrogram_texture_; }
