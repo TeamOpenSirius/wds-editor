@@ -6426,13 +6426,15 @@ void ChartEditPanel::handle_timeline_wheel(const wds::interaction::ScrollEvent& 
 
   // Fixed gesture: Option+wheel (Alt+wheel on Windows/Linux) adjusts visible
   // range only when that is the sole modifier (not in shortcut settings).
+  // Qt on Windows and AppKit on macOS both report that gesture on delta_x.
   // Shift+Ctrl/Cmd is curve fill and must not zoom.
   // Default: scroll up shrinks the window (zoom in).
   if (wds::interaction::is_visible_range_wheel_modifiers(event.mods)) {
     auto grid = viewport_.grid();
     const int32_t before = grid.visible_hectoms;
     const int32_t next = visible_range_after_wheel(
-        event.delta_y, before, wds::interaction::invert_scroll_wheel(),
+        visible_range_wheel_delta(event.delta_x, event.delta_y), before,
+        wds::interaction::invert_scroll_wheel(),
         wds::interaction::invert_visible_range_scroll());
     if (next == before) return;
     pointer_ = event.position;

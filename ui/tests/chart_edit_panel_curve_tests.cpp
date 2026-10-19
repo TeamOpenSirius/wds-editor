@@ -882,6 +882,15 @@ void test_exact_option_wheel_updates_visible_range_and_playhead_grid() {
   CHECK(std::fabs(h.panel.viewport().y_at(0) - judgeline) < 1.0f);
 }
 
+void test_option_horizontal_wheel_updates_visible_range() {
+  Harness h;
+  const auto pos = h.at_tick_lane(480, 2);
+  const int32_t before = h.panel.viewport().grid().visible_hectoms;
+  // Qt Windows puts Alt+wheel on delta_x; macOS Option does the same.
+  h.panel.on_scroll(wds::interaction::ScrollEvent{pos, 1.0f, 0.0f, option_mods()});
+  CHECK(h.panel.viewport().grid().visible_hectoms != before);
+}
+
 void test_primary_wheel_does_not_change_visible_range() {
   Harness h;
   const auto pos = h.at_tick_lane(480, 2);
@@ -3632,6 +3641,7 @@ int main() {
   test_ui_manager_pushes_selection();
   test_dialog_confirm_keeps_toolbar_fill_and_delete_falls_back();
   test_exact_option_wheel_updates_visible_range_and_playhead_grid();
+  test_option_horizontal_wheel_updates_visible_range();
   test_primary_wheel_does_not_change_visible_range();
   test_curve_fill_wheel_does_not_change_visible_range();
   test_hold_tail_adjust_follows_playback_resync();

@@ -32,6 +32,10 @@
 #include <QPushButton>
 #include <QMenu>
 #include <QToolBar>
+#include <QToolButton>
+#include <QLabel>
+#include <QEnterEvent>
+#include <QCursor>
 #include <QKeySequence>
 #include <QFileDialog>
 #include <QMessageBox>
@@ -43,7 +47,6 @@
 #include <QLineEdit>
 #include <QComboBox>
 #include <QDoubleSpinBox>
-#include <QLabel>
 #include <QPalette>
 #include <QColor>
 #include <QSizePolicy>
@@ -127,6 +130,166 @@ bool focus_is_typing_field(QWidget* focus) {
   return false;
 }
 
+// Trailing command-bar items to hide so the rest plus an overflow control fit.
+std::size_t command_overflow_hide_count(const std::vector<int>& item_widths, int overflow_w,
+                                        int budget) {
+  int total = 0;
+  for (int width : item_widths) total += std::max(0, width);
+  if (total <= budget) return 0;
+  int used = total;
+  std::size_t hide = 0;
+  const int room = budget - std::max(0, overflow_w);
+  while (hide < item_widths.size() && used > room) {
+    used -= std::max(0, item_widths[item_widths.size() - 1 - hide]);
+    ++hide;
+  }
+  return hide;
+}
+
+class HoverOverflowAffordance final : public QLabel {
+ public:
+  explicit HoverOverflowAffordance(QWidget* parent) : QLabel(parent) {
+    setFocusPolicy(Qt::NoFocus);
+    setAlignment(Qt::AlignCenter);
+    setFrameShape(QFrame::NoFrame);
+    setAttribute(Qt::WA_Hover, true);
+    setMouseTracking(true);
+    setContentsMargins(0, 0, 0, 0);
+    setMargin(0);
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    setStyleSheet(QStringLiteral("QLabel { border: none; background: transparent; padding: 0px; }"));
+    hide_timer_.setSingleShot(true);
+    hide_timer_.setInterval(160);
+    connect(&hide_timer_, &QTimer::timeout, this, [this] { hide_if_pointer_left(); });
+    watch_timer_.setInterval(50);
+    connect(&watch_timer_, &QTimer::timeout, this, [this] { watch_pointer(); });
+  }
+
+  void set_overflow_menu(QMenu* menu) {
+    if (menu_ != nullptr) menu_->removeEventFilter(this);
+    menu_ = menu;
+    if (menu_ == nullptr) return;
+    menu_->installEventFilter(this);
+    connect(menu_, &QMenu::aboutToHide, this, [this] {
+      hide_timer_.stop();
+      watch_timer_.stop();
+    });
+  }
+
+ protected:
+  bool event(QEvent* event) override {
+    if (event->type() == QEvent::HoverEnter) {
+      hide_timer_.stop();
+      show_overflow_menu();
+    }
+    return QLabel::event(event);
+  }
+
+  void enterEvent(QEnterEvent* event) override {
+    QLabel::enterEvent(event);
+    hide_timer_.stop();
+    show_overflow_menu();
+  }
+
+  bool eventFilter(QObject* watched, QEvent* event) override {
+    if (watched == menu_ && (event->type() == QEvent::Enter || event->type() == QEvent::HoverEnter)) {
+      hide_timer_.stop();
+    }
+    return QLabel::eventFilter(watched, event);
+  }
+
+ private:
+  void show_overflow_menu() {
+    if (menu_ == nullptr || menu_->isEmpty() || !isVisible()) return;
+    if (!menu_->isVisible()) menu_->popup(mapToGlobal(QPoint(0, height())));
+    watch_timer_.start();
+  }
+
+  void watch_pointer() {
+    if (menu_ == nullptr || !menu_->isVisible()) {
+      hide_timer_.stop();
+      watch_timer_.stop();
+      return;
+    }
+    if (pointer_over_self_or_menu()) {
+      hide_timer_.stop();
+      return;
+    }
+    if (!hide_timer_.isActive()) hide_timer_.start();
+  }
+
+  void hide_if_pointer_left() {
+    if (menu_ == nullptr || !menu_->isVisible()) {
+      watch_timer_.stop();
+      return;
+    }
+    if (pointer_over_self_or_menu()) return;
+    menu_->hide();
+    watch_timer_.stop();
+  }
+
+  bool pointer_over_self_or_menu() const {
+    const QPoint global = QCursor::pos();
+    const QRect self_global(mapToGlobal(QPoint(0, 0)), size());
+    if (self_global.contains(global)) return true;
+    if (menu_ == nullptr || !menu_->isVisible()) return false;
+    const QRect menu_global(menu_->mapToGlobal(QPoint(0, 0)), menu_->size());
+    if (menu_global.contains(global)) return true;
+    // Gap between the dots and the list: crossing it is not a leave.
+    const int left = std::min(self_global.left(), menu_global.left());
+    const int right = std::max(self_global.right(), menu_global.right());
+    const int top = std::min(self_global.bottom(), menu_global.top());
+    const int bottom = std::max(self_global.bottom(), menu_global.top());
+    return QRect(QPoint(left, top), QPoint(right, bottom)).contains(global);
+  }
+
+  QMenu* menu_ = nullptr;
+  QTimer hide_timer_;
+  QTimer watch_timer_;
+};
+
+void suppress_qt_toolbar_extension(QToolBar* bar) {
+  if (bar == nullptr) return;
+  const auto buttons = bar->findChildren<QToolButton*>(QStringLiteral("qt_toolbar_ext_button"));
+  for (QToolButton* ext : buttons) {
+    ext->hide();
+    ext->setEnabled(false);
+    ext->setFixedSize(0, 0);
+    ext->setMaximumSize(0, 0);
+  }
+}
+
+// QToolBar / QMainWindow take a child widget's minimumSizeHint as the window
+// floor. The strip must be allowed to shrink to the overflow control; hiding
+// trailing buttons happens in relayout, not by locking the window width.
+class CommandToolbarStrip final : public QWidget {
+ public:
+  explicit CommandToolbarStrip(QWidget* parent) : QWidget(parent) {
+    setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+  }
+
+  QSize sizeHint() const override {
+    if (QLayout* lay = layout()) return lay->sizeHint();
+    return QSize(0, 0);
+  }
+
+  QSize minimumSizeHint() const override {
+    return QSize(0, sizeHint().height());
+  }
+};
+
+class ShrinkableCommandToolBar final : public QToolBar {
+ public:
+  using QToolBar::QToolBar;
+
+  QSize minimumSizeHint() const override {
+    QSize min = QToolBar::minimumSizeHint();
+    if (orientation() == Qt::Horizontal) min.setWidth(0);
+    else min.setHeight(0);
+    return min;
+  }
+};
+
 int dock_title_bar_height(const QDockWidget* dock) {
   if (dock == nullptr) return 0;
   if (const QWidget* bar = dock->titleBarWidget()) {
@@ -180,25 +343,37 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   auto* fileMenu = menuBar()->actions().at(0)->menu();
   auto* editMenu = menuBar()->actions().at(1)->menu();
   auto* viewMenu = menuBar()->actions().at(2)->menu();
-  command_toolbar_ = addToolBar(tr("功能区"));
+  command_toolbar_ = new ShrinkableCommandToolBar(tr("功能区"), this);
+  addToolBar(command_toolbar_);
   command_toolbar_->setObjectName(QStringLiteral("editorToolBar"));
   command_toolbar_->setIconSize(QSize(22, 22));
   command_toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   command_toolbar_->setMovable(true);
   command_toolbar_->setFloatable(true);
   command_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
-  command_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-  // Theme QToolBar spacing is ignored or stacked; pin item spacing to 0 so the
-  // 4px spacers are the only gap (same as the convert ribbon).
-  command_toolbar_->setStyleSheet(QStringLiteral("QToolBar#editorToolBar { spacing: 0px; }"));
+  command_toolbar_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  command_toolbar_->setMinimumWidth(0);
+  // Own the command row: one strip widget so QToolBar never creates per-action
+  // buttons or the themed QToolBarExtension (click / bordered / vertical dots).
+  command_toolbar_->setStyleSheet(QStringLiteral(
+      "QToolBar#editorToolBar { spacing: 0px; }"
+      "QToolBar#editorToolBar QToolBarExtension {"
+      "  min-width: 0px; max-width: 0px; padding: 0px; margin: 0px; border: none;"
+      "}"));
+  command_strip_ = new CommandToolbarStrip(command_toolbar_);
+  command_strip_->setObjectName(QStringLiteral("commandToolbarStrip"));
+  auto* strip_layout = new QHBoxLayout(command_strip_);
+  strip_layout->setContentsMargins(0, 0, 0, 0);
+  strip_layout->setSpacing(0);
   bool first_command = true;
-  auto addCommand = [this, &first_command](QMenu* menu, const QString& text,
-                                           const QKeySequence& shortcut) {
+  auto addCommand = [this, strip_layout, &first_command](QMenu* menu, const QString& text,
+                                                         const QKeySequence& shortcut) {
     if (!first_command) {
-      auto* gap = new QWidget(command_toolbar_);
+      auto* gap = new QWidget(command_strip_);
       gap->setFixedWidth(4);
       gap->setAttribute(Qt::WA_TransparentForMouseEvents);
-      command_toolbar_->addWidget(gap);
+      strip_layout->addWidget(gap);
+      command_gaps_.push_back(gap);
     }
     first_command = false;
     auto* action = new QAction(text, this);
@@ -210,7 +385,14 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
                                  shortcut.toString(QKeySequence::NativeText) +
                                  QStringLiteral("）"));
     if (menu != nullptr) menu->addAction(action);
-    command_toolbar_->addAction(action);
+    auto* button = new QToolButton(command_strip_);
+    button->setDefaultAction(action);
+    button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    button->setIconSize(QSize(22, 22));
+    button->setFocusPolicy(Qt::NoFocus);
+    strip_layout->addWidget(button);
+    command_actions_.push_back(action);
+    command_buttons_.push_back(button);
     return action;
   };
   open_action_ = addCommand(fileMenu, tr("打开工程"), QKeySequence::Open);
@@ -230,7 +412,15 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   }
   undo_action_ = addCommand(editMenu, tr("撤销"), QKeySequence::Undo);
   redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
-  if (auto* layout = command_toolbar_->layout()) layout->setSpacing(0);
+  auto* overflow = new HoverOverflowAffordance(command_strip_);
+  overflow->setObjectName(QStringLiteral("commandToolbarOverflow"));
+  overflow->setToolTip(tr("更多"));
+  overflow->setAccessibleName(tr("更多"));
+  command_overflow_menu_ = new QMenu(this);
+  overflow->set_overflow_menu(command_overflow_menu_);
+  command_overflow_button_ = overflow;
+  strip_layout->addWidget(overflow, 0, Qt::AlignVCenter);
+  command_toolbar_->addWidget(command_strip_);
   apply_command_icons();
   convert_toolbar_ = addToolBar(tr("转换"));
   convert_toolbar_->setObjectName(QStringLiteral("convertToolBar"));
@@ -238,9 +428,21 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   convert_toolbar_->setMovable(true);
   convert_toolbar_->setFloatable(true);
   convert_toolbar_->setAllowedAreas(Qt::AllToolBarAreas);
-  convert_toolbar_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  convert_toolbar_->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+  convert_toolbar_->setMinimumWidth(0);
   watch_chrome_layout(command_toolbar_);
   watch_chrome_layout(convert_toolbar_);
+  command_toolbar_->installEventFilter(this);
+  convert_toolbar_->installEventFilter(this);
+  connect(command_toolbar_, &QToolBar::orientationChanged, this,
+          [this](Qt::Orientation) { schedule_command_toolbar_relayout(); });
+  connect(command_toolbar_, &QToolBar::topLevelChanged, this,
+          [this](bool) { schedule_command_toolbar_relayout(); });
+  connect(convert_toolbar_, &QToolBar::topLevelChanged, this,
+          [this](bool) { schedule_command_toolbar_relayout(); });
+  connect(convert_toolbar_, &QToolBar::visibilityChanged, this,
+          [this](bool) { schedule_command_toolbar_relayout(); });
+  schedule_command_toolbar_relayout();
   // AboutRole only takes effect when the action lives in a QMenu.
   // menuBar()->addAction() makes a top-level title and macOS ignores the role.
   about_action_ = new QAction(tr("关于"), this);
@@ -391,6 +593,7 @@ void EditorMainWindow::reset_default_layout() {
     if (dock != nullptr) dock->show();
   }
   QTimer::singleShot(0, this, [this] { apply_default_dock_sizes(); });
+  schedule_command_toolbar_relayout();
 }
 
 void EditorMainWindow::restore_or_reset_layout() {
@@ -417,6 +620,7 @@ void EditorMainWindow::restore_or_reset_layout() {
   }
   if (!chrome_revealed_) concealed_floating_chrome_.clear();
   conceal_unrevealed_floating_chrome();
+  schedule_command_toolbar_relayout();
 }
 
 void EditorMainWindow::save_chrome_layout() {
@@ -600,6 +804,7 @@ void EditorMainWindow::create_control_docks() {
   convert_bar_ = new ConvertBar(ui_manager_, skins_dir_, convert_toolbar_);
   convert_bar_->set_ribbon_mode();
   if (convert_toolbar_ != nullptr) convert_toolbar_->addWidget(convert_bar_);
+  schedule_command_toolbar_relayout();
 
   toolbar_dock_ = new QDockWidget(tr("工具栏"), this);
   toolbar_dock_->setObjectName(QStringLiteral("editorToolbarDock"));
@@ -674,6 +879,117 @@ void EditorMainWindow::apply_command_icons() {
   if (clear_marks_action_ != nullptr) clear_marks_action_->setIcon(icon_for("clear-marks"));
   if (export_video_action_ != nullptr) export_video_action_->setIcon(icon_for("export-video"));
   if (about_action_ != nullptr) about_action_->setIcon(icon_for("info"));
+  if (command_overflow_button_ != nullptr) {
+    const QIcon more = icon_for("more");
+    command_overflow_button_->setPixmap(more.pixmap(22, 22));
+    command_overflow_button_->setFixedSize(22, 22);
+  }
+  schedule_command_toolbar_relayout();
+}
+
+void EditorMainWindow::schedule_command_toolbar_relayout() {
+  if (command_toolbar_relayout_pending_) return;
+  command_toolbar_relayout_pending_ = true;
+  QTimer::singleShot(0, this, [this] {
+    command_toolbar_relayout_pending_ = false;
+    relayout_command_toolbar();
+  });
+}
+
+bool EditorMainWindow::command_shares_row_with_convert() const {
+  if (command_toolbar_ == nullptr || convert_toolbar_ == nullptr) return false;
+  if (convert_toolbar_->isHidden() || convert_toolbar_->isFloating()) return false;
+  if (command_toolbar_->isFloating()) return false;
+  if (toolBarArea(command_toolbar_) != toolBarArea(convert_toolbar_)) return false;
+  if (command_toolbar_->orientation() != Qt::Horizontal) return false;
+  return !toolBarBreak(convert_toolbar_) && !toolBarBreak(command_toolbar_);
+}
+
+void EditorMainWindow::relayout_command_toolbar() {
+  if (command_toolbar_relayouting_ || command_toolbar_ == nullptr || command_strip_ == nullptr ||
+      command_overflow_button_ == nullptr || command_overflow_menu_ == nullptr) {
+    return;
+  }
+  command_toolbar_relayouting_ = true;
+
+  const auto show_all = [this] {
+    for (QWidget* gap : command_gaps_) {
+      if (gap != nullptr) gap->show();
+    }
+    for (QToolButton* button : command_buttons_) {
+      if (button != nullptr) button->show();
+    }
+    command_overflow_button_->hide();
+    command_overflow_menu_->clear();
+  };
+
+  suppress_qt_toolbar_extension(command_toolbar_);
+
+  if (command_toolbar_->orientation() != Qt::Horizontal) {
+    show_all();
+    command_strip_->setMaximumWidth(QWIDGETSIZE_MAX);
+    command_strip_->updateGeometry();
+    command_toolbar_->updateGeometry();
+    command_toolbar_relayouting_ = false;
+    return;
+  }
+
+  std::vector<int> widths;
+  widths.reserve(command_buttons_.size());
+  for (std::size_t i = 0; i < command_buttons_.size(); ++i) {
+    QToolButton* button = command_buttons_[i];
+    int width = button != nullptr ? std::max(button->sizeHint().width(), button->minimumWidth()) : 0;
+    if (i > 0 && i - 1 < command_gaps_.size() && command_gaps_[i - 1] != nullptr) {
+      width += command_gaps_[i - 1]->width();
+    }
+    widths.push_back(width);
+  }
+
+  const int overflow_w = std::max(command_overflow_button_->sizeHint().width(), 22);
+
+  int convert_w = 0;
+  const bool share_row = command_shares_row_with_convert();
+  if (share_row) {
+    // Natural ribbon width only. The toolbar sizeHint can grow with the row
+    // and would hide command buttons while the window is still wide enough.
+    convert_w = convert_bar_ != nullptr ? convert_bar_->sizeHint().width()
+                                        : convert_toolbar_->minimumSizeHint().width();
+    if (convert_toolbar_->isMovable()) {
+      convert_w += convert_toolbar_->style()->pixelMetric(QStyle::PM_ToolBarHandleExtent);
+    }
+  }
+
+  int budget = command_toolbar_->isFloating() ? command_toolbar_->width() : width() - convert_w;
+  if (command_toolbar_->isMovable() && !command_toolbar_->isFloating()) {
+    budget -= command_toolbar_->style()->pixelMetric(QStyle::PM_ToolBarHandleExtent);
+  }
+  budget = std::max(0, budget);
+
+  const std::size_t hide_n = command_overflow_hide_count(widths, overflow_w, budget);
+  const std::size_t keep = command_buttons_.size() - hide_n;
+  for (std::size_t i = 0; i < command_buttons_.size(); ++i) {
+    const bool show = i < keep;
+    if (command_buttons_[i] != nullptr) command_buttons_[i]->setVisible(show);
+    if (i > 0 && i - 1 < command_gaps_.size() && command_gaps_[i - 1] != nullptr) {
+      command_gaps_[i - 1]->setVisible(show);
+    }
+  }
+
+  command_overflow_menu_->clear();
+  if (hide_n == 0) {
+    command_overflow_button_->hide();
+    command_strip_->setMaximumWidth(QWIDGETSIZE_MAX);
+  } else {
+    for (std::size_t i = keep; i < command_actions_.size(); ++i) {
+      command_overflow_menu_->addAction(command_actions_[i]);
+    }
+    command_overflow_button_->show();
+    command_strip_->setMaximumWidth(std::max(1, budget));
+  }
+  command_strip_->updateGeometry();
+  command_toolbar_->updateGeometry();
+  suppress_qt_toolbar_extension(command_toolbar_);
+  command_toolbar_relayouting_ = false;
 }
 
 void EditorMainWindow::refresh_history_actions() {
@@ -1193,6 +1509,12 @@ void EditorMainWindow::remember_recent_project(const QString& path) {
 
 bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
   const auto type = event->type();
+  if ((watched == command_toolbar_ || watched == convert_toolbar_) &&
+      (type == QEvent::Resize || type == QEvent::Show || type == QEvent::Hide ||
+       type == QEvent::ParentChange || type == QEvent::LayoutRequest)) {
+    if (watched == command_toolbar_) suppress_qt_toolbar_extension(command_toolbar_);
+    if (!command_toolbar_relayouting_) schedule_command_toolbar_relayout();
+  }
   if ((type == QEvent::KeyPress || type == QEvent::KeyRelease ||
        type == QEvent::ShortcutOverride) &&
       ui_manager_ != nullptr) {
@@ -1393,6 +1715,7 @@ void EditorMainWindow::resizeEvent(QResizeEvent* event) {
     window->set_resize_suspended(true);
   QMainWindow::resizeEvent(event);
   resize_settle_timer_.start();
+  relayout_command_toolbar();
 }
 
 bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
@@ -1689,6 +2012,7 @@ void EditorMainWindow::hideEvent(QHideEvent* event) {
 void EditorMainWindow::showEvent(QShowEvent* event) {
   QMainWindow::showEvent(event);
   reveal_concealed_floating_chrome();
+  schedule_command_toolbar_relayout();
   for (auto* dock : chrome_docks()) {
     if (dock != nullptr && dock->isFloating() && !dock->isHidden()) dock->raise();
   }

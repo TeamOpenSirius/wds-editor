@@ -328,6 +328,15 @@ int main() {
   assert(wds::ui::timeline_scrub_delta_ms(1.0f, 0, 1.0f) == -5);
   assert(wds::ui::timeline_scrub_delta_ms(0.0f, 20, 1.0f) == 0);
 
+  // Alt/Option+wheel arrives on X (Qt Windows and macOS). Equal magnitude keeps Y.
+  assert(wds::ui::visible_range_wheel_delta(0.0f, 1.0f) == 1.0f);
+  assert(wds::ui::visible_range_wheel_delta(1.0f, 0.0f) == 1.0f);
+  assert(wds::ui::visible_range_wheel_delta(-3.0f, 0.0f) == -3.0f);
+  assert(wds::ui::visible_range_wheel_delta(-2.0f, 0.1f) == -2.0f);
+  assert(wds::ui::visible_range_wheel_delta(0.2f, -1.0f) == -1.0f);
+  assert(wds::ui::visible_range_wheel_delta(2.0f, 2.0f) == 2.0f);
+  assert(wds::ui::visible_range_wheel_delta(-1.0f, 1.0f) == 1.0f);
+
   // Primary+wheel visible range: undo global invert, apply dedicated invert, min 1 step.
   assert(wds::ui::visible_range_after_wheel(1.0f, 20, false, false) == 19);
   assert(wds::ui::visible_range_after_wheel(-1.0f, 20, false, false) == 21);

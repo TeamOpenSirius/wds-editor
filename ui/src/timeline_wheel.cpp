@@ -21,6 +21,11 @@ int64_t timeline_scrub_delta_ms(float delta_y, int32_t visible_hectoms, float sp
   return static_cast<int64_t>(std::lround(delta_ms));
 }
 
+float visible_range_wheel_delta(float delta_x, float delta_y) noexcept {
+  if (std::abs(delta_x) > std::abs(delta_y)) return delta_x;
+  return delta_y;
+}
+
 int32_t visible_range_after_wheel(float delta_y, int32_t current, bool invert_scroll_wheel,
                                   bool invert_visible_range_scroll) noexcept {
   if (std::abs(delta_y) < 1e-6f) {
