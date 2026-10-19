@@ -77,9 +77,13 @@ void set_editor_shortcuts(const std::array<ShortcutChord, kEditorShortcutCount>&
 void reset_editor_shortcuts() noexcept;
 std::array<ShortcutChord, kEditorShortcutCount> editor_shortcuts_snapshot() noexcept;
 
-// Period and other text-field typables cannot be shortcut keys; digits are allowed.
+// Escape is reserved for cancel / close / clear-selection and cannot be bound.
 bool is_forbidden_shortcut_key(KeyCode key) noexcept;
+// Mapped keys that settings and ShortcutField will accept (not reserved).
 bool is_completing_shortcut_key(KeyCode key) noexcept;
+// Letters, digits, punctuation, space, Enter/Tab, and field navigation. A
+// focused text field consumes these so they do not fire editor shortcuts.
+bool is_text_field_consumed_key(KeyCode key) noexcept;
 
 // On-screen label. macOS matches Qt NativeText (⌘S, ⇧⌘C); elsewhere Ctrl+S.
 std::string format_shortcut_chord(const ShortcutChord& chord);

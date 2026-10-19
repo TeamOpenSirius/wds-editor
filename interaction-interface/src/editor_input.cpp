@@ -206,6 +206,7 @@ void set_scroll_wheel_speed(float speed) noexcept {
 }
 
 std::optional<int> default_width_for_key(KeyCode key) noexcept {
+  if (key == KeyCode::Unknown) return std::nullopt;
   // Match configured width-slot chords (bare key, no modifiers).
   const auto& slots = slots_storage();
   static constexpr EditorShortcut kIds[6] = {
@@ -220,7 +221,9 @@ std::optional<int> default_width_for_key(KeyCode key) noexcept {
 }
 
 EditKeyResult resolve_edit_key(const KeyDownEvent& event) noexcept {
+  if (event.key == KeyCode::Unknown) return {};
   const ShortcutChord chord{event.key, normalize_primary(event.mods)};
+  if (chord.key == KeyCode::Unknown) return {};
   if (chord == editor_shortcut(EditorShortcut::DeleteSelection)) {
     return {EditKeyAction::DeleteSelection, 0};
   }

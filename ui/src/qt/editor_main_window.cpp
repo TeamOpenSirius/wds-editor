@@ -91,26 +91,9 @@ bool is_plain_text_or_field_edit_key(const QKeyEvent* event) {
       event->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
   if (chord_mods != Qt::NoModifier) return false;
 
-  switch (event->key()) {
-    case Qt::Key_Backspace:
-    case Qt::Key_Delete:
-    case Qt::Key_Left:
-    case Qt::Key_Right:
-    case Qt::Key_Up:
-    case Qt::Key_Down:
-    case Qt::Key_Home:
-    case Qt::Key_End:
-    case Qt::Key_Space:
-      return true;
-    default:
-      break;
+  if (wds::interaction::is_text_field_consumed_key(wds::ui::qt_key_code(event->key()))) {
+    return true;
   }
-
-  const int key = event->key();
-  if (key >= Qt::Key_A && key <= Qt::Key_Z) return true;
-  if (key >= Qt::Key_0 && key <= Qt::Key_9) return true;
-  // Remaining US-ASCII punctuation (',' '!' etc.). Letters/digits already matched.
-  if (key >= 0x21 && key <= 0x7e) return true;
 
   const QString text = event->text();
   return !text.isEmpty() && text.at(0).isPrint();

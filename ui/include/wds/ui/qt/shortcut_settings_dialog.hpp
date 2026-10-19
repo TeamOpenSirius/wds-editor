@@ -6,6 +6,7 @@
 #include <wds/interaction/editor_shortcuts.hpp>
 
 class QEvent;
+class QKeyEvent;
 class QKeySequenceEdit;
 class QLabel;
 class QPushButton;
@@ -24,6 +25,8 @@ class ShortcutSettingsDialog final : public QDialog {
  protected:
   void showEvent(QShowEvent* event) override;
   void changeEvent(QEvent* event) override;
+  bool eventFilter(QObject* watched, QEvent* event) override;
+  void keyPressEvent(QKeyEvent* event) override;
 
  private:
   void build_ui(bool pause_at_current);

@@ -2,17 +2,20 @@
 
 #include "wds/ui/editor_ui_config.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/qt/qt_input_adapter.hpp"
 #include "wds/ui/ui_manager.hpp"
 
 #include <wds/interaction/platform.hpp>
 #include <wds/interaction/shortcuts.hpp>
 
+#include <QApplication>
 #include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QKeySequenceEdit>
 #include <QLabel>
@@ -20,6 +23,7 @@
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QSignalBlocker>
+#include <QWidget>
 #include <QSizePolicy>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -37,61 +41,8 @@ using wds::interaction::EditorShortcut;
 using wds::interaction::KeyCode;
 using wds::interaction::ShortcutChord;
 
-int chord_to_qt_key(const ShortcutChord& chord) {
-  const int v = static_cast<int>(chord.key);
-  if (v >= '0' && v <= '9') return Qt::Key_0 + (v - '0');
-  if (v >= 'A' && v <= 'Z') return Qt::Key_A + (v - 'A');
-  switch (chord.key) {
-    case KeyCode::Space: return Qt::Key_Space;
-    case KeyCode::Escape: return Qt::Key_Escape;
-    case KeyCode::Enter: return Qt::Key_Return;
-    case KeyCode::Tab: return Qt::Key_Tab;
-    case KeyCode::Backspace: return Qt::Key_Backspace;
-    case KeyCode::Delete: return Qt::Key_Delete;
-    case KeyCode::Left: return Qt::Key_Left;
-    case KeyCode::Right: return Qt::Key_Right;
-    case KeyCode::Up: return Qt::Key_Up;
-    case KeyCode::Down: return Qt::Key_Down;
-    case KeyCode::F1: return Qt::Key_F1;
-    case KeyCode::F2: return Qt::Key_F2;
-    case KeyCode::F3: return Qt::Key_F3;
-    case KeyCode::F4: return Qt::Key_F4;
-    case KeyCode::F11: return Qt::Key_F11;
-    default: break;
-  }
-  if (v == '.') return Qt::Key_Period;
-  return 0;
-}
-
-KeyCode qt_key_to_chord_key(int key) {
-  if (key >= Qt::Key_0 && key <= Qt::Key_9)
-    return static_cast<KeyCode>('0' + key - Qt::Key_0);
-  if (key >= Qt::Key_A && key <= Qt::Key_Z)
-    return static_cast<KeyCode>('A' + key - Qt::Key_A);
-  switch (key) {
-    case Qt::Key_Space: return KeyCode::Space;
-    case Qt::Key_Escape: return KeyCode::Escape;
-    case Qt::Key_Return:
-    case Qt::Key_Enter: return KeyCode::Enter;
-    case Qt::Key_Tab: return KeyCode::Tab;
-    case Qt::Key_Backspace: return KeyCode::Backspace;
-    case Qt::Key_Delete: return KeyCode::Delete;
-    case Qt::Key_Left: return KeyCode::Left;
-    case Qt::Key_Right: return KeyCode::Right;
-    case Qt::Key_Up: return KeyCode::Up;
-    case Qt::Key_Down: return KeyCode::Down;
-    case Qt::Key_F1: return KeyCode::F1;
-    case Qt::Key_F2: return KeyCode::F2;
-    case Qt::Key_F3: return KeyCode::F3;
-    case Qt::Key_F4: return KeyCode::F4;
-    case Qt::Key_F11: return KeyCode::F11;
-    case Qt::Key_Period: return static_cast<KeyCode>('.');
-    default: return KeyCode::Unknown;
-  }
-}
-
 QKeySequence chord_to_sequence(const ShortcutChord& chord) {
-  const int key = chord_to_qt_key(chord);
+  const int key = key_code_to_qt(chord.key);
   if (key == 0) return {};
   Qt::KeyboardModifiers mods;
   if (chord.mods.shift) mods |= Qt::ShiftModifier;
@@ -105,8 +56,8 @@ ShortcutChord sequence_to_chord(const QKeySequence& sequence) {
   ShortcutChord chord;
   if (sequence.isEmpty()) return chord;
   const QKeyCombination combo = sequence[0];
-  chord.key = qt_key_to_chord_key(combo.key());
-  if (chord.key == KeyCode::Unknown || wds::interaction::is_forbidden_shortcut_key(chord.key)) {
+  chord.key = qt_key_code(static_cast<int>(combo.key()));
+  if (!wds::interaction::is_completing_shortcut_key(chord.key)) {
     return {};
   }
   const auto mods = combo.keyboardModifiers();
@@ -115,6 +66,22 @@ ShortcutChord sequence_to_chord(const QKeySequence& sequence) {
   chord.mods.alt = mods.testFlag(Qt::AltModifier);
   chord.mods.super = mods.testFlag(Qt::MetaModifier);
   return chord;
+}
+
+bool focus_is_key_sequence_edit(QWidget* focus) {
+  for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+    if (qobject_cast<QKeySequenceEdit*>(widget) != nullptr) return true;
+  }
+  return false;
+}
+
+void reject_unusable_sequence(QKeySequenceEdit* edit) {
+  if (edit == nullptr) return;
+  const QKeySequence sequence = edit->keySequence();
+  if (sequence.isEmpty()) return;
+  if (sequence_to_chord(sequence).key != KeyCode::Unknown) return;
+  const QSignalBlocker blocker(edit);
+  edit->clear();
 }
 
 struct ShortcutCategory {
@@ -288,6 +255,10 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
       edit->setStyleSheet(QString::fromLatin1(kFieldStyle));
       edit->setFixedWidth(field_w);
       edits_[index] = edit;
+      edit->installEventFilter(this);
+      for (auto* child : edit->findChildren<QWidget*>()) {
+        child->installEventFilter(this);
+      }
       grid->addWidget(edit, row, col + 1, Qt::AlignVCenter);
 
       auto* clear = new QPushButton(content);
@@ -365,8 +336,10 @@ void ShortcutSettingsDialog::build_ui(bool pause_at_current) {
   });
 
   for (auto* edit : edits_) {
-    connect(edit, &QKeySequenceEdit::keySequenceChanged, this, [this](const QKeySequence&) {
-      if (!loading_) refresh_shortcut_conflicts();
+    connect(edit, &QKeySequenceEdit::keySequenceChanged, this, [this, edit](const QKeySequence&) {
+      if (loading_) return;
+      reject_unusable_sequence(edit);
+      refresh_shortcut_conflicts();
     });
     connect(edit, &QKeySequenceEdit::editingFinished, this, [] {
       journal_menu_action("settings.shortcut_edit");
@@ -437,12 +410,33 @@ void ShortcutSettingsDialog::showEvent(QShowEvent* event) {
 void ShortcutSettingsDialog::changeEvent(QEvent* event) {
   QDialog::changeEvent(event);
   if (event != nullptr && (event->type() == QEvent::PaletteChange ||
-                           event->type() == QEvent::ApplicationPaletteChange)) {
+                            event->type() == QEvent::ApplicationPaletteChange)) {
     const QIcon icon = themed_named_icon("clear", {}, 18);
     for (auto* button : findChildren<QPushButton*>(QStringLiteral("shortcutClear"))) {
       button->setIcon(icon);
     }
   }
+}
+
+bool ShortcutSettingsDialog::eventFilter(QObject* watched, QEvent* event) {
+  if (event != nullptr &&
+      (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride)) {
+    auto* key = static_cast<QKeyEvent*>(event);
+    if (key->key() == Qt::Key_Escape && focus_is_key_sequence_edit(QApplication::focusWidget())) {
+      key->accept();
+      return true;
+    }
+  }
+  return QDialog::eventFilter(watched, event);
+}
+
+void ShortcutSettingsDialog::keyPressEvent(QKeyEvent* event) {
+  if (event != nullptr && event->key() == Qt::Key_Escape &&
+      focus_is_key_sequence_edit(QApplication::focusWidget())) {
+    event->accept();
+    return;
+  }
+  QDialog::keyPressEvent(event);
 }
 
 }  // namespace wds::ui
