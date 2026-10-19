@@ -885,14 +885,29 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
   const auto chart_paths = list_official_charts(dir);
   if (chart_paths.empty()) return false;
 
-  std::vector<ChartSlot> loaded;
-  loaded.reserve(chart_paths.size());
+  // Per-file fold would disagree across difficulties; load chart-local times with
+  // config delay, then apply one shared negative-time fold (notes + splits + HiSpeed).
+  wds::chart_editor::OfficialChartLoadOptions load_opt;
+  load_opt.fold_negative_times_into_delay = false;
+
+  std::vector<wds::chart_editor::NotationChart> pack_charts;
+  pack_charts.reserve(chart_paths.size());
   for (const auto& chart_path : chart_paths) {
     wds::chart_editor::NotationChart chart;
     if (!ok(wds::chart_editor::OfficialChartFormat::load_chart_auto_profile(
-            chart_path, music_config_path, chart))) {
+            chart_path, music_config_path, chart, load_opt))) {
       return false;
     }
+    pack_charts.push_back(std::move(chart));
+  }
+  wds::chart_editor::OfficialChartFormat::fold_negative_times_into_delay(pack_charts);
+
+  std::vector<ChartSlot> loaded;
+  loaded.reserve(pack_charts.size());
+  const int64_t pack_offset_ms =
+      pack_charts.empty() ? static_cast<int64_t>(std::llround(music.delay_seconds * 1000.0))
+                          : pack_charts.front().timing.offset_ms;
+  for (auto& chart : pack_charts) {
     chart.timing.offset_ms = 0;
     // Keep charts in memory only — do not bind official CSV paths (avoids overwriting
     // them when the user later saves a .wdsproject / .wdschart).
@@ -908,7 +923,7 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
   jacket_path_.clear();
   charts_ = std::move(loaded);
   active_chart_index_ = 0;
-  offset_ms_ = static_cast<int64_t>(std::llround(music.delay_seconds * 1000.0));
+  offset_ms_ = pack_offset_ms;
   metadata_dirty_ = false;
   read_only_ = true;
   allow_delay_when_read_only_ = false;

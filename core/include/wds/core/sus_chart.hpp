@@ -28,7 +28,10 @@ namespace wds::chart_editor {
 //   #TIL00 non-negative global HiSpeed is retained as scroll_speed_points.
 //   Both use sus2txt's 1920ths-of-the-measure index (not raw ticks).
 // - Legacy #2 Hold channels from older WDS exports import as blue Hold.
-// - Ched 12-key pad: export L→L+2; import auto-detects offset 2 for the 2..d window.
+// - Ched pad is always +2 both ways (WDS L ↔ SUS L+2). Export clips each span
+//   to SUS columns 0..f; columns outside that window are dropped. Import always
+//   subtracts 2 (no layout heuristic). Overhang that remains auto-upgrades
+//   Official → SiriusExtended unless #WDS_PROFILE Official.
 // - HoldEighth is generated on export as slide type 5 (invisible mid). On import
 //   slide type 5 never becomes Sound or HoldEighth; eighths are always recomputed
 //   from the imported holds (tailed and nontail) on the tpq/2 grid.
@@ -57,7 +60,7 @@ struct SusChartLoadResult {
 
 struct SusChartSaveOptions {
   SusChartMetadata meta;
-  // When true, export WDS lane L as SUS lane L+2 (Ched 12-key layout).
+  // Ignored: export always uses the Ched +2 pad and clips to SUS 0..f.
   bool ched_lane_padding = true;
 };
 

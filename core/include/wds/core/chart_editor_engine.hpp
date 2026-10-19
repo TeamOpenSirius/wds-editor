@@ -96,6 +96,7 @@ class ChartEditorEngine {
                                       const std::string& music_config_path = {});
 
   // Export as official CSV (native editable charts only).
+  // Bakes chart delay into CSV seconds (self-contained; no music_config).
   // Does not clear dirty / does not switch edit mode.
   SerializeResult export_official_to_file(const std::string& path);
 

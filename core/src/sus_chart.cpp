@@ -54,6 +54,28 @@ char base36_digit(int value) {
   return static_cast<char>('a' + (value - 10));
 }
 
+// Ched 16-key columns 0..f. Export always writes WDS L as L+2, then keeps only
+// the overlap with that window. Import always subtracts the same pad.
+constexpr int kSusChedLanePad = 2;
+constexpr int kSusLaneColumnMax = 15;
+
+struct SusLaneSpan {
+  int lane = 0;
+  int width = 1;
+};
+
+bool clip_editor_span_to_sus(int32_t lane, int32_t width, SusLaneSpan& out) {
+  if (width < 1) return false;
+  const int left = static_cast<int>(lane) + kSusChedLanePad;
+  const int right = left + static_cast<int>(width) - 1;
+  const int clip_l = std::max(left, 0);
+  const int clip_r = std::min(right, kSusLaneColumnMax);
+  if (clip_l > clip_r) return false;
+  out.lane = clip_l;
+  out.width = clip_r - clip_l + 1;
+  return true;
+}
+
 bool parse_quoted(const std::string& raw, std::string& out) {
   const std::string t = trim_copy(raw);
   if (t.size() >= 2 && t.front() == '"' && t.back() == '"') {
@@ -385,7 +407,6 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   size_t skipped_nonpositive_speed_points = 0;
   ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
   bool saw_compatibility_profile = false;
-  int declared_lane_offset = -1;
 
   int measure_base = 0;
   std::istringstream stream(text);
@@ -435,7 +456,7 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       if (!parse_int(data, offset) || offset < 0 || offset > 35) {
         return {SerializeError::ParseError, "SUS invalid WDS_LANE_OFFSET"};
       }
-      declared_lane_offset = offset;
+      // Accepted for older WDS files; import always uses kSusChedLanePad.
       continue;
     }
 
@@ -906,42 +927,10 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   }
   normalize_timing_points(chart.timing);
 
-  // Lane offset: intentional Ched-SUS-only heuristic (not a general SUS importer).
-  // Supported subset: charts written by Ched / WDS↔Ched 12-key window (typically
-  // lanes 2..d with padding offset=2). Non-Ched layouts (bare 0–11, arbitrary
-  // 16-column pads, other toolchains) are out of scope by design — do not "fix"
-  // offset=2 for those. If round-trip with Ched matches, behavior is correct.
-  // Lane offset: WDS export with ched_lane_padding writes L → L+2 (Ched 12-key
-  // window 2..d). Prefer offset 2 whenever data fits that window so right-side
-  // notes (e.g. WDS lane 7 → SUS 9) do not import as lane 9 with offset 0.
-  int min_lane = 99;
-  int max_end = 0;
-  for (const auto& ev : events) {
-    min_lane = std::min(min_lane, ev.lane);
-    max_end = std::max(max_end, ev.lane + ev.width);
-  }
-  int lane_offset = 0;
-  if (declared_lane_offset >= 0) {
-    lane_offset = declared_lane_offset;
-  } else if (min_lane < 99 && min_lane >= 2 && max_end <= 14) {
-    lane_offset = 2;
-  } else if (min_lane < 99 && max_end > 12 && min_lane >= 2) {
-    lane_offset = min_lane;
-  } else if (min_lane < 99 && max_end > 12) {
-    lane_offset = std::max(0, max_end - 12);
-  }
-
-  auto map_lane = [&](int lane) {
-    const int mapped = lane - lane_offset;
-    return compatibility_profile == ChartCompatibilityProfile::SiriusExtended
-               ? mapped
-               : std::clamp(mapped, 0, 11);
-  };
-  auto map_width = [&](int lane, int width) {
-    if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) return width;
-    const int left = map_lane(lane);
-    return std::clamp(width, 1, 12 - left);
-  };
+  // Every file uses the Ched 12-key pad: SUS column C → editor C-2.
+  // Export clips to 0..f first, so import does not need a layout heuristic.
+  auto map_lane = [&](int lane) { return lane - kSusChedLanePad; };
+  auto map_width = [&](int, int width) { return width; };
 
   std::vector<NotationNote> notes;
   int32_t next_id = 0;
@@ -993,8 +982,22 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     return std::make_pair(first, last);
   };
 
+  // sus2txt walks official 1..12 (editor 0..11) plus adjacent spans. Overhang
+  // Air lives outside that window; include every mapped #5 so JumpScratch that
+  // covers past 0 or 11 still pairs.
+  int air_search_lo = 0;
+  int air_search_hi = 11;
+  for (const auto& air : airs) {
+    air_search_lo = std::min(air_search_lo, air.lane);
+    air_search_hi = std::max(air_search_hi, air.lane + air.width - 1);
+  }
+  auto air_search_bounds = [&](int left, int right) {
+    return std::pair<int, int>{std::min(air_search_lo, left), std::max(air_search_hi, right)};
+  };
+
   auto slide_start_has_air = [&](int64_t tick, int left, int right) -> bool {
-    for (int i = std::min(0, left); i <= std::max(11, right); ++i) {
+    const auto [lo, hi] = air_search_bounds(left, right);
+    for (int i = lo; i <= hi; ++i) {
       if (i > left && i < right) continue;
       const int al = (i <= left) ? i : left;
       const int ar = (i <= left) ? right : i;
@@ -1011,7 +1014,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
   // Last unconsumed match wins: highest i, then highest air index at that span.
   auto find_slide_end_air = [&](int64_t tick, int left, int right) -> FoundAir {
     FoundAir found;
-    for (int i = std::min(0, left); i <= std::max(11, right); ++i) {
+    const auto [lo, hi] = air_search_bounds(left, right);
+    for (int i = lo; i <= hi; ++i) {
       if (i > left && i <= right) continue;
       const int al = (i <= left) ? i : left;
       const int ar = (i <= left) ? right : i;
@@ -1114,14 +1118,6 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
         } else {
           set_scratch_hold_end_lanes(body, body_lane, body_lane + body_width - 1);
           body.scratch_length = 0;
-        }
-        auto [lo, hi] = get_scratch_end_lane_range(body);
-        if (compatibility_profile == ChartCompatibilityProfile::Official &&
-            (lo < 0 || hi > 11)) {
-          lo = std::max(lo, 0);
-          hi = std::min(hi, 11);
-          set_scratch_hold_end_lanes(body, std::min(lo, body.lane),
-                                     std::max(hi, body.end_lane()));
         }
       } else {
         body.note_type = critical_cover ? NoteType::CriticalHold : NoteType::Hold;
@@ -1409,25 +1405,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   const std::vector<NotationNote> export_notes =
       with_all_hold_eighths_recomputed(chart.notes, timing.ticks_per_quarter);
 
-  int lane_pad = options.ched_lane_padding ? 2 : 0;
-  if (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
-    int min_lane = 0;
-    int max_end = 0;
-    for (const auto& note : export_notes) {
-      if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
-      if (note.width < 1 || note.width > 35) {
-        return {SerializeError::ParseError, "SUS note lane/width out of range"};
-      }
-      min_lane = std::min(min_lane, note.lane);
-      max_end = std::max(max_end, note.end_lane());
-    }
-    lane_pad = std::max(lane_pad, -min_lane);
-    if (max_end + lane_pad > 35) {
-      return {SerializeError::ParseError, "SUS lane span exceeds base36 range"};
-    }
-  }
-
-  auto sus_lane = [&](int32_t lane) { return std::clamp(lane + lane_pad, 0, 35); };
+  (void)options.ched_lane_padding;
 
   // Build measure starts from the real timing map (meters / bar lengths).
   int64_t max_tick = 0;
@@ -1496,7 +1474,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   std::ostringstream ss;
   ss << "This file was generated by WDS Chart Editor.\n";
   if (chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
-    ss << "#WDS_PROFILE SiriusExtended\n#WDS_LANE_OFFSET " << lane_pad << "\n";
+    ss << "#WDS_PROFILE SiriusExtended\n#WDS_LANE_OFFSET " << kSusChedLanePad << "\n";
   }
   const auto& meta = options.meta;
   auto emit_str = [&](const char* key, const std::string& value) {
@@ -1789,9 +1767,11 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     if (t1 <= t0) continue;
 
     // Ched: all holds are Slide #3 with body geometry on both ends.
-    const int channel_lane = body->lane;
-    const int channel_width = std::clamp(body->width, 1, 35);
-    const int sl = sus_lane(channel_lane);
+    // Always pad +2, then keep only the 0..f overlap.
+    SusLaneSpan body_span;
+    if (!clip_editor_span_to_sus(body->lane, body->width, body_span)) continue;
+    const int sl = body_span.lane;
+    const int channel_width = body_span.width;
 
     const bool scratch_body =
         body->note_type == NoteType::ScratchHold ||
@@ -1811,7 +1791,7 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     place(end_suffix, t1, 2, channel_width);
     if (nontail_body) {
       std::string dmg_suffix = "1";
-      dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
+      dmg_suffix.push_back(base36_digit(sl));
       place(dmg_suffix, t1, kSusTapDamage, channel_width);
     }
 
@@ -1825,48 +1805,53 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
         body->note_type == NoteType::NontailCriticalHold ||
         body->note_type == NoteType::NontailScratchCriticalHold;
     if (critical_hold) {
-      const int crit_lane = !authored_headless ? head->lane : body->lane;
-      const int crit_w =
-          std::clamp(!authored_headless ? head->width : body->width, 1, 35);
-      std::string crit_suffix = "1";
-      crit_suffix.push_back(base36_digit(sus_lane(crit_lane)));
-      place(crit_suffix, t0, kSusTapCritical, crit_w);
+      const int32_t crit_lane = !authored_headless ? head->lane : body->lane;
+      const int32_t crit_w = !authored_headless ? head->width : body->width;
+      SusLaneSpan crit_span;
+      if (clip_editor_span_to_sus(crit_lane, crit_w, crit_span)) {
+        std::string crit_suffix = "1";
+        crit_suffix.push_back(base36_digit(crit_span.lane));
+        place(crit_suffix, t0, kSusTapCritical, crit_span.width);
+      }
     }
 
     // Truly headless (authored without head, start not fully covered) → Damage
-    // marker of equal body lane/width. Fully covered / CriticalHold need no marker.
+    // marker of equal clipped body lane/width. Fully covered / CriticalHold need no marker.
     if (authored_headless && !critical_hold &&
         !hold_start_fully_covered(*body, export_notes, export_occupancy_at(body->start_tick))) {
       std::string dmg_suffix = "1";
-      dmg_suffix.push_back(base36_digit(sus_lane(body->lane)));
-      place(dmg_suffix, t0, kSusTapDamage, std::clamp(body->width, 1, 35));
+      dmg_suffix.push_back(base36_digit(sl));
+      place(dmg_suffix, t0, kSusTapDamage, channel_width);
     }
 
     // Purple tail: paired Flick (#1 type3) + Air (#5) at end (required by Ched).
     if (scratch_body) {
       const auto cover = get_scratch_end_lane_range(*body);
-      const int cover_l = cover.first;
-      const int cover_w = std::max(1, cover.second - cover.first + 1);
+      const int cover_w_src = std::max(1, cover.second - cover.first + 1);
       const int air_dir = air_type_from_scratch_length(body->scratch_length);
-      if (!nontail_body) {
-        std::string flick_suffix = "1";
-        flick_suffix.push_back(base36_digit(sus_lane(cover_l)));
-        place(flick_suffix, t1, kSusTapFlick, cover_w);
+      SusLaneSpan cover_span;
+      if (clip_editor_span_to_sus(cover.first, cover_w_src, cover_span)) {
+        if (!nontail_body) {
+          std::string flick_suffix = "1";
+          flick_suffix.push_back(base36_digit(cover_span.lane));
+          place(flick_suffix, t1, kSusTapFlick, cover_span.width);
+        }
+        std::string air_suffix = "5";
+        air_suffix.push_back(base36_digit(cover_span.lane));
+        place(air_suffix, t1, air_dir, cover_span.width);
       }
-      std::string air_suffix = "5";
-      air_suffix.push_back(base36_digit(sus_lane(cover_l)));
-      place(air_suffix, t1, air_dir, cover_w);
     }
 
     const auto body_mids = mids_by_parent.find(body->id);
     if (body_mids != mids_by_parent.end()) {
       for (const NotationNote* mid : body_mids->second) {
         if (mid->start_tick <= body->start_tick || mid->start_tick >= body->end_tick) continue;
+        SusLaneSpan mid_span;
+        if (!clip_editor_span_to_sus(mid->lane, mid->width, mid_span)) continue;
         std::string mid_suffix = "3";
-        mid_suffix.push_back(base36_digit(sus_lane(mid->lane)));
+        mid_suffix.push_back(base36_digit(mid_span.lane));
         mid_suffix.push_back(base36_digit(h.channel));
-        place(mid_suffix, static_cast<int64_t>(mid->start_tick), 3,
-              std::clamp(mid->width, 1, 35));
+        place(mid_suffix, static_cast<int64_t>(mid->start_tick), 3, mid_span.width);
       }
     }
     // Type 5 = invisible mid (already ignored on import; not Sound).
@@ -1876,19 +1861,22 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
         if (eighth->start_tick <= body->start_tick || eighth->start_tick >= body->end_tick) {
           continue;
         }
+        SusLaneSpan eighth_span;
+        if (!clip_editor_span_to_sus(eighth->lane, eighth->width, eighth_span)) continue;
         std::string eighth_suffix = "3";
-        eighth_suffix.push_back(base36_digit(sus_lane(eighth->lane)));
+        eighth_suffix.push_back(base36_digit(eighth_span.lane));
         eighth_suffix.push_back(base36_digit(h.channel));
-        place(eighth_suffix, static_cast<int64_t>(eighth->start_tick), 5,
-              std::clamp(eighth->width, 1, 35));
+        place(eighth_suffix, static_cast<int64_t>(eighth->start_tick), 5, eighth_span.width);
       }
     }
   }
 
   for (const NotationNote* n : taps) {
+    SusLaneSpan tap_span;
+    if (!clip_editor_span_to_sus(n->lane, n->width, tap_span)) continue;
     const int64_t tick = static_cast<int64_t>(n->start_tick);
-    const int sl = sus_lane(n->lane);
-    const int w = std::clamp(n->width, 1, 35);
+    const int sl = tap_span.lane;
+    const int w = tap_span.width;
     if (is_flick_like(n->note_type)) {
       std::string tap_suffix = "1";
       tap_suffix.push_back(base36_digit(sl));

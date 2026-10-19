@@ -2240,26 +2240,34 @@ void test_official_chart_five_column_form_matches_openwds() {
 
 void test_official_chart_accepts_negative_start_seconds() {
   // OpenWDS StandardNotation.Parse has no lower bound on start/end seconds.
+  // Editor folds negatives into offset_ms so the timeline can stay at tick >= 0.
   const std::string csv =
       "-0.0487,-1.0,10,1,1\n"
       "1.0,-1.0,10,2,1\n";
+  OfficialChartLoadOptions no_fold;
+  no_fold.fold_negative_times_into_delay = false;
+  NotationChart raw;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, raw, no_fold).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(raw.notes.size(), static_cast<size_t>(2));
+  CHECK(raw.notes[0].start_tick < 0);
+  CHECK_EQ(raw.timing.offset_ms, 0);
+
   NotationChart chart;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart).error),
            static_cast<int>(SerializeError::Ok));
   CHECK_EQ(chart.notes.size(), static_cast<size_t>(2));
-
   MusicTiming local = chart.timing;
   local.offset_ms = 0;
-  const int64_t csv_ms = static_cast<int64_t>(std::llround(-0.0487 * 1000.0));
-  CHECK_EQ(chart.notes[0].start_tick, milliseconds_to_tick(csv_ms, local));
-  CHECK_EQ(chart.notes[0].start_ms(local),
-           tick_to_milliseconds(chart.notes[0].start_tick, local));
+  CHECK_EQ(chart.notes[0].start_tick, 0);
+  CHECK_EQ(chart.notes[1].start_tick, raw.notes[1].start_tick - raw.notes[0].start_tick);
+  CHECK_EQ(chart.timing.offset_ms, tick_to_milliseconds(raw.notes[0].start_tick, local));
 
   std::string exported;
   CHECK_EQ(static_cast<int>(
                OfficialChartFormat::serialize_chart(chart, exported).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK(exported.front() == '-');
+  CHECK(exported.front() != '-');
   NotationChart roundtrip;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(exported, roundtrip).error),
            static_cast<int>(SerializeError::Ok));
@@ -2267,6 +2275,90 @@ void test_official_chart_accepts_negative_start_seconds() {
 
   CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart("nan,-1.0,10,1,1\n", chart).error),
            static_cast<int>(SerializeError::ParseError));
+}
+
+void test_official_csv_folds_split_and_config_delay() {
+  // Split startTime is included in the fold min; DelaySeconds adds on top.
+  const std::string csv =
+      "-2.0,0.5,0,-1,0,13,10170\n"
+      "-1.0,-1.0,10,3,2,0,0\n"
+      "0.0,-1.0,10,1,1,0,0\n";
+  OfficialChartLoadOptions opt;
+  opt.delay_seconds = 3.019;
+  NotationChart chart;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, chart, opt).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(chart.timing.offset_ms, 3019 - 2000);
+  CHECK_EQ(chart.notes.size(), static_cast<size_t>(3));
+  // Earliest was the split at -2s → tick 0 after fold.
+  bool found_split = false;
+  for (const auto& n : chart.notes) {
+    if (n.gimmick_type == GimmickType::Split3 && n.scratch_length == 10170) {
+      found_split = true;
+      CHECK_EQ(n.start_tick, 0);
+      MusicTiming local = chart.timing;
+      local.offset_ms = 0;
+      CHECK_EQ(n.end_tick, milliseconds_to_tick(2500, local));
+    }
+  }
+  CHECK(found_split);
+
+  // Config delay too small to cover the early span: first event at 0, delay is
+  // the residual (0.5 + (-2.0) = -1.5s), never forced to 0.
+  OfficialChartLoadOptions short_delay;
+  short_delay.delay_seconds = 0.5;
+  NotationChart residual;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, residual, short_delay).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(residual.timing.offset_ms, 500 - 2000);
+  CHECK_EQ(min_persisted_start_tick(residual), 0);
+
+  // No music_config: delay is just the early span.
+  NotationChart solo;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, solo).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(solo.timing.offset_ms, -2000);
+  CHECK_EQ(min_persisted_start_tick(solo), 0);
+}
+
+void test_official_csv_single_export_bakes_delay() {
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.offset_ms = 3000;
+  normalize_timing_points(chart.timing);
+  NotationNote note = make_tap(0, 0);
+  note.id = 0;
+  chart.notes.push_back(note);
+  NotationNote split = make_tap(480, 0);
+  split.id = 1;
+  split.note_type = NoteType::None;
+  split.gimmick_type = GimmickType::Split3;
+  split.scratch_length = 10170;
+  split.width = 0;
+  split.end_tick = 960;
+  chart.notes.push_back(split);
+
+  OfficialChartSaveOptions baked;
+  baked.bake_delay_into_times = true;
+  baked.convert_lane_to_one_based = false;
+  std::string text;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, text, baked).error),
+           static_cast<int>(SerializeError::Ok));
+  // First row is the tap at chart 0 + 3s delay; split at 1s chart → 4s / 5s.
+  const double start_sec = std::stod(text.substr(0, text.find(',')));
+  CHECK(std::abs(start_sec - 3.0) < 1e-3);
+  CHECK(text.find("4.0000,5.0000,0,-1,0,13,10170") != std::string::npos);
+
+  OfficialChartSaveOptions project;
+  project.bake_delay_into_times = false;
+  project.convert_lane_to_one_based = false;
+  std::string project_text;
+  CHECK_EQ(static_cast<int>(
+               OfficialChartFormat::serialize_chart(chart, project_text, project).error),
+           static_cast<int>(SerializeError::Ok));
+  const double project_start = std::stod(project_text.substr(0, project_text.find(',')));
+  CHECK(std::abs(project_start - 0.0) < 1e-3);
 }
 
 void test_wdschart_accepts_negative_note_ticks() {
@@ -2315,18 +2407,21 @@ void test_official_standard_charts_wdschart_and_csv_roundtrip() {
     if (!fs::exists(csv_path)) {
       continue;
     }
+    // Raw file times may be negative (e.g. early split effects); import folds them
+    // into offset_ms so editor ticks stay >= 0.
+    OfficialChartLoadOptions raw_opt;
+    raw_opt.fold_negative_times_into_delay = false;
+    NotationChart raw;
+    CHECK_EQ(static_cast<int>(
+                 OfficialChartFormat::load_chart_file(csv_path.string(), raw, raw_opt).error),
+             static_cast<int>(SerializeError::Ok));
+    CHECK(min_persisted_start_tick(raw) < 0);
+
     NotationChart official;
     CHECK_EQ(static_cast<int>(OfficialChartFormat::load_chart_file(csv_path.string(), official).error),
              static_cast<int>(SerializeError::Ok));
-
-    bool has_negative_start = false;
-    for (const auto& n : official.notes) {
-      if (n.start_tick < 0) {
-        has_negative_start = true;
-        break;
-      }
-    }
-    CHECK(has_negative_start);
+    CHECK_EQ(min_persisted_start_tick(official), 0);
+    CHECK(official.timing.offset_ms < 0);
 
     const fs::path wds_path =
         temp_chart_path("std_" + csv_path.parent_path().parent_path().filename().string() + "_" +
@@ -2339,14 +2434,13 @@ void test_official_standard_charts_wdschart_and_csv_roundtrip() {
     std::string csv_out;
     CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(official, csv_out).error),
              static_cast<int>(SerializeError::Ok));
-    CHECK(csv_out.find('-') != std::string::npos);
     NotationChart from_csv;
     CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv_out, from_csv).error),
              static_cast<int>(SerializeError::Ok));
     CHECK_EQ(notes_without_hold_eighths(official.notes).size(),
              notes_without_hold_eighths(from_csv.notes).size());
     CHECK_EQ(min_persisted_start_tick(official), min_persisted_start_tick(from_csv));
-    CHECK(min_persisted_start_tick(from_csv) < 0);
+    CHECK_EQ(min_persisted_start_tick(from_csv), 0);
   }
 
   int roundtrip_ok = 0;
@@ -4748,7 +4842,7 @@ void test_sus_hold_auto_generates_head_when_uncovered() {
       "#TITLE \"hold\"\n"
       "#BPM01: 120.0\n"
       "#00008: 01\n"
-      "#00020a: 1121\n";  // lane0 ch-a: start@0 width1, end@half-bar width1
+      "#00022a: 1121\n";  // Ched lane 2 → editor 0, ch-a: start@0 width1, end@half-bar width1
 
   SusChartLoadResult loaded;
   const auto result = SusChartFormat::parse(sus, loaded);
@@ -5192,10 +5286,10 @@ void test_sus_export_headless_hold_body() {
   std::string text;
   CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
            static_cast<int>(SerializeError::Ok));
-  // Truly headless → Damage tap (#1 type 4, width 2) at lane 2.
-  CHECK(text.find("#00012:") != std::string::npos);
+  // Truly headless → Damage tap (#1 type 4, width 2) at SUS lane 4 (WDS 2 + pad 2).
+  CHECK(text.find("#00014:") != std::string::npos);
   {
-    const auto pos = text.find("#00012:");
+    const auto pos = text.find("#00014:");
     CHECK(pos != std::string::npos);
     const auto colon = text.find(':', pos);
     const auto end = text.find('\n', pos);
@@ -5243,7 +5337,7 @@ void test_sus_export_covered_hold_skips_damage() {
   std::string text;
   CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
            static_cast<int>(SerializeError::Ok));
-  const auto pos = text.find("#00012:");
+  const auto pos = text.find("#00014:");
   CHECK(pos != std::string::npos);
   const auto colon = text.find(':', pos);
   const auto end = text.find('\n', pos);
@@ -5549,10 +5643,10 @@ void test_sus_ched_export_slide_and_end_pair() {
   CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
            static_cast<int>(SerializeError::Ok));
   CHECK(text.find("#00020") == std::string::npos);  // no Hold #2 channel
-  CHECK(text.find("#00030") != std::string::npos);  // Slide #3
+  CHECK(text.find("#00032") != std::string::npos);  // Slide #3 (WDS 0 + pad 2)
   // Purple end at tick 960 → measure 0 half → Flick+Air present
-  CHECK(text.find("#00012:") != std::string::npos);
-  CHECK(text.find("#00052:") != std::string::npos);
+  CHECK(text.find("#00014:") != std::string::npos);
+  CHECK(text.find("#00054:") != std::string::npos);
 
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
@@ -5618,8 +5712,8 @@ void test_sus_left_jump_air_binds_scratch_hold() {
       "#TITLE \"leftjump\"\n"
       "#BPM01: 120.0\n"
       "#00008: 01\n"
-      "#00032a: 1222\n"  // body [2,3] (lane 0 used by Air → no Ched offset)
-      "#00050: 0014\n";  // Air [0,3] at end — i-r-1 = 0-3-1 = -4
+      "#00032a: 1222\n"  // body SUS [2,3] → editor [0,1]
+      "#00050: 0014\n";  // Air SUS [0,3] → editor [-2,1]; sl = i-r-1 = -4
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
            static_cast<int>(SerializeError::Ok));
@@ -5629,7 +5723,7 @@ void test_sus_left_jump_air_binds_scratch_hold() {
   }
   CHECK(body != nullptr);
   if (body == nullptr) return;
-  CHECK_EQ(body->lane, 2);
+  CHECK_EQ(body->lane, 0);
   CHECK_EQ(body->width, 2);
   CHECK_EQ(body->scratch_length, -4);
   CHECK_EQ(static_cast<int>(body->gimmick_type), static_cast<int>(GimmickType::JumpScratch));
@@ -5641,11 +5735,11 @@ void test_sus_jump_scratch_chain_joint_no_pink_head() {
       "#TITLE \"chain\"\n"
       "#BPM01: 120.0\n"
       "#00008: 01\n"
-      "#00030a: 1222\n"  // A [0,1] 0→960
-      "#00032b: 0012\n"  // B start @960 [2,3]
-      "#00132b: 22\n"    // B end @1920
-      "#00050: 0014\n"   // Air [0,3] at joint (A's JumpScratch + B addStart=false)
-      "#00152: 12\n";    // B end Air on [2,3] — keeps B purple (no shouldUnscratch)
+      "#00032a: 1222\n"  // A SUS [2,3] → editor [0,1] 0→960
+      "#00034b: 0012\n"  // B start @960 SUS [4,5] → editor [2,3]
+      "#00134b: 22\n"    // B end @1920
+      "#00052: 0014\n"   // Air SUS [2,5] at joint (A's JumpScratch + B addStart=false)
+      "#00154: 12\n";    // B end Air on [4,5] — keeps B purple (no shouldUnscratch)
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(sus, loaded).error),
            static_cast<int>(SerializeError::Ok));
@@ -6193,7 +6287,7 @@ void test_sus_critical_hold_exports_as_critical_plus_hold() {
   CHECK_EQ(static_cast<int>(SusChartFormat::serialize(chart, options, text).error),
            static_cast<int>(SerializeError::Ok));
   // Critical tap (#mmm1x type 2) must appear alongside the hold channel.
-  CHECK(text.find("#00012:") != std::string::npos);
+  CHECK(text.find("#00014:") != std::string::npos);
 
   SusChartLoadResult loaded;
   CHECK_EQ(static_cast<int>(SusChartFormat::parse(text, loaded).error),
@@ -8464,8 +8558,18 @@ void test_sirius_extended_csv_native_and_sus_scroll() {
     CHECK(csv_auto.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
     CHECK_EQ(static_cast<int>(csv_auto.notes.size()), 2);
 
+    // SUS clips to columns 0..f after +2: lane 14 and -8 lie fully outside and
+    // are dropped. Partial overhang is kept and truncated.
+    NotationChart clip_src = fully_out;
+    NotationNote clip_right = make_tap(960, 13);
+    clip_right.id = 2;
+    clip_right.width = 4;  // SUS 15..18 → keep f only
+    NotationNote clip_left = make_tap(1440, -3);
+    clip_left.id = 3;
+    clip_left.width = 3;  // SUS -1..1 → keep 0..1
+    clip_src.notes = {far_right, far_left, clip_right, clip_left};
     std::string outside_sus;
-    CHECK(SusChartFormat::serialize(fully_out, SusChartSaveOptions{}, outside_sus).error ==
+    CHECK(SusChartFormat::serialize(clip_src, SusChartSaveOptions{}, outside_sus).error ==
           SerializeError::Ok);
     const fs::path outside_sus_file = temp_chart_path("fully_outside.sus");
     {
@@ -8477,8 +8581,10 @@ void test_sirius_extended_csv_native_and_sus_scroll() {
     CHECK(sus_outside.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
     CHECK_EQ(static_cast<int>(sus_outside.chart.notes.size()), 2);
     if (sus_outside.chart.notes.size() == 2) {
-      CHECK_EQ(sus_outside.chart.notes[0].lane, 14);
-      CHECK_EQ(sus_outside.chart.notes[1].lane, -8);
+      CHECK_EQ(sus_outside.chart.notes[0].lane, 13);
+      CHECK_EQ(sus_outside.chart.notes[0].width, 1);
+      CHECK_EQ(sus_outside.chart.notes[1].lane, -2);
+      CHECK_EQ(sus_outside.chart.notes[1].width, 2);
     }
   }
   {
@@ -8991,6 +9097,170 @@ void test_sus_official_import_matches_sus2txt_nontail_and_hispeed() {
     CHECK_EQ(count_chart_note_type(roundtrip.chart, NoteType::NontailHold), 0);
     CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::Hold), 1);
   }
+}
+
+// SUS export always pads +2 and clips to 0..f; import always subtracts 2.
+void test_sus_export_import_nontail_sv_and_overhang() {
+  const std::string header = "#REQUEST \"ticks_per_beat 480\"\n#BPM01: 120\n#00008: 01\n";
+  auto parse_ok = [&](const std::string& body, SusChartLoadResult& out) {
+    const auto result = SusChartFormat::parse(header + body, out);
+    CHECK_EQ(static_cast<int>(result.error), static_cast<int>(SerializeError::Ok));
+    return result.error == SerializeError::Ok;
+  };
+  auto first_of = [](const NotationChart& chart, NoteType type) -> const NotationNote* {
+    for (const auto& n : chart.notes) {
+      if (n.note_type == type) return &n;
+    }
+    return nullptr;
+  };
+
+  {
+    // Ched right-edge overhang: lane d width 2 → editor 11..12. Old recenter
+    // used offset=min_lane and collapsed this to lane 0.
+    SusChartLoadResult loaded;
+    if (!parse_ok("#0001d: 12\n", loaded)) return;
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
+    if (!loaded.chart.notes.empty()) {
+      CHECK_EQ(loaded.chart.notes.front().lane, 11);
+      CHECK_EQ(loaded.chart.notes.front().width, 2);
+    }
+  }
+  {
+    // Note that only lives on e+ must keep offset 2, not shift to lane 0.
+    SusChartLoadResult loaded;
+    if (!parse_ok("#0001e: 13\n", loaded)) return;
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
+    if (!loaded.chart.notes.empty()) {
+      CHECK_EQ(loaded.chart.notes.front().lane, 12);
+      CHECK_EQ(loaded.chart.notes.front().width, 3);
+    }
+  }
+  {
+    // Left pad 0-1 plus column d: Ched 12-key + left overhang.
+    SusChartLoadResult loaded;
+    if (!parse_ok("#00010: 12\n#0001d: 11\n", loaded)) return;
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 2);
+    if (loaded.chart.notes.size() >= 2) {
+      CHECK_EQ(loaded.chart.notes[0].lane, -2);
+      CHECK_EQ(loaded.chart.notes[0].width, 2);
+      CHECK_EQ(loaded.chart.notes[1].lane, 11);
+      CHECK_EQ(loaded.chart.notes[1].width, 1);
+    }
+  }
+  {
+    // Import always subtracts 2: SUS 0/b → editor -2/9, no layout heuristic.
+    SusChartLoadResult loaded;
+    if (!parse_ok("#00010: 11\n#0001b: 11\n", loaded)) return;
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 2);
+    if (loaded.chart.notes.size() >= 2) {
+      CHECK_EQ(loaded.chart.notes[0].lane, -2);
+      CHECK_EQ(loaded.chart.notes[1].lane, 9);
+    }
+  }
+  {
+    // Overhang slide + end Damage + #TIL00, no WDS headers.
+    SusChartLoadResult loaded;
+    if (!parse_ok("#TIL00: \"0'0:2.0\"\n#0003e0: 13000023\n#0001e: 00000043\n", loaded)) {
+      return;
+    }
+    CHECK(loaded.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+    CHECK_EQ(count_chart_note_type(loaded.chart, NoteType::NontailHold), 1);
+    const auto* body = first_of(loaded.chart, NoteType::NontailHold);
+    CHECK(body != nullptr);
+    if (body != nullptr) {
+      CHECK_EQ(body->lane, 12);
+      CHECK_EQ(body->width, 3);
+    }
+    CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 1);
+    if (!loaded.chart.scroll_speed_points.empty()) {
+      CHECK(std::fabs(loaded.chart.scroll_speed_points.front().multiplier - 2.0) < 1e-9);
+    }
+  }
+
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationNote left = make_tap(0, -2);
+  left.id = 0;
+  left.width = 2;
+  NotationNote right = make_tap(480, 12);
+  right.id = 1;
+  right.width = 3;
+  NotationNote body = make_tap(960, 11);
+  body.id = 2;
+  body.width = 2;
+  body.end_tick = 1920;
+  body.note_type = NoteType::NontailHold;
+  NotationNote scratch = make_tap(2400, 11);
+  scratch.id = 3;
+  scratch.width = 1;
+  scratch.end_tick = 2880;
+  scratch.note_type = NoteType::ScratchHold;
+  set_scratch_hold_end_lanes(scratch, 11, 13);
+  chart.notes = {left, right, body, scratch};
+  chart.scroll_speed_points = {{0, 1.0}, {480, 2.0}};
+
+  std::string text;
+  CHECK(SusChartFormat::serialize(chart, SusChartSaveOptions{}, text).error == SerializeError::Ok);
+  CHECK(text.find("#WDS_PROFILE SiriusExtended") != std::string::npos);
+  CHECK(text.find("#WDS_LANE_OFFSET") != std::string::npos);
+  CHECK(text.find("#TIL00:") != std::string::npos);
+  CHECK(text.find("#00010:") != std::string::npos);  // WDS -2 + pad 2
+  CHECK(text.find("#0001e:") != std::string::npos);  // WDS 12 + pad 2
+  {
+    bool wrote_end_damage = false;
+    std::string line;
+    std::istringstream ss(text);
+    while (std::getline(ss, line)) {
+      const auto colon = line.find(':');
+      if (line.size() < 6 || line[0] != '#' || colon == std::string::npos) continue;
+      const std::string hdr = line.substr(1, colon - 1);
+      if (hdr.size() < 4 || hdr[3] != '1') continue;
+      std::string data = line.substr(colon + 1);
+      while (!data.empty() && (data.front() == ' ' || data.front() == '\t')) data.erase(data.begin());
+      for (size_t i = 0; i + 1 < data.size(); i += 2) {
+        if (data[i] == '4') wrote_end_damage = true;
+      }
+    }
+    CHECK(wrote_end_damage);
+  }
+
+  SusChartLoadResult roundtrip;
+  CHECK(SusChartFormat::parse(text, roundtrip).error == SerializeError::Ok);
+  CHECK(roundtrip.chart.compatibility_profile == ChartCompatibilityProfile::SiriusExtended);
+  CHECK_EQ(count_chart_note_type(roundtrip.chart, NoteType::Normal), 2);
+  CHECK_EQ(count_chart_note_type(roundtrip.chart, NoteType::NontailHold), 1);
+  CHECK_EQ(count_chart_note_type(roundtrip.chart, NoteType::ScratchHold), 1);
+  CHECK_EQ(static_cast<int>(roundtrip.chart.scroll_speed_points.size()), 2);
+  const auto* rt_left = first_of(roundtrip.chart, NoteType::Normal);
+  CHECK(rt_left != nullptr);
+  if (rt_left != nullptr) {
+    CHECK_EQ(rt_left->lane, -2);
+    CHECK_EQ(rt_left->width, 2);
+  }
+  bool saw_right = false;
+  bool saw_nontail = false;
+  bool saw_scratch = false;
+  for (const auto& n : roundtrip.chart.notes) {
+    // WDS 12 w3 → SUS 14..16, clipped to e..f, import 12 w2.
+    if (n.note_type == NoteType::Normal && n.lane == 12 && n.width == 2) saw_right = true;
+    if (n.note_type == NoteType::NontailHold && n.lane == 11 && n.width == 2) saw_nontail = true;
+    if (n.note_type == NoteType::ScratchHold && n.lane == 11) {
+      saw_scratch = true;
+      const auto cover = get_scratch_end_lane_range(n);
+      CHECK_EQ(cover.first, 11);
+      CHECK_EQ(cover.second, 13);
+    }
+  }
+  CHECK(saw_right);
+  CHECK(saw_nontail);
+  CHECK(saw_scratch);
 }
 
 // Old .wdschart files: authored / suppressed HoldEighth rows and X tombstones still load,
@@ -10193,6 +10463,7 @@ int main() {
   test_official_csv_nontail_import_keeps_file_eighths();
   test_sus_import_ignores_file_eighths_and_recomputes();
   test_sus_official_import_matches_sus2txt_nontail_and_hispeed();
+  test_sus_export_import_nontail_sv_and_overhang();
   test_legacy_wdschart_eighth_rows_load_ignored_and_roundtrip();
   test_sirius_features_require_extended_profile();
   test_sirius_extended_csv_native_and_sus_scroll();
@@ -10311,6 +10582,8 @@ int main() {
   test_official_chart_load_auto();
   test_official_chart_five_column_form_matches_openwds();
   test_official_chart_accepts_negative_start_seconds();
+  test_official_csv_folds_split_and_config_delay();
+  test_official_csv_single_export_bakes_delay();
   test_wdschart_accepts_negative_note_ticks();
   test_official_standard_charts_wdschart_and_csv_roundtrip();
   test_load_repo_test_official_charts();
