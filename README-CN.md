@@ -701,9 +701,9 @@ Workflow：
 
 ## 使用与许可
 
-当前仓库根目录没有提供独立的 `LICENSE` 文件，因此不能仅根据“源码公开”推断项目采用某一种开源许可证。
+本项目以 **GNU Lesser General Public License v3 或更高版本**（LGPLv3+）发布，见根目录 `LICENSE`、`COPYING.LESSER` 与 `COPYING`。
 
-Qt、Vulkan / MoltenVK、BASS / BASSmix、字体以及仓库中的其他第三方组件和资源，分别受其自身许可证与再分发条款约束。
+随安装包提供的完整第三方许可文本在 `licenses/`（打包后位于应用资源目录的 `licenses/`）。Qt、OBS Yami 主题、FFmpeg、BASS / BASSmix、MoltenVK、字体与图标等分别受其自身许可证约束；摘要见关于对话框与 `licenses/README.txt`。
 
 ## 声明
 

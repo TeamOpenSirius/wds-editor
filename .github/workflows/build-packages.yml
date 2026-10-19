@@ -150,8 +150,16 @@ jobs:
       - name: Verify packaged fonts
         run: |
           font_dir="dist/staging/wds-win-x86_64/fonts"
+          lic="dist/staging/wds-win-x86_64/licenses"
           test -f "${font_dir}/NotoSansSC-Regular.ttf"
-          test -f "${font_dir}/SegoeFluentIcons.ttf"
+          test ! -e "${font_dir}/SegoeFluentIcons.ttf"
+          test -f "dist/staging/wds-win-x86_64/icons/play.svg"
+          test -f "${lic}/Fluent-UI-System-Icons-LICENSE.txt"
+          test -f "${lic}/COPYING.LESSER"
+          test -f "${lic}/Qt-NOTICE.txt"
+          test -f "${lic}/OBS-Yami-NOTICE.txt"
+          test -f "${lic}/FFmpeg-NOTICE.txt"
+          test -f "${lic}/THIRD_PARTY_NOTICES.txt"
 
       - name: Upload MSI
         uses: actions/upload-artifact@v6
@@ -200,9 +208,17 @@ jobs:
 
       - name: Verify packaged fonts
         run: |
-          font_dir="dist/staging/wds-macos-arm/WDS Editor.app/Contents/Resources/fonts"
-          test -f "${font_dir}/NotoSansSC-Regular.ttf"
-          test -f "${font_dir}/SegoeFluentIcons.ttf"
+          res="dist/staging/wds-macos-arm/WDS Editor.app/Contents/Resources"
+          lic="${res}/licenses"
+          test -f "${res}/fonts/NotoSansSC-Regular.ttf"
+          test ! -e "${res}/fonts/SegoeFluentIcons.ttf"
+          test -f "${res}/icons/play.svg"
+          test -f "${lic}/Fluent-UI-System-Icons-LICENSE.txt"
+          test -f "${lic}/COPYING.LESSER"
+          test -f "${lic}/Qt-NOTICE.txt"
+          test -f "${lic}/OBS-Yami-NOTICE.txt"
+          test -f "${lic}/FFmpeg-NOTICE.txt"
+          test -f "${lic}/THIRD_PARTY_NOTICES.txt"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v6

@@ -1,0 +1,27 @@
+Qt 6 — LGPL v3 compliance notes for WDS Editor
+==============================================
+
+WDS Editor links Qt 6 dynamically (shared libraries / frameworks). Qt is
+used under the GNU Lesser General Public License version 3 (or later), as
+offered by The Qt Company for open-source use.
+
+Corresponding source
+  Obtain the Qt sources matching the version shown in Help → About
+  (QT_VERSION_STR) from:
+    https://code.qt.io/cgit/qt/
+    https://download.qt.io/official_releases/qt/
+  or any mirror that publishes the same versioned source archives.
+
+Relinking / replacing Qt
+  Because Qt is dynamically linked, you may replace the bundled Qt shared
+  libraries (or macOS frameworks) with a compatible build of the same major
+  version, subject to the LGPL. On macOS they live under
+  WDS Editor.app/Contents/MacOS/lib/ (QtCore, QtGui, QtWidgets, QtSvg,
+  QtNetwork, …) and plugins under …/lib/plugins/.
+
+License texts
+  See COPYING.LESSER and COPYING in this licenses/ folder, and
+  https://doc.qt.io/qt-6/lgpl.html
+
+Copyright
+  The Qt Company Ltd. and Qt contributors.

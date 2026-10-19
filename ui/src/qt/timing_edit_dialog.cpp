@@ -1,6 +1,5 @@
 #include "wds/ui/qt/timing_edit_dialog.hpp"
 
-#include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/ui_manager.hpp"
 
 #include <QDialogButtonBox>
@@ -53,10 +52,8 @@ TimingEditDialog::TimingEditDialog(bool bpm_mode, double bpm, int32_t numerator,
   root->addLayout(form);
 
   auto* buttons = new QDialogButtonBox(this);
-  auto* confirm = buttons->addButton(tr("确认"), QDialogButtonBox::AcceptRole);
-  confirm->setIcon(fluent_icon(fluent::Accept));
-  auto* cancel = buttons->addButton(tr("取消"), QDialogButtonBox::RejectRole);
-  cancel->setIcon(fluent_icon(fluent::Clear));
+  buttons->addButton(tr("确认"), QDialogButtonBox::AcceptRole);
+  buttons->addButton(tr("取消"), QDialogButtonBox::RejectRole);
   root->addWidget(buttons);
   connect(buttons, &QDialogButtonBox::accepted, this, [this] {
     journal_menu_action("timing.ok");

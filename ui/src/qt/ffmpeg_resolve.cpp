@@ -162,6 +162,12 @@ FfmpegProbe probe_ffmpeg_binary(const QString& path) {
   static const QRegularExpression minor_re(QStringLiteral(R"(ffmpeg version (?:n)?(\d+)\.(\d+))"));
   const auto mm = minor_re.match(ver);
   if (mm.hasMatch()) p.minor = mm.captured(2).toInt();
+  // FFmpeg legal.html: --enable-nonfree makes the binary unredistributable.
+  // Reject cached/PATH copies that still carry it (e.g. old eugeneware static).
+  if (ver.contains(QLatin1String("--enable-nonfree"))) {
+    p.error = QStringLiteral("ffmpeg enable-nonfree");
+    return p;
+  }
   const QString formats =
       run_ffmpeg(path, {QStringLiteral("-hide_banner"), QStringLiteral("-formats")});
   p.has_mp4 = has_token(formats, QStringLiteral(" mp4 "));
@@ -223,8 +229,9 @@ FfmpegDownloadSpec ffmpeg_download_spec() {
 #else
       QStringLiteral("ffmpeg");
 #endif
-  // Pinned BtbN autobuild-2026-07-23-14-16 (n8.1.2-30-g45f1910444) / eugeneware b6.1.1.
-  // Same sha256 on every URL of a platform. npmmirror first, then ghfast, then origin.
+  // Win/Linux: BtbN autobuild-2026-07-23-14-16 (n8.1.2-30-g45f1910444) LGPL.
+  // macOS: serversideup/ffmpeg-lgpl-builds v8.1.2-27 (disable-gpl, disable-nonfree,
+  // VideoToolbox). Same sha256 on every URL of a platform. Prefer mirrors, then origin.
 #if defined(_WIN32)
   spec.filename = QStringLiteral("ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip");
   spec.archive_kind = QStringLiteral("zip");
@@ -236,13 +243,21 @@ FfmpegDownloadSpec ffmpeg_download_spec() {
       QStringLiteral("https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"),
   };
 #elif defined(Q_OS_MACOS)
-  spec.filename = QStringLiteral("ffmpeg-darwin-arm64.gz");
-  spec.archive_kind = QStringLiteral("gz");
-  spec.sha256 = QStringLiteral("8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa");
+  // LGPL-only Apple Silicon build (no --enable-nonfree / --enable-gpl).
+  // npmmirror does not host this artifact; use CN GitHub release proxies first.
+  spec.filename = QStringLiteral("ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz");
+  spec.archive_kind = QStringLiteral("tar.gz");
+  spec.sha256 = QStringLiteral("ac0babf65798bf681da1dc81c4fe4ae049d0d26e161410174b0e120e3e783332");
   spec.urls = {
-      QStringLiteral("https://cdn.npmmirror.com/binaries/ffmpeg-static/ffmpeg-darwin-arm64.gz"),
-      QStringLiteral("https://ghfast.top/https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz"),
-      QStringLiteral("https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz"),
+      QStringLiteral(
+          "https://gh-proxy.com/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/"
+          "download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"),
+      QStringLiteral(
+          "https://ghfast.top/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/"
+          "v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"),
+      QStringLiteral(
+          "https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/"
+          "ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"),
   };
 #elif defined(__aarch64__) || defined(_M_ARM64)
   spec.filename = QStringLiteral("ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz");

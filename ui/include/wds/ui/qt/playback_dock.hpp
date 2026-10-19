@@ -32,11 +32,15 @@ class PlaybackBar final : public QWidget {
   void set_stem_handlers(std::function<void(int)> select, std::function<void()> open);
   void set_stem_tracks(const QStringList& names, int selected);
 
+ protected:
+  void changeEvent(QEvent* event) override;
+
  private:
   void build_ui();
   // User-driven scrub only. Do not call from sync_position() / setValue —
   // that feedback loop was the pause-to-start forward-creep bug.
   void seek_to_slider(int value);
+  void reload_transport_icons();
   void apply_play_icon(bool playing);
 
   UiManager* manager_ = nullptr;

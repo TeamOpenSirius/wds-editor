@@ -1,13 +1,14 @@
 {
   "note": "Pinned ffmpeg download specs. Runtime copy lives in ffmpeg_download_spec().",
   "macos-arm64": {
-    "filename": "ffmpeg-darwin-arm64.gz",
-    "archive": "gz",
-    "sha256": "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa",
+    "filename": "ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz",
+    "archive": "tar.gz",
+    "sha256": "ac0babf65798bf681da1dc81c4fe4ae049d0d26e161410174b0e120e3e783332",
+    "note": "serversideup/ffmpeg-lgpl-builds v8.1.2-27: --disable-gpl --disable-nonfree + VideoToolbox. No npmmirror host; CN GH proxies then origin.",
     "urls": [
-      "https://cdn.npmmirror.com/binaries/ffmpeg-static/ffmpeg-darwin-arm64.gz",
-      "https://ghfast.top/https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz",
-      "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz"
+      "https://gh-proxy.com/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz",
+      "https://ghfast.top/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz",
+      "https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"
     ]
   },
   "win-x86_64": {

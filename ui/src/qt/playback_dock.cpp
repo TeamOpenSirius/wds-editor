@@ -349,17 +349,7 @@ void PlaybackBar::build_ui() {
   play_ = new QPushButton(tr("播放"), block);
   pause_here_ = new QPushButton(tr("暂停在当前位置"), block);
   play_from_start_ = new QPushButton(tr("从开头开始播放"), block);
-  play_icon_ = fluent_icon(fluent::Play);
-  pause_icon_ = fluent_icon(fluent::Pause);
-  if (play_icon_.isNull()) play_icon_ = style()->standardIcon(QStyle::SP_MediaPlay);
-  if (pause_icon_.isNull()) pause_icon_ = style()->standardIcon(QStyle::SP_MediaPause);
-  auto previous = fluent_icon(fluent::Previous);
-  if (previous.isNull()) previous = style()->standardIcon(QStyle::SP_MediaSkipBackward);
-  auto pause_here = fluent_icon(fluent::Next);  // outline triangle + bar
-  if (pause_here.isNull()) pause_here = style()->standardIcon(QStyle::SP_MediaSkipForward);
-  play_->setIcon(play_icon_);
-  pause_here_->setIcon(pause_here);
-  play_from_start_->setIcon(previous);
+  reload_transport_icons();
   for (auto* button : {play_, pause_here_, play_from_start_}) {
     button->setToolTip(button->text());
     button->setAccessibleName(button->text());
@@ -520,6 +510,33 @@ void PlaybackBar::build_ui() {
       manager_->request_save_ui_config(true);
     }
   });
+}
+
+void PlaybackBar::reload_transport_icons() {
+  constexpr int kIconPx = 20;
+  play_icon_ = themed_named_icon("play", {}, kIconPx);
+  pause_icon_ = themed_named_icon("pause", {}, kIconPx);
+  if (play_icon_.isNull()) play_icon_ = style()->standardIcon(QStyle::SP_MediaPlay);
+  if (pause_icon_.isNull()) pause_icon_ = style()->standardIcon(QStyle::SP_MediaPause);
+  auto previous = themed_named_icon("previous", {}, kIconPx);
+  if (previous.isNull()) previous = style()->standardIcon(QStyle::SP_MediaSkipBackward);
+  auto pause_here = themed_named_icon("pause-here", {}, kIconPx);
+  if (pause_here.isNull()) pause_here = style()->standardIcon(QStyle::SP_MediaSkipForward);
+  if (pause_here_ != nullptr) pause_here_->setIcon(pause_here);
+  if (play_from_start_ != nullptr) play_from_start_->setIcon(previous);
+  if (play_ != nullptr) {
+    const bool playing =
+        manager_ != nullptr && manager_->playback_intends_playing();
+    play_->setIcon(playing ? pause_icon_ : play_icon_);
+  }
+}
+
+void PlaybackBar::changeEvent(QEvent* event) {
+  QWidget::changeEvent(event);
+  if (event != nullptr && (event->type() == QEvent::PaletteChange ||
+                           event->type() == QEvent::ApplicationPaletteChange)) {
+    reload_transport_icons();
+  }
 }
 
 void PlaybackBar::apply_play_icon(bool playing) {

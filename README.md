@@ -675,9 +675,9 @@ When changing the chart core:
 
 ## Licensing
 
-This repository currently does not include a repository-level `LICENSE` file, so public source availability should not be interpreted as granting a particular open-source license.
+WDS Editor is licensed under the **GNU Lesser General Public License version 3 or later** (LGPLv3+). See `LICENSE`, `COPYING.LESSER`, and `COPYING` at the repository root.
 
-Third-party components and bundled runtime dependencies — including Qt, Vulkan/MoltenVK-related components, BASS/BASSmix, fonts, and other assets — remain subject to their respective licenses and redistribution terms.
+Packaged builds ship third-party license texts under `licenses/` (copied into the app resource tree). Qt, the OBS Yami theme, FFmpeg, BASS/BASSmix, MoltenVK, fonts, icons, and other dependencies remain under their own terms; see Help → About and `licenses/README.txt`.
 
 ## Disclaimer
 

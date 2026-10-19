@@ -1,0 +1,20 @@
+BASS / BASSmix (un4seen developments)
+=====================================
+
+WDS Editor ships BASS and BASSmix shared libraries for audio playback and
+mixing (for example libbass.dylib / bass.dll).
+
+License summary (see https://www.un4seen.com for the authoritative terms):
+
+  BASS is free for non-commercial use. If you are a non-commercial entity
+  (e.g. an individual) and you are not making any money from your product
+  (through sales, advertising, etc.), you may use BASS for free. Commercial
+  use requires a paid licence from un4seen, on a per-platform basis.
+
+  Redistribution of the BASS DLLs with your own end-user product is
+  permitted under those terms. Reselling or sublicensing BASS itself is not.
+
+WDS Editor is distributed as free, non-commercial software. If that changes,
+obtain the appropriate commercial BASS licences before shipping.
+
+https://www.un4seen.com

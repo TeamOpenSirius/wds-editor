@@ -159,7 +159,16 @@ void test_download_spec_is_pinned() {
   expect(!spec.filename.isEmpty(), "filename pinned");
   expect(!spec.sha256.isEmpty(), "sha256 pinned");
   expect(!spec.urls.isEmpty(), "url list");
+#if defined(Q_OS_MACOS)
+  // No npmmirror host for this artifact; CN GitHub proxies first, then origin.
+  expect(spec.archive_kind == QLatin1String("tar.gz"), "macos uses tar.gz");
+  expect(spec.urls.size() >= 3, "macos has three sources");
+  expect(spec.urls.front().contains(QStringLiteral("gh-proxy.com")), "china proxy first");
+  expect(spec.urls.back().startsWith(QStringLiteral("https://github.com/")), "origin last");
+  expect(spec.urls.front().contains(QStringLiteral("ffmpeg-lgpl-builds")), "macos uses lgpl-builds");
+#else
   expect(spec.urls.front().contains(QStringLiteral("npmmirror")), "china mirror first");
+#endif
   for (const auto& url : spec.urls) {
     expect(!url.contains(QStringLiteral("/latest/")), "no unpinned latest");
   }

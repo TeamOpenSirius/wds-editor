@@ -261,7 +261,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   // AboutRole only takes effect when the action lives in a QMenu.
   // menuBar()->addAction() makes a top-level title and macOS ignores the role.
   about_action_ = new QAction(tr("关于"), this);
-  about_action_->setIcon(fluent_icon(fluent::Info));
+  about_action_->setIcon(themed_named_icon("info"));
   auto* help_menu = menuBar()->addMenu(tr("帮助"));
 #ifdef Q_OS_MACOS
   about_action_->setText(tr("关于 WDS Editor"));
@@ -676,23 +676,21 @@ void EditorMainWindow::apply_command_icons() {
     icons_dir_ = resolve_icons_dir(argv0.toUtf8().constData());
   }
   const QDir dir(QString::fromStdString(icons_dir_));
-  const auto icon_for = [&](const char* stem, char32_t fallback) {
-    const QIcon svg = themed_svg_icon(dir.filePath(QString::fromLatin1(stem) + QStringLiteral(".svg")));
-    return svg.isNull() ? fluent_icon(fallback) : svg;
+  const auto icon_for = [&](const char* stem) {
+    return themed_svg_icon(dir.filePath(QString::fromLatin1(stem) + QStringLiteral(".svg")));
   };
-  if (open_action_ != nullptr) open_action_->setIcon(icon_for("open", fluent::OpenFolder));
-  if (save_action_ != nullptr) save_action_->setIcon(icon_for("save", fluent::Save));
-  if (undo_action_ != nullptr) undo_action_->setIcon(icon_for("undo", fluent::Undo));
-  if (redo_action_ != nullptr) redo_action_->setIcon(icon_for("redo", fluent::Redo));
-  if (import_action_ != nullptr) import_action_->setIcon(icon_for("import", fluent::Import));
-  if (export_action_ != nullptr) export_action_->setIcon(icon_for("export", fluent::Export));
-  if (music_action_ != nullptr) music_action_->setIcon(icon_for("import-audio", fluent::Music));
-  if (jacket_action_ != nullptr) jacket_action_->setIcon(icon_for("import-image", fluent::Image));
-  if (check_action_ != nullptr) check_action_->setIcon(icon_for("check", fluent::Checklist));
-  if (clear_marks_action_ != nullptr)
-    clear_marks_action_->setIcon(icon_for("clear-marks", fluent::Eraser));
-  if (export_video_action_ != nullptr)
-    export_video_action_->setIcon(icon_for("export-video", fluent::Video));
+  if (open_action_ != nullptr) open_action_->setIcon(icon_for("open"));
+  if (save_action_ != nullptr) save_action_->setIcon(icon_for("save"));
+  if (undo_action_ != nullptr) undo_action_->setIcon(icon_for("undo"));
+  if (redo_action_ != nullptr) redo_action_->setIcon(icon_for("redo"));
+  if (import_action_ != nullptr) import_action_->setIcon(icon_for("import"));
+  if (export_action_ != nullptr) export_action_->setIcon(icon_for("export"));
+  if (music_action_ != nullptr) music_action_->setIcon(icon_for("import-audio"));
+  if (jacket_action_ != nullptr) jacket_action_->setIcon(icon_for("import-image"));
+  if (check_action_ != nullptr) check_action_->setIcon(icon_for("check"));
+  if (clear_marks_action_ != nullptr) clear_marks_action_->setIcon(icon_for("clear-marks"));
+  if (export_video_action_ != nullptr) export_video_action_->setIcon(icon_for("export-video"));
+  if (about_action_ != nullptr) about_action_->setIcon(icon_for("info"));
 }
 
 void EditorMainWindow::refresh_history_actions() {
