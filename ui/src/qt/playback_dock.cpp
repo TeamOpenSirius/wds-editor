@@ -45,7 +45,7 @@
 namespace wds::ui {
 namespace {
 
-constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
+constexpr std::array<wds::interaction::PlaceIntent, 10> kPlaceIntents = {{
     wds::interaction::PlaceIntent::Tap,
     wds::interaction::PlaceIntent::ExTap,
     wds::interaction::PlaceIntent::HoldStart,
@@ -54,6 +54,8 @@ constexpr std::array<wds::interaction::PlaceIntent, 8> kPlaceIntents = {{
     wds::interaction::PlaceIntent::Flick,
     wds::interaction::PlaceIntent::FlickRight,
     wds::interaction::PlaceIntent::ScratchHoldBody,
+    wds::interaction::PlaceIntent::Sound,
+    wds::interaction::PlaceIntent::SoundPurple,
 }};
 
 struct ConvertSpec {
@@ -62,7 +64,7 @@ struct ConvertSpec {
   int direction;
 };
 
-constexpr std::array<ConvertSpec, 8> kConvertSpecs = {{
+constexpr std::array<ConvertSpec, 10> kConvertSpecs = {{
     {"Tap", wds::chart_editor::NoteType::Normal, 0},
     {"ExTap", wds::chart_editor::NoteType::Critical, 0},
     {"Hold Head", wds::chart_editor::NoteType::HoldStart, 0},
@@ -71,9 +73,11 @@ constexpr std::array<ConvertSpec, 8> kConvertSpecs = {{
     {"Flick", wds::chart_editor::NoteType::Flick, 0},
     {"Right Flick", wds::chart_editor::NoteType::Flick, 1},
     {"Scratch Hold", wds::chart_editor::NoteType::ScratchHold, 0},
+    {"Sound", wds::chart_editor::NoteType::Sound, 0},
+    {"SoundPurple", wds::chart_editor::NoteType::ScratchSound, 0},
 }};
 
-constexpr std::array<const char*, 8> kConvertJournalIds = {{
+constexpr std::array<const char*, 10> kConvertJournalIds = {{
     "convert.to_tap",
     "convert.to_extap",
     "convert.to_hold_start",
@@ -82,7 +86,12 @@ constexpr std::array<const char*, 8> kConvertJournalIds = {{
     "convert.to_flick",
     "convert.to_flick_right",
     "convert.to_scratch_hold",
+    "convert.to_sound",
+    "convert.to_sound_purple",
 }};
+
+static_assert(kConvertSpecs.size() == kPlaceIntents.size());
+static_assert(kConvertSpecs.size() == kConvertJournalIds.size());
 
 constexpr std::array<const char*, 4> kCurveEaseJournalIds = {{
     "curve.ease_in",
@@ -667,7 +676,9 @@ void ConvertBar::sync_place_checks() {
     if (convert_buttons_[i] == nullptr) continue;
     convert_buttons_[i]->setEnabled(editable);
     const QString name = QString::fromUtf8(kConvertSpecs[i].name);
-    convert_buttons_[i]->setToolTip(enabled ? name : tr("转换为%1").arg(name));
+    const QString tip = enabled ? tr("放置%1").arg(name) : tr("转换为%1").arg(name);
+    convert_buttons_[i]->setToolTip(tip);
+    convert_buttons_[i]->setAccessibleName(tip);
     const QSignalBlocker blocker(convert_buttons_[i]);
     convert_buttons_[i]->setChecked(enabled && kPlaceIntents[i] == current);
   }

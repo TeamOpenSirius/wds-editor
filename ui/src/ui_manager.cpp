@@ -519,7 +519,7 @@ void UiManager::bind_editor_shortcuts() {
       notify_ui_change(UiChange::PlaybackSettings);
     }
   });
-  for (int slot = 0; slot < 8; ++slot) {
+  for (int slot = 0; slot < 10; ++slot) {
     const auto id = static_cast<wds::interaction::EditorShortcut>(
         static_cast<int>(wds::interaction::EditorShortcut::PlaceType0) + slot);
     editor.bind(wds::interaction::editor_shortcut(id), [this, slot] {
@@ -659,16 +659,17 @@ void UiManager::set_new_note_place_logic(bool enabled) {
 }
 
 void UiManager::activate_convert_bar_slot(int slot) {
-  if (slot < 0 || slot >= 8 || has_blocking_modal_dialog()) return;
+  if (slot < 0 || slot >= 10 || has_blocking_modal_dialog()) return;
   if (session_->read_only()) return;
   auto* panel = edit_panel();
   if (panel == nullptr) return;
 
-  static constexpr wds::interaction::PlaceIntent kPlaceTypes[8] = {
+  static constexpr wds::interaction::PlaceIntent kPlaceTypes[10] = {
       wds::interaction::PlaceIntent::Tap,           wds::interaction::PlaceIntent::ExTap,
       wds::interaction::PlaceIntent::HoldStart,     wds::interaction::PlaceIntent::HoldBody,
       wds::interaction::PlaceIntent::FlickLeft,     wds::interaction::PlaceIntent::Flick,
       wds::interaction::PlaceIntent::FlickRight,    wds::interaction::PlaceIntent::ScratchHoldBody,
+      wds::interaction::PlaceIntent::Sound,         wds::interaction::PlaceIntent::SoundPurple,
   };
   struct ConvertSpec {
     const char* name;
@@ -676,7 +677,7 @@ void UiManager::activate_convert_bar_slot(int slot) {
     bool flick_direction;
     int32_t direction;
   };
-  static constexpr ConvertSpec kSpecs[8] = {
+  static constexpr ConvertSpec kSpecs[10] = {
       {"Tap", wds::chart_editor::NoteType::Normal, false, 0},
       {"ExTap", wds::chart_editor::NoteType::Critical, false, 0},
       {"Hold Head", wds::chart_editor::NoteType::HoldStart, false, 0},
@@ -685,6 +686,8 @@ void UiManager::activate_convert_bar_slot(int slot) {
       {"Flick", wds::chart_editor::NoteType::Flick, true, 0},
       {"Right Flick", wds::chart_editor::NoteType::Flick, true, 1},
       {"Scratch Hold", wds::chart_editor::NoteType::ScratchHold, false, 0},
+      {"Sound", wds::chart_editor::NoteType::Sound, false, 0},
+      {"SoundPurple", wds::chart_editor::NoteType::ScratchSound, false, 0},
   };
   const auto& spec = kSpecs[slot];
   if (new_note_place_logic_) {
@@ -700,7 +703,10 @@ void UiManager::activate_convert_bar_slot(int slot) {
   const std::optional<int32_t> direction =
       spec.flick_direction ? std::optional<int32_t>(spec.direction) : std::nullopt;
   if (panel->convert_selected(spec.type, direction)) {
-    set_status(std::string("已转换为 ") + spec.name, StatusLevel::Info);
+    const bool star = spec.type == wds::chart_editor::NoteType::Sound ||
+                      spec.type == wds::chart_editor::NoteType::ScratchSound;
+    set_status(std::string(star ? "已转换星星为 " : "已转换为 ") + spec.name,
+               StatusLevel::Info);
   }
 }
 

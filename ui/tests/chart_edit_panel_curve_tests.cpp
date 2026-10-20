@@ -2206,23 +2206,157 @@ void test_convert_selected_hold_stars_and_defaults() {
     head.lane = 3;
     head.width = 1;
     h.engine.add_note(head);
-    const int32_t keep_id = add_bound_star(h, hold_id, 240, 3, 1);
-    const int32_t drop_id = add_bound_star(h, hold_id, 480, 3, 1);
-    h.panel.set_selected({hold_id, keep_id});
+    const int32_t child_id = add_bound_star(h, hold_id, 240, 3, 1);
+    const int32_t other_id = add_bound_star(h, hold_id, 480, 3, 1);
+    h.panel.set_selected({hold_id, child_id});
     CHECK(h.panel.convert_selected(NoteType::Flick, 1));
     const auto body = h.engine.document().find_note(hold_id);
-    const auto kept = h.engine.document().find_note(keep_id);
-    CHECK(body.has_value() && kept.has_value());
-    if (body && kept) {
+    CHECK(body.has_value());
+    if (body) {
       CHECK(body->note_type == NoteType::Flick);
       CHECK_EQ(body->end_tick, body->start_tick);
       CHECK_EQ(body->scratch_length, 1);
-      CHECK(kept->note_type == NoteType::Flick);
-      CHECK_EQ(kept->scratch_length, 1);
     }
-    CHECK(!h.engine.document().find_note(drop_id).has_value());
+    // Hold → non-hold deletes every child, including the selected one. Stars are
+    // never converted to non-star types.
+    CHECK(!h.engine.document().find_note(child_id).has_value());
+    CHECK(!h.engine.document().find_note(other_id).has_value());
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 0);
     CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  }
+}
+
+const NotationNote* last_of_type(const std::vector<NotationNote>& notes, NoteType type);
+
+void test_star_target_converts_hold_children_and_star_bodies() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 2);
+  NotationNote head;
+  head.note_type = NoteType::HoldStart;
+  head.start_tick = 0;
+  head.lane = 3;
+  head.width = 2;
+  const int32_t head_id = h.engine.add_note(head);
+  const int32_t first = add_bound_star(h, hold_id, 240, 3, 2);
+  const int32_t second = add_bound_star(h, hold_id, 480, 3, 2);
+
+  h.panel.set_selected({hold_id});
+  CHECK(h.panel.convert_selected(NoteType::ScratchSound));
+  {
+    const auto body = h.engine.document().find_note(hold_id);
+    const auto star_a = h.engine.document().find_note(first);
+    const auto star_b = h.engine.document().find_note(second);
+    const auto head_after = h.engine.document().find_note(head_id);
+    CHECK(body.has_value() && star_a.has_value() && star_b.has_value() && head_after.has_value());
+    if (body && star_a && star_b && head_after) {
+      CHECK(body->note_type == NoteType::Hold);
+      CHECK(star_a->note_type == NoteType::ScratchSound);
+      CHECK(star_b->note_type == NoteType::ScratchSound);
+      CHECK_EQ(star_a->parent_hold_id, hold_id);
+      CHECK_EQ(star_b->parent_hold_id, hold_id);
+      CHECK(head_after->note_type == NoteType::HoldStart);
+    }
+  }
+
+  // Direct star selection changes only that star.
+  h.panel.set_selected({first});
+  CHECK(h.panel.convert_selected(NoteType::Sound));
+  {
+    const auto star_a = h.engine.document().find_note(first);
+    const auto star_b = h.engine.document().find_note(second);
+    CHECK(star_a.has_value() && star_b.has_value());
+    if (star_a && star_b) {
+      CHECK(star_a->note_type == NoteType::Sound);
+      CHECK(star_b->note_type == NoteType::ScratchSound);
+      CHECK_EQ(star_a->parent_hold_id, hold_id);
+    }
+  }
+
+  // Ordinary convert buttons never turn a star body into another note type.
+  h.panel.set_selected({first});
+  CHECK(!h.panel.convert_selected(NoteType::Normal));
+  {
+    const auto star_a = h.engine.document().find_note(first);
+    CHECK(star_a.has_value());
+    if (star_a) CHECK(star_a->note_type == NoteType::Sound);
+  }
+}
+
+void test_toolbox_star_placement_snaps_to_pointer_hold() {
+  namespace in = wds::interaction;
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 2);
+    h.panel.set_toolbox_place_mode(true);
+    h.panel.set_place_intent_override(in::PlaceIntent::SoundPurple);
+
+    // Pointer sits on lane 4 (right half of the lane-3..4 hold). The ghost and
+    // the placed star must both snap to the hold's whole span.
+    const auto p = h.at_tick_lane(480, 4);
+    h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+    bool saw_star = false;
+    for (const auto& ghost : h.panel.skinned_ghosts()) {
+      if (ghost.note.note_type != NoteType::ScratchSound) continue;
+      saw_star = true;
+      CHECK_EQ(ghost.note.lane, 3);
+      CHECK_EQ(ghost.note.width, 2);
+      CHECK_EQ(ghost.note.parent_hold_id, hold_id);
+    }
+    CHECK(saw_star);
+
+    h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+    const NotationNote* star = last_of_type(h.engine.document().notes(), NoteType::ScratchSound);
+    CHECK(star != nullptr);
+    if (star) {
+      CHECK_EQ(star->lane, 3);
+      CHECK_EQ(star->width, 2);
+      CHECK_EQ(star->parent_hold_id, hold_id);
+    }
+
+    // Same tick again: duplicate star is refused (no extra note / undo step).
+    const int count_before = count_type(h.engine.document().notes(), NoteType::ScratchSound);
+    h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchSound), count_before);
+
+    // Outside the hold's lane span: no ghost and no placement.
+    h.panel.set_selected({hold_id});
+    const auto outside = h.at_tick_lane(480, 8);
+    h.panel.on_pointer_move(PointerMoveEvent{outside, {}});
+    CHECK(h.panel.skinned_ghosts().empty());
+    h.panel.on_pointer_down(PointerDownEvent{outside, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{outside, PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchSound), count_before);
+    CHECK_EQ(static_cast<int>(h.panel.selected().size()), 1);
+    CHECK(h.panel.selected().count(hold_id));
+
+    // Hold start/end ticks are not open span: no ghost / no placement.
+    const auto boundary = h.at_tick_lane(0, 3);
+    h.panel.on_pointer_move(PointerMoveEvent{boundary, {}});
+    CHECK(h.panel.skinned_ghosts().empty());
+    h.panel.on_pointer_down(PointerDownEvent{boundary, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{boundary, PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchSound), count_before);
+  }
+
+  // Opposite color is legal: Sound on a purple ScratchHold.
+  {
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::ScratchHold, 0, 960, 5, 2);
+    h.panel.set_toolbox_place_mode(true);
+    h.panel.set_place_intent_override(in::PlaceIntent::Sound);
+    const auto p = h.at_tick_lane(480, 5);
+    h.panel.on_pointer_move(PointerMoveEvent{p, {}});
+    h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+    const NotationNote* star = last_of_type(h.engine.document().notes(), NoteType::Sound);
+    CHECK(star != nullptr);
+    if (star) {
+      CHECK_EQ(star->lane, 5);
+      CHECK_EQ(star->width, 2);
+      CHECK_EQ(star->parent_hold_id, hold_id);
+    }
   }
 }
 
@@ -3667,6 +3801,8 @@ int main() {
   test_nontail_hold_eighths_follow_paste_and_resize();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
+  test_star_target_converts_hold_children_and_star_bodies();
+  test_toolbox_star_placement_snaps_to_pointer_hold();
   test_marquee_and_convert_ignore_split_lines();
   test_gutter_label_select_copy_mirror_and_move();
   test_paste_mirror_is_one_history_step_and_skips_splits();

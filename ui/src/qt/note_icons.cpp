@@ -51,6 +51,20 @@ QPixmap flick_note(const QPixmap& top, const QPixmap& arrow, int direction) {
   return canvas;
 }
 
+// Hold mid-star: the skin tick sprite, centered at its native aspect ratio.
+QPixmap tick_note(const QPixmap& tick) {
+  QPixmap canvas(kIconSide, kIconSide);
+  canvas.fill(Qt::transparent);
+  if (tick.isNull()) return canvas;
+  QPainter p(&canvas);
+  p.setRenderHint(QPainter::SmoothPixmapTransform);
+  const int side = kIconSide * 3 / 5;
+  const QPixmap scaled =
+      tick.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  p.drawPixmap((kIconSide - scaled.width()) / 2, (kIconSide - scaled.height()) / 2, scaled);
+  return canvas;
+}
+
 // Hold connection ribbon: the runtime bakes these procedurally, so paint an
 // equivalent translucent gradient band here.
 QPixmap hold_ribbon(const QColor& base) {
@@ -75,13 +89,15 @@ QPixmap hold_ribbon(const QColor& base) {
 
 }  // namespace
 
-std::array<QIcon, 8> build_convert_note_icons(const std::string& skins_dir) {
+std::array<QIcon, 10> build_convert_note_icons(const std::string& skins_dir) {
   const QString dir = QString::fromStdString(skins_dir);
   const QPixmap red = load_skin(dir, "Sirius Note Red Top.png");
   const QPixmap yellow = load_skin(dir, "Sirius Note Yellow Top.png");
   const QPixmap blue = load_skin(dir, "Sirius Note Blue Top.png");
   const QPixmap purple = load_skin(dir, "Sirius Note Purple Top.png");
   const QPixmap arrow = load_skin(dir, "Sirius Scratch Arrow.png");
+  const QPixmap tick_blue = load_skin(dir, "Sirius Note Tick Blue.png");
+  const QPixmap tick_purple = load_skin(dir, "Sirius Note Tick Purple.png");
 
   return {
       QIcon(flat_note(red)),                       // Tap
@@ -92,6 +108,8 @@ std::array<QIcon, 8> build_convert_note_icons(const std::string& skins_dir) {
       QIcon(flick_note(purple, arrow, 0)),         // Flick
       QIcon(flick_note(purple, arrow, 1)),         // Right Flick
       QIcon(hold_ribbon(QColor(190, 110, 255))),   // Scratch Hold
+      QIcon(tick_note(tick_blue)),                 // Sound
+      QIcon(tick_note(tick_purple)),               // SoundPurple
   };
 }
 

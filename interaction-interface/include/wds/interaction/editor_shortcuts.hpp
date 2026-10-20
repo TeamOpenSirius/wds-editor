@@ -48,6 +48,8 @@ enum class EditorShortcut : int {
   PlaceType5,
   PlaceType6,
   PlaceType7,
+  PlaceType8,
+  PlaceType9,
   ClickRecord0,
   ClickRecord1,
   ClickRecord2,

@@ -59,7 +59,7 @@ The codebase is intentionally split into reusable layers. Its chart core and ren
 - **Scratch Hold / JumpScratch editing** with chain-aware lane geometry.
 - **Nontail Hold** support for duration-only holds without a judged tail.
 - **Split lane / split effect** authoring.
-- **Hold mid-star / soft-judge** handling.
+- **Hold mid-star / soft-judge** handling, with independent Sound / SoundPurple conversion and Ched-like snapped placement.
 - **Curve templates** for faster hold/scratch shape authoring.
 - **Waveform and spectrum-assisted editing**.
 - **Chart validation** with note-overlap detection and error highlighting.
@@ -258,9 +258,28 @@ Selected notes can be quickly converted to:
 - Left Flick;
 - Flick;
 - Right Flick;
-- Scratch Hold.
+- Scratch Hold;
+- Sound;
+- SoundPurple.
 
-Hold-family conversion also updates related head / mid-star relationships where appropriate.
+The first eight buttons convert ordinary notes and holds. `Sound` / `SoundPurple` only convert between the two hold mid-star types: other notes are never turned into stars, and the ordinary buttons never turn a star body into a non-star note.
+
+- Selecting a hold converts every child star inside it and leaves the hold body unchanged;
+- Selecting a star body converts only that star;
+- Hold → non-hold removes all child stars, HoldEighth rows and the paired head;
+- Hold → hold keeps the existing behaviour: the head family is synchronized and child stars follow the target hold family;
+- Mixed selections only apply those legal cases.
+
+Stars no longer need to match the hold color family. Native `.wdschart` and official CSV import/export preserve mismatched star types; SUS/Ched still derives slide-mid color from the hold family (format limitation).
+
+### Ched-like star placement
+
+With **Ched-like placement logic** enabled, the conversion bar selects the placement type instead:
+
+- `9` / `0` select `Sound` / `SoundPurple` by default and are configurable in the shortcut settings;
+- the star's horizontal lane span always snaps to the hold under the pointer;
+- outside a hold (including its start/end boundary ticks) no ghost is shown and placement is refused;
+- placing a star regenerates that hold's HoldEighth rows in the same undo step.
 
 ## Curves
 
@@ -369,6 +388,7 @@ Common defaults include:
 | `Ctrl/Cmd + C` / `V` | Copy / paste |
 | Arrow keys | Nudge selection |
 | `Q / W / E / A / S / D` | Set default width to 1 / 2 / 3 / 4 / 6 / 12 |
+| `9` / `0` | With Ched-like placement enabled, select Sound / SoundPurple placement |
 
 Shortcuts are configurable in the editor settings.
 

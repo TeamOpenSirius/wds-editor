@@ -211,6 +211,10 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "place_type_6";
     case EditorShortcut::PlaceType7:
       return "place_type_7";
+    case EditorShortcut::PlaceType8:
+      return "place_type_8";
+    case EditorShortcut::PlaceType9:
+      return "place_type_9";
     case EditorShortcut::ClickRecord0:
       return "click_record_0";
     case EditorShortcut::ClickRecord1:
@@ -300,6 +304,10 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "Right Flick";
     case EditorShortcut::PlaceType7:
       return "Scratch Hold";
+    case EditorShortcut::PlaceType8:
+      return "Sound";
+    case EditorShortcut::PlaceType9:
+      return "SoundPurple";
     case EditorShortcut::ClickRecord0:
       return "点击记录 1";
     case EditorShortcut::ClickRecord1:
@@ -391,6 +399,10 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return {KeyCode::Num7, {}};
     case EditorShortcut::PlaceType7:
       return {KeyCode::Num8, {}};
+    case EditorShortcut::PlaceType8:
+      return {KeyCode::Num9, {}};
+    case EditorShortcut::PlaceType9:
+      return {KeyCode::Num0, {}};
     case EditorShortcut::ClickRecord0:
       return {static_cast<KeyCode>('F'), {}};
     case EditorShortcut::ClickRecord1:

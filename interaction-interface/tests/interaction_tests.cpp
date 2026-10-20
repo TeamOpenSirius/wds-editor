@@ -401,10 +401,22 @@ int main() {
          "PlaceType0 default is Num1");
   expect(default_editor_shortcut(EditorShortcut::PlaceType7).key == KeyCode::Num8,
          "PlaceType7 default is Num8");
+  expect(default_editor_shortcut(EditorShortcut::PlaceType8).key == KeyCode::Num9,
+         "PlaceType8 default is Num9");
+  expect(default_editor_shortcut(EditorShortcut::PlaceType9).key == KeyCode::Num0,
+         "PlaceType9 default is Num0");
   expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType0)) == "place_type_0",
          "PlaceType0 id");
   expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType7)) == "place_type_7",
          "PlaceType7 id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType8)) == "place_type_8",
+         "PlaceType8 id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType9)) == "place_type_9",
+         "PlaceType9 id");
+  expect(std::string(editor_shortcut_label(EditorShortcut::PlaceType8)) == "Sound",
+         "PlaceType8 label");
+  expect(std::string(editor_shortcut_label(EditorShortcut::PlaceType9)) == "SoundPurple",
+         "PlaceType9 label");
   expect(default_editor_shortcut(EditorShortcut::ClickRecord0).key == static_cast<KeyCode>('F'),
          "ClickRecord0 default is F");
   expect(default_editor_shortcut(EditorShortcut::ClickRecord3).key == static_cast<KeyCode>('J'),

@@ -59,7 +59,7 @@ WDS Editor 拥有自己的可编辑工程与谱面格式，同时兼容已有 WD
 - Scratch Hold / JumpScratch 链式编辑。
 - **无尾 Hold（Nontail Hold）**。
 - Split Lane / 分割线效果编辑。
-- Hold 中间判定点 / Mid Star 处理。
+- Hold 中间判定点 / Mid Star 处理，Sound / SoundPurple 独立转换与类Ched吸附放置。
 - **曲线模板**，快速制作 Hold / Scratch Hold 曲线。
 - 波形与频谱辅助制谱。
 - 谱面检查：重叠检测与错误位置标记。
@@ -261,9 +261,28 @@ Tick `0` 始终存在 Timing Anchor，后续 Timing Point 可以单独修改 BPM
 - Left Flick；
 - Flick；
 - Right Flick；
-- Scratch Hold。
+- Scratch Hold；
+- Sound；
+- SoundPurple。
 
-Hold 类型互转时，也会同步处理相关 Head / Mid Star 关系。
+前 8 个按钮用于普通 Note / Hold 类型转换；`Sound` / `SoundPurple` 只用于两种 Hold Mid Star 之间互转，不能把其它 Note 变成星星，其它转换按钮也不会把星星本体转成普通 Note。
+
+- 选中 Hold 后点击星星转换按钮：转换该 Hold 内部全部子星星，Hold 本体不变；
+- 直接选中星星本体：只转换这颗星星自身；
+- Hold → 非 Hold：删除其全部子星星、HoldEighth 与配对 Head；
+- Hold → Hold：保留原有行为，同步 Head 家族并把子星星更新为对应 Hold 家族的类型；
+- 混合选择时只处理上述合法项。
+
+两类 Hold 与 Sound / SoundPurple 的绑定不再要求颜色配对，原生 `.wdschart` 与官方 CSV 导入导出都会保留不配对的星星类型；SUS/Ched 的 Slide Mid 颜色仍由 Hold 家族还原（格式限制）。
+
+### 类Ched星星放置
+
+开启“启用类Ched放置逻辑”后，转换栏按钮切换为放置类型选择：
+
+- 默认按 `9` / `0` 选择放置 `Sound` / `SoundPurple`，可在快捷键设置中修改；
+- 放置星星时，横向轨道强制吸附到鼠标所在 Hold 的 lane / width；
+- 鼠标不在 Hold 内（包括 Hold 起止边界）时不显示虚影，也无法放置；
+- 放置成功会在同一 Undo 步骤中重新生成该 Hold 的 HoldEighth。
 
 ## 曲线模板
 
@@ -372,6 +391,7 @@ Transport 统一管理：
 | `Ctrl/Cmd + C` / `V` | 复制 / 粘贴 |
 | 方向键 | 微移选区 |
 | `Q / W / E / A / S / D` | 默认宽度 1 / 2 / 3 / 4 / 6 / 12 |
+| `9` / `0` | 类Ched放置逻辑开启时，选择放置 Sound / SoundPurple |
 
 快捷键可以在设置中重新配置。
 

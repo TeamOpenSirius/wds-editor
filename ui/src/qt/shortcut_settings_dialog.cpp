@@ -115,7 +115,8 @@ constexpr EditorShortcut kPlaybackShortcuts[] = {
 constexpr EditorShortcut kNoteShortcuts[] = {
     EditorShortcut::PlaceType0, EditorShortcut::PlaceType1, EditorShortcut::PlaceType2,
     EditorShortcut::PlaceType3, EditorShortcut::PlaceType4, EditorShortcut::PlaceType5,
-    EditorShortcut::PlaceType6, EditorShortcut::PlaceType7,
+    EditorShortcut::PlaceType6, EditorShortcut::PlaceType7, EditorShortcut::PlaceType8,
+    EditorShortcut::PlaceType9,
 };
 
 constexpr EditorShortcut kWidthShortcuts[] = {
