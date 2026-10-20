@@ -1,0 +1,25 @@
+Third-party runtime libraries (desktop packages)
+================================================
+
+macOS and Windows installers may bundle additional shared libraries next to
+the editor. Exact set depends on the platform and Qt deployment. License
+texts for the common ones are in this folder:
+
+  MoltenVK              Apache-2.0     MoltenVK-LICENSE.txt / Apache-2.0.txt
+  Vulkan Loader         Apache-2.0     Vulkan-Loader-LICENSE.txt
+  libpng                libpng license libpng-LICENSE.txt
+  OpenSSL 3             Apache-2.0     OpenSSL-LICENSE.txt
+  HarfBuzz              MIT-style      HarfBuzz-COPYING.txt
+  ICU                   ICU License    ICU-LICENSE.txt
+
+Other Qt transitive dependencies (e.g. pcre2, freetype, glib, jpeg, zstd,
+double-conversion, brotli, dbus) follow their upstream open-source licenses
+as distributed by the Qt / Homebrew / MinGW packages used at build time.
+
+Embedded source libraries (not always separate binaries):
+
+  stb_truetype.h        public domain (Sean Barrett)
+  nanosvg / nanosvgrast zlib-style (Mikko Mononen)
+
+See also Qt-NOTICE.txt, FFmpeg-NOTICE.txt, BASS-NOTICE.txt, OBS-Yami-NOTICE.txt,
+NotoSansSC-OFL.txt, and Fluent-UI-System-Icons-LICENSE.txt.

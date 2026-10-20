@@ -1,0 +1,28 @@
+FFmpeg — LGPLv2.1 or later (video export helper)
+================================================
+
+WDS Editor may download a standalone FFmpeg binary for chart video export.
+That binary is invoked as a separate process (not linked into the editor).
+
+Pinned builds (see ui/ffmpeg-download.json and ffmpeg_download_spec()):
+
+  Windows / Linux
+    BtbN FFmpeg-Builds LGPL variants (filename contains "-lgpl-").
+    https://github.com/BtbN/FFmpeg-Builds
+
+  macOS (Apple Silicon)
+    serversideup/ffmpeg-lgpl-builds (configure uses --disable-gpl
+    --disable-nonfree --disable-version3), with VideoToolbox for H.264.
+    https://github.com/serversideup/ffmpeg-lgpl-builds
+
+The editor rejects FFmpeg binaries whose -version output contains
+--enable-nonfree.
+
+Corresponding source
+  Official FFmpeg release tarballs: https://ffmpeg.org/releases/
+  Build provenance for the macOS LGPL package is also recorded in SOURCE.txt
+  inside the downloaded archive.
+
+License texts
+  LGPLv2.1 applies to these builds. See https://ffmpeg.org/legal.html
+  and COPYING.LGPLv2.1 in the FFmpeg source tree.

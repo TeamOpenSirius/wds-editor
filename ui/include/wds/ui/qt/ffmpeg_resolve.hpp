@@ -32,7 +32,7 @@ struct FfmpegDownloadSpec {
   QString filename;
   QString sha256;
   QStringList urls;
-  QString archive_kind;  // tar.xz / zip / gz
+  QString archive_kind;  // tar.xz / tar.gz / zip / gz
   QString binary_name;
 };
 

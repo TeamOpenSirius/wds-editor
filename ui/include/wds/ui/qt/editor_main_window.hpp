@@ -18,6 +18,9 @@ class QWindow;
 class QWidget;
 class QDockWidget;
 class QToolBar;
+class QToolButton;
+class QLabel;
+class QMenu;
 
 namespace wds::ui {
 enum class UiChange;
@@ -98,6 +101,9 @@ class EditorMainWindow final : public QMainWindow {
   void add_dock_toggle(QDockWidget* dock);
   void sync_toolbox_place_checks();
   void apply_command_icons();
+  void schedule_command_toolbar_relayout();
+  void relayout_command_toolbar();
+  bool command_shares_row_with_convert() const;
   void refresh_history_actions();
   void refresh_clear_marks_action();
   void clear_click_marks();
@@ -142,6 +148,14 @@ class EditorMainWindow final : public QMainWindow {
   ::QAction* about_action_ = nullptr;
   ::QAction* check_updates_action_ = nullptr;
   ::QAction* fullscreen_action_ = nullptr;
+  std::vector<QAction*> command_actions_;
+  std::vector<QToolButton*> command_buttons_;
+  std::vector<QWidget*> command_gaps_;
+  QWidget* command_strip_ = nullptr;
+  QLabel* command_overflow_button_ = nullptr;
+  QMenu* command_overflow_menu_ = nullptr;
+  bool command_toolbar_relayout_pending_ = false;
+  bool command_toolbar_relayouting_ = false;
   ::QToolBar* command_toolbar_ = nullptr;
   ::QToolBar* convert_toolbar_ = nullptr;
   ::QDockWidget* preview_dock_ = nullptr;

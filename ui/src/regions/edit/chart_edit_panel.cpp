@@ -1138,6 +1138,10 @@ void ChartEditPanel::update_hover_cursor(wds::interaction::Vec2 point) {
     set_hover_cursor(CursorKind::Default);
     return;
   }
+  if (toolbox_place_mode_ && star_type_for_place_intent(toolbox_place_intent())) {
+    set_hover_cursor(CursorKind::Default);
+    return;
+  }
   if (!absolute_bounds().contains(point)) {
     set_hover_cursor(CursorKind::Default);
     return;
@@ -1391,6 +1395,12 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
         ghost_.note.end_tick =
             std::max(ghost_.note.start_tick, viewport_.tick_at(point.y));
         break;
+      case PlaceIntent::Sound:
+        ghost_.note.note_type = NoteType::Sound;
+        break;
+      case PlaceIntent::SoundPurple:
+        ghost_.note.note_type = NoteType::ScratchSound;
+        break;
       case PlaceIntent::None:
         // Non-place swipe (e.g. Down): keep the button's resting place type.
         ghost_.note.note_type =
@@ -1399,11 +1409,34 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
     }
   };
 
+  // Ched-like star ghost: lane/width always come from the hold under the pointer.
+  // No hold → no ghost at all (never fall back to an ordinary note preview).
+  auto apply_star_ghost = [&](wds::interaction::Vec2 p) {
+    hide_gutter_ghost();
+    ghost_.visible = false;
+    const auto star_type = star_type_for_place_intent(toolbox_place_intent());
+    if (!star_type) return;
+    const auto hold = hold_body_under_pointer(p);
+    if (!hold) return;
+    const int32_t tick = viewport_.tick_at(p.y);
+    ghost_.note = make_base_note(p);
+    ghost_.note.note_type = *star_type;
+    ghost_.note.start_tick = tick;
+    ghost_.note.end_tick = tick;
+    ghost_.note.lane = hold->lane;
+    ghost_.note.width = hold->width;
+    ghost_.note.scratch_length = 0;
+    ghost_.note.parent_hold_id = hold->id;
+    ghost_.visible = true;
+  };
+
   // Active place gesture: keep the note ghost on the press anchor even if the
   // swipe overshoots into BPM / split gutters or leaves the playfield.
   if (mode_ == Mode::PlaceGesture) {
     hide_gutter_ghost();
-    if (toolbox_place_mode_) {
+    if (toolbox_place_mode_ && star_type_for_place_intent(toolbox_place_intent())) {
+      apply_star_ghost(place_note_center());
+    } else if (toolbox_place_mode_) {
       apply_intent(toolbox_place_intent(), place_note_center());
     } else {
       const auto swipe = update_place_swipe(point);
@@ -1428,6 +1461,12 @@ void ChartEditPanel::update_ghost(wds::interaction::Vec2 point) {
     return;
   }
   hide_gutter_ghost();
+  // Star placement never shows an ordinary note ghost: either the pointer is on
+  // a bindable hold (snapped star ghost) or the ghost stays hidden.
+  if (toolbox_place_mode_ && star_type_for_place_intent(toolbox_place_intent())) {
+    apply_star_ghost(point);
+    return;
+  }
   // Hide when pointer leaves the playfield, or sits on a note / non-place target.
   if (!playfield_.contains(point) || hit_test_note(point).has_value()) {
     ghost_.visible = false;
@@ -2001,7 +2040,96 @@ void ChartEditPanel::add_hold_star_at(wds::interaction::Vec2 point) {
   hold_stars_.push_back(g);
 }
 
-bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold) {
+std::optional<NotationNote> ChartEditPanel::hold_body_under_pointer(
+    wds::interaction::Vec2 point) const {
+  if (!engine_.is_editable()) return std::nullopt;
+  sync_viewport();
+  if (!playfield_.contains(point)) return std::nullopt;
+  const int32_t tick = viewport_.tick_at(point.y);
+  const int32_t lane = viewport_.lane_at(point.x, 1);
+  if (tick < 0) return std::nullopt;
+
+  std::optional<NotationNote> best;
+  // Same conservative window used by hit-testing: notes() is sorted by start, so
+  // holds that can cover `point.y` are a contiguous slice. Exact open-span and
+  // lane tests below decide the result.
+  const auto window = notes_near_y(point.y, 1.0f, note_spans().hit_span);
+  for (const NotationNote* it = window.first; it != window.second; ++it) {
+    const NotationNote& hold = *it;
+    if (!wds::chart_editor::is_bindable_hold_body(hold.note_type)) continue;
+    if (hold.end_tick <= hold.start_tick) continue;
+    if (tick <= hold.start_tick || tick >= hold.end_tick) continue;
+    if (lane < hold.lane || lane > hold.end_lane()) continue;
+    if (!best) {
+      best = hold;
+      continue;
+    }
+    // Deterministic pick for overlapping holds: narrower span wins, then the
+    // later-starting body, then the larger id. The ghost and the click both use
+    // this exact function, so they can never disagree.
+    const bool better = hold.width < best->width ||
+                        (hold.width == best->width &&
+                         (hold.start_tick > best->start_tick ||
+                          (hold.start_tick == best->start_tick && hold.id > best->id)));
+    if (better) best = hold;
+  }
+  return best;
+}
+
+std::optional<NoteType> ChartEditPanel::star_type_for_place_intent(
+    wds::interaction::PlaceIntent intent) noexcept {
+  switch (intent) {
+    case wds::interaction::PlaceIntent::Sound:
+      return NoteType::Sound;
+    case wds::interaction::PlaceIntent::SoundPurple:
+      return NoteType::ScratchSound;
+    default:
+      return std::nullopt;
+  }
+}
+
+bool ChartEditPanel::commit_star_on_hold(const NotationNote& hold, int32_t tick,
+                                         NoteType star_type, const char* label) {
+  if (!engine_.is_editable()) return false;
+  if (!wds::chart_editor::is_bindable_hold_body(hold.note_type) || hold.id < 0) return false;
+  if (hold.end_tick <= hold.start_tick) return false;
+  if (tick <= hold.start_tick || tick >= hold.end_tick) return false;
+  if (star_type != NoteType::Sound && star_type != NoteType::ScratchSound) return false;
+  if (wds::chart_editor::hold_has_visible_star_at(engine_.document(), hold.id, tick,
+                                                  wds::chart_editor::kNoBoundHoldId)) {
+    return false;
+  }
+
+  NotationNote star;
+  star.note_type = star_type;
+  star.lane = hold.lane;
+  star.width = hold.width;
+  star.start_tick = tick;
+  star.end_tick = tick;
+  star.scratch_length = 0;
+  star.id = wds::chart_editor::kAutoNoteId;
+  star.parent_hold_id = hold.id;
+  const auto before = engine_.document().notes();
+  auto after = before;
+  after.push_back(star);
+  after = wds::chart_editor::with_recomputed_hold_eighths(
+      std::move(after), hold, engine_.document().timing().ticks_per_quarter);
+  if (!engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
+          before, std::move(after), label))) {
+    return false;
+  }
+  engine_.rebuild_snapshot();
+  return true;
+}
+
+bool ChartEditPanel::place_star_under_pointer(wds::interaction::Vec2 point, NoteType star_type) {
+  auto hold = hold_body_under_pointer(point);
+  if (!hold) return false;
+  return commit_star_on_hold(*hold, viewport_.tick_at(point.y), star_type, "Place star");
+}
+
+bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point,
+                                               NoteType star_type) {
   if (!engine_.is_editable() || selected_.empty()) return false;
   sync_viewport();
   if (!playfield_.contains(point)) return false;
@@ -2012,27 +2140,12 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
     auto note = engine_.document().find_note(id);
     if (!note) continue;
     std::optional<NotationNote> body;
-    if (scratch_hold) {
-      if (wds::chart_editor::is_scratch_hold_body(note->note_type)) {
-        body = *note;
-      } else if (wds::chart_editor::is_hold_head_note(*note)) {
-        body = wds::chart_editor::paired_hold_body_for(engine_.document(), *note);
-        if (body && !wds::chart_editor::is_scratch_hold_body(body->note_type)) body.reset();
-      } else if (is_visible_mid_star(note->note_type)) {
-        body = wds::chart_editor::parent_hold_for(engine_.document(), *note);
-        if (body && !wds::chart_editor::is_scratch_hold_body(body->note_type)) body.reset();
-      }
-    } else {
-      if (wds::chart_editor::is_bindable_hold_body(note->note_type) &&
-          !wds::chart_editor::is_scratch_hold_body(note->note_type)) {
-        body = *note;
-      } else if (wds::chart_editor::is_hold_head_note(*note)) {
-        body = wds::chart_editor::paired_hold_body_for(engine_.document(), *note);
-        if (body && wds::chart_editor::is_scratch_hold_body(body->note_type)) body.reset();
-      } else if (is_visible_mid_star(note->note_type)) {
-        body = wds::chart_editor::parent_hold_for(engine_.document(), *note);
-        if (body && wds::chart_editor::is_scratch_hold_body(body->note_type)) body.reset();
-      }
+    if (wds::chart_editor::is_bindable_hold_body(note->note_type)) {
+      body = *note;
+    } else if (wds::chart_editor::is_hold_head_note(*note)) {
+      body = wds::chart_editor::paired_hold_body_for(engine_.document(), *note);
+    } else if (is_visible_mid_star(note->note_type)) {
+      body = wds::chart_editor::parent_hold_for(engine_.document(), *note);
     }
     if (!body || !hold_body_selected_for_stars(*body)) continue;
     if (tick <= body->start_tick || tick >= body->end_tick) continue;
@@ -2041,31 +2154,7 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point, boo
     break;
   }
   if (!target) return false;
-  if (wds::chart_editor::hold_has_visible_star_at(engine_.document(), target->id, tick,
-                                                  wds::chart_editor::kNoBoundHoldId)) {
-    return false;
-  }
-
-  NotationNote star;
-  star.note_type = scratch_hold ? NoteType::ScratchSound : NoteType::Sound;
-  star.lane = target->lane;
-  star.width = target->width;
-  star.start_tick = tick;
-  star.end_tick = tick;
-  star.scratch_length = 0;
-  star.id = wds::chart_editor::kAutoNoteId;
-  star.parent_hold_id = target->id;
-  const auto before = engine_.document().notes();
-  auto after = before;
-  after.push_back(star);
-  after = wds::chart_editor::with_recomputed_hold_eighths(
-      std::move(after), *target, engine_.document().timing().ticks_per_quarter);
-  if (!engine_.execute_command(std::make_unique<wds::chart_editor::SetNotesCommand>(
-          before, std::move(after), "Add hold star"))) {
-    return false;
-  }
-  engine_.rebuild_snapshot();
-  return true;
+  return commit_star_on_hold(*target, tick, star_type, "Add hold star");
 }
 
 void ChartEditPanel::restore_hold_chain_prev_preview() {
@@ -2422,6 +2511,15 @@ void ChartEditPanel::finish_place_gesture(const wds::interaction::PointerUpEvent
         hold_draft_.scratch_length = 0;
       }
       finish_hold_body(false);
+      break;
+    }
+    case PlaceIntent::Sound:
+    case PlaceIntent::SoundPurple: {
+      // Defensive: star placement normally commits on pointer-down and never
+      // reaches a PlaceGesture. Keep the same snapping if it ever does.
+      if (const auto star_type = star_type_for_place_intent(intent)) {
+        (void)place_star_under_pointer(anchor, *star_type);
+      }
       break;
     }
     case PlaceIntent::None:
@@ -4971,14 +5069,25 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     if (star_side) return;
   }
 
+  // Ched-like star placement: the hold under the pointer owns the lane span.
+  // Consume the press even when no hold is hit so selected notes are not moved.
+  if (mode_ == Mode::Idle && toolbox_place_mode_) {
+    if (const auto star_type = star_type_for_place_intent(toolbox_place_intent())) {
+      if (wds::interaction::is_left_button(event.button)) {
+        (void)place_star_under_pointer(event.position, *star_type);
+      }
+      return;
+    }
+  }
+
   // Selected existing hold: Shift-only RMB (normal) / LMB (scratch) places a star.
   if (mode_ == Mode::Idle) {
     if (wds::interaction::is_place_hold_star(event, false) &&
-        add_star_to_selected_hold(event.position, false)) {
+        add_star_to_selected_hold(event.position, NoteType::Sound)) {
       return;
     }
     if (wds::interaction::is_place_hold_star(event, true) &&
-        add_star_to_selected_hold(event.position, true)) {
+        add_star_to_selected_hold(event.position, NoteType::ScratchSound)) {
       return;
     }
   }
@@ -6385,6 +6494,13 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     return;
   }
 
+  // Star placement commits on press; consume the release so an empty click does
+  // not clear the selection or start a marquee finish.
+  if (toolbox_place_mode_ && star_type_for_place_intent(toolbox_place_intent())) {
+    update_ghost(event.position);
+    return;
+  }
+
   // Click empty to clear selection
   if (!hit_test_note(event.position) && wds::interaction::is_clear_selection_click(event)) {
     selected_.clear();
@@ -6396,6 +6512,7 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
 
 void ChartEditPanel::on_double_click(const wds::interaction::DoubleClickEvent& event) {
   if (has_modal_popup()) return;
+  if (toolbox_place_mode_ && star_type_for_place_intent(toolbox_place_intent())) return;
   if (!absolute_bounds().contains(event.position)) return;
   if (!playfield_.contains(event.position)) return;
   sync_viewport();
@@ -6426,13 +6543,15 @@ void ChartEditPanel::handle_timeline_wheel(const wds::interaction::ScrollEvent& 
 
   // Fixed gesture: Option+wheel (Alt+wheel on Windows/Linux) adjusts visible
   // range only when that is the sole modifier (not in shortcut settings).
+  // Qt on Windows and AppKit on macOS both report that gesture on delta_x.
   // Shift+Ctrl/Cmd is curve fill and must not zoom.
   // Default: scroll up shrinks the window (zoom in).
   if (wds::interaction::is_visible_range_wheel_modifiers(event.mods)) {
     auto grid = viewport_.grid();
     const int32_t before = grid.visible_hectoms;
     const int32_t next = visible_range_after_wheel(
-        event.delta_y, before, wds::interaction::invert_scroll_wheel(),
+        visible_range_wheel_delta(event.delta_x, event.delta_y), before,
+        wds::interaction::invert_scroll_wheel(),
         wds::interaction::invert_visible_range_scroll());
     if (next == before) return;
     pointer_ = event.position;

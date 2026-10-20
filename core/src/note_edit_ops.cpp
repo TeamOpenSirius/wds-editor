@@ -27,16 +27,12 @@ bool is_visible_hold_mid_star(NoteType type) noexcept {
   return type == NoteType::Sound || type == NoteType::ScratchSound;
 }
 
-bool star_type_matches_hold(NoteType star, NoteType hold) noexcept {
-  if (!is_bindable_hold_body(hold)) return false;
-  if (star == NoteType::Sound) return !is_scratch_hold_body(hold);
-  if (star == NoteType::ScratchSound) return is_scratch_hold_body(hold);
-  return false;
-}
-
+// Stars bind by geometry only: Sound and ScratchSound may attach to either hold
+// family (blue / purple). Do not reintroduce a color/family gate here — native
+// load, official CSV import and save normalization all share this inference.
 bool star_matches_hold_for_legacy_bind(const NotationNote& star,
                                        const NotationNote& hold) noexcept {
-  if (!star_type_matches_hold(star.note_type, hold.note_type)) return false;
+  if (!is_bindable_hold_body(hold.note_type)) return false;
   if (hold.end_tick <= hold.start_tick) return false;
   if (star.start_tick <= hold.start_tick || star.start_tick >= hold.end_tick) return false;
   return star.lane == hold.lane && star.width == hold.width;
@@ -699,6 +695,28 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
     if (remove_ids.insert(note.id).second) result.removals.push_back(note);
   };
 
+  // Sound / ScratchSound conversion is the only path that changes a star:
+  // - a selected hold converts its attached visible stars, leaving the hold alone;
+  // - a selected star converts its own type and keeps its parent bind.
+  // Ordinary notes, heads and eighths are never turned into stars.
+  if (is_visible_hold_mid_star(target)) {
+    for (const int32_t id : selected) {
+      auto note = doc.find_note(id);
+      if (!note || !is_playfield_selectable(*note)) continue;
+      if (is_bindable_hold_body(note->note_type)) {
+        for (const auto& dep : hold_attached_notes_for(doc, *note)) {
+          if (!is_visible_hold_mid_star(dep.note_type) || dep.note_type == target) continue;
+          NotationNote star_after = convert_note_type(dep, target, tpq);
+          star_after.parent_hold_id = note->id;
+          result.updates[dep.id] = star_after;
+        }
+      } else if (is_visible_hold_mid_star(note->note_type) && note->note_type != target) {
+        result.updates[id] = convert_note_type(*note, target, tpq);
+      }
+    }
+    return result;
+  }
+
   std::vector<int32_t> selected_bodies;
   selected_bodies.reserve(selected.size());
   for (const int32_t id : selected) {
@@ -743,13 +761,9 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
           continue;
         }
         if (!is_visible_hold_mid_star(dep.note_type)) continue;
-        if (selected.count(dep.id)) {
-          NotationNote star_after = convert_note_type(dep, target, tpq);
-          apply_convert_scratch_override(star_after, scratch_length);
-          result.updates[dep.id] = star_after;
-        } else {
-          queue_remove(dep);
-        }
+        // Hold → non-hold removes every attached star, selected or not. Stars
+        // themselves are never converted to non-star types by this path.
+        queue_remove(dep);
         handled.insert(dep.id);
       }
       if (auto head = paired_hold_head_for(doc, *body)) {
@@ -763,6 +777,8 @@ ConvertNotesResult convert_notes_in_selection(const ChartDocument& doc,
     if (handled.count(id) || remove_ids.count(id)) continue;
     auto note = doc.find_note(id);
     if (!note || !is_playfield_selectable(*note)) continue;
+    // Stars keep their type unless the target is a star (handled above).
+    if (is_visible_hold_mid_star(note->note_type)) continue;
     NotationNote after = convert_note_type(*note, target, tpq);
     apply_convert_scratch_override(after, scratch_length);
     result.updates[id] = after;

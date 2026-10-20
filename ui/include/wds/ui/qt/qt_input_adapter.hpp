@@ -6,6 +6,8 @@
 namespace wds::ui {
 
 wds::interaction::KeyCode qt_key_code(int qt_key) noexcept;
+// Inverse of qt_key_code. 0 when the chord key has no Qt mapping.
+int key_code_to_qt(wds::interaction::KeyCode key) noexcept;
 wds::interaction::Modifiers qt_modifiers(Qt::KeyboardModifiers mods) noexcept;
 // Host-side invert for timeline scrub. Option+wheel later undoes this so
 // invert_visible_range_scroll stays independent.

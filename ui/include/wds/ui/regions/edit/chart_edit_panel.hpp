@@ -189,6 +189,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // scratch_length: Flick / ScratchHold direction intent (-1 left, 0 both, +1 right).
   // Flick is stored as the official signed span (0 / ±width). ScratchHold uses
   // ±width for equal-width tails. Pass nullopt for convert_note_type defaults.
+  // Target Sound / ScratchSound converts selected hold children and selected
+  // star bodies only; other targets skip star bodies, while Hold → non-hold
+  // deletes all attached stars.
   bool convert_selected(wds::chart_editor::NoteType target,
                         std::optional<int32_t> scratch_length = std::nullopt);
   bool mirror_selected(bool about_center);
@@ -443,8 +446,24 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void begin_scratch_hold_placement(wds::interaction::Vec2 point);
   void begin_regular_hold_placement(wds::interaction::Vec2 point);
   void add_hold_star_at(wds::interaction::Vec2 point);
+  // Bindable hold body whose open tick span and lane span contain `point`.
+  // Used by both the Ched-like star ghost and the actual placement so the two
+  // cannot disagree. Returns nullopt when the pointer is not inside a hold.
+  std::optional<wds::chart_editor::NotationNote> hold_body_under_pointer(
+      wds::interaction::Vec2 point) const;
+  static std::optional<wds::chart_editor::NoteType> star_type_for_place_intent(
+      wds::interaction::PlaceIntent intent) noexcept;
+  // Commit one Sound / ScratchSound into `hold` at `tick`, snapping lane/width to
+  // the hold and regenerating its eighths in the same undo step.
+  bool commit_star_on_hold(const wds::chart_editor::NotationNote& hold, int32_t tick,
+                           wds::chart_editor::NoteType star_type, const char* label);
+  // Ched-like placement: the hold under the pointer decides the lane span.
+  bool place_star_under_pointer(wds::interaction::Vec2 point,
+                                wds::chart_editor::NoteType star_type);
   // Place a Sound / ScratchSound on an already-selected existing hold body.
-  bool add_star_to_selected_hold(wds::interaction::Vec2 point, bool scratch_hold);
+  // The requested star type is independent of the hold's color family.
+  bool add_star_to_selected_hold(wds::interaction::Vec2 point,
+                                 wds::chart_editor::NoteType star_type);
   // Keep placement ghost in sync with hold_draft_ (zero length → Tap / Flick).
   void sync_hold_placement_ghost();
   // First-segment gold head: Shift was down at mouse press, and this draft is

@@ -46,29 +46,55 @@ void apply_scroll_invert(float& dx, float& dy) noexcept {
 }
 
 wds::interaction::KeyCode qt_key_code(int value) noexcept {
-  if (value >= Qt::Key_0 && value <= Qt::Key_9)
-    return static_cast<wds::interaction::KeyCode>(48 + value - Qt::Key_0);
-  if (value >= Qt::Key_A && value <= Qt::Key_Z)
-    return static_cast<wds::interaction::KeyCode>(65 + value - Qt::Key_A);
+  using wds::interaction::KeyCode;
+  if (value >= 0x20 && value <= 0x7e) return static_cast<KeyCode>(value);
+  if (value >= Qt::Key_F1 && value <= Qt::Key_F12) {
+    return static_cast<KeyCode>(static_cast<int>(KeyCode::F1) + (value - Qt::Key_F1));
+  }
   switch (value) {
-    case Qt::Key_Space: return wds::interaction::KeyCode::Space;
-    case Qt::Key_Escape: return wds::interaction::KeyCode::Escape;
+    case Qt::Key_Escape: return KeyCode::Escape;
     case Qt::Key_Return:
-    case Qt::Key_Enter: return wds::interaction::KeyCode::Enter;
-    case Qt::Key_Tab: return wds::interaction::KeyCode::Tab;
-    case Qt::Key_Backspace: return wds::interaction::KeyCode::Backspace;
-    case Qt::Key_Delete: return wds::interaction::KeyCode::Delete;
-    case Qt::Key_Left: return wds::interaction::KeyCode::Left;
-    case Qt::Key_Right: return wds::interaction::KeyCode::Right;
-    case Qt::Key_Up: return wds::interaction::KeyCode::Up;
-    case Qt::Key_Down: return wds::interaction::KeyCode::Down;
-    case Qt::Key_F1: return wds::interaction::KeyCode::F1;
-    case Qt::Key_F2: return wds::interaction::KeyCode::F2;
-    case Qt::Key_F3: return wds::interaction::KeyCode::F3;
-    case Qt::Key_F4: return wds::interaction::KeyCode::F4;
-    case Qt::Key_F11: return wds::interaction::KeyCode::F11;
-    case Qt::Key_Period: return static_cast<wds::interaction::KeyCode>('.');
-    default: return wds::interaction::KeyCode::Unknown;
+    case Qt::Key_Enter: return KeyCode::Enter;
+    case Qt::Key_Tab:
+    case Qt::Key_Backtab: return KeyCode::Tab;
+    case Qt::Key_Backspace: return KeyCode::Backspace;
+    case Qt::Key_Insert: return KeyCode::Insert;
+    case Qt::Key_Delete: return KeyCode::Delete;
+    case Qt::Key_Left: return KeyCode::Left;
+    case Qt::Key_Right: return KeyCode::Right;
+    case Qt::Key_Up: return KeyCode::Up;
+    case Qt::Key_Down: return KeyCode::Down;
+    case Qt::Key_PageUp: return KeyCode::PageUp;
+    case Qt::Key_PageDown: return KeyCode::PageDown;
+    case Qt::Key_Home: return KeyCode::Home;
+    case Qt::Key_End: return KeyCode::End;
+    default: return KeyCode::Unknown;
+  }
+}
+
+int key_code_to_qt(wds::interaction::KeyCode key) noexcept {
+  using wds::interaction::KeyCode;
+  const int v = static_cast<int>(key);
+  if (v >= 0x20 && v <= 0x7e) return v;
+  if (v >= static_cast<int>(KeyCode::F1) && v <= static_cast<int>(KeyCode::F12)) {
+    return Qt::Key_F1 + (v - static_cast<int>(KeyCode::F1));
+  }
+  switch (key) {
+    case KeyCode::Escape: return Qt::Key_Escape;
+    case KeyCode::Enter: return Qt::Key_Return;
+    case KeyCode::Tab: return Qt::Key_Tab;
+    case KeyCode::Backspace: return Qt::Key_Backspace;
+    case KeyCode::Insert: return Qt::Key_Insert;
+    case KeyCode::Delete: return Qt::Key_Delete;
+    case KeyCode::Left: return Qt::Key_Left;
+    case KeyCode::Right: return Qt::Key_Right;
+    case KeyCode::Up: return Qt::Key_Up;
+    case KeyCode::Down: return Qt::Key_Down;
+    case KeyCode::PageUp: return Qt::Key_PageUp;
+    case KeyCode::PageDown: return Qt::Key_PageDown;
+    case KeyCode::Home: return Qt::Key_Home;
+    case KeyCode::End: return Qt::Key_End;
+    default: return 0;
   }
 }
 

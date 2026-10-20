@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -21,26 +22,27 @@ std::array<ShortcutChord, kEditorShortcutCount>& storage() noexcept {
   return chords;
 }
 
-bool is_letter_key(KeyCode key) noexcept {
+bool is_raw_ascii_key(KeyCode key) noexcept {
   const int v = static_cast<int>(key);
-  return v >= static_cast<int>(KeyCode::A) && v <= static_cast<int>(KeyCode::Z);
+  return v >= 33 && v <= 126;
 }
 
-bool is_digit_key(KeyCode key) noexcept {
+bool is_named_function_key(KeyCode key) noexcept {
   const int v = static_cast<int>(key);
-  return v >= static_cast<int>(KeyCode::Num0) && v <= static_cast<int>(KeyCode::Num9);
+  return v >= static_cast<int>(KeyCode::F1) && v <= static_cast<int>(KeyCode::F12);
 }
 
-std::string key_token(KeyCode key) {
-  if (is_letter_key(key)) {
-    return std::string(1, static_cast<char>(key));
+std::string key_token(KeyCode key, bool portable) {
+  if (key == KeyCode::Space) return "Space";
+  if (is_raw_ascii_key(key)) {
+    const char c = static_cast<char>(key);
+    if (c == '+') return portable ? "Plus" : "+";
+    return std::string(1, c);
   }
-  if (is_digit_key(key)) {
-    return std::string(1, static_cast<char>('0' + (static_cast<int>(key) - static_cast<int>(KeyCode::Num0))));
+  if (is_named_function_key(key)) {
+    return "F" + std::to_string(static_cast<int>(key) - static_cast<int>(KeyCode::F1) + 1);
   }
   switch (key) {
-    case KeyCode::Space:
-      return "Space";
     case KeyCode::Escape:
       return "Esc";
     case KeyCode::Enter:
@@ -49,6 +51,8 @@ std::string key_token(KeyCode key) {
       return "Tab";
     case KeyCode::Backspace:
       return "Backspace";
+    case KeyCode::Insert:
+      return "Insert";
     case KeyCode::Delete:
       return "Delete";
     case KeyCode::Left:
@@ -59,18 +63,15 @@ std::string key_token(KeyCode key) {
       return "Up";
     case KeyCode::Down:
       return "Down";
-    case KeyCode::F1:
-      return "F1";
-    case KeyCode::F2:
-      return "F2";
-    case KeyCode::F3:
-      return "F3";
-    case KeyCode::F4:
-      return "F4";
-    case KeyCode::F11:
-      return "F11";
+    case KeyCode::PageUp:
+      return "PageUp";
+    case KeyCode::PageDown:
+      return "PageDown";
+    case KeyCode::Home:
+      return "Home";
+    case KeyCode::End:
+      return "End";
     default:
-      if (static_cast<int>(key) == 46) return ".";
       return {};
   }
 }
@@ -78,27 +79,60 @@ std::string key_token(KeyCode key) {
 std::optional<KeyCode> parse_key_token(std::string token) {
   for (char& c : token) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
   if (token.size() == 1) {
-    const char c = token[0];
-    if (c >= 'A' && c <= 'Z') return static_cast<KeyCode>(c);
-    if (c >= '0' && c <= '9') return static_cast<KeyCode>(static_cast<int>(KeyCode::Num0) + (c - '0'));
-    if (c == '.') return static_cast<KeyCode>(46);
+    const unsigned char c = static_cast<unsigned char>(token[0]);
+    if (c >= 33 && c <= 126) return static_cast<KeyCode>(c);
   }
+  if (token == "PLUS") return static_cast<KeyCode>('+');
   if (token == "SPACE") return KeyCode::Space;
   if (token == "ESC" || token == "ESCAPE") return KeyCode::Escape;
   if (token == "ENTER" || token == "RETURN") return KeyCode::Enter;
   if (token == "TAB") return KeyCode::Tab;
   if (token == "BACKSPACE") return KeyCode::Backspace;
+  if (token == "INSERT" || token == "INS") return KeyCode::Insert;
   if (token == "DELETE" || token == "DEL") return KeyCode::Delete;
   if (token == "LEFT") return KeyCode::Left;
   if (token == "RIGHT") return KeyCode::Right;
   if (token == "UP") return KeyCode::Up;
   if (token == "DOWN") return KeyCode::Down;
-  if (token == "F1") return KeyCode::F1;
-  if (token == "F2") return KeyCode::F2;
-  if (token == "F3") return KeyCode::F3;
-  if (token == "F4") return KeyCode::F4;
-  if (token == "F11") return KeyCode::F11;
+  if (token == "PAGEUP" || token == "PGUP") return KeyCode::PageUp;
+  if (token == "PAGEDOWN" || token == "PGDN" || token == "PGDOWN") return KeyCode::PageDown;
+  if (token == "HOME") return KeyCode::Home;
+  if (token == "END") return KeyCode::End;
+  if (token.size() >= 2 && token.size() <= 3 && token[0] == 'F') {
+    int n = 0;
+    for (std::size_t i = 1; i < token.size(); ++i) {
+      if (token[i] < '0' || token[i] > '9') return std::nullopt;
+      n = n * 10 + (token[i] - '0');
+    }
+    if (n >= 1 && n <= 12) {
+      return static_cast<KeyCode>(static_cast<int>(KeyCode::F1) + (n - 1));
+    }
+  }
   return std::nullopt;
+}
+
+bool is_supported_shortcut_key(KeyCode key) noexcept {
+  const int v = static_cast<int>(key);
+  if (v >= 32 && v <= 126) return true;
+  if (is_named_function_key(key)) return true;
+  switch (key) {
+    case KeyCode::Enter:
+    case KeyCode::Tab:
+    case KeyCode::Backspace:
+    case KeyCode::Insert:
+    case KeyCode::Delete:
+    case KeyCode::Left:
+    case KeyCode::Right:
+    case KeyCode::Up:
+    case KeyCode::Down:
+    case KeyCode::PageUp:
+    case KeyCode::PageDown:
+    case KeyCode::Home:
+    case KeyCode::End:
+      return true;
+    default:
+      return false;
+  }
 }
 
 }  // namespace
@@ -177,6 +211,10 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "place_type_6";
     case EditorShortcut::PlaceType7:
       return "place_type_7";
+    case EditorShortcut::PlaceType8:
+      return "place_type_8";
+    case EditorShortcut::PlaceType9:
+      return "place_type_9";
     case EditorShortcut::ClickRecord0:
       return "click_record_0";
     case EditorShortcut::ClickRecord1:
@@ -266,6 +304,10 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "Right Flick";
     case EditorShortcut::PlaceType7:
       return "Scratch Hold";
+    case EditorShortcut::PlaceType8:
+      return "Sound";
+    case EditorShortcut::PlaceType9:
+      return "SoundPurple";
     case EditorShortcut::ClickRecord0:
       return "点击记录 1";
     case EditorShortcut::ClickRecord1:
@@ -357,6 +399,10 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return {KeyCode::Num7, {}};
     case EditorShortcut::PlaceType7:
       return {KeyCode::Num8, {}};
+    case EditorShortcut::PlaceType8:
+      return {KeyCode::Num9, {}};
+    case EditorShortcut::PlaceType9:
+      return {KeyCode::Num0, {}};
     case EditorShortcut::ClickRecord0:
       return {static_cast<KeyCode>('F'), {}};
     case EditorShortcut::ClickRecord1:
@@ -403,31 +449,29 @@ std::array<ShortcutChord, kEditorShortcutCount> editor_shortcuts_snapshot() noex
   return storage();
 }
 
-bool is_forbidden_shortcut_key(KeyCode key) noexcept {
-  // Period and other typable punctuation that text fields accept. Digits are allowed.
-  if (static_cast<int>(key) == 46) return true;  // '.'
-  return false;
-}
+bool is_forbidden_shortcut_key(KeyCode key) noexcept { return key == KeyCode::Escape; }
 
 bool is_completing_shortcut_key(KeyCode key) noexcept {
-  if (key == KeyCode::Unknown) return false;
-  if (is_forbidden_shortcut_key(key)) return false;
-  if (is_letter_key(key)) return true;
-  if (is_digit_key(key)) return true;
+  return is_supported_shortcut_key(key) && !is_forbidden_shortcut_key(key);
+}
+
+bool is_text_field_consumed_key(KeyCode key) noexcept {
+  const int v = static_cast<int>(key);
+  if (v >= 32 && v <= 126) return true;
   switch (key) {
-    case KeyCode::Space:
+    case KeyCode::Enter:
+    case KeyCode::Tab:
+    case KeyCode::Backspace:
+    case KeyCode::Insert:
     case KeyCode::Delete:
     case KeyCode::Left:
     case KeyCode::Right:
     case KeyCode::Up:
     case KeyCode::Down:
-    case KeyCode::F1:
-    case KeyCode::F2:
-    case KeyCode::F3:
-    case KeyCode::F4:
-    case KeyCode::F11:
-    case KeyCode::Tab:
-    case KeyCode::Backspace:
+    case KeyCode::PageUp:
+    case KeyCode::PageDown:
+    case KeyCode::Home:
+    case KeyCode::End:
       return true;
     default:
       return false;
@@ -464,7 +508,7 @@ std::string format_shortcut_modifiers(const Modifiers& mods) {
 
 std::string format_shortcut_chord_portable(const ShortcutChord& chord) {
   std::string out = format_shortcut_modifiers_portable(chord.mods);
-  const std::string key = key_token(chord.key);
+  const std::string key = key_token(chord.key, /*portable=*/true);
   if (key.empty()) return out;
   if (!out.empty()) out += '+';
   out += key;
@@ -472,7 +516,7 @@ std::string format_shortcut_chord_portable(const ShortcutChord& chord) {
 }
 
 std::string format_shortcut_chord(const ShortcutChord& chord) {
-  const std::string key = key_token(chord.key);
+  const std::string key = key_token(chord.key, /*portable=*/false);
 #ifdef __APPLE__
   return format_shortcut_modifiers(chord.mods) + key;
 #else
@@ -491,6 +535,10 @@ std::optional<ShortcutChord> parse_shortcut_chord(const std::string& text) {
     if (!std::isspace(static_cast<unsigned char>(c))) s.push_back(c);
   }
   if (s.empty()) return std::nullopt;
+  if (s == "+" || s == "Plus" || s == "PLUS" || s == "plus") {
+    ShortcutChord chord{static_cast<KeyCode>('+'), {}};
+    return chord;
+  }
 
   auto replace_utf8 = [&](std::string_view glyph, const char* token) {
     for (std::string::size_type pos = 0; (pos = s.find(glyph, pos)) != std::string::npos;) {

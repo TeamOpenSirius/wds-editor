@@ -201,11 +201,22 @@ std::string resolve_ui_font_path(const char* argv0) {
   return {};
 }
 
-std::string resolve_fluent_font_path(const char* argv0) {
-  const fs::path dir = path_from_utf8(resolve_fonts_dir(argv0));
-  const fs::path ttf = dir / "SegoeFluentIcons.ttf";
-  if (path_is_regular_file(ttf)) {
-    return path_to_utf8(ttf);
+std::string resolve_licenses_dir(const char* argv0) {
+  std::error_code ec;
+  for (const auto& cand : resource_candidates(argv0, "licenses")) {
+    if (path_is_directory(cand)) {
+      return path_to_utf8(cand.lexically_normal());
+    }
+  }
+  const fs::path cwd_lic = fs::current_path(ec) / "licenses";
+  if (!ec && path_is_directory(cwd_lic)) {
+    return path_to_utf8(cwd_lic.lexically_normal());
+  }
+  if (const fs::path exe_dir = executable_dir(argv0); !exe_dir.empty()) {
+    const fs::path repo = exe_dir / ".." / ".." / "licenses";
+    if (path_is_directory(repo)) {
+      return path_to_utf8(repo.lexically_normal());
+    }
   }
   return {};
 }

@@ -210,17 +210,6 @@ copy_fonts() {
   else
     die "UI font missing (expected build ui/fonts or ui/assets/fonts/NotoSansSC-Regular.ttf)"
   fi
-  # Icon font is not produced by the compiler. A build tree configured before
-  # the file existed never installs it, and then every Fluent button falls
-  # back to the platform media icon (the pause-here button stays "skip").
-  local fluent="${ROOT}/ui/assets/fonts/SegoeFluentIcons.ttf"
-  [[ -f "${fluent}" ]] || die "icon font missing: ${fluent}"
-  cp -a "${fluent}" "${stage}/fonts/"
-  # Ship font license next to the font when available.
-  if [[ -f "${ROOT}/ui/assets/fonts/OFL.txt" ]]; then
-    mkdir -p "${stage}/licenses"
-    cp -a "${ROOT}/ui/assets/fonts/OFL.txt" "${stage}/licenses/NotoSansSC-OFL.txt"
-  fi
 }
 
 copy_icons() {
@@ -236,11 +225,21 @@ copy_icons() {
   else
     die "toolbar icons missing (expected repo icons/ or build ui/icons)"
   fi
-  if [[ -f "${ROOT}/icons/Fluent-UI-System-Icons-LICENSE.txt" ]]; then
-    mkdir -p "${stage}/licenses"
-    cp -a "${ROOT}/icons/Fluent-UI-System-Icons-LICENSE.txt" \
-      "${stage}/licenses/Fluent-UI-System-Icons-LICENSE.txt"
-  fi
+}
+
+# Project + third-party license texts (Qt/OBS/FFmpeg/BASS/MoltenVK/…).
+copy_licenses() {
+  local stage="$1"
+  local src="${ROOT}/licenses"
+  [[ -d "$src" ]] || die "missing licenses/ directory at ${src}"
+  mkdir -p "${stage}/licenses"
+  cp -a "${src}/." "${stage}/licenses/"
+  # Required compliance texts must be present in every package.
+  [[ -f "${stage}/licenses/COPYING.LESSER" ]] || die "licenses/COPYING.LESSER missing"
+  [[ -f "${stage}/licenses/Qt-NOTICE.txt" ]] || die "licenses/Qt-NOTICE.txt missing"
+  [[ -f "${stage}/licenses/OBS-Yami-NOTICE.txt" ]] || die "licenses/OBS-Yami-NOTICE.txt missing"
+  [[ -f "${stage}/licenses/FFmpeg-NOTICE.txt" ]] || die "licenses/FFmpeg-NOTICE.txt missing"
+  [[ -f "${stage}/licenses/THIRD_PARTY_NOTICES.txt" ]] || die "licenses/THIRD_PARTY_NOTICES.txt missing"
 }
 
 # App icon derived from logo.png (see scripts/generate-app-icons.sh).
@@ -283,6 +282,7 @@ copy_portable_resources() {
   copy_split_effect_resources "$stage"
   copy_fonts "$stage" "$build_dir"
   copy_icons "$stage" "$build_dir"
+  copy_licenses "$stage"
   copy_theme "$stage"
   copy_app_icon "$stage"
   copy_shaders "$stage" "$build_dir"
@@ -2420,6 +2420,7 @@ stage_win_debug() {
   if [[ ! -d "${stage}/icons" ]] || [[ -z "$(ls -A "${stage}/icons" 2>/dev/null || true)" ]]; then
     copy_icons "$stage" "$build_dir"
   fi
+  copy_licenses "$stage"
   if [[ ! -f "${stage}/theme/Yami.obt" ]]; then
     copy_theme "$stage"
   fi

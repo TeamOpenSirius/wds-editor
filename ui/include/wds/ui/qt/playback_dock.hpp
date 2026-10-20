@@ -32,11 +32,15 @@ class PlaybackBar final : public QWidget {
   void set_stem_handlers(std::function<void(int)> select, std::function<void()> open);
   void set_stem_tracks(const QStringList& names, int selected);
 
+ protected:
+  void changeEvent(QEvent* event) override;
+
  private:
   void build_ui();
   // User-driven scrub only. Do not call from sync_position() / setValue —
   // that feedback loop was the pause-to-start forward-creep bug.
   void seek_to_slider(int value);
+  void reload_transport_icons();
   void apply_play_icon(bool playing);
 
   UiManager* manager_ = nullptr;
@@ -59,7 +63,8 @@ class PlaybackBar final : public QWidget {
   std::optional<int64_t> last_scrub_ms_;
 };
 
-// Convert dock: eight note-type buttons in a single row.
+// Convert dock: ten note-type / star buttons in a single row. In Ched-like
+// placement mode the same buttons select the place intent instead.
 class ConvertBar final : public QWidget {
  public:
   ConvertBar(UiManager* manager, const std::string& skins_dir, QWidget* parent = nullptr);
@@ -70,7 +75,7 @@ class ConvertBar final : public QWidget {
   void build_ui(const std::string& skins_dir);
 
   UiManager* manager_ = nullptr;
-  std::array<QToolButton*, 8> convert_buttons_{};
+  std::array<QToolButton*, 10> convert_buttons_{};
 };
 
 // Toolbar dock: chart/grid/curve/behavior controls.

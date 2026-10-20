@@ -71,7 +71,16 @@ enum class PlaceIntent {
   FlickLeft,
   FlickRight,
   ScratchHoldBody,
+  // Visible hold mid-stars. Only meaningful in toolbox (Ched-like) placement:
+  // the lane span is always taken from the hold under the pointer, never from
+  // the pointer's horizontal position.
+  Sound,
+  SoundPurple,
 };
+
+inline bool is_star_place_intent(PlaceIntent intent) noexcept {
+  return intent == PlaceIntent::Sound || intent == PlaceIntent::SoundPurple;
+}
 
 bool is_vertical_swipe(SwipeDirection swipe) noexcept;
 bool is_horizontal_swipe(SwipeDirection swipe) noexcept;

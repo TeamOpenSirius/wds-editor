@@ -3,7 +3,6 @@
 #include <wds/audio/transport.hpp>
 #include "wds/ui/qt/chart_edit_widget.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
-#include "wds/ui/qt/fluent_icons.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/frame_diag.hpp"
 #include "wds/ui/editor_session.hpp"
@@ -1328,7 +1327,6 @@ int main(int argc, char** argv) {
       QApplication::setFont(font);
     }
   }
-  wds::ui::load_fluent_font(QString::fromStdString(wds::ui::resolve_fluent_font_path(argv[0])));
   const QString theme_dir = QString::fromStdString(wds::ui::resolve_theme_dir(argv[0]));
   const QString theme_id =
       QSettings("WDS", "WDS Editor").value("appearance/theme").toString();

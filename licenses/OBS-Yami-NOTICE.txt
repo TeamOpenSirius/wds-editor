@@ -1,0 +1,18 @@
+OBS Studio theme "Yami" — GPL-2.0-or-later
+=========================================
+
+WDS Editor's Qt stylesheet and related theme assets under ui/assets/theme/
+(and the installed theme/ directory) are derived from OBS Studio's Yami
+theme.
+
+Copyright (C) The OBS Project and contributors.
+Upstream: https://github.com/obsproject/obs-studio
+
+License
+  GNU General Public License version 2 or later. The full GPLv2 text is in
+  GPL-2.0.txt in this folder.
+
+Source
+  The theme files shipped with this application are the preferred form for
+  modification of those assets. Corresponding OBS Studio sources are at the
+  upstream repository above.

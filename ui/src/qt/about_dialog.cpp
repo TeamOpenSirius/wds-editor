@@ -1,15 +1,15 @@
 #include "wds/ui/qt/about_dialog.hpp"
 
-#include "wds/ui/qt/fluent_icons.hpp"
+#include "wds/ui/resource_paths.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/common/crash_handler.hpp"
 
+#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QTabWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -33,41 +33,60 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU Lesser General Public License for more details.
 
-You should have received a copy of the GNU Lesser General Public License
-along with this program (COPYING.LESSER). If not, see
-<https://www.gnu.org/licenses/>. The GNU GPLv3 text required by LGPLv3
-is in COPYING.
+Full texts ship in the app's licenses/ folder (COPYING.LESSER, COPYING).
+Online: <https://www.gnu.org/licenses/>.
 
-This program bundles third-party components under their own licenses:
+This program bundles or downloads third-party components under their own
+licenses. Open “打开许可文件文件夹” for the complete set.
 
 ────────────────────────────────────────
 Qt 6 (LGPL v3)
   The Qt Company Ltd. https://www.qt.io
-  Dynamically linked. See https://doc.qt.io/qt-6/lgpl.html
+  Dynamically linked. You may replace the bundled Qt shared libraries with a
+  compatible build of the same major version. Corresponding Qt source for the
+  version shown above is available from https://code.qt.io/ and
+  https://download.qt.io/. See licenses/Qt-NOTICE.txt and COPYING.LESSER.
+  https://doc.qt.io/qt-6/lgpl.html
 
 ────────────────────────────────────────
 OBS Studio theme "Yami" (GPL v2 or later)
   Copyright (C) The OBS Project.
   The editor's Qt stylesheet and theme icons are derived from OBS Studio's
-  theme assets. https://github.com/obsproject/obs-studio
+  theme assets. See licenses/OBS-Yami-NOTICE.txt and GPL-2.0.txt.
+  https://github.com/obsproject/obs-studio
+
+────────────────────────────────────────
+FFmpeg (LGPL v2.1 or later)
+  Optional helper downloaded for video export; run as a separate process.
+  Windows/Linux: BtbN FFmpeg-Builds LGPL builds.
+  macOS: serversideup/ffmpeg-lgpl-builds (--disable-gpl --disable-nonfree).
+  Binaries with --enable-nonfree are rejected. Source:
+  https://ffmpeg.org/releases/ — see licenses/FFmpeg-NOTICE.txt.
 
 ────────────────────────────────────────
 Noto Sans SC (SIL Open Font License 1.1)
-  Copyright The Noto Project Authors.
+  Copyright The Noto Project Authors. See licenses/NotoSansSC-OFL.txt.
 
 ────────────────────────────────────────
-Segoe Fluent Icons (Microsoft — restricted)
-  The Segoe Fluent Icons font is used under Microsoft's font EULA solely for
-  UI on a Microsoft platform; it may not be redistributed to third parties.
-  Ship your own icon font when distributing outside that scope.
+Fluent UI System Icons (MIT)
+  Copyright (c) 2020 Microsoft Corporation.
+  Toolbar and playback icons. See licenses/Fluent-UI-System-Icons-LICENSE.txt.
+  https://github.com/microsoft/fluentui-system-icons
 
 ────────────────────────────────────────
 BASS / BASSmix (un4seen developments)
-  Free for non-commercial use; a license is required for commercial use.
-  https://www.un4seen.com
+  Free for non-commercial use; a commercial licence is required otherwise.
+  See licenses/BASS-NOTICE.txt and https://www.un4seen.com
 
-Skin / chart assets belonging to the original game are the property of their
-respective rights holders and are used here for authoring/preview only.)";
+────────────────────────────────────────
+Other bundled libraries (MoltenVK, Vulkan Loader, libpng, OpenSSL, HarfBuzz,
+ICU, …)
+  See licenses/THIRD_PARTY_NOTICES.txt and the individual LICENSE files in
+  licenses/.
+
+Game-related preview assets (skins, SFX, split-effect resources) are used for
+chart authoring and playback preview. Rights follow the applicable game-asset
+terms for this project.)";
 
 }  // namespace
 
@@ -96,6 +115,16 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
     journal_menu_action("about.open_logs");
     QDesktopServices::openUrl(
         QUrl::fromLocalFile(QString::fromUtf8(wds::common::crash_log_directory())));
+  });
+  auto* open_licenses = buttons->addButton(tr("打开许可文件文件夹"), QDialogButtonBox::ActionRole);
+  connect(open_licenses, &QPushButton::clicked, this, [] {
+    journal_menu_action("about.open_licenses");
+    const auto argv0 = QCoreApplication::applicationFilePath();
+    const QString dir =
+        QString::fromStdString(resolve_licenses_dir(argv0.toUtf8().constData()));
+    if (!dir.isEmpty()) {
+      QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+    }
   });
   connect(buttons, &QDialogButtonBox::rejected, this, [this] {
     journal_menu_action("about.close");

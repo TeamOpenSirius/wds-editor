@@ -379,20 +379,44 @@ int main() {
   expect(chord_width_slot(5).key == static_cast<KeyCode>('D'), "width slot D");
 
   expect(!is_forbidden_shortcut_key(KeyCode::Num1), "digit allowed as shortcut");
-  expect(is_forbidden_shortcut_key(static_cast<KeyCode>(46)), "period forbidden as shortcut");
+  expect(!is_forbidden_shortcut_key(static_cast<KeyCode>(46)), "period allowed as shortcut");
   expect(!is_forbidden_shortcut_key(static_cast<KeyCode>('C')), "letter allowed as shortcut");
+  expect(!is_forbidden_shortcut_key(static_cast<KeyCode>('[' )), "bracket allowed as shortcut");
+  expect(is_forbidden_shortcut_key(KeyCode::Escape), "escape reserved");
   expect(is_completing_shortcut_key(KeyCode::Space), "space completes shortcut");
   expect(is_completing_shortcut_key(KeyCode::F11), "F11 completes shortcut");
+  expect(is_completing_shortcut_key(KeyCode::F5), "F5 completes shortcut");
+  expect(is_completing_shortcut_key(KeyCode::Home), "Home completes shortcut");
+  expect(is_completing_shortcut_key(static_cast<KeyCode>('[' )), "bracket completes shortcut");
+  expect(is_completing_shortcut_key(static_cast<KeyCode>(']' )), "right bracket completes");
   expect(!is_completing_shortcut_key(KeyCode::Unknown), "unknown does not complete");
+  expect(!is_completing_shortcut_key(KeyCode::Escape), "escape does not complete");
   expect(is_completing_shortcut_key(KeyCode::Num5), "digit completes shortcut");
+  expect(is_text_field_consumed_key(static_cast<KeyCode>('[' )), "field consumes bracket");
+  expect(is_text_field_consumed_key(KeyCode::Enter), "field consumes enter");
+  expect(is_text_field_consumed_key(KeyCode::Home), "field consumes Home");
+  expect(!is_text_field_consumed_key(KeyCode::F5), "field does not consume F5");
+  expect(!is_text_field_consumed_key(KeyCode::Escape), "field does not consume escape");
   expect(default_editor_shortcut(EditorShortcut::PlaceType0).key == KeyCode::Num1,
          "PlaceType0 default is Num1");
   expect(default_editor_shortcut(EditorShortcut::PlaceType7).key == KeyCode::Num8,
          "PlaceType7 default is Num8");
+  expect(default_editor_shortcut(EditorShortcut::PlaceType8).key == KeyCode::Num9,
+         "PlaceType8 default is Num9");
+  expect(default_editor_shortcut(EditorShortcut::PlaceType9).key == KeyCode::Num0,
+         "PlaceType9 default is Num0");
   expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType0)) == "place_type_0",
          "PlaceType0 id");
   expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType7)) == "place_type_7",
          "PlaceType7 id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType8)) == "place_type_8",
+         "PlaceType8 id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::PlaceType9)) == "place_type_9",
+         "PlaceType9 id");
+  expect(std::string(editor_shortcut_label(EditorShortcut::PlaceType8)) == "Sound",
+         "PlaceType8 label");
+  expect(std::string(editor_shortcut_label(EditorShortcut::PlaceType9)) == "SoundPurple",
+         "PlaceType9 label");
   expect(default_editor_shortcut(EditorShortcut::ClickRecord0).key == static_cast<KeyCode>('F'),
          "ClickRecord0 default is F");
   expect(default_editor_shortcut(EditorShortcut::ClickRecord3).key == static_cast<KeyCode>('J'),
@@ -437,6 +461,33 @@ int main() {
            "parse native ⇧⌘M");
     expect(parse_shortcut_chord("").has_value() == false, "empty parse fails");
     expect(parse_shortcut_chord("Shift").has_value() == false, "mods-only parse fails");
+    const auto bracket = parse_shortcut_chord("[");
+    expect(bracket.has_value() && bracket->key == static_cast<KeyCode>('['), "parse [");
+    expect(format_shortcut_chord_portable({static_cast<KeyCode>('['), {}}) == "[",
+           "portable [");
+    const auto close = parse_shortcut_chord("]");
+    expect(close.has_value() && close->key == static_cast<KeyCode>(']'), "parse ]");
+    const auto ctrl_bracket = parse_shortcut_chord("Ctrl+[");
+    expect(ctrl_bracket.has_value() && ctrl_bracket->key == static_cast<KeyCode>('[') &&
+               ctrl_bracket->mods.control,
+           "parse Ctrl+[");
+    expect(format_shortcut_chord_portable(*ctrl_bracket) == "Ctrl+[", "portable Ctrl+[");
+    expect(parse_shortcut_chord("Plus").has_value() &&
+               parse_shortcut_chord("Plus")->key == static_cast<KeyCode>('+'),
+           "parse Plus");
+    expect(parse_shortcut_chord("+").has_value() &&
+               parse_shortcut_chord("+")->key == static_cast<KeyCode>('+'),
+           "parse lone +");
+    expect(format_shortcut_chord_portable({static_cast<KeyCode>('+'), {}}) == "Plus",
+           "portable Plus");
+    expect(parse_shortcut_chord("F5").has_value() && parse_shortcut_chord("F5")->key == KeyCode::F5,
+           "parse F5");
+    expect(parse_shortcut_chord("Home").has_value() &&
+               parse_shortcut_chord("Home")->key == KeyCode::Home,
+           "parse Home");
+    expect(parse_shortcut_chord(format_shortcut_chord_portable(
+               {static_cast<KeyCode>(']'), {}}))->key == static_cast<KeyCode>(']'),
+           "roundtrip ]");
   }
   // Round-trip every default binding through display and portable format/parse.
   for (std::size_t i = 0; i < kEditorShortcutCount; ++i) {
@@ -469,7 +520,26 @@ int main() {
     reset_editor_shortcuts();
   }
 
-  // ShortcutField: commit, allow duplicate temporarily, forbidden reject, clear, blur.
+  {
+    const ShortcutChord original = editor_shortcut(EditorShortcut::DeleteSelection);
+    set_editor_shortcut(EditorShortcut::DeleteSelection, {});
+    expect(resolve_edit_key(KeyDownEvent{KeyCode::Unknown, {}}).action == EditKeyAction::None,
+           "unknown does not fire empty delete binding");
+    expect(resolve_edit_key(KeyDownEvent{static_cast<KeyCode>('['), {}}).action ==
+               EditKeyAction::None,
+           "bracket does not match empty delete binding");
+    set_editor_shortcut(EditorShortcut::DeleteSelection, {static_cast<KeyCode>('['), {}});
+    expect(resolve_edit_key(KeyDownEvent{static_cast<KeyCode>('['), {}}).action ==
+               EditKeyAction::DeleteSelection,
+           "rebound delete to [");
+    expect(resolve_edit_key(KeyDownEvent{static_cast<KeyCode>(']'), {}}).action ==
+               EditKeyAction::None,
+           "] does not match [ delete binding");
+    set_editor_shortcut(EditorShortcut::DeleteSelection, original);
+    reset_editor_shortcuts();
+  }
+
+  // ShortcutField: commit, allow duplicate temporarily, punctuation, clear, blur.
   {
     ShortcutField field;
     field.set_bounds({0, 0, 120, 28});
@@ -502,15 +572,16 @@ int main() {
     expect(field.conflict_highlight(), "parent can mark conflict highlight");
 
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
-    field.on_key_down(KeyDownEvent{static_cast<KeyCode>(46), {}, false});
-    expect(field.chord().key == blocked.key, "period rejected");
+    field.on_key_down(KeyDownEvent{static_cast<KeyCode>('['), {}, false});
+    expect(field.chord().key == static_cast<KeyCode>('['), "bracket commits");
 
+    field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     field.on_key_down(KeyDownEvent{KeyCode::Escape, {}, false});
     expect(field.visual_state() == WidgetState::Normal, "escape cancels capture");
 
     field.clear_chord();
     expect(field.chord().key == KeyCode::Unknown, "clear empties chord");
-    expect(changes == changes_before + 2, "clear fires on_change");
+    expect(changes == changes_before + 3, "clear fires on_change");
 
     field.on_pointer_down(PointerDownEvent{{10, 10}, PointerButton::Left, {}});
     field.on_key_down(KeyDownEvent{KeyCode::Unknown, shift, false});

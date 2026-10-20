@@ -5065,7 +5065,9 @@ void test_star_hold_bind_legacy_uniqueness_and_attachment() {
   CHECK(loaded_star != nullptr);
   if (loaded_star != nullptr) CHECK_EQ(loaded_star->parent_hold_id, 0);
   CHECK(loaded_type_mismatch != nullptr);
-  if (loaded_type_mismatch != nullptr) CHECK_EQ(loaded_type_mismatch->parent_hold_id, kNoBoundHoldId);
+  // Sound on a ScratchHold is legal now: geometry (open span + exact lanes) is
+  // the only bind requirement; color pairing is intentionally gone.
+  if (loaded_type_mismatch != nullptr) CHECK_EQ(loaded_type_mismatch->parent_hold_id, 3);
   CHECK(loaded_width_mismatch != nullptr);
   if (loaded_width_mismatch != nullptr) {
     CHECK_EQ(loaded_width_mismatch->parent_hold_id, kNoBoundHoldId);
@@ -5085,9 +5087,18 @@ void test_star_hold_bind_legacy_uniqueness_and_attachment() {
     if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) ++visible_on_b;
   }
   CHECK_EQ(visible_on_b, 0);
+  auto attached_purple = hold_attached_notes_for(doc, *doc.find_note(3));
+  int visible_on_purple = 0;
+  for (const auto& n : attached_purple) {
+    if (n.note_type == NoteType::Sound || n.note_type == NoteType::ScratchSound) {
+      ++visible_on_purple;
+    }
+  }
+  CHECK_EQ(visible_on_purple, 1);
 
   CHECK(hold_has_visible_star_at(doc, 0, 960, kNoBoundHoldId));
   CHECK(!hold_has_visible_star_at(doc, 1, 960, kNoBoundHoldId));
+  CHECK(hold_has_visible_star_at(doc, 3, 960, kNoBoundHoldId));
 
   NotationNote dup = *doc.find_note(2);
   dup.id = 9;
@@ -5133,6 +5144,111 @@ void test_star_hold_bind_legacy_uniqueness_and_attachment() {
   CHECK(hold_b_id >= 0);
   CHECK_EQ(star_parent, hold_a_id);
   CHECK(star_parent != hold_b_id);
+}
+
+void test_star_hold_bind_across_colors() {
+  NotationNote blue = make_tap(0, 2);
+  blue.id = 0;
+  blue.width = 2;
+  blue.end_tick = 960;
+  blue.note_type = NoteType::Hold;
+  NotationNote purple = make_tap(0, 5);
+  purple.id = 1;
+  purple.width = 2;
+  purple.end_tick = 960;
+  purple.note_type = NoteType::ScratchHold;
+  NotationNote blue_sound = make_tap(480, 2);
+  blue_sound.id = 2;
+  blue_sound.width = 2;
+  blue_sound.end_tick = blue_sound.start_tick;
+  blue_sound.note_type = NoteType::Sound;
+  NotationNote purple_sound = make_tap(480, 5);
+  purple_sound.id = 3;
+  purple_sound.width = 2;
+  purple_sound.end_tick = purple_sound.start_tick;
+  purple_sound.note_type = NoteType::Sound;
+  NotationNote blue_purple = make_tap(240, 2);
+  blue_purple.id = 4;
+  blue_purple.width = 2;
+  blue_purple.end_tick = blue_purple.start_tick;
+  blue_purple.note_type = NoteType::ScratchSound;
+  NotationNote purple_purple = make_tap(240, 5);
+  purple_purple.id = 5;
+  purple_purple.width = 2;
+  purple_purple.end_tick = purple_purple.start_tick;
+  purple_purple.note_type = NoteType::ScratchSound;
+  NotationNote wrong_width = make_tap(720, 2);
+  wrong_width.id = 6;
+  wrong_width.width = 1;
+  wrong_width.end_tick = wrong_width.start_tick;
+  wrong_width.note_type = NoteType::ScratchSound;
+
+  std::vector<NotationNote> notes = {blue, purple, blue_sound, purple_sound, blue_purple,
+                                     purple_purple, wrong_width};
+  infer_legacy_star_hold_binds(notes);
+  CHECK_EQ(notes[2].parent_hold_id, 0);
+  CHECK_EQ(notes[3].parent_hold_id, 1);
+  CHECK_EQ(notes[4].parent_hold_id, 0);
+  CHECK_EQ(notes[5].parent_hold_id, 1);
+  // Width must still match exactly: the relaxed rule is color, not geometry.
+  CHECK_EQ(notes[6].parent_hold_id, kNoBoundHoldId);
+}
+
+void test_official_csv_star_bind_across_colors() {
+  NotationChart chart;
+  chart.timing.bpm = 60.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.timing.points = {TimingPoint{0, 60.0, 4, 4, true, true}};
+
+  NotationNote blue = make_tap(0, 2);
+  blue.id = 0;
+  blue.width = 2;
+  blue.end_tick = 960;
+  blue.note_type = NoteType::Hold;
+  NotationNote purple = make_tap(0, 5);
+  purple.id = 1;
+  purple.width = 2;
+  purple.end_tick = 960;
+  purple.note_type = NoteType::ScratchHold;
+  NotationNote blue_purple = make_tap(240, 2);
+  blue_purple.id = 2;
+  blue_purple.width = 2;
+  blue_purple.end_tick = blue_purple.start_tick;
+  blue_purple.note_type = NoteType::ScratchSound;
+  NotationNote purple_sound = make_tap(480, 5);
+  purple_sound.id = 3;
+  purple_sound.width = 2;
+  purple_sound.end_tick = purple_sound.start_tick;
+  purple_sound.note_type = NoteType::Sound;
+  chart.notes = {blue, purple, blue_purple, purple_sound};
+
+  std::string csv;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, csv).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart parsed;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(csv, parsed).error),
+           static_cast<int>(SerializeError::Ok));
+
+  ChartDocument doc;
+  doc.load_from_chart(parsed, ChartEditMode::Editable);
+  const NotationNote* blue_after = nullptr;
+  const NotationNote* purple_after = nullptr;
+  const NotationNote* blue_purple_after = nullptr;
+  const NotationNote* purple_sound_after = nullptr;
+  for (const auto& n : doc.notes()) {
+    if (n.note_type == NoteType::Hold && n.lane == 2) blue_after = &n;
+    if (n.note_type == NoteType::ScratchHold && n.lane == 5) purple_after = &n;
+    if (n.note_type == NoteType::ScratchSound && n.lane == 2) blue_purple_after = &n;
+    if (n.note_type == NoteType::Sound && n.lane == 5) purple_sound_after = &n;
+  }
+  CHECK(blue_after != nullptr && purple_after != nullptr);
+  CHECK(blue_purple_after != nullptr && purple_sound_after != nullptr);
+  if (blue_after && blue_purple_after) {
+    CHECK_EQ(blue_purple_after->parent_hold_id, blue_after->id);
+  }
+  if (purple_after && purple_sound_after) {
+    CHECK_EQ(purple_sound_after->parent_hold_id, purple_after->id);
+  }
 }
 
 void test_load_v5_rebinds_dangling_and_unbound_star_parents() {
@@ -6836,22 +6952,22 @@ void test_convert_notes_in_selection_hold_stars() {
   }
 
   {
-    const auto keep_star = convert_notes_in_selection(doc, {1, 3}, NoteType::Flick);
-    CHECK(keep_star.updates.at(1).note_type == NoteType::Flick);
-    CHECK(keep_star.updates.at(3).note_type == NoteType::Flick);
-    CHECK_EQ(keep_star.updates.at(3).parent_hold_id, kNoBoundHoldId);
+    // Hold → non-hold removes every attached star, including a selected one.
+    const auto drop_star = convert_notes_in_selection(doc, {1, 3}, NoteType::Flick);
+    CHECK(drop_star.updates.at(1).note_type == NoteType::Flick);
+    CHECK(drop_star.updates.find(3) == drop_star.updates.end());
     std::unordered_set<int32_t> removed;
-    for (const auto& n : keep_star.removals) removed.insert(n.id);
+    for (const auto& n : drop_star.removals) removed.insert(n.id);
     CHECK(removed.count(2));
+    CHECK(removed.count(3));
     CHECK(removed.count(4));
-    CHECK(!removed.count(3));
   }
 
   {
+    // Star bodies are not converted to non-star types by the ordinary buttons.
     const auto star_only = convert_notes_in_selection(doc, {3}, NoteType::Normal);
     CHECK(star_only.removals.empty());
-    CHECK(star_only.updates.at(3).note_type == NoteType::Normal);
-    CHECK(star_only.updates.find(1) == star_only.updates.end());
+    CHECK(star_only.updates.empty());
     CHECK(doc.find_note(4)->note_type == NoteType::Sound);
   }
 
@@ -6885,6 +7001,98 @@ void test_convert_notes_in_selection_hold_stars() {
   CHECK(to_hold.updates.at(11).note_type == NoteType::HoldStart);
   CHECK(to_hold.updates.at(12).note_type == NoteType::Sound);
   CHECK_EQ(to_hold.updates.at(12).parent_hold_id, 10);
+}
+
+void test_convert_notes_in_selection_stars() {
+  ChartDocument doc;
+  NotationNote body = make_tap(0, 2);
+  body.id = 1;
+  body.width = 2;
+  body.end_tick = 960;
+  body.note_type = NoteType::Hold;
+  CHECK(doc.add_note(body) == 1);
+  NotationNote head = make_tap(0, 2);
+  head.id = 2;
+  head.width = 2;
+  head.note_type = NoteType::HoldStart;
+  CHECK(doc.add_note(head) == 2);
+  NotationNote star_a = make_tap(240, 2);
+  star_a.id = 3;
+  star_a.width = 2;
+  star_a.note_type = NoteType::Sound;
+  star_a.parent_hold_id = 1;
+  CHECK(doc.add_note(star_a) == 3);
+  // Deliberately mismatched: purple star on a blue hold (binding is relaxed).
+  NotationNote star_b = make_tap(480, 2);
+  star_b.id = 4;
+  star_b.width = 2;
+  star_b.note_type = NoteType::ScratchSound;
+  star_b.parent_hold_id = 1;
+  CHECK(doc.add_note(star_b) == 4);
+  NotationNote tap = make_tap(120, 5);
+  tap.id = 5;
+  CHECK(doc.add_note(tap) == 5);
+
+  {
+    // Selecting the hold converts its children to the requested star type and
+    // leaves the hold body / head / ordinary notes alone.
+    const auto to_purple = convert_notes_in_selection(doc, {1}, NoteType::ScratchSound);
+    CHECK(to_purple.removals.empty());
+    CHECK(to_purple.updates.at(3).note_type == NoteType::ScratchSound);
+    // id 4 is already ScratchSound (mismatched child), so it needs no update.
+    CHECK(to_purple.updates.find(4) == to_purple.updates.end());
+    CHECK_EQ(to_purple.updates.at(3).parent_hold_id, 1);
+    CHECK(to_purple.updates.find(1) == to_purple.updates.end());
+    CHECK(to_purple.updates.find(2) == to_purple.updates.end());
+    CHECK(to_purple.updates.find(5) == to_purple.updates.end());
+  }
+
+  {
+    // Direct star selection converts only the star body.
+    const auto direct = convert_notes_in_selection(doc, {4}, NoteType::Sound);
+    CHECK(direct.removals.empty());
+    CHECK_EQ(static_cast<int>(direct.updates.size()), 1);
+    CHECK(direct.updates.at(4).note_type == NoteType::Sound);
+    CHECK_EQ(direct.updates.at(4).parent_hold_id, 1);
+    CHECK(direct.updates.find(1) == direct.updates.end());
+  }
+
+  {
+    // Mixed selection: hold children + stars are legal; taps are ignored.
+    const auto mixed = convert_notes_in_selection(doc, {1, 4, 5}, NoteType::ScratchSound);
+    CHECK(mixed.removals.empty());
+    CHECK(mixed.updates.at(3).note_type == NoteType::ScratchSound);
+    CHECK(mixed.updates.find(4) == mixed.updates.end());
+    CHECK(mixed.updates.find(5) == mixed.updates.end());
+  }
+
+  {
+    // Ordinary buttons skip a selected star when its hold is not in the selection.
+    const auto tap_and_star = convert_notes_in_selection(doc, {3, 5}, NoteType::Flick);
+    CHECK(tap_and_star.updates.at(5).note_type == NoteType::Flick);
+    CHECK(tap_and_star.updates.find(3) == tap_and_star.updates.end());
+    CHECK(tap_and_star.removals.empty());
+  }
+
+  {
+    // Hold + selected child → non-hold still deletes the child.
+    const auto collapse = convert_notes_in_selection(doc, {1, 3, 5}, NoteType::Flick);
+    CHECK(collapse.updates.at(1).note_type == NoteType::Flick);
+    CHECK(collapse.updates.at(5).note_type == NoteType::Flick);
+    CHECK(collapse.updates.find(3) == collapse.updates.end());
+    std::unordered_set<int32_t> removed;
+    for (const auto& n : collapse.removals) removed.insert(n.id);
+    CHECK(removed.count(2));
+    CHECK(removed.count(3));
+    CHECK(removed.count(4));
+  }
+
+  {
+    // No legal star target: ordinary notes are never turned into stars.
+    const auto no_star = convert_notes_in_selection(doc, {5}, NoteType::Sound);
+    CHECK(no_star.updates.empty());
+    CHECK(no_star.removals.empty());
+  }
 }
 
 void test_convert_skips_split_lane_gimmicks() {
@@ -10515,6 +10723,7 @@ int main() {
   test_hold_head_pairs_exact_span_and_family();
   test_resolve_convert_target_is_identity();
   test_convert_notes_in_selection_hold_stars();
+  test_convert_notes_in_selection_stars();
   test_convert_skips_split_lane_gimmicks();
   test_explicit_note_id_zero();
   test_normalize_for_save_reassigns_zero_based();
@@ -10611,6 +10820,8 @@ int main() {
   test_paired_hold_head_tolerates_subtick_drift();
   test_recompute_hold_eighths_respects_fractional_star();
   test_star_hold_bind_legacy_uniqueness_and_attachment();
+  test_star_hold_bind_across_colors();
+  test_official_csv_star_bind_across_colors();
   test_load_v5_rebinds_dangling_and_unbound_star_parents();
   test_timing_tick_ms_roundtrip_multi_bpm();
   test_timing_first_bpm_is_song_start_without_tick0();

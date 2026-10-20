@@ -675,15 +675,10 @@ int old_repair_legacy_hold_heads(ChartDocument& doc) {
   return repaired;
 }
 
-bool o_star_type_matches_hold(NoteType star, NoteType hold) {
-  if (!is_bindable_hold_body(hold)) return false;
-  if (star == NoteType::Sound) return !is_scratch_hold_body(hold);
-  if (star == NoteType::ScratchSound) return is_scratch_hold_body(hold);
-  return false;
-}
-
 bool o_star_matches_hold_for_legacy_bind(const NotationNote& star, const NotationNote& hold) {
-  if (!o_star_type_matches_hold(star.note_type, hold.note_type)) return false;
+  // Relaxed binding: geometry only, Sound / ScratchSound may attach to either
+  // hold family. Keep this oracle in sync with infer_legacy_star_hold_binds.
+  if (!is_bindable_hold_body(hold.note_type)) return false;
   if (hold.end_tick <= hold.start_tick) return false;
   if (star.start_tick <= hold.start_tick || star.start_tick >= hold.end_tick) return false;
   return star.lane == hold.lane && star.width == hold.width;

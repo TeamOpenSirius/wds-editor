@@ -45,10 +45,14 @@ struct ConvertNotesResult {
   std::vector<NotationNote> removals;
 };
 
-// Selection convert: any type → any type. Hold → another hold remaps attached
-// visible stars (Sound ↔ ScratchSound) and the paired head family. Hold →
-// non-hold deletes unselected stars / eighths / the paired head; selected stars
-// convert to the target instead of being deleted.
+// Selection convert.
+// - Target Sound / ScratchSound: selected hold bodies convert their attached
+//   visible stars; selected star bodies convert themselves. Ordinary notes,
+//   heads and eighths are ignored. The hold body is never modified by this path.
+// - Other targets: Hold → another hold remaps attached visible stars
+//   (Sound ↔ ScratchSound) and the paired head family, as before. Hold →
+//   non-hold deletes every attached star (selected or not) / eighths / the
+//   paired head. Star bodies are never converted to non-star types.
 ConvertNotesResult convert_notes_in_selection(
     const ChartDocument& doc, const std::unordered_set<int32_t>& selected, NoteType target,
     std::optional<int32_t> scratch_length = std::nullopt);
@@ -165,8 +169,9 @@ bool hold_has_visible_star_at(const ChartDocument& doc, int32_t hold_id, int32_t
 bool visible_star_tick_conflicts(const std::vector<NotationNote>& notes);
 
 // Clear missing / non-hold parent_hold_id, then bind remaining unbound visible
-// stars when type, open span, and exact lanes match. Used on load and before
-// save-time id normalization.
+// stars when open span and exact lanes match. Sound / ScratchSound may bind
+// either hold family; color pairing is intentionally not required. Used on load
+// and before save-time id normalization.
 void infer_legacy_star_hold_binds(std::vector<NotationNote>& notes);
 
 // Returns copies shifted so the earliest source note starts at snapped anchor_tick.
