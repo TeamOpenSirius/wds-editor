@@ -1,5 +1,7 @@
 #include "wds/ui/qt/ffmpeg_resolve.hpp"
 
+#include "wds/ui/qt/system_proxy.hpp"
+
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -285,6 +287,9 @@ FfmpegDownloadSpec ffmpeg_download_spec() {
 
 FfmpegDownloader::FfmpegDownloader(QObject* parent) : QObject(parent) {
   nam_ = new QNetworkAccessManager(this);
+  // Follow the OS proxy (WinHTTP on Windows, CFNetwork on macOS, libproxy or
+  // http_proxy on Linux) even if a global application proxy is set.
+  use_system_proxy(nam_);
   spec_ = ffmpeg_download_spec();
 }
 
