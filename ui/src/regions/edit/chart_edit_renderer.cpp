@@ -546,13 +546,10 @@ void ChartEditRenderer::paint_overlays(
     // Include nontail ribbons so selection spans the body, not a tap-sized head.
     const bool hold_body =
         note.end_tick > note.start_tick && wds::chart_editor::is_bindable_hold_body(note.note_type);
+    const NotationNote* head = hold_body ? paired_head(note) : nullptr;
     bool paired = false;
-    bool clear_head_zone = false;
-    if (hold_body) {
-      if (const auto* head = paired_head(note)) {
-        paired = selected.count(head->id) != 0;
-        clear_head_zone = !paired;  // body alone: leave head sprite unhighlighted
-      }
+    if (head != nullptr) {
+      paired = selected.count(head->id) != 0;
     } else if (wds::chart_editor::is_hold_head_note(note)) {
       if (const auto* body = paired_body(note)) {
         paired = selected.count(body->id) != 0;
@@ -565,18 +562,18 @@ void ChartEditRenderer::paint_overlays(
     const float y0 = viewport.y_at(note.start_tick);
     const float y1 =
         note.end_tick > note.start_tick ? viewport.y_at(note.end_tick) : y0;
+    // Without its paired head selected, the body box uses the headless-hold
+    // style: only the border pad past the start tick. Whole/Chain select
+    // head+body and keep the complete start cap.
+    const bool headless_start = hold_body && (head == nullptr || !paired);
     const float cap = note_h * 0.55f + kPad;
     float top = std::min(y0, y1) - cap;
     float bottom = std::max(y0, y1) + cap;
-    if (clear_head_zone) {
-      // Head sprite sits at y0; clip body selection out of that band so solo
-      // body vs solo head / paired chain stay visually distinct.
-      const float head_lo = y0 - note_h * 0.5f;
-      const float head_hi = y0 + note_h * 0.5f;
-      if (y1 < y0) {
-        bottom = std::min(bottom, head_lo - kPad);
-      } else if (y1 > y0) {
-        top = std::max(top, head_hi + kPad);
+    if (headless_start) {
+      if (y0 >= y1) {
+        bottom = std::max(y0, y1) + kPad;
+      } else {
+        top = std::min(y0, y1) - kPad;
       }
     }
     if (bottom < b.y || top > b.bottom() || bottom - top < 2.0f) return;

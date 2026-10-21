@@ -14,6 +14,7 @@
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/common/crash_input_journal.hpp>
+#include <wds/common/perf_stages.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
@@ -1156,6 +1157,7 @@ void ChartEditWidget::fill_audio_backdrop_rows(const EditViewport& v,
 
 void ChartEditWidget::sync_audio_backdrop(const EditViewport& v,
                                           const wds::interaction::Rect& b) {
+  WDS_PERF_SCOPE("edit.backdrop");
   if (!panel_) {
     audio_backdrop_ = {};
     backdrop_mode_ = EditSpectrumMode::None;
@@ -1171,6 +1173,8 @@ void ChartEditWidget::sync_audio_backdrop(const EditViewport& v,
     backdrop_wave_ = nullptr;
     return;
   }
+  // The backdrop is only consumed by paintEvent; rebuilding it while hidden is wasted work.
+  if (!isVisible()) return;
 
   const float vis = static_cast<float>(std::max(1, v.visible_ms()));
   const float view_lo = v.scroll_ms();
@@ -1465,8 +1469,24 @@ void ChartEditWidget::paint_notes(QPainter& p,
       p.setPen(QPen(qcolor(wds::interaction::theme::kEditSelection), 2.5));
       if (hold_ribbon) {
         const float left = std::min(x, tail_x), right = std::max(x + w, tail_x + tail_w);
-        const float top = std::min(y0, y1) - v.note_height_px()*.5f;
-        const float bottom = std::max(y0, y1) + v.note_height_px()*.5f;
+        // Without its paired head selected, the body box uses the headless-hold
+        // style: the visible box starts on the start tick, not half a
+        // note-height past it. Whole/Chain select head+body and keep the cap.
+        const auto paired_head =
+            wds::chart_editor::paired_hold_head_for(panel_->engine().document(), n);
+        const bool headless_start =
+            !paired_head || panel_->selected().count(paired_head->id) == 0;
+        float start_ext = v.note_height_px() * 0.5f;
+        float end_ext = v.note_height_px() * 0.5f;
+        if (headless_start) {
+          if (y0 >= y1) {
+            start_ext = 0.0f;
+          } else {
+            end_ext = 0.0f;
+          }
+        }
+        const float top = std::min(y0, y1) - end_ext;
+        const float bottom = std::max(y0, y1) + start_ext;
         p.drawRoundedRect(QRectF(left, top, right-left, bottom-top).adjusted(-3,-3,3,3), 4, 4);
       } else {
         p.drawRoundedRect(head.adjusted(-3,-3,3,3), 4, 4);

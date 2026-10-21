@@ -1,7 +1,10 @@
 #include "split_eval_carry.hpp"
 #include "split_wall_profile.hpp"
 
+#include <wds/chart_render/split_effect_particles.hpp>
+
 #include <wds/common/page_touch.hpp>
+#include <wds/common/perf_stages.hpp>
 
 #include <atomic>
 #include <cmath>
@@ -74,6 +77,22 @@ float parse_gap() noexcept {
   return v;
 }
 
+bool parse_rewind_enabled() noexcept {
+  const char* raw = std::getenv("WDS_SPLIT_REWIND");
+  if (raw == nullptr || raw[0] == '\0') {
+    // B1 history did not reach the drag gate in the first measurement; keep it
+    // opt-in for further experiments until the child/subemit path is covered.
+    return false;
+  }
+  const std::string_view v(raw);
+  return v != "0" && v != "off" && v != "false" && v != "OFF";
+}
+
+constexpr float kRewindStepSec = 0.5f;
+constexpr float kRewindMaxAgeSec = 2.5f;
+constexpr std::size_t kRewindMaxSnapshots = 4;
+constexpr std::size_t kRewindMaxBytes = 64ull * 1024ull * 1024ull;
+
 bool parse_enabled() noexcept {
   const char* raw = std::getenv("WDS_SPLIT_CARRY");
   if (raw == nullptr || raw[0] == '\0') {
@@ -95,10 +114,17 @@ std::size_t snapshot_bytes(const std::vector<CarryParticle>& parts) noexcept {
   return kEntryOverhead + parts.size() * sizeof(CarryParticle);
 }
 
+struct RewindSnapshot {
+  float now_t = -1.0e30f;
+  int next_birth = 0;
+  std::shared_ptr<const std::vector<CarryParticle>> particles;
+};
+
 struct Entry {
   float now_t = -1.0e30f;
   int next_birth = 0;
   std::shared_ptr<const std::vector<CarryParticle>> particles;
+  std::vector<RewindSnapshot> rewind;
   std::uint64_t tick = 0;
 };
 
@@ -124,6 +150,7 @@ void give_carry_entry(Shard& sh, std::unique_ptr<Entry> e) {
     return;
   }
   e->particles.reset();
+  e->rewind.clear();
   sh.entry_free.push_back(std::move(e));
 }
 
@@ -195,12 +222,28 @@ std::size_t walk_bytes(const WalkEntry& e) noexcept {
   return kEntryOverhead + sizeof(WalkEntry) + walk_payload_bytes(e.births, e.poses);
 }
 
+std::size_t rewind_bytes(const Entry& e) noexcept {
+  std::size_t n = 0;
+  for (const RewindSnapshot& r : e.rewind) {
+    if (r.particles) {
+      n += snapshot_bytes(*r.particles);
+    }
+  }
+  return n;
+}
+
 std::size_t entry_bytes(const Entry& e) noexcept {
-  return e.particles ? snapshot_bytes(*e.particles) : kEntryOverhead;
+  return (e.particles ? snapshot_bytes(*e.particles) : kEntryOverhead) + rewind_bytes(e);
 }
 
 std::size_t entry_particles(const Entry& e) noexcept {
-  return e.particles ? e.particles->size() : 0;
+  std::size_t n = e.particles ? e.particles->size() : 0;
+  for (const RewindSnapshot& r : e.rewind) {
+    if (r.particles) {
+      n += r.particles->size();
+    }
+  }
+  return n;
 }
 
 struct Store {
@@ -216,10 +259,14 @@ struct Store {
   std::atomic<std::uint64_t> walk_hits{0};
   std::atomic<std::uint64_t> walk_misses{0};
   std::atomic<std::uint64_t> walk_commits{0};
+  std::atomic<std::uint64_t> rewind_hits{0};
+  std::atomic<std::uint64_t> rewind_misses{0};
+  std::atomic<std::size_t> rewind_bytes{0};
   std::atomic<int> override_enabled{-1};
   std::atomic<uint8_t> inhibit_store{0};
   std::atomic<float> gap_override{-1.0f};
   const bool enabled = parse_enabled();
+  const bool rewind_enabled = parse_rewind_enabled();
   const std::size_t budget = parse_budget();
   const float max_gap = parse_gap();
 };
@@ -304,6 +351,7 @@ void evict_one(Store& s, Shard& sh) {
   }
   const std::size_t drop = entry_bytes(*oldest->second);
   const std::size_t npart = entry_particles(*oldest->second);
+  sat_sub(s.rewind_bytes, rewind_bytes(*oldest->second));
   auto node = std::move(oldest->second);
   sh.map.erase(oldest);
   give_carry_entry(sh, std::move(node));
@@ -336,6 +384,10 @@ bool split_eval_carry_enabled() noexcept {
     return ov != 0;
   }
   return s.enabled;
+}
+
+bool split_eval_carry_rewind_enabled() noexcept {
+  return store().rewind_enabled;
 }
 
 float split_eval_carry_max_gap() noexcept {
@@ -375,6 +427,41 @@ void split_eval_carry_clear() noexcept {
   s.bytes.store(0, std::memory_order_relaxed);
   s.systems.store(0, std::memory_order_relaxed);
   s.particles.store(0, std::memory_order_relaxed);
+  s.rewind_bytes.store(0, std::memory_order_relaxed);
+}
+
+void split_eval_carry_clear_current_keep_rewind() noexcept {
+  Store& s = store();
+  for (int i = 0; i < kShards; ++i) {
+    Shard& sh = s.shards[i];
+    std::lock_guard<std::mutex> lock(sh.mu);
+    for (auto it = sh.map.begin(); it != sh.map.end();) {
+      Entry& e = *it->second;
+      if (e.rewind.empty()) {
+        give_carry_entry(sh, std::move(it->second));
+        it = sh.map.erase(it);
+        s.systems.fetch_sub(1, std::memory_order_relaxed);
+        continue;
+      }
+      const std::size_t old_b = entry_bytes(e);
+      const std::size_t old_n = entry_particles(e);
+      e.particles.reset();
+      e.now_t = -1.0e30f;
+      e.next_birth = 0;
+      apply_delta(s.bytes, old_b, entry_bytes(e));
+      apply_delta(s.particles, old_n, entry_particles(e));
+      ++it;
+    }
+  }
+  // Walk snapshots are not versioned yet; preserve the old seek semantics.
+  for (int i = 0; i < kWalkShards; ++i) {
+    WalkShard& sh = s.walks[i];
+    std::lock_guard<std::mutex> lock(sh.mu);
+    for (auto& kv : sh.map) {
+      give_walk_entry(sh, std::move(kv.second));
+    }
+    sh.map.clear();
+  }
 }
 
 void split_eval_carry_bump_epoch() noexcept {
@@ -454,6 +541,9 @@ SplitEvalCarryStats split_eval_carry_stats() noexcept {
   out.walk_hits = s.walk_hits.load(std::memory_order_relaxed);
   out.walk_misses = s.walk_misses.load(std::memory_order_relaxed);
   out.walk_commits = s.walk_commits.load(std::memory_order_relaxed);
+  out.rewind_hits = s.rewind_hits.load(std::memory_order_relaxed);
+  out.rewind_misses = s.rewind_misses.load(std::memory_order_relaxed);
+  out.rewind_bytes = s.rewind_bytes.load(std::memory_order_relaxed);
   return out;
 }
 
@@ -479,6 +569,10 @@ bool split_eval_carry_lookup(const SystemCarryKey& key, SystemCarrySnapshot& out
     return false;
   }
   SplitWallScope wall(SplitWallSec::CarryLookup);
+  // Diagnostics: carry/pose-cache lookups are a large slice of realize and
+  // are otherwise only visible via split_wall. Charged to the same
+  // CacheLookup column as the eval cache (both are checkpoint probes).
+  SplitDiagScope diag_lu(SplitDiagPhase::CacheLookup);
   Store& s = store();
   Shard& sh = s.shards[shard_of(key)];
   std::lock_guard<std::mutex> lock(sh.mu);
@@ -502,6 +596,10 @@ bool split_eval_carry_lookup_for_now(const SystemCarryKey& key, float now,
     return false;
   }
   SplitWallScope wall(SplitWallSec::CarryLookup);
+  // Diagnostics: carry/pose-cache lookups are a large slice of realize and
+  // are otherwise only visible via split_wall. Charged to the same
+  // CacheLookup column as the eval cache (both are checkpoint probes).
+  SplitDiagScope diag_lu(SplitDiagPhase::CacheLookup);
   Store& s = store();
   Shard& sh = s.shards[shard_of(key)];
   std::lock_guard<std::mutex> lock(sh.mu);
@@ -516,6 +614,53 @@ bool split_eval_carry_lookup_for_now(const SystemCarryKey& key, float now,
     fill_snap_from_entry(e, out);
     s.hits.fetch_add(1, std::memory_order_relaxed);
     return true;
+  }
+  s.misses.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
+bool split_eval_carry_lookup_for_time(const SystemCarryKey& key, float now,
+                                      SystemCarrySnapshot& out) noexcept {
+  out.now_t = -1.0e30f;
+  out.next_birth = 0;
+  out.storage.reset();
+  if (!split_eval_carry_enabled()) {
+    return false;
+  }
+  SplitWallScope wall(SplitWallSec::CarryLookup);
+  SplitDiagScope diag_lu(SplitDiagPhase::CacheLookup);
+  Store& s = store();
+  Shard& sh = s.shards[shard_of(key)];
+  std::lock_guard<std::mutex> lock(sh.mu);
+  const auto it = sh.map.find(key);
+  if (it == sh.map.end()) {
+    s.misses.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  Entry& e = *it->second;
+  e.tick = ++sh.tick;
+  if (split_eval_carry_can_resume(e.now_t, now)) {
+    fill_snap_from_entry(e, out);
+    s.hits.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  // Backward / gap-too-large: newest snapshot at or before now.
+  for (auto rit = e.rewind.rbegin(); rit != e.rewind.rend(); ++rit) {
+    if (!rit->particles || rit->now_t > now + 1e-6f) {
+      continue;
+    }
+    if (now - rit->now_t > kRewindMaxAgeSec) {
+      break;
+    }
+    out.now_t = rit->now_t;
+    out.next_birth = rit->next_birth;
+    out.storage = rit->particles;
+    s.rewind_hits.fetch_add(1, std::memory_order_relaxed);
+    s.hits.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  if (!e.rewind.empty() && now + 1e-6f < e.now_t) {
+    s.rewind_misses.fetch_add(1, std::memory_order_relaxed);
   }
   s.misses.fetch_add(1, std::memory_order_relaxed);
   return false;
@@ -562,6 +707,29 @@ void trim_shard_for_key(Store& s, Shard& sh, const SystemCarryKey& key, Entry* s
   }
 }
 
+void trim_rewind(Entry& e) noexcept {
+  while (e.rewind.size() > kRewindMaxSnapshots) {
+    e.rewind.erase(e.rewind.begin());
+  }
+  while (!e.rewind.empty() && e.now_t - e.rewind.front().now_t > kRewindMaxAgeSec) {
+    e.rewind.erase(e.rewind.begin());
+  }
+  while (rewind_bytes(e) > kRewindMaxBytes && !e.rewind.empty()) {
+    e.rewind.erase(e.rewind.begin());
+  }
+}
+
+void push_rewind(Store& s, Entry& e) noexcept {
+  if (!s.rewind_enabled || !e.particles || e.now_t <= -1.0e29f) {
+    return;
+  }
+  if (!e.rewind.empty() && e.now_t - e.rewind.back().now_t < kRewindStepSec) {
+    return;
+  }
+  e.rewind.push_back(RewindSnapshot{e.now_t, e.next_birth, e.particles});
+  trim_rewind(e);
+}
+
 void store_held_locked(Store& s, Shard& sh, const SystemCarryKey& key, float now_t, int next_birth,
                        std::shared_ptr<const std::vector<CarryParticle>> held) {
   const auto it = sh.map.find(key);
@@ -586,11 +754,18 @@ void store_held_locked(Store& s, Shard& sh, const SystemCarryKey& key, float now
   Entry& e = *it->second;
   const std::size_t old_bytes = entry_bytes(e);
   const std::size_t old_n = entry_particles(e);
+  const std::size_t old_rew = rewind_bytes(e);
+  // Keep a bounded, immutable history of current snapshots. The old snapshot
+  // is shared, not copied; the next current replaces only the entry head.
+  if (now_t + 1e-6f >= e.now_t) {
+    push_rewind(s, e);
+  }
   e.now_t = now_t;
   e.next_birth = next_birth;
   e.particles = std::move(held);
   e.tick = ++sh.tick;
   apply_entry_delta(s, old_bytes, old_n, entry_bytes(e), entry_particles(e));
+  apply_delta(s.rewind_bytes, old_rew, rewind_bytes(e));
   trim_shard_for_key(s, sh, key, &e);
   s.commits.fetch_add(1, std::memory_order_relaxed);
 }
@@ -788,6 +963,10 @@ bool split_eval_walk_lookup(const SubemitWalkKey& key, SubemitWalkCursor& out) n
     return false;
   }
   SplitWallScope wall(SplitWallSec::CarryLookup);
+  // Diagnostics: carry/pose-cache lookups are a large slice of realize and
+  // are otherwise only visible via split_wall. Charged to the same
+  // CacheLookup column as the eval cache (both are checkpoint probes).
+  SplitDiagScope diag_lu(SplitDiagPhase::CacheLookup);
   Store& s = store();
   WalkShard& sh = s.walks[walk_shard_of(key)];
   std::lock_guard<std::mutex> lock(sh.mu);
@@ -809,6 +988,10 @@ bool split_eval_walk_lookup_for_now(const SubemitWalkKey& key, float now,
     return false;
   }
   SplitWallScope wall(SplitWallSec::CarryLookup);
+  // Diagnostics: carry/pose-cache lookups are a large slice of realize and
+  // are otherwise only visible via split_wall. Charged to the same
+  // CacheLookup column as the eval cache (both are checkpoint probes).
+  SplitDiagScope diag_lu(SplitDiagPhase::CacheLookup);
   Store& s = store();
   WalkShard& sh = s.walks[walk_shard_of(key)];
   std::lock_guard<std::mutex> lock(sh.mu);

@@ -110,6 +110,87 @@ ThreadTrail& thread_trail() {
   return tls;
 }
 
+// ---------------------------------------------------------------------------
+// SPLITPHASE stage accumulator (diagnostics only).
+//
+// The stage scopes run on the collect caller AND on pool workers (evaluate /
+// integrate / realize are per-task), so every slot here is a relaxed atomic.
+// Nothing is touched unless wds::common::perf::enabled(): with WDS_FRAME_DIAG
+// unset no clock is read, no atomic is written, and the per-frame reset is a
+// single load. Not part of any scheduling or particle decision.
+//
+// Nesting (do not add the columns up blindly):
+//   Collect  ⊃ Prepare + Evaluate + Assemble + Copyout
+//   Evaluate ⊃ Realize ⊃ { Integrate, Trails, Stitch, CacheLookup, MakeState }
+//   Subemit  ⊃ its own Integrate / Trails
+// so Integrate is a subset of Evaluate, and Subemit runs in the same wave.
+// ---------------------------------------------------------------------------
+constexpr int kDiagPhaseN = static_cast<int>(SplitDiagPhase::Count);
+constexpr int kDiagCountN = static_cast<int>(SplitDiagCount::Count);
+
+struct SplitDiagFrame {
+  std::atomic<int64_t> phase_ns[kDiagPhaseN]{};
+  std::atomic<int64_t> count[kDiagCountN]{};
+  std::atomic<int> splits{0};
+  std::atomic<int> particles{0};
+  std::atomic<int> playing{0};
+  std::atomic<int> quality{0};
+  std::atomic<uint64_t> frame{0};
+  // Cold (post-seek / post-epoch) redo marker, set by collect.
+  std::atomic<int> cold{0};
+  std::atomic<int> cold_reason{0};  // 0 none, 1 seek, 2 doc, 3 preload
+
+  void reset_stages() noexcept {
+    for (int i = 0; i < kDiagPhaseN; ++i) {
+      phase_ns[i].store(0, std::memory_order_relaxed);
+    }
+    for (int i = 0; i < kDiagCountN; ++i) {
+      count[i].store(0, std::memory_order_relaxed);
+    }
+    splits.store(0, std::memory_order_relaxed);
+    particles.store(0, std::memory_order_relaxed);
+    playing.store(0, std::memory_order_relaxed);
+    quality.store(0, std::memory_order_relaxed);
+    cold.store(0, std::memory_order_relaxed);
+    cold_reason.store(0, std::memory_order_relaxed);
+  }
+};
+
+SplitDiagFrame g_diag{};
+std::atomic<int64_t> g_diag_last_phase_ns[kDiagPhaseN]{};
+std::atomic<int> g_diag_last_systems{0};
+std::atomic<int> g_diag_last_splits{0};
+std::atomic<int> g_diag_last_particles{0};
+std::atomic<int> g_diag_last_playing{0};
+std::atomic<int> g_diag_last_cold{0};
+std::atomic<uint64_t> g_diag_last_frame{0};
+// Published snapshot of the last completed collect. Filled on the owner
+// thread; worker threads only ever contribute to g_diag above.
+uint64_t g_split_frame_seq = 0;
+
+// Diagnostics only: why the next collect is cold (0 none, 1 seek, 2 doc,
+// 3 preload). Set by the invalidation entry points, consumed by collect.
+std::atomic<int> g_cold_reason{0};
+// Set by split_effect_prepare_heavy_collect (seek pre-roll) so the very next
+// cold collect can label itself even when the epoch also changed.
+std::atomic<int> g_preload_armed{0};
+
+// Set once per second to emit the POOLSTAT rollup (diagnostics only).
+std::atomic<int64_t> g_poolstat_last_ns{0};
+
+const char* cold_reason_name(int r) noexcept {
+  switch (r) {
+    case 1:
+      return "seek";
+    case 2:
+      return "doc";
+    case 3:
+      return "preload";
+    default:
+      return "none";
+  }
+}
+
 }  // namespace
 
 void SplitEffectTrailArena::reset() noexcept {
@@ -759,6 +840,9 @@ struct ParallelEvalCtx {
 
 void apply_over_cap(FrameScratch& fs, int cap);
 
+// Diagnostics-only frame publisher (defined below, after the collect code).
+void diag_finish_frame(bool frame_scope) noexcept;
+
 void apply_tmp_reuse_leak(FrameScratch& fs, size_t begin, size_t end) {
   // evaluate() does not write trail_u0/u1 except ribbon stitch (vertex>0).
   // Leak arrays grow to this frame's max written, never the pool cap.
@@ -800,6 +884,42 @@ void write_subemit_plan(EvalTask& task) {
       task.bound.data(), task.bound_count, task.element_slot, task.ctx, task.sub_plan,
       kSplitEffectParticlePool, nullptr, nullptr);
   task.written = n > 0 ? n : 0;
+  // Diagnostics only: how many SubemitFillItems a task actually keeps, versus the
+  // kSplitEffectParticlePool that evaluate_subemitters_plan reserves for it.
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    static std::atomic<int> calls{0};
+    static std::atomic<int> max_items{0};
+    static std::atomic<int> sum_items{0};
+    static std::atomic<int> max_cap_items{0};
+    static std::atomic<int64_t> last_sec{0};
+    const int items = static_cast<int>(task.sub_plan.items.size());
+    calls.fetch_add(1, std::memory_order_relaxed);
+    sum_items.fetch_add(items, std::memory_order_relaxed);
+    int prev = max_items.load(std::memory_order_relaxed);
+    while (items > prev && !max_items.compare_exchange_weak(prev, items)) {
+    }
+    const int cap_items = static_cast<int>(task.sub_plan.items.capacity());
+    prev = max_cap_items.load(std::memory_order_relaxed);
+    while (cap_items > prev && !max_cap_items.compare_exchange_weak(prev, cap_items)) {
+    }
+    const int64_t now_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+    int64_t last = last_sec.load(std::memory_order_relaxed);
+    if (now_sec != last &&
+        last_sec.compare_exchange_strong(last, now_sec, std::memory_order_relaxed)) {
+      const int c = calls.exchange(0, std::memory_order_relaxed);
+      const int mx = max_items.exchange(0, std::memory_order_relaxed);
+      const int sm = sum_items.exchange(0, std::memory_order_relaxed);
+      std::fprintf(stderr,
+                   "SUBMITPLAN_SEC tasks=%d max_items=%d mean_items=%d reserved=%d cap=%d item_bytes=%zu\n",
+                   c, mx, c > 0 ? sm / c : 0,
+                   max_cap_items.exchange(0, std::memory_order_relaxed), kSplitEffectParticlePool,
+                   sizeof(shuriken::SubemitFillItem));
+    }
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void write_subemit_realize(EvalTask& task) {
@@ -822,7 +942,11 @@ void write_subemit_realize(EvalTask& task) {
 }
 
 bool eval_task_timing() noexcept {
+#if WDS_DIAG_ENABLED
   return split_wall_enabled() || wds::common::perf::enabled();
+#else
+  return false;
+#endif  // WDS_DIAG_ENABLED
 }
 
 void finish_eval_task_cost(EvalTask& task, std::chrono::steady_clock::time_point t0,
@@ -838,20 +962,28 @@ void finish_eval_task_cost(EvalTask& task, std::chrono::steady_clock::time_point
   } else {
     task.last_cost_us = part;
   }
+#if WDS_DIAG_ENABLED
   split_wall_note_task(ns);
+#endif  // WDS_DIAG_ENABLED
 }
 
 void run_one_eval_plan(EvalTask& task) {
   // Do not write last_cost_us here. Plan microseconds are tiny; using them
   // as the realize work_hint under-schedules (2 workers) on Noise+Particle-
   // trail. last_cost_us stays the previous realize weight, or 1 → formula.
+#if WDS_DIAG_ENABLED
   const bool time = eval_task_timing();
   const auto t0 = time ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   split_wall_begin_task();
+#endif  // WDS_DIAG_ENABLED
   {
     SplitWallScope wall_task(SplitWallSec::TaskSetup);
     if (task.kind == EvalKind::Primary) {
       WDS_PERF_SCOPE("split.collect.evaluate");
+      SplitDiagScope diag_eval(SplitDiagPhase::Evaluate);
+#if WDS_DIAG_ENABLED
+      split_diag_add_count(SplitDiagCount::Systems, 1);
+#endif  // WDS_DIAG_ENABLED
       bool can = false;
       {
         SplitWallScope wall_gate(SplitWallSec::PlanGate);
@@ -865,6 +997,7 @@ void run_one_eval_plan(EvalTask& task) {
       }
     } else {
       WDS_PERF_SCOPE("split.collect.subemit");
+      SplitDiagScope diag_sub(SplitDiagPhase::Subemit);
       bool can = false;
       {
         SplitWallScope wall_gate(SplitWallSec::PlanGate);
@@ -878,12 +1011,14 @@ void run_one_eval_plan(EvalTask& task) {
       }
     }
   }
+#if WDS_DIAG_ENABLED
   if (time) {
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
     split_wall_note_task(ns);
   }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void run_one_eval_realize(EvalTask& task) {
@@ -895,10 +1030,16 @@ void run_one_eval_realize(EvalTask& task) {
     return;
   }
   const auto t0 = std::chrono::steady_clock::now();
+#if WDS_DIAG_ENABLED
   split_wall_begin_task();
+#endif  // WDS_DIAG_ENABLED
   {
     SplitWallScope wall_task(SplitWallSec::TaskSetup);
     WDS_PERF_SCOPE("split.collect.evaluate");
+    // Realize nests inside Evaluate on purpose (see the SPLITPHASE nesting
+    // note); the column is the part of Evaluate that actually fills live
+    // particles, so evaluate - realize is the birth/plan/traverse share.
+    SplitDiagScope diag_real(SplitDiagPhase::Realize);
     int keep = 0;
     {
       SplitWallScope wall_keep(SplitWallSec::RealizeMatch);
@@ -925,6 +1066,9 @@ void run_one_eval_realize(EvalTask& task) {
       }
       const int n = shuriken::evaluate_realize(task.primary, task_emit_ctx(task), task.plan,
                                                task.out.data(), keep, task.write_stamps != 0);
+#if WDS_DIAG_ENABLED
+      split_diag_add_count(SplitDiagCount::Particles, n);
+#endif  // WDS_DIAG_ENABLED
       if (task.has_catalog != 0) {
         for (int i = 0; i < n; ++i) {
           task.out[static_cast<size_t>(i)].catalog_index = task.catalog_i;
@@ -1023,17 +1167,25 @@ void run_one_eval_subemit_realize(EvalTask& task) {
   if (task.kind != EvalKind::Subemit) {
     return;
   }
+#if WDS_DIAG_ENABLED
   const bool time = eval_task_timing();
   const auto t0 = time ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   split_wall_begin_task();
+#endif  // WDS_DIAG_ENABLED
   {
     SplitWallScope wall_task(SplitWallSec::TaskSetup);
     WDS_PERF_SCOPE("split.collect.subemit");
+    SplitDiagScope diag_sub(SplitDiagPhase::Subemit);
     write_subemit_realize(task);
+#if WDS_DIAG_ENABLED
+    split_diag_add_count(SplitDiagCount::Particles, task.written);
+#endif  // WDS_DIAG_ENABLED
   }
+#if WDS_DIAG_ENABLED
   if (time) {
     finish_eval_task_cost(task, t0, true);
   }
+#endif  // WDS_DIAG_ENABLED
 }
 
 uint64_t estimate_realize_cost(const EvalTask& t) noexcept {
@@ -1143,8 +1295,10 @@ void run_eval_tasks(FrameScratch& fs, SplitPrep& prep, int cap) {
   ParallelEvalCtx ctx;
   ctx.tasks = fs.tasks.data();
   ctx.order = fs.order.data();
+#if WDS_DIAG_ENABLED
   const bool time_b = split_wall_enabled();
   const auto b0 = time_b ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#endif  // WDS_DIAG_ENABLED
   split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
     auto* c = static_cast<ParallelEvalCtx*>(raw);
     run_one_eval_plan(c->tasks[c->order[i]]);
@@ -1161,11 +1315,13 @@ void run_eval_tasks(FrameScratch& fs, SplitPrep& prep, int cap) {
     auto* c = static_cast<ParallelEvalCtx*>(raw);
     run_one_eval_subemit_realize(c->tasks[c->order[i]]);
   }, &ctx, realize_hint);
+#if WDS_DIAG_ENABLED
   if (time_b) {
     const auto b1 = std::chrono::steady_clock::now();
     split_wall_note_phase_b(static_cast<int>(n), split_collect_last_participants(),
                             std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count());
   }
+#endif  // WDS_DIAG_ENABLED
   for (size_t i = begin; i < end; ++i) {
     fs.costs[task_cost_key(fs.tasks[i])] = fs.tasks[i].last_cost_us;
   }
@@ -1199,8 +1355,10 @@ void run_eval_tasks_all(FrameScratch& fs, std::vector<SplitPrep>& preps, int cap
   ParallelEvalCtx ctx;
   ctx.tasks = fs.tasks.data();
   ctx.order = fs.order.data();
+#if WDS_DIAG_ENABLED
   const bool time_b = split_wall_enabled();
   const auto b0 = time_b ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#endif  // WDS_DIAG_ENABLED
   split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
     auto* c = static_cast<ParallelEvalCtx*>(raw);
     run_one_eval_plan(c->tasks[c->order[i]]);
@@ -1226,11 +1384,13 @@ void run_eval_tasks_all(FrameScratch& fs, std::vector<SplitPrep>& preps, int cap
     auto* c = static_cast<ParallelEvalCtx*>(raw);
     run_one_eval_subemit_realize(c->tasks[c->order[i]]);
   }, &ctx, realize_hint);
+#if WDS_DIAG_ENABLED
   if (time_b) {
     const auto b1 = std::chrono::steady_clock::now();
     split_wall_note_phase_b(static_cast<int>(n), split_collect_last_participants(),
                             std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count());
   }
+#endif  // WDS_DIAG_ENABLED
   for (size_t i = 0; i < n; ++i) {
     const size_t ti = fs.order[i];
     fs.costs[task_cost_key(fs.tasks[ti])] = fs.tasks[ti].last_cost_us;
@@ -1459,6 +1619,10 @@ int assemble_split(FrameScratch& fs, SplitPrep& prep, SplitEffectLiveParticle* o
     }
   } else {
     SplitWallScope wall_compact(SplitWallSec::Compaction);
+    // Compact = the candidate walk that turns per-task output into the
+    // ordered DrawBatch rows (unmarked branch). The copy into the pool is
+    // Copyout; per-particle trail vertices are Traverse (in evaluate.cpp).
+    SplitDiagScope diag_compact(SplitDiagPhase::Compact);
     fs.candidates.clear();
     for (size_t ti = prep.task_begin; ti < prep.task_end; ++ti) {
       EvalTask& t = fs.tasks[ti];
@@ -1491,7 +1655,9 @@ int assemble_split(FrameScratch& fs, SplitPrep& prep, SplitEffectLiveParticle* o
     out = want > 0 ? pool->data() + offset : nullptr;
   }
   if (out == nullptr || want <= 0) {
+#if WDS_DIAG_ENABLED
     split_wall_note_candidates(evaluated, 0);
+#endif  // WDS_DIAG_ENABLED
     WDS_PERF_COUNT("split.particles", 0);
     return 0;
   }
@@ -1499,6 +1665,7 @@ int assemble_split(FrameScratch& fs, SplitPrep& prep, SplitEffectLiveParticle* o
   {
     WDS_PERF_SCOPE("split.collect.copyout");
     SplitWallScope wall_copy(SplitWallSec::Copyout);
+    SplitDiagScope diag_copy(SplitDiagPhase::Copyout);
     for (auto& c : fs.candidates) {
       if (written >= cap) {
         break;
@@ -1525,7 +1692,9 @@ int assemble_split(FrameScratch& fs, SplitPrep& prep, SplitEffectLiveParticle* o
       ++written;
     }
   }
+#if WDS_DIAG_ENABLED
   split_wall_note_candidates(evaluated, written);
+#endif  // WDS_DIAG_ENABLED
   WDS_PERF_COUNT("split.particles", written);
   return written;
 }
@@ -1549,16 +1718,34 @@ int collect_one_split(const wds::chart_editor::PreviewSplitLaneInstance& split, 
   FrameScratch& fs = frame_scratch();
   fs.task_used = 0;
   fs.preps.assign(1, SplitPrep{});
+#if WDS_DIAG_ENABLED
+  const bool diag = wds::common::perf::enabled();
+  if (diag) {
+    g_diag.reset_stages();
+    g_diag.frame.store(++g_split_frame_seq, std::memory_order_relaxed);
+    g_diag.playing.store(0, std::memory_order_relaxed);
+    g_diag.quality.store(quality, std::memory_order_relaxed);
+    g_diag.splits.store(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
   {
     WDS_PERF_SCOPE("split.collect");
+    SplitDiagScope diag_col(SplitDiagPhase::Collect);
     prepare_split_tasks(fs, fs.preps[0], split, quality, now_sec, parent_motion, false);
     if (!fs.preps[0].visible || !fs.preps[0].has_work) {
+      diag_finish_frame(false);
       return 0;
     }
     run_eval_tasks(fs, fs.preps[0], max_out);
     apply_tmp_reuse_leak(fs, fs.preps[0].task_begin, fs.preps[0].task_end);
     const int n = assemble_split(fs, fs.preps[0], out, max_out, &trails);
     shuriken::split_eval_carry_set_store_inhibited(false);
+#if WDS_DIAG_ENABLED
+    if (diag) {
+      g_diag.particles.store(n, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
+    diag_finish_frame(false);
     return n;
   }
 }
@@ -1601,6 +1788,11 @@ void reset_split_effect_auto_seed_session(bool invalidate_eval_cache) noexcept {
   auto_seed_session() = AutoSeedSession{};
   if (invalidate_eval_cache) {
     shuriken::split_eval_cache_bump_epoch();
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled()) {
+      g_cold_reason.store(2, std::memory_order_relaxed);  // doc / Play restart
+    }
+#endif  // WDS_DIAG_ENABLED
   }
 }
 
@@ -1609,10 +1801,275 @@ void split_effect_clear_caches() noexcept {
   shuriken::split_eval_carry_clear();
   shuriken::split_eval_persist_clear();
   clear_dead_latches();
+  // Diagnostics only: remember *why* the next collect is cold so SPLITCOLD
+  // can name it. Does not change when invalidation happens.
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    g_cold_reason.store(1, std::memory_order_relaxed);  // seek
+  }
+#endif  // WDS_DIAG_ENABLED
+}
+
+void split_effect_clear_seek_state() noexcept {
+  // B1: keep the bounded rewind history across a seek; only the current
+  // forward snapshot is invalid. Doc/quality/epoch invalidation still calls
+  // split_eval_carry_clear() (full).
+  shuriken::split_eval_carry_clear_current_keep_rewind();
+  shuriken::split_eval_persist_clear();
+  clear_dead_latches();
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    g_cold_reason.store(1, std::memory_order_relaxed);  // seek
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void split_effect_prepare_heavy_collect(int hold_ms) noexcept {
   split_collect_prepare_heavy(hold_ms);
+  // Diagnostics only: the seek path calls this right after
+  // split_effect_clear_caches(), so the next cold collect is a seek pre-roll
+  // rather than an ordinary doc invalidation.
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    g_preload_armed.store(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
+}
+
+#if WDS_DIAG_ENABLED
+void split_diag_add_ns(SplitDiagPhase phase, std::int64_t ns) noexcept {
+  const int i = static_cast<int>(phase);
+  if (i < 0 || i >= kDiagPhaseN || ns <= 0 || !wds::common::perf::enabled()) {
+    return;
+  }
+  g_diag.phase_ns[i].fetch_add(ns, std::memory_order_relaxed);
+}
+
+void split_diag_add_count(SplitDiagCount counter, std::int64_t n) noexcept {
+  const int i = static_cast<int>(counter);
+  if (i < 0 || i >= kDiagCountN || n <= 0 || !wds::common::perf::enabled()) {
+    return;
+  }
+  g_diag.count[i].fetch_add(n, std::memory_order_relaxed);
+}
+#endif  // WDS_DIAG_ENABLED
+
+#if WDS_DIAG_ENABLED
+SplitDiagScope::SplitDiagScope(SplitDiagPhase phase) noexcept : phase_(phase) {
+  if (!wds::common::perf::enabled()) {
+    return;
+  }
+  on_ = true;
+  start_ = std::chrono::steady_clock::now();
+}
+
+SplitDiagScope::~SplitDiagScope() {
+  if (!on_) {
+    return;
+  }
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - start_)
+                      .count();
+  split_diag_add_ns(phase_, ns);
+}
+#endif  // WDS_DIAG_ENABLED
+
+namespace {
+
+// Owner-thread: fold this frame's atomics into the published snapshot.
+void diag_publish_frame() noexcept {
+  for (int i = 0; i < kDiagPhaseN; ++i) {
+    g_diag_last_phase_ns[i].store(g_diag.phase_ns[i].load(std::memory_order_relaxed),
+                                  std::memory_order_relaxed);
+  }
+  // systems = evaluate tasks this frame (one per bound ParticleSystem).
+  g_diag_last_systems.store(
+      static_cast<int>(g_diag.count[static_cast<int>(SplitDiagCount::Systems)].load(
+          std::memory_order_relaxed)),
+      std::memory_order_relaxed);
+  g_diag_last_splits.store(g_diag.splits.load(std::memory_order_relaxed),
+                           std::memory_order_relaxed);
+  g_diag_last_particles.store(g_diag.particles.load(std::memory_order_relaxed),
+                              std::memory_order_relaxed);
+  g_diag_last_playing.store(g_diag.playing.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+  g_diag_last_cold.store(g_diag.cold.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
+  g_diag_last_frame.store(g_diag.frame.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+}
+
+}  // namespace
+
+SplitEffectPhaseDiag split_effect_last_phase_diag() noexcept {
+  SplitEffectPhaseDiag d;
+#if WDS_DIAG_ENABLED
+  if (!wds::common::perf::enabled()) {
+    return d;
+  }
+  const shuriken::SplitEvalCacheStats cs = shuriken::split_eval_cache_stats();
+  d.frame = g_diag_last_frame.load(std::memory_order_relaxed);
+  d.splits = g_diag_last_splits.load(std::memory_order_relaxed);
+  d.systems = g_diag_last_systems.load(std::memory_order_relaxed);
+  d.particles = g_diag_last_particles.load(std::memory_order_relaxed);
+  d.playing = g_diag_last_playing.load(std::memory_order_relaxed);
+  d.cold = g_diag_last_cold.load(std::memory_order_relaxed);
+  auto us = [](SplitDiagPhase p) -> std::int64_t {
+    const std::int64_t ns =
+        g_diag_last_phase_ns[static_cast<int>(p)].load(std::memory_order_relaxed);
+    return ns > 0 ? ns / 1000 : 0;
+  };
+  d.collect_us = us(SplitDiagPhase::Collect);
+  d.prepare_us = us(SplitDiagPhase::Prepare);
+  d.evaluate_us = us(SplitDiagPhase::Evaluate);
+  d.assemble_us = us(SplitDiagPhase::Assemble);
+  d.integrate_us = us(SplitDiagPhase::Integrate);
+  d.subemit_us = us(SplitDiagPhase::Subemit);
+  d.subemit_plan_us = us(SplitDiagPhase::SubemitPlan);
+  d.subemit_realize_us = us(SplitDiagPhase::SubemitRealize);
+  d.realize_us = us(SplitDiagPhase::Realize);
+  d.copyout_us = us(SplitDiagPhase::Copyout);
+  d.compact_us = us(SplitDiagPhase::Compact);
+  d.traverse_us = us(SplitDiagPhase::Traverse);
+  d.stitch_us = us(SplitDiagPhase::Stitch);
+  d.cache_lookup_us = us(SplitDiagPhase::CacheLookup);
+  shuriken::SplitEvalCacheDiag cd;
+  shuriken::split_eval_cache_diag(cd);
+  d.cache_lookup_hits = cs.lookup_hits;
+  d.cache_lookup_misses = cd.lookup_misses;
+  d.cache_evict = cd.evict_ops;
+  d.cache_bytes = cs.bytes_used;
+  d.cache_lookup_ops = cs.lookup_ops;
+  d.cache_lookup_stale = cd.lookup_stale;
+  d.cache_evict_budget = cd.evict_budget;
+  d.cache_evict_reap = cd.evict_reap;
+  d.cache_evict_clear = cd.evict_clear;
+  d.cache_epoch_bumps = cd.epoch_bumps;
+  const SplitCollectPoolDiag pd = split_collect_pool_diag_frame();
+  d.pool_tasks = pd.tasks;
+  d.pool_wait_us = pd.wait_us;
+  d.pool_claims_caller = pd.claims_caller;
+  d.pool_claims_worker = pd.claims_worker;
+  d.pool_items_caller = pd.items_caller;
+  d.pool_items_worker = pd.items_worker;
+  d.pool_join_us = pd.join_us;
+  d.pool_inline_calls = pd.inline_calls;
+  d.pool_serial_calls = pd.serial_calls;
+  d.pool_sum_item_us = pd.sum_item_us;
+  d.pool_wall_us = pd.wall_us;
+  d.pool_participants = split_collect_last_call_participants();
+  const double wall = static_cast<double>(pd.wall_us);
+  const double sum_item = static_cast<double>(pd.sum_item_us);
+  // Parallel efficiency = how much of the summed per-claim work ran
+  // concurrently: sum_item / (wall * participants), clamped to [0,1]. Both
+  // sides are µs on the same core class, so the ratio is usable, not exact.
+  const int participants =
+      split_collect_frame_max_participants() > 0 ? split_collect_frame_max_participants() : 1;
+  const double cap = wall * static_cast<double>(participants);
+  if (wall > 0.0 && cap > 0.0) {
+    double eff = sum_item / cap;
+    if (!(eff >= 0.0)) {
+      eff = 0.0;
+    }
+    if (eff > 1.0) {
+      eff = 1.0;
+    }
+    d.pool_par_eff = eff;
+  }
+  return d;
+#else
+  return d;
+#endif  // WDS_DIAG_ENABLED
+}
+
+std::size_t format_split_effect_phase_line(char* buf, std::size_t cap) noexcept {
+#if WDS_DIAG_ENABLED
+  if (buf == nullptr || cap == 0 || !wds::common::perf::enabled()) {
+    return 0;
+  }
+  const SplitEffectPhaseDiag d = split_effect_last_phase_diag();
+  // Every value is clamped non-negative by split_effect_last_phase_diag(), so
+  // the line never prints a negative or NaN. The first three lines of fields
+  // are the contracted set; the rest is appended so the prefix stays stable.
+  const int n = std::snprintf(
+      buf, cap,
+      "SPLITPHASE frame=%llu playing=%d splits=%d systems=%d particles=%d "
+      "collect_ms=%.3f evaluate_ms=%.3f integrate_ms=%.3f subemit_ms=%.3f realize_ms=%.3f "
+      "copyout_ms=%.3f cache_hit=%llu cache_miss=%llu cache_bytes=%llu pool_tasks=%llu "
+      "pool_wait_us=%llu pool_par_eff=%.3f "
+      "prepare_ms=%.3f assemble_ms=%.3f compact_ms=%.3f traverse_ms=%.3f stitch_ms=%.3f "
+      "cache_lu_ms=%.3f "
+      "cache_ops=%llu cache_stale=%llu cache_evict_budget=%llu cache_evict_reap=%llu "
+      "cache_evict_clear=%llu cache_epoch_bumps=%llu "
+      "pool_claims_caller=%llu pool_claims_worker=%llu pool_items_caller=%llu "
+      "pool_items_worker=%llu pool_join_us=%llu pool_sum_item_us=%llu pool_wall_us=%llu "
+      "pool_inline=%llu pool_serial=%llu pool_participants=%d "
+      "subemit_plan_ms=%.3f subemit_realize_ms=%.3f",
+      static_cast<unsigned long long>(d.frame), d.playing, d.splits, d.systems, d.particles,
+      static_cast<double>(d.collect_us) / 1000.0, static_cast<double>(d.evaluate_us) / 1000.0,
+      static_cast<double>(d.integrate_us) / 1000.0, static_cast<double>(d.subemit_us) / 1000.0,
+      static_cast<double>(d.realize_us) / 1000.0, static_cast<double>(d.copyout_us) / 1000.0,
+      static_cast<unsigned long long>(d.cache_lookup_hits),
+      static_cast<unsigned long long>(d.cache_lookup_misses),
+      static_cast<unsigned long long>(d.cache_bytes),
+      static_cast<unsigned long long>(d.pool_tasks),
+      static_cast<unsigned long long>(d.pool_wait_us), d.pool_par_eff,
+      static_cast<double>(d.prepare_us) / 1000.0, static_cast<double>(d.assemble_us) / 1000.0,
+      static_cast<double>(d.compact_us) / 1000.0, static_cast<double>(d.traverse_us) / 1000.0,
+      static_cast<double>(d.stitch_us) / 1000.0,
+      static_cast<double>(d.cache_lookup_us) / 1000.0,
+      static_cast<unsigned long long>(d.cache_lookup_ops),
+      static_cast<unsigned long long>(d.cache_lookup_stale),
+      static_cast<unsigned long long>(d.cache_evict_budget),
+      static_cast<unsigned long long>(d.cache_evict_reap),
+      static_cast<unsigned long long>(d.cache_evict_clear),
+      static_cast<unsigned long long>(d.cache_epoch_bumps),
+      static_cast<unsigned long long>(d.pool_claims_caller),
+      static_cast<unsigned long long>(d.pool_claims_worker),
+      static_cast<unsigned long long>(d.pool_items_caller),
+      static_cast<unsigned long long>(d.pool_items_worker),
+      static_cast<unsigned long long>(d.pool_join_us),
+      static_cast<unsigned long long>(d.pool_sum_item_us),
+      static_cast<unsigned long long>(d.pool_wall_us),
+      static_cast<unsigned long long>(d.pool_inline_calls),
+      static_cast<unsigned long long>(d.pool_serial_calls), d.pool_participants,
+      static_cast<double>(d.subemit_plan_us) / 1000.0,
+      static_cast<double>(d.subemit_realize_us) / 1000.0);
+  if (n < 0) {
+    return 0;
+  }
+  return static_cast<std::size_t>(n) < cap ? static_cast<std::size_t>(n) : cap - 1;
+#else
+  (void)buf;
+  (void)cap;
+  return 0;
+#endif  // WDS_DIAG_ENABLED
+}
+
+std::size_t format_split_effect_poolstat_line(char* buf, std::size_t cap) noexcept {
+#if WDS_DIAG_ENABLED
+  if (buf == nullptr || cap == 0 || !wds::common::perf::enabled()) {
+    return 0;
+  }
+  const SplitCollectPoolStat s = split_collect_pool_stat();
+  const int n = std::snprintf(
+      buf, cap, "POOLSTAT tasks=%llu participants_max=%llu wait_us_sum=%llu spin_us_sum=%llu "
+                "inline=%llu serial=%llu",
+      static_cast<unsigned long long>(s.tasks),
+      static_cast<unsigned long long>(s.participants_max),
+      static_cast<unsigned long long>(s.wait_us_sum),
+      static_cast<unsigned long long>(s.spin_us_sum),
+      static_cast<unsigned long long>(s.inline_calls),
+      static_cast<unsigned long long>(s.serial_calls));
+  if (n < 0) {
+    return 0;
+  }
+  return static_cast<std::size_t>(n) < cap ? static_cast<std::size_t>(n) : cap - 1;
+#else
+  (void)buf;
+  (void)cap;
+  return 0;
+#endif  // WDS_DIAG_ENABLED
 }
 
 void split_effect_note_prev_frame_ms(double frame_ms) noexcept {
@@ -1745,12 +2202,29 @@ long precommit_minflt() noexcept {
 #endif
 }
 
+// Buffer precommit is OFF by default.
+//
+// It materialised every planned buffer up front (resize + touch_pages) so the
+// first seek would not pay the faults. Measured on the heavy chart: 7.0 ms and
+// 6 333 minor faults in the load frame, ~101 MB of resident pages (footprint
+// 767 MB with it, 666 MB without), of which only the part a frame actually
+// writes is ever needed. Keeping it off lowers total minor faults by ~14 %
+// (33 590 -> 28 764) and leaves frame times unchanged (collect p50 3.70 vs
+// 3.79 ms, per-second wall p95 16.7 vs 16.7 ms, wall_max 17.3 vs 17.4 ms), i.e.
+// the faults simply move to the pages the renderer really touches.
+//
+// WDS_PRECOMMIT=1 restores the old behaviour for A/B measurement.
 bool precommit_enabled() noexcept {
-  const char* v = std::getenv("WDS_PRECOMMIT");
-  if (v == nullptr || v[0] == '\0') {
-    return true;
-  }
-  return !(v[0] == '0' && v[1] == '\0');
+#if WDS_DIAG_ENABLED
+  static const bool on = [] {
+    const char* v = std::getenv("WDS_PRECOMMIT");
+    return v != nullptr && v[0] == '1' && v[1] == '\0';
+  }();
+  return on;
+#else
+  // Release: no env read, no string, no branch.
+  return false;
+#endif
 }
 
 struct WorkerPrecommitCtx {
@@ -2161,14 +2635,18 @@ SplitEffectPrecommitStats split_effect_precommit_stats() noexcept {
 SplitEffectPrecommitStats split_effect_precommit_buffers(const SplitEffectPrecommitPlan& plan,
                                                          SplitEffectFrameCollect* io) {
   split_effect_raise_precommit(plan);
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("precommit.begin");
+#endif  // WDS_DIAG_ENABLED
   while (split_effect_precommit_pending() ||
          (io != nullptr && precommit_work_left(precommit_rt(), io))) {
     if (split_effect_pump_precommit(io, 1000000) <= 0) {
       break;
     }
   }
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("precommit.end");
+#endif  // WDS_DIAG_ENABLED
   SplitEffectPrecommitStats st = split_effect_precommit_stats();
   static const bool diag = [] {
     const char* v = std::getenv("WDS_FRAME_DIAG");
@@ -2177,21 +2655,116 @@ SplitEffectPrecommitStats split_effect_precommit_buffers(const SplitEffectPrecom
   if (!diag) {
     return st;
   }
+#if WDS_DIAG_ENABLED
   std::fprintf(stderr,
                "PRECOMMIT wall_us=%lld minflt=%ld rss_kb=%ld->%ld pool=%d trails=%d verts=%zu "
                "heaviest=%d floor_n=%d pending=%d\n",
                static_cast<long long>(st.wall_us), st.minflt, st.rss_kb_before, st.rss_kb_after,
                st.plan.particle_cap, st.plan.trail_chunks, st.plan.draw_verts, st.plan.heaviest_id,
                st.plan.floor_instances, st.pending);
+#endif  // WDS_DIAG_ENABLED
   return st;
 }
+
+
+namespace {
+
+// Diagnostics only. Publishes this collect's stage totals. Called from every
+// exit path of collect_split_effect_frame so the SPLITPHASE line always names
+// the last completed frame instead of a stale one. No-op when perf is off.
+//
+// frame_scope: true only for the whole-frame collect (one call per preview
+// frame). It gates the SPLITPHASE / SPLITCOLD / POOLSTAT stderr lines; the
+// per-split entry point (tests / bench / snapshot bake) publishes its counters
+// without spamming a line per split.
+void diag_finish_frame(bool frame_scope) noexcept {
+#if WDS_DIAG_ENABLED
+  if (!wds::common::perf::enabled()) {
+    return;
+  }
+  diag_publish_frame();
+  if (!frame_scope) {
+    return;
+  }
+  // SPLITPHASE: exactly one line per preview frame. stderr (not WDS_LOG):
+  // this build has WDS_ENABLE_LOGGING=0, so WDS_LOG only reaches the crash
+  // ring and the harness would never see the line.
+  {
+    char buf[1536];
+    const std::size_t n = format_split_effect_phase_line(buf, sizeof(buf));
+    if (n > 0) {
+      std::fprintf(stderr, "%s\n", buf);
+    }
+  }
+  // SPLITCOLD: once per cold (post-seek / post-doc-invalidate / post-preload)
+  // collect. The cold flag is what the existing epoch check already decided;
+  // invalidation timing is untouched.
+  const int reason = g_diag.cold_reason.load(std::memory_order_relaxed);
+  if (reason != 0) {
+    char buf[256];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "SPLITCOLD frame=%llu reason=%s systems=%d particles=%d steps=%lld evaluate_ms=%.3f",
+        static_cast<unsigned long long>(g_diag.frame.load(std::memory_order_relaxed)),
+        cold_reason_name(reason),
+        static_cast<int>(g_diag.count[static_cast<int>(SplitDiagCount::Systems)].load(
+            std::memory_order_relaxed)),
+        static_cast<int>(g_diag.count[static_cast<int>(SplitDiagCount::Particles)].load(
+            std::memory_order_relaxed)),
+        static_cast<long long>(g_diag.count[static_cast<int>(SplitDiagCount::Steps)].load(
+            std::memory_order_relaxed)),
+        static_cast<double>(
+            g_diag_last_phase_ns[static_cast<int>(SplitDiagPhase::Evaluate)].load(
+                std::memory_order_relaxed)) /
+            1e6);
+    if (n > 0) {
+      std::fprintf(stderr, "%s\n", buf);
+    }
+  }
+  // POOLSTAT: cumulative pool counters once per wall-clock second, keyed off
+  // the same 1 s cadence the editor's frame log uses. Emitted here because
+  // chart-render cannot see the Qt logger's window.
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  const int64_t prev = g_poolstat_last_ns.load(std::memory_order_relaxed);
+  if (prev == 0 || now_ns - prev >= 1000000000ll) {
+    g_poolstat_last_ns.store(now_ns, std::memory_order_relaxed);
+    char pbuf[256];
+    const std::size_t pn = format_split_effect_poolstat_line(pbuf, sizeof(pbuf));
+    if (pn > 0) {
+      std::fprintf(stderr, "%s\n", pbuf);
+    }
+    split_collect_diag_reset();
+  }
+#endif  // WDS_DIAG_ENABLED
+}
+
+}  // namespace
 
 void collect_split_effect_frame(
     const std::vector<wds::chart_editor::PreviewSplitLaneInstance>& splits, int quality,
     double now_sec, bool playing, SplitEffectPlaybackState& state, SplitEffectFrameCollect& io) {
   const OwnerThreadGuard owner_guard;
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.begin");
+#endif  // WDS_DIAG_ENABLED
+  // Diagnostics: whole-collect stage total. Nested SplitDiagScopes add the
+  // sub-stages; this one is the outer bound. Off => no clock read.
+#if WDS_DIAG_ENABLED
+  const bool diag = wds::common::perf::enabled();
+  const auto diag_t0 = diag ? std::chrono::steady_clock::now()
+                            : std::chrono::steady_clock::time_point{};
+  if (diag) {
+    g_diag.reset_stages();
+    g_diag.frame.store(++g_split_frame_seq, std::memory_order_relaxed);
+    g_diag.playing.store(playing ? 1 : 0, std::memory_order_relaxed);
+    g_diag.quality.store(quality, std::memory_order_relaxed);
+    g_diag.splits.store(static_cast<int>(splits.size()), std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
   split_collect_begin_frame();
+  shuriken::begin_eval_system_hash_frame();
   {
     thread_local double tls_collect_now = std::numeric_limits<double>::quiet_NaN();
     thread_local std::uint32_t tls_epoch = 0;
@@ -2205,6 +2778,30 @@ void collect_split_effect_frame(
     if (backward) {
       shuriken::split_eval_persist_clear();
     }
+#if WDS_DIAG_ENABLED
+    if (diag) {
+      // Invalidation semantics are untouched; this only labels what the
+      // existing epoch/backward check already decided:
+      //   seek    - split_effect_clear_caches() (chart_preview_panel seek)
+      //   doc     - reset_split_effect_auto_seed_session(true) / quality switch
+      //             / the first collect of the session (nothing cached yet)
+      //   preload - the seek pre-roll armed it and no explicit marker arrived
+      //   seek    - fallback: a timeline jump with no explicit invalidation
+      int reason = 0;
+      if (cold || backward) {
+        reason = g_cold_reason.exchange(0, std::memory_order_relaxed);
+        if (reason == 0) {
+          reason = g_preload_armed.exchange(0, std::memory_order_relaxed) != 0 ? 3 : 1;
+        }
+        if (!std::isfinite(tls_collect_now)) {
+          reason = 2;  // first collect of the session
+        }
+      }
+      g_preload_armed.store(0, std::memory_order_relaxed);
+      g_diag.cold.store(reason != 0 ? 1 : 0, std::memory_order_relaxed);
+      g_diag.cold_reason.store(reason, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
     tls_collect_now = now_sec;
     tls_epoch = epoch;
   }
@@ -2214,20 +2811,32 @@ void collect_split_effect_frame(
     shuriken::split_eval_cache_bump_epoch();
     shuriken::split_eval_persist_clear();
     clear_dead_latches();
+    // Diagnostics only: a quality switch is a document-side invalidation.
+    // The next collect's cold flag picks this up via the epoch change.
+#if WDS_DIAG_ENABLED
+    if (diag) {
+      g_cold_reason.store(2, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
   }
   const int cap = kSplitEffectParticlePool;
   if (io.pool.capacity() < static_cast<size_t>(cap)) {
     io.pool.reserve(static_cast<size_t>(cap));
   }
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.after_pool");
+#endif  // WDS_DIAG_ENABLED
   io.split_begin.assign(splits.size(), 0);
   io.split_count.assign(splits.size(), 0);
   io.total = 0;
   if (splits.empty()) {
+    // Still exactly one SPLITPHASE line for this frame (all zeros).
+    diag_finish_frame(true);
     return;
   }
   if (playing && std::isfinite(state.last_now_sec) &&
       now_sec + 1e-9 < state.last_now_sec) {
+    diag_finish_frame(true);
     return;
   }
   if (!playing) {
@@ -2246,21 +2855,27 @@ void collect_split_effect_frame(
   int remaining = cap;
   int offset = 0;
   int last_visited = -1;
+#if WDS_DIAG_ENABLED
   split_wall_begin_frame();
+#endif  // WDS_DIAG_ENABLED
   {
     SplitWallScope wall_frame(SplitWallSec::Frame);
+#if WDS_DIAG_ENABLED
     split_wall_note_splits(static_cast<int>(splits.size()));
+#endif  // WDS_DIAG_ENABLED
     // A stays per-split (seed / bind order). Plan+realize of every split
     // share one pool wave; mark still walks splits in order with the same
     // remaining budget so assemble keeps the identical set.
     {
       SplitWallScope wall_a(SplitWallSec::PhaseA);
+      SplitDiagScope diag_a(SplitDiagPhase::Prepare);
       for (size_t k = 0; k < splits.size(); ++k) {
         prepare_split_tasks(fs, fs.preps[k], splits[k], quality, now_sec, nullptr, playing);
       }
     }
     {
       SplitWallScope wall_b(SplitWallSec::PhaseB);
+      SplitDiagScope diag_b(SplitDiagPhase::Evaluate);
       run_eval_tasks_all(fs, fs.preps, remaining);
     }
     for (size_t k = 0; k < splits.size(); ++k) {
@@ -2274,8 +2889,11 @@ void collect_split_effect_frame(
           SplitWallScope wall_leak(SplitWallSec::Leak);
           apply_tmp_reuse_leak(fs, fs.preps[k].task_begin, fs.preps[k].task_end);
         }
-        const int n = assemble_split(fs, fs.preps[k], nullptr, remaining, &io.trails, &io.pool,
-                                     offset);
+        int n = 0;
+        {
+          SplitDiagScope diag_asm(SplitDiagPhase::Assemble);
+          n = assemble_split(fs, fs.preps[k], nullptr, remaining, &io.trails, &io.pool, offset);
+        }
         io.split_count[k] = n;
         io.total += n;
         remaining -= n;
@@ -2296,8 +2914,12 @@ void collect_split_effect_frame(
       last_visited = static_cast<int>(k);
     }
   }
+#if WDS_DIAG_ENABLED
   split_wall_end_frame();
+#endif  // WDS_DIAG_ENABLED
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.after_eval");
+#endif  // WDS_DIAG_ENABLED
   shuriken::split_eval_carry_set_store_inhibited(false);
 
   if (playing && last_visited >= 0) {
@@ -2306,7 +2928,19 @@ void collect_split_effect_frame(
   if (playing) {
     shuriken::split_eval_cache_reap_unused();
   }
+#if WDS_DIAG_ENABLED
+  if (diag) {
+    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - diag_t0)
+                           .count();
+    split_diag_add_ns(SplitDiagPhase::Collect, ns);
+    g_diag.particles.store(io.total, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
+  diag_finish_frame(true);
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.end");
+#endif  // WDS_DIAG_ENABLED
 }
 
 }  // namespace wds::chart_render

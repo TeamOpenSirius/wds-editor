@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -559,9 +561,9 @@ struct AliveCapTls {
 };
 thread_local AliveCapTls g_alive_cap_tls;
 
-template <typename BirthVec, typename DeathVec, typename KeepVec, typename IndexAt>
-void mark_alive_cap_greedy(int cap, const BirthVec& births, const DeathVec& death_wall,
-                           KeepVec& keep, IndexAt index_at, size_t n) {
+template <typename BirthVec, typename KeepVec, typename DeathAt, typename IndexAt>
+void mark_alive_cap_greedy(int cap, const BirthVec& births, DeathAt death_at, KeepVec& keep,
+                           IndexAt index_at, size_t n) {
   auto& heap = g_alive_cap_tls.heap;
   heap.clear();
   for (size_t i = 0; i < n; ++i) {
@@ -574,7 +576,7 @@ void mark_alive_cap_greedy(int cap, const BirthVec& births, const DeathVec& deat
     if (static_cast<int>(heap.size()) >= cap) {
       continue;
     }
-    heap.push_back(death_wall[oi]);
+    heap.push_back(death_at(oi));
     std::push_heap(heap.begin(), heap.end(), std::greater<float>{});
     keep[oi] = 1;
   }
@@ -605,7 +607,8 @@ void mark_alive_cap(int cap, const BirthVec& births, const DeathVec& death_wall,
       !any_nan && std::is_sorted(births.begin(), births.end(),
                                  [](const auto& a, const auto& b) { return a.time < b.time; });
   if (already_sorted) {
-    mark_alive_cap_greedy(cap, births, death_wall, keep, [](size_t i) { return i; }, n);
+    mark_alive_cap_greedy(cap, births, [&](size_t i) { return death_wall[i]; }, keep,
+                          [](size_t i) { return i; }, n);
     return;
   }
   auto& ord = g_alive_cap_tls.ord;
@@ -622,8 +625,64 @@ void mark_alive_cap(int cap, const BirthVec& births, const DeathVec& death_wall,
   } else {
     std::sort(ord.begin(), ord.end(), cmp);
   }
-  mark_alive_cap_greedy(cap, births, death_wall, keep, [&](size_t i) { return ord[i]; }, n);
+  mark_alive_cap_greedy(cap, births, [&](size_t i) { return death_wall[i]; }, keep,
+                        [&](size_t i) { return ord[i]; }, n);
 }
+
+// Same greedy as mark_alive_cap, but death_wall is a callable evaluated lazily
+// only at push time. When the death value is expensive to precompute for every
+// birth (e.g. lifetime math the greedy then discards), this avoids the work on
+// the births the cap drops.
+template <typename BirthVec, typename KeepVec, typename DeathAt>
+void mark_alive_cap_lazy(int cap, const BirthVec& births, DeathAt death_at, KeepVec& keep) {
+  keep.assign(births.size(), 0);
+  if (births.empty()) {
+    return;
+  }
+  if (cap <= 0 || static_cast<int>(births.size()) <= cap) {
+    keep.assign(births.size(), 1);
+    return;
+  }
+  const size_t n = births.size();
+  bool any_nan = false;
+  for (size_t i = 0; i < n; ++i) {
+    if (std::isnan(births[i].time)) {
+      any_nan = true;
+      break;
+    }
+  }
+  const bool already_sorted =
+      !any_nan && std::is_sorted(births.begin(), births.end(),
+                                 [](const auto& a, const auto& b) { return a.time < b.time; });
+  if (already_sorted) {
+    mark_alive_cap_greedy(cap, births, death_at, keep, [](size_t i) { return i; }, n);
+    return;
+  }
+  auto& ord = g_alive_cap_tls.ord;
+  ord.resize(n);
+  std::iota(ord.begin(), ord.end(), 0);
+  auto cmp = [&](size_t a, size_t b) {
+    if (births[a].time != births[b].time) {
+      return births[a].time < births[b].time;
+    }
+    return a < b;
+  };
+  if (any_nan) {
+    std::stable_sort(ord.begin(), ord.end(), cmp);
+  } else {
+    std::sort(ord.begin(), ord.end(), cmp);
+  }
+  mark_alive_cap_greedy(cap, births, death_at, keep, [&](size_t i) { return ord[i]; }, n);
+}
+
+// Diagnostic: once per wall-clock second while perf is on, summarize
+// apply_max_particles_alive_cap traffic so the subemit-plan lifetime cost is
+// visible. No cost when perf is disabled.
+#if WDS_DIAG_ENABLED
+static std::atomic<int> g_submitplan_calls{0};
+static std::atomic<int> g_submitplan_max_items{0};
+static std::atomic<int64_t> g_submitplan_last_sec{0};
+#endif  // WDS_DIAG_ENABLED
 
 void apply_max_particles_alive_cap(const SplitEffectParticle& p, const EmitContext& ctx,
                                    std::vector<Birth>& births,
@@ -633,22 +692,46 @@ void apply_max_particles_alive_cap(const SplitEffectParticle& p, const EmitConte
   if (cap <= 0 || static_cast<int>(births.size()) <= cap) {
     return;
   }
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    g_submitplan_calls.fetch_add(1, std::memory_order_relaxed);
+    const int n = static_cast<int>(births.size());
+    int prev = g_submitplan_max_items.load(std::memory_order_relaxed);
+    while (n > prev && !g_submitplan_max_items.compare_exchange_weak(
+                           prev, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+    const int64_t now_sec =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    int64_t last = g_submitplan_last_sec.load(std::memory_order_relaxed);
+    if (now_sec != last &&
+        g_submitplan_last_sec.compare_exchange_strong(last, now_sec, std::memory_order_relaxed)) {
+      const int n_calls = g_submitplan_calls.exchange(0, std::memory_order_relaxed);
+      const int max_items = g_submitplan_max_items.exchange(0, std::memory_order_relaxed);
+      std::fprintf(stderr, "SUBMITPLAN_SEC n=%d max_items=%d\n", n_calls, max_items);
+    }
+  }
+#endif  // WDS_DIAG_ENABLED
   const float sim = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
-  auto& death = g_alive_cap_tls.death;
-  death.resize(births.size());
+  auto& keep = g_alive_cap_tls.keep;
   if (death_wall != nullptr) {
+    auto& death = g_alive_cap_tls.death;
+    death.resize(births.size());
     for (size_t i = 0; i < births.size(); ++i) {
       death[i] = death_wall[i];
     }
+    mark_alive_cap(cap, births, death, keep);
   } else {
-    for (size_t i = 0; i < births.size(); ++i) {
+    // Lazy: defer the lifetime math to push time so only births the cap keeps
+    // pay for it. The greedy compares death by heap order, so the birth order
+    // and cap semantics are unchanged versus precomputing death[].
+    mark_alive_cap_lazy(cap, births, [&](size_t i) {
       const float life =
           birth_start_life(p, ctx, births[i], system_emit_u(p, birth_curve_t(births[i])));
-      death[i] = births[i].time + life / sim;
-    }
+      return births[i].time + life / sim;
+    }, keep);
   }
-  auto& keep = g_alive_cap_tls.keep;
-  mark_alive_cap(cap, births, death, keep);
   size_t w = 0;
   for (size_t i = 0; i < births.size(); ++i) {
     if (keep[i] != 0) {
@@ -838,15 +921,60 @@ SystemEvalHash make_system_eval_hash(const SplitEffectParticle& p, int32_t color
 
 thread_local SystemEvalHash g_tls_sys_hash{};
 
+// Per-collect-frame system hash cache. The old single slot thrashed when a
+// frame alternated primary/parent/child systems; the hash itself only depends
+// on the bound row + color id. The frame token invalidates all entries at the
+// next collect, so pointers into reused task/bound storage cannot go stale
+// across frames. Direct evaluate()/tests (token == 0) keep the old single-slot
+// path; callers that mutate global noise/integrator config bump the generation.
+constexpr int kSysHashCacheSlots = 128;
+struct SystemEvalHashEntry {
+  const SplitEffectParticle* p = nullptr;
+  int32_t color_id = 0;
+  uint32_t frame_token = 0;
+  uint32_t config_gen = 0;
+  uint64_t prefix = 1469598103934665603ull;
+};
+thread_local SystemEvalHashEntry g_tls_sys_hash_cache[kSysHashCacheSlots];
+std::atomic<uint32_t> g_sys_hash_frame_token{0};
+std::atomic<uint32_t> g_sys_hash_config_gen{0};
+
+inline std::size_t sys_hash_slot(const SplitEffectParticle* p, int32_t color_id) noexcept {
+  const std::uintptr_t u = reinterpret_cast<std::uintptr_t>(p);
+  std::uint64_t h = (u >> 4) * 0x9e3779b97f4a7c15ull + static_cast<uint64_t>(color_id);
+  return static_cast<std::size_t>(h >> 32) & (kSysHashCacheSlots - 1);
+}
+
 void note_eval_system_hash(const SplitEffectParticle& p, int32_t color_id) noexcept {
   SplitWallScope wall_hash(SplitWallSec::CfHash);
-  if (g_tls_sys_hash.p == &p && g_tls_sys_hash.color_id == color_id) {
+  const uint32_t token = g_sys_hash_frame_token.load(std::memory_order_relaxed);
+  if (token == 0) {
+    if (g_tls_sys_hash.p == &p && g_tls_sys_hash.color_id == color_id) {
+      WDS_PERF_COUNT("shuriken.sys_hash.hit", 1);
+      return;
+    }
+    WDS_PERF_COUNT("shuriken.sys_hash.recompute", 1);
+    WDS_PERF_SCOPE("shuriken.sys_hash");
+    g_tls_sys_hash = make_system_eval_hash(p, color_id);
+    return;
+  }
+  const uint32_t gen = g_sys_hash_config_gen.load(std::memory_order_relaxed);
+  SystemEvalHashEntry& e = g_tls_sys_hash_cache[sys_hash_slot(&p, color_id)];
+  if (e.p == &p && e.color_id == color_id && e.frame_token == token && e.config_gen == gen) {
     WDS_PERF_COUNT("shuriken.sys_hash.hit", 1);
+    g_tls_sys_hash.p = &p;
+    g_tls_sys_hash.color_id = color_id;
+    g_tls_sys_hash.prefix = e.prefix;
     return;
   }
   WDS_PERF_COUNT("shuriken.sys_hash.recompute", 1);
   WDS_PERF_SCOPE("shuriken.sys_hash");
   g_tls_sys_hash = make_system_eval_hash(p, color_id);
+  e.p = &p;
+  e.color_id = color_id;
+  e.frame_token = token;
+  e.config_gen = gen;
+  e.prefix = g_tls_sys_hash.prefix;
 }
 
 uint64_t hash_integration_inputs(const ParticleState& st, const SystemEvalHash* sys) noexcept {
@@ -960,6 +1088,7 @@ void fill_live(PoseIntegrator& integ, const ParticleState& st, float age, bool w
   {
     SplitWallScope wall_int(SplitWallSec::Integrate);
     WDS_PERF_SCOPE("shuriken.integrate");
+    SplitDiagScope diag_int(SplitDiagPhase::Integrate);
     integ.sample(age, out.world_x, out.main_y, out.z, nullptr);
   }
   fill_live_after_pose(integ, st, age, want_trail, out, want_fd, trail_clock);
@@ -1275,6 +1404,10 @@ void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float 
     // a step boundary (that FD inflated minVertexDistance on the old
     // equal-split path). Stretch still uses stored/total, not this.
     SplitWallScope wall_int(SplitWallSec::Integrate);
+    // Diagnostics only: the finite-difference tail re-runs the integrator, so
+    // it belongs in integrate_ms (it is not a separate visible stage, but it
+    // is charged to no task scope today).
+    SplitDiagScope diag_fd(SplitDiagPhase::Integrate);
     integ.finite_difference(age, kDt, out.world_x, out.main_y, out.z, out.vel_x, out.vel_y,
                             out.vel_z);
   }
@@ -1283,6 +1416,10 @@ void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float 
     integ.export_grid(live_lo);
     SplitWallScope wall_tr(SplitWallSec::Trails);
     WDS_PERF_SCOPE("shuriken.trails");
+    // Traverse = per-particle realization of the trail / ribbon vertices
+    // (sampling n ages per particle). Charged separately from Integrate so a
+    // Stretch/Trail-heavy catalog shows up in its own column.
+    SplitDiagScope diag_tr(SplitDiagPhase::Traverse);
     const float clock = trail_clock >= 0.0f ? trail_clock : age;
     fill_trails(integ, st, clock, out);
     integ.import_grid(live_lo);
@@ -1713,7 +1850,7 @@ bool try_primary_carry(const EmitContext& ctx, const SplitEffectParticle& p,
     return false;
   }
   const SystemCarryKey key = make_system_key(ctx, p, 0);
-  if (split_eval_carry_lookup_for_now(key, ctx.now_t, snap)) {
+  if (split_eval_carry_lookup_for_time(key, ctx.now_t, snap)) {
     return true;
   }
   split_eval_carry_note_fallback();
@@ -1721,6 +1858,14 @@ bool try_primary_carry(const EmitContext& ctx, const SplitEffectParticle& p,
 }
 
 }  // namespace
+
+void begin_eval_system_hash_frame() noexcept {
+  g_sys_hash_frame_token.fetch_add(1, std::memory_order_relaxed);
+}
+
+void bump_eval_system_hash_config_generation() noexcept {
+  g_sys_hash_config_gen.fetch_add(1, std::memory_order_relaxed);
+}
 
 void evaluate_plan(const SplitEffectParticle& p, const EmitContext& ctx,
                    std::vector<PrimaryEvalJob>& jobs) {
@@ -1805,13 +1950,16 @@ int finish_realize_outputs(const SplitEffectParticle& p, const EmitContext& ctx,
   const uint32_t cat = system_id_of(ctx, p);
   if (ctx.want_trail && p.trail_mode == 1) {
     SplitWallScope wall_stitch(SplitWallSec::Stitch);
+    SplitDiagScope diag_stitch(SplitDiagPhase::Stitch);
     stitch_ribbons(p, out, written, ctx.line_index, cat);
   }
   if (commit_carry && split_eval_carry_enabled() && !observers_installed()) {
     commit_primary_carry(make_system_key(ctx, p, 0), ctx, jobs);
   }
   WDS_PERF_COUNT("shuriken.alive", written);
+#if WDS_DIAG_ENABLED
   split_wall_note_realized(written);
+#endif  // WDS_DIAG_ENABLED
   return written;
 }
 
@@ -3443,7 +3591,7 @@ void hydrate_deferred_parent_poses(const EmitContext& ctx, SubemitFillPlan& plan
                                            persist_parent);
     const bool have_snap =
         !persist_hit &&
-        split_eval_carry_lookup_for_now(parent_key, ctx.now_t, snap);
+        split_eval_carry_lookup_for_time(parent_key, ctx.now_t, snap);
     const int carried_i = have_snap ? carry_find_particle(snap, head.parent_b, seed) : -1;
     ParticleState pst;
     if (persist_hit) {
@@ -3818,8 +3966,22 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
   plan.items.clear();
   plan.persist_occ.clear();
   plan.kept = 0;
-  if (max_out > 0 && plan.items.capacity() < static_cast<std::size_t>(max_out)) {
-    plan.items.reserve(static_cast<std::size_t>(max_out));
+  SplitWallScope wall_subemit_plan(SplitWallSec::SubemitPlan);
+  SplitDiagScope diag_subemit_plan(SplitDiagPhase::SubemitPlan);
+  // Reserve for the rows this task can plausibly fill, not for the whole pool.
+  // max_out is kSplitEffectParticlePool, so reserving it charges
+  // 16384 * sizeof(SubemitFillItem) ~= 3.1 MB of *commit* per task; a task keeps
+  // a few hundred rows (measured max 1536 on a 25-instance stress chart). On
+  // macOS/Linux that is only address space (untouched pages are not resident),
+  // but on Windows commit charge is a hard limit (RAM + page file), so the cap
+  // is what keeps a many-instance scene from charging ~0.5 GB it never touches.
+  // Capacity only: no reference into plan.items is held across a push_back, so
+  // growth is safe and the kept set / vertex stream are unchanged.
+  const std::size_t want =
+      std::min<std::size_t>(static_cast<std::size_t>(max_out),
+                            std::max<std::size_t>(256u, 4u * static_cast<std::size_t>(count)));
+  if (plan.items.capacity() < want) {
+    plan.items.reserve(want);
   }
   if (particles == nullptr || max_out <= 0 || count == 0) {
     return 0;
@@ -3894,6 +4056,9 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
   const uint32_t base = idx_of(particles[0]);
   std::vector<ChildSysHoist> child_sys(static_cast<size_t>(count));
   for (uint16_t ci = 0; ci < count; ++ci) {
+    if (static_cast<int>(particles[ci].element_index) != element_slot) {
+      continue;
+    }
     fill_child_sys_hoist(particles[ci], child_sys[ci]);
   }
   std::vector<ParentSysHoist> parent_sys(static_cast<size_t>(count));
@@ -3901,6 +4066,9 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
   {
     size_t slot_total = 0;
     for (uint16_t ci = 0; ci < count; ++ci) {
+      if (static_cast<int>(particles[ci].element_index) != element_slot) {
+        continue;
+      }
       uint16_t nslots = 0;
       (void)subemitters_of(static_cast<uint16_t>(idx_of(particles[ci])), &nslots);
       slot_total += static_cast<size_t>(nslots);
@@ -3908,6 +4076,9 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
     parent_slot_flat.resize(slot_total);
     size_t slot_off = 0;
     for (uint16_t ci = 0; ci < count; ++ci) {
+      if (static_cast<int>(particles[ci].element_index) != element_slot) {
+        continue;
+      }
       uint16_t nslots = 0;
       const uint32_t pidx = idx_of(particles[ci]);
       (void)subemitters_of(static_cast<uint16_t>(pidx), &nslots);
@@ -4000,7 +4171,7 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
           }
           seen[ev.local] = 1;
           const SystemCarryKey key = make_system_key(ctx, particles[ev.local], 0);
-          if (split_eval_carry_lookup_for_now(key, ctx.now_t, parent_snaps[ev.local])) {
+          if (split_eval_carry_lookup_for_time(key, ctx.now_t, parent_snaps[ev.local])) {
             parent_ok[ev.local] = 1;
           }
         }
@@ -4367,12 +4538,49 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
   return plan.kept;
 }
 
+bool child_carry_time_lt(float a, float b) noexcept {
+  uint32_t ua = 0;
+  uint32_t ub = 0;
+  std::memcpy(&ua, &a, sizeof(ua));
+  std::memcpy(&ub, &b, sizeof(ub));
+  return ua < ub;
+}
+
+// Sort child CarryParticle rows in the same order carry_find_child() probes:
+// parent birth (index/extra/time), slot, child birth (index/extra/time).
+bool child_carry_lt(const CarryParticle& a, const CarryParticle& b) noexcept {
+  if (a.parent_b.index != b.parent_b.index) {
+    return a.parent_b.index < b.parent_b.index;
+  }
+  if (a.parent_b.extra != b.parent_b.extra) {
+    return a.parent_b.extra < b.parent_b.extra;
+  }
+  if (a.parent_b.time != b.parent_b.time) {
+    return child_carry_time_lt(a.parent_b.time, b.parent_b.time);
+  }
+  if (a.slot_i != b.slot_i) {
+    return a.slot_i < b.slot_i;
+  }
+  if (a.b.index != b.b.index) {
+    return a.b.index < b.b.index;
+  }
+  if (a.b.extra != b.b.extra) {
+    return a.b.extra < b.b.extra;
+  }
+  if (a.b.time != b.b.time) {
+    return child_carry_time_lt(a.b.time, b.b.time);
+  }
+  return false;
+}
+
 int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
                                  const uint8_t* do_fill, SplitEffectLiveParticle* out, int max_out) {
   if (out == nullptr || max_out <= 0 || plan.kept <= 0) {
     return 0;
   }
   SplitWallScope wall_real(SplitWallSec::SubemitSetup);
+  SplitWallScope wall_subemit_realize(SplitWallSec::SubemitRealize);
+  SplitDiagScope diag_subemit_realize(SplitDiagPhase::SubemitRealize);
   int written = 0;
   uint16_t prev_group = 0xffffu;
   int ribbon0 = 0;
@@ -4385,6 +4593,44 @@ int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
     }
   };
   const int n = std::min(plan.kept, static_cast<int>(plan.items.size()));
+  // B1: one child-state checkpoint per plan/task. The plan is per bound parent
+  // system, so all nonzero parent pointers should share the same key; if they
+  // do not, skip the checkpoint rather than pair a child with the wrong parent.
+  thread_local std::vector<CarryParticle> child_carry_parts;
+  child_carry_parts.clear();
+  SystemCarryKey child_carry_key{};
+  SystemCarrySnapshot child_carry_snap;
+  bool have_child_carry_key = false;
+  bool have_child_carry_snap = false;
+  if (n > 0 && split_eval_carry_rewind_enabled() && !observers_installed()) {
+    const SubemitFillItem* key_item = nullptr;
+    for (int i = 0; i < n; ++i) {
+      if (plan.items[static_cast<size_t>(i)].parent != nullptr) {
+        key_item = &plan.items[static_cast<size_t>(i)];
+        break;
+      }
+    }
+    if (key_item != nullptr) {
+      bool consistent = true;
+      for (int i = 0; i < n; ++i) {
+        const SubemitFillItem& it = plan.items[static_cast<size_t>(i)];
+        if (it.parent != nullptr &&
+            (it.parent != key_item->parent || it.parent_idx != key_item->parent_idx)) {
+          consistent = false;
+          break;
+        }
+      }
+      if (consistent) {
+        EmitContext key_ctx = ctx;
+        key_ctx.catalog_index_override = key_item->parent_idx;
+        key_ctx.has_catalog_index_override = 1;
+        child_carry_key = make_system_key(key_ctx, *key_item->parent, 1);
+        have_child_carry_key = true;
+        have_child_carry_snap =
+            split_eval_carry_lookup_for_time(child_carry_key, ctx.now_t, child_carry_snap);
+      }
+    }
+  }
   thread_local std::vector<uint8_t> will_fill;
   thread_local std::vector<ChildPersistSession> child_sessions;
   thread_local std::vector<int> child_session_of;
@@ -4505,12 +4751,18 @@ int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
       if (keep == 0 && item.child != nullptr) {
         CarryParticle cap{};
         fill_subemit_child(*item.child, item.b, item.born, item.properties, ctx, item.child_idx,
-                           out[written], keep, nullptr, &cap, item.parent_b, item.slot_i, true,
-                           &item);
-        if (keep != 0 && si >= 0 && child_sessions[static_cast<size_t>(si)].persist_ok != 0) {
-          PrimaryEvalJob job{};
-          job_from_child_carry(job, cap);
-          child_sessions[static_cast<size_t>(si)].jobs.push_back(job);
+                           out[written], keep,
+                           have_child_carry_snap ? &child_carry_snap : nullptr, &cap,
+                           item.parent_b, item.slot_i, true, &item);
+        if (keep != 0) {
+          if (have_child_carry_key) {
+            child_carry_parts.push_back(cap);
+          }
+          if (si >= 0 && child_sessions[static_cast<size_t>(si)].persist_ok != 0) {
+            PrimaryEvalJob job{};
+            job_from_child_carry(job, cap);
+            child_sessions[static_cast<size_t>(si)].jobs.push_back(job);
+          }
         }
       }
       if (keep == 0) {
@@ -4525,6 +4777,10 @@ int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
   }
   finish_child_persist(child_sessions, child_n_sessions, ctx.now_t, plan, &plan.persist_occ);
   child_n_sessions = 0;
+  if (have_child_carry_key && !child_carry_parts.empty()) {
+    std::sort(child_carry_parts.begin(), child_carry_parts.end(), child_carry_lt);
+    split_eval_carry_store(child_carry_key, ctx.now_t, std::move(child_carry_parts), 0);
+  }
   flush_stitch();
   return written;
 }

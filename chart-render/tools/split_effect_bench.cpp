@@ -13,6 +13,15 @@
 
 #if __has_include(<wds/common/perf_stages.hpp>)
 #include <wds/common/perf_stages.hpp>
+#if !WDS_DIAG_ENABLED
+// Release builds compile the perf implementation out; the bench still exposes
+// WDS_SPLIT_BENCH_PERF, so provide the same no-op surface locally.
+namespace wds::common::perf {
+inline void set_enabled(bool) noexcept {}
+inline void end_frame() noexcept {}
+inline std::string window_report() { return {}; }
+}  // namespace wds::common::perf
+#endif
 #else
 #include <string>
 namespace wds::common::perf {
@@ -120,7 +129,7 @@ void usage() {
                "      Sweep now_t in [0, tmax] for official effect ids (stateless collect).\n"
                "\n"
                "  scenario --effect ID [--instances 4] [--stagger 0|SEC]\n"
-               "           [--mode play|scrub|cold|dead|seek-play|all] [--quality 0]\n"
+               "           [--mode play|scrub|cold|dead|seek-play|rewind|all] [--quality 0]\n"
                "           [--frames N] [--seed S] [--now-t T] [--now-t-hi T] [--warm-from-t T]\n"
                "           [--warm-frames N] [--dt SEC]\n"
                "      Overlapping instances, peak-count window, per-mode timings + perf stages.\n"
@@ -128,6 +137,8 @@ void usage() {
                "      --warm-frames plays N untimed frames in-range before the measured --frames.\n"
                "      --mode seek-play: editor seek (clear caches + dead latches) then play 1/60\n"
                "      advancing from T for N frames. Prints SEEKFRAME rows. T is play-relative.\n"
+               "      --mode rewind: warm to T_hi, then 25 Hz ping-pong seeks with 1.6 s steps;\n"
+               "      each backward seek clears seek state like the editor and prints REWIND rows.\n"
                "      --mode dead: full fixture (past crowd + live + future) after all live\n"
                "      particles died and before the next group starts. Default now_t 3.5–5.0.\n"
                "\n"
@@ -2558,6 +2569,63 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       ps.add(io.total);
       wds::common::perf::end_frame();
     }
+  } else if (kind == "rewind") {
+    // Warm forward to range_hi, then ping-pong backward/forward in 1.6 s
+    // steps (same cadence as --seek-sweep 20:60:25). Each backward seek does
+    // the editor's clear-seek-state call and resets the playback adapter so
+    // collect is allowed to run at an earlier now_t.
+    const double dt = play_dt > 1e-9 ? play_dt : 1.0 / 60.0;
+    const double step = 1.6;
+    double warm = range_lo;
+    state.reset();
+    int warm_n = 0;
+    while (warm + 1e-12 < range_hi) {
+      (void)collect_ms(splits, quality, warm, true, state, io);
+      warm = std::min(range_hi, warm + dt);
+      ++warm_n;
+    }
+    std::fprintf(stdout, "  rewind warm-frames=%d now_sec=%.4f n=%d\n", warm_n, warm, io.total);
+    double target = range_hi;
+    int dir = -1;
+    auto prev = wds::chart_render::split_effect_eval_cache_stats();
+    mark_collect_faults();
+    for (int i = 0; i < frames; ++i) {
+      if (dir < 0) {
+        target = std::max(range_lo, target - step);
+        if (target <= range_lo + 1e-9) {
+          dir = 1;
+        }
+      } else {
+        target = std::min(range_hi, target + step);
+        if (target >= range_hi - 1e-9) {
+          dir = -1;
+        }
+      }
+      // Same invalidation the editor applies on request_seek_ms().
+      wds::chart_render::split_effect_clear_seek_state();
+      state.reset();
+      const double t = collect_ms(splits, quality, target, true, state, io);
+      ms.add(t);
+      ps.add(io.total);
+      const auto cur = wds::chart_render::split_effect_eval_cache_stats();
+      const auto carry = wds::chart_render::shuriken::split_eval_carry_stats();
+      const auto diag = wds::chart_render::split_effect_last_phase_diag();
+      std::fprintf(stdout,
+                   "REWIND i=%d target=%.4f collect=%.3f n=%d cold=%d "
+                   "cache hit/op=%llu/%llu carry hit/miss/fallback=%llu/%llu/%llu "
+                   "rewind hit/miss/bytes=%llu/%llu/%llu\n",
+                   i, target - play_origin_sec(kDefaultStartMs), t, io.total, diag.cold,
+                   static_cast<unsigned long long>(cur.lookup_hits - prev.lookup_hits),
+                   static_cast<unsigned long long>(cur.lookup_ops - prev.lookup_ops),
+                   static_cast<unsigned long long>(cur.carry_hits - prev.carry_hits),
+                   static_cast<unsigned long long>(cur.carry_misses - prev.carry_misses),
+                   static_cast<unsigned long long>(cur.carry_fallbacks - prev.carry_fallbacks),
+                   static_cast<unsigned long long>(carry.rewind_hits),
+                   static_cast<unsigned long long>(carry.rewind_misses),
+                   static_cast<unsigned long long>(carry.rewind_bytes));
+      prev = cur;
+      wds::common::perf::end_frame();
+    }
   } else if (kind == "seek-play") {
     if (warm_frames > 0) {
       double warm_sec = range_lo;
@@ -2725,7 +2793,7 @@ int cmd_scenario(int32_t effect_id, int instances, double stagger, const std::st
     return 0;
   }
   if (mode == "play" || mode == "scrub" || mode == "cold" || mode == "cold-keep-cache" ||
-      mode == "dead" || mode == "seek-play") {
+      mode == "dead" || mode == "seek-play" || mode == "rewind") {
     return run(mode.c_str(), mode);
   }
   std::fprintf(stderr, "unknown --mode %s\n", mode.c_str());

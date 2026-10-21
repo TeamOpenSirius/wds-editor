@@ -247,6 +247,7 @@ struct GpuTexture {
   bool retiring = false;               // destroy_texture ran; waiting for the GPU
   uint64_t retire_after_submit = 0;    // GPU-free when completed_submit_seq >= this
   uint64_t sampled_seq = 0;       // 0 = never bound in a recorded draw
+  size_t alloc_bytes = 0;         // vkGetImageMemoryRequirements size, for accounting
 };
 
 uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props,
@@ -839,6 +840,17 @@ struct VulkanRenderer::Impl {
   int64_t last_push_consts = 0;
   int64_t last_render_passes = 0;
   int64_t last_vb_binds = 0;
+  size_t last_frame_verts_total = 0;
+  // CPU wall time of the command-buffer record block, measured only when
+  // perf::enabled() (0 otherwise, so no clock read on the normal path).
+  int64_t last_encode_us = 0;
+  // Per-group draw/vertex attribution of the last recorded frame.
+  int64_t last_draws_split = 0;
+  size_t last_verts_split = 0;
+  int64_t last_draws_notes = 0;
+  size_t last_verts_notes = 0;
+  int64_t last_draws_rest = 0;
+  size_t last_verts_rest = 0;
   // Debug-session diagnostics for a black preview. Edge-triggered so a stuck
   // acquire/present result or a repeated early-out does not fill the log.
   const char* draw_stop_reason = nullptr;
@@ -1054,10 +1066,83 @@ struct VulkanRenderer::Impl {
 
   // Per-slot TIMESTAMP query pools. Created only while perf::enabled().
   static constexpr uint32_t kGpuTimestampQueries = 32;
-  static constexpr uint32_t kGpuTimestampUsed = 6;
+  // Ordered timestamp points written once per recorded frame. Query index ==
+  // position in this table; draw_frame writes them strictly in order (and only
+  // between render passes: MoltenVK resolves timestamps at encoder boundaries,
+  // never inside one). kGpuPhaseSegs below references these same slots, so a
+  // phase label can never drift from the slot that measures it.
+  //
+  // Slots 0..2 and 3..6 keep the exact boundaries the old 6-slot build wrote,
+  // so every pre-existing segment name still measures the same span; only the
+  // new blit point (slot 4) is inserted between them.
+  static constexpr uint32_t kGpuStampStart = 0;     // top of pipe, after the VB/IB copy
+  static constexpr uint32_t kGpuStampGlowEnd = 1;   // after the early HDR extract pass
+  static constexpr uint32_t kGpuStampLateHdr = 2;   // legacy duplicate point (zero span)
+  static constexpr uint32_t kGpuStampMainEnd = 3;   // after the main render pass
+  static constexpr uint32_t kGpuStampBlitEnd = 4;   // after the carve blit (transfer only)
+  static constexpr uint32_t kGpuStampCarveEnd = 5;  // after the carve extract pass
+  static constexpr uint32_t kGpuStampTailEnd = 6;   // after the tail composite pass
+  static constexpr uint32_t kGpuStampCount = 7;
+  static constexpr VkPipelineStageFlagBits kGpuStampStages[kGpuStampCount] = {
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,     // 0 start
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,  // 1 glow extract end
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,  // 2 late-hdr duplicate
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,  // 3 main pass end
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,  // 4 carve blit end
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,  // 5 carve extract end
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,  // 6 tail pass end
+  };
+  // Historical name kept for the contract: the number of slots a complete frame
+  // writes (all of them, on a frame that runs the carve + tail passes).
+  static constexpr uint32_t kGpuTimestampUsed = kGpuStampCount;
+  // Published GPU phases (nanoseconds), read back over the stamp slots above.
+  // The first six keep their original names and exact spans so older logs stay
+  // comparable; the rest nest inside them. `gpu.split_plate` is the same encoder
+  // pass as `gpu.glow_hdr` (the line/split plate HDR extract) under the name the
+  // split-effect consumer looks for.
+  //
+  // Deliberately absent: gpu.stage_bg, gpu.notes, gpu.bombs, gpu.hud, gpu.post.
+  // Those draws are recorded inside the main or tail render pass (scene bg, mid
+  // overlay, additive bombs, playfield HUD, post overlays), and MoltenVK only
+  // resolves timestamp queries at encoder boundaries, so they have no stampable
+  // boundary. They are attributable on the CPU side only (DrawFrameCpuDiag) and
+  // print as 0 in the GPUPHASE line.
+  struct GpuPhaseSeg {
+    const char* name;
+    uint32_t from;
+    uint32_t to;
+  };
+  static constexpr GpuPhaseSeg kGpuPhaseSegs[] = {
+      {"gpu.glow_hdr", kGpuStampStart, kGpuStampGlowEnd},
+      {"gpu.late_hdr", kGpuStampGlowEnd, kGpuStampLateHdr},
+      {"gpu.opaque", kGpuStampLateHdr, kGpuStampMainEnd},
+      {"gpu.carve", kGpuStampMainEnd, kGpuStampCarveEnd},
+      {"gpu.composite", kGpuStampCarveEnd, kGpuStampTailEnd},
+      {"gpu.total", kGpuStampStart, kGpuStampTailEnd},
+      {"gpu.split_plate", kGpuStampStart, kGpuStampGlowEnd},
+      {"gpu.carve_blit", kGpuStampMainEnd, kGpuStampBlitEnd},
+      {"gpu.split_particles", kGpuStampBlitEnd, kGpuStampCarveEnd},
+  };
+  static constexpr uint32_t kGpuPhaseSegCount =
+      sizeof(kGpuPhaseSegs) / sizeof(kGpuPhaseSegs[0]);
+
+  // CPU-side facts of the frame whose timestamps a slot holds, captured at
+  // submit time so the GPUPHASE line pairs them with the right GPU numbers
+  // (reap happens frames_in_flight later).
+  struct GpuPhaseCpu {
+    uint64_t frame_seq = 0;
+    int64_t draws_split = 0;
+    size_t verts_split = 0;
+    int64_t draws_notes = 0;
+    size_t verts_notes = 0;
+    int64_t draws_total = 0;
+    size_t verts_total = 0;
+    int64_t encode_us = 0;
+  };
   std::array<VkQueryPool, kMaxFramesInFlight> gpu_timestamp_pools{};
   std::array<uint32_t, kMaxFramesInFlight> gpu_timestamp_written{};
   std::array<bool, kMaxFramesInFlight> gpu_timestamp_pending{};
+  std::array<GpuPhaseCpu, kMaxFramesInFlight> gpu_phase_cpu{};
   std::vector<std::pair<const char*, int64_t>> last_gpu_segments;
   float gpu_timestamp_period = 0.0f;
   uint32_t gpu_timestamp_valid_bits = 0;
@@ -1068,6 +1153,7 @@ struct VulkanRenderer::Impl {
   bool gpu_timestamps_sample_logged = false;
   bool gpu_timestamps_recording = false;
   uint32_t gpu_timestamp_cursor = 0;
+  int32_t gpu_timestamp_last_index = -1;
   uint32_t gpu_timestamp_frame = 0;
 
   void destroy_gpu_timestamp_pools();
@@ -1075,9 +1161,22 @@ struct VulkanRenderer::Impl {
   bool ensure_gpu_timestamp_pool(uint32_t frame);
   void reap_gpu_timestamps(uint32_t frame);
   bool begin_gpu_timestamps(uint32_t frame, VkCommandBuffer cmd);
-  void write_gpu_timestamp(VkCommandBuffer cmd, VkPipelineStageFlagBits stage);
+  void write_gpu_timestamp_at(VkCommandBuffer cmd, uint32_t index);
   void commit_gpu_timestamps(uint32_t frame);
   int64_t gpu_timestamp_delta_ns(uint64_t t0, uint64_t t1) const;
+
+  // Device-memory owned by this renderer, cached at alloc/free time (bytes).
+  // Never queries the driver: the snapshot below is a plain sum of counters.
+  size_t mem_depth_bytes = 0;
+  size_t mem_msaa_bytes = 0;
+  size_t mem_bloom_hdr_bytes = 0;  // bloom_src + hdr_late
+  size_t mem_export_bytes = 0;     // export color / depth / MSAA targets
+  size_t mem_export_hdr_bytes = 0; // export bloom_src + hdr_late
+  size_t mem_export_staging_bytes = 0;  // export readback staging ring
+  size_t mem_texture_bytes = 0;         // live texture cache images
+  size_t mem_heap_bytes = 0;            // DEVICE_LOCAL heap sum, probed once
+  size_t ring_alloc_bytes() const noexcept;
+  size_t device_memory_total_bytes() const noexcept;
 };
 
 namespace {
@@ -1229,6 +1328,10 @@ void VulkanRenderer::Impl::cleanup_swapchain_resources_keep_handle() {
     vkFreeMemory(device, color_msaa_memory, nullptr);
     color_msaa_memory = VK_NULL_HANDLE;
   }
+  // Re-created by create_color_msaa_resources / create_depth_resources.
+  if (wds::common::perf::enabled()) {
+    mem_msaa_bytes = 0;
+  }
   if (depth_view) {
     vkDestroyImageView(device, depth_view, nullptr);
     depth_view = VK_NULL_HANDLE;
@@ -1241,6 +1344,7 @@ void VulkanRenderer::Impl::cleanup_swapchain_resources_keep_handle() {
     vkFreeMemory(device, depth_memory, nullptr);
     depth_memory = VK_NULL_HANDLE;
   }
+  mem_depth_bytes = 0;
   swapchain_images.clear();
   images_in_flight.clear();
   // Device is idle above, so no present wait is pending on these.
@@ -1342,6 +1446,7 @@ void VulkanRenderer::Impl::cleanup_swapchain() {
 }
 
 void VulkanRenderer::Impl::destroy_gpu_timestamp_pools() {
+#if WDS_DIAG_ENABLED
   if (device != VK_NULL_HANDLE) {
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
       if (gpu_timestamp_pools[static_cast<size_t>(i)] != VK_NULL_HANDLE) {
@@ -1354,9 +1459,11 @@ void VulkanRenderer::Impl::destroy_gpu_timestamp_pools() {
   }
   gpu_timestamps_recording = false;
   gpu_timestamp_cursor = 0;
+#endif  // WDS_DIAG_ENABLED
 }
 
 void VulkanRenderer::Impl::probe_gpu_timestamps() {
+#if WDS_DIAG_ENABLED
   if (gpu_timestamps_probed) {
     return;
   }
@@ -1390,20 +1497,19 @@ void VulkanRenderer::Impl::probe_gpu_timestamps() {
                            ? ~uint64_t{0}
                            : ((uint64_t{1} << gpu_timestamp_valid_bits) - 1ull);
   gpu_timestamps_supported = true;
-  wds::common::perf::stage_id("gpu.glow_hdr");
-  wds::common::perf::stage_id("gpu.late_hdr");
-  wds::common::perf::stage_id("gpu.opaque");
-  wds::common::perf::stage_id("gpu.carve");
-  wds::common::perf::stage_id("gpu.composite");
-  wds::common::perf::stage_id("gpu.total");
+  for (const GpuPhaseSeg& seg : kGpuPhaseSegs) {
+    wds::common::perf::stage_id(seg.name);
+  }
   if (!gpu_timestamps_logged) {
     gpu_timestamps_logged = true;
     WDS_LOG("gpu timestamps enabled timestampPeriod=%g timestampValidBits=%u\n",
             static_cast<double>(gpu_timestamp_period), gpu_timestamp_valid_bits);
   }
+#endif  // WDS_DIAG_ENABLED
 }
 
 bool VulkanRenderer::Impl::ensure_gpu_timestamp_pool(uint32_t frame) {
+#if WDS_DIAG_ENABLED
   if (frame >= static_cast<uint32_t>(kMaxFramesInFlight) || device == VK_NULL_HANDLE) {
     return false;
   }
@@ -1429,9 +1535,14 @@ bool VulkanRenderer::Impl::ensure_gpu_timestamp_pool(uint32_t frame) {
   gpu_timestamp_written[frame] = 0;
   gpu_timestamp_pending[frame] = false;
   return true;
+#else
+  (void)frame;
+  return false;
+#endif  // WDS_DIAG_ENABLED
 }
 
 int64_t VulkanRenderer::Impl::gpu_timestamp_delta_ns(uint64_t t0, uint64_t t1) const {
+#if WDS_DIAG_ENABLED
   t0 &= gpu_timestamp_mask;
   t1 &= gpu_timestamp_mask;
   if (t1 < t0) {
@@ -1443,9 +1554,15 @@ int64_t VulkanRenderer::Impl::gpu_timestamp_delta_ns(uint64_t t0, uint64_t t1) c
     return 0;
   }
   return static_cast<int64_t>(ns + 0.5);
+#else
+  (void)t0;
+  (void)t1;
+  return 0;
+#endif  // WDS_DIAG_ENABLED
 }
 
 void VulkanRenderer::Impl::reap_gpu_timestamps(uint32_t frame) {
+#if WDS_DIAG_ENABLED
   if (frame >= static_cast<uint32_t>(kMaxFramesInFlight) || device == VK_NULL_HANDLE) {
     return;
   }
@@ -1454,7 +1571,10 @@ void VulkanRenderer::Impl::reap_gpu_timestamps(uint32_t frame) {
   }
   gpu_timestamp_pending[frame] = false;
   const uint32_t n = gpu_timestamp_written[frame];
-  if (n < kGpuTimestampUsed || n > kGpuTimestampQueries) {
+  // Two points (start + at least one boundary) are enough to publish a frame.
+  // A frame that ran no carve/tail pass stops at main-end: the later segments
+  // read back as 0 ns and gpu_total is clamped to the last point written.
+  if (n <= kGpuStampStart || n > kGpuTimestampQueries) {
     return;
   }
   struct StampAvail {
@@ -1475,72 +1595,136 @@ void VulkanRenderer::Impl::reap_gpu_timestamps(uint32_t frame) {
     }
     return gpu_timestamp_delta_ns(stamps[a].ts, stamps[b].ts);
   };
-  const int64_t glow = delta(0, 1);
-  const int64_t late = delta(1, 2);
-  const int64_t opaque = delta(2, 3);
-  const int64_t carve = delta(3, 4);
-  const int64_t composite = delta(4, 5);
-  const int64_t total = delta(0, n - 1);
-
   last_gpu_segments.clear();
-  last_gpu_segments.reserve(6);
-  const std::pair<const char*, int64_t> segs[] = {
-      {"gpu.glow_hdr", glow}, {"gpu.late_hdr", late},     {"gpu.opaque", opaque},
-      {"gpu.carve", carve},   {"gpu.composite", composite}, {"gpu.total", total},
-  };
-  for (const auto& seg : segs) {
-    last_gpu_segments.push_back(seg);
-    wds::common::perf::add_ns(wds::common::perf::stage_id(seg.first), seg.second);
+  last_gpu_segments.reserve(kGpuPhaseSegCount);
+  // Single table drives both the write loop and this read-back mapping, so a
+  // label can never drift from the slot it measures.
+  for (const GpuPhaseSeg& seg : kGpuPhaseSegs) {
+    const int64_t ns = delta(seg.from, seg.to);
+    last_gpu_segments.emplace_back(seg.name, ns);
+    wds::common::perf::add_ns(wds::common::perf::stage_id(seg.name), ns);
   }
   if (!gpu_timestamps_sample_logged) {
     gpu_timestamps_sample_logged = true;
     WDS_LOG("gpu timestamps sample glow=%lld late=%lld opaque=%lld carve=%lld composite=%lld "
             "total=%lld ns\n",
-            static_cast<long long>(glow), static_cast<long long>(late),
-            static_cast<long long>(opaque), static_cast<long long>(carve),
-            static_cast<long long>(composite), static_cast<long long>(total));
+            static_cast<long long>(delta(kGpuStampStart, kGpuStampGlowEnd)),
+            static_cast<long long>(delta(kGpuStampGlowEnd, kGpuStampLateHdr)),
+            static_cast<long long>(delta(kGpuStampLateHdr, kGpuStampMainEnd)),
+            static_cast<long long>(delta(kGpuStampMainEnd, kGpuStampCarveEnd)),
+            static_cast<long long>(delta(kGpuStampCarveEnd, kGpuStampTailEnd)),
+            static_cast<long long>(delta(kGpuStampStart, kGpuStampTailEnd)));
   }
+
+  // One structured line per completed frame, only while perf is on. Release
+  // builds compile WDS_LOG down to the crash ring, so a measurement run reads
+  // this from stderr (the same channel as the other perf diagnostics).
+  // Phases with no stampable boundary inside a render pass print 0.
+  if (wds::common::perf::enabled()) {
+    const auto& cpu = gpu_phase_cpu[frame];
+    auto ms = [](int64_t ns) -> double { return ns > 0 ? static_cast<double>(ns) / 1e6 : 0.0; };
+    // Clamp the frame end to the last point actually written, so a frame
+    // without the carve/tail passes reports a real (non-negative) total.
+    uint32_t last_written = kGpuStampStart;
+    for (uint32_t q = 0; q < n; ++q) {
+      if (stamps[q].avail != 0) {
+        last_written = q;
+      }
+    }
+    const int64_t total_ns = delta(kGpuStampStart, last_written);
+    const int64_t plate_ns = delta(kGpuStampStart, kGpuStampGlowEnd);
+    const int64_t blit_ns = delta(kGpuStampMainEnd, kGpuStampBlitEnd);
+    const int64_t split_ns = delta(kGpuStampBlitEnd, kGpuStampCarveEnd);
+    const int64_t main_ns = delta(kGpuStampLateHdr, kGpuStampMainEnd);
+    const int64_t tail_ns = delta(kGpuStampCarveEnd, kGpuStampTailEnd);
+    std::fprintf(
+        stderr,
+        "GPUPHASE frame=%llu gpu_total_ms=%.3f split_ms=%.3f notes_ms=%.3f plate_ms=%.3f "
+        "bombs_ms=%.3f hud_ms=%.3f post_ms=%.3f draws_split=%lld verts_split=%zu "
+        "draws_total=%lld verts_total=%zu encode_ms=%.3f "
+        "draws_notes=%lld verts_notes=%zu blit_ms=%.3f main_ms=%.3f tail_ms=%.3f "
+        "mem_kb=%zu\n",
+        static_cast<unsigned long long>(cpu.frame_seq), ms(total_ns), ms(split_ns),
+        /*notes_ms: no stampable boundary, see above*/ 0.0, ms(plate_ns),
+        /*bombs_ms*/ 0.0, /*hud_ms*/ 0.0, /*post_ms*/ 0.0,
+        static_cast<long long>(cpu.draws_split), cpu.verts_split,
+        static_cast<long long>(cpu.draws_total), cpu.verts_total,
+        cpu.encode_us > 0 ? static_cast<double>(cpu.encode_us) / 1000.0 : 0.0,
+        static_cast<long long>(cpu.draws_notes), cpu.verts_notes,
+        ms(blit_ns), ms(main_ns), ms(tail_ns),
+        device_memory_total_bytes() / 1024);
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 bool VulkanRenderer::Impl::begin_gpu_timestamps(uint32_t frame, VkCommandBuffer cmd) {
+#if WDS_DIAG_ENABLED
   gpu_timestamps_recording = false;
   gpu_timestamp_cursor = 0;
+  gpu_timestamp_last_index = -1;
   if (!wds::common::perf::enabled() || cmd == VK_NULL_HANDLE) {
     return false;
   }
   if (!ensure_gpu_timestamp_pool(frame)) {
     return false;
   }
+  // This slot's fence was just waited on, so anything pending was reaped. Clear
+  // again so an aborted frame (returns before commit) cannot publish stale
+  // numbers from the previous submit into this slot's GPUPHASE line.
+  gpu_timestamp_pending[frame] = false;
   vkCmdResetQueryPool(cmd, gpu_timestamp_pools[frame], 0, kGpuTimestampQueries);
   gpu_timestamps_recording = true;
   gpu_timestamp_cursor = 0;
+  gpu_timestamp_last_index = -1;
   gpu_timestamp_frame = frame;
   return true;
+#else
+  (void)frame;
+  (void)cmd;
+  return false;
+#endif  // WDS_DIAG_ENABLED
 }
 
-void VulkanRenderer::Impl::write_gpu_timestamp(VkCommandBuffer cmd, VkPipelineStageFlagBits stage) {
+void VulkanRenderer::Impl::write_gpu_timestamp_at(VkCommandBuffer cmd, uint32_t index) {
+#if WDS_DIAG_ENABLED
   if (!gpu_timestamps_recording || cmd == VK_NULL_HANDLE) {
     return;
   }
-  if (gpu_timestamp_cursor >= kGpuTimestampQueries) {
+  if (index >= kGpuStampCount) {
     return;
   }
   if (gpu_timestamp_frame >= static_cast<uint32_t>(kMaxFramesInFlight) ||
       gpu_timestamp_pools[gpu_timestamp_frame] == VK_NULL_HANDLE) {
     return;
   }
-  vkCmdWriteTimestamp(cmd, stage, gpu_timestamp_pools[gpu_timestamp_frame], gpu_timestamp_cursor);
-  ++gpu_timestamp_cursor;
+  if (static_cast<int32_t>(index) <= gpu_timestamp_last_index) {
+    return;
+  }
+  // Fill any skipped point at the current boundary so query index always equals
+  // the table position (a skipped phase then reads back as 0 ns).
+  for (uint32_t q = gpu_timestamp_cursor; q <= index; ++q) {
+    if (q >= kGpuTimestampQueries) {
+      return;
+    }
+    vkCmdWriteTimestamp(cmd, kGpuStampStages[q], gpu_timestamp_pools[gpu_timestamp_frame], q);
+  }
+  gpu_timestamp_cursor = index + 1;
+  gpu_timestamp_last_index = static_cast<int32_t>(index);
+#endif  // WDS_DIAG_ENABLED
 }
 
 void VulkanRenderer::Impl::commit_gpu_timestamps(uint32_t frame) {
+#if WDS_DIAG_ENABLED
   if (!gpu_timestamps_recording || frame >= static_cast<uint32_t>(kMaxFramesInFlight)) {
     gpu_timestamps_recording = false;
     return;
   }
   gpu_timestamp_written[frame] = gpu_timestamp_cursor;
-  gpu_timestamp_pending[frame] = gpu_timestamp_cursor >= 2;
+  gpu_timestamp_pending[frame] = gpu_timestamp_cursor > kGpuStampStart;
   gpu_timestamps_recording = false;
+#else
+  (void)frame;
+#endif  // WDS_DIAG_ENABLED
 }
 
 UploadResult VulkanRenderer::Impl::begin_one_time(VkCommandBuffer* out_cmd) {
@@ -1798,6 +1982,9 @@ bool VulkanRenderer::Impl::create_depth_resources() {
     return false;
   }
   vkBindImageMemory(device, depth_image, depth_memory, 0);
+  if (wds::common::perf::enabled()) {
+    mem_depth_bytes = static_cast<size_t>(req.size);
+  }
 
   VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view_info.image = depth_image;
@@ -1839,6 +2026,9 @@ bool VulkanRenderer::Impl::create_color_msaa_resources() {
     return false;
   }
   vkBindImageMemory(device, color_msaa_image, color_msaa_memory, 0);
+  if (wds::common::perf::enabled()) {
+    mem_msaa_bytes = static_cast<size_t>(req.size);
+  }
 
   VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view_info.image = color_msaa_image;
@@ -1892,6 +2082,7 @@ void VulkanRenderer::Impl::destroy_export_hdr_resources() {
     export_hdr_late_view = VK_NULL_HANDLE;
     export_hdr_late_image = VK_NULL_HANDLE;
     export_hdr_late_memory = VK_NULL_HANDLE;
+    mem_export_hdr_bytes = 0;
     return;
   }
   auto free_hdr_desc = [&](VkDescriptorSet& desc, VkDescriptorPool& pool) {
@@ -1941,10 +2132,12 @@ void VulkanRenderer::Impl::destroy_export_hdr_resources() {
     vkFreeMemory(device, export_hdr_late_memory, nullptr);
     export_hdr_late_memory = VK_NULL_HANDLE;
   }
+  mem_export_hdr_bytes = 0;
 }
 
 void VulkanRenderer::Impl::destroy_export_target() {
   destroy_export_hdr_resources();
+  mem_export_bytes = 0;
   if (device == VK_NULL_HANDLE) {
     export_fb = VK_NULL_HANDLE;
     export_bloom_fb = VK_NULL_HANDLE;
@@ -2011,6 +2204,7 @@ void VulkanRenderer::Impl::destroy_export_staging() {
     export_write = 0;
     export_read = 0;
     export_pending = 0;
+    mem_export_staging_bytes = 0;
     return;
   }
   for (auto& slot : export_ring) {
@@ -2028,6 +2222,7 @@ void VulkanRenderer::Impl::destroy_export_staging() {
     }
     slot = {};
   }
+  mem_export_staging_bytes = 0;
   export_write = 0;
   export_read = 0;
   export_pending = 0;
@@ -2040,8 +2235,12 @@ bool VulkanRenderer::Impl::create_export_target() {
     return false;
   }
 
+  mem_export_bytes = 0;
+  mem_export_hdr_bytes = 0;
+  // create_export_target() starts by destroying the previous target, so both
+  // buckets are zero here and the allocations below only ever accumulate.
   auto alloc_image = [&](VkFormat format, VkSampleCountFlagBits samples, VkImageUsageFlags usage,
-                         VkImage& image, VkDeviceMemory& memory) -> bool {
+                         VkImage& image, VkDeviceMemory& memory, size_t& bytes_out) -> bool {
     VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.extent = {export_extent.width, export_extent.height, 1};
@@ -2070,6 +2269,9 @@ bool VulkanRenderer::Impl::create_export_target() {
       return false;
     }
     vkBindImageMemory(device, image, memory, 0);
+    if (wds::common::perf::enabled()) {
+      bytes_out += static_cast<size_t>(req.size);
+    }
     return true;
   };
   auto make_view = [&](VkImage image, VkFormat format, VkImageAspectFlags aspect,
@@ -2088,20 +2290,20 @@ bool VulkanRenderer::Impl::create_export_target() {
                                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (!alloc_image(swapchain_format, VK_SAMPLE_COUNT_1_BIT, color_usage, export_image,
-                   export_memory) ||
+                   export_memory, mem_export_bytes) ||
       !make_view(export_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT, export_view)) {
     destroy_export_target();
     return false;
   }
   if (!alloc_image(depth_format, msaa_samples, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                   export_depth_image, export_depth_memory) ||
+                   export_depth_image, export_depth_memory, mem_export_bytes) ||
       !make_view(export_depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, export_depth_view)) {
     destroy_export_target();
     return false;
   }
   if (msaa_samples != VK_SAMPLE_COUNT_1_BIT) {
     if (!alloc_image(swapchain_format, msaa_samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                     export_msaa_image, export_msaa_memory) ||
+                     export_msaa_image, export_msaa_memory, mem_export_bytes) ||
         !make_view(export_msaa_image, swapchain_format, VK_IMAGE_ASPECT_COLOR_BIT,
                    export_msaa_view)) {
       destroy_export_target();
@@ -2150,7 +2352,8 @@ bool VulkanRenderer::Impl::create_export_target() {
                                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     auto alloc_hdr = [&](VkImage& image, VkDeviceMemory& memory, VkImageView& view,
                          VkFramebuffer& fb, VkDescriptorSet& desc, VkDescriptorPool& pool) -> bool {
-      if (!alloc_image(bloom_src_format, VK_SAMPLE_COUNT_1_BIT, hdr_usage, image, memory) ||
+      if (!alloc_image(bloom_src_format, VK_SAMPLE_COUNT_1_BIT, hdr_usage, image, memory,
+                       mem_export_hdr_bytes) ||
           !make_view(image, bloom_src_format, VK_IMAGE_ASPECT_COLOR_BIT, view)) {
         return false;
       }
@@ -2207,6 +2410,7 @@ bool VulkanRenderer::Impl::create_export_staging(uint32_t width, uint32_t height
   } else {
     return true;
   }
+  mem_export_staging_bytes = 0;
   for (auto& slot : export_ring) {
     VkBufferCreateInfo buf_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buf_info.size = buf_bytes;
@@ -2234,6 +2438,9 @@ bool VulkanRenderer::Impl::create_export_staging(uint32_t width, uint32_t height
         vkMapMemory(device, slot.memory, 0, VK_WHOLE_SIZE, 0, &slot.mapped) != VK_SUCCESS) {
       destroy_export_staging();
       return false;
+    }
+    if (wds::common::perf::enabled()) {
+      mem_export_staging_bytes += static_cast<size_t>(req.size);
     }
     slot.row_pitch = row_pitch;
     slot.size = buf_bytes;
@@ -3120,6 +3327,33 @@ void VulkanRenderer::Impl::destroy_frame_vertices() {
   }
 }
 
+// Sum of the per-frame VB/IB ring allocations, including their staging mirrors
+// when a slot fell back to DEVICE_LOCAL + staging. Cheap: sizes are cached on
+// the slot at allocation time, so this never calls the driver.
+size_t VulkanRenderer::Impl::ring_alloc_bytes() const noexcept {
+  size_t total = 0;
+  auto add = [&](const FrameVertexBuffer& slot) {
+    if (slot.buffer != VK_NULL_HANDLE) {
+      total += slot.capacity_bytes;
+    }
+    if (slot.uses_staging && slot.staging_buffer != VK_NULL_HANDLE) {
+      total += slot.capacity_bytes;
+    }
+  };
+  for (const auto& slot : frame_vertices) {
+    add(slot);
+  }
+  for (const auto& slot : frame_indices) {
+    add(slot);
+  }
+  return total;
+}
+
+size_t VulkanRenderer::Impl::device_memory_total_bytes() const noexcept {
+  return mem_depth_bytes + mem_msaa_bytes + mem_bloom_hdr_bytes + mem_export_bytes +
+         mem_export_hdr_bytes + mem_export_staging_bytes + mem_texture_bytes + ring_alloc_bytes();
+}
+
 TextureId VulkanRenderer::Impl::alloc_texture_slot() {
   for (size_t i = 1; i < textures.size(); ++i) {
     // Pending-destroy slots still hold live GPU images — do not reuse.
@@ -3159,6 +3393,9 @@ void VulkanRenderer::Impl::destroy_gpu_texture_resources(GpuTexture& tex) {
   if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
   if (tex.image) vkDestroyImage(device, tex.image, nullptr);
   if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
+  if (wds::common::perf::enabled()) {
+    mem_texture_bytes -= std::min(mem_texture_bytes, tex.alloc_bytes);
+  }
   tex = GpuTexture{};
 }
 
@@ -3326,6 +3563,10 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
   };
   auto cleanup_tex = [&]() {
     release_texture_descriptor(tex);
+    if (wds::common::perf::enabled()) {
+      mem_texture_bytes -= std::min(mem_texture_bytes, tex.alloc_bytes);
+    }
+    tex.alloc_bytes = 0;
     if (tex.view != VK_NULL_HANDLE) {
       vkDestroyImageView(device, tex.view, nullptr);
       tex.view = VK_NULL_HANDLE;
@@ -3426,6 +3667,10 @@ UploadResult VulkanRenderer::Impl::upload_texture_pixels(GpuTexture& tex, Textur
       make_upload_result(vkBindImageMemory(device, tex.image, tex.memory, 0), UploadStage::Bind);
   if (!image_bound.ok()) {
     return fail_all(image_bound);
+  }
+  if (wds::common::perf::enabled()) {
+    tex.alloc_bytes = static_cast<size_t>(req.size);
+    mem_texture_bytes += tex.alloc_bytes;
   }
 
   VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -4042,6 +4287,7 @@ void VulkanRenderer::Impl::destroy_bloom_resources() {
     hdr_late_image = VK_NULL_HANDLE;
     hdr_late_memory = VK_NULL_HANDLE;
     bloom_extent = {};
+    mem_bloom_hdr_bytes = 0;
     return;
   }
   if (bloom_extract_fb) {
@@ -4084,6 +4330,7 @@ void VulkanRenderer::Impl::destroy_bloom_resources() {
     vkFreeMemory(device, hdr_late_memory, nullptr);
     hdr_late_memory = VK_NULL_HANDLE;
   }
+  mem_bloom_hdr_bytes = 0;
   bloom_extent = {};
 }
 
@@ -4681,6 +4928,9 @@ bool VulkanRenderer::Impl::create_bloom_resources(VkExtent2D extent) {
     return false;
   }
   vkBindImageMemory(device, bloom_src_image, bloom_src_memory, 0);
+  if (wds::common::perf::enabled()) {
+    mem_bloom_hdr_bytes = static_cast<size_t>(req.size);
+  }
 
   VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view_info.image = bloom_src_image;
@@ -4737,6 +4987,9 @@ bool VulkanRenderer::Impl::create_bloom_resources(VkExtent2D extent) {
       return false;
     }
     vkBindImageMemory(device, hdr_late_image, hdr_late_memory, 0);
+    if (wds::common::perf::enabled()) {
+      mem_bloom_hdr_bytes += static_cast<size_t>(late_req.size);
+    }
     view_info.image = hdr_late_image;
     if (vkCreateImageView(device, &view_info, nullptr, &hdr_late_view) != VK_SUCCESS) {
       return false;
@@ -5577,6 +5830,18 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
     if (impl_->persistent_index_ring_max_bytes < impl_->persistent_index_ring_bytes) {
       impl_->persistent_index_ring_max_bytes = impl_->persistent_index_ring_bytes;
     }
+    // One-shot heap size for GPU-memory attribution. Never queried per frame.
+    {
+      VkPhysicalDeviceMemoryProperties mem_props{};
+      vkGetPhysicalDeviceMemoryProperties(impl_->physical, &mem_props);
+      size_t heap_total = 0;
+      for (uint32_t h = 0; h < mem_props.memoryHeapCount; ++h) {
+        if ((mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+          heap_total += static_cast<size_t>(mem_props.memoryHeaps[h].size);
+        }
+      }
+      impl_->mem_heap_bytes = heap_total;
+    }
     WDS_LOG("selected GPU='%s' type=%s vendor=0x%x api=%u.%u.%u drv=%u.%u.%u "
             "queue_family=%u msaa=%u vb_ring=%zu vb_ring_max=%zu ib_ring=%zu ib_ring_max=%zu "
             "atom=%llu\n",
@@ -5983,7 +6248,39 @@ VulkanRenderer::DrawFrameCpuDiag VulkanRenderer::last_draw_cpu() const noexcept 
   out.push_consts = impl_->last_push_consts;
   out.render_passes = impl_->last_render_passes;
   out.vb_binds = impl_->last_vb_binds;
+  out.draws_split = impl_->last_draws_split;
+  out.verts_split = impl_->last_verts_split;
+  out.draws_notes = impl_->last_draws_notes;
+  out.verts_notes = impl_->last_verts_notes;
+  out.draws_rest = impl_->last_draws_rest;
+  out.verts_rest = impl_->last_verts_rest;
   return out;
+}
+
+VulkanRenderer::DeviceMemorySnapshot VulkanRenderer::device_memory() const noexcept {
+  DeviceMemorySnapshot out;
+  if (impl_ == nullptr) {
+    return out;
+  }
+  out.depth_bytes = impl_->mem_depth_bytes;
+  out.msaa_bytes = impl_->mem_msaa_bytes;
+  out.bloom_hdr_bytes = impl_->mem_bloom_hdr_bytes;
+  out.export_bytes = impl_->mem_export_bytes + impl_->mem_export_hdr_bytes +
+                     impl_->mem_export_staging_bytes;
+  out.vertex_ring_bytes = impl_->ring_alloc_bytes();
+  out.texture_bytes = impl_->mem_texture_bytes;
+  out.heap_bytes = impl_->mem_heap_bytes;
+  out.total_bytes = impl_->device_memory_total_bytes();
+  return out;
+}
+
+size_t VulkanRenderer::device_memory_bytes() const noexcept {
+#if WDS_DIAG_ENABLED
+  return impl_ != nullptr ? impl_->device_memory_total_bytes() : 0;
+#else
+  (void)impl_;
+  return 0;  // Diagnostic symbol: device-memory accounting is off without diagnostics.
+#endif  // WDS_DIAG_ENABLED
 }
 
 const std::vector<std::pair<const char*, int64_t>>& VulkanRenderer::last_gpu_segments() const {
@@ -6976,16 +7273,18 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                          0, 0, nullptr, 1, &barrier, 0, nullptr);
   }
   const bool gpu_time = impl_->begin_gpu_timestamps(frame, cmd);
-  auto gpu_stamp = [&](VkPipelineStageFlagBits stage) {
+  auto gpu_stamp = [&](uint32_t index) {
     if (gpu_time) {
-      impl_->write_gpu_timestamp(cmd, stage);
+      impl_->write_gpu_timestamp_at(cmd, index);
     }
   };
   // Timestamp queries stay outside render passes (MoltenVK/Apple may only
-  // resolve them at encoder boundaries). Shared-pass draws are timed as one
-  // segment: glow extract, late extract, main (opaque+mid+HDR+inline post),
-  // carve blit+extract, carve tail composite/post.
-  gpu_stamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+  // resolve them at encoder boundaries), so every stamp below sits between
+  // passes. Draws that share a pass cannot be separated on the GPU: the main
+  // pass carries scene bg + notes + plate tail + bombs + HUD/post, the tail pass
+  // carries the post-carve bombs + HUD/post. Those groups are attributed on the
+  // CPU side instead (DrawFrameCpuDiag::draws_split/notes/rest).
+  gpu_stamp(Impl::kGpuStampStart);
 
   float mvp[16];
   ortho_rh(screen.l, screen.r, screen.b, screen.t, -1.0f, 1.0f, mvp);
@@ -7022,8 +7321,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                                   static_cast<uint32_t>(early_verts), vb.buffer, mvp, glow_scissor,
                                   early_extract_fb, false, ib.buffer, extract_extent);
   }
-  gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-  gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  // End of the plate/line HDR extract pass. The duplicate stamp keeps the legacy
+  // gpu.late_hdr boundary at zero width; it used to be two consecutive stamps.
+  gpu_stamp(Impl::kGpuStampGlowEnd);
+  gpu_stamp(Impl::kGpuStampLateHdr);
 
   VkImage color_img = VK_NULL_HANDLE;
   VkFramebuffer main_fb = VK_NULL_HANDLE;
@@ -7090,11 +7391,39 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   uint32_t skipped_buckets = 0;
   uint32_t skipped_verts = 0;
   int64_t vk_draws = 0;
+  // Per-group CPU attribution of this frame's submissions (diagnostics only:
+  // plain counters, no clocks, filled whether or not perf is enabled).
+  struct GroupDrawStat {
+    int64_t draws = 0;
+    uint32_t verts = 0;
+  };
+  // Only notes and split are named groups; everything else is "rest", derived
+  // by subtraction from the frame totals so the three always add up.
+  // The per-draw increments live inside the existing draw loop (two register
+  // adds, no clock/allocation/Vulkan call). The extra O(buckets) walk below is
+  // diagnostics-only and stays behind perf::enabled().
+  GroupDrawStat stat_notes;
+  GroupDrawStat stat_split;
+  auto visible_bucket_verts = [&](const std::vector<GpuDrawBucket>& src) -> uint32_t {
+    if (!wds::common::perf::enabled()) {
+      return 0;
+    }
+    uint32_t n = 0;
+    for (const auto& b : src) {
+      if ((b.vert_count == 0 && b.index_count == 0) || b.texture == kInvalidTextureId ||
+          b.texture >= impl_->textures.size() || !impl_->textures[b.texture].alive) {
+        continue;
+      }
+      n += b.vert_count;
+    }
+    return n;
+  };
   auto draw_gpu_buckets = [&](VkPipeline pipeline, const std::vector<GpuDrawBucket>& src,
                              VkPipeline syuriken_pipe = VK_NULL_HANDLE,
-                             VkPipeline no_clip_pipe = VK_NULL_HANDLE) {
+                             VkPipeline no_clip_pipe = VK_NULL_HANDLE) -> GroupDrawStat {
+    GroupDrawStat stat;
     if (gpu_buckets_vert_count(src) == 0) {
-      return;
+      return stat;
     }
     VkPipeline bound = VK_NULL_HANDLE;
     TextureId bound_tex = kInvalidTextureId;
@@ -7157,7 +7486,12 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
         vkCmdDraw(cmd, bucket.vert_count, 1, bucket.first_vertex, 0);
       }
       ++vk_draws;
+      ++stat.draws;
+      // Vertex count, not index count: verts_* must share units with
+      // DrawBatch::vertex_count / total_verts, which sized the ring upload.
+      stat.verts += bucket.vert_count;
     }
+    return stat;
   };
 
   auto apply_additive_scissor = [&]() {
@@ -7177,7 +7511,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     vkCmdSetScissor(cmd, 0, 1, &add_scissor);
   };
 
-  draw_gpu_buckets(impl_->pipeline, scene_gpu);
+  {
+    WDS_PERF_SCOPE("vk.encode.scene");
+    (void)draw_gpu_buckets(impl_->pipeline, scene_gpu);
+  }
   auto composite_hdr = [&](VkDescriptorSet desc, VkPipeline pipe) {
     if (pipe == VK_NULL_HANDLE) {
       return;
@@ -7198,9 +7535,11 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   };
   // Official SortingGroup 20 > Note sortingOrder 10: notes first, then Add.
   if (mid_verts > 0) {
-    draw_gpu_buckets(impl_->pipeline_alpha_soft != VK_NULL_HANDLE ? impl_->pipeline_alpha_soft
-                                                                : impl_->pipeline,
-                    mid_gpu);
+    WDS_PERF_SCOPE("vk.encode.notes");
+    stat_notes = draw_gpu_buckets(impl_->pipeline_alpha_soft != VK_NULL_HANDLE
+                                      ? impl_->pipeline_alpha_soft
+                                      : impl_->pipeline,
+                                  mid_gpu);
   }
   const bool hdr_early = (use_export_hdr || use_live_hdr) &&
                          impl_->pipeline_hdr_composite != VK_NULL_HANDLE &&
@@ -7208,9 +7547,10 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   if (hdr_early) {
     composite_hdr(early_desc, impl_->pipeline_hdr_composite);
   } else if (early_verts > 0 && impl_->pipeline_additive) {
+    WDS_PERF_SCOPE("vk.encode.plate");
     apply_additive_scissor();
-    draw_gpu_buckets(impl_->pipeline_additive, early_gpu, impl_->pipeline_syuriken_add,
-                     impl_->pipeline_additive_no_clip);
+    (void)draw_gpu_buckets(impl_->pipeline_additive, early_gpu, impl_->pipeline_syuriken_add,
+                           impl_->pipeline_additive_no_clip);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
   const bool scene_carve_ok = carve_verts > 0 && impl_->hdr_can_scene_carve &&
@@ -7227,34 +7567,37 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   const bool hits_in_tail = scene_carve_ok && additive_verts > 0 &&
                             impl_->pipeline_additive_1x != VK_NULL_HANDLE;
   if (!scene_carve_ok && carve_verts > 0 && impl_->pipeline_additive) {
+    WDS_PERF_SCOPE("vk.encode.split");
     apply_additive_scissor();
-    draw_gpu_buckets(impl_->pipeline_additive, carve_gpu, impl_->pipeline_syuriken_add,
-                     impl_->pipeline_additive_no_clip);
+    stat_split = draw_gpu_buckets(impl_->pipeline_additive, carve_gpu,
+                                  impl_->pipeline_syuriken_add, impl_->pipeline_additive_no_clip);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
   if (!hits_in_tail && additive_verts > 0 && impl_->pipeline_additive) {
+    WDS_PERF_SCOPE("vk.encode.bombs");
     apply_additive_scissor();
-    draw_gpu_buckets(impl_->pipeline_additive, additive_gpu, VK_NULL_HANDLE,
-                     impl_->pipeline_additive_no_clip);
+    (void)draw_gpu_buckets(impl_->pipeline_additive, additive_gpu, VK_NULL_HANDLE,
+                           impl_->pipeline_additive_no_clip);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
   }
   const bool overlays_after_carve = scene_carve_ok && impl_->pipeline_alpha_1x != VK_NULL_HANDLE;
   // Timing/combo HUD and editor chrome stay after carve REPLACE so dest+signed
   // Add cannot cover them. Without carve they stay in this pass, after bombs.
   if (!overlays_after_carve) {
+    WDS_PERF_SCOPE("vk.encode.hud");
     if (hud_verts > 0) {
-      draw_gpu_buckets(impl_->pipeline, hud_gpu);
+      (void)draw_gpu_buckets(impl_->pipeline, hud_gpu);
     }
     if (post_verts > 0) {
-      draw_gpu_buckets(impl_->pipeline, post_gpu);
+      (void)draw_gpu_buckets(impl_->pipeline, post_gpu);
     }
     if (post2_verts > 0) {
-      draw_gpu_buckets(impl_->pipeline, post2_gpu);
+      (void)draw_gpu_buckets(impl_->pipeline, post2_gpu);
     }
   }
 
   vkCmdEndRenderPass(cmd);
-  gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  gpu_stamp(Impl::kGpuStampMainEnd);
 
   if (scene_carve_ok) {
     image_barrier(cmd, color_img, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -7281,14 +7624,23 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                   VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-    impl_->record_glow_extract_gpu(cmd, carve_gpu.data(), carve_gpu.size(),
-                                  static_cast<uint32_t>(carve_verts), vb.buffer, mvp, glow_scissor,
-                                  carve_extract_fb, true, ib.buffer, extract_extent);
+    gpu_stamp(Impl::kGpuStampBlitEnd);
+    {
+      WDS_PERF_SCOPE("vk.encode.split");
+      // record_glow_extract_gpu bumps last_vk_draws itself; take the delta so the
+      // split group is attributed without touching that hot loop.
+      const int64_t draws_before = impl_->last_vk_draws;
+      impl_->record_glow_extract_gpu(cmd, carve_gpu.data(), carve_gpu.size(),
+                                    static_cast<uint32_t>(carve_verts), vb.buffer, mvp, glow_scissor,
+                                    carve_extract_fb, true, ib.buffer, extract_extent);
+      stat_split.draws = impl_->last_vk_draws - draws_before;
+      stat_split.verts = visible_bucket_verts(carve_gpu);
+    }
     image_barrier(cmd, color_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-    gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    gpu_stamp(Impl::kGpuStampCarveEnd);
     VkRenderPassBeginInfo tail{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     tail.renderPass = impl_->bloom_pass;
     tail.framebuffer = bloom_fb;
@@ -7314,30 +7666,59 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
       vkCmdSetViewport(cmd, 0, 1, &viewport);
     }
     if (hits_in_tail) {
+      WDS_PERF_SCOPE("vk.encode.bombs");
       apply_additive_scissor();
-      draw_gpu_buckets(impl_->pipeline_additive_1x, additive_gpu, VK_NULL_HANDLE, VK_NULL_HANDLE);
+      (void)draw_gpu_buckets(impl_->pipeline_additive_1x, additive_gpu, VK_NULL_HANDLE,
+                             VK_NULL_HANDLE);
       vkCmdSetScissor(cmd, 0, 1, &scissor);
     }
     if (overlays_after_carve) {
+      WDS_PERF_SCOPE("vk.encode.hud");
       if (hud_verts > 0) {
-        draw_gpu_buckets(impl_->pipeline_alpha_1x, hud_gpu);
+        (void)draw_gpu_buckets(impl_->pipeline_alpha_1x, hud_gpu);
       }
       if (post_verts > 0) {
-        draw_gpu_buckets(impl_->pipeline_alpha_1x, post_gpu);
+        (void)draw_gpu_buckets(impl_->pipeline_alpha_1x, post_gpu);
       }
       if (post2_verts > 0) {
-        draw_gpu_buckets(impl_->pipeline_alpha_1x, post2_gpu);
+        (void)draw_gpu_buckets(impl_->pipeline_alpha_1x, post2_gpu);
       }
     }
     vkCmdEndRenderPass(cmd);
-    gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-  } else {
-    gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-    gpu_stamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    gpu_stamp(Impl::kGpuStampTailEnd);
   }
+  // No carve pass: blit/carve/tail-end stay unsampled, so gpu.carve,
+  // gpu.split_particles and gpu.composite read back as 0 instead of as a bogus
+  // negative span (gpu.carve spans main-end..carve-end and would otherwise end
+  // before it starts). gpu.total is clamped to the last sampled point and
+  // therefore equals gpu.opaque on those frames.
 
   impl_->last_vk_draws += vk_draws;
   WDS_PERF_COUNT("vk.draws", vk_draws);
+  // Group attribution for last_draw_cpu(). split + notes + rest == totals by
+  // construction (rest is the remainder).
+  // last_vk_draws already carries every draw this frame recorded, including the
+  // ones record_glow_extract_gpu issued for the plate and carve extract passes.
+  // Vertices come from `total_verts`, the same count the upload sized itself
+  // from, so verts_total always matches what was pushed into the ring.
+  const int64_t frame_draws_total = impl_->last_vk_draws;
+  impl_->last_draws_split = stat_split.draws;
+  impl_->last_verts_split = stat_split.verts;
+  impl_->last_draws_notes = stat_notes.draws;
+  impl_->last_verts_notes = stat_notes.verts;
+  impl_->last_draws_rest =
+      std::max<int64_t>(0, frame_draws_total - impl_->last_draws_split - impl_->last_draws_notes);
+  impl_->last_verts_rest = static_cast<size_t>(
+      std::max<int64_t>(0, static_cast<int64_t>(total_verts) -
+                              static_cast<int64_t>(impl_->last_verts_split) -
+                              static_cast<int64_t>(impl_->last_verts_notes)));
+  impl_->last_frame_verts_total = total_verts;
+  // Same numbers through the shared perf path, so the window report attributes
+  // draw/vertex cost to the split batch and the note overlay as well.
+  WDS_PERF_COUNT("vk.draws.split", impl_->last_draws_split);
+  WDS_PERF_COUNT("vk.verts.split", static_cast<int64_t>(impl_->last_verts_split));
+  WDS_PERF_COUNT("vk.draws.notes", impl_->last_draws_notes);
+  WDS_PERF_COUNT("vk.verts.notes", static_cast<int64_t>(impl_->last_verts_notes));
 
   if (export_offscreen) {
     impl_->queue_export_copy(cmd, frame);
@@ -7346,8 +7727,26 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
   vkEndCommandBuffer(cmd);
   impl_->last_bloom_pass = hdr_early ? 1 : 0;
   impl_->last_carve_pass = scene_carve_ok ? 1 : 0;
+  // Reuses the existing record timer (no extra clock read on any path).
   impl_->last_draw_record_us =
       std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - record_t0).count();
+#if WDS_DIAG_ENABLED
+  impl_->last_encode_us = impl_->last_draw_record_us;
+  if (wds::common::perf::enabled()) {
+    // Pair this frame's CPU facts with the timestamps its slot will produce,
+    // which are only reaped frames_in_flight later. `frame` differs from
+    // frame_seq because aborted frames never submit.
+    auto& slot_cpu = impl_->gpu_phase_cpu[frame];
+    slot_cpu.frame_seq = impl_->frame_seq;
+    slot_cpu.draws_split = impl_->last_draws_split;
+    slot_cpu.verts_split = impl_->last_verts_split;
+    slot_cpu.draws_notes = impl_->last_draws_notes;
+    slot_cpu.verts_notes = impl_->last_verts_notes;
+    slot_cpu.draws_total = impl_->last_vk_draws;
+    slot_cpu.verts_total = impl_->last_frame_verts_total;
+    slot_cpu.encode_us = impl_->last_encode_us;
+  }
+#endif  // WDS_DIAG_ENABLED
 
   VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};

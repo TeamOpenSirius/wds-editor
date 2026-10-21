@@ -24,6 +24,10 @@ struct SplitEvalCarryStats {
   std::uint64_t walk_hits = 0;
   std::uint64_t walk_misses = 0;
   std::uint64_t walk_commits = 0;
+  // B1 rewind history (diagnostics; 0 until history is enabled).
+  std::uint64_t rewind_hits = 0;
+  std::uint64_t rewind_misses = 0;
+  std::uint64_t rewind_bytes = 0;
 };
 
 struct SystemCarryKey {
@@ -67,8 +71,13 @@ struct SystemCarrySnapshot {
 };
 
 bool split_eval_carry_enabled() noexcept;
+// B1: bounded rewind history is opt-in (WDS_SPLIT_REWIND=1).
+bool split_eval_carry_rewind_enabled() noexcept;
 float split_eval_carry_max_gap() noexcept;
 void split_eval_carry_clear() noexcept;
+// Seek path: drop the current forward snapshot but keep the bounded rewind
+// history (B1). Doc/quality/epoch invalidation still uses the full clear.
+void split_eval_carry_clear_current_keep_rewind() noexcept;
 void split_eval_carry_bump_epoch() noexcept;
 void split_eval_carry_precommit(std::size_t entries_per_shard,
                                 std::size_t walk_per_shard) noexcept;
@@ -88,6 +97,9 @@ bool split_eval_carry_lookup(const SystemCarryKey& key, SystemCarrySnapshot& out
 // Current snapshot only; resume if now is forward within max_gap.
 bool split_eval_carry_lookup_for_now(const SystemCarryKey& key, float now,
                                      SystemCarrySnapshot& out) noexcept;
+// Forward current snapshot first, then the newest rewind history <= now.
+bool split_eval_carry_lookup_for_time(const SystemCarryKey& key, float now,
+                                      SystemCarrySnapshot& out) noexcept;
 void split_eval_carry_store(const SystemCarryKey& key, float now_t,
                             std::vector<CarryParticle>&& parts, int next_birth = 0) noexcept;
 void split_eval_carry_drop(const SystemCarryKey& key) noexcept;

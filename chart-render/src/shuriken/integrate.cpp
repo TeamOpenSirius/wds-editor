@@ -6,6 +6,8 @@
 #include <wds/chart_render/shuriken/curve.hpp>
 #include <wds/chart_render/split_effect_catalog.hpp>
 
+#include <wds/chart_render/split_effect_particles.hpp>
+
 #include <wds/common/perf_stages.hpp>
 
 #include <wds/core/gimmick.hpp>
@@ -486,10 +488,12 @@ bool split_integrator_is_legacy() noexcept {
 
 void set_split_integrator_legacy_for_tests(bool legacy) noexcept {
   g_legacy_override = legacy ? LegacyOverride::Legacy : LegacyOverride::Grid;
+  bump_eval_system_hash_config_generation();
 }
 
 void set_integration_hz_for_tests(float hz) noexcept {
   g_hz_override = hz;
+  bump_eval_system_hash_config_generation();
 }
 
 float integration_candidate_hz() noexcept {
@@ -1056,6 +1060,9 @@ void PoseIntegrator::sample_legacy(float age, float& world_x, float& main_y, flo
   apply_epilogue(hot_->lx, hot_->ly, hot_->lz, world_x, main_y, world_z);
   publish_sample(observe_age_, trace);
   WDS_PERF_COUNT("shuriken.integrate.steps", steps);
+#if WDS_DIAG_ENABLED
+  split_diag_add_count(SplitDiagCount::Steps, steps);
+#endif  // WDS_DIAG_ENABLED
   reset_to_birth();
 }
 
@@ -1369,6 +1376,9 @@ void PoseIntegrator::sample(float age, float& world_x, float& main_y, float& wor
   }
   maybe_store();
   WDS_PERF_COUNT("shuriken.integrate.steps", ran);
+#if WDS_DIAG_ENABLED
+  split_diag_add_count(SplitDiagCount::Steps, ran);
+#endif  // WDS_DIAG_ENABLED
 }
 
 void PoseIntegrator::finite_difference(float age, float dt, float x0, float y0, float z0, float& vx,

@@ -5,6 +5,7 @@
 
 #include <wds/common/crash_handler.hpp>
 #include <wds/common/minflt_stage.hpp>
+#include <wds/common/perf_stages.hpp>
 #include <wds/common/time.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/jacket_image.hpp>
@@ -39,6 +40,7 @@
 namespace wds::ui {
 namespace {
 
+#if WDS_DIAG_ENABLED
 long process_minflt() noexcept {
 #ifndef _WIN32
   rusage ru{};
@@ -48,16 +50,54 @@ long process_minflt() noexcept {
 #endif
   return 0;
 }
+#endif  // WDS_DIAG_ENABLED
 
-std::vector<wds::chart_editor::PreviewSplitLaneInstance> collect_steady_split_lanes(
+uint64_t hash_steady_lane_config(const wds::chart_editor::PreviewConfig& cfg) noexcept {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  auto mix_f = [&](float f) {
+    uint32_t u = 0;
+    std::memcpy(&u, &f, sizeof(u));
+    mix(static_cast<uint64_t>(u));
+  };
+  mix(static_cast<uint64_t>(cfg.lane_count));
+  mix_f(static_cast<float>(cfg.note_speed));
+  mix_f(cfg.lane_border_width);
+  mix_f(cfg.note_width_per_lane);
+  mix_f(cfg.judge_line_y);
+  mix_f(cfg.spawn_y);
+  mix_f(cfg.note_approach_seconds);
+  mix_f(cfg.split_line_animation_start_sec);
+  mix_f(cfg.split_line_animation_end_sec);
+  return h;
+}
+
+// Steady split instances do not depend on chart time. Rebuilding the full
+// gimmick list every paused tick was pure repeated work; key it on the
+// document generation plus the PreviewConfig fields SplitLaneSimulator reads.
+const std::vector<wds::chart_editor::PreviewSplitLaneInstance>& collect_steady_split_lanes(
     const wds::chart_editor::ChartEditorEngine& engine) {
+  struct Cache {
+    uint64_t doc_gen = ~uint64_t{0};
+    uint64_t cfg_hash = 0;
+    std::vector<wds::chart_editor::PreviewSplitLaneInstance> out;
+  };
+  static thread_local Cache cache;
+  const uint64_t doc_gen = engine.document().content_generation();
+  const uint64_t cfg_hash = hash_steady_lane_config(engine.preview_config());
+  if (cache.doc_gen == doc_gen && cache.cfg_hash == cfg_hash) {
+    return cache.out;
+  }
   std::vector<int32_t> ids;
   const auto& doc = engine.document();
   doc.index().query_split_lanes_up_to(std::numeric_limits<int64_t>::max(), ids);
   wds::chart_editor::SplitLaneSimulator sim(engine.preview_config());
   const auto& timing = doc.timing();
-  std::vector<wds::chart_editor::PreviewSplitLaneInstance> out;
-  out.reserve(ids.size());
+  cache.out.clear();
+  cache.out.reserve(ids.size());
   for (int32_t id : ids) {
     const auto note = doc.find_note(id);
     if (!note || !wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) {
@@ -68,9 +108,11 @@ std::vector<wds::chart_editor::PreviewSplitLaneInstance> collect_steady_split_la
     if (inst.split_count <= 0) {
       continue;
     }
-    out.push_back(inst);
+    cache.out.push_back(inst);
   }
-  return out;
+  cache.doc_gen = doc_gen;
+  cache.cfg_hash = cfg_hash;
+  return cache.out;
 }
 
 std::vector<wds::chart_editor::PreviewSplitLaneInstance> collect_splits_at(
@@ -313,7 +355,30 @@ void ChartPreviewPanel::resize_framebuffer(int width, int height) {
   if (video_export_clock_) {
     return;
   }
+  // UiManager::resize_preview_viewport runs from the frame callback on every
+  // frame, so this is a hot entry, not a rare user resize. Only take a clock
+  // and emit a MEMSTEP row when the size actually changed; otherwise the
+  // diagnostics themselves would sample task_info + walk every batch per frame.
+#if WDS_DIAG_ENABLED
+  const bool size_changed = width != last_resize_fb_w_ || height != last_resize_fb_h_;
+  last_resize_fb_w_ = width;
+  last_resize_fb_h_ = height;
+  const bool step_diag = size_changed && wds::common::perf::enabled();
+  const auto resize_t0 =
+      step_diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#endif  // WDS_DIAG_ENABLED
   preview_.resize(width, height);
+  mark_present_dirty();
+  // MEMSTEP: swapchain + stage-geometry rebuild also clears lane_geom_pool_
+  // (invalidate_lane_geom_cache), so this row is the retained-buffer delta
+  // for a viewport change. No clock read when diagnostics are off.
+#if WDS_DIAG_ENABLED
+  if (step_diag) {
+    preview_.diag_resize(std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - resize_t0)
+                             .count());
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void ChartPreviewPanel::apply_export_geometry(int pixel_w, int pixel_h) {
@@ -340,13 +405,22 @@ void ChartPreviewPanel::set_content_bounds(int x, int y, int width, int height) 
   preview_.geometry().set_content_rect(content_x_, content_y_, content_width_, content_height_);
   if (changed) {
     preview_.invalidate_lane_geom_cache();
+    mark_present_dirty();
   }
 }
 
 void ChartPreviewPanel::set_panel_bounds(int x, int y, int width, int height) noexcept {
   if (video_export_clock_) return;
+  const bool changed = x != panel_x_ || y != panel_y_ || width != panel_fb_w_ ||
+                       height != panel_h_;
+  panel_x_ = x;
+  panel_y_ = y;
   panel_fb_w_ = std::max(0, width);
+  panel_h_ = height;
   preview_.geometry().set_panel_rect(x, y, width, height);
+  if (changed) {
+    mark_present_dirty();
+  }
 }
 
 void ChartPreviewPanel::sync_ui_font_texture() {
@@ -372,7 +446,9 @@ void ChartPreviewPanel::join_speculative_split_collect() {
 }
 
 void ChartPreviewPanel::request_buffer_precommit(bool fill_now) {
+#if WDS_DIAG_ENABLED
   const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
   const auto& doc = engine_.document();
   const auto& timing = doc.timing();
   const int64_t appear_ms = wds::chart_editor::split_fade_sec_to_ms(
@@ -395,6 +471,7 @@ void ChartPreviewPanel::request_buffer_precommit(bool fill_now) {
   if (fill_now) {
     skip_precommit_pump_ = true;
   }
+#if WDS_DIAG_ENABLED
   static const bool diag = frame_diag_enabled_from_env();
   if (!diag) {
     return;
@@ -410,6 +487,7 @@ void ChartPreviewPanel::request_buffer_precommit(bool fill_now) {
                plan.particle_cap, plan.heaviest_id, plan.floor_instances, plan.heaviest_live,
                plan.trail_chunks, plan.draw_verts, st.rss_kb_before, st.pending,
                static_cast<long long>(st.request_us));
+#endif  // WDS_DIAG_ENABLED
 }
 
 void ChartPreviewPanel::pump_buffer_precommit() {
@@ -421,30 +499,77 @@ void ChartPreviewPanel::pump_buffer_precommit() {
 }
 
 void ChartPreviewPanel::request_seek_ms(int64_t time_ms) {
+#if WDS_DIAG_ENABLED
   const auto t0 = std::chrono::steady_clock::now();
   const long flt0 = process_minflt();
+  // Seek-step attribution (PREVSEC / preview.seek.*). Timers only when the
+  // perf gate is on; the measurement itself never changes seek behaviour.
+  const bool seek_time = wds::common::perf::enabled();
+  PlaybackPreviewView::SeekStepDiag seek_diag;
+  // The transport holds at most one queued intent; a seek arriving while one
+  // is still pending overwrites it (coalescing in Transport::poll).
+  seek_diag.overwrote_pending = transport_.pending_seek();
+  auto seek_step_t0 = t0;
+  auto seek_step = [&](int64_t* out) {
+    if (!seek_time) {
+      *out = 0;
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    *out = std::chrono::duration_cast<std::chrono::microseconds>(now - seek_step_t0).count();
+    seek_step_t0 = now;
+  };
   wds::common::minflt_stage("seek.begin");
+#endif  // WDS_DIAG_ENABLED
+  // (1) cancel/join of any in-flight split collect.
   preview_.join_speculative_split_collect();
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("seek.after_join");
+  seek_step(&seek_diag.join_us);
+#endif  // WDS_DIAG_ENABLED
+  // (2) transport seek intent.
   transport_.request_seek_ms(time_ms);
+  mark_present_dirty();
+#if WDS_DIAG_ENABLED
+  seek_step(&seek_diag.transport_us);
+#endif  // WDS_DIAG_ENABLED
   // Pin the visual snapshot to T now. Transport poll may drop a seek when
   // audio is not ready or a music set_position fails; line/lane geometry
   // must still be a function of chart T (OpenWDS SplitLaneRuntime.Tick
   // takes chartMilliseconds, not Time.deltaTime).
+  // (3) engine seek / snapshot rebuild.
   engine_.seek(time_ms);
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("seek.after_engine");
+  seek_step(&seek_diag.engine_us);
+#endif  // WDS_DIAG_ENABLED
+  // (4) pinned-seek bookkeeping + refresh-rate probe.
   pinned_seek_ms_ = time_ms;
   has_pinned_seek_ = true;
   if (display_refresh_hz_fn_) {
     display_refresh_hz_ = std::max(1, display_refresh_hz_fn_());
   }
-  // Pose/carry from a previous pictured T must not leak into this seek.
-  // useAutoRandomSeed stays (Play remints; seek does not). Hash buckets
-  // and lane cell vectors keep capacity (memory reuse, not a result cache).
-  wds::chart_render::split_effect_clear_caches();
+#if WDS_DIAG_ENABLED
+  seek_step(&seek_diag.pin_us);
+#endif  // WDS_DIAG_ENABLED
+  // (5) cache invalidation. Pose/carry from a previous pictured T must not
+  // leak into this seek. useAutoRandomSeed stays (Play remints; seek does
+  // not). Hash buckets and lane cell vectors keep capacity (memory reuse,
+  // not a result cache).
+  wds::chart_render::split_effect_clear_seek_state();
+#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("seek.after_clear");
+#endif  // WDS_DIAG_ENABLED
   last_present_latency_us_ = 0;
   wds::chart_render::split_effect_prepare_heavy_collect(50);
+  // reset_lane_geom_time_state keeps lane_geom_pool_; only a preceding
+  // invalidate_lane_geom_cache() (resize / doc / quality change) empties it.
+#if WDS_DIAG_ENABLED
+  seek_diag.lane_pool_cleared = preview_.lane_geom_cache_empty();
+  seek_diag.split_eval_cleared = false;  // the eval cache is retained on a pure seek
+  seek_step(&seek_diag.clear_us);
+#endif  // WDS_DIAG_ENABLED
+  // (6) lane-plate preload + recolor warm-up for this T (and the play lead).
   preview_.reset_lane_geom_time_state();
   const int64_t now_us = wds::common::ms_to_us(time_ms).count();
   preview_.pump_lane_geom_preload(collect_splits_at(engine_, time_ms), now_us, true);
@@ -455,15 +580,38 @@ void ChartPreviewPanel::request_seek_ms(int64_t time_ms) {
   // draw_split_lanes hashes snapshot lanes (committed T) with pictured now.
   // Pictured collect_splits_at percents differ during fade; color that pair last.
   preview_.pump_lane_geom_preload(engine_.snapshot().split_lanes, now_us + lead_us, true);
+#if WDS_DIAG_ENABLED
+  seek_step(&seek_diag.preload_us);
+#endif  // WDS_DIAG_ENABLED
+  // (7) host prepare hook (seek-bar / scroll sync in the Qt shell).
   if (after_seek_prepare_ && !video_export_clock_) {
     after_seek_prepare_(time_ms);
   }
+#if WDS_DIAG_ENABLED
+  seek_step(&seek_diag.prepare_us);
   last_seek_handle_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
                              std::chrono::steady_clock::now() - t0)
                              .count();
   last_seek_minflt_ = process_minflt() - flt0;
   wds::common::minflt_stage("seek.end");
+#endif  // WDS_DIAG_ENABLED
   skip_precommit_pump_ = true;
+#if WDS_DIAG_ENABLED
+  seek_diag.skip_precommit = true;
+  if (seek_time) {
+    seek_diag.total_us = last_seek_handle_us_;
+    seek_diag.minflt = last_seek_minflt_;
+    // The split-effect atlas is loaded once by request_split_effect_preload()
+    // and rebound only by ensure_split_effect_textures() on a cold first
+    // frame; a seek never re-uploads it, so this stays false. Kept as an
+    // explicit field so a future rebind path is visible in the row.
+    seek_diag.atlas_rebound = false;
+    preview_.record_seek_diag(seek_diag);
+    // MEMSTEP: the preview tracks cold/warm itself (first seek vs. drag seek)
+    // and samples drag seeks so stderr cannot flood at 60 Hz.
+    preview_.diag_seek_step(transport_.intends_playing(), last_seek_handle_us_);
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void ChartPreviewPanel::maybe_inject_preview_stall(bool playing, double chart_sec) {
@@ -491,6 +639,7 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   if (!ready_) {
     return;
   }
+#if WDS_DIAG_ENABLED
   static const bool time_tick = frame_diag_enabled_from_env();
   const auto t_all = time_tick ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
@@ -502,8 +651,17 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
                std::chrono::steady_clock::now() - t0)
         .count();
   };
+#endif  // WDS_DIAG_ENABLED
 
+  // Diagnostics: pending seek intents are visible to the preview's PREVFRAME
+  // row, and one PREVSEC row closes each ~1 s window.
+#if WDS_DIAG_ENABLED
+  const bool step_diag = wds::common::perf::enabled();
+  if (step_diag) {
+    preview_.set_seeks_pending_diag(transport_.pending_seek() ? 1 : 0);
+  }
   auto t0 = t_all;
+#endif  // WDS_DIAG_ENABLED
   if (transport_.pending_seek()) {
     preview_.join_speculative_split_collect();
   }
@@ -521,9 +679,11 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   preview_.pump_split_effect_preload();
   collect_ready_waveforms();
   maybe_bake_spectrogram_texture();
+#if WDS_DIAG_ENABLED
   last_tick_preload_us_ = lapse(t0);
 
   t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+#endif  // WDS_DIAG_ENABLED
   if (display_refresh_hz_fn_) {
     display_refresh_hz_ = std::max(1, display_refresh_hz_fn_());
   }
@@ -543,9 +703,11 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   }
   preview_.set_chart_offset_ms(transport_.chart_offset_ms());
   preview_.set_preview_lead_in_visible_ms(engine_.preview_lead_in_visible_ms());
+#if WDS_DIAG_ENABLED
   last_tick_transport_us_ = lapse(t0);
 
   t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+#endif  // WDS_DIAG_ENABLED
   // Warm plates for the committed snapshot and the pictured clock. Appear
   // percents at T+lead must be ready before the first rendered frame.
   // Playing lead includes last present latency so late frames do not eat the
@@ -557,17 +719,30 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   }
   pump_lane_geom_rendered(preview_, engine_, playing, playing ? playing_visual_lead_us() : 0,
                          display_frame_lead_us());
+#if WDS_DIAG_ENABLED
   last_tick_geom_us_ = lapse(t0);
 
   t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+#endif  // WDS_DIAG_ENABLED
   // Arm POS SFX on a still-paused stream. Audible start waits until render()
   // has collected the first picture at t0 (audio follows picture).
   // Export bounce mixes SFX offline; do not arm the speaker mixer.
   if (!video_export_clock_) {
     preview_.sync_hit_sfx(engine_.snapshot());
   }
+#if WDS_DIAG_ENABLED
   last_tick_sfx_us_ = lapse(t0);
+#endif  // WDS_DIAG_ENABLED
   pump_buffer_precommit();
+#if WDS_DIAG_ENABLED
+  if (step_diag && !video_export_clock_) {
+    // All milestone/PREVSEC bookkeeping lives in PlaybackPreviewView (this
+    // panel's header is outside the instrumentation boundary). It only emits
+    // when perf::enabled(); passing the facts, not decisions, keeps it honest.
+    preview_.diag_preview_tick(playing, preview_.vulkan().framebuffer_width(),
+                               preview_.vulkan().framebuffer_height());
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
@@ -632,10 +807,38 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   }
 }
 
+bool ChartPreviewPanel::needs_present() const noexcept {
+  if (!ready_) return true;
+  if (present_dirty_) return true;
+  if (transport_.pending_seek()) return true;
+  if (transport_.playing() || transport_.intends_playing()) return true;
+  if (want_spectrogram_ != last_presented_want_spectrogram_) return true;
+  const uint64_t doc_gen = engine_.document().content_generation();
+  if (doc_gen != last_presented_doc_gen_) return true;
+  const auto& snap = engine_.snapshot();
+  if (snap.revision != last_presented_revision_) return true;
+  const int64_t us =
+      snap.timeline_us != 0 ? snap.timeline_us
+                            : wds::common::ms_to_us(snap.timeline_ms).count();
+  return us != last_presented_timeline_us_;
+}
+
+void ChartPreviewPanel::note_frame_presented() noexcept {
+  const auto& snap = engine_.snapshot();
+  last_presented_doc_gen_ = engine_.document().content_generation();
+  last_presented_revision_ = snap.revision;
+  last_presented_timeline_us_ =
+      snap.timeline_us != 0 ? snap.timeline_us
+                            : wds::common::ms_to_us(snap.timeline_ms).count();
+  last_presented_want_spectrogram_ = want_spectrogram_;
+  present_dirty_ = false;
+}
+
 void ChartPreviewPanel::set_lane_count(int lane_count) {
   lane_count = std::clamp(lane_count, 1, 32);
   auto visual = preview_.config();
   visual.lane_count = lane_count;
+  mark_present_dirty();
   preview_.set_config(visual);
   auto core_cfg = engine_.preview_config();
   core_cfg.lane_count = lane_count;
@@ -663,11 +866,26 @@ void ChartPreviewPanel::apply_display_settings(double note_speed, int note_start
       wds::chart_editor::official_clamp_sprit_effect_setting(split_effect_quality);
 
   auto visual = preview_.config();
+  // MEMSTEP "quality_change" fires only when the split-effect quality or the
+  // line opacity actually changes: both paths re-tessellate lanes, while a
+  // pure note_speed change does not.
+#if WDS_DIAG_ENABLED
+  const bool quality_changed =
+      visual.split_effect_quality != split_effect_quality ||
+      std::lround(static_cast<double>(visual.split_line_opacity) * 100.0) !=
+          split_line_opacity_percent;
+#endif  // WDS_DIAG_ENABLED
   visual.note_speed = static_cast<float>(note_speed);
   visual.note_start_offset = note_start_offset;
   visual.note_height_level = note_height_level;
   visual.split_line_opacity = static_cast<float>(split_line_opacity_percent) / 100.0f;
   visual.split_effect_quality = split_effect_quality;
+  mark_present_dirty();
+#if WDS_DIAG_ENABLED
+  const bool step_diag = wds::common::perf::enabled();
+  const auto quality_t0 =
+      step_diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#endif  // WDS_DIAG_ENABLED
   preview_.join_speculative_split_collect();
   preview_.set_config(visual);
 
@@ -675,6 +893,15 @@ void ChartPreviewPanel::apply_display_settings(double note_speed, int note_start
   core_cfg.note_speed = note_speed;
   core_cfg.note_approach_seconds = visual.appear_time();
   engine_.set_preview_config(core_cfg);
+#if WDS_DIAG_ENABLED
+  if (step_diag && quality_changed) {
+    // set_config() -> invalidate_lane_geom_cache() drops every cached lane
+    // plate, so this row shows the re-fill cost of a quality/opacity change.
+    preview_.diag_quality_change(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - quality_t0)
+                                     .count());
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_playback) {
@@ -745,6 +972,7 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
     engine_.seek(transport_.chart_start_ms());
   }
   rebuild_waveform(music_path);
+  mark_present_dirty();
   return true;
 }
 
@@ -752,6 +980,7 @@ bool ChartPreviewPanel::load_jacket(const std::string& jacket_path) {
   if (!ready_) {
     return false;
   }
+  mark_present_dirty();
   if (jacket_path.empty()) {
     return preview_.load_jacket({});
   }
@@ -783,6 +1012,7 @@ bool ChartPreviewPanel::load_jacket(const std::string& jacket_path) {
 
 bool ChartPreviewPanel::audition_music(const std::string& music_path) {
   if (!ready_ || !transport_.audio().replace_music_source(music_path)) return false;
+  mark_present_dirty();
   // rebuild_waveform() cancels the old decode without joining (the BASS device
   // stays up here).
   rebuild_waveform(music_path);
@@ -820,6 +1050,7 @@ const wds::audio::WaveformOverview* ChartPreviewPanel::cached_waveform(
 void ChartPreviewPanel::set_want_spectrogram(bool want) {
   if (want_spectrogram_ == want) return;
   want_spectrogram_ = want;
+  mark_present_dirty();
   if (!want) {
     destroy_spectrogram_texture();
     return;
@@ -899,6 +1130,7 @@ void ChartPreviewPanel::bake_spectrogram_texture() {
     WDS_LOG("ChartPreviewPanel: spectrogram texture upload failed %dx%d\n", w, h);
   } else {
     preview_.textures().bind_identity(spectrogram_texture_.id, "ui.spectrogram");
+    mark_present_dirty();
   }
 }
 

@@ -14,7 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include <wds/chart_render/split_effect_particles.hpp>
+
 #include <wds/common/crash_handler.hpp>
+#include <wds/common/perf_stages.hpp>
 
 #ifndef _WIN32
 #include <pthread.h>
@@ -342,6 +345,47 @@ std::atomic<int> g_work_tasks{0};
 std::atomic<int> g_allow_burst{0};
 std::atomic<int64_t> g_spin_until_ns{0};
 
+// Diagnostics only (WDS_FRAME_DIAG). All updates sit behind perf::enabled();
+// with diagnostics off these are never touched, and the frame reset only
+// clears the per-call worst columns, so the cumulative columns stay valid
+// across frames. Not part of scheduling: no decision reads these.
+std::atomic<uint64_t> g_diag_tasks{0};        // pool tasks created this frame
+std::atomic<uint64_t> g_diag_wakeups{0};      // notify_one issued this frame
+std::atomic<uint64_t> g_diag_wait_us{0};      // caller blocked in cv_done_
+std::atomic<uint64_t> g_diag_spin_us{0};      // caller claimed its own work
+std::atomic<uint64_t> g_diag_inline{0};       // hint below threshold
+std::atomic<uint64_t> g_diag_serial{0};       // cap<=1 or a single item: no pool
+std::atomic<uint64_t> g_diag_run_inline{0};   // kMaxJobs exhausted: ran inline
+std::atomic<uint64_t> g_diag_par_tasks{0};    // calls that published a Job
+std::atomic<uint64_t> g_diag_sum_item_us{0};  // Σ top-level claim µs this frame
+std::atomic<uint64_t> g_diag_wall_us{0};      // Σ wall µs of those pool waves
+// Claim attribution: a task executed on the caller vs on a pool worker. This
+// is the "is the pool helping or is the GUI thread doing everything" split.
+std::atomic<uint64_t> g_diag_claims_caller{0};
+std::atomic<uint64_t> g_diag_claims_worker{0};
+std::atomic<uint64_t> g_diag_items_caller{0};
+std::atomic<uint64_t> g_diag_items_worker{0};
+// Time the caller blocked in cv_done_ (a subset of wall_us).
+std::atomic<uint64_t> g_diag_join_us{0};
+// Cumulative POOLSTAT columns (reset only by split_collect_diag_reset).
+std::atomic<uint64_t> g_poolstat_tasks{0};
+std::atomic<uint64_t> g_poolstat_participants_max{0};
+std::atomic<uint64_t> g_poolstat_wait_us{0};
+std::atomic<uint64_t> g_poolstat_spin_us{0};
+std::atomic<uint64_t> g_poolstat_inline{0};
+std::atomic<uint64_t> g_poolstat_serial{0};
+
+inline uint64_t diag_load(const std::atomic<uint64_t>& slot) noexcept {
+  return slot.load(std::memory_order_relaxed);
+}
+
+inline uint64_t diag_cum_max(std::atomic<uint64_t>& slot, uint64_t v) noexcept {
+  uint64_t cur = slot.load(std::memory_order_relaxed);
+  while (v > cur && !slot.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+  }
+  return v;
+}
+
 int64_t steady_now_ns() noexcept {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -367,6 +411,13 @@ int choose_participants(size_t nitems, uint64_t hint) noexcept {
                       ? topo().burst_cap
                       : topo().cap;
   if (cap <= 1 || nitems <= 1) {
+#if WDS_DIAG_ENABLED
+    // Diagnostics: no worker can help (cap 1) or there is nothing to share.
+    if (wds::common::perf::enabled()) {
+      g_diag_serial.fetch_add(1, std::memory_order_relaxed);
+      g_poolstat_serial.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
     return 1;
   }
   // 512 / 8000 are microseconds of last_cost_us (wall time on this core).
@@ -375,7 +426,8 @@ int choose_participants(size_t nitems, uint64_t hint) noexcept {
   // double-count slower cores. The njob×steps formula is first-touch only
   // and was tuned as work-units on M4; it yields to last_cost_us immediately.
   int parts = 1;
-  if (hint < 512ull) {
+  const bool hint_inline = hint < 512ull;
+  if (hint_inline) {
     parts = 1;
   } else if (hint < 8000ull) {
     parts = clamp_i(2, 1, cap);
@@ -385,7 +437,17 @@ int choose_participants(size_t nitems, uint64_t hint) noexcept {
   if (static_cast<size_t>(parts) > nitems) {
     parts = static_cast<int>(nitems);
   }
-  return parts < 1 ? 1 : parts;
+  parts = parts < 1 ? 1 : parts;
+#if WDS_DIAG_ENABLED
+  // Diagnostics only: "the hint was below the threshold so work was inlined"
+  // is exactly the hint<512 decision. parts<=1 for another reason (nitems
+  // clamp) is a serial call, not a hint inline.
+  if (wds::common::perf::enabled() && hint_inline) {
+    g_diag_inline.fetch_add(1, std::memory_order_relaxed);
+    g_poolstat_inline.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
+  return parts;
 }
 
 void record_call_participants(int parts) noexcept {
@@ -394,6 +456,11 @@ void record_call_participants(int parts) noexcept {
   while (parts > cur && !g_frame_max_participants.compare_exchange_weak(
                             cur, parts, std::memory_order_relaxed, std::memory_order_relaxed)) {
   }
+#if WDS_DIAG_ENABLED
+  if (parts > 0 && wds::common::perf::enabled()) {
+    diag_cum_max(g_poolstat_participants_max, static_cast<uint64_t>(parts));
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 class SplitCollectPool {
@@ -462,6 +529,13 @@ class SplitCollectPool {
     if (participants < 1) {
       participants = 1;
     }
+    // Diagnostics only: one clock read for the whole section, taken after the
+    // early-outs so an empty call costs nothing. Never allocates.
+#if WDS_DIAG_ENABLED
+    const bool diag = wds::common::perf::enabled();
+    const auto diag_t0 = diag ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
+#endif  // WDS_DIAG_ENABLED
     Job* job = nullptr;
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -481,11 +555,24 @@ class SplitCollectPool {
       }
     }
     if (job == nullptr) {
+      // All kMaxJobs slots busy (nested publish overflow): run inline.
+#if WDS_DIAG_ENABLED
+      if (diag) {
+        g_diag_run_inline.fetch_add(1, std::memory_order_relaxed);
+      }
+#endif  // WDS_DIAG_ENABLED
       for (size_t i = begin; i < end; ++i) {
         fn(i, ctx);
       }
       return;
     }
+#if WDS_DIAG_ENABLED
+    if (diag) {
+      g_diag_tasks.fetch_add(1, std::memory_order_relaxed);
+      g_diag_par_tasks.fetch_add(1, std::memory_order_relaxed);
+      g_poolstat_tasks.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
     if (participants > 1) {
       ensure_workers(participants - 1);
       // Wake only the workers we want. Parked extras stay blocked.
@@ -494,21 +581,62 @@ class SplitCollectPool {
         for (int i = 0; i < participants - 1; ++i) {
           cv_wake_.notify_one();
           g_frame_wakeups.fetch_add(1, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+          if (diag) {
+            g_diag_wakeups.fetch_add(1, std::memory_order_relaxed);
+          }
+#endif  // WDS_DIAG_ENABLED
         }
       }
     }
 
     const size_t nitems = end - begin;
     const uint64_t id = job->id;
+#if WDS_DIAG_ENABLED
+    uint64_t diag_wait_ns = 0;
+#endif  // WDS_DIAG_ENABLED
     while (job->finished.load(std::memory_order_acquire) < nitems) {
       if (!run_one_claim()) {
         SplitWallScope wall_join(SplitWallSec::PoolJoin);
         std::unique_lock<std::mutex> lock(mu_);
+        // Measured separately from the claim time so wait vs spin stays
+        // separable. 0 cost when diagnostics are off.
+#if WDS_DIAG_ENABLED
+        const auto w0 = diag ? std::chrono::steady_clock::now()
+                             : std::chrono::steady_clock::time_point{};
+#endif  // WDS_DIAG_ENABLED
         cv_done_.wait(lock, [&] {
           return job->finished.load(std::memory_order_acquire) >= nitems || has_claimable();
         });
+#if WDS_DIAG_ENABLED
+        if (diag) {
+          diag_wait_ns += static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - w0)
+                  .count());
+        }
+#endif  // WDS_DIAG_ENABLED
       }
     }
+#if WDS_DIAG_ENABLED
+    if (diag) {
+      const int64_t wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - diag_t0)
+                                  .count();
+      const uint64_t wall_us =
+          wall_ns > 0 ? static_cast<uint64_t>(wall_ns / 1000) : 0ull;
+      const uint64_t wait_us = diag_wait_ns / 1000;
+      // The caller is one of the participants, so its own claim time is part
+      // of sum_item but not part of the "wait"; spin is the remainder.
+      const uint64_t spin_us = wall_us > wait_us ? wall_us - wait_us : 0ull;
+      g_diag_wall_us.fetch_add(wall_us, std::memory_order_relaxed);
+      g_diag_wait_us.fetch_add(wait_us, std::memory_order_relaxed);
+      g_diag_join_us.fetch_add(wait_us, std::memory_order_relaxed);
+      g_diag_spin_us.fetch_add(spin_us, std::memory_order_relaxed);
+      g_poolstat_wait_us.fetch_add(wait_us, std::memory_order_relaxed);
+      g_poolstat_spin_us.fetch_add(spin_us, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
 
     std::exception_ptr error;
     {
@@ -613,12 +741,20 @@ class SplitCollectPool {
         apply_worker_qos(heavy);
       }
     }
+#if WDS_DIAG_ENABLED
     const bool time_busy = split_wall_enabled() && tls_claim_depth == 0;
+    // Diagnostics: claim time is the per-item work unit for parallel
+    // efficiency. Only timed when perf is on, and only for top-level claims so
+    // a nested publish does not count the same work twice.
+    const bool time_diag = wds::common::perf::enabled() && tls_claim_depth == 0;
+#endif  // WDS_DIAG_ENABLED
     std::exception_ptr err;
     {
       ClaimDepthGuard depth_guard;
-      const auto t0 = time_busy ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point();
+#if WDS_DIAG_ENABLED
+      const auto t0 = (time_busy || time_diag) ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point();
+#endif  // WDS_DIAG_ENABLED
       try {
         for (size_t i = c.i0; i < c.i1; ++i) {
           c.fn(i, c.ctx);
@@ -628,13 +764,32 @@ class SplitCollectPool {
         // job completes, and the caller thread rethrows once the job is popped.
         err = std::current_exception();
       }
-      if (time_busy) {
+#if WDS_DIAG_ENABLED
+      if (time_busy || time_diag) {
         const auto t1 = std::chrono::steady_clock::now();
-        split_wall_note_worker_busy(
-            tls_worker_id,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        if (time_busy) {
+          split_wall_note_worker_busy(tls_worker_id, ns);
+        }
+        if (time_diag && ns > 0) {
+          g_diag_sum_item_us.fetch_add(static_cast<uint64_t>(ns / 1000),
+                                       std::memory_order_relaxed);
+        }
+      }
+#endif  // WDS_DIAG_ENABLED
+    }
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled()) {
+      const uint64_t got_items = static_cast<uint64_t>(c.i1 - c.i0);
+      if (tls_worker_id != 0) {
+        g_diag_claims_worker.fetch_add(1, std::memory_order_relaxed);
+        g_diag_items_worker.fetch_add(got_items, std::memory_order_relaxed);
+      } else {
+        g_diag_claims_caller.fetch_add(1, std::memory_order_relaxed);
+        g_diag_items_caller.fetch_add(got_items, std::memory_order_relaxed);
       }
     }
+#endif  // WDS_DIAG_ENABLED
     if (err) {
       std::lock_guard<std::mutex> lock(mu_);
       if (!c.job->error) {
@@ -938,6 +1093,28 @@ void split_collect_begin_frame() noexcept {
   g_frame_max_participants.store(0, std::memory_order_relaxed);
   g_frame_wakeups.store(0, std::memory_order_relaxed);
   g_allow_burst.store(0, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+  if (!wds::common::perf::enabled()) {
+    return;
+  }
+  // Per-frame diagnostics columns. Cumulative POOLSTAT columns deliberately
+  // survive; they are only cleared by split_collect_diag_reset().
+  g_diag_tasks.store(0, std::memory_order_relaxed);
+  g_diag_wakeups.store(0, std::memory_order_relaxed);
+  g_diag_wait_us.store(0, std::memory_order_relaxed);
+  g_diag_spin_us.store(0, std::memory_order_relaxed);
+  g_diag_inline.store(0, std::memory_order_relaxed);
+  g_diag_serial.store(0, std::memory_order_relaxed);
+  g_diag_run_inline.store(0, std::memory_order_relaxed);
+  g_diag_par_tasks.store(0, std::memory_order_relaxed);
+  g_diag_sum_item_us.store(0, std::memory_order_relaxed);
+  g_diag_wall_us.store(0, std::memory_order_relaxed);
+  g_diag_claims_caller.store(0, std::memory_order_relaxed);
+  g_diag_claims_worker.store(0, std::memory_order_relaxed);
+  g_diag_items_caller.store(0, std::memory_order_relaxed);
+  g_diag_items_worker.store(0, std::memory_order_relaxed);
+  g_diag_join_us.store(0, std::memory_order_relaxed);
+#endif  // WDS_DIAG_ENABLED
 }
 
 void split_collect_prepare_heavy(int hold_ms) noexcept {
@@ -967,6 +1144,48 @@ int split_collect_claim_depth() noexcept {
   return tls_claim_depth;
 }
 
+#if WDS_DIAG_ENABLED
+SplitCollectPoolDiag split_collect_pool_diag_frame() noexcept {
+  SplitCollectPoolDiag d;
+  d.tasks = diag_load(g_diag_tasks);
+  d.wakeups = diag_load(g_diag_wakeups);
+  d.wait_us = diag_load(g_diag_wait_us);
+  d.spin_us = diag_load(g_diag_spin_us);
+  d.inline_calls = diag_load(g_diag_inline);
+  d.serial_calls = diag_load(g_diag_serial);
+  d.run_inline_calls = diag_load(g_diag_run_inline);
+  d.par_calls = diag_load(g_diag_par_tasks);
+  d.sum_item_us = diag_load(g_diag_sum_item_us);
+  d.wall_us = diag_load(g_diag_wall_us);
+  d.claims_caller = diag_load(g_diag_claims_caller);
+  d.claims_worker = diag_load(g_diag_claims_worker);
+  d.items_caller = diag_load(g_diag_items_caller);
+  d.items_worker = diag_load(g_diag_items_worker);
+  d.join_us = diag_load(g_diag_join_us);
+  return d;
+}
+#endif  // WDS_DIAG_ENABLED
+
+SplitCollectPoolStat split_collect_pool_stat() noexcept {
+  SplitCollectPoolStat s;
+  s.tasks = diag_load(g_poolstat_tasks);
+  s.participants_max = diag_load(g_poolstat_participants_max);
+  s.wait_us_sum = diag_load(g_poolstat_wait_us);
+  s.spin_us_sum = diag_load(g_poolstat_spin_us);
+  s.inline_calls = diag_load(g_poolstat_inline);
+  s.serial_calls = diag_load(g_poolstat_serial);
+  return s;
+}
+
+void split_collect_diag_reset() noexcept {
+  std::atomic<uint64_t>* slots[] = {&g_poolstat_tasks,     &g_poolstat_participants_max,
+                                    &g_poolstat_wait_us,   &g_poolstat_spin_us,
+                                    &g_poolstat_inline,    &g_poolstat_serial};
+  for (std::atomic<uint64_t>* p : slots) {
+    p->store(0, std::memory_order_relaxed);
+  }
+}
+
 void split_collect_parallel_for(size_t begin, size_t end, size_t grain, void (*fn)(size_t, void*),
                                 void* ctx, uint64_t work_hint) {
   if (begin >= end || fn == nullptr) {
@@ -978,6 +1197,8 @@ void split_collect_parallel_for(size_t begin, size_t end, size_t grain, void (*f
   const int parts = choose_participants(n, work_hint);
   record_call_participants(parts);
   if (cap <= 1 || parts <= 1 || n == 1) {
+    // Fallback: fn runs on the calling thread, no Job, no wake-up.
+    // choose_participants already counted the cap<=1 / single-item cases.
     for (size_t i = begin; i < end; ++i) {
       fn(i, ctx);
     }

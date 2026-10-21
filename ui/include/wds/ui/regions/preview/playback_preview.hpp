@@ -40,6 +40,7 @@ bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
 
 #include <wds/audio/hit_sfx.hpp>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -151,8 +152,84 @@ class PlaybackPreviewView {
     int64_t upload_us = 0;
     int64_t submit_us = 0;
     int64_t total_us = 0;
+    // Per-frame PREVFRAME breakdown (append-only; zero when perf is off).
+    // notes/splits/particles/lanes/hud/stage/merge/ensure_tex/draw_frame are
+    // wall-clock µs on the GUI thread; leftover_us = total_us − their sum.
+    int64_t notes_us = 0;
+    int64_t splits_us = 0;
+    int64_t particles_us = 0;
+    int64_t hud_us = 0;
+    int64_t stage_us = 0;
+    int64_t merge_us = 0;
+    int64_t ensure_tex_us = 0;
+    int64_t draw_frame_us = 0;
+    int64_t leftover_us = 0;
+    // Post-draw bookkeeping inside render() (pause memo persist + VB unbind).
+    int64_t after_draw_us = 0;
+    // draw_split_particles internals: (a) collect_emit_jobs + estimate +
+    // stable_sort of EmitJobs, (b) per-job vertex emit (parallel/serial),
+    // (c) append_from merge into split_late_batch_ / emit parts.
+    int64_t emit_build_us = 0;
+    int64_t emit_vertex_us = 0;
+    int64_t emit_merge_us = 0;
+    int64_t frame_no = 0;
+    int64_t seeks_pending = 0;
+    int64_t verts = 0;
+    int64_t draws = 0;
+    // Retained preview-owned buffer sizes (MEMSTEP rows).
+    int64_t lane_pool_entries = 0;
+    int64_t lane_pool_bytes = 0;
+    int64_t batch_verts_cap = 0;
+    int64_t tex_bytes = 0;
   };
   const SplitFrameDiag& last_split_frame_diag() const noexcept { return split_frame_diag_; }
+
+  // Diagnostics only (WDS_FRAME_DIAG=1; all no-ops otherwise). The panel calls
+  // these from its seek path and from tick()/resize()/quality changes so seeks
+  // and retained preview buffers stay attributable per action.
+#if WDS_DIAG_ENABLED
+  // Breakdown of ONE ChartPreviewPanel::request_seek_ms call. Every field is
+  // wall-clock µs on the GUI thread; 0 when that sub-step did not run.
+  struct SeekStepDiag {
+    int64_t join_us = 0;     // speculative-collect join / in-flight cancel
+    int64_t transport_us = 0;  // Transport::request_seek_ms (queued intent)
+    int64_t engine_us = 0;   // ChartEditorEngine::seek (snapshot rebuild)
+    int64_t clear_us = 0;    // split_effect_clear_caches + heavy-collect arm
+    int64_t pin_us = 0;      // pinned-seek bookkeeping + refresh-hz probe
+    int64_t preload_us = 0;  // lane-plate preload / recolor warm-up
+    int64_t prepare_us = 0;  // after_seek_prepare_ host hook
+    int64_t total_us = 0;
+    long minflt = 0;
+    // Which caches this seek dropped: the "full rebuild" suspects.
+    bool lane_pool_cleared = false;
+    bool split_eval_cleared = false;
+    bool atlas_rebound = false;
+    bool skip_precommit = false;
+    // A previous seek intent was still queued when this one arrived, so the
+    // transport (and the coalescing in tick()) will drop/overwrite it.
+    bool overwrote_pending = false;
+  };
+  // Record one handled seek (called from ChartPreviewPanel::request_seek_ms).
+  // Also feeds the per-second PREVSEC aggregates.
+  void record_seek_diag(const SeekStepDiag& step);
+  // MEMSTEP row for `step`; samples RSS/minflt and every retained buffer size.
+  void emit_memstep(const char* step, int64_t elapsed_us);
+  // PREVSEC row for the last ~1 s window; resets the window counters.
+  void emit_prevsec_diag(int64_t now_us, int64_t drawable_w, int64_t drawable_h);
+  // Called once per ChartPreviewPanel::tick (diagnostics path only). Emits the
+  // per-second PREVSEC row and the one-shot MEMSTEP milestones
+  // (first_frame / first_play) that the panel cannot store itself.
+  void diag_preview_tick(bool playing, int64_t drawable_w, int64_t drawable_h);
+  // One MEMSTEP row per seek. The first seek in a session is always emitted
+  // (cold); later drag seeks are sampled 1-in-N so stderr cannot flood at
+  // 20–60 seeks/s.
+  void diag_seek_step(bool playing, int64_t elapsed_us);
+  void diag_quality_change(int64_t elapsed_us);
+  void diag_resize(int64_t elapsed_us);
+  // Pending (queued, not yet applied) seek intents, as seen by the panel.
+  void set_seeks_pending_diag(int64_t pending) noexcept { prev_seeks_pending_ = pending; }
+  int64_t seek_full_rebuilds_diag() const noexcept { return seek_full_rebuilds_; }
+#endif  // WDS_DIAG_ENABLED
 
   // Decode UV/trail on a worker; GPU upload on pump/ensure (render thread).
   void request_split_effect_preload();
@@ -165,6 +242,15 @@ class PlaybackPreviewView {
   // lane_geom_pool_ (keys are split-line parameters, not chart time).
   void reset_lane_geom_time_state();
   bool lane_geom_cache_empty() const noexcept { return lane_geom_pool_.empty(); }
+  // Retained lane-plate pool size / bytes (MEMSTEP). Diagnostics only.
+  size_t lane_geom_pool_size_for_diag() const noexcept { return lane_geom_pool_.size(); }
+  size_t lane_geom_pool_bytes_for_diag() const noexcept {
+    size_t bytes = 0;
+    for (const auto& kv : lane_geom_pool_) {
+      bytes += kv.second.cells.capacity() * sizeof(PreviewLaneGeomCell);
+    }
+    return bytes;
+  }
   // High-water request (no touch). Idle pump commits pages off the edit frame.
   void request_buffer_precommit(const wds::chart_render::SplitEffectPrecommitPlan& plan,
                                 bool fill_now);
@@ -286,6 +372,14 @@ class PlaybackPreviewView {
   void prepare_note_draw_order(const wds::chart_editor::PreviewSnapshot& snapshot);
   // After present: copy mapped-VB / CPU parts into pause memo (not tess time).
   void persist_split_pause_vert_memo();
+#if WDS_DIAG_ENABLED
+  // Diagnostics only (WDS_FRAME_DIAG): emit one PREVFRAME stderr row and fill
+  // the appended SplitFrameDiag fields. Called from render() under perf::enabled().
+  void publish_prevframe_diag(bool playing, size_t known_verts, int64_t stage_stage_us,
+                              int64_t stage_notes_us, int64_t stage_merge_us,
+                              int64_t stage_hud_us, int64_t stage_draw_us,
+                              int64_t stage_after_us);
+#endif  // WDS_DIAG_ENABLED
 
   wds::renderer::PreviewVisualConfig config_;
   wds::renderer::StageGeometry geometry_;
@@ -364,7 +458,27 @@ class PlaybackPreviewView {
     wds::renderer::DrawBatch late;
     int drawn = 0;
   };
+  // Per-split emit job: a particle or a ribbon (trail) chain. key is the
+  // sorting_order bucket used by the stable counting sort in draw_split_particles.
+  struct EmitJob {
+    enum Kind : uint8_t { Particle, Ribbon } kind = Particle;
+    int32_t index = 0;
+    uint8_t key = 0;
+    // Vertex estimate computed once while the job is created. notes/glow/late
+    // mirror the old estimate_job() categories; 0 for a dropped body.
+    uint32_t n_notes = 0;
+    uint32_t n_glow = 0;
+    uint32_t n_late = 0;
+  };
   std::vector<SplitEmitPart> split_emit_parts_;
+  // Per-sorting_order buckets. Jobs are appended in collect order, so
+  // flattening buckets 0..255 is the same stable order as the old counting
+  // sort, but the cost is accumulated during the collect walk instead of a
+  // second estimate pass.
+  std::array<std::vector<EmitJob>, 256> emit_job_buckets_;
+  // Stable destination for split emit jobs (reused across frames so the
+  // steady state does not allocate). Sorted by EmitJob::key.
+  std::vector<EmitJob> emit_jobs_sorted_;
   size_t split_emit_reserve_hint_ = 0;
   // Split line plate geometry (Syuriken CPU tess) kept separate from particle glow.
   wds::renderer::DrawBatch split_lanes_glow_;
@@ -378,6 +492,11 @@ class PlaybackPreviewView {
   std::vector<PreviewLaneGeomSplit> lane_geom_free_;
   std::vector<const PreviewLaneGeomSplit*> lane_geom_frame_;
   uint32_t lane_geom_hit_seq_ = 1;
+  // Exact-input memo for repeated pump_lane_geom_preload calls in one tick.
+  uint64_t last_lane_preload_key_ = 0;
+  int64_t last_lane_preload_now_us_ = std::numeric_limits<int64_t>::min();
+  bool last_lane_preload_retain_ = false;
+  bool last_lane_preload_valid_ = false;
   std::vector<wds::renderer::DrawBatch> lane_color_parts_;
   wds::renderer::DrawBatch lane_color_warmup_;
   uint64_t lane_color_warmup_hash_ = 0;
@@ -403,6 +522,31 @@ class PlaybackPreviewView {
   wds::chart_render::SplitEffectPrecommitStats last_precommit_{};
   std::size_t draw_precommit_verts_ = 0;
   int draw_precommit_step_ = 0;
+  // GUI-thread-only counters for PREVFRAME / PREVSEC / MEMSTEP. All plain
+  // (no worker touches them): the texture-preload worker only returns decoded
+  // RGBA through std::future; the pump/upload happens here.
+  int64_t prevframe_count_ = 0;
+  int64_t prev_seeks_pending_ = 0;
+  // Seek accounting: queued seeks vs. the ones the transport coalesced away.
+  int64_t seek_request_total_ = 0;
+  int64_t seek_request_window_ = 0;
+  int64_t seek_us_window_sum_ = 0;
+  int64_t seek_us_window_max_ = 0;
+  int64_t seek_full_rebuilds_ = 0;
+  int64_t seek_overwritten_total_ = 0;
+  // PREVSEC window bookkeeping.
+  int64_t sec_frames_start_ = 0;
+  int64_t sec_full_rebuilds_start_ = 0;
+  int64_t sec_seek_overwritten_start_ = 0;
+  int64_t sec_last_us_ = 0;
+  // One-shot MEMSTEP milestones + seek sampling cursor (GUI thread only).
+  bool diag_first_frame_done_ = false;
+  bool diag_first_play_done_ = false;
+  int64_t seek_diag_seen_ = 0;
+  int64_t seek_line_seen_ = 0;
+  // MEMSTEP baseline: rss_delta_kb is measured against the first sample of
+  // the session (so "first_frame" is the reference row).
+  long mem_rss_base_kb_ = 0;
 };
 
 }  // namespace wds::ui

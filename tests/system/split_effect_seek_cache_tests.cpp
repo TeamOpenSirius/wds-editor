@@ -185,6 +185,44 @@ void test_effect_seeks(int32_t effect_id, int instances, double stagger) {
   }
 }
 
+void test_effect_seeks_retain_cache(int32_t effect_id, int instances, double stagger) {
+  if (wds::chart_render::official_split_effect(effect_id) == nullptr) {
+    std::fprintf(stderr, "skip unknown effect %d\n", effect_id);
+    return;
+  }
+  const auto splits = make_instances(effect_id, instances, stagger);
+  const std::vector<double> seq = seek_sequence(effect_id);
+
+  // Reference: every collect is a fresh cold rebuild (full clear between each).
+  wds::chart_render::reset_split_effect_auto_seed_session();
+  std::vector<SplitEffectFrameCollect> fresh(seq.size());
+  for (size_t i = 0; i < seq.size(); ++i) {
+    wds::chart_render::split_effect_clear_caches();
+    collect_at(splits, seq[i], fresh[i]);
+  }
+
+  // Seek path: drop only time-ordered state between collects; keep the eval
+  // cache. Must match the fresh-with-full-clear reference frame for frame.
+  wds::chart_render::reset_split_effect_auto_seed_session();
+  wds::chart_render::split_effect_clear_caches();
+  std::vector<SplitEffectFrameCollect> cached(seq.size());
+  for (size_t i = 0; i < seq.size(); ++i) {
+    wds::chart_render::split_effect_clear_seek_state();
+    collect_at(splits, seq[i], cached[i]);
+  }
+
+  for (size_t i = 0; i < seq.size(); ++i) {
+    if (const char* d = frame_diff(cached[i], fresh[i])) {
+      std::fprintf(stderr, "seek-retain effect=%d i=%zu t=%.2f %s\n", effect_id, i, seq[i], d);
+      CHECK(false);
+    }
+  }
+
+  // The retained cache must stay bounded after the full sequence.
+  const auto stats = wds::chart_render::split_effect_eval_cache_stats();
+  CHECK(stats.bytes_used <= 64ull * 1024ull * 1024ull);  // <= 64 MB
+}
+
 void test_empty_collect_wakes_nobody() {
   const auto heavy = make_instances(10380, 4, 0.2);
   wds::chart_render::split_effect_clear_caches();
@@ -305,6 +343,11 @@ int main() {
   test_effect_seeks(10380, 1, 0.0);
   test_effect_seeks(10516, 1, 0.0);
   test_effect_seeks(10600, 1, 0.0);
+  test_effect_seeks_retain_cache(11621, 4, 0.2);
+  test_effect_seeks_retain_cache(10660, 1, 0.0);
+  test_effect_seeks_retain_cache(10380, 1, 0.0);
+  test_effect_seeks_retain_cache(10516, 1, 0.0);
+  test_effect_seeks_retain_cache(10600, 1, 0.0);
   test_identity_no_collision_across_instances();
   test_empty_collect_wakes_nobody();
   if (failures == 0) {

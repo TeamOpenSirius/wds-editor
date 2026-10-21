@@ -18,7 +18,7 @@ endif()
 project(wds VERSION 2.0.0 LANGUAGES CXX)
 # CMake project() VERSION is numeric only. About, crash reports, and packages
 # use this marketing string (may include a prerelease suffix).
-set(WDS_APP_VERSION "2.0.0-beta.3")
+set(WDS_APP_VERSION "2.0.0-beta.4")
 
 include("${CMAKE_SOURCE_DIR}/cmake/WdsPlatform.cmake")
 
@@ -49,6 +49,18 @@ option(WDS_BUILD_RENDERER "Build Vulkan renderer layer" ON)
 option(WDS_BUILD_AUDIO "Build audio-player layer" ON)
 option(WDS_BUILD_INTERACTION "Build interaction-interface layer" ON)
 option(WDS_BUILD_UI "Build ui layer / editor shell" ON)
+# Runtime diagnostics (perf scopes, GPU timestamps, per-frame/per-second logs,
+# memory sampling). OFF means every instrumentation site is compiled out: the
+# macros expand to nothing, the diagnostic scope types are empty, and the log
+# formatting code is removed by the preprocessor, so a Release build contains
+# no calls, no format strings and no clock reads for diagnostics at all.
+# Measurement builds pass -DWDS_DIAGNOSTICS=ON.
+option(WDS_DIAGNOSTICS "Compile runtime diagnostics (perf/GPU/memory logs)" OFF)
+if(WDS_DIAGNOSTICS)
+  add_compile_definitions(WDS_DIAG_ENABLED=1)
+else()
+  add_compile_definitions(WDS_DIAG_ENABLED=0)
+endif()
 
 # Propagate cross-friendly defaults before subdirectories declare their options.
 if(NOT DEFINED WDS_CORE_BUILD_TESTS)

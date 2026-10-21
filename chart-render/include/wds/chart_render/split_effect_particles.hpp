@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -352,6 +353,11 @@ void collect_split_effect_frame(
 // Drops integrator checkpoints. Does not reset auto-seed session.
 void split_effect_clear_caches() noexcept;
 
+// pure time seek drops time-ordered state only; the eval cache key already carries
+// the epoch and the full input hash, so retaining it is equivalent to a cold rebuild
+// (proved by wds_split_effect_seek_cache_tests).
+void split_effect_clear_seek_state() noexcept;
+
 // After seek: wake collect workers and keep them INTERACTIVE for hold_ms
 // so the first cold collect does not pay idle-core clock/QoS ramp.
 void split_effect_prepare_heavy_collect(int hold_ms = 50) noexcept;
@@ -377,6 +383,23 @@ struct SplitEffectEvalCacheStats {
   std::uint64_t lookup_contend = 0;
   std::uint64_t store_ops = 0;
   std::uint64_t store_contend = 0;
+  // Diagnostics only (WDS_FRAME_DIAG). Extends the counters above; no
+  // second store. hits+misses == lookup_ops when the cache is enabled.
+  // Miss = no slot for the key. Stale = the slot existed and its key
+  // changed (epoch / input hash), so find() replaced it — that is the only
+  // real "invalidated" signal because keys carry the epoch.
+  std::uint64_t lookup_misses = 0;
+  std::uint64_t lookup_stale = 0;
+  std::uint64_t rollup_hits = 0;
+  std::uint64_t rollup_misses = 0;
+  // Entry drops with the reason. Byte-budget eviction and idle reap are
+  // the two ways an entry leaves the map.
+  std::uint64_t evict_ops = 0;
+  std::uint64_t evict_budget = 0;
+  std::uint64_t evict_reap = 0;
+  std::uint64_t evict_alloc = 0;
+  std::uint64_t clear_ops = 0;
+  std::uint64_t epoch_bumps = 0;
   std::size_t carry_bytes_used = 0;
   std::size_t carry_systems = 0;
   std::size_t carry_particles = 0;
@@ -414,6 +437,192 @@ const char* split_effect_simd_name() noexcept;
 void split_effect_set_simd_for_tests(const char* name) noexcept;
 
 SplitEffectEvalCacheStats split_effect_eval_cache_stats() noexcept;
+
+// Diagnostics only (WDS_FRAME_DIAG). Nothing here allocates, and nothing
+// reads a clock or writes a counter unless wds::common::perf::enabled().
+// ---------------------------------------------------------------------------
+// Diagnostics-only counters for the internal helpers that this task may not
+// extend in their own headers (split_collect_pool.hpp / split_eval_cache.hpp
+// are outside the edit boundary). Declared here, defined in those .cpp files.
+// Every field is written only when wds::common::perf::enabled().
+// ---------------------------------------------------------------------------
+namespace shuriken {
+struct SplitEvalCacheDiag {
+  std::uint64_t lookup_misses = 0;   // no checkpoint for this key
+  std::uint64_t lookup_stale = 0;    // slot present, key replaced (epoch)
+  std::uint64_t rollup_hits = 0;     // C16 rollup reused
+  std::uint64_t rollup_misses = 0;   // C16 rolled up into the run
+  std::uint64_t evict_ops = 0;       // budget + reap + clear
+  std::uint64_t evict_budget = 0;    // dropped for the byte budget
+  std::uint64_t evict_reap = 0;      // dropped by idle reap (untouched gen)
+  std::uint64_t evict_clear = 0;     // dropped by clear()/epoch bump
+  std::uint64_t clear_ops = 0;
+  std::uint64_t epoch_bumps = 0;
+};
+void split_eval_cache_diag(SplitEvalCacheDiag& out) noexcept;
+}  // namespace shuriken
+
+// Pool counters for one frame; see split_collect_pool.cpp. tasks/wakeups are
+// per frame, the rest are per frame too except POOLSTAT's cumulative view.
+struct SplitCollectPoolDiag {
+  std::uint64_t tasks = 0;             // pool jobs published this frame
+  std::uint64_t wakeups = 0;           // cv_wake_.notify_one calls
+  std::uint64_t wait_us = 0;           // caller blocked in cv_done_ (µs)
+  std::uint64_t spin_us = 0;           // caller ran claims instead (µs)
+  std::uint64_t inline_calls = 0;      // hint below the 512 µs threshold
+  std::uint64_t serial_calls = 0;      // cap<=1 / single item: no pool
+  std::uint64_t run_inline_calls = 0;  // kMaxJobs exhausted: ran inline
+  std::uint64_t par_calls = 0;         // calls that published a Job
+  std::uint64_t sum_item_us = 0;       // Σ top-level claim µs
+  std::uint64_t wall_us = 0;           // Σ wall µs of those waves
+  // Who ran the work: claims/item counts for the calling (GUI) thread vs the
+  // pool workers. items_caller / (items_caller + items_worker) is the share of
+  // the collect the GUI thread did itself.
+  std::uint64_t claims_caller = 0;
+  std::uint64_t claims_worker = 0;
+  std::uint64_t items_caller = 0;
+  std::uint64_t items_worker = 0;
+  std::uint64_t join_us = 0;           // caller blocked in cv_done_ (µs)
+};
+
+SplitCollectPoolDiag split_collect_pool_diag_frame() noexcept;
+
+struct SplitCollectPoolStat {
+  std::uint64_t tasks = 0;
+  std::uint64_t participants_max = 0;
+  std::uint64_t wait_us_sum = 0;
+  std::uint64_t spin_us_sum = 0;
+  std::uint64_t inline_calls = 0;
+  std::uint64_t serial_calls = 0;
+};
+
+// Cumulative since the last split_collect_diag_reset().
+SplitCollectPoolStat split_collect_pool_stat() noexcept;
+void split_collect_diag_reset() noexcept;
+
+struct SplitEffectPhaseDiag {
+  std::uint64_t frame = 0;
+  int splits = 0;
+  int systems = 0;
+  int particles = 0;
+  int playing = 0;
+  int quality = 0;
+  // Last completed collect was a post-seek/post-epoch cold rebuild.
+  int cold = 0;
+  // Stage totals for the last completed collect (µs). Nested scopes are
+  // included in their parent, e.g. evaluate includes make_state / integrate.
+  std::int64_t collect_us = 0;
+  std::int64_t prepare_us = 0;
+  std::int64_t evaluate_us = 0;
+  std::int64_t assemble_us = 0;
+  std::int64_t integrate_us = 0;
+  std::int64_t subemit_us = 0;
+  std::int64_t subemit_plan_us = 0;
+  std::int64_t subemit_realize_us = 0;
+  std::int64_t realize_us = 0;
+  std::int64_t copyout_us = 0;
+  std::int64_t compact_us = 0;
+  std::int64_t traverse_us = 0;
+  std::int64_t stitch_us = 0;
+  std::int64_t cache_lookup_us = 0;
+  // Cumulative cache counters sampled at the end of that frame.
+  std::uint64_t cache_lookup_hits = 0;
+  std::uint64_t cache_lookup_misses = 0;
+  std::uint64_t cache_evict = 0;
+  std::uint64_t cache_bytes = 0;
+  // Pool counters for that frame.
+  std::uint64_t pool_tasks = 0;
+  std::uint64_t pool_wait_us = 0;
+  int pool_participants = 0;
+  double pool_par_eff = 0.0;
+  // Who ran the work: items claimed by the calling (GUI) thread vs pool
+  // workers, and the µs the caller blocked in the join.
+  std::uint64_t pool_claims_caller = 0;
+  std::uint64_t pool_claims_worker = 0;
+  std::uint64_t pool_items_caller = 0;
+  std::uint64_t pool_items_worker = 0;
+  std::uint64_t pool_join_us = 0;
+  std::uint64_t pool_inline_calls = 0;
+  std::uint64_t pool_serial_calls = 0;
+  std::uint64_t pool_sum_item_us = 0;
+  std::uint64_t pool_wall_us = 0;
+  // Cache detail (same counters as above, split by outcome / drop reason).
+  std::uint64_t cache_lookup_ops = 0;
+  std::uint64_t cache_lookup_stale = 0;
+  std::uint64_t cache_evict_budget = 0;
+  std::uint64_t cache_evict_reap = 0;
+  std::uint64_t cache_evict_clear = 0;
+  std::uint64_t cache_epoch_bumps = 0;
+};
+
+// Diagnostics only (WDS_FRAME_DIAG). Per-frame split-phase snapshot plus the
+// SPLITPHASE / POOLSTAT line formatters, so a caller outside chart-render (the
+// Qt FrameDiagLogger) can place the lines in its own once-per-second block
+// without changing this module's scope counters.
+// Last completed collect. Zeroed struct when perf::enabled() is false.
+SplitEffectPhaseDiag split_effect_last_phase_diag() noexcept;
+// One `SPLITPHASE ...` line (no trailing newline) into buf; returns length,
+// 0 when diagnostics are off. Safe to call every frame.
+std::size_t format_split_effect_phase_line(char* buf, std::size_t cap) noexcept;
+// One `POOLSTAT ...` line (no trailing newline); returns length, 0 when off.
+std::size_t format_split_effect_poolstat_line(char* buf, std::size_t cap) noexcept;
+
+// Per-frame stage accumulator behind the SPLITPHASE line. The stages nest:
+// Evaluate includes Realize, Realize includes Integrate/Stitch/CacheLookup,
+// Subemit includes its own Integrate. Collect covers Prepare + Evaluate +
+// Assemble + Copyout. A single clock read per scope, and only when
+// wds::common::perf::enabled(). Nothing here feeds particle math, cache
+// keys, or scheduling.
+enum class SplitDiagPhase : int {
+  Collect = 0,
+  Prepare,
+  Evaluate,
+  Integrate,
+  Subemit,
+  SubemitPlan,
+  SubemitRealize,
+  Realize,
+  Copyout,
+  Assemble,
+  // Candidate walk in assemble_split: per-task output -> ordered rows.
+  Compact,
+  // Per-particle trail / ribbon vertex realization (fill_trails).
+  Traverse,
+  Stitch,
+  CacheLookup,
+  Count
+};
+
+// Counters: Systems / Particles count per-frame work; Steps counts fixed-step
+// integrations; Tasks counts evaluate tasks; StepsCold is the post-seek redo.
+enum class SplitDiagCount : int {
+  Systems = 0,
+  Particles,
+  Steps,
+  Tasks,
+  Count
+};
+
+void split_diag_add_ns(SplitDiagPhase phase, std::int64_t ns) noexcept;
+void split_diag_add_count(SplitDiagCount counter, std::int64_t n) noexcept;
+
+class SplitDiagScope {
+#if !WDS_DIAG_ENABLED
+ public:
+  explicit constexpr SplitDiagScope(SplitDiagPhase) noexcept {}
+#else
+ public:
+  explicit SplitDiagScope(SplitDiagPhase phase) noexcept;
+  ~SplitDiagScope();
+  SplitDiagScope(const SplitDiagScope&) = delete;
+  SplitDiagScope& operator=(const SplitDiagScope&) = delete;
+
+ private:
+  SplitDiagPhase phase_;
+  bool on_ = false;
+  std::chrono::steady_clock::time_point start_{};
+#endif  // WDS_DIAG_ENABLED
+};
 
 // -1 restores env (default on). 0/1 force off/on for in-process A/B.
 void split_effect_set_eval_carry_enabled(int enabled) noexcept;

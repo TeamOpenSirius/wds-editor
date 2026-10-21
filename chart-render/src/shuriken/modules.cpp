@@ -495,22 +495,27 @@ bool split_noise_an_simd_enabled() noexcept {
 
 void set_split_noise_exact_for_tests(int on) noexcept {
   g_noise_exact_override = on;
+  bump_eval_system_hash_config_generation();
 }
 
 void set_split_noise_neon_for_tests(int on) noexcept {
   g_noise_neon_override = on;
+  bump_eval_system_hash_config_generation();
 }
 
 void set_split_noise_vol_for_tests(int on) noexcept {
   g_noise_vol_override = on;
+  bump_eval_system_hash_config_generation();
 }
 
 void set_split_noise_hold_for_tests(int steps) noexcept {
   g_noise_hold_override = steps;
+  bump_eval_system_hash_config_generation();
 }
 
 void set_split_walk_hz_for_tests(int hz) noexcept {
   g_walk_hz_override = hz;
+  bump_eval_system_hash_config_generation();
 }
 
 // hop (not 2022.3): tileable 3D curl volume sampled trilinearly. Opt-in

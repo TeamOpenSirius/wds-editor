@@ -996,9 +996,6 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     const float y0 = viewport_.y_at(note.start_tick);
     const float y1 =
         note.end_tick > note.start_tick ? viewport_.y_at(note.end_tick) : y0;
-    const float top = std::min(y0, y1) - pad;
-    const float bottom = std::max(y0, y1) + pad;
-    if (point.y < top || point.y > bottom) continue;
 
     int32_t hit_lane = note.lane;
     int32_t hit_width = note.width;
@@ -1017,6 +1014,30 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
     const float x0 = viewport_.x_at(hit_lane);
     const float x1 = x0 + viewport_.lane_width(hit_width);
     if (point.x < x0 || point.x > x1) continue;
+
+    // Holds draw their ribbon below every flat sprite, and a body without a
+    // paired head has no start sprite at all: its visible span starts exactly at
+    // start_tick. Do not keep the head-height cap there (it would let a headless
+    // hold steal clicks from a tap placed on its start tick).
+    const bool body_here = wds::chart_editor::is_bindable_hold_body(note.note_type) &&
+                           note.end_tick > note.start_tick;
+    // Start-side test also drives the tighter cap: the start tick is y0, while
+    // the tail flat (if any) sits at y1. Pairing is only consulted here, not for
+    // every body the pointer merely passes over near its tail.
+    const bool start_side = std::abs(point.y - y0) <= std::abs(point.y - y1);
+    const bool head_covers_point =
+        body_here && start_side && hold_body_head_covers_x(note, point.x);
+    float top = std::min(y0, y1) - pad;
+    float bottom = std::max(y0, y1) + pad;
+    if (body_here && start_side && !head_covers_point) {
+      const float start_pad = headless_hold_start_pad_px();
+      if (y0 >= y1) {
+        bottom = std::max(y0, y1) + start_pad;
+      } else {
+        top = std::min(y0, y1) - start_pad;
+      }
+    }
+    if (point.y < top || point.y > bottom) continue;
 
     // At chain joints the next body start coincides with this end — prefer the
     // JumpScratch owner so side-edge width drags remain reachable.
@@ -1048,8 +1069,13 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
             priority = -8;
           }
         }
+      } else if (body_here) {
+        // The body ribbon is visually below flats. At a start with no covering
+        // head art, keep it below even a selected note's +8 bonus so the topmost
+        // note (e.g. a tap on a headless hold's start tick) wins the tie.
+        priority = (start_side && !head_covers_point) ? -9 : 1;
       } else {
-        priority = wds::chart_editor::is_bindable_hold_body(note.note_type) ? 1 : 0;
+        priority = 0;
       }
     }
     consider(dist, priority, note);
@@ -1092,6 +1118,27 @@ bool ChartEditPanel::near_end_time(const NotationNote& note, float y) const {
   if (note.end_tick <= note.start_tick) return false;
   return std::abs(y - viewport_.y_at(note.end_tick)) <= time_edge_px(note);
 }
+
+bool ChartEditPanel::hold_body_head_covers_x(const NotationNote& body, float x) const {
+  if (!wds::chart_editor::is_bindable_hold_body(body.note_type) ||
+      body.end_tick <= body.start_tick) {
+    return false;
+  }
+  const auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), body);
+  if (!head) return false;
+  // Auto heads can be narrower than the body when other notes occupy part of the
+  // start span; only the lanes the head sprite actually covers have start art.
+  const float x0 = viewport_.x_at(head->lane);
+  const float x1 = x0 + viewport_.lane_width(std::max(1, head->width));
+  return x >= x0 && x <= x1;
+}
+
+float ChartEditPanel::headless_hold_start_pad_px() const {
+  // No note-height start sprite: the ribbon simply ends at the start tick, so
+  // keep only a small grab band instead of a hold-head cap.
+  return std::max(2.0f, viewport_.note_height_px() * 0.12f);
+}
+
 bool ChartEditPanel::near_scratch_end_left(const NotationNote& note, float x) const {
   if (!wds::chart_editor::is_hold_chain_body(note.note_type)) return false;
   const auto range = wds::chart_editor::get_scratch_end_lane_range(note);
@@ -1686,18 +1733,25 @@ bool ChartEditPanel::hold_bodies_same_focus(const NotationNote& body) const {
   if (hold_sel_body_id_ < 0) return false;
   if (body.id == hold_sel_body_id_) return true;
   auto focus = engine_.document().find_note(hold_sel_body_id_);
-  if (!focus || !wds::chart_editor::is_hold_chain_body(focus->note_type) ||
-      !wds::chart_editor::is_hold_chain_body(body.note_type)) {
+  if (!focus) return false;
+  return hold_bodies_connected(*focus, body);
+}
+
+bool ChartEditPanel::hold_bodies_connected(const NotationNote& a,
+                                           const NotationNote& b) const {
+  if (a.id == b.id) return true;
+  if (!wds::chart_editor::is_hold_chain_body(a.note_type) ||
+      !wds::chart_editor::is_hold_chain_body(b.note_type)) {
     return false;
   }
-  NotationNote cur = *focus;
+  NotationNote cur = a;
   for (int guard = 0; guard < 64; ++guard) {
     auto prev = wds::chart_editor::chained_prev_scratch_hold(engine_.document(), cur);
     if (!prev) break;
     cur = *prev;
   }
   for (int guard = 0; guard < 64; ++guard) {
-    if (cur.id == body.id) return true;
+    if (cur.id == b.id) return true;
     auto next = wds::chart_editor::chained_next_scratch_hold(engine_.document(), cur);
     if (!next) break;
     cur = *next;
@@ -1705,14 +1759,61 @@ bool ChartEditPanel::hold_bodies_same_focus(const NotationNote& body) const {
   return false;
 }
 
-void ChartEditPanel::select_hold_outer(const NotationNote& body) {
-  hold_sel_body_id_ = body.id;
-  if (wds::chart_editor::is_hold_chain_body(body.note_type)) {
-    select_scratch_hold_chain_from(body);
-    hold_sel_layer_ = HoldSelLayer::Chain;
-    return;
+std::vector<ChartEditPanel::HoldSelLayer> ChartEditPanel::hold_layer_order(
+    const NotationNote& body) const {
+  // A chain exists only when another hold is actually connected to this one.
+  const bool chained =
+      wds::chart_editor::chained_prev_scratch_hold(engine_.document(), body).has_value() ||
+      wds::chart_editor::chained_next_scratch_hold(engine_.document(), body).has_value();
+  const bool has_head =
+      wds::chart_editor::paired_hold_head_for(engine_.document(), body).has_value();
+
+  std::vector<HoldSelLayer> order;
+  if (chained) order.push_back(HoldSelLayer::Chain);
+  // Whole means "this one segment (body + head when it has one)". A lone
+  // headless hold has no distinct Whole selection, so it starts at Parts.
+  if (chained || has_head) order.push_back(HoldSelLayer::Whole);
+  // Parts splits head/body. A lone headless hold is body-only, which is still
+  // its top layer; a headless segment inside a chain would duplicate Whole.
+  if (has_head || !chained) order.push_back(HoldSelLayer::Parts);
+  order.push_back(HoldSelLayer::Stars);
+  return order;
+}
+
+bool ChartEditPanel::selection_belongs_to_hold_chain(const NotationNote& body) const {
+  if (selected_.empty()) return false;
+  for (const int32_t id : selected_) {
+    auto note = engine_.document().find_note(id);
+    if (!note) continue;
+    const auto selected_body = resolve_hold_body(*note);
+    if (!selected_body || !hold_bodies_connected(body, *selected_body)) return false;
   }
-  select_hold_segment(body);
+  return true;
+}
+
+void ChartEditPanel::select_hold_outer(const NotationNote& body) {
+  const auto order = hold_layer_order(body);
+  hold_sel_body_id_ = body.id;
+  const HoldSelLayer top =
+      order.empty() ? HoldSelLayer::Stars : order.front();
+  switch (top) {
+    case HoldSelLayer::Chain:
+      select_scratch_hold_chain_from(body);
+      hold_sel_layer_ = HoldSelLayer::Chain;
+      return;
+    case HoldSelLayer::Whole:
+      select_hold_segment(body);
+      return;
+    case HoldSelLayer::Parts:
+      // Lone headless hold: body-only is the top layer.
+      select_hold_part(body, body);
+      return;
+    case HoldSelLayer::Stars:
+      select_hold_stars(body);
+      return;
+    case HoldSelLayer::None:
+      break;
+  }
 }
 
 void ChartEditPanel::select_hold_segment(const NotationNote& body) {
@@ -1737,6 +1838,44 @@ void ChartEditPanel::select_hold_part(const NotationNote& hit, const NotationNot
   selected_.insert(body.id);
 }
 
+void ChartEditPanel::select_hold_stars(const NotationNote& body) {
+  selected_.clear();
+  hold_sel_body_id_ = body.id;
+  hold_sel_layer_ = HoldSelLayer::Stars;
+  for (const auto& note :
+       wds::chart_editor::hold_attached_notes_for(engine_.document(), body)) {
+    if (is_visible_mid_star(note.note_type)) selected_.insert(note.id);
+  }
+}
+
+NotationNote ChartEditPanel::hold_drill_target(const NotationNote& body,
+                                               wds::interaction::Vec2 point,
+                                               bool include_stars) const {
+  // A star under the pointer keeps the direct double-click shortcut: select that
+  // star itself instead of drilling its parent body's next layer. Single-click
+  // Parts switching passes false so an overlapping star cannot hide the head.
+  if (include_stars) {
+    for (const auto& note :
+         wds::chart_editor::hold_attached_notes_for(engine_.document(), body)) {
+      if (!is_visible_mid_star(note.note_type)) continue;
+      if (viewport_.mid_star_screen_rect(note).contains(point)) return note;
+    }
+  }
+  // The paired head owns a note-height sprite at the start tick. Resolve it from
+  // geometry instead of hit_test_note(): the selected body's +8 tie bonus would
+  // otherwise win at the shared start tick and make the head unreachable.
+  if (const auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), body)) {
+    const float y0 = viewport_.y_at(body.start_tick);
+    const float half_h = viewport_.note_height_px() * 0.5f;
+    const float x0 = viewport_.x_at(head->lane);
+    const float x1 = x0 + viewport_.lane_width(std::max(1, head->width));
+    if (point.x >= x0 && point.x <= x1 && point.y >= y0 - half_h && point.y <= y0 + half_h) {
+      return *head;
+    }
+  }
+  return body;
+}
+
 bool ChartEditPanel::hold_body_selected_for_stars(const NotationNote& body) const {
   if (selected_.count(body.id)) return true;
   // Star within this hold selected at Stars layer.
@@ -1752,7 +1891,8 @@ bool ChartEditPanel::hold_body_selected_for_stars(const NotationNote& body) cons
 }
 
 void ChartEditPanel::drill_hold_selection(const NotationNote& hit) {
-  // Any-layer double-click on a mid-star jumps straight into Stars.
+  // Direct star double-click keeps its shortcut: select that star and enter the
+  // Stars layer, regardless of the current drill layer.
   if (is_visible_mid_star(hit.note_type)) {
     auto parent = wds::chart_editor::parent_hold_for(engine_.document(), hit);
     if (!parent) return;
@@ -1771,31 +1911,117 @@ void ChartEditPanel::drill_hold_selection(const NotationNote& hit) {
     return;
   }
 
-  if (hold_sel_layer_ == HoldSelLayer::Chain) {
-    select_hold_segment(*body);
-    return;
+  const auto order = hold_layer_order(*body);
+  if (order.empty()) return;
+  HoldSelLayer next = order.front();
+  const auto current = std::find(order.begin(), order.end(), hold_sel_layer_);
+  if (current == order.end()) {
+    // The current layer is not available for the clicked segment (e.g. Parts on
+    // a headless chain segment): advance to the first layer below it.
+    for (const HoldSelLayer layer : order) {
+      if (static_cast<int>(layer) > static_cast<int>(hold_sel_layer_)) {
+        next = layer;
+        break;
+      }
+    }
+  } else {
+    auto it = current;
+    ++it;
+    next = (it == order.end()) ? order.front() : *it;
   }
 
-  if (hold_sel_layer_ == HoldSelLayer::Whole) {
-    select_hold_part(hit, *body);
-    return;
-  }
-
-  if (hold_sel_layer_ == HoldSelLayer::Stars) {
-    // Body / head → back to Parts (no path to Whole/Chain from here).
-    if (wds::chart_editor::is_hold_head_note(hit) ||
-        wds::chart_editor::is_bindable_hold_body(hit.note_type)) {
+  switch (next) {
+    case HoldSelLayer::Chain:
+      hold_sel_body_id_ = body->id;
+      select_scratch_hold_chain_from(*body);
+      hold_sel_layer_ = HoldSelLayer::Chain;
+      return;
+    case HoldSelLayer::Whole:
+      select_hold_segment(*body);
+      return;
+    case HoldSelLayer::Parts:
       select_hold_part(hit, *body);
       return;
-    }
-    select_hold_outer(*body);
-    return;
+    case HoldSelLayer::Stars:
+      select_hold_stars(*body);
+      return;
+    case HoldSelLayer::None:
+      break;
   }
+}
 
-  // Parts: double-click head/body switches which part is selected.
-  if (hold_sel_layer_ == HoldSelLayer::Parts) {
-    select_hold_part(hit, *body);
+bool ChartEditPanel::switch_hold_selection_layer(const NotationNote& hit,
+                                                wds::interaction::Vec2 point) {
+  if (hold_sel_layer_ == HoldSelLayer::None) return false;
+  std::optional<NotationNote> body;
+  if (is_visible_mid_star(hit.note_type)) {
+    body = wds::chart_editor::parent_hold_for(engine_.document(), hit);
+  } else {
+    body = resolve_hold_body(hit);
   }
+  if (!body) return false;
+  // The switch domain is the whole chain captured by layer 1, not only the
+  // segment selected by the previous click. A different chain falls through to
+  // normal selection and resets the drill.
+  if (!hold_bodies_same_focus(*body)) return false;
+
+  switch (hold_sel_layer_) {
+    case HoldSelLayer::Chain:
+      // The group stays selected; move the drill focus to the clicked segment so
+      // the next double-click narrows there.
+      hold_sel_body_id_ = body->id;
+      return true;
+    case HoldSelLayer::Whole:
+      select_hold_segment(*body);
+      return true;
+    case HoldSelLayer::Parts: {
+      // Resolve the head/body from geometry: hit_test_note's selected-note bonus
+      // can return the body when the user is actually clicking the head sprite.
+      const NotationNote target = hold_drill_target(*body, point, false);
+      select_hold_part(target, *body);
+      return true;
+    }
+    case HoldSelLayer::Stars: {
+      for (const auto& note :
+           wds::chart_editor::hold_attached_notes_for(engine_.document(), *body)) {
+        if (!is_visible_mid_star(note.note_type)) continue;
+        if (viewport_.mid_star_screen_rect(note).contains(point)) {
+          selected_.clear();
+          selected_.insert(note.id);
+          hold_sel_body_id_ = body->id;
+          hold_sel_layer_ = HoldSelLayer::Stars;
+          return true;
+        }
+      }
+      // Body/head click steps back to the layer directly above Stars for this
+      // segment: Parts when it has a head (or is a lone headless hold), else
+      // Whole for a headless segment inside a chain.
+      const auto order = hold_layer_order(*body);
+      const auto stars = std::find(order.begin(), order.end(), HoldSelLayer::Stars);
+      const HoldSelLayer previous =
+          (stars != order.end() && stars != order.begin()) ? *(stars - 1)
+                                                           : order.front();
+      switch (previous) {
+        case HoldSelLayer::Chain:
+          hold_sel_body_id_ = body->id;
+          select_scratch_hold_chain_from(*body);
+          hold_sel_layer_ = HoldSelLayer::Chain;
+          return true;
+        case HoldSelLayer::Whole:
+          select_hold_segment(*body);
+          return true;
+        case HoldSelLayer::Parts:
+          select_hold_part(hold_drill_target(*body, point, false), *body);
+          return true;
+        default:
+          break;
+      }
+      return true;
+    }
+    case HoldSelLayer::None:
+      break;
+  }
+  return false;
 }
 
 void ChartEditPanel::apply_hold_tail_cover(NotationNote& prev, const NotationNote& prev_body,
@@ -1807,6 +2033,7 @@ void ChartEditPanel::apply_hold_tail_cover(NotationNote& prev, const NotationNot
 }
 
 void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*point*/) {
+  finish_chain_extend_on_right_up_ = false;
   hold_scratch_ = scratch;
   hold_draft_ = place_anchor_;
   hold_draft_.note_type = wds::chart_editor::drawn_hold_body_type(scratch, place_gold_head_);
@@ -1826,7 +2053,7 @@ void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*poin
 }
 
 void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
-                                                 bool scratch_family) {
+                                                 std::optional<bool> scratch_family) {
   pending_chain_extend_id_ = -1;
   sync_viewport();
   std::optional<NotationNote> best;
@@ -1840,7 +2067,10 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
     if (!found) continue;
     const NotationNote& note = *found;
     if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-    if (wds::chart_editor::is_scratch_hold_body(note.note_type) != scratch_family) continue;
+    if (scratch_family.has_value() &&
+        wds::chart_editor::is_scratch_hold_body(note.note_type) != *scratch_family) {
+      continue;
+    }
     if (note.end_tick <= note.start_tick) continue;
     // Only the chain terminal (last JumpScratch) can be extended.
     if (wds::chart_editor::chained_next_scratch_hold(engine_.document(), note)) continue;
@@ -1868,6 +2098,7 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
 }
 
 void ChartEditPanel::begin_hold_chain_extend() {
+  finish_chain_extend_on_right_up_ = false;
   const int32_t prev_id = pending_chain_extend_id_;
   pending_chain_extend_id_ = -1;
   auto prev = prev_id >= 0 ? engine_.document().find_note(prev_id) : std::nullopt;
@@ -2202,6 +2433,7 @@ void ChartEditPanel::commit_hold_chain_prev_cover() {
 
 void ChartEditPanel::cancel_placement() {
   clear_pending_chain_extend();
+  finish_chain_extend_on_right_up_ = false;
   curve_mode_active_ = false;
   curve_dismissed_ = false;
   curve_ghosts_.clear();
@@ -2225,6 +2457,7 @@ void ChartEditPanel::cancel_placement() {
 }
 
 void ChartEditPanel::finish_hold_body(bool chain_next) {
+  finish_chain_extend_on_right_up_ = false;
   curve_mode_active_ = false;
   curve_dismissed_ = false;
   curve_ghosts_.clear();
@@ -5009,6 +5242,9 @@ void ChartEditPanel::update(float delta_seconds) {
 }
 
 void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& event) {
+  // A new press owns the next double-click. Only a hold length/width edge grab
+  // below re-arms this; any other press (move/select/place) clears it.
+  last_hold_edge_body_id_ = -1;
   // Modal captures the whole host; do not require the edit-pane bounds.
   if (has_modal_popup()) {
     pointer_ = event.position;
@@ -5163,29 +5399,93 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
           near_scratch_end_cap(*hit_note, event.position.y);
       const bool mid_star_hit =
           is_visible_mid_star(hit_note->note_type) || hit_note->note_type == NoteType::HoldEighth;
-      const bool hitting_width_edge =
+      bool hitting_width_edge =
           !mid_star_hit &&
           (hitting_scratch_end || near_left_edge(*hit_note, event.position.x) ||
            near_right_edge(*hit_note, event.position.x));
-      const bool hitting_time_edge =
+      bool hitting_time_edge =
           !mid_star_hit && !hitting_scratch_end &&
           (in_jump_scratch_cap ||
            (wds::chart_editor::is_bindable_hold_body(hit_note->note_type) &&
             (near_start_time(*hit_note, event.position.y) ||
              near_end_time(*hit_note, event.position.y))));
 
+      // Same-layer switching: once a drill layer is active, a plain click on any
+      // segment/part/star inside the layer-1 chain scope switches the selection
+      // without changing the layer. Only a double-click advances the layer.
+      // Parts must accept the head sprite even though it sits on the start-time
+      // edge; only switch to a *different* part so a click on the selected edge
+      // can still start a length drag.
+      bool switched_layer_selection = false;
+      if (!alt_chain_part && hold_sel_layer_ != HoldSelLayer::None &&
+          !event.mods.shift && !event.mods.alt && !event.mods.control && !event.mods.super) {
+        if (hold_sel_layer_ == HoldSelLayer::Parts) {
+          bool part_changes = true;
+          bool click_is_head = false;
+          if (const auto body = resolve_hold_body(*hit_note)) {
+            const NotationNote target =
+                hold_drill_target(*body, event.position, false);
+            click_is_head = wds::chart_editor::is_hold_head_note(target);
+            const int32_t target_id = click_is_head ? target.id : body->id;
+            part_changes = selected_.count(target_id) == 0;
+          }
+          // A head sprite sits on the start-time edge, so allow that one edge
+          // click to switch parts. Other edge clicks keep their length/width drag.
+          const bool edge_click = hitting_width_edge || hitting_time_edge;
+          if ((!edge_click || click_is_head) &&
+              switch_hold_selection_layer(*hit_note, event.position)) {
+            // Consume the click at this layer even when the target part was
+            // already selected; only a real part change overrides an edge drag.
+            switched_layer_selection = true;
+            if (part_changes) {
+              hitting_width_edge = false;
+              hitting_time_edge = false;
+            }
+          }
+        } else if (hold_sel_layer_ == HoldSelLayer::Stars) {
+          // Star click stays in Stars; a body/head click steps back to Parts
+          // (or Whole when headless). Allow it on edges too because the head
+          // sits on the start-time edge.
+          if (switch_hold_selection_layer(*hit_note, event.position)) {
+            switched_layer_selection = true;
+            if (hold_sel_layer_ != HoldSelLayer::Stars) {
+              hitting_width_edge = false;
+              hitting_time_edge = false;
+            }
+          }
+        } else if (!hitting_width_edge && !hitting_time_edge) {
+          switched_layer_selection = switch_hold_selection_layer(*hit_note, event.position);
+        }
+      }
+
       // Width / time edge drags must not change the current selection set.
-      // Single click never advances hold layers (double-click → drill_hold_selection).
-      // Same rule as taps: already selected → keep set for group drag; else replace.
-      if (!alt_chain_part && !hitting_width_edge && !hitting_time_edge) {
-        if (!selected_.count(hit_note->id)) {
+      // A handled layer switch keeps its own selection. Otherwise a plain click
+      // enters the outermost layer available for the clicked hold: Chain when it
+      // has connected neighbours, Whole for a lone headed segment, Parts(body)
+      // for a lone headless segment. An already-selected piece inside a foreign
+      // multi-selection is kept for group drag.
+      if (!alt_chain_part && !switched_layer_selection && !hitting_width_edge &&
+          !hitting_time_edge) {
+        const auto hold_body = resolve_hold_body(*hit_note);
+        const bool star_hit = is_visible_mid_star(hit_note->note_type);
+        const bool entering_new_hold =
+            hold_body && !star_hit &&
+            (hold_sel_layer_ == HoldSelLayer::None || !hold_bodies_same_focus(*hold_body)) &&
+            (selected_.empty() || selection_belongs_to_hold_chain(*hold_body));
+        if (entering_new_hold) {
           clear_hold_sel_focus();
-          selected_.clear();
-          selected_.insert(hit_note->id);
-          // Pair head↔body so a plain body grab keeps its head without entering
-          // hold-layer focus. Chain expansion is double-click only.
-          if (auto partner = hold_width_pair_partner(engine_.document(), *hit_note)) {
-            selected_.insert(partner->id);
+          select_hold_outer(*hold_body);
+        } else if (!selected_.count(hit_note->id)) {
+          clear_hold_sel_focus();
+          if (hold_body && !star_hit) {
+            select_hold_outer(*hold_body);
+          } else {
+            selected_.clear();
+            selected_.insert(hit_note->id);
+            // Pair head↔body so a plain body grab keeps its head.
+            if (auto partner = hold_width_pair_partner(engine_.document(), *hit_note)) {
+              selected_.insert(partner->id);
+            }
           }
         }
       }
@@ -5206,6 +5506,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         // ScratchHold end width: grab the end-cap side edges (not the body).
         // Width edits always target the grabbed note only — never the selection set.
         mode_ = Mode::ResizeWidth;
+        last_hold_edge_body_id_ = hit_note->id;
         resize_scratch_end_ = true;
         resize_chain_peer_id_ = -1;
         resize_chain_next_id_ = -1;
@@ -5232,6 +5533,9 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         }
       } else if (hitting_time_edge) {
         mode_ = Mode::AdjustHoldTime;
+        if (const auto edge_body = resolve_hold_body(*hit_note)) {
+          last_hold_edge_body_id_ = edge_body->id;
+        }
         adjust_end_ = in_jump_scratch_cap || near_end_time(*hit_note, event.position.y);
         anchor_note_id_ = hit_note->id;
         resize_scratch_end_ = false;
@@ -5289,6 +5593,9 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         // Width edits always target the grabbed note only — never the selection set.
         // Move / copy / mirror remain the multi-select batch operations.
         mode_ = Mode::ResizeWidth;
+        if (const auto edge_body = resolve_hold_body(*hit_note)) {
+          last_hold_edge_body_id_ = edge_body->id;
+        }
         resize_scratch_end_ = false;
         resize_chain_peer_id_ = -1;
         resize_chain_next_id_ = -1;
@@ -5427,11 +5734,17 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     return;
   }
 
-  // Empty area: start placement. Right-click on a selected purple terminal
-  // end-cap (including outer-edge slop that hit_test misses) arms chain-extend.
+  // Empty area: start placement. Right-click on the end-cap of an already-selected
+  // hold (including outer-edge slop that hit_test misses) continues drawing that
+  // hold instead of starting an unrelated flick. Both chain families qualify.
   clear_pending_chain_extend();
   if (wds::interaction::is_right_button(event.button)) {
-    try_arm_pending_chain_extend(event.position, true);
+    try_arm_pending_chain_extend(event.position);
+    if (pending_chain_extend_id_ >= 0) {
+      begin_hold_chain_extend();
+      finish_chain_extend_on_right_up_ = true;
+      return;
+    }
   }
 
   place_anchor_ = make_base_note(event.position);
@@ -6477,6 +6790,14 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     return;
   }
   if (mode_ == Mode::PlaceHoldBody) {
+    // A chain continued from an existing tail starts on right-down without a
+    // place-gesture swipe, so that same right-up must finish it even for a
+    // regular Hold (whose normal finish button is Left).
+    if (finish_chain_extend_on_right_up_ &&
+        wds::interaction::is_right_button(event.button)) {
+      finish_hold_body(false);
+      return;
+    }
     // Chain/star use the opposite button (down); only the hold's primary button
     // release finishes. ScratchHold finishes on right-up; normal Hold on left-up.
     if (curve_mode_active_ &&
@@ -6516,9 +6837,54 @@ void ChartEditPanel::on_double_click(const wds::interaction::DoubleClickEvent& e
   if (!absolute_bounds().contains(event.position)) return;
   if (!playfield_.contains(event.position)) return;
   sync_viewport();
+
+  // In a length/width drag (the press grabbed a hold edge), the first click is
+  // spent on resizing and deliberately does not change the selection. A
+  // double-click anywhere inside that same hold must still select its segment,
+  // even after the pointer left the narrow edge handle.
+  if (wds::interaction::is_left_button(event.button) && last_hold_edge_body_id_ >= 0) {
+    const auto body = engine_.document().find_note(last_hold_edge_body_id_);
+    if (body && wds::chart_editor::is_bindable_hold_body(body->note_type) &&
+        body->end_tick > body->start_tick) {
+      const float y0 = viewport_.y_at(body->start_tick);
+      const float y1 = viewport_.y_at(body->end_tick);
+      const float pad = viewport_.note_height_px() * 0.55f;
+      float top = std::min(y0, y1) - pad;
+      float bottom = std::max(y0, y1) + pad;
+      if (!hold_body_head_covers_x(*body, event.position.x)) {
+        const float start_pad = headless_hold_start_pad_px();
+        if (y0 >= y1) {
+          bottom = std::max(y0, y1) + start_pad;
+        } else {
+          top = std::min(y0, y1) - start_pad;
+        }
+      }
+      const auto span = wds::chart_editor::resolve_end_lane_span(*body);
+      const float x0 = viewport_.x_at(span.first);
+      const float x1 = x0 + viewport_.lane_width(span.second);
+      if (event.position.y >= top && event.position.y <= bottom && event.position.x >= x0 &&
+          event.position.x <= x1) {
+        // Double-click only advances the layer (or starts at Chain when entering
+        // a new hold/chain). The edge grab only helps identify the hold even when
+        // another note, such as a tap, covers its start.
+        drill_hold_selection(hold_drill_target(*body, event.position));
+        last_hold_edge_body_id_ = -1;
+        mode_ = Mode::Idle;
+        drag_originals_.clear();
+        return;
+      }
+    }
+  }
+
   auto hit = hit_test_note(event.position);
   if (!hit) return;
-  drill_hold_selection(*hit);
+  if (const auto body = resolve_hold_body(*hit)) {
+    // Pick star/head/body from geometry for the Parts transition (hit_test_note's
+    // selected-note bonus can otherwise hide the head at the shared start tick).
+    drill_hold_selection(hold_drill_target(*body, event.position));
+  } else {
+    drill_hold_selection(*hit);
+  }
   mode_ = Mode::Idle;
   drag_originals_.clear();
 }

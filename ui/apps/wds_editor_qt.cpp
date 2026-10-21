@@ -18,6 +18,7 @@
 #include <wds/core/types.hpp>
 #include "wds/common/crash_handler.hpp"
 #include "wds/common/log.hpp"
+#include "wds/common/minflt_stage.hpp"
 #include "wds/common/perf_stages.hpp"
 #include "wds/common/runtime_env.hpp"
 #include "wds/common/utf8_path.hpp"
@@ -209,12 +210,77 @@ long process_minor_faults() noexcept {
 #endif
 }
 
+// Thread role for the once-per-second CPUCLASS breakdown. Roles derived from a
+// thread's *name* are cached per tid (a thread never gets renamed here); main /
+// split-collect-pool membership is decided per sample because a pool worker only
+// registers itself the first time it runs a split.collect.* scope.
+// Declared outside the macOS block so append_cpuclass() compiles everywhere;
+// only the *sampling* is macOS-only (other platforms report zeroes).
+enum ThreadRole : uint8_t {
+  kRoleOther = 0,
+  kRoleMain = 1,
+  kRolePool = 2,
+  kRolePreload = 3,
+  kRoleAudio = 4,
+};
+constexpr int kRoleCount = 5;
+// Cap for the tid→role cache; see sample_thread_cpu().
+constexpr size_t kMaxRoleCache = 512;
+
 #if defined(Q_OS_MACOS)
 int64_t mach_time_to_us(time_value_t t) noexcept {
   return static_cast<int64_t>(t.seconds) * 1000000LL + static_cast<int64_t>(t.microseconds);
 }
 
-void sample_thread_cpu(std::unordered_map<uint64_t, int64_t>& out, int& thread_n) {
+// Case-insensitive substring test over a NUL-terminated thread name.
+bool name_has(const char* name, const char* needle) noexcept {
+  if (name == nullptr || name[0] == '\0' || needle == nullptr || needle[0] == '\0') {
+    return false;
+  }
+  const size_t n = std::strlen(needle);
+  for (const char* p = name; *p != '\0'; ++p) {
+    size_t i = 0;
+    while (i < n && p[i] != '\0') {
+      const char a = p[i];
+      const char b = needle[i];
+      const char al = (a >= 'A' && a <= 'Z') ? static_cast<char>(a - 'A' + 'a') : a;
+      const char bl = (b >= 'A' && b <= 'Z') ? static_cast<char>(b - 'A' + 'a') : b;
+      if (al != bl) break;
+      ++i;
+    }
+    if (i == n) return true;
+  }
+  return false;
+}
+
+// Thread-name → role. Names are the only portable signal (no thread calls
+// pthread_setname_np in this codebase), so the patterns are deliberately
+// substring matches on what the OS / libraries actually name threads:
+//   audio   — BASS on macOS mixes on CoreAudio HAL threads: the IO thread is
+//             "com.apple.audio.IOThread.client", the HAL client is
+//             "HALC_ProxyIOContext", the driver side "AURemoteIO"/"auri*";
+//             "bass*" covers a named BASS helper, "coreaudio" the umbrella.
+//   preload — only when the owning code names its worker. Today the std::async
+//             texture preload (playback_preview.cpp) and the split-snapshot
+//             worker (ui/src/qt/split_effect_snapshot.cpp) are UNNAMED, so their
+//             CPU is reported under other_ms. TODO(renderer/ui owners): add a
+//             pthread_setname_np("wds.preload"/"wds.snapshot") there and it
+//             lands in preload_ms with no change here.
+ThreadRole role_from_name(const char* name) noexcept {
+  static const char* const kAudio[] = {"audio", "bass", "auri", "halc", "coreaudio"};
+  for (const char* pat : kAudio) {
+    if (name_has(name, pat)) return kRoleAudio;
+  }
+  static const char* const kPreload[] = {"preload", "texture", "decode", "loader",
+                                         "snapshot", "cluster", "atlas", "upload"};
+  for (const char* pat : kPreload) {
+    if (name_has(name, pat)) return kRolePreload;
+  }
+  return kRoleOther;
+}
+
+void sample_thread_cpu(std::unordered_map<uint64_t, int64_t>& out, int& thread_n,
+                       std::unordered_map<uint64_t, uint8_t>* role_cache) {
   out.clear();
   thread_n = 0;
   thread_act_array_t list = nullptr;
@@ -226,17 +292,41 @@ void sample_thread_cpu(std::unordered_map<uint64_t, int64_t>& out, int& thread_n
   for (mach_msg_type_number_t i = 0; i < n; ++i) {
     thread_identifier_info_data_t idinfo{};
     mach_msg_type_number_t id_cnt = THREAD_IDENTIFIER_INFO_COUNT;
-    thread_basic_info_data_t info{};
-    mach_msg_type_number_t info_cnt = THREAD_BASIC_INFO_COUNT;
     uint64_t tid = static_cast<uint64_t>(list[i]);
     if (thread_info(list[i], THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&idinfo),
                     &id_cnt) == KERN_SUCCESS) {
       tid = idinfo.thread_id;
     }
-    if (thread_info(list[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info),
-                    &info_cnt) == KERN_SUCCESS) {
-      out[tid] = mach_time_to_us(info.user_time) + mach_time_to_us(info.system_time);
+    // One call for both the cumulative CPU time and the thread name. The
+    // extended struct's pth_user_time / pth_system_time are nanoseconds (the
+    // THREAD_BASIC_INFO path below is the older microseconds form).
+    thread_extended_info_data_t ext{};
+    mach_msg_type_number_t ext_cnt = THREAD_EXTENDED_INFO_COUNT;
+    int64_t us = 0;
+    if (thread_info(list[i], THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&ext),
+                    &ext_cnt) == KERN_SUCCESS) {
+      us = static_cast<int64_t>(ext.pth_user_time + ext.pth_system_time) / 1000;
+      if (role_cache != nullptr && role_cache->find(tid) == role_cache->end()) {
+        // tids are recycled by the kernel, so this cache is best-effort; cap it
+        // so a long session that churns short-lived threads cannot grow it
+        // without bound (a reset only costs one re-classification sweep).
+        if (role_cache->size() >= kMaxRoleCache) role_cache->clear();
+        ext.pth_name[sizeof(ext.pth_name) - 1] = '\0';
+        (*role_cache)[tid] = static_cast<uint8_t>(role_from_name(ext.pth_name));
+      }
+    } else {
+      thread_basic_info_data_t info{};
+      mach_msg_type_number_t info_cnt = THREAD_BASIC_INFO_COUNT;
+      if (thread_info(list[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info),
+                      &info_cnt) == KERN_SUCCESS) {
+        us = mach_time_to_us(info.user_time) + mach_time_to_us(info.system_time);
+      }
+      if (role_cache != nullptr && role_cache->find(tid) == role_cache->end()) {
+        if (role_cache->size() >= kMaxRoleCache) role_cache->clear();
+        (*role_cache)[tid] = static_cast<uint8_t>(kRoleOther);
+      }
     }
+    out[tid] = us;
     mach_port_deallocate(mach_task_self(), list[i]);
   }
   vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(list),
@@ -244,16 +334,85 @@ void sample_thread_cpu(std::unordered_map<uint64_t, int64_t>& out, int& thread_n
 }
 #endif
 
-void sample_process_cpu(ProcessCpuSnap& snap) {
+void sample_process_cpu(ProcessCpuSnap& snap,
+                        std::unordered_map<uint64_t, uint8_t>* role_cache = nullptr) {
   (void)process_cpu_times_us(snap.user_us, snap.sys_us);
 #if defined(Q_OS_MACOS)
-  sample_thread_cpu(snap.thread_us, snap.thread_n);
+  sample_thread_cpu(snap.thread_us, snap.thread_n, role_cache);
 #else
+  (void)role_cache;
   snap.thread_us.clear();
   snap.thread_n = 0;
 #endif
 }
 
+// GPU memory for the MEMMEM line. TODO(hook): the renderer owner is adding a
+// VulkanRenderer::device_memory_bytes()-style accessor; until it lands this
+// returns 0. Keep it a free function so swapping in the real accessor is a
+// one-line change here, and nothing else in this file needs the renderer type.
+// Called once per second only (never per frame).
+int64_t gpu_memory_kb(const wds::renderer::VulkanRenderer& vk) noexcept {
+  (void)vk;
+  return 0;
+}
+
+// Bounded histogram of the window's frame wall times, for the summary's
+// wall_p50/p95/p99 and STALLSEC's p99_wall_ms.
+//   2048 fixed buckets of 0.05 ms (covers 0..102.4 ms at 0.05 ms resolution,
+//   i.e. 0.3% at a 60 Hz frame) plus one overflow bucket that reports the
+//   exact max. Inline array, no allocation, no per-frame sort: O(1) insert,
+//   O(2048) percentile. Bounded memory = 2049 * 4 B ≈ 8 KiB, inside the
+//   "≤2048 samples" budget.
+constexpr double kWallBucketMs = 0.05;
+constexpr int kWallBuckets = 2048;
+
+struct WallHistogram {
+  uint32_t bucket[kWallBuckets + 1]{};
+  uint32_t n = 0;
+  double max_ms = 0.0;
+
+  void clear() noexcept {
+    std::memset(bucket, 0, sizeof(bucket));
+    n = 0;
+    max_ms = 0.0;
+  }
+
+  void add(int64_t wall_us) noexcept {
+    if (wall_us < 0) {
+      return;
+    }
+    const double ms = static_cast<double>(wall_us) / 1000.0;
+    int idx = static_cast<int>(ms / kWallBucketMs);
+    if (idx < 0) idx = 0;
+    if (idx >= kWallBuckets) idx = kWallBuckets;  // overflow bucket
+    ++bucket[idx];
+    ++n;
+    if (ms > max_ms) max_ms = ms;
+  }
+
+  // Value at percentile q (0..1) in ms: the containing bucket's midpoint, or
+  // the exact max for the overflow bucket. 0 when empty.
+  double percentile(double q) const noexcept {
+    if (n == 0) {
+      return 0.0;
+    }
+    uint32_t target = static_cast<uint32_t>(q * static_cast<double>(n));
+    if (target >= n) target = n - 1;
+    uint32_t seen = 0;
+    for (int i = 0; i <= kWallBuckets; ++i) {
+      seen += bucket[i];
+      if (seen > target) {
+        if (i == kWallBuckets) {
+          return max_ms;
+        }
+        return (static_cast<double>(i) + 0.5) * kWallBucketMs;
+      }
+    }
+    return max_ms;
+  }
+};
+
+#if WDS_DIAG_ENABLED
 class FrameDiagLogger {
  public:
   FrameDiagLogger() {
@@ -267,6 +426,26 @@ class FrameDiagLogger {
     active_ = true;
     wds::common::perf::set_enabled(wds::ui::frame_diag_perf_enabled_from_env());
     started_ = std::chrono::steady_clock::now();
+#if defined(Q_OS_MACOS)
+    {
+      uint64_t tid = 0;
+      if (pthread_threadid_np(nullptr, &tid) == 0) main_tid_ = tid;
+    }
+#endif
+    // Optional scenario marker: WDS_FRAME_DIAG_MARK=<path>. Polled once per
+    // second; a changed mtime writes the file's first line as "MARK text=…".
+    if (const char* mark = std::getenv("WDS_FRAME_DIAG_MARK")) {
+      if (mark[0] != '\0') mark_path_ = QString::fromLocal8Bit(mark);
+    }
+    {
+      // MEMMEM baseline (one sample at startup; every later sample is the
+      // once-per-second one in append_memmem()).
+      wds::common::ProcessMemSnap mem{};
+      wds::common::sample_process_mem(mem);
+      mem_rss0_kb_ = mem.rss_kb;
+      mem_minflt0_ = mem.minflt;
+      mem_majflt0_ = mem.majflt;
+    }
     write_startup_header();
     arm_cold("open");
   }
@@ -298,6 +477,7 @@ class FrameDiagLogger {
                     int64_t wall_us, int64_t delta_us, int64_t tick_us, int64_t render_us) {
     if (!active_) return;
     auto& vk = editor.chart_preview().preview().vulkan();
+    vk_ = &vk;  // diagnostics only: MEMMEM asks it for GPU memory once per second
     const int64_t fence_us = vk.last_fence_wait_us();
     const int64_t acquire_us = vk.last_acquire_wait_us();
     const int64_t submit_us = vk.last_gpu_submit_us();
@@ -453,6 +633,7 @@ class FrameDiagLogger {
     if (wall_us >= 0) {
       acc(wall_sum_us_, wall_max_us_, wall_us);
       ++wall_samples_;
+      wall_hist_.add(wall_us);
     }
     const auto cpu = vk.last_draw_cpu();
     // MoltenVK synchronous submits: vsync/drawable back-pressure waits inside
@@ -469,6 +650,20 @@ class FrameDiagLogger {
     acc(submit_wait_sum_us_, submit_wait_max_us_, submit_wait);
     acc(present_sum_us_, present_max_us_, present_us);
     acc(ui_sum_us_, ui_max_us_, ui_us);
+    // STALLSEC partition. wall_us is the interval between the *previous*
+    // callback and this one, so it is explained by the previous frame's work:
+    //   wall = prev_work + vsync_gap + unsched
+    // where prev_work = tick + render + ui of the previous frame (fence /
+    // acquire / present are measured inside preview.render(), i.e. already in
+    // render). The first frame of a window has no predecessor yet.
+    if (wall_us >= 0 && have_prev_work_) {
+      const int64_t gap_us = wall_us > prev_work_us_ ? wall_us - prev_work_us_ : 0;
+      const int64_t vsync_gap_us = gap_us < kVsyncPeriodUs ? gap_us : kVsyncPeriodUs;
+      acc(gap_vsync_sum_us_, gap_vsync_max_us_, vsync_gap_us);
+      acc(gap_unsched_sum_us_, gap_unsched_max_us_, gap_us - vsync_gap_us);
+    }
+    prev_work_us_ = tick_us + render_us + ui_us;
+    have_prev_work_ = true;
     if (paint_count > last_seen_paint_count_) {
       last_seen_paint_count_ = paint_count;
       acc(paint_sum_us_, paint_max_us_, paint_us);
@@ -601,6 +796,12 @@ class FrameDiagLogger {
  private:
   static constexpr int64_t kHitchUs = 25000;
   static constexpr int64_t kMissedVsyncUs = 16700;
+  // One 60 Hz display period. A gap up to this is the display link waiting for
+  // the next vsync; beyond it the process lost the slot (STALLSEC split).
+  static constexpr int64_t kVsyncPeriodUs = 16666;
+  // Upper bound on pool tids perf::pool_thread_ids() may report (matches the
+  // kMaxPoolTraceThreads cap in common/src/perf_stages.cpp).
+  static constexpr int kMaxPerfPoolTids = 32;
 
   // MoltenVK sync submits park vsync/drawable back-pressure in vkQueueSubmit.
   // Only idle draws (tiny record, no particle verts) with a vsync-sized submit
@@ -696,6 +897,9 @@ class FrameDiagLogger {
         frames_ > 0 ? static_cast<double>(playing_frames_) / static_cast<double>(frames_) : 0.0;
     const uint64_t paints = count_delta(last_paint_count_, paint_count0_);
     const auto& c = last_path_counts_;
+    const double wall_p50 = wall_hist_.percentile(0.50);
+    const double wall_p95 = wall_hist_.percentile(0.95);
+    const double wall_p99 = wall_hist_.percentile(0.99);
     char buf[1100];
     const int n = std::snprintf(
         buf, sizeof(buf),
@@ -709,7 +913,7 @@ class FrameDiagLogger {
         "paint_max=%.1f paints=%llu ui_avg=%.1f ui_max=%.1f swapchain_recreate=%llu "
         "create_texture_rgba=%llu upload_fence_wait=%llu upload_submit=%llu "
         "upload_fence_reap=%llu descriptor_allocate=%llu apply_msaa=%llu "
-        "apply_msaa_idle_wait=%llu\n",
+        "apply_msaa_idle_wait=%llu wall_p50=%.3f wall_p95=%.3f wall_p99=%.3f\n",
         t, last_chart_sec_, window_chart_sec0_, last_transport_playing_ ? 1 : 0, frames_, fps, playing,
         avg_ms(wall_sum_us_, wall_samples_), ms(wall_max_us_), hitch_count_, missed_vsync_,
         window_s, window_s < 0.95 ? 1 : 0,
@@ -728,11 +932,12 @@ class FrameDiagLogger {
         static_cast<unsigned long long>(count_delta(c.upload_fence_reap, path_counts0_.upload_fence_reap)),
         static_cast<unsigned long long>(count_delta(c.descriptor_allocate, path_counts0_.descriptor_allocate)),
         static_cast<unsigned long long>(count_delta(c.apply_msaa, path_counts0_.apply_msaa)),
-        static_cast<unsigned long long>(count_delta(c.apply_msaa_idle_wait, path_counts0_.apply_msaa_idle_wait)));
+        static_cast<unsigned long long>(count_delta(c.apply_msaa_idle_wait, path_counts0_.apply_msaa_idle_wait)),
+        wall_p50, wall_p95, wall_p99);
     if (n > 0) pending_.append(buf, static_cast<std::size_t>(n));
     {
       ProcessCpuSnap now_cpu{};
-      sample_process_cpu(now_cpu);
+      sample_process_cpu(now_cpu, &thread_roles_);
       const int64_t user_d = now_cpu.user_us >= cpu0_.user_us ? now_cpu.user_us - cpu0_.user_us : 0;
       const int64_t sys_d = now_cpu.sys_us >= cpu0_.sys_us ? now_cpu.sys_us - cpu0_.sys_us : 0;
       const double cpu_pct =
@@ -757,7 +962,11 @@ class FrameDiagLogger {
           last_split_diag_.pool_participants, last_split_diag_.pool_last,
           last_split_diag_.particles);
       if (cn > 0) pending_.append(cbuf, static_cast<std::size_t>(cn));
+      append_cpuclass(t, window_s, now_cpu);
     }
+    append_memmem(t);
+    append_stallsec(t);
+    poll_mark(t);
     {
       char sbuf[1152];
       const int sn = std::snprintf(
@@ -870,6 +1079,164 @@ class FrameDiagLogger {
     }
   }
 
+  // CPUCLASS: window CPU split by thread class, macOS only (the tid→CPU map
+  // comes from task_threads). A thread is classified once per tid:
+  //   main     — the thread that owns the diag logger (GUI/render thread: the
+  //              Qt frame callback runs there; captured at construction).
+  //   pool     — a tid that perf::pool_thread_ids() has seen run a
+  //              "split.collect.*" scope, i.e. the chart-render split collect
+  //              pool workers (recorded in perf_stages.cpp, one store per
+  //              thread for the process lifetime). The GUI thread also
+  //              participates in collects, which is why main is tested first
+  //              and wins: main_ms is the frame-thread total, pool_ms is purely
+  //              the extra worker threads.
+  //   preload  — a thread whose name matches a preload/texture/upload/snapshot
+  //              word (role_from_name). Today the std::async texture preload and
+  //              the split-snapshot worker are unnamed, so their CPU is reported
+  //              under other_ms; naming those threads would move it to preload.
+  //   audio    — a thread whose name matches an audio word; on macOS BASS mixes
+  //              on the CoreAudio HAL threads ("com.apple.audio.*", "HALC_*").
+  //   other    — everything else (Qt helpers, driver, snapshots, ...).
+  // Re-sampled every second against the window start snapshot, so the numbers
+  // are deltas for this window. Non-macOS emits the same line with zeroes so
+  // downstream parsers do not need a platform check.
+  void append_cpuclass(double t, double window_s, const ProcessCpuSnap& now_cpu) {
+    int64_t class_us[kRoleCount] = {};
+    uint64_t pool_tids[kMaxPerfPoolTids];
+    const int pool_n = wds::common::perf::pool_thread_ids(pool_tids, kMaxPerfPoolTids);
+    for (const auto& kv : now_cpu.thread_us) {
+      const auto it = cpu0_.thread_us.find(kv.first);
+      const int64_t prev = it == cpu0_.thread_us.end() ? 0 : it->second;
+      const int64_t d = kv.second >= prev ? kv.second - prev : 0;
+      if (d <= 0) continue;
+      ThreadRole role = kRoleOther;
+      if (kv.first == main_tid_) {
+        role = kRoleMain;
+      } else {
+        bool is_pool = false;
+        for (int i = 0; i < pool_n; ++i) {
+          if (pool_tids[i] == kv.first) {
+            is_pool = true;
+            break;
+          }
+        }
+        if (is_pool) {
+          role = kRolePool;
+        } else {
+          const auto rit = thread_roles_.find(kv.first);
+          if (rit != thread_roles_.end() && rit->second != kRoleOther) {
+            role = static_cast<ThreadRole>(rit->second);
+          }
+        }
+      }
+      class_us[role] += d;
+    }
+    int64_t total_us = 0;
+    for (int i = 0; i < kRoleCount; ++i) total_us += class_us[i];
+    const double total_pct =
+        window_s > 0.0 ? static_cast<double>(total_us) / window_s / 10000.0 : 0.0;
+    char buf[320];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "CPUCLASS t=%.1f main_ms=%.1f pool_ms=%.1f preload_ms=%.1f audio_ms=%.1f other_ms=%.1f "
+        "total_pct=%.1f\n",
+        t, ms(class_us[kRoleMain]), ms(class_us[kRolePool]), ms(class_us[kRolePreload]),
+        ms(class_us[kRoleAudio]), ms(class_us[kRoleOther]), total_pct);
+    if (n > 0) pending_.append(buf, static_cast<std::size_t>(n));
+  }
+
+  // MEMMEM: process memory + faults for the window. Exactly one mach/getrusage
+  // sample per second (never per frame); the window deltas are taken against
+  // the baseline rolled forward at the end of this function (and seeded once in
+  // the constructor). gpu_mem_kb is 0 until the renderer exposes
+  // device_memory_bytes() — see gpu_memory_kb() and the report's TODO.
+  void append_memmem(double t) {
+    wds::common::ProcessMemSnap mem{};
+    int64_t gpu_kb = 0;
+    if (vk_ != nullptr) gpu_kb = gpu_memory_kb(*vk_);
+    wds::common::sample_process_mem(mem);
+    const long minflt_d = mem.minflt >= mem_minflt0_ ? mem.minflt - mem_minflt0_ : 0;
+    const long majflt_d = mem.majflt >= mem_majflt0_ ? mem.majflt - mem_majflt0_ : 0;
+    char buf[320];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "MEMMEM t=%.1f rss_kb=%ld rss_peak_kb=%ld rss_delta_kb=%ld footprint_kb=%ld swap_kb=%ld "
+        "commit_kb=%ld minflt=%ld majflt=%ld gpu_mem_kb=%lld\n",
+        t, mem.rss_kb, mem.rss_peak_kb, mem.rss_kb - mem_rss0_kb_, mem.footprint_kb,
+        mem.compressed_kb, mem.commit_kb, minflt_d, majflt_d, static_cast<long long>(gpu_kb));
+    if (n > 0) pending_.append(buf, static_cast<std::size_t>(n));
+    // Roll the baseline forward: exactly one sample per summary (i.e. per
+    // second), and the next window's deltas are measured from here.
+    mem_rss0_kb_ = mem.rss_kb;
+    mem_minflt0_ = mem.minflt;
+    mem_majflt0_ = mem.majflt;
+  }
+
+  // STALLSEC: partition of the window's wall time (accumulated per frame in
+  // finish_frame(), where wall_us is the gap since the previous callback and is
+  // attributed to the previous frame's work). Per frame:
+  //   work     = tick + render + ui   (inside the frame callback)
+  //   gap      = max(0, wall - prev_work)  time between callbacks: the paint
+  //              pass, the vsync pad inside vkQueueSubmit, and idle time
+  //   vsync_gap= min(gap, one display period)  display link pace, not lost time
+  //   unsched  = gap - vsync_gap      not scheduled / blocked outside work
+  // so wall == prev_work + vsync_gap + unsched per frame, and the window totals
+  // sum to the window's wall time (minus the first frame, which has no
+  // predecessor). fence_ms / acquire_ms / present_ms are attribution, NOT extra
+  // slices: the renderer measures them inside preview.render(), so they are
+  // already contained in render_ms. Use them to explain render_ms.
+  //   missed_vsync= frames whose wall time exceeded one 60 Hz period.
+  //   p99_wall_ms = 99th percentile of the window's frame wall times, from the
+  //                 fixed ≤2049-slot histogram (0.05 ms resolution).
+  void append_stallsec(double t) {
+    char buf[320];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "STALLSEC t=%.1f unsched_ms=%.1f fence_ms=%.1f acquire_ms=%.1f present_ms=%.1f "
+        "vsync_gap_ms=%.1f missed_vsync=%d p99_wall_ms=%.3f\n",
+        t, ms(gap_unsched_sum_us_), ms(fence_sum_us_), ms(acquire_sum_us_), ms(present_sum_us_),
+        ms(gap_vsync_sum_us_), missed_vsync_, wall_hist_.percentile(0.99));
+    if (n > 0) pending_.append(buf, static_cast<std::size_t>(n));
+  }
+
+  // WDS_FRAME_DIAG_MARK: poll (at most once per summary, i.e. ~1 s) for an
+  // mtime change and write the marker file's first line. Cheap: one stat per
+  // second, a read only when the file actually changed.
+  //
+  // The first observation is only a baseline: a marker file left over from a
+  // previous run does not inject a MARK at t=0. Any later mtime change does,
+  // and so does the file appearing after launch (mark_seen_ resets while it is
+  // absent). Decimal mtimes are used so a rewrite inside the same second is
+  // still seen.
+  void poll_mark(double t) {
+    if (mark_path_.isEmpty()) return;
+    QFileInfo info(mark_path_);
+    if (!info.exists()) {
+      mark_seen_ = false;
+      return;
+    }
+    const qint64 mtime = info.lastModified().toMSecsSinceEpoch();
+    if (!mark_seen_) {
+      mark_seen_ = true;
+      mark_mtime_ = mtime;
+      return;
+    }
+    if (mtime == mark_mtime_) return;
+    mark_mtime_ = mtime;
+    QFile f(mark_path_);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    QByteArray line = f.readLine(512);
+    f.close();
+    while (!line.isEmpty() && (line.endsWith('\n') || line.endsWith('\r'))) {
+      line.chop(1);
+    }
+    // key=value fields cannot contain spaces; keep the marker one token.
+    line.replace(' ', '_');
+    char buf[600];
+    const int n = std::snprintf(buf, sizeof(buf), "MARK text=%s t=%.1f\n", line.constData(), t);
+    if (n > 0) pending_.append(buf, static_cast<std::size_t>(n));
+  }
+
   void flush_file() {
     if (!file_.isOpen() || pending_.empty()) return;
     file_.write(pending_.data(), static_cast<qint64>(pending_.size()));
@@ -896,6 +1263,11 @@ class FrameDiagLogger {
     present_sum_us_ = present_max_us_ = 0;
     paint_sum_us_ = paint_max_us_ = 0;
     ui_sum_us_ = ui_max_us_ = 0;
+    gap_vsync_sum_us_ = gap_vsync_max_us_ = 0;
+    gap_unsched_sum_us_ = gap_unsched_max_us_ = 0;
+    prev_work_us_ = 0;
+    have_prev_work_ = false;
+    wall_hist_.clear();
     collect_samples_ = 0;
     verts_samples_ = 0;
     collect_sum_us_ = collect_max_us_ = 0;
@@ -905,7 +1277,10 @@ class FrameDiagLogger {
     window_open_ = false;
     align_screen_samples_.clear();
     align_present_samples_.clear();
-    sample_process_cpu(cpu0_);
+    // The MEMMEM baseline is NOT re-sampled here: append_memmem() rolls it
+    // forward right after each emission, so the memory sampler runs exactly
+    // once per second and never twice inside one window.
+    sample_process_cpu(cpu0_, &thread_roles_);
   }
 
   bool active_ = false;
@@ -994,6 +1369,34 @@ class FrameDiagLogger {
   std::vector<int64_t> align_screen_samples_;
   std::vector<int64_t> align_present_samples_;
 
+  // --- diagnostics-only state for the per-second lines added below ---
+  // tid of the thread that owns this logger (Qt GUI/render thread).
+  uint64_t main_tid_ = 0;
+  // tid → ThreadRole, filled on the first per-second sample that sees the
+  // thread (macOS only; cheap because names do not change).
+  std::unordered_map<uint64_t, uint8_t> thread_roles_;
+  // MEMMEM window baselines (snapshot taken at window open / reset).
+  long mem_rss0_kb_ = 0;
+  long mem_minflt0_ = 0;
+  long mem_majflt0_ = 0;
+  // STALLSEC: work (tick + render + ui) of the previous frame, which explains
+  // the wall interval measured at the start of this one.
+  int64_t prev_work_us_ = 0;
+  bool have_prev_work_ = false;
+  int64_t gap_vsync_sum_us_ = 0;
+  int64_t gap_vsync_max_us_ = 0;
+  int64_t gap_unsched_sum_us_ = 0;
+  int64_t gap_unsched_max_us_ = 0;
+  // Bounded wall-time histogram for wall_p50/p95/p99 and STALLSEC p99.
+  WallHistogram wall_hist_;
+  // Renderer whose GPU memory the MEMMEM line reports (GUI thread only, set on
+  // every finish_frame()); never null while the window is open.
+  wds::renderer::VulkanRenderer* vk_ = nullptr;
+  // WDS_FRAME_DIAG_MARK state.
+  QString mark_path_;
+  bool mark_seen_ = false;
+  qint64 mark_mtime_ = 0;
+
   void arm_cold(const char* why) noexcept {
     cold_left_ = 3;
     cold_n_ = 0;
@@ -1005,6 +1408,7 @@ class FrameDiagLogger {
     }
   }
 };
+#endif  // WDS_DIAG_ENABLED
 
 QtMessageHandler g_prev_qt_handler = nullptr;
 
@@ -1394,6 +1798,10 @@ int main(int argc, char** argv) {
   preview_window->set_idle_throttle_bypass([&editor] {
     return editor.chart_preview().ready() && editor.chart_preview().transport().playing();
   });
+  preview_window->set_idle_present_gate([&editor] {
+    return !editor.chart_preview().ready() || editor.chart_preview().needs_present();
+  });
+  preview_window->set_idle_wakeup_interval_us(250000);
   window.set_skins_dir(wds::ui::resolve_skins_dir(argv[0]));
   window.set_icons_dir(wds::ui::resolve_icons_dir(argv[0]));
   window.set_theme_dir(theme_dir);
@@ -1430,8 +1838,10 @@ int main(int argc, char** argv) {
   };
 
 
+#if WDS_DIAG_ENABLED
   FrameDiagLogger frame_diag;
   QObject::connect(&app, &QCoreApplication::aboutToQuit, [&frame_diag] { frame_diag.close(); });
+#endif  // WDS_DIAG_ENABLED
 
   auto last_editor_tick = std::make_shared<std::chrono::steady_clock::time_point>(
       std::chrono::steady_clock::now() - std::chrono::seconds(1));
@@ -1445,6 +1855,12 @@ int main(int argc, char** argv) {
   bool autoplay = false;
   int quit_after_sec = -1;
   double seek_sec = -1.0;
+  // `--seek-sweep <start_sec>:<end_sec>:<hz>`: emulates dragging the preview
+  // scrubber (ping-pong) so the seek-drag scenario can be measured headless.
+  // A negative start means "not requested".
+  double sweep_start_sec = -1.0;
+  double sweep_end_sec = -1.0;
+  int sweep_hz = 0;
   double pause_at_sec = -1.0;
   double jump_at_sec = -1.0;
   double jump_to_sec = -1.0;
@@ -1480,6 +1896,24 @@ int main(int argc, char** argv) {
       bool ok = false;
       const double sec = args[++i].toDouble(&ok);
       if (ok && sec >= 0.0) seek_sec = sec;
+    } else if (args[i] == QLatin1String("--seek-sweep") && i + 1 < args.size()) {
+      // <start_sec>:<end_sec>:<hz>. Invalid or non-positive hz / range is
+      // ignored (the option stays off), same leniency as --seek.
+      const QString spec = args[++i];
+      const QStringList parts = spec.split(QLatin1Char(':'));
+      bool start_ok = false;
+      bool end_ok = false;
+      bool hz_ok = false;
+      if (parts.size() == 3) {
+        const double start = parts[0].toDouble(&start_ok);
+        const double end = parts[1].toDouble(&end_ok);
+        const int hz = parts[2].toInt(&hz_ok);
+        if (start_ok && end_ok && hz_ok && start >= 0.0 && end >= 0.0 && hz > 0) {
+          sweep_start_sec = start;
+          sweep_end_sec = end;
+          sweep_hz = std::min(hz, 120);
+        }
+      }
     } else if (args[i] == QLatin1String("--pause-at") && i + 1 < args.size()) {
       bool ok = false;
       const double sec = args[++i].toDouble(&ok);
@@ -1587,14 +2021,20 @@ int main(int argc, char** argv) {
   };
 
   preview_window->set_frame_callback([&editor, preview_window, visual, ui_font,
-                                      overlay_loaded_display, &frame_diag, editor_widget,
+                                      overlay_loaded_display,
+#if WDS_DIAG_ENABLED
+                                      &frame_diag,
+#endif  // WDS_DIAG_ENABLED
+                                      editor_widget,
                                       ui_alive, &finish_editor_frame, &window](
                                          float delta, int logical_w, int logical_h, int fb_w,
                                          int fb_h,
                                          const std::vector<wds::interaction::InputEvent>& events) mutable {
+#if WDS_DIAG_ENABLED
     const bool diag = frame_diag.active();
     int64_t wall_us = -1;
     if (diag) wall_us = frame_diag.begin_callback(std::chrono::steady_clock::now());
+#endif  // WDS_DIAG_ENABLED
     if (!editor.chart_preview().ready()) {
       finish_editor_frame(delta);
       if (editor_widget->isVisible()) editor_widget->repaint();
@@ -1645,22 +2085,29 @@ int main(int argc, char** argv) {
       }
       editor.set_status("ui资源加载完毕", wds::ui::StatusLevel::Info);
     }
+#if WDS_DIAG_ENABLED
     if (diag) frame_diag.enable_path_diagnostics(editor);
+#endif  // WDS_DIAG_ENABLED
     if (editor.chart_preview().video_export_clock()) {
       return;
     }
     editor.resize_preview_viewport(logical_w, logical_h, fb_w, fb_h);
+#if WDS_DIAG_ENABLED
     std::chrono::steady_clock::time_point phase_t0{};
     if (diag) phase_t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
     const auto work_t0 = std::chrono::steady_clock::now();
     editor.chart_preview().tick(static_cast<int64_t>(delta * 1000000.0f));
+#if WDS_DIAG_ENABLED
     int64_t tick_us = 0;
     if (diag) {
       const auto tick_t1 = std::chrono::steady_clock::now();
       tick_us = std::chrono::duration_cast<std::chrono::microseconds>(tick_t1 - phase_t0).count();
       phase_t0 = tick_t1;
     }
+#endif  // WDS_DIAG_ENABLED
     editor.chart_preview().render();
+    editor.chart_preview().note_frame_presented();
     preview_window->mark_presented();
     static bool logged_present = false;
     if (!logged_present) {
@@ -1668,12 +2115,14 @@ int main(int argc, char** argv) {
       WDS_LOG("preview first frame callback fb=%dx%d logical=%dx%d\n", fb_w, fb_h, logical_w,
               logical_h);
     }
+#if WDS_DIAG_ENABLED
     int64_t render_us = 0;
     if (diag) {
       render_us = std::chrono::duration_cast<std::chrono::microseconds>(
                       std::chrono::steady_clock::now() - phase_t0)
                       .count();
     }
+#endif  // WDS_DIAG_ENABLED
     editor.chart_preview().flush_retired_font_textures();
     {
       const double work_ms = std::chrono::duration<double, std::milli>(
@@ -1683,10 +2132,12 @@ int main(int argc, char** argv) {
     }
     window.on_preview_frame();
     finish_editor_frame(delta);
+#if WDS_DIAG_ENABLED
     if (diag) {
       frame_diag.finish_frame(editor, *editor_widget, wall_us,
                              static_cast<int64_t>(delta * 1000000.0f), tick_us, render_us);
     }
+#endif  // WDS_DIAG_ENABLED
     (void)events;
   });
   preview_window->set_surface_teardown(
@@ -1700,7 +2151,10 @@ int main(int argc, char** argv) {
                      const bool ready = editor.chart_preview().ready();
                      const bool intends =
                          ready && editor.chart_preview().transport().intends_playing();
-                     const int interval_ms = intends ? 16 : 33;
+                     // Idle no longer needs a 30 Hz editor tick. Qt events still
+                     // repaint immediately; this timer is only the fallback/frame
+                     // clock while playing or while a preview invalidation is pending.
+                     const int interval_ms = intends ? 16 : 250;
                      if (edit_timer->interval() != interval_ms) {
                        edit_timer->setInterval(interval_ms);
                      }
@@ -1744,7 +2198,7 @@ int main(int argc, char** argv) {
 
   window.setWindowIcon(QApplication::windowIcon());
   const bool cli_automation =
-      capture_preview || seek_sec >= 0.0 || quit_after_sec >= 0 ||
+      capture_preview || seek_sec >= 0.0 || sweep_start_sec >= 0.0 || quit_after_sec >= 0 ||
       (std::getenv("WDS_DUMP_VERTS") != nullptr && std::getenv("WDS_DUMP_VERTS")[0] != '\0');
   if (!args.contains("--smoke-test") && !cli_automation) {
     maybe_notify_previous_crash(nullptr);
@@ -2107,6 +2561,7 @@ int main(int argc, char** argv) {
               seq->injected = true;
               QTimer::singleShot(precommit_wait_ms, transport_timer,
                                  [transport_timer, apply_cli_transport, seek_sec, autoplay, &editor] {
+#if WDS_DIAG_ENABLED
                                    const auto st = editor.chart_preview().preview().last_precommit();
                                    std::fprintf(stderr,
                                                 "PRECOMMIT_WAIT done pending=%d wall_us=%lld "
@@ -2114,6 +2569,7 @@ int main(int argc, char** argv) {
                                                 st.pending, static_cast<long long>(st.wall_us),
                                                 st.rss_kb_before, st.rss_kb_after,
                                                 st.plan.particle_cap);
+#endif  // WDS_DIAG_ENABLED
                                    apply_cli_transport(seek_sec, autoplay);
                                    transport_timer->stop();
                                  });
@@ -2128,6 +2584,113 @@ int main(int argc, char** argv) {
         });
     QTimer::singleShot(2500, &window, [transport_timer] { transport_timer->start(); });
   }
+  // `--seek-sweep <start_sec>:<end_sec>:<hz>`: headless scrubber drag. Once
+  // the preview is ready (same readiness gate the --seek path uses: the first
+  // attempt after the transport timer's warm-up, retried while !ready()), a
+  // QTimer issues editor.chart_preview().request_seek_ms() at 1000/hz ms —
+  // the same call PlaybackBar::seek_to_slider() makes while dragging — and
+  // ping-pongs the target between start and end forever.
+  //
+  // Deliberately NOT routed through transport/engine: this emulates the user
+  // dragging the bar, nothing else. --autoplay still starts playback through
+  // the normal path above and is left running during the sweep.
+  //
+  // Two QTimers, no thread: a 1 s reporter (SEEKSWEEP line, one per second)
+  // and the sweep timer itself. Both are plain GUI-thread timers parented to
+  // the window, and everything is created only when the flag is present.
+  // Nothing here is gated on WDS_FRAME_DIAG: the flag itself is the opt-in.
+  if (sweep_start_sec >= 0.0 && sweep_hz > 0) {
+    struct SeekSweep {
+      int hz = 0;
+      double start_sec = 0.0;
+      double end_sec = 0.0;
+      double pos_sec = 0.0;
+      int dir = 1;          // +1 forward, -1 backward (ping-pong)
+      int64_t issued = 0;
+      int64_t last_issued = -1;  // last target handed to request_seek_ms
+      std::chrono::steady_clock::time_point t0{};
+    };
+    auto sweep = std::make_shared<SeekSweep>();
+    sweep->hz = sweep_hz;
+    sweep->start_sec = std::min(sweep_start_sec, sweep_end_sec);
+    sweep->end_sec = std::max(sweep_start_sec, sweep_end_sec);
+    sweep->pos_sec = sweep->start_sec;
+    sweep->t0 = std::chrono::steady_clock::now();
+
+    auto* sweep_timer = new QTimer(&window);
+    sweep_timer->setTimerType(Qt::PreciseTimer);
+    sweep_timer->setInterval(std::max(1, 1000 / sweep->hz));
+    auto* report_timer = new QTimer(&window);
+    report_timer->setInterval(1000);
+    report_timer->setTimerType(Qt::CoarseTimer);
+
+    // Wait for readiness without a busy timer: the sweep timer itself is the
+    // poll, at its own rate, and just skips issuing while the preview is not
+    // ready yet (the same "not ready yet" behaviour as the --seek loop).
+    QObject::connect(
+        sweep_timer, &QTimer::timeout, &window,
+        [sweep, &editor, preview_window]() {
+          // Readiness gate: identical to the --seek loop (skip while the
+          // preview is not ready, keep the timer armed).
+          if (!editor.chart_preview().ready()) return;
+          // Ping-pong. A zero-length range parks on the same target; the
+          // last_issued check below then issues exactly one seek total, which
+          // is the "drag without motion" baseline.
+          const double span = sweep->end_sec - sweep->start_sec;
+          if (span <= 0.0) {
+            sweep->pos_sec = sweep->start_sec;
+          } else {
+            // hz taps per second over the range -> one step per tick.
+            const double step = span / static_cast<double>(sweep->hz);
+            sweep->pos_sec += (sweep->dir > 0 ? step : -step);
+            if (sweep->pos_sec >= sweep->end_sec) {
+              sweep->pos_sec = sweep->end_sec;
+              sweep->dir = -1;
+            } else if (sweep->pos_sec <= sweep->start_sec) {
+              sweep->pos_sec = sweep->start_sec;
+              sweep->dir = 1;
+            }
+          }
+          const int64_t target_ms = static_cast<int64_t>(sweep->pos_sec * 1000.0);
+          // Same de-dupe the real slider does (PlaybackBar::seek_to_slider skips
+          // a repeated target while the handle is down), so `issued` counts the
+          // seeks the UI would actually have queued.
+          if (target_ms == sweep->last_issued) return;
+          sweep->last_issued = target_ms;
+          // Same entry point the playback dock's slider calls while dragging.
+          editor.chart_preview().request_seek_ms(target_ms);
+          // Ask for the frame the real slider drag would piggy-back on.
+          preview_window->request_frame();
+          ++sweep->issued;
+        });
+
+    QObject::connect(report_timer, &QTimer::timeout, &window, [sweep]() {
+      const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                     sweep->t0)
+                           .count();
+      std::fprintf(stderr, "SEEKSWEEP t=%.1f hz=%d issued=%lld pos=%.3f\n", t, sweep->hz,
+                   static_cast<long long>(sweep->issued), sweep->pos_sec);
+      std::fflush(stderr);
+    });
+
+    // Same warm-up delay as the --seek loop. With --autoplay, wait one extra
+    // beat so the transport timer's request_play() is in effect before the
+    // first scrub seek lands (a seek does not pause, so playback then runs
+    // through the sweep exactly as it does during a real drag while playing).
+    QTimer::singleShot(autoplay ? 3000 : 2500, &window, [sweep_timer, report_timer] {
+      sweep_timer->start();
+      report_timer->start();
+    });
+    // Final line on exit, whatever ended the run.
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &window, [sweep] {
+      const double wall_s =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - sweep->t0).count();
+      std::fprintf(stderr, "SEEKSWEEP_DONE issued=%lld wall_s=%.1f\n",
+                   static_cast<long long>(sweep->issued), wall_s);
+      std::fflush(stderr);
+    });
+  }
+
   if (quit_after_sec >= 0 || args.contains("--smoke-test")) {
     window.discard_unsaved_on_close();
   }
@@ -2158,11 +2721,14 @@ int main(int argc, char** argv) {
   ui_alive->store(false);
   preview_window->set_frame_callback({});
   preview_window->set_idle_throttle_bypass({});
+  preview_window->set_idle_present_gate({});
   preview_window->set_surface_teardown({});
   edit_timer->stop();
   window.detach_ui_manager();
   editor_widget->set_global_key_handler({});
+#if WDS_DIAG_ENABLED
   frame_diag.close();
+#endif  // WDS_DIAG_ENABLED
   wds::common::mark_clean_exit();
   return rc;
 }
