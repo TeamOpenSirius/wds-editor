@@ -321,6 +321,7 @@ void test_app_version_parse_and_compare() {
   CHECK(!parse_app_version(""));
 }
 
+#if WDS_DIAG_ENABLED
 void test_perf_stages() {
   using wds::common::perf::add_count;
   using wds::common::perf::enabled;
@@ -385,6 +386,7 @@ void test_perf_stages() {
   set_enabled(false);
   (void)enabled();
 }
+#endif  // WDS_DIAG_ENABLED
 
 }  // namespace
 
@@ -395,7 +397,9 @@ int main() {
   test_utf8_install_path_io();
   test_crash_input_journal();
   test_app_version_parse_and_compare();
+#if WDS_DIAG_ENABLED
   test_perf_stages();
+#endif
   if (failures != 0) {
     std::fprintf(stderr, "%d common test failure(s)\n", failures);
     return 1;
