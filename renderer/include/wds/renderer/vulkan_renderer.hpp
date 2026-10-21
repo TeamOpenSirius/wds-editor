@@ -771,6 +771,19 @@ class VulkanRenderer {
     int64_t push_consts = 0;
     int64_t render_passes = 0;
     int64_t vb_binds = 0;
+    // Per-group attribution of the last recorded frame (diagnostics only).
+    // `split` is the split-effect particle batch (scene_carve buckets, drawn in
+    // the main pass when carve is unavailable and into the carve extract target
+    // when it is), `notes` is the mid overlay, `rest` is everything else
+    // (scene bg, line plate, bombs, HUD, post overlays, fullscreen composites).
+    // Appended with defaults so aggregate initialization elsewhere still builds;
+    // all zero when diagnostics are off.
+    int64_t draws_split = 0;
+    size_t verts_split = 0;
+    int64_t draws_notes = 0;
+    size_t verts_notes = 0;
+    int64_t draws_rest = 0;
+    size_t verts_rest = 0;
   };
   DrawFrameCpuDiag last_draw_cpu() const noexcept;
   // Latest GPU timestamp-query segment times (nanoseconds). Empty until
@@ -794,6 +807,26 @@ class VulkanRenderer {
     uint32_t live_sets = 0;
   };
   DescriptorPoolDiagnostics descriptor_pool_diagnostics() const noexcept;
+
+  // Device memory this renderer has allocated for its own targets/buffers.
+  // Cheap snapshot (a sum of per-allocation counters kept at create/free time);
+  // no driver calls. `total_bytes` covers depth + MSAA + HDR/bloom targets,
+  // export targets/staging, the per-frame VB/IB rings (incl. their staging) and
+  // the texture cache. `heap_bytes` is the DEVICE_LOCAL heap sum probed once at
+  // create; 0 when unknown. Descriptors/pipelines/command buffers are not
+  // counted (driver-side, not attributable by size here).
+  struct DeviceMemorySnapshot {
+    size_t total_bytes = 0;
+    size_t depth_bytes = 0;
+    size_t msaa_bytes = 0;
+    size_t bloom_hdr_bytes = 0;
+    size_t export_bytes = 0;
+    size_t vertex_ring_bytes = 0;
+    size_t texture_bytes = 0;
+    size_t heap_bytes = 0;
+  };
+  DeviceMemorySnapshot device_memory() const noexcept;
+  size_t device_memory_bytes() const noexcept;
 
   // Upload a standalone RGBA8 texture (full UV 0..1). Also used by atlas bake.
   // Submit is asynchronous: a successful queue submit publishes TextureInfo

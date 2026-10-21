@@ -13,6 +13,7 @@
 #include <split_collect_pool.hpp>
 #include <wds/common/page_touch.hpp>
 #include <wds/common/perf_stages.hpp>
+#include <wds/common/minflt_stage.hpp>
 #include <wds/chart_render/split_line_fade.hpp>
 #include <wds/chart_render/split_line_official_colors.hpp>
 #include <wds/core/edit_grid.hpp>
@@ -57,6 +58,7 @@ using wds::renderer::TextureId;
 using wds::renderer::Vec2;
 using wds::renderer::VulkanRenderer;
 using wds::renderer::add_sliced_note;
+namespace perf = wds::common::perf;
 
 namespace {
 
@@ -261,11 +263,9 @@ uint64_t hash_one_lane_geom(const PreviewSplitLaneInstance& s, uint64_t view_has
   h = mix_u64(h, static_cast<uint64_t>(static_cast<uint32_t>(s.scratch_length)));
   h = mix_u64(h, static_cast<uint64_t>(s.start_ms));
   h = mix_u64(h, static_cast<uint64_t>(s.end_ms));
-  h = mix_u64(h, static_cast<uint64_t>(static_cast<uint32_t>(s.effective_lane_count)));
   h = mix_f32(h, s.split_percent_start);
   h = mix_f32(h, s.split_percent_end);
   h = mix_f32(h, s.split_line_alpha);
-  h = mix_u64(h, static_cast<uint64_t>(static_cast<uint32_t>(s.split_anim_phase)));
   h = mix_u64(h, static_cast<uint64_t>(plate_tex));
   return h;
 }
@@ -549,8 +549,11 @@ size_t ensure_lane_geom_pool(std::unordered_map<uint64_t, PreviewLaneGeomSplit>&
   if (split_n == 0 || sh.plate == nullptr || sh.geometry == nullptr) {
     return 0;
   }
-  std::vector<uint64_t> keys(split_n, 0);
-  std::vector<size_t> miss;
+  // UI-thread scratch: avoid reallocating three vectors on every pump/draw.
+  thread_local std::vector<uint64_t> keys;
+  thread_local std::vector<size_t> miss;
+  keys.resize(split_n, 0);
+  miss.clear();
   miss.reserve(split_n);
   for (size_t i = 0; i < split_n; ++i) {
     keys[i] = hash_one_lane_geom(splits[i], view_hash, sh.plate->id);
@@ -559,8 +562,10 @@ size_t ensure_lane_geom_pool(std::unordered_map<uint64_t, PreviewLaneGeomSplit>&
     }
   }
   if (!miss.empty()) {
-    std::vector<PreviewSplitLaneInstance> miss_splits(miss.size());
-    std::vector<PreviewLaneGeomSplit> miss_geoms(miss.size());
+    thread_local std::vector<PreviewSplitLaneInstance> miss_splits;
+    thread_local std::vector<PreviewLaneGeomSplit> miss_geoms;
+    miss_splits.resize(miss.size());
+    miss_geoms.resize(miss.size());
     for (size_t j = 0; j < miss.size(); ++j) {
       miss_splits[j] = splits[miss[j]];
       if (!recycled.empty()) {
@@ -1031,6 +1036,60 @@ PreviewLookup build_preview_lookup(const PreviewSnapshot& snapshot) {
   return out;
 }
 
+// ---- preview frame/step diagnostics (WDS_FRAME_DIAG only) ------------------
+#if WDS_DIAG_ENABLED
+// Retained-buffer sizes for MEMSTEP. Reads capacity only (no realloc, no
+// touch); every caller is inside perf::enabled() / frame_diag_env_enabled().
+size_t draw_batch_verts_capacity(const wds::renderer::DrawBatch& b) noexcept {
+  size_t n = 0;
+  for (const auto& bucket : b.buckets) {
+    n += bucket.vertices.capacity();
+  }
+  return n;
+}
+
+size_t preview_sprite_bytes(const wds::renderer::SkinCatalog& skin) {
+  // RGBA8 byte count of the skin sprites the preview owns. The atlas is one
+  // GPU id whose extent is not exposed, so this charges each sprite's source
+  // area (deduped by texture id): a monotonic lower bound on atlas VRAM.
+  size_t bytes = 0;
+  std::unordered_set<wds::renderer::TextureId> seen;
+  auto add = [&](const wds::renderer::TextureInfo& t) {
+    if (!t || t.width <= 0 || t.height <= 0) {
+      return;
+    }
+    if (!seen.insert(t.id).second) {
+      return;
+    }
+    bytes += static_cast<size_t>(t.width) * static_cast<size_t>(t.height) * 4u;
+  };
+  add(skin.ingame_background);
+  add(skin.bg_shadow);
+  add(skin.lane_border);
+  add(skin.judgeline);
+  add(skin.note_bottom);
+  add(skin.note_red_top);
+  add(skin.note_yellow_top);
+  add(skin.note_blue_top);
+  add(skin.note_purple_top);
+  add(skin.hold_connection_blue);
+  add(skin.hold_connection_purple);
+  add(skin.sync_line);
+  add(skin.scratch_arrow);
+  add(skin.tick_blue);
+  add(skin.tick_purple);
+  add(skin.hidden_line);
+  add(skin.split_line_1);
+  add(skin.split_line_2);
+  add(skin.soft_split_line);
+  add(skin.syuriken_plate);
+  add(skin.soft_disk);
+  add(skin.split_effect_uvs);
+  add(skin.split_effect_trail);
+  return bytes;
+}
+#endif  // WDS_DIAG_ENABLED
+
 }  // namespace
 
 struct PlaybackPreviewView::SplitTexPreloadState {
@@ -1128,6 +1187,7 @@ void PlaybackPreviewView::pump_split_effect_preload() {
 }
 
 void PlaybackPreviewView::reset_lane_geom_time_state() {
+  last_lane_preload_valid_ = false;
   ++lane_geom_hit_seq_;
   if (lane_geom_hit_seq_ == 0) {
     lane_geom_hit_seq_ = 1;
@@ -1172,8 +1232,35 @@ void PlaybackPreviewView::pump_draw_precommit_slice(bool all) {
     return;
   }
   const std::size_t buckets = 8;
-  const std::size_t verts_each = std::max<std::size_t>(draw_precommit_verts_ / buckets, 64);
-  auto one = [&](DrawBatch& b) { b.precommit_capacity(buckets, verts_each); };
+  constexpr std::size_t kPrecommitBudgetBytes = 64u * 1024u * 1024u;
+  constexpr std::size_t kBucketReservations = 6u * 8u + 8u * 3u * 4u;  // 144
+  constexpr std::size_t kBytesPerVertAndIndex =
+      sizeof(wds::renderer::DrawVertex) + sizeof(uint32_t);
+  const std::size_t budget_verts =
+      kPrecommitBudgetBytes / (kBucketReservations * kBytesPerVertAndIndex);
+  const std::size_t verts_each = std::clamp<std::size_t>(
+      std::min<std::size_t>(draw_precommit_verts_ / buckets, budget_verts), 1024u, 16384u);
+  // Reserve-only. Materialising 996 MB measured 50-62 ms in one frame, so the
+  // page-touching path is a diagnostics-build escape hatch only:
+  // WDS_PRECOMMIT_DRAW=1 in a WDS_DIAGNOSTICS=ON build. A Release build has no
+  // env read and no branch here.
+#if WDS_DIAG_ENABLED
+  static const bool materialize = [] {
+    const char* raw = std::getenv("WDS_PRECOMMIT_DRAW");
+    return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+  }();
+#else
+  constexpr bool materialize = false;
+#endif
+#if WDS_DIAG_ENABLED
+  const bool diag = wds::common::perf::enabled();
+  const auto draw_pre_t0 =
+      diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  wds::common::ProcessMemSnap draw_pre_mem{};
+  if (diag) wds::common::sample_process_mem(draw_pre_mem);
+  const int step_before = draw_precommit_step_;
+#endif  // WDS_DIAG_ENABLED
+  auto one = [&](DrawBatch& b) { b.precommit_capacity(buckets, verts_each, materialize); };
   DrawBatch* batches[] = {&notes_batch_,        &glow_batch_,      &split_late_batch_,
                           &split_emit_notes_,   &split_emit_glow_, &split_emit_late_};
   if (all) {
@@ -1184,9 +1271,9 @@ void PlaybackPreviewView::pump_draw_precommit_slice(bool all) {
       split_emit_parts_.resize(8);
     }
     for (auto& part : split_emit_parts_) {
-      part.notes.precommit_capacity(4, verts_each);
-      part.glow.precommit_capacity(4, verts_each);
-      part.late.precommit_capacity(4, verts_each);
+      part.notes.precommit_capacity(4, verts_each, materialize);
+      part.glow.precommit_capacity(4, verts_each, materialize);
+      part.late.precommit_capacity(4, verts_each, materialize);
     }
     draw_precommit_step_ = 16;
   } else if (draw_precommit_step_ < 6) {
@@ -1197,15 +1284,15 @@ void PlaybackPreviewView::pump_draw_precommit_slice(bool all) {
       split_emit_parts_.resize(8);
     }
     auto& part = split_emit_parts_[0];
-    part.notes.precommit_capacity(4, verts_each);
-    part.glow.precommit_capacity(4, verts_each);
-    part.late.precommit_capacity(4, verts_each);
+    part.notes.precommit_capacity(4, verts_each, materialize);
+    part.glow.precommit_capacity(4, verts_each, materialize);
+    part.late.precommit_capacity(4, verts_each, materialize);
     ++draw_precommit_step_;
   } else if (draw_precommit_step_ == 7) {
     for (size_t i = 1; i < split_emit_parts_.size(); ++i) {
-      split_emit_parts_[i].notes.precommit_capacity(4, verts_each);
-      split_emit_parts_[i].glow.precommit_capacity(4, verts_each);
-      split_emit_parts_[i].late.precommit_capacity(4, verts_each);
+      split_emit_parts_[i].notes.precommit_capacity(4, verts_each, materialize);
+      split_emit_parts_[i].glow.precommit_capacity(4, verts_each, materialize);
+      split_emit_parts_[i].late.precommit_capacity(4, verts_each, materialize);
     }
     ++draw_precommit_step_;
   }
@@ -1220,6 +1307,40 @@ void PlaybackPreviewView::pump_draw_precommit_slice(bool all) {
     geom.cells.clear();
     lane_geom_free_.push_back(std::move(geom));
   }
+  // One row per actual reservation pass: this is the single frame that pays
+  // the 996 MB materialisation, so it must be reported as a frame cost, not
+  // amortised. `committed_kb` is the sum of every bucket's capacity*stride.
+  // pump_draw_precommit_slice(false) is called on every idle tick once the
+  // high-water mark stops moving, so gate on "this pass did work".
+#if WDS_DIAG_ENABLED
+  if (diag && (all || draw_precommit_step_ != step_before)) {
+    std::size_t committed = 0;
+    auto add = [&](const DrawBatch& b) {
+      for (const auto& bucket : b.buckets) {
+        committed += bucket.vertices.capacity() * sizeof(wds::renderer::DrawVertex);
+        committed += bucket.indices.capacity() * sizeof(uint32_t);
+      }
+    };
+    for (const DrawBatch* b : batches) {
+      add(*b);
+    }
+    for (const auto& part : split_emit_parts_) {
+      add(part.notes);
+      add(part.glow);
+      add(part.late);
+    }
+    const auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - draw_pre_t0)
+                             .count();
+    wds::common::ProcessMemSnap mem{};
+    wds::common::sample_process_mem(mem);
+    std::fprintf(stderr,
+                 "PRECOMMIT_DRAW all=%d materialize=%d verts_each=%zu committed_kb=%zu "
+                 "wall_us=%lld minflt=%ld rss_kb=%ld\n",
+                 all ? 1 : 0, materialize ? 1 : 0, verts_each, committed / 1024,
+                 static_cast<long long>(wall_us), mem.minflt - draw_pre_mem.minflt, mem.rss_kb);
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void PlaybackPreviewView::pump_buffer_precommit(int budget_us) {
@@ -1235,6 +1356,7 @@ void PlaybackPreviewView::pump_buffer_precommit(int budget_us) {
 }
 
 void PlaybackPreviewView::invalidate_lane_geom_cache() {
+  last_lane_preload_valid_ = false;
   for (auto& kv : lane_geom_pool_) {
     recycle_lane_geom_entry(std::move(kv.second), lane_geom_free_);
   }
@@ -1257,6 +1379,19 @@ void PlaybackPreviewView::pump_lane_geom_preload(
   sh.skin = &skin_;
   sh.plate = plate;
   sh.rgb_k = std::clamp(config_.split_line_opacity, 0.10f, 1.00f);
+  // The tick pumps the same committed snapshot several times (nominal, lead,
+  // steady). Skip an exact repeat without touching the pool.
+  const uint64_t preload_key =
+      hash_split_lanes_frame(hash_split_lanes(splits), hash_preview_view(geometry_), now_us,
+                             sh.rgb_k, plate->id);
+  if (last_lane_preload_valid_ && preload_key == last_lane_preload_key_ &&
+      now_us == last_lane_preload_now_us_ && retain_colored_batch == last_lane_preload_retain_) {
+    return;
+  }
+  last_lane_preload_valid_ = true;
+  last_lane_preload_key_ = preload_key;
+  last_lane_preload_now_us_ = now_us;
+  last_lane_preload_retain_ = retain_colored_batch;
   std::vector<const PreviewLaneGeomSplit*> frame;
   // Chart time may be negative (delay, export −2s pad, official CSV start < 0).
   // Corners-only is retain_colored_batch=false, not now_us < 0.
@@ -1295,14 +1430,18 @@ void PlaybackPreviewView::pump_lane_geom_preload(
 }
 
 void PlaybackPreviewView::ensure_split_effect_textures() {
+#if WDS_DIAG_ENABLED
   const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
   if (split_tex_preload_ && split_tex_preload_->decode.valid()) {
     finish_split_effect_preload_upload();
   }
   if (config_.skins_directory.empty()) {
+#if WDS_DIAG_ENABLED
     last_ensure_tex_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
                               std::chrono::steady_clock::now() - t0)
                               .count();
+#endif  // WDS_DIAG_ENABLED
     return;
   }
   std::string dir = config_.skins_directory;
@@ -1317,9 +1456,11 @@ void PlaybackPreviewView::ensure_split_effect_textures() {
     const std::string path = dir + wds::chart_render::official_split_effect_trail_tex_relpath();
     skin_.split_effect_trail = textures_.load_standalone_png(path);
   }
+#if WDS_DIAG_ENABLED
   last_ensure_tex_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now() - t0)
                             .count();
+#endif  // WDS_DIAG_ENABLED
 }
 
 bool PlaybackPreviewView::initialize(const wds::renderer::VulkanHostSurface& host, const PreviewVisualConfig& config) {
@@ -1490,8 +1631,29 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
     return;
   }
   WDS_PERF_SCOPE("preview.render");
+#if WDS_DIAG_ENABLED
   const auto render_t0 = std::chrono::steady_clock::now();
   const auto path0 = vulkan_.path_diagnostics();
+  // PREVFRAME stage clocks. Hand-rolled timers stay inside perf::enabled().
+  const bool frame_time = perf::enabled();
+  const auto stage_now = [&]() {
+    return frame_time ? std::chrono::steady_clock::now() : render_t0;
+  };
+  const auto stage_us = [&](std::chrono::steady_clock::time_point t0) -> int64_t {
+    if (!frame_time) {
+      return 0;
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+  int64_t stage_stage_us = 0;
+  int64_t stage_notes_us = 0;
+  int64_t stage_merge_us = 0;
+  int64_t stage_hud_us = 0;
+  int64_t stage_draw_us = 0;
+  int64_t stage_after_us = 0;
+#endif  // WDS_DIAG_ENABLED
   last_ensure_tex_us_ = 0;
   last_lanes_us_ = 0;
   last_lanes_geom_miss_ = 0;
@@ -1551,25 +1713,55 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   // Depth write is off, so later buckets cover earlier ones. The plate shares
   // the UI 1×1 solid texture and must not be submitted before the background.
   // Jacket sortingOrder −11, ingame_bg −10: submit jacket first so the starfield covers it.
+#if WDS_DIAG_ENABLED
+  auto stage_t0 = stage_now();  // jacket + ingame_bg
+#endif  // WDS_DIAG_ENABLED
   draw_jacket(batch_);
   draw_ingame_background(batch_);
+#if WDS_DIAG_ENABLED
+  stage_stage_us += stage_us(stage_t0);
+  auto merge_t0 = stage_now();  // solid overlay merge into the scene batch
+#endif  // WDS_DIAG_ENABLED
   merge_overlay(batch_, ui_overlay, true);
+#if WDS_DIAG_ENABLED
+  stage_merge_us += stage_us(merge_t0);
+  stage_t0 = stage_now();  // BGShadow / lane borders / judgeline
+#endif  // WDS_DIAG_ENABLED
   draw_stage(batch_, snapshot, ui_solid_texture);
+#if WDS_DIAG_ENABLED
+  stage_stage_us += stage_us(stage_t0);
+#endif  // WDS_DIAG_ENABLED
   // Official SortingGroup 20 > Note sortingOrder 10: plate stays in glow.
   // All split-effect particles go to split_late_batch_ after notes + line
   // (OfflineRhythmPreview m_HDR=1, unclamped Custom1).
   {
+#if WDS_DIAG_ENABLED
     const auto lanes_t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
     draw_split_lanes(batch_, snapshot);
+#if WDS_DIAG_ENABLED
     last_lanes_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
                          std::chrono::steady_clock::now() - lanes_t0)
                          .count();
+#endif  // WDS_DIAG_ENABLED
   }
+#if WDS_DIAG_ENABLED
+  merge_t0 = stage_now();  // lane plates merged into the early (glow) batch
+#endif  // WDS_DIAG_ENABLED
   if (!wds::ui::preview_legacy_lanes_from_env()) {
     glow_batch_.append_from(split_lanes_glow_);
   }
+#if WDS_DIAG_ENABLED
+  stage_merge_us += stage_us(merge_t0);
+#endif  // WDS_DIAG_ENABLED
   draw_split_particles(snapshot, ui_solid_texture);
+#if WDS_DIAG_ENABLED
+  merge_t0 = stage_now();  // sync/concurrent line quads into the scene batch
+#endif  // WDS_DIAG_ENABLED
   draw_concurrent_lines(batch_, snapshot);
+#if WDS_DIAG_ENABLED
+  stage_merge_us += stage_us(merge_t0);
+#endif  // WDS_DIAG_ENABLED
 
   // Pin the split plate under edit notes in this pass (same atlas as preview
   // SplitEffect). Otherwise sticky buckets can place edit split sprites last.
@@ -1580,8 +1772,19 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   } else if (skin_.split_line_2) {
     notes_batch_.bucket_for(skin_.split_line_2.id);
   }
+#if WDS_DIAG_ENABLED
+  auto notes_t0 = stage_now();  // note draw-order + geometry emit
+#endif  // WDS_DIAG_ENABLED
   draw_notes(notes_batch_, snapshot);
+#if WDS_DIAG_ENABLED
+  stage_notes_us = stage_us(notes_t0);
+  merge_t0 = stage_now();  // edit-skin sprites merged into the notes batch
+#endif  // WDS_DIAG_ENABLED
   merge_overlay(notes_batch_, ui_overlay, false);
+#if WDS_DIAG_ENABLED
+  stage_merge_us += stage_us(merge_t0);
+  auto hud_t0 = stage_now();  // hit FX + timing effect + combo HUD
+#endif  // WDS_DIAG_ENABLED
   // Bombs are a separate uncapped list (not kSplitEffectParticlePool). Bomb
   // SortingGroup 30 is after SplitEffect 20. The renderer stamps this batch
   // after scene-carve so dest+signed Add cannot wipe the judgeline.
@@ -1590,6 +1793,9 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   // ScreenSpaceOverlay. Both must sit after bombs and split particles.
   draw_timing_effect(hud_batch_, snapshot);
   draw_combo(hud_batch_, snapshot);
+#if WDS_DIAG_ENABLED
+  stage_hud_us = stage_us(hud_t0);
+#endif  // WDS_DIAG_ENABLED
 
   const DrawBatch* post =
       (modal_overlay != nullptr && modal_overlay->vertex_count() > 0) ? modal_overlay : nullptr;
@@ -1661,13 +1867,22 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   }
   {
     WDS_PERF_SCOPE("preview.draw_frame");
+#if WDS_DIAG_ENABLED
+    const auto draw_t0 = stage_now();
+#endif  // WDS_DIAG_ENABLED
     vulkan_.draw_frame(batch_, geometry_.screen(),
                        wds::chart_editor::kOfficialCameraBackgroundR,
                        wds::chart_editor::kOfficialCameraBackgroundG,
                        wds::chart_editor::kOfficialCameraBackgroundB, &additive_batch_, post,
                        post2, add_scissor_ptr, mid, early, carve, &hud_batch_,
                        split_emit_direct_ ? &extras : nullptr, want_dump ? &dump : nullptr);
+#if WDS_DIAG_ENABLED
+    stage_draw_us = stage_us(draw_t0);
+#endif  // WDS_DIAG_ENABLED
   }
+#if WDS_DIAG_ENABLED
+  const auto after_t0 = stage_now();
+#endif  // WDS_DIAG_ENABLED
   if (want_dump) {
     dump_preview_draw_batches_if_requested(dump_scene, dump_glow, dump_notes, dump_late, dump_add,
                                            now_us, playing, split_frame_diag_.verts_memo != 0,
@@ -1683,6 +1898,8 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
     split_emit_in_vb_ = false;
     split_emit_vb_low_ = 0;
   }
+#if WDS_DIAG_ENABLED
+  stage_after_us = stage_us(after_t0);
   const auto path1 = vulkan_.path_diagnostics();
   auto path_delta = [](int64_t now, int64_t then) {
     return now >= then ? now - then : 0;
@@ -1701,7 +1918,278 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   split_frame_diag_.total_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::steady_clock::now() - render_t0)
                                   .count();
+  if (frame_time) {
+    publish_prevframe_diag(playing_now, known_verts, stage_stage_us, stage_notes_us,
+                           stage_merge_us, stage_hud_us, stage_draw_us, stage_after_us);
+    // MEMSTEP milestones sampled after a completed frame so the retained
+    // buffers / textures they report are the ones the frame actually built.
+    if (!diag_first_frame_done_) {
+      diag_first_frame_done_ = true;
+      emit_memstep("first_frame", 0);
+    }
+    if (playing_now && !diag_first_play_done_) {
+      diag_first_play_done_ = true;
+      emit_memstep("first_play", 0);
+    }
+  }
+#endif  // WDS_DIAG_ENABLED
 }
+
+// PREVFRAME row: one line per rendered frame, every field printed (0 unknown).
+#if WDS_DIAG_ENABLED
+void PlaybackPreviewView::publish_prevframe_diag(bool playing, size_t known_verts,
+                                                 int64_t stage_stage_us, int64_t stage_notes_us,
+                                                 int64_t stage_merge_us, int64_t stage_hud_us,
+                                                 int64_t stage_draw_us, int64_t stage_after_us) {
+  SplitFrameDiag& d = split_frame_diag_;
+  d.frame_no = ++prevframe_count_;
+  d.playing = playing ? 1 : 0;
+  d.seeks_pending = prev_seeks_pending_;
+  d.stage_us = stage_stage_us;
+  d.notes_us = stage_notes_us;
+  d.merge_us = stage_merge_us;
+  d.hud_us = stage_hud_us;
+  d.draw_frame_us = stage_draw_us;
+  d.after_draw_us = stage_after_us;
+  // draw_split_particles already recorded these for the frame it ran on.
+  d.splits_us = d.collect_us;
+  d.particles_us = d.verts_us;
+  d.ensure_tex_us = last_ensure_tex_us_;
+  const int64_t lanes = last_lanes_us_;
+  const int64_t timed = d.notes_us + d.splits_us + d.particles_us + lanes + d.hud_us + d.stage_us +
+                        d.merge_us + d.ensure_tex_us + d.draw_frame_us + d.after_draw_us;
+  d.leftover_us = d.total_us > timed ? d.total_us - timed : 0;
+  d.verts = static_cast<int64_t>(known_verts);
+  d.draws = vulkan_.last_draw_cpu().draws;
+  std::fprintf(stderr,
+               "PREVFRAME frame=%lld playing=%d seeks_pending=%lld total_ms=%.3f notes_ms=%.3f "
+               "splits_ms=%.3f particles_ms=%.3f lanes_ms=%.3f hud_ms=%.3f stage_ms=%.3f "
+               "merge_ms=%.3f ensure_tex_ms=%.3f draw_frame_ms=%.3f leftover_ms=%.3f verts=%lld "
+               "draws=%lld emit_build_ms=%.3f emit_vertex_ms=%.3f emit_merge_ms=%.3f\n",
+               static_cast<long long>(d.frame_no), d.playing,
+               static_cast<long long>(d.seeks_pending), static_cast<double>(d.total_us) / 1000.0,
+               static_cast<double>(d.notes_us) / 1000.0,
+               static_cast<double>(d.splits_us) / 1000.0,
+               static_cast<double>(d.particles_us) / 1000.0,
+               static_cast<double>(lanes) / 1000.0, static_cast<double>(d.hud_us) / 1000.0,
+               static_cast<double>(d.stage_us) / 1000.0,
+               static_cast<double>(d.merge_us) / 1000.0,
+               static_cast<double>(d.ensure_tex_us) / 1000.0,
+               static_cast<double>(d.draw_frame_us) / 1000.0,
+               static_cast<double>(d.leftover_us) / 1000.0, static_cast<long long>(d.verts),
+               static_cast<long long>(d.draws),
+               static_cast<double>(d.emit_build_us) / 1000.0,
+               static_cast<double>(d.emit_vertex_us) / 1000.0,
+               static_cast<double>(d.emit_merge_us) / 1000.0);
+}
+
+#endif  // WDS_DIAG_ENABLED
+
+#if WDS_DIAG_ENABLED
+void PlaybackPreviewView::record_seek_diag(const SeekStepDiag& step) {
+  if (!perf::enabled()) {
+    return;
+  }
+  ++seek_request_total_;
+  ++seek_request_window_;
+  if (step.total_us > 0) {
+    seek_us_window_sum_ += step.total_us;
+    seek_us_window_max_ = std::max(seek_us_window_max_, step.total_us);
+  }
+  // A "full rebuild" is any seek that dropped a cache the next frame would
+  // otherwise hit: lane geometry pool, split eval / pose cache, texture atlas
+  // rebind. Counted per seek (not per cache cleared).
+  const bool full_rebuild =
+      step.lane_pool_cleared || step.split_eval_cleared || step.atlas_rebound;
+  if (full_rebuild) {
+    ++seek_full_rebuilds_;
+  }
+  if (step.overwrote_pending) {
+    ++seek_overwritten_total_;
+  }
+  // PREVSEEK: per-seek sub-step split. Sampled like the MEMSTEP seek row so a
+  // 60 Hz drag stays readable; the first seek of a session always prints.
+  constexpr int64_t kSeekLineSampleEvery = 10;
+  const bool first_seek = seek_line_seen_ == 0;
+  ++seek_line_seen_;
+  if (first_seek || (seek_line_seen_ % kSeekLineSampleEvery) == 0) {
+    std::fprintf(stderr,
+                 "PREVSEEK n=%lld total_us=%lld join_us=%lld transport_us=%lld engine_us=%lld "
+                 "clear_us=%lld pin_us=%lld preload_us=%lld prepare_us=%lld minflt=%ld "
+                 "lane_pool_cleared=%d split_eval_cleared=%d atlas_rebound=%d precommit_skip=%d "
+                 "overwrote_pending=%d full_rebuild=%d\n",
+                 static_cast<long long>(seek_line_seen_), static_cast<long long>(step.total_us),
+                 static_cast<long long>(step.join_us),
+                 static_cast<long long>(step.transport_us),
+                 static_cast<long long>(step.engine_us), static_cast<long long>(step.clear_us),
+                 static_cast<long long>(step.pin_us), static_cast<long long>(step.preload_us),
+                 static_cast<long long>(step.prepare_us), step.minflt,
+                 step.lane_pool_cleared ? 1 : 0, step.split_eval_cleared ? 1 : 0,
+                 step.atlas_rebound ? 1 : 0, step.skip_precommit ? 1 : 0,
+                 step.overwrote_pending ? 1 : 0, full_rebuild ? 1 : 0);
+  }
+  // Per-sub-step µs going into the existing WDS_PERF window report, so the Qt
+  // shell's `perf` rows carry the seek breakdown without a second mechanism.
+  auto add = [](const char* name, int64_t us) {
+    if (us <= 0) {
+      return;
+    }
+    static thread_local std::unordered_map<const char*, int> ids;
+    auto it = ids.find(name);
+    if (it == ids.end()) {
+      it = ids.emplace(name, perf::stage_id(name)).first;
+    }
+    perf::add_ns(it->second, us * 1000);
+  };
+  add("preview.seek.join", step.join_us);
+  add("preview.seek.transport", step.transport_us);
+  add("preview.seek.engine", step.engine_us);
+  add("preview.seek.clear", step.clear_us);
+  add("preview.seek.pin", step.pin_us);
+  add("preview.seek.preload", step.preload_us);
+  add("preview.seek.prepare", step.prepare_us);
+  add("preview.seek.handle", step.total_us);
+  perf::add_count(perf::stage_id("preview.seek.count"), 1);
+  if (step.lane_pool_cleared || step.split_eval_cleared || step.atlas_rebound) {
+    perf::add_count(perf::stage_id("preview.seek.full_rebuild"), 1);
+  }
+}
+#endif  // WDS_DIAG_ENABLED
+
+#if WDS_DIAG_ENABLED
+void PlaybackPreviewView::emit_memstep(const char* step, int64_t elapsed_us) {
+  if (!perf::enabled() || step == nullptr) {
+    return;
+  }
+  wds::common::ProcessMemSnap mem{};
+  wds::common::sample_process_mem(mem);
+  const long rss = mem.rss_kb;
+  if (mem_rss_base_kb_ <= 0) {
+    mem_rss_base_kb_ = rss;
+  }
+  const long delta = rss - mem_rss_base_kb_;
+  size_t batch_cap = 0;
+  batch_cap += draw_batch_verts_capacity(batch_);
+  batch_cap += draw_batch_verts_capacity(notes_batch_);
+  batch_cap += draw_batch_verts_capacity(glow_batch_);
+  batch_cap += draw_batch_verts_capacity(split_late_batch_);
+  batch_cap += draw_batch_verts_capacity(additive_batch_);
+  batch_cap += draw_batch_verts_capacity(hud_batch_);
+  batch_cap += draw_batch_verts_capacity(split_emit_notes_);
+  batch_cap += draw_batch_verts_capacity(split_emit_glow_);
+  batch_cap += draw_batch_verts_capacity(split_emit_late_);
+  for (const auto& part : split_emit_parts_) {
+    batch_cap += draw_batch_verts_capacity(part.notes);
+    batch_cap += draw_batch_verts_capacity(part.glow);
+    batch_cap += draw_batch_verts_capacity(part.late);
+  }
+  const int64_t lane_entries = static_cast<int64_t>(lane_geom_pool_size_for_diag());
+  const int64_t lane_bytes = static_cast<int64_t>(lane_geom_pool_bytes_for_diag());
+  const int64_t tex_bytes = static_cast<int64_t>(preview_sprite_bytes(skin_));
+  // Cold vs. warm lives in the step name (seek_first / seek_drag / resize /
+  // quality_change / first_frame / first_play), so the field set stays exactly
+  // the documented one and remains trivially parseable.
+  std::fprintf(stderr,
+               "MEMSTEP step=%s rss_kb=%ld rss_delta_kb=%ld minflt=%ld lane_pool_entries=%lld "
+               "lane_pool_bytes=%lld batch_verts_cap=%zu tex_bytes=%lld elapsed_ms=%.3f\n",
+               step, rss, delta, mem.minflt, static_cast<long long>(lane_entries),
+               static_cast<long long>(lane_bytes), batch_cap, static_cast<long long>(tex_bytes),
+               static_cast<double>(elapsed_us) / 1000.0);
+  split_frame_diag_.lane_pool_entries = lane_entries;
+  split_frame_diag_.lane_pool_bytes = lane_bytes;
+  split_frame_diag_.batch_verts_cap = static_cast<int64_t>(batch_cap);
+  split_frame_diag_.tex_bytes = tex_bytes;
+}
+#endif  // WDS_DIAG_ENABLED
+
+// PREVSEC row: one line per ~1 s window. Printed even when nothing happened so
+// a quiet (idle) scenario is still attributable.
+#if WDS_DIAG_ENABLED
+void PlaybackPreviewView::emit_prevsec_diag(int64_t now_us, int64_t drawable_w, int64_t drawable_h) {
+  if (!perf::enabled()) {
+    return;
+  }
+  const int64_t frames = prevframe_count_ - sec_frames_start_;
+  const int64_t seeks = seek_request_window_;
+  const int64_t seek_us_total = seek_us_window_sum_;
+  const int64_t seek_us_max = seek_us_window_max_;
+  const int64_t rebuilt = seek_full_rebuilds_ - sec_full_rebuilds_start_;
+  const double avg = seeks > 0 ? static_cast<double>(seek_us_total) / static_cast<double>(seeks)
+                               : 0.0;
+  // fps over the window's real wall duration (the close is tick-driven, so the
+  // window is >= 1 s and a bare frame count would overstate it).
+  const int64_t window_us = now_us > sec_last_us_ ? now_us - sec_last_us_ : 0;
+  const double fps = window_us > 0
+                         ? static_cast<double>(frames) * 1'000'000.0 /
+                               static_cast<double>(window_us)
+                         : 0.0;
+  std::fprintf(stderr,
+               "PREVSEC seeks=%lld seek_us_avg=%.3f seek_us_max=%.3f full_rebuilds=%lld "
+               "fps=%.1f coalesced=%lld frames=%lld window_ms=%.3f drawable=%lldx%lld\n",
+               static_cast<long long>(seeks), avg, static_cast<double>(seek_us_max),
+               static_cast<long long>(rebuilt), fps,
+               static_cast<long long>(seek_overwritten_total_ - sec_seek_overwritten_start_),
+               static_cast<long long>(frames), static_cast<double>(window_us) / 1000.0,
+               static_cast<long long>(drawable_w), static_cast<long long>(drawable_h));
+  sec_frames_start_ = prevframe_count_;
+  seek_request_window_ = 0;
+  seek_us_window_sum_ = 0;
+  seek_us_window_max_ = 0;
+  sec_full_rebuilds_start_ = seek_full_rebuilds_;
+  sec_seek_overwritten_start_ = seek_overwritten_total_;
+  sec_last_us_ = now_us;
+}
+
+// Called from ChartPreviewPanel::tick under perf::enabled(). Owns the
+// per-second window close plus the one-shot first_frame / first_play rows.
+void PlaybackPreviewView::diag_preview_tick(bool playing, int64_t drawable_w,
+                                            int64_t drawable_h) {
+  if (!perf::enabled()) {
+    return;
+  }
+  const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  if (sec_last_us_ == 0) {
+    sec_last_us_ = now_us;
+  }
+  (void)playing;  // milestones are sampled after the frame, in render()
+  if (now_us - sec_last_us_ >= 1'000'000) {
+    emit_prevsec_diag(now_us, drawable_w, drawable_h);
+  }
+}
+
+// One MEMSTEP row per seek. The first seek is cold (cache epoch just bumped,
+// lane pool may be empty) and is always emitted; drag seeks are sampled 1-in-N
+// so a 20–60 seeks/s drag stays readable. Sampling never skips the counters.
+void PlaybackPreviewView::diag_seek_step(bool playing, int64_t elapsed_us) {
+  if (!perf::enabled()) {
+    return;
+  }
+  constexpr int64_t kDragSampleEvery = 10;
+  const bool first_seek = seek_diag_seen_ == 0;
+  ++seek_diag_seen_;
+  if (!first_seek && (seek_diag_seen_ % kDragSampleEvery) != 0) {
+    return;
+  }
+  emit_memstep(first_seek ? "seek_first" : "seek_drag", elapsed_us);
+  (void)playing;
+}
+
+void PlaybackPreviewView::diag_quality_change(int64_t elapsed_us) {
+  if (!perf::enabled()) {
+    return;
+  }
+  emit_memstep("quality_change", elapsed_us);
+}
+
+void PlaybackPreviewView::diag_resize(int64_t elapsed_us) {
+  if (!perf::enabled()) {
+    return;
+  }
+  emit_memstep("resize", elapsed_us);
+}
+#endif  // WDS_DIAG_ENABLED
 
 bool PlaybackPreviewView::load_jacket(const std::vector<unsigned char>& rgba) {
   constexpr const char* kSessionJacketKey = "session/jacket";
@@ -2060,10 +2548,12 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     split_pause_collect_valid_ = false;
     split_pause_verts_valid_ = false;
     split_pause_verts_pending_ = false;
+#if WDS_DIAG_ENABLED
     split_frame_diag_ = {};
     split_frame_diag_.revision = snapshot.revision;
     split_frame_diag_.now_us = now_us;
     split_frame_diag_.playing = playing ? 1 : 0;
+#endif  // WDS_DIAG_ENABLED
     return;
   }
   ensure_split_effect_textures();
@@ -2743,6 +3233,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     WDS_PERF_COUNT("preview.verts.count", split_pause_vert_count_);
     WDS_PERF_COUNT("preview.split_memo.collect", 1);
     WDS_PERF_COUNT("preview.split_memo.verts", 1);
+#if WDS_DIAG_ENABLED
     split_frame_diag_.revision = snapshot.revision;
     split_frame_diag_.now_us = now_us;
     split_frame_diag_.quality = quality;
@@ -2767,14 +3258,22 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     split_frame_diag_.playing = 0;
     split_frame_diag_.collect_us = 0;
     split_frame_diag_.verts_us = 0;
+    split_frame_diag_.emit_build_us = 0;
+    split_frame_diag_.emit_vertex_us = 0;
+    split_frame_diag_.emit_merge_us = 0;
+#endif  // WDS_DIAG_ENABLED
     split_pause_verts_pending_ = false;
     return;
   }
 
+#if WDS_DIAG_ENABLED
   int64_t collect_us = 0;
+#endif  // WDS_DIAG_ENABLED
   {
     WDS_PERF_SCOPE("preview.split_particles.collect");
+#if WDS_DIAG_ENABLED
     const auto collect_t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
     if (!collect_memo) {
       if (playing && std::isfinite(split_playback_state_.last_now_sec) &&
           now + 1e-9 < split_playback_state_.last_now_sec) {
@@ -2783,9 +3282,11 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       wds::chart_render::collect_split_effect_frame(snapshot.split_lanes, quality, now, playing,
                                                     split_playback_state_, collected);
     }
+#if WDS_DIAG_ENABLED
     collect_us = std::chrono::duration_cast<std::chrono::microseconds>(
                      std::chrono::steady_clock::now() - collect_t0)
                      .count();
+#endif  // WDS_DIAG_ENABLED
   }
   WDS_PERF_COUNT("preview.split_memo.collect", collect_memo ? 1 : 0);
   if (collected.total <= 0) {
@@ -2812,6 +3313,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     } else {
       split_pause_verts_pending_ = false;
     }
+#if WDS_DIAG_ENABLED
     split_frame_diag_.revision = snapshot.revision;
     split_frame_diag_.now_us = now_us;
     split_frame_diag_.quality = quality;
@@ -2837,9 +3339,32 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     split_frame_diag_.playing = playing ? 1 : 0;
     split_frame_diag_.collect_us = collect_us;
     split_frame_diag_.verts_us = 0;
+    split_frame_diag_.emit_build_us = 0;
+    split_frame_diag_.emit_vertex_us = 0;
+    split_frame_diag_.emit_merge_us = 0;
+#endif  // WDS_DIAG_ENABLED
     return;
   }
+#if WDS_DIAG_ENABLED
   const auto verts_t0 = std::chrono::steady_clock::now();
+  // PREVFRAME sub-splits of verts_us: emit-job build (collect + estimate +
+  // stable_sort), per-job vertex emit, and the append_from merge.
+  const bool emit_time = perf::enabled();
+  int64_t emit_build_us = 0;
+  int64_t emit_vertex_us = 0;
+  int64_t emit_merge_us = 0;
+  const auto emit_now = [&]() {
+    return emit_time ? std::chrono::steady_clock::now() : verts_t0;
+  };
+  const auto emit_elapsed = [&](std::chrono::steady_clock::time_point t0) -> int64_t {
+    if (!emit_time) {
+      return 0;
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+#endif  // WDS_DIAG_ENABLED
   const auto& pool = collected.pool;
   const bool legacy_emit = wds::ui::preview_legacy_emit_from_env();
   const size_t split_n = snapshot.split_lanes.size();
@@ -3116,11 +3641,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                              0.0f, 0.0f, ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
   };
 
-  struct EmitJob {
-    enum Kind : uint8_t { Particle, Ribbon } kind = Particle;
-    int32_t index = 0;
-  };
-  std::vector<EmitJob> emit_jobs;
   std::vector<std::vector<int>> ribbon_job_idxs;
   // live dump align2-u1-unity-v2 hop (not 2022.3): within a line, draw
   // catalog (prefab) index — primaries and subemitters together. Do not
@@ -3193,57 +3713,13 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       on_ribbon(*order[ci].idxs);
     }
   };
-  auto collect_emit_jobs = [&]() {
-    emit_jobs.clear();
-    ribbon_job_idxs.clear();
-    emit_jobs.reserve(static_cast<size_t>(std::max(collected.total, 0)) + split_n);
-    for (size_t split_i = 0; split_i < split_n; ++split_i) {
-      const int begin =
-          split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
-      const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
-      std::vector<int> particle_idxs;
-      particle_idxs.reserve(static_cast<size_t>(n));
-      for (int i = 0; i < n; ++i) {
-        particle_idxs.push_back(begin + i);
-      }
-      std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
-      WDS_PERF_COUNT("preview.verts.ribbon", 1);
-      for_each_line_job(
-          particle_idxs, [&](int idx) { emit_jobs.push_back({EmitJob::Particle, idx}); },
-          [&](std::vector<int>& idxs) {
-            ribbon_job_idxs.push_back(std::move(idxs));
-            emit_jobs.push_back(
-                {EmitJob::Ribbon, static_cast<int32_t>(ribbon_job_idxs.size() - 1)});
-          });
+  // Ribbon key: chain-last particle sorting_order, else 1 (unresolved).
+  auto ribbon_job_key = [&](const std::vector<int>& idxs) -> uint8_t {
+    if (!idxs.empty() && idxs.back() >= 0 &&
+        static_cast<size_t>(idxs.back()) < pool.size()) {
+      return pool[static_cast<size_t>(idxs.back())].sorting_order;
     }
-  };
-  auto run_emit_job = [&](const EmitJob& job, SplitEmitTargets tg) {
-    if (job.kind == EmitJob::Particle) {
-      if (job.index >= 0 && static_cast<size_t>(job.index) < pool.size()) {
-        emit_one(pool[static_cast<size_t>(job.index)], tg);
-      }
-      return;
-    }
-    if (job.index >= 0 && static_cast<size_t>(job.index) < ribbon_job_idxs.size()) {
-      process_chain(ribbon_job_idxs[static_cast<size_t>(job.index)], tg);
-    }
-  };
-
-  std::function<void(size_t, SplitEmitTargets)> build_one_split;
-  build_one_split = [&](size_t split_i, SplitEmitTargets tg) {
-    const int begin =
-        split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
-    const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
-    std::vector<int> particle_idxs;
-    particle_idxs.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-      particle_idxs.push_back(begin + i);
-    }
-    std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
-    WDS_PERF_COUNT("preview.verts.ribbon", 1);
-    for_each_line_job(
-        particle_idxs, [&](int idx) { emit_one(pool[static_cast<size_t>(idx)], tg); },
-        [&](std::vector<int>& idxs) { process_chain(idxs, tg); });
+    return 1;
   };
 
   auto body_layer = [&](const wds::chart_render::SplitEffectLiveParticle&) -> int {
@@ -3290,65 +3766,116 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       return;
     }
     const int pn = std::max(static_cast<int>(p.trail_points), 2);
-    int tlayer = 2;
-    add_layer(tlayer,
+    add_layer(2,
               static_cast<uint32_t>(pn - 1) *
                   (wds::renderer::split_geometry_indexed_from_env() ? 4u : 6u),
               notes, glow, late);
   };
-  auto estimate_job = [&](const EmitJob& job, uint32_t& notes, uint32_t& glow, uint32_t& late) {
+
+  auto collect_emit_jobs = [&]() {
+    for (auto& bucket : emit_job_buckets_) {
+      bucket.clear();
+    }
+    ribbon_job_idxs.clear();
+    auto append_job = [&](EmitJob job) { emit_job_buckets_[job.key].push_back(job); };
+    for (size_t split_i = 0; split_i < split_n; ++split_i) {
+      const int begin =
+          split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
+      const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
+      std::vector<int> particle_idxs;
+      particle_idxs.reserve(static_cast<size_t>(n));
+      for (int i = 0; i < n; ++i) {
+        particle_idxs.push_back(begin + i);
+      }
+      std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
+      WDS_PERF_COUNT("preview.verts.ribbon", 1);
+      for_each_line_job(
+          particle_idxs,
+          [&](int idx) {
+            EmitJob job{EmitJob::Particle, idx, 0};
+            if (idx >= 0 && static_cast<size_t>(idx) < pool.size()) {
+              job.key = pool[static_cast<size_t>(idx)].sorting_order;
+              estimate_particle(pool[static_cast<size_t>(idx)], job.n_notes, job.n_glow,
+                                job.n_late);
+            }
+            append_job(job);
+          },
+          [&](std::vector<int>& idxs) {
+            ribbon_job_idxs.push_back(std::move(idxs));
+            EmitJob job{EmitJob::Ribbon,
+                        static_cast<int32_t>(ribbon_job_idxs.size() - 1), 0};
+            job.key = ribbon_job_key(ribbon_job_idxs.back());
+            if (ribbon_job_idxs.back().size() >= 2) {
+              job.n_late = static_cast<uint32_t>(ribbon_job_idxs.back().size() - 1) *
+                           (wds::renderer::split_geometry_indexed_from_env() ? 4u : 6u);
+            }
+            append_job(job);
+          });
+    }
+  };
+  auto run_emit_job = [&](const EmitJob& job, SplitEmitTargets tg) {
     if (job.kind == EmitJob::Particle) {
       if (job.index >= 0 && static_cast<size_t>(job.index) < pool.size()) {
-        estimate_particle(pool[static_cast<size_t>(job.index)], notes, glow, late);
+        emit_one(pool[static_cast<size_t>(job.index)], tg);
       }
       return;
     }
     if (job.index >= 0 && static_cast<size_t>(job.index) < ribbon_job_idxs.size()) {
-      const auto& idxs = ribbon_job_idxs[static_cast<size_t>(job.index)];
-      if (idxs.size() < 2) {
-        return;
-      }
-      int tlayer = 2;
-      add_layer(tlayer,
-                static_cast<uint32_t>(idxs.size() - 1) *
-                    (wds::renderer::split_geometry_indexed_from_env() ? 4u : 6u),
-                notes, glow, late);
+      process_chain(ribbon_job_idxs[static_cast<size_t>(job.index)], tg);
     }
+  };
+
+  std::function<void(size_t, SplitEmitTargets)> build_one_split;
+  build_one_split = [&](size_t split_i, SplitEmitTargets tg) {
+    const int begin =
+        split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
+    const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
+    std::vector<int> particle_idxs;
+    particle_idxs.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      particle_idxs.push_back(begin + i);
+    }
+    std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
+    WDS_PERF_COUNT("preview.verts.ribbon", 1);
+    for_each_line_job(
+        particle_idxs, [&](int idx) { emit_one(pool[static_cast<size_t>(idx)], tg); },
+        [&](std::vector<int>& idxs) { process_chain(idxs, tg); });
   };
 
   auto emit_jobs_into = [&](DrawBatch& notes, DrawBatch& glow, DrawBatch& late, int& drawn) {
     late.overlay_ordered = true;
+#if WDS_DIAG_ENABLED
+    const auto build_t0 = emit_now();
+#endif  // WDS_DIAG_ENABLED
     collect_emit_jobs();
-    auto job_sort_key = [&](const EmitJob& job) -> uint8_t {
-      if (job.kind == EmitJob::Particle && job.index >= 0 &&
-          static_cast<size_t>(job.index) < pool.size()) {
-        return pool[static_cast<size_t>(job.index)].sorting_order;
+    // Jobs are already stored in per-key buckets in collect order. Flattening
+    // 0..255 is the same stable sort result as the old counting sort, while
+    // vertex estimates come from the job itself instead of another walk.
+    size_t total_jobs = 0;
+    for (const auto& bucket : emit_job_buckets_) {
+      total_jobs += bucket.size();
+    }
+    emit_jobs_sorted_.clear();
+    emit_jobs_sorted_.reserve(total_jobs);
+    uint32_t est_notes = 0;
+    uint32_t est_glow = 0;
+    uint32_t est_late = 0;
+    for (const auto& bucket : emit_job_buckets_) {
+      for (const EmitJob& job : bucket) {
+        emit_jobs_sorted_.push_back(job);
+        est_notes += job.n_notes;
+        est_glow += job.n_glow;
+        est_late += job.n_late;
       }
-      if (job.kind == EmitJob::Ribbon && job.index >= 0 &&
-          static_cast<size_t>(job.index) < ribbon_job_idxs.size()) {
-        const auto& idxs = ribbon_job_idxs[static_cast<size_t>(job.index)];
-        if (!idxs.empty() && idxs.back() >= 0 &&
-            static_cast<size_t>(idxs.back()) < pool.size()) {
-          return pool[static_cast<size_t>(idxs.back())].sorting_order;
-        }
-      }
-      return 1;
-    };
-    std::stable_sort(emit_jobs.begin(), emit_jobs.end(),
-                     [&](const EmitJob& a, const EmitJob& b) {
-                       return job_sort_key(a) < job_sort_key(b);
-                     });
-    const size_t njobs = emit_jobs.size();
+    }
+    const size_t njobs = emit_jobs_sorted_.size();
+#if WDS_DIAG_ENABLED
+    emit_build_us = emit_elapsed(build_t0);
+#endif  // WDS_DIAG_ENABLED
     if (njobs == 0) {
       return;
     }
     const int threads = std::max(wds::chart_render::split_collect_thread_count(), 1);
-    uint32_t est_notes = 0;
-    uint32_t est_glow = 0;
-    uint32_t est_late = 0;
-    for (const auto& job : emit_jobs) {
-      estimate_job(job, est_notes, est_glow, est_late);
-    }
     const uint32_t est_verts = est_notes + est_glow + est_late;
     // Small tessellation stays on this thread; the shared collect pool
     // scales with topology (not a hardcoded 4).
@@ -3356,11 +3883,18 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     const size_t nparts =
         use_pool ? std::max<size_t>(1, std::min(static_cast<size_t>(threads), njobs))
                  : size_t{1};
+#if WDS_DIAG_ENABLED
+    emit_build_us += emit_elapsed(build_t0);
+    const auto vertex_t0 = emit_now();
+#endif  // WDS_DIAG_ENABLED
     if (nparts <= 1 && !(&notes == &emit_notes && &glow == &emit_glow && &late == &emit_late)) {
       SplitEmitTargets tg{&notes, &glow, &late, &drawn};
-      for (const auto& job : emit_jobs) {
+      for (const auto& job : emit_jobs_sorted_) {
         run_emit_job(job, tg);
       }
+#if WDS_DIAG_ENABLED
+      emit_vertex_us += emit_elapsed(vertex_t0);
+#endif  // WDS_DIAG_ENABLED
       return;
     }
     if (split_emit_parts_.size() < nparts) {
@@ -3403,7 +3937,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         const size_t lo = njobs * part_i / nparts;
         const size_t hi = njobs * (part_i + 1) / nparts;
         for (size_t j = lo; j < hi; ++j) {
-          estimate_job(emit_jobs[j], notes_cap[part_i], glow_cap[part_i], late_cap[part_i]);
+          const EmitJob& job = emit_jobs_sorted_[j];
+          notes_cap[part_i] += job.n_notes;
+          glow_cap[part_i] += job.n_glow;
+          late_cap[part_i] += job.n_late;
         }
       }
       uint64_t extra_verts = 0;
@@ -3489,7 +4026,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       size_t njobs = 0;
       decltype(run_emit_job)* run = nullptr;
     } par_ctx;
-    par_ctx.jobs = &emit_jobs;
+    par_ctx.jobs = &emit_jobs_sorted_;
     par_ctx.parts = &split_emit_parts_;
     par_ctx.nparts = nparts;
     par_ctx.njobs = njobs;
@@ -3552,6 +4089,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
             &par_ctx, static_cast<uint64_t>(est_verts));
       }
     }
+#if WDS_DIAG_ENABLED
+    emit_vertex_us += emit_elapsed(vertex_t0);
+    const auto part_merge_t0 = emit_now();
+#endif  // WDS_DIAG_ENABLED
     for (size_t i = 0; i < nparts; ++i) {
       drawn += split_emit_parts_[i].drawn;
     }
@@ -3564,6 +4105,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         late.append_from(part.late);
       }
     }
+#if WDS_DIAG_ENABLED
+    emit_merge_us += emit_elapsed(part_merge_t0);
+#endif  // WDS_DIAG_ENABLED
   };
 
   auto emit_splits_serial = [&]() {
@@ -3605,9 +4149,19 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   }
 
   if (legacy_emit) {
+#if WDS_DIAG_ENABLED
+    const auto legacy_t0 = emit_now();
+#endif  // WDS_DIAG_ENABLED
     emit_splits_serial();
+#if WDS_DIAG_ENABLED
+    emit_vertex_us += emit_elapsed(legacy_t0);
+    const auto legacy_merge_t0 = emit_now();
+#endif  // WDS_DIAG_ENABLED
     split_late_batch_.overlay_ordered = true;
     split_late_batch_.append_from(emit_late);
+#if WDS_DIAG_ENABLED
+    emit_merge_us += emit_elapsed(legacy_merge_t0);
+#endif  // WDS_DIAG_ENABLED
   } else {
     emit_jobs_into(emit_notes, emit_glow, emit_late, split_particles_drawn);
     static bool vb_selftest_done = false;
@@ -3683,6 +4237,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   if (vert_delta > 0) {
     split_emit_reserve_hint_ = std::max(split_emit_reserve_hint_, static_cast<size_t>(vert_delta));
   }
+#if WDS_DIAG_ENABLED
   split_frame_diag_.revision = snapshot.revision;
   split_frame_diag_.now_us = now_us;
   split_frame_diag_.quality = quality;
@@ -3714,6 +4269,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   split_frame_diag_.verts_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::steady_clock::now() - verts_t0)
                                   .count();
+  split_frame_diag_.emit_build_us = emit_build_us;
+  split_frame_diag_.emit_vertex_us = emit_vertex_us;
+  split_frame_diag_.emit_merge_us = emit_merge_us;
+#endif  // WDS_DIAG_ENABLED
 }
 
 void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewSnapshot& snapshot) {

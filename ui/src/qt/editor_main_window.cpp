@@ -252,6 +252,7 @@ void suppress_qt_toolbar_extension(QToolBar* bar) {
   if (bar == nullptr) return;
   const auto buttons = bar->findChildren<QToolButton*>(QStringLiteral("qt_toolbar_ext_button"));
   for (QToolButton* ext : buttons) {
+    if (ext->isHidden() && ext->maximumWidth() == 0 && ext->maximumHeight() == 0) continue;
     ext->hide();
     ext->setEnabled(false);
     ext->setFixedSize(0, 0);
@@ -731,7 +732,9 @@ void EditorMainWindow::prepare_preview_capture_size(int pixel_w, int pixel_h) {
   preview_dock_->show();
   preview_dock_->raise();
   preview_window_->show();
-  preview_window_->requestUpdate();
+  if (auto* window = dynamic_cast<RealtimeVulkanWindow*>(preview_window_)) {
+    window->request_frame();
+  }
 }
 
 void EditorMainWindow::restore_preview_after_export() {
@@ -750,7 +753,9 @@ void EditorMainWindow::restore_preview_after_export() {
     preview_dock_->setTitleBarWidget(nullptr);
   }
   restore_or_reset_layout();
-  if (preview_window_ != nullptr) preview_window_->requestUpdate();
+  if (auto* window = dynamic_cast<RealtimeVulkanWindow*>(preview_window_)) {
+    window->request_frame();
+  }
 }
 
 void EditorMainWindow::set_export_session_busy(bool on) { busy_active_ = on; }
@@ -976,16 +981,32 @@ void EditorMainWindow::relayout_command_toolbar() {
   }
 
   command_overflow_menu_->clear();
+  int max_width_to_set = QWIDGETSIZE_MAX;
   if (hide_n == 0) {
     command_overflow_button_->hide();
-    command_strip_->setMaximumWidth(QWIDGETSIZE_MAX);
+    max_width_to_set = QWIDGETSIZE_MAX;
   } else {
     for (std::size_t i = keep; i < command_actions_.size(); ++i) {
       command_overflow_menu_->addAction(command_actions_[i]);
     }
     command_overflow_button_->show();
-    command_strip_->setMaximumWidth(std::max(1, budget));
+    max_width_to_set = std::max(1, budget);
   }
+
+  // Mix the computed layout into a single int so re-layouts that produce an
+  // identical result (same visible count, same strip width, same row sharing)
+  // short-circuit and stop the self-sustaining LayoutRequest → relayout loop.
+  int state = static_cast<int>(keep);
+  state = state * 31 + static_cast<int>(hide_n);
+  state = state * 31 + max_width_to_set;
+  state = state * 31 + (share_row ? 1 : 0);
+  if (state == command_layout_state_) {
+    command_toolbar_relayouting_ = false;
+    suppress_qt_toolbar_extension(command_toolbar_);
+    return;
+  }
+  command_layout_state_ = state;
+  command_strip_->setMaximumWidth(max_width_to_set);
   command_strip_->updateGeometry();
   command_toolbar_->updateGeometry();
   suppress_qt_toolbar_extension(command_toolbar_);
@@ -1145,6 +1166,12 @@ void EditorMainWindow::detach_ui_manager() {
 }
 
 void EditorMainWindow::handle_ui_change(UiChange change) {
+  // The preview only presents when something changed. Any UI-side change that
+  // can affect the stage (document, settings, playback chrome) requests one
+  // frame; input and explicit seeks already do the same.
+  if (auto* window = dynamic_cast<RealtimeVulkanWindow*>(preview_window_)) {
+    window->request_frame();
+  }
   switch (change) {
     case UiChange::PlaybackSettings:
       if (playback_panel_ != nullptr) playback_panel_->refresh_settings_widgets();
@@ -1511,7 +1538,7 @@ bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
   const auto type = event->type();
   if ((watched == command_toolbar_ || watched == convert_toolbar_) &&
       (type == QEvent::Resize || type == QEvent::Show || type == QEvent::Hide ||
-       type == QEvent::ParentChange || type == QEvent::LayoutRequest)) {
+       type == QEvent::ParentChange)) {
     if (watched == command_toolbar_) suppress_qt_toolbar_extension(command_toolbar_);
     if (!command_toolbar_relayouting_) schedule_command_toolbar_relayout();
   }

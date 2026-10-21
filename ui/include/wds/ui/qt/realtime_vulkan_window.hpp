@@ -31,6 +31,15 @@ class RealtimeVulkanWindow final : public QWindow {
   void set_idle_throttle_bypass(std::function<bool()> playing) {
     idle_throttle_bypass_ = std::move(playing);
   }
+  // While this returns false (paused, unchanged preview) no UpdateRequest is
+  // scheduled; a low-rate watchdog polls until it becomes true or request_frame
+  // forces one. Empty means always ready (legacy behaviour).
+  void set_idle_present_gate(std::function<bool()> ready) {
+    idle_present_gate_ = std::move(ready);
+  }
+  void set_idle_wakeup_interval_us(int64_t us) noexcept {
+    idle_wakeup_interval_us_ = us > 0 ? us : 0;
+  }
   // Called on SurfaceAboutToBeDestroyed, before QWindow destroys the VkSurface.
   // Empty clears the callback.
   void set_surface_teardown(std::function<void()> teardown) {
@@ -68,10 +77,13 @@ class RealtimeVulkanWindow final : public QWindow {
   FrameCallback frame_callback_;
   std::function<void()> surface_teardown_;
   std::function<bool()> idle_throttle_bypass_;
+  std::function<bool()> idle_present_gate_;
   std::chrono::steady_clock::time_point last_frame_{};
   int64_t idle_frame_interval_us_ = 0;
+  int64_t idle_wakeup_interval_us_ = 250000;
   int64_t pending_elapsed_us_ = 0;
   QTimer resize_settle_timer_;
+  QTimer idle_wakeup_timer_;
   bool resizing_ = false;
   bool host_resize_suspended_ = false;
   bool was_exposed_ = false;

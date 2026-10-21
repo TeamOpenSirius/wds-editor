@@ -156,6 +156,7 @@ class EditorMainWindow final : public QMainWindow {
   QMenu* command_overflow_menu_ = nullptr;
   bool command_toolbar_relayout_pending_ = false;
   bool command_toolbar_relayouting_ = false;
+  int command_layout_state_ = -1;
   ::QToolBar* command_toolbar_ = nullptr;
   ::QToolBar* convert_toolbar_ = nullptr;
   ::QDockWidget* preview_dock_ = nullptr;

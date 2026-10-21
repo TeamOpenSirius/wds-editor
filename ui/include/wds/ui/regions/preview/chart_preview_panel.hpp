@@ -63,6 +63,11 @@ class ChartPreviewPanel {
   // Resize the Vulkan swapchain using the complete window framebuffer.
   void resize_framebuffer(int width, int height);
   void tick(int64_t delta_us);
+  // Idle presentation gate: true when the next frame could change pixels or
+  // playback state. The window host uses this to stop scheduling idle frames.
+  void mark_present_dirty() noexcept { present_dirty_ = true; }
+  bool needs_present() const noexcept;
+  void note_frame_presented() noexcept;
   void render(const wds::renderer::DrawBatch* ui_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_chrome = nullptr);
@@ -175,6 +180,11 @@ class ChartPreviewPanel {
   std::unordered_map<std::string, wds::audio::WaveformOverview> waveform_cache_;
   std::string waveform_path_;
   bool want_spectrogram_ = false;
+  bool present_dirty_ = true;
+  bool last_presented_want_spectrogram_ = false;
+  std::uint64_t last_presented_doc_gen_ = ~std::uint64_t{0};
+  std::uint64_t last_presented_revision_ = ~std::uint64_t{0};
+  int64_t last_presented_timeline_us_ = std::numeric_limits<int64_t>::min();
   std::uint64_t music_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;
@@ -209,6 +219,13 @@ class ChartPreviewPanel {
   bool skip_precommit_pump_ = false;
   bool precommit_inited_ = false;
   int panel_fb_w_ = 0;
+  int panel_x_ = 0;
+  int panel_y_ = 0;
+  int panel_h_ = 0;
+  // Last framebuffer size passed to resize_framebuffer(). resize_preview_viewport
+  // runs every frame, so this is what makes the MEMSTEP row event-driven.
+  int last_resize_fb_w_ = 0;
+  int last_resize_fb_h_ = 0;
   int content_x_ = 0;
   int content_y_ = 0;
   int content_width_ = 0;

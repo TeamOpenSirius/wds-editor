@@ -701,6 +701,11 @@ struct PrimaryEvalJob {
   int32_t persist_i = -1;
 };
 
+// Per-collect-frame invalidation for the TLS system-hash cache. Called once
+// before the frame's eval tasks; direct evaluate() callers leave token 0.
+void begin_eval_system_hash_frame() noexcept;
+void bump_eval_system_hash_config_generation() noexcept;
+
 void evaluate_plan(const SplitEffectParticle& p, const EmitContext& ctx,
                    std::vector<PrimaryEvalJob>& jobs);
 void evaluate_realize_job(const SplitEffectParticle& p, const EmitContext& ctx, PrimaryEvalJob& job,

@@ -30,6 +30,7 @@ constexpr const char* kSecName[kSecN] = {
     "persist_cl", "realize_m",  "plan_gate",   "vec_grow",    "capselect",
     "assemble",   "lockwait",   "pool_wake",   "pool_join",   "task_setup",
     "cf_hash",    "cf_keep",    "cf_ident",    "pe_pose_at",
+    "subemit_plan", "subemit_realize",
 };
 
 bool env_on() noexcept {
@@ -451,7 +452,7 @@ std::string split_wall_report() {
   const double unscoped = task_sum > staged ? task_sum - staged : 0.0;
 
   std::string out;
-  char buf[1400];
+  char buf[1800];
   std::snprintf(buf, sizeof(buf),
                 "wall frames=%d splits/frame=%.1f  frame=%.3f  A=%.3f  B=%.3f  C=%.3f  "
                 "serial=%.3f (%.0f%%)  util=%.0f%%\n",
@@ -504,7 +505,8 @@ std::string split_wall_report() {
   std::snprintf(buf, sizeof(buf),
                 "  eval extra capsort=%.3f parent_ev=%.3f child_fill=%.3f child_cap=%.3f "
                 "subsetup=%.3f persist_claim=%.3f realize_match=%.3f plan_gate=%.3f "
-                "vec_grow=%.3f cf_hash=%.3f cf_keep=%.3f cf_ident=%.3f pe_pose_at=%.3f\n",
+                "vec_grow=%.3f cf_hash=%.3f cf_keep=%.3f cf_ident=%.3f pe_pose_at=%.3f "
+                "subemit_plan=%.3f subemit_realize=%.3f\n",
                 sec_avg[static_cast<int>(SplitWallSec::CapSort)],
                 sec_avg[static_cast<int>(SplitWallSec::ParentEvents)],
                 sec_avg[static_cast<int>(SplitWallSec::ChildFill)],
@@ -517,7 +519,9 @@ std::string split_wall_report() {
                 sec_avg[static_cast<int>(SplitWallSec::CfHash)],
                 sec_avg[static_cast<int>(SplitWallSec::CfKeep)],
                 sec_avg[static_cast<int>(SplitWallSec::CfIdent)],
-                sec_avg[static_cast<int>(SplitWallSec::PePoseAt)]);
+                sec_avg[static_cast<int>(SplitWallSec::PePoseAt)],
+                sec_avg[static_cast<int>(SplitWallSec::SubemitPlan)],
+                sec_avg[static_cast<int>(SplitWallSec::SubemitRealize)]);
   out += buf;
   std::snprintf(buf, sizeof(buf),
                 "  serial extra capselect=%.3f assemble=%.3f lockwait=%.3f pool_wake=%.3f "

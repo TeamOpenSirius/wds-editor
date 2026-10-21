@@ -32,6 +32,8 @@ RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* p
   setSurfaceType(QSurface::VulkanSurface);
   setVulkanInstance(instance);
   input_adapter_ = std::make_unique<QtInputAdapter>(this, input_queue_);
+  idle_wakeup_timer_.setSingleShot(true);
+  QObject::connect(&idle_wakeup_timer_, &QTimer::timeout, this, [this] { schedule_frame(); });
   resize_settle_timer_.setSingleShot(true);
   resize_settle_timer_.setInterval(120);
   QObject::connect(&resize_settle_timer_, &QTimer::timeout, this, [this] {
@@ -42,6 +44,7 @@ RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* p
       return;
     }
     resizing_ = false;
+    force_frame_ = true;
     last_frame_ = std::chrono::steady_clock::now();
     pending_elapsed_us_ = 0;
     schedule_frame();
@@ -53,9 +56,11 @@ RealtimeVulkanWindow::~RealtimeVulkanWindow() = default;
 void RealtimeVulkanWindow::set_resize_suspended(bool suspended) noexcept {
   host_resize_suspended_ = suspended;
   if (suspended) {
+    idle_wakeup_timer_.stop();
     pending_elapsed_us_ = 0;
     return;
   }
+  force_frame_ = true;
   last_frame_ = std::chrono::steady_clock::now();
   pending_elapsed_us_ = 0;
   schedule_frame();
@@ -63,6 +68,7 @@ void RealtimeVulkanWindow::set_resize_suspended(bool suspended) noexcept {
 
 void RealtimeVulkanWindow::request_frame() {
   force_frame_ = true;
+  idle_wakeup_timer_.stop();
   if (frame_callback_ && !surface_dead_) requestUpdate();
 }
 
@@ -124,6 +130,7 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     const bool handled = QWindow::event(event);
     if (created) {
       surface_dead_ = false;
+      force_frame_ = true;
       last_frame_ = std::chrono::steady_clock::now();
       pending_elapsed_us_ = 0;
       schedule_frame();
@@ -149,6 +156,17 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       pending_elapsed_us_ = 0;
       return true;
     }
+    const bool has_input = !input_queue_.events().empty();
+    if (!startup && !force_frame_ && !has_input && idle_present_gate_ &&
+        !idle_present_gate_()) {
+      if (idle_wakeup_interval_us_ > 0) {
+        idle_wakeup_timer_.start(
+            std::max(1, static_cast<int>(idle_wakeup_interval_us_ / 1000)));
+      }
+      pending_elapsed_us_ = 0;
+      return true;
+    }
+    idle_wakeup_timer_.stop();
     force_frame_ = false;
     initialized_ = isExposed();
     const char* dump_verts = std::getenv("WDS_DUMP_VERTS");
@@ -164,7 +182,6 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_frame_).count();
     last_frame_ = now;
     pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
-    const bool has_input = !input_queue_.events().empty();
     const bool bypass_idle_cap =
         static_cast<bool>(idle_throttle_bypass_) && idle_throttle_bypass_();
     // 2 ms slack: at exactly one vsync per interval the accumulator lands a
@@ -199,6 +216,7 @@ void RealtimeVulkanWindow::exposeEvent(QExposeEvent*) {
   // handleExposeEvent on every presented frame. Resetting last_frame_ here
   // would truncate the UpdateRequest delta (wall ~16.7 ms → measured ~8 ms).
   if (isExposed() && !was_exposed_) {
+    force_frame_ = true;
     last_frame_ = std::chrono::steady_clock::now();
     pending_elapsed_us_ = 0;
     schedule_frame();
@@ -251,6 +269,14 @@ void RealtimeVulkanWindow::schedule_frame() {
     note_frame_hold("resize-suspend");
     return;
   }
+  if (idle_present_gate_ && presented_ && !force_frame_ && !idle_present_gate_()) {
+    if (idle_wakeup_interval_us_ > 0) {
+      idle_wakeup_timer_.start(
+          std::max(1, static_cast<int>(idle_wakeup_interval_us_ / 1000)));
+    }
+    return;
+  }
+  idle_wakeup_timer_.stop();
   requestUpdate();
 }
 }

@@ -206,7 +206,12 @@ struct DrawBatch {
   }
 
   // Commit vertex/index pages. overlay_ordered reuses leading slots.
-  void precommit_capacity(size_t bucket_n, size_t verts_each) {
+  //
+  // materialize=true writes every reserved page now (resize(capacity) zero-fill
+  // + touch_pages), which is what makes the reservation resident. false keeps
+  // only `reserve`, so the first real write pays the fault. Measurement A/B
+  // only: WDS_PRECOMMIT_DRAW=0 selects reserve-only.
+  void precommit_capacity(size_t bucket_n, size_t verts_each, bool materialize = true) {
     if (ext_dst != nullptr || bucket_n == 0 || verts_each == 0) {
       return;
     }
@@ -220,6 +225,9 @@ struct DrawBatch {
       }
       if (b.indices.capacity() < idx_each) {
         b.indices.reserve(idx_each);
+      }
+      if (!materialize) {
+        continue;
       }
       const size_t vs = b.vertices.size();
       const size_t is = b.indices.size();

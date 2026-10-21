@@ -3,7 +3,10 @@
 #include "split_eval_persist.hpp"
 #include "split_wall_profile.hpp"
 
+#include <wds/chart_render/split_effect_particles.hpp>
+
 #include <wds/common/page_touch.hpp>
+#include <wds/common/perf_stages.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -132,6 +135,13 @@ struct FlatMap {
   }
 
   FlatSlot* find(std::uint64_t h, const ParticleCacheKey& key) noexcept {
+    return find(h, key, nullptr);
+  }
+
+  // stale (diagnostics only, may be null): a slot for the same hash but a
+  // different key was walked past, i.e. this key was invalidated / replaced
+  // rather than never stored. Does not change the probe or the result.
+  FlatSlot* find(std::uint64_t h, const ParticleCacheKey& key, bool* stale) noexcept {
     if (slots.empty()) {
       return nullptr;
     }
@@ -144,6 +154,9 @@ struct FlatMap {
       }
       if (s.hash == h && s.key == key) {
         return &s;
+      }
+      if (stale != nullptr && s.hash == h) {
+        *stale = true;
       }
       i = (i + 1) & mask;
     }
@@ -237,6 +250,15 @@ struct Shard {
   std::atomic<std::uint64_t> lookup_contend{0};
   std::atomic<std::uint64_t> store_ops{0};
   std::atomic<std::uint64_t> store_contend{0};
+  // Diagnostics only (WDS_FRAME_DIAG): extends the counters above, same
+  // storage. Never read by a lookup or eviction decision.
+  std::atomic<std::uint64_t> lookup_misses{0};   // no slot for this key
+  std::atomic<std::uint64_t> lookup_stale{0};    // slot existed, key replaced
+  std::atomic<std::uint64_t> rollup_hits{0};     // C16: no particle rollup
+  std::atomic<std::uint64_t> rollup_misses{0};   // C16: rolled up into run
+  std::atomic<std::uint64_t> evict_budget{0};    // dropped for the byte budget
+  std::atomic<std::uint64_t> evict_reap{0};      // dropped by idle reap
+  std::atomic<std::uint64_t> evict_alloc{0};     // dropped by clear()/epoch
 };
 
 Entry* take_entry(Shard& sh) {
@@ -271,6 +293,10 @@ struct Cache {
 
 std::atomic<Cache*> g_cache{nullptr};
 std::mutex g_init_mu;
+
+// Diagnostics only (WDS_FRAME_DIAG). Cumulative; never drives a decision.
+std::atomic<std::uint64_t> g_epoch_bumps{0};
+std::atomic<std::uint64_t> g_clear_ops{0};
 
 #ifndef _WIN32
 void after_fork_child() {
@@ -406,6 +432,13 @@ void evict_one(Shard& sh) {
   drop_entry_account(sh, *e);
   give_entry(sh, e);
   sh.map.erase_at(victim);
+  // Only evict_until_fit reaches here, so the reason is always the byte
+  // budget. Idle reap has its own path (reap_shard_unused).
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    sh.evict_budget.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 std::size_t cache_bytes(const Cache& c) noexcept {
@@ -491,24 +524,45 @@ std::uint32_t split_eval_cache_epoch() noexcept {
 
 void split_eval_cache_clear() noexcept {
   Cache& c = cache();
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    g_clear_ops.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
   for (int i = 0; i < kShards; ++i) {
     Shard& sh = c.shards[i];
     std::lock_guard<std::shared_mutex> lock(sh.mu);
+#if WDS_DIAG_ENABLED
+    std::size_t dropped = 0;
+#endif  // WDS_DIAG_ENABLED
     for (FlatSlot& s : sh.map.slots) {
       if (s.hash != 0) {
         give_entry(sh, s.entry);
+#if WDS_DIAG_ENABLED
+        ++dropped;
+#endif  // WDS_DIAG_ENABLED
       }
     }
     sh.map.clear();
     sh.bytes.store(0, std::memory_order_relaxed);
     sh.particles.store(0, std::memory_order_relaxed);
     sh.checkpoints.store(0, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+    if (dropped > 0 && wds::common::perf::enabled()) {
+      sh.evict_alloc.fetch_add(dropped, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
   }
 }
 
 void split_eval_cache_bump_epoch() noexcept {
   Cache& c = cache();
   c.epoch.fetch_add(1, std::memory_order_acq_rel);
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    g_epoch_bumps.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
   split_eval_cache_clear();
   split_eval_carry_bump_epoch();
   split_eval_persist_clear();
@@ -568,6 +622,27 @@ SplitEvalCacheStats split_eval_cache_stats() noexcept {
   return s;
 }
 
+// Diagnostics-only extension of the counters above (same storage, split by
+// outcome and by drop reason). Defined as a separate accessor so the existing
+// SplitEvalCacheStats layout — and every caller of it — stays untouched.
+void split_eval_cache_diag(SplitEvalCacheDiag& out) noexcept {
+  const Cache& c = cache();
+  out = SplitEvalCacheDiag{};
+  for (int i = 0; i < kShards; ++i) {
+    const Shard& sh = c.shards[i];
+    out.lookup_misses += sh.lookup_misses.load(std::memory_order_relaxed);
+    out.lookup_stale += sh.lookup_stale.load(std::memory_order_relaxed);
+    out.rollup_hits += sh.rollup_hits.load(std::memory_order_relaxed);
+    out.rollup_misses += sh.rollup_misses.load(std::memory_order_relaxed);
+    out.evict_budget += sh.evict_budget.load(std::memory_order_relaxed);
+    out.evict_reap += sh.evict_reap.load(std::memory_order_relaxed);
+    out.evict_clear += sh.evict_alloc.load(std::memory_order_relaxed);
+  }
+  out.evict_ops = out.evict_budget + out.evict_reap + out.evict_clear;
+  out.clear_ops = g_clear_ops.load(std::memory_order_relaxed);
+  out.epoch_bumps = g_epoch_bumps.load(std::memory_order_relaxed);
+}
+
 bool split_eval_cache_lookup(const ParticleCacheKey& key, int k_target,
                              IntegratorGridState& out) noexcept {
   if (key.valid == 0 || k_target < 0) {
@@ -578,17 +653,45 @@ bool split_eval_cache_lookup(const ParticleCacheKey& key, int k_target,
     return false;
   }
   SplitWallScope wall_lookup(SplitWallSec::CacheLookup);
+  SplitDiagScope diag_lookup(SplitDiagPhase::CacheLookup);
   const std::uint64_t h = key_hash64(key);
   Shard& sh = c.shards[shard_of(h)];
   const std::shared_lock<std::shared_mutex> lock = lock_shard_shared(sh);
-  FlatSlot* slot = sh.map.find(h, key);
+  // Diagnostics only: classify a miss as never-stored vs invalidated
+  // (same hash, different key). Does not change the probe.
+#if WDS_DIAG_ENABLED
+  bool stale = false;
+#endif  // WDS_DIAG_ENABLED
+  FlatSlot* slot = sh.map.find(
+      h, key,
+#if WDS_DIAG_ENABLED
+      wds::common::perf::enabled() ? &stale : nullptr
+#else
+      nullptr
+#endif  // WDS_DIAG_ENABLED
+  );
   if (slot == nullptr) {
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled()) {
+      sh.lookup_misses.fetch_add(1, std::memory_order_relaxed);
+      if (stale) {
+        sh.lookup_stale.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+#endif  // WDS_DIAG_ENABLED
     return false;
   }
   slot->entry->used_gen.store(c.play_gen.load(std::memory_order_relaxed),
                               std::memory_order_relaxed);
   const IntegratorGridState* st = pick_leq(*slot->entry, k_target);
   if (st == nullptr) {
+    // Slot present but no checkpoint at/below k_target: still a miss for the
+    // caller. Counted separately so hits+misses == lookup_ops.
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled()) {
+      sh.lookup_misses.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
     return false;
   }
   out = *st;
@@ -677,17 +780,32 @@ bool split_eval_cache_lookup_rol(const ParticleCacheKey& key, std::uint8_t axis,
   const std::shared_lock<std::shared_mutex> lock = lock_shard_shared(sh);
   FlatSlot* slot = sh.map.find(h, key);
   if (slot == nullptr) {
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled()) {
+      sh.rollup_misses.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
     return false;
   }
   slot->entry->used_gen.store(c.play_gen.load(std::memory_order_relaxed),
                               std::memory_order_relaxed);
   const int have = slot->entry->rol_k[axis];
   if (have < 0 || have > k_target) {
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled()) {
+      sh.rollup_misses.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif  // WDS_DIAG_ENABLED
     return false;
   }
   k_have = have;
   acc = slot->entry->rol_acc[axis];
   sh.lookup_hits.fetch_add(1, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+  if (wds::common::perf::enabled()) {
+    sh.rollup_hits.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
   return true;
 }
 
@@ -740,6 +858,9 @@ double split_eval_cache_prev_frame_ms() noexcept {
 
 void reap_shard_unused(Shard& sh, std::uint64_t gen) {
   std::size_t idx = 0;
+#if WDS_DIAG_ENABLED
+  std::size_t dropped = 0;
+#endif  // WDS_DIAG_ENABLED
   while (idx < sh.map.slots.size()) {
     FlatSlot& s = sh.map.slots[idx];
     if (s.hash == 0 || s.entry == nullptr ||
@@ -750,7 +871,16 @@ void reap_shard_unused(Shard& sh, std::uint64_t gen) {
     drop_entry_account(sh, *s.entry);
     give_entry(sh, s.entry);
     sh.map.erase_at(idx);
+#if WDS_DIAG_ENABLED
+    ++dropped;
+#endif  // WDS_DIAG_ENABLED
   }
+  // Reason: the entry was not touched this play frame (dead particle).
+#if WDS_DIAG_ENABLED
+  if (dropped > 0 && wds::common::perf::enabled()) {
+    sh.evict_reap.fetch_add(dropped, std::memory_order_relaxed);
+  }
+#endif  // WDS_DIAG_ENABLED
 }
 
 void split_eval_cache_reap_unused() noexcept {

@@ -14,6 +14,7 @@
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/common/crash_input_journal.hpp>
+#include <wds/common/perf_stages.hpp>
 #include <wds/interaction/theme.hpp>
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/ui/regions/edit/edit_gutters.hpp>
@@ -1156,6 +1157,7 @@ void ChartEditWidget::fill_audio_backdrop_rows(const EditViewport& v,
 
 void ChartEditWidget::sync_audio_backdrop(const EditViewport& v,
                                           const wds::interaction::Rect& b) {
+  WDS_PERF_SCOPE("edit.backdrop");
   if (!panel_) {
     audio_backdrop_ = {};
     backdrop_mode_ = EditSpectrumMode::None;
@@ -1171,6 +1173,8 @@ void ChartEditWidget::sync_audio_backdrop(const EditViewport& v,
     backdrop_wave_ = nullptr;
     return;
   }
+  // The backdrop is only consumed by paintEvent; rebuilding it while hidden is wasted work.
+  if (!isVisible()) return;
 
   const float vis = static_cast<float>(std::max(1, v.visible_ms()));
   const float view_lo = v.scroll_ms();

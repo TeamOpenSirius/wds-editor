@@ -56,6 +56,8 @@ enum class SplitWallSec : int {
   CfKeep,
   CfIdent,
   PePoseAt,
+  SubemitPlan,
+  SubemitRealize,
   Count
 };
 
@@ -94,6 +96,10 @@ const char* split_wall_sec_name(SplitWallSec sec) noexcept;
 bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept;
 
 class SplitWallScope {
+#if !WDS_DIAG_ENABLED
+ public:
+  explicit constexpr SplitWallScope(SplitWallSec) noexcept {}
+#else
  public:
   explicit SplitWallScope(SplitWallSec sec) noexcept {
     if (!split_wall_enabled()) {
@@ -122,6 +128,7 @@ class SplitWallScope {
   SplitWallSec sec_{};
   bool active_ = false;
   int64_t start_ns_ = 0;
+#endif  // WDS_DIAG_ENABLED
 };
 
 }  // namespace wds::chart_render
