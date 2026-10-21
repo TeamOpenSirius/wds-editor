@@ -19,6 +19,7 @@ constexpr int kMaxWindow = 4096;
 
 constexpr int kScopeNest = 64;
 
+#if WDS_DIAG_ENABLED
 constexpr const char* kSecName[kSecN] = {
     "frame",      "A",          "B",           "C",           "cap",
     "copyout",    "leak",       "births",      "filter",      "compact",
@@ -32,6 +33,7 @@ constexpr const char* kSecName[kSecN] = {
     "cf_hash",    "cf_keep",    "cf_ident",    "pe_pose_at",
     "subemit_plan", "subemit_realize",
 };
+#endif  // WDS_DIAG_ENABLED
 
 bool env_on() noexcept {
   const char* raw = std::getenv("WDS_SPLIT_WALL");
@@ -365,11 +367,16 @@ void split_wall_note_splits(int n) noexcept {
 }
 
 const char* split_wall_sec_name(SplitWallSec sec) noexcept {
+#if WDS_DIAG_ENABLED
   const int i = static_cast<int>(sec);
   if (i < 0 || i >= kSecN) {
     return "?";
   }
   return kSecName[i];
+#else
+  (void)sec;
+  return "?";
+#endif
 }
 
 bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept {
@@ -385,6 +392,7 @@ bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept {
 }
 
 std::string split_wall_report() {
+#if WDS_DIAG_ENABLED
   std::lock_guard<std::mutex> lock(g_mu);
   const int n = static_cast<int>(g_window.size());
   if (n == 0) {
@@ -564,6 +572,9 @@ std::string split_wall_report() {
   }
   g_window.clear();
   return out;
+#else
+  return {};
+#endif
 }
 
 }  // namespace wds::chart_render

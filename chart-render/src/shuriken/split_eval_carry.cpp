@@ -78,6 +78,7 @@ float parse_gap() noexcept {
 }
 
 bool parse_rewind_enabled() noexcept {
+#if WDS_DIAG_ENABLED
   const char* raw = std::getenv("WDS_SPLIT_REWIND");
   if (raw == nullptr || raw[0] == '\0') {
     // B1 history did not reach the drag gate in the first measurement; keep it
@@ -86,6 +87,10 @@ bool parse_rewind_enabled() noexcept {
   }
   const std::string_view v(raw);
   return v != "0" && v != "off" && v != "false" && v != "OFF";
+#else
+  // Release carries no rewind diagnostics or opt-in experiment surface.
+  return false;
+#endif
 }
 
 constexpr float kRewindStepSec = 0.5f;
@@ -351,7 +356,9 @@ void evict_one(Store& s, Shard& sh) {
   }
   const std::size_t drop = entry_bytes(*oldest->second);
   const std::size_t npart = entry_particles(*oldest->second);
+#if WDS_DIAG_ENABLED
   sat_sub(s.rewind_bytes, rewind_bytes(*oldest->second));
+#endif
   auto node = std::move(oldest->second);
   sh.map.erase(oldest);
   give_carry_entry(sh, std::move(node));
@@ -427,7 +434,9 @@ void split_eval_carry_clear() noexcept {
   s.bytes.store(0, std::memory_order_relaxed);
   s.systems.store(0, std::memory_order_relaxed);
   s.particles.store(0, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
   s.rewind_bytes.store(0, std::memory_order_relaxed);
+#endif
 }
 
 void split_eval_carry_clear_current_keep_rewind() noexcept {
@@ -541,9 +550,11 @@ SplitEvalCarryStats split_eval_carry_stats() noexcept {
   out.walk_hits = s.walk_hits.load(std::memory_order_relaxed);
   out.walk_misses = s.walk_misses.load(std::memory_order_relaxed);
   out.walk_commits = s.walk_commits.load(std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
   out.rewind_hits = s.rewind_hits.load(std::memory_order_relaxed);
   out.rewind_misses = s.rewind_misses.load(std::memory_order_relaxed);
   out.rewind_bytes = s.rewind_bytes.load(std::memory_order_relaxed);
+#endif
   return out;
 }
 
@@ -655,13 +666,17 @@ bool split_eval_carry_lookup_for_time(const SystemCarryKey& key, float now,
     out.now_t = rit->now_t;
     out.next_birth = rit->next_birth;
     out.storage = rit->particles;
+#if WDS_DIAG_ENABLED
     s.rewind_hits.fetch_add(1, std::memory_order_relaxed);
+#endif
     s.hits.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
+#if WDS_DIAG_ENABLED
   if (!e.rewind.empty() && now + 1e-6f < e.now_t) {
     s.rewind_misses.fetch_add(1, std::memory_order_relaxed);
   }
+#endif
   s.misses.fetch_add(1, std::memory_order_relaxed);
   return false;
 }
@@ -765,7 +780,11 @@ void store_held_locked(Store& s, Shard& sh, const SystemCarryKey& key, float now
   e.particles = std::move(held);
   e.tick = ++sh.tick;
   apply_entry_delta(s, old_bytes, old_n, entry_bytes(e), entry_particles(e));
+#if WDS_DIAG_ENABLED
   apply_delta(s.rewind_bytes, old_rew, rewind_bytes(e));
+#else
+  (void)old_rew;
+#endif
   trim_shard_for_key(s, sh, key, &e);
   s.commits.fetch_add(1, std::memory_order_relaxed);
 }
