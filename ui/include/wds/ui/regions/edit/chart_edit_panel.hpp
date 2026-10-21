@@ -375,6 +375,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool near_right_edge(const wds::chart_editor::NotationNote& note, float x) const;
   bool near_start_time(const wds::chart_editor::NotationNote& note, float y) const;
   bool near_end_time(const wds::chart_editor::NotationNote& note, float y) const;
+  // True when the body's paired hold head (official start note) covers screen x.
+  // A body without a covering head has no start sprite there: only the ribbon
+  // ends at the start tick, so the start hit / selection caps must stay tight.
+  bool hold_body_head_covers_x(const wds::chart_editor::NotationNote& body, float x) const;
+  // Extra screen-space tolerance past a headless body's start tick (no head cap).
+  float headless_hold_start_pad_px() const;
   // ScratchHold end span edges (Sirius scratchLength), distinct from body edges.
   bool near_scratch_end_left(const wds::chart_editor::NotationNote& note, float x) const;
   bool near_scratch_end_right(const wds::chart_editor::NotationNote& note, float x) const;
@@ -436,11 +442,15 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void place_instant(wds::chart_editor::NoteType type, wds::interaction::Vec2 point,
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
-  // Continue a selected terminal ScratchHold from its JumpScratch end-cap.
-  // Requires pending_chain_extend_id_ armed on pointer-down.
+  // Continue a selected terminal hold from its end-cap. Requires
+  // pending_chain_extend_id_ armed on pointer-down. Works for both the regular
+  // and ScratchHold chain families.
   void begin_hold_chain_extend();
-  // If point is on a selected terminal ScratchHold end-cap, arm pending_chain_extend_id_.
-  void try_arm_pending_chain_extend(wds::interaction::Vec2 point, bool scratch_family);
+  // If point is on a selected terminal hold end-cap, arm pending_chain_extend_id_.
+  // `scratch_family` restricts the search to one family (toolbox placement);
+  // nullopt accepts either family (right-click on an already-selected tail).
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point,
+                                    std::optional<bool> scratch_family = std::nullopt);
   void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
   // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
   void begin_scratch_hold_placement(wds::interaction::Vec2 point);
@@ -711,9 +721,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // current width/lane cannot represent a cover — chain stays armed for width
   // changes, but ghost looks like a disconnected independent ScratchHold.
   bool hold_chain_link_preview_ = true;
-  // Armed on RMB-down over a selected terminal JumpScratch; consumed when the
-  // gesture resolves to ScratchHoldBody (chain continue instead of a new hold).
+  // Armed on RMB-down over a selected terminal hold end-cap; consumed when the
+  // gesture resolves to HoldBody / ScratchHoldBody or finishes on right-up.
   int32_t pending_chain_extend_id_ = -1;
+  // A right-click chain-extend starts placing immediately (no place-gesture
+  // swipe), so its own right-up must finish for regular Hold too (whose finish
+  // button is normally Left).
+  bool finish_chain_extend_on_right_up_ = false;
   // Locked when PlaceGesture starts: Shift was already down at mouse press.
   // The same Shift still places stars; releasing it mid-draw does not retint.
   bool place_gold_head_ = false;
@@ -738,15 +752,33 @@ class ChartEditPanel final : public wds::interaction::Widget {
                                     const wds::chart_editor::NotationNote& next_body,
                                     bool scratch);
 
-  // --- Multi-layer hold selection (double-click only) --------------------------
-  // Single click never advances layers — it only selects / group-drags like taps.
-  // Normal: (dbl) Whole → (dbl) Parts(head|body) → (dbl star) Stars
-  // ScratchHold: (dbl) Chain → (dbl) Whole(segment) → (dbl) Parts → (dbl star) Stars
-  // Stars dbl body/head → Parts. Parts has no path back to Whole/Chain (blur resets).
+  // --- Multi-layer hold selection -------------------------------------------
+  // A plain click on a hold enters its outermost available layer:
+  //   Chain  when the hold has connected neighbours,
+  //   Whole  for a lone segment with a paired head,
+  //   Parts  for a lone headless segment (body-only is its top layer).
+  // Double-click advances to the next available layer:
+  //   Chain → Whole → Parts (only with a head) → Stars → wrap to the top layer.
+  // Once a layer is active, a plain click switches the selected piece anywhere
+  // inside the layer-1 chain scope without changing the layer. Parts: single
+  // click picks the head or body. Stars: single click on a star stays in Stars
+  // and picks that star; single click on body/head steps back one layer.
+  // Exception: double-clicking a star keeps the direct star jump.
   enum class HoldSelLayer { None, Chain, Whole, Parts, Stars };
 
   void clear_hold_sel_focus();
   void sync_hold_sel_focus_to_selection();
+  // Layers available for a hold body, outermost first. Stars is always last.
+  // A one-segment chain has no Chain layer. A one-segment headless hold has
+  // neither Chain nor Whole: Parts(body) is its top layer.
+  std::vector<HoldSelLayer> hold_layer_order(
+      const wds::chart_editor::NotationNote& body) const;
+  // True when two bodies are the same body or belong to the same connected chain.
+  bool hold_bodies_connected(const wds::chart_editor::NotationNote& a,
+                             const wds::chart_editor::NotationNote& b) const;
+  // True when every selected note resolves to a hold in `body`'s chain.
+  bool selection_belongs_to_hold_chain(
+      const wds::chart_editor::NotationNote& body) const;
   std::optional<wds::chart_editor::NotationNote> resolve_hold_body(
       const wds::chart_editor::NotationNote& hit) const;
   bool hold_bodies_same_focus(const wds::chart_editor::NotationNote& body) const;
@@ -754,13 +786,32 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void select_hold_segment(const wds::chart_editor::NotationNote& body);
   void select_hold_part(const wds::chart_editor::NotationNote& hit,
                         const wds::chart_editor::NotationNote& body);
-  // Double-click hold-family drill. Single click must not call this.
+  // Select every visible mid-star bound to `body` (Stars layer).
+  void select_hold_stars(const wds::chart_editor::NotationNote& body);
+  // Resolve which piece a double-click targeted inside `body`. With
+  // `include_stars` (double-click shortcut) a bound star under the pointer wins;
+  // otherwise the paired head wins when the pointer is over its sprite, else the
+  // body. Geometry-based, so the selected-note hit-test tie bonus cannot hide the
+  // head/star. Single-click Parts switching passes false so an overlapping star
+  // canvas (also used for star placement) cannot hide the head.
+  wds::chart_editor::NotationNote hold_drill_target(
+      const wds::chart_editor::NotationNote& body, wds::interaction::Vec2 point,
+      bool include_stars = true) const;
+  // Double-click hold-family drill. Single click must not advance layers.
   void drill_hold_selection(const wds::chart_editor::NotationNote& hit);
+  // Single click while a drill layer is active: switch the selected piece at the
+  // current layer, anywhere inside the layer-1 chain scope. Returns true when the
+  // click was consumed by the layer (so it must not reset the selection).
+  bool switch_hold_selection_layer(const wds::chart_editor::NotationNote& hit,
+                                   wds::interaction::Vec2 point);
   // True when a hold body is effectively selected for star placement.
   bool hold_body_selected_for_stars(const wds::chart_editor::NotationNote& body) const;
 
   HoldSelLayer hold_sel_layer_ = HoldSelLayer::None;
   int32_t hold_sel_body_id_ = -1;
+  // Last hold body whose length/width edge gesture ran. A double-click anywhere
+  // inside it drills that hold even if another note (e.g. a tap) covers its start.
+  int32_t last_hold_edge_body_id_ = -1;
 
   void sync_curve_mode();
   void refresh_curve_ghosts();

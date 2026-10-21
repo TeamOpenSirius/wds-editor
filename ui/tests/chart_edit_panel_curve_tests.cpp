@@ -1,4 +1,5 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/regions/edit/chart_edit_renderer.hpp"
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 #include "wds/ui/regions/settings/curve_templates_dialog.hpp"
 #include "wds/ui/regions/toolbar/editor_toolbar.hpp"
@@ -1560,8 +1561,8 @@ void test_unselected_edge_edits_keep_selection() {
 }
 
 void test_multi_select_drag_from_hold_keeps_foreign_notes() {
-  // Single click never enters hold layers — multi-select group-drags from the hold
-  // the same way as from a tap. Layer entry is double-click only.
+  // An already-selected hold inside a foreign multi-selection keeps the group for
+  // dragging instead of entering its hold layer.
   Harness h;
   NotationNote tap;
   tap.note_type = NoteType::Normal;
@@ -1628,34 +1629,36 @@ void test_hold_layer_only_on_double_click() {
   }
   CHECK(hold_id >= 0);
   CHECK(head_id >= 0);
+  const int32_t star_id = add_bound_star(h, hold_id, 720, 3, 1);
 
-  // Clear placement selection, then single-click the body: selects body+head, no layer.
+  // Clear placement selection, then single-click the body. A lone headed hold
+  // has no Chain layer: its top layer is Whole (body + head).
   h.panel.set_selected({});
   const auto mid = h.at_tick_lane(480, 3);
   h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
   h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
   CHECK(h.panel.selected().count(hold_id));
   CHECK(h.panel.selected().count(head_id));
-  // A second single click on an already-selected hold must not collapse to Parts.
+  // A second single click on the same layer keeps body+head.
   h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
   h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
   CHECK(h.panel.selected().count(hold_id));
   CHECK(h.panel.selected().count(head_id));
 
-  // Hold is a chain-family body: (dbl) Chain → (dbl) Whole → (dbl) Parts.
+  // (dbl) Whole → Parts(body) → Stars → wrap Whole.
   h.panel.on_double_click(
       wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
-  CHECK(h.panel.selected().count(hold_id));
-  CHECK(h.panel.selected().count(head_id));
-  h.panel.on_double_click(
-      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
-  CHECK(h.panel.selected().count(hold_id));
-  CHECK(h.panel.selected().count(head_id));
-  h.panel.on_double_click(
-      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK_EQ(h.panel.selected().size(), 1u);
   CHECK(h.panel.selected().count(hold_id));
   CHECK(!h.panel.selected().count(head_id));
+  h.panel.on_double_click(
+      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
   CHECK_EQ(h.panel.selected().size(), 1u);
+  CHECK(h.panel.selected().count(star_id));
+  h.panel.on_double_click(
+      wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(hold_id));
+  CHECK(h.panel.selected().count(head_id));
 }
 
 void test_paste_hold_does_not_select_eighths() {
@@ -1738,6 +1741,346 @@ std::vector<int32_t> eighth_ticks_of(const std::vector<NotationNote>& notes, int
   }
   std::sort(ticks.begin(), ticks.end());
   return ticks;
+}
+
+void test_hold_selection_layer_order() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  const int32_t star_a = add_bound_star(h, body_id, 240, 3, 1);
+  const int32_t star_b = add_bound_star(h, body_id, 720, 3, 1);
+  const auto body_pos = h.at_tick_lane(480, 3);
+  const auto head_pos = h.at_tick_lane(0, 3);
+  const auto star_a_pos = h.at_tick_lane(240, 3);
+  const auto star_b_pos = h.at_tick_lane(720, 3);
+
+  auto dbl = [&](Vec2 p) {
+    h.panel.on_double_click(wds::interaction::DoubleClickEvent{p, PointerButton::Left, {}});
+  };
+  auto click = [&](Vec2 p) {
+    h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+  };
+  auto selected_is = [&](std::initializer_list<int32_t> ids) {
+    return h.panel.selected() == std::unordered_set<int32_t>(ids);
+  };
+
+  // A lone headed hold has no Chain: the first click selects Whole.
+  h.panel.set_selected({});
+  click(body_pos);
+  CHECK(selected_is({body_id, head_id}));
+  click(head_pos);
+  CHECK(selected_is({body_id, head_id}));
+
+  // Double-click advances Whole → Parts(body).
+  dbl(body_pos);
+  CHECK(selected_is({body_id}));
+  // Parts single clicks switch head/body.
+  click(head_pos);
+  CHECK(selected_is({head_id}));
+  click(body_pos);
+  CHECK(selected_is({body_id}));
+
+  // Double-click advances Parts → Stars(all).
+  dbl(body_pos);
+  CHECK(selected_is({star_a, star_b}));
+  // Stars single clicks switch individual stars.
+  click(star_a_pos);
+  CHECK(selected_is({star_a}));
+  click(star_b_pos);
+  CHECK(selected_is({star_b}));
+
+  // Single-click body/head at Stars steps back to Parts.
+  click(body_pos);
+  CHECK(selected_is({body_id}));
+  click(head_pos);
+  CHECK(selected_is({head_id}));
+  click(body_pos);
+  CHECK(selected_is({body_id}));
+
+  // Double-click from Parts advances to Stars again; from Stars it wraps Whole.
+  dbl(body_pos);
+  CHECK(selected_is({star_a, star_b}));
+  dbl(body_pos);
+  CHECK(selected_is({body_id, head_id}));
+}
+
+void test_hold_chain_layer_then_headless_skips_parts() {
+  Harness h;
+  const int32_t first_id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
+  const int32_t first_head = add_hold_head(h, 0, 3);
+  const int32_t first_star = add_bound_star(h, first_id, 120, 3, 1);
+  const int32_t second_id = add_hold_body(h, NoteType::Hold, 480, 960, 3, 1);
+  const int32_t second_star = add_bound_star(h, second_id, 840, 3, 1);
+  const auto* first = find_note_id(h.engine.document().notes(), first_id);
+  CHECK(first != nullptr);
+  if (first != nullptr) {
+    CHECK(wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *first).has_value());
+  }
+
+  auto dbl = [&](Vec2 p) {
+    h.panel.on_double_click(wds::interaction::DoubleClickEvent{p, PointerButton::Left, {}});
+  };
+  auto click = [&](Vec2 p) {
+    h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+  };
+  auto selected_is = [&](std::initializer_list<int32_t> ids) {
+    return h.panel.selected() == std::unordered_set<int32_t>(ids);
+  };
+  const auto first_body_pos = h.at_tick_lane(400, 3);
+  const auto first_head_pos = h.at_tick_lane(0, 3);
+  const auto first_star_pos = h.at_tick_lane(120, 3);
+  const auto second_body_pos = h.at_tick_lane(600, 3);
+  const auto second_star_pos = h.at_tick_lane(840, 3);
+
+  // A connected chain's top layer is Chain: the first single click selects
+  // every connected hold (both bodies + the first segment's head).
+  h.panel.set_selected({});
+  click(second_body_pos);
+  CHECK(selected_is({first_id, first_head, second_id}));
+
+  // Double-click advances Chain → Whole(second).
+  dbl(second_body_pos);
+  CHECK(selected_is({second_id}));
+  // The second segment is headless: the next layer skips Parts and goes Stars.
+  dbl(second_body_pos);
+  CHECK(selected_is({second_star}));
+
+  // Same-layer single clicks on stars switch anywhere inside the chain scope.
+  click(first_star_pos);
+  CHECK(selected_is({first_star}));
+  click(second_star_pos);
+  CHECK(selected_is({second_star}));
+  // Double-click advances/wraps instead of switching.
+  dbl(second_body_pos);
+  CHECK(selected_is({first_id, first_head, second_id}));
+
+  // Drill to Parts on the first segment, then switch parts/segments by click.
+  dbl(first_body_pos);  // Chain → Whole(first)
+  CHECK(selected_is({first_id, first_head}));
+  dbl(first_body_pos);  // Whole → Parts(body)
+  CHECK(selected_is({first_id}));
+  click(second_body_pos);  // Parts layer switches to the other chain segment
+  CHECK(selected_is({second_id}));
+  click(first_head_pos);  // ...and to another segment's head part
+  CHECK(selected_is({first_head}));
+  click(first_body_pos);
+  CHECK(selected_is({first_id}));
+  dbl(first_body_pos);  // Parts → Stars(first)
+  CHECK(selected_is({first_star}));
+
+  // A headless segment has no Parts layer: single-clicking its body at Stars
+  // steps back to Whole (layer 2).
+  click(second_body_pos);
+  CHECK(selected_is({second_id}));
+  dbl(second_body_pos);  // Whole(headless) → Stars(second)
+  CHECK(selected_is({second_star}));
+}
+void test_double_click_star_keeps_direct_jump() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  const int32_t star_a = add_bound_star(h, body_id, 240, 3, 1);
+  const int32_t star_b = add_bound_star(h, body_id, 720, 3, 1);
+  const auto body_pos = h.at_tick_lane(480, 3);
+  const auto star_a_pos = h.at_tick_lane(240, 3);
+  const auto star_b_pos = h.at_tick_lane(720, 3);
+
+  auto dbl = [&](Vec2 p) {
+    h.panel.on_double_click(wds::interaction::DoubleClickEvent{p, PointerButton::Left, {}});
+  };
+  auto selected_is = [&](std::initializer_list<int32_t> ids) {
+    return h.panel.selected() == std::unordered_set<int32_t>(ids);
+  };
+
+  // From an unfocused chart, double-clicking a star selects that star directly.
+  h.panel.set_selected({});
+  dbl(star_a_pos);
+  CHECK(selected_is({star_a}));
+
+  // The shortcut still wins after entering the chain layer.
+  h.panel.set_selected({});
+  dbl(body_pos);
+  CHECK(selected_is({body_id, head_id}));
+  dbl(star_b_pos);
+  CHECK(selected_is({star_b}));
+}
+
+void test_single_headless_hold_top_is_parts() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t star_id = add_bound_star(h, body_id, 720, 3, 1);
+  const auto body_pos = h.at_tick_lane(480, 3);
+
+  auto dbl = [&](Vec2 p) {
+    h.panel.on_double_click(wds::interaction::DoubleClickEvent{p, PointerButton::Left, {}});
+  };
+  auto click = [&](Vec2 p) {
+    h.panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, {}});
+  };
+  auto selected_is = [&](std::initializer_list<int32_t> ids) {
+    return h.panel.selected() == std::unordered_set<int32_t>(ids);
+  };
+
+  // Lone headless hold: no Chain and no Whole; Parts(body) is the top layer.
+  h.panel.set_selected({});
+  click(body_pos);
+  CHECK(selected_is({body_id}));
+  // Double-click advances straight to Stars.
+  dbl(body_pos);
+  CHECK(selected_is({star_id}));
+  // Stars body click steps back to Parts(body), not Whole.
+  click(body_pos);
+  CHECK(selected_is({body_id}));
+  dbl(body_pos);
+  CHECK(selected_is({star_id}));
+}
+
+void test_headless_hold_start_tap_wins_visual_order() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  // A note placed on a headless hold's start tick/lane paints above the ribbon.
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 0;
+  tap.end_tick = 0;
+  tap.lane = 3;
+  tap.width = 1;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+
+  const auto start = h.at_tick_lane(0, 3);
+  const auto hit = wds::ui::ChartEditPanelTestAccess::hit_test_note(h.panel, start);
+  CHECK(hit.has_value());
+  if (hit) CHECK_EQ(hit->id, tap_id);
+
+  // Hover must not turn into the hold's length-drag cursor while over the tap.
+  h.panel.on_pointer_move(PointerMoveEvent{start, {}});
+  CHECK(h.panel.hover_cursor() == CursorKind::Default);
+
+  h.panel.on_pointer_down(PointerDownEvent{start, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{start, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(tap_id) != 0);
+  CHECK(h.panel.selected().count(hold_id) == 0);
+}
+
+void test_headless_hold_start_caps_are_tightened() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const auto& v = h.panel.viewport();
+  const float x = h.at_tick_lane(0, 3).x;
+  const float y0 = v.y_at(0);
+  const float note_h = v.note_height_px();
+
+  // The ribbon endpoint itself is still hittable...
+  const auto on_start = wds::ui::ChartEditPanelTestAccess::hit_test_note(h.panel, {x, y0});
+  CHECK(on_start.has_value());
+  if (on_start) CHECK_EQ(on_start->id, hold_id);
+
+  // ...but a head-height band below it is not (there is no head sprite there).
+  const auto below =
+      wds::ui::ChartEditPanelTestAccess::hit_test_note(h.panel, {x, y0 + note_h * 0.5f});
+  CHECK(!below.has_value() || below->id != hold_id);
+
+  // Selection overlay: body-only box ends at the start tick + border pad.
+  wds::ui::ChartEditRenderer renderer;
+  wds::interaction::UiPainter painter;
+  renderer.paint_overlays(painter, v, h.engine.document().notes(), {hold_id}, std::nullopt,
+                          &h.engine.document());
+  float lowest = -1e9f;
+  for (const auto& r : painter.rects()) lowest = std::max(lowest, r.bounds.bottom());
+  CHECK(lowest >= y0 - 1.0f);
+  CHECK(lowest <= y0 + 6.0f);
+
+  // Parts body-only selection uses the headless style even when a paired head
+  // exists but is not selected.
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  wds::interaction::UiPainter parts;
+  renderer.paint_overlays(parts, v, h.engine.document().notes(), {hold_id}, std::nullopt,
+                          &h.engine.document());
+  float parts_lowest = -1e9f;
+  for (const auto& r : parts.rects()) parts_lowest = std::max(parts_lowest, r.bounds.bottom());
+  CHECK(parts_lowest >= y0 - 1.0f);
+  CHECK(parts_lowest <= y0 + 6.0f);
+
+  // A paired head keeps its full start cap when head+body are selected.
+  wds::interaction::UiPainter headed;
+  renderer.paint_overlays(headed, v, h.engine.document().notes(), {hold_id, head_id},
+                          std::nullopt, &h.engine.document());
+  float headed_lowest = -1e9f;
+  for (const auto& r : headed.rects()) headed_lowest = std::max(headed_lowest, r.bounds.bottom());
+  CHECK(headed_lowest > y0 + note_h * 0.4f);
+}
+
+void test_double_click_inside_hold_after_edge_grab_selects_segment() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  const int32_t star_id = add_bound_star(h, body_id, 720, 3, 1);
+  const auto mid = h.at_tick_lane(480, 3);
+  h.panel.set_selected({body_id, head_id});
+
+  // No first click was recorded: a double-click enters the outer layer (Whole
+  // for a lone headed hold).
+  h.panel.on_double_click(wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(body_id) != 0);
+  CHECK(h.panel.selected().count(head_id) != 0);
+
+  // Edge grab + double-click advances Whole → Parts(body).
+  const auto edge = h.at_tick_lane(960, 3);
+  h.panel.on_pointer_down(PointerDownEvent{edge, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{edge, PointerButton::Left, {}});
+  h.panel.on_double_click(wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK_EQ(h.panel.selected().size(), 1u);
+  CHECK(h.panel.selected().count(body_id) != 0);
+
+  // Another edge double-click advances Parts → Stars.
+  h.panel.on_pointer_down(PointerDownEvent{edge, PointerButton::Left, {}});
+  h.panel.on_pointer_up(PointerUpEvent{edge, PointerButton::Left, {}});
+  h.panel.on_double_click(wds::interaction::DoubleClickEvent{mid, PointerButton::Left, {}});
+  CHECK(h.panel.selected().count(star_id) != 0);
+}
+
+void test_right_click_selected_hold_tail_continues_draw() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  h.panel.set_selected({body_id, head_id});
+  const auto* before = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(before != nullptr);
+  if (before == nullptr) return;
+
+  const auto tail = h.at_tick_lane(before->end_tick, before->lane);
+  const auto pull = h.at_tick_lane(before->end_tick + 480, before->lane);
+  h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+  h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
+
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+  const auto* first = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(first != nullptr);
+  if (first) {
+    CHECK(wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *first).has_value());
+  }
+
+  // The ScratchHold family uses the same right-click continuation.
+  {
+    Harness hs;
+    const int32_t scratch_id = add_hold_body(hs, NoteType::ScratchHold, 0, 480, 3, 1);
+    hs.panel.set_selected({scratch_id});
+    const auto* scratch = find_note_id(hs.engine.document().notes(), scratch_id);
+    CHECK(scratch != nullptr);
+    if (scratch != nullptr) {
+      const auto scratch_tail = hs.at_tick_lane(scratch->end_tick, scratch->lane);
+      const auto scratch_pull = hs.at_tick_lane(scratch->end_tick + 480, scratch->lane);
+      hs.panel.on_pointer_down(PointerDownEvent{scratch_tail, PointerButton::Right, {}});
+      hs.panel.on_pointer_move(PointerMoveEvent{scratch_pull, {}});
+      hs.panel.on_pointer_up(PointerUpEvent{scratch_pull, PointerButton::Right, {}});
+      CHECK_EQ(count_type(hs.engine.document().notes(), NoteType::ScratchHold), 2);
+    }
+  }
 }
 
 void test_hold_eighths_are_never_selectable_or_deletable() {
@@ -2904,6 +3247,18 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
   const auto& doc = panel.engine().document();
   const auto& selected = panel.selected();
   auto is_star = [](NoteType t) { return t == NoteType::Sound || t == NoteType::ScratchSound; };
+  // Mirrors ChartEditPanel::hold_body_head_covers_x: a body with no paired head
+  // (or a narrower auto head that does not cover x) has no start sprite there.
+  auto head_covers = [&](const NotationNote& body, float x) {
+    if (!ce::is_bindable_hold_body(body.note_type) || body.end_tick <= body.start_tick) {
+      return false;
+    }
+    const auto head = ce::paired_hold_head_for(doc, body);
+    if (!head) return false;
+    const float hx0 = viewport.x_at(head->lane);
+    const float hx1 = hx0 + viewport.lane_width(std::max(1, head->width));
+    return x >= hx0 && x <= hx1;
+  };
 
   std::optional<NotationNote> best;
   float best_dist = 1e9f;
@@ -2947,9 +3302,6 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
     const float y0 = viewport.y_at(note.start_tick);
     const float y1 = note.end_tick > note.start_tick ? viewport.y_at(note.end_tick) : y0;
     const float pad = viewport.note_height_px() * 0.55f;
-    const float top = std::min(y0, y1) - pad;
-    const float bottom = std::max(y0, y1) + pad;
-    if (point.y < top || point.y > bottom) continue;
 
     int32_t hit_lane = note.lane;
     int32_t hit_width = note.width;
@@ -2966,6 +3318,22 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
     const float x0 = viewport.x_at(hit_lane);
     const float x1 = x0 + viewport.lane_width(hit_width);
     if (point.x < x0 || point.x > x1) continue;
+
+    const bool body_here =
+        ce::is_bindable_hold_body(note.note_type) && note.end_tick > note.start_tick;
+    const bool start_side = std::abs(point.y - y0) <= std::abs(point.y - y1);
+    const bool head_covers_point = body_here && start_side && head_covers(note, point.x);
+    const float start_pad = std::max(2.0f, viewport.note_height_px() * 0.12f);
+    float top = std::min(y0, y1) - pad;
+    float bottom = std::max(y0, y1) + pad;
+    if (body_here && start_side && !head_covers_point) {
+      if (y0 >= y1) {
+        bottom = std::max(y0, y1) + start_pad;
+      } else {
+        top = std::min(y0, y1) - start_pad;
+      }
+    }
+    if (point.y < top || point.y > bottom) continue;
 
     float dist;
     int priority;
@@ -2985,8 +3353,10 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
             priority = -8;
           }
         }
+      } else if (body_here) {
+        priority = (start_side && !head_covers_point) ? -9 : 1;
       } else {
-        priority = ce::is_bindable_hold_body(note.note_type) ? 1 : 0;
+        priority = 0;
       }
     }
     consider(dist, priority, note);
@@ -3765,6 +4135,10 @@ int main() {
   test_selected_regular_terminal_left_drag_resizes_tail();
   test_selected_regular_terminal_tail_shows_resize_cursor();
   test_selected_scratch_terminal_tail_keeps_resize_cursor();
+  test_headless_hold_start_tap_wins_visual_order();
+  test_headless_hold_start_caps_are_tightened();
+  test_double_click_inside_hold_after_edge_grab_selects_segment();
+  test_right_click_selected_hold_tail_continues_draw();
   test_hot_switch_ghosts_and_no_document_mutation();
   test_tail_at_pointer_one_and_multiple_segments();
   test_left_click_and_right_up_commit_modifier_release_ordinary();
@@ -3790,6 +4164,10 @@ int main() {
   test_unselected_edge_edits_keep_selection();
   test_multi_select_drag_from_hold_keeps_foreign_notes();
   test_hold_layer_only_on_double_click();
+  test_hold_selection_layer_order();
+  test_hold_chain_layer_then_headless_skips_parts();
+  test_double_click_star_keeps_direct_jump();
+  test_single_headless_hold_top_is_parts();
   test_paste_hold_does_not_select_eighths();
   test_hold_eighths_are_never_selectable_or_deletable();
   test_delete_star_regenerates_eighth_in_one_undo_step();
