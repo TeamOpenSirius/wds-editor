@@ -534,16 +534,36 @@ uint32_t particle_seed(const EmitContext& ctx, const SplitEffectParticle& p,
   return hash_auto_particle_seed(ctx, p, b.index, b.extra, gen);
 }
 
+// hop, not 2022.3. Unity Particle.randomSeed is written at emit and stays
+// with that particle; compacting the live array does not remint it.
+// https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.Particle-randomSeed.html
+// Native dest merge used to overwrite Birth.index with dest.size() so later
+// parents' children rehashed every time an earlier parent grew. Seed here
+// from the per-parent emit identity, mixed with the parent so two parents'
+// k=0 do not share a stream. Unity RNG is closed; this is identity, not a
+// numerical match.
+uint32_t child_emit_seed(const EmitContext& ctx, const SplitEffectParticle& child, const Birth& cb,
+                         const Birth& parent_b, uint16_t slot_i) noexcept {
+  const uint32_t parent_tok =
+      mix3(static_cast<uint32_t>(parent_b.index + 1), parent_b.extra + 1u,
+           static_cast<uint32_t>(slot_i) + 1u);
+  return mix3(particle_seed(ctx, child, cb), parent_tok, 0x53425545u);
+}
+
 // Same startLifetime as make_state (curve @ emit_u, else pick). Cap walk
 // needs death times before evaluate; lifetimes are deterministic per seed.
-float birth_start_life(const SplitEffectParticle& p, const EmitContext& ctx,
-                       const Birth& b, float emit_u) noexcept {
+float birth_start_life(const SplitEffectParticle& p, const EmitContext&, const Birth&, float emit_u,
+                       uint32_t seed) noexcept {
   const float eu = std::clamp(emit_u, 0.0f, 1.0f);
   if (p.life_curve_count > 0) {
     return std::max(official_split_effect_eval_start_lifetime(p, eu), 1e-4f);
   }
-  const uint32_t seed = particle_seed(ctx, p, b);
   return std::max(pick(p.lifetime, p.lifetime_min, p.life_random != 0, seed), 1e-4f);
+}
+
+float birth_start_life(const SplitEffectParticle& p, const EmitContext& ctx, const Birth& b,
+                       float emit_u) noexcept {
+  return birth_start_life(p, ctx, b, emit_u, particle_seed(ctx, p, b));
 }
 
 // Unity 2022.3 Main.maxParticles: maximum number of particles in the system
@@ -1791,8 +1811,8 @@ void adopt_stored_state(PrimaryEvalJob& job, const ParticleState& st, const Inte
   SplitWallScope wall_adopt(SplitWallSec::AdoptCarry);
   job.st = st;
   refresh_carried_state(job.st, ctx, p);
-  // Child persist keeps baked event_wx / birth_parent_z. Child Birth.index is
-  // remapped each frame and parent_pose on that Birth is not the bake.
+  // Child persist keeps baked event_wx / birth_parent_z. Child Birth.parent_pose
+  // is not the bake (parent_pose on that Birth is unused for children).
   if (job.is_child == 0 && job.b.parent_pose != 0) {
     job.st.birth_parent_z = job.b.parent_z;
   }
@@ -3290,7 +3310,7 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
                                    : (child.simulation_speed > 1e-6f ? child.simulation_speed : 1.0f);
   const float age = ctx.now_t * sim - cb.time * sim;
   const float eu = official_split_effect_sub_emit_u(born.age, born.life);
-  const uint32_t cseed = particle_seed(ctx, child, cb);
+  const uint32_t cseed = child_emit_seed(ctx, child, cb, parent_b, slot_i);
   auto write_dest_identity = [&](SubemitFillItem* dest, uint8_t filled_now, float pose_age_now) {
     if (dest == nullptr) {
       return;
@@ -3326,7 +3346,7 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
     {
       life = (sys != nullptr && sys->const_life >= 0.0f)
                  ? sys->const_life
-                 : birth_start_life(child, ctx, cb, eu);
+                 : birth_start_life(child, ctx, cb, eu, cseed);
       if ((properties & kSplitEffectSubInheritLifetime) != 0) {
         const float rem =
             born.life > 1e-8f ? std::clamp(1.0f - born.age / born.life, 0.0f, 1.0f) : 0.0f;
@@ -4296,17 +4316,12 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
       for (size_t si = 0; si < events[ei].slots.size(); ++si) {
         SubSlotOut& slot = events[ei].slots[si];
         auto& dest = child_event[slot.local_child];
-        const int before = static_cast<int>(dest.size());
         const size_t bn = slot_birth_n(slot);
         for (size_t di = 0; di < bn; ++di) {
-          // Match the serial dest walk: bursts use start_index=before;
-          // RoT/RoD use index = before + dest.size() at push time.
-          Birth cb = slot_birth_at(slot, di);
-          if (di < slot.burst_count) {
-            cb.index = static_cast<int>(dest.size());
-          } else {
-            cb.index = before + static_cast<int>(dest.size());
-          }
+          // Keep the per-parent emit identity (burst k / RoT extra 800+k /
+          // RoD extra 900+k). Do not rewrite Birth.index to dest.size():
+          // that remints particle_seed every time an earlier parent grows.
+          const Birth cb = slot_birth_at(slot, di);
           dest.push_back(cb);
           refs.push_back(ChildRef{ei, si, di, cb.index});
         }
@@ -4370,12 +4385,14 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
           const ChildRef& r = refs[mine[k]];
           const SubSlotOut& slot = events[r.ev].slots[r.sl];
           cand[k] = slot_birth_at(slot, r.di);
-          cand[k].index = r.index;
           const float eu =
               r.di < slot.poses.size()
                   ? official_split_effect_sub_emit_u(slot.poses[r.di].age, slot.poses[r.di].life)
                   : 1.0f;
-          float life = ch.const_life >= 0.0f ? ch.const_life : birth_start_life(child, ctx, cand[k], eu);
+          const uint32_t cseed =
+              child_emit_seed(ctx, child, cand[k], events[r.ev].b, slot.slot_i);
+          float life =
+              ch.const_life >= 0.0f ? ch.const_life : birth_start_life(child, ctx, cand[k], eu, cseed);
           if ((slot.properties & kSplitEffectSubInheritLifetime) != 0 &&
               r.di < slot.poses.size()) {
             const SubParentPose& born = slot.poses[r.di];
@@ -4433,8 +4450,7 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
       thread_local SplitEffectLiveParticle dummy;
       SplitEffectLiveParticle& dest = c->fill_now ? slot.lives[r.di] : dummy;
       const uint8_t hyd = r.di < slot.pose_hydrated.size() ? slot.pose_hydrated[r.di] : 0;
-      Birth cb = slot_birth_at(slot, r.di);
-      cb.index = r.index;
+      const Birth cb = slot_birth_at(slot, r.di);
       const ChildSysHoist* sys =
           c->child_sys != nullptr && slot.local_child < c->count ? &c->child_sys[slot.local_child]
                                                                  : nullptr;
@@ -4728,7 +4744,7 @@ int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
           job.do_fill = 1;
           job.alive = 1;
           job.pose_age = job.age < job.st.life ? job.age : std::max(job.st.life - 1e-4f, 0.0f);
-          // Child Birth.index is remapped per frame; do not use the pose cache.
+          // Child pose cache is keyed by parent walk, not child Birth.index.
           PoseIntegrator integ(job.st);
           if (job.has_grid != 0) {
             integ.import_carry_grid(job.grid);

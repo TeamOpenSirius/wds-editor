@@ -2,6 +2,7 @@
 
 #include "wds/common/crash_handler.hpp"
 #include "wds/ui/editor_session.hpp"
+#include "wds/ui/qt/system_proxy.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/ui_manager.hpp"
 
@@ -892,6 +893,13 @@ void StemPanel::launch(const QString& python, const QStringList& arguments) {
   last_python_ = python;
   last_arguments_ = arguments;
   auto environment = QProcessEnvironment::systemEnvironment();
+  // pip (PyTorch, Demucs, requirements) and torch.hub only look at proxy
+  // environment variables; on Windows/macOS they do not evaluate the PAC script
+  // Qt already resolves. Export the OS proxy for the host this process will use
+  // so the Python download follows the same route as the ffmpeg downloader.
+  apply_system_proxy(environment, QUrl(installing_
+                                           ? QStringLiteral("https://pypi.org/")
+                                           : QStringLiteral("https://dl.fbaipublicfiles.com/")));
   environment.insert("PYTHONUNBUFFERED", "1");
   environment.insert("PYTHONUTF8", "1");
   environment.insert("PYTHONDONTWRITEBYTECODE", "1");
