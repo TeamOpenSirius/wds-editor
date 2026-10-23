@@ -561,7 +561,6 @@ void ChartPreviewPanel::request_seek_ms(int64_t time_ms) {
   wds::common::minflt_stage("seek.after_clear");
 #endif  // WDS_DIAG_ENABLED
   last_present_latency_us_ = 0;
-  wds::chart_render::split_effect_prepare_heavy_collect(50);
   // reset_lane_geom_time_state keeps lane_geom_pool_; only a preceding
   // invalidate_lane_geom_cache() (resize / doc / quality change) empties it.
 #if WDS_DIAG_ENABLED
@@ -569,17 +568,17 @@ void ChartPreviewPanel::request_seek_ms(int64_t time_ms) {
   seek_diag.split_eval_cleared = false;  // the eval cache is retained on a pure seek
   seek_step(&seek_diag.clear_us);
 #endif  // WDS_DIAG_ENABLED
-  // (6) lane-plate preload + recolor warm-up for this T (and the play lead).
+  // (6) lane-plate preload. Pause matches tick: committed T, no play lead.
+  // Playing still warms T+lead / T+nominal (fade percents differ at pictured T).
   preview_.reset_lane_geom_time_state();
   const int64_t now_us = wds::common::ms_to_us(time_ms).count();
-  preview_.pump_lane_geom_preload(collect_splits_at(engine_, time_ms), now_us, true);
-  // First play tick draws at T+nominal lead (latency 0). Build that clock
-  // here so tick_geom / first lanes fill are not on the presented frame.
-  const int64_t lead_us = playing_visual_lead_us();
-  pump_lane_geom_rendered(preview_, engine_, true, lead_us, display_frame_lead_us());
-  // draw_split_lanes hashes snapshot lanes (committed T) with pictured now.
-  // Pictured collect_splits_at percents differ during fade; color that pair last.
-  preview_.pump_lane_geom_preload(engine_.snapshot().split_lanes, now_us + lead_us, true);
+  const bool playing = transport_.playing();
+  preview_.pump_lane_geom_preload(engine_.snapshot().split_lanes, now_us, true);
+  const int64_t lead_us = playing ? playing_visual_lead_us() : 0;
+  pump_lane_geom_rendered(preview_, engine_, playing, lead_us, display_frame_lead_us());
+  if (playing && lead_us > 0) {
+    preview_.pump_lane_geom_preload(engine_.snapshot().split_lanes, now_us + lead_us, true);
+  }
 #if WDS_DIAG_ENABLED
   seek_step(&seek_diag.preload_us);
 #endif  // WDS_DIAG_ENABLED
@@ -693,6 +692,12 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   const bool want_play = transport_.intends_playing();
   const int64_t wall_us = want_play ? std::max<int64_t>(0, delta_us) : 0;
   const auto timeline = transport_.poll(wall_us);
+#if WDS_DIAG_ENABLED
+  last_tick_poll_us_ = lapse(t0);
+  last_tick_bass_us_ = transport_.audio().last_set_position_us();
+  last_tick_has_music_ = transport_.audio().has_music();
+  t0 = time_tick ? std::chrono::steady_clock::now() : t0;
+#endif  // WDS_DIAG_ENABLED
   engine_.apply_timeline(timeline);
   if (has_pinned_seek_) {
     if (!want_play && engine_.timeline_ms() != pinned_seek_ms_) {
@@ -704,7 +709,8 @@ void ChartPreviewPanel::tick(int64_t delta_us) {
   preview_.set_chart_offset_ms(transport_.chart_offset_ms());
   preview_.set_preview_lead_in_visible_ms(engine_.preview_lead_in_visible_ms());
 #if WDS_DIAG_ENABLED
-  last_tick_transport_us_ = lapse(t0);
+  last_tick_apply_us_ = lapse(t0);
+  last_tick_transport_us_ = last_tick_poll_us_ + last_tick_apply_us_;
 
   t0 = time_tick ? std::chrono::steady_clock::now() : t0;
 #endif  // WDS_DIAG_ENABLED

@@ -406,14 +406,14 @@ bool burst_env_on() noexcept {
   return raw[0] == '1' && raw[1] == '\0';
 }
 
-int choose_participants(size_t nitems, uint64_t hint) noexcept {
+int choose_participants(size_t nitems, uint64_t hint, [[maybe_unused]] bool record_diag = true) noexcept {
   const int cap = (g_allow_burst.load(std::memory_order_relaxed) != 0 && burst_env_on())
                       ? topo().burst_cap
                       : topo().cap;
   if (cap <= 1 || nitems <= 1) {
 #if WDS_DIAG_ENABLED
     // Diagnostics: no worker can help (cap 1) or there is nothing to share.
-    if (wds::common::perf::enabled()) {
+    if (record_diag && wds::common::perf::enabled()) {
       g_diag_serial.fetch_add(1, std::memory_order_relaxed);
       g_poolstat_serial.fetch_add(1, std::memory_order_relaxed);
     }
@@ -442,7 +442,7 @@ int choose_participants(size_t nitems, uint64_t hint) noexcept {
   // Diagnostics only: "the hint was below the threshold so work was inlined"
   // is exactly the hint<512 decision. parts<=1 for another reason (nitems
   // clamp) is a serial call, not a hint inline.
-  if (wds::common::perf::enabled() && hint_inline) {
+  if (record_diag && wds::common::perf::enabled() && hint_inline) {
     g_diag_inline.fetch_add(1, std::memory_order_relaxed);
     g_poolstat_inline.fetch_add(1, std::memory_order_relaxed);
   }
@@ -1115,6 +1115,10 @@ void split_collect_begin_frame() noexcept {
   g_diag_items_worker.store(0, std::memory_order_relaxed);
   g_diag_join_us.store(0, std::memory_order_relaxed);
 #endif  // WDS_DIAG_ENABLED
+}
+
+int split_collect_choose_participants(size_t nitems, uint64_t work_hint) noexcept {
+  return choose_participants(nitems, work_hint, false);
 }
 
 void split_collect_prepare_heavy(int hold_ms) noexcept {

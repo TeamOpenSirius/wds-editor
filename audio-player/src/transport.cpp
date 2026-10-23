@@ -136,6 +136,7 @@ wds::common::TimelineSnapshot Transport::committed_snapshot() const noexcept {
 }
 
 wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
+  audio_.reset_last_set_position_us();
   if (!audio_.ready()) {
     return committed_snapshot();
   }
@@ -220,6 +221,18 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
   auto apply_user_seek = [&]() {
     const auto target = clamp_time(seek_time);
     recovery_.reset();
+    // Paused scrub: visual T + SFX cut only. Mixer stays until Play, which
+    // still apply_music_seek + MIXER_RESET. Pause-drag leftover: set_position
+    // was 99% of tick_transport (median 0.52 ms).
+    if (!playing_ && !want_play) {
+      committed_position_ = target;
+      filtered_audio_us_ = committed_position_.count();
+      audio_filter_valid_ = true;
+      music_seek_pending_ = false;
+      sought_this_poll_ = true;
+      audio_.begin_timeline_control();
+      return;
+    }
     if (!audio_.has_music()) {
       committed_position_ = target;
       filtered_audio_us_ = committed_position_.count();

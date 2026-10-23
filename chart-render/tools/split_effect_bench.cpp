@@ -100,6 +100,10 @@ constexpr int kDefaultScenarioEffect = 10660;
 constexpr int kOverlapInstanceCount = 4;
 constexpr int kOverlapSampleCount = 20;
 constexpr double kOverlapStaggers[] = {0.0, 0.2};
+// Frozen golden overlap now_t grid. Do not follow kSplitEffectLinePlayWindowSec
+// (now 10s): changing W would retarget every overlap SampleKey and silently
+// skip the existing baseline.
+constexpr double kGoldenOverlapWindowSec = 8.0;
 
 // Fixed single-instance times. Do not pick a heaviest effect at write time.
 constexpr double kGoldenTimes[] = {0.05, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.5};
@@ -728,7 +732,7 @@ bool keys_same(const SampleKey& a, const SampleKey& b) {
 void overlap_now_times(std::vector<double>& times) {
   times.clear();
   times.reserve(static_cast<size_t>(kOverlapSampleCount));
-  const double window = static_cast<double>(wds::chart_render::kSplitEffectLinePlayWindowSec);
+  const double window = kGoldenOverlapWindowSec;
   const double denom = static_cast<double>(std::max(kOverlapSampleCount - 1, 1));
   for (int i = 0; i < kOverlapSampleCount; ++i) {
     times.push_back(window * static_cast<double>(i) / denom);

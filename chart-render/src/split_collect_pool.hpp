@@ -52,6 +52,10 @@ void split_collect_begin_frame() noexcept;
 // not pay idle-core clock/QoS ramp. Not a result cache.
 void split_collect_prepare_heavy(int hold_ms = 50) noexcept;
 
+// Same participant choice as parallel_for, without recording pool diag.
+// Used to decide whether prepare_heavy would actually wake extra workers.
+int split_collect_choose_participants(std::size_t nitems, std::uint64_t work_hint) noexcept;
+
 // Diagnostic only. Participant choice no longer reads this store.
 void split_collect_note_work(size_t ntasks, uint64_t step_hint) noexcept;
 
