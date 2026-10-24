@@ -91,6 +91,15 @@
 
 namespace {
 
+// Paused sync cadence. While the transport is paused the preview window still
+// polls its present gate at this rate, so a scrub / wheel / editor change lands
+// on the next 30 Hz slot instead of waiting for a 250 ms idle watchdog. Frames
+// are only rendered when the gate says the picture changed; this is the poll
+// interval, not an unconditional redraw timer.
+constexpr int kPausedSyncFps = 30;
+constexpr int kPausedSyncIntervalMs = 1000 / kPausedSyncFps;
+constexpr int64_t kPausedSyncIntervalUs = 1000000 / kPausedSyncFps;
+
 void add_qt_plugin_path(const QString& plugins, bool prepend) {
   if (plugins.isEmpty() || !QDir(plugins).exists()) return;
   const QByteArray extra = QFile::encodeName(QDir::cleanPath(plugins));
@@ -1800,14 +1809,17 @@ int main(int argc, char** argv) {
   editor.enable_qt_chrome();
   editor.set_config_path(wds::ui::resolve_editor_config_path(argv[0]));
   editor.load_ui_config();
-  preview_window->set_idle_frame_rate(30);
+  // Idle presents are capped at 30 Hz. The gate below decides whether the
+  // picture actually changed; the 30 Hz wakeup keeps paused scrubbing and
+  // wheel seeks on the same cadence as playback instead of a 4 Hz watchdog.
+  preview_window->set_idle_frame_rate(kPausedSyncFps);
   preview_window->set_idle_throttle_bypass([&editor] {
     return editor.chart_preview().ready() && editor.chart_preview().transport().playing();
   });
   preview_window->set_idle_present_gate([&editor] {
     return !editor.chart_preview().ready() || editor.chart_preview().needs_present();
   });
-  preview_window->set_idle_wakeup_interval_us(250000);
+  preview_window->set_idle_wakeup_interval_us(kPausedSyncIntervalUs);
   window.set_skins_dir(wds::ui::resolve_skins_dir(argv[0]));
   window.set_icons_dir(wds::ui::resolve_icons_dir(argv[0]));
   window.set_theme_dir(theme_dir);
@@ -2162,10 +2174,12 @@ int main(int argc, char** argv) {
                      const bool ready = editor.chart_preview().ready();
                      const bool intends =
                          ready && editor.chart_preview().transport().intends_playing();
-                     // Idle no longer needs a 30 Hz editor tick. Qt events still
-                     // repaint immediately; this timer is only the fallback/frame
-                     // clock while playing or while a preview invalidation is pending.
-                     const int interval_ms = intends ? 16 : 250;
+                     // Playing stays on the 60 Hz preview clock; paused keeps a
+                     // 30 Hz sync tick so the edit viewport, seek handle and
+                     // preview all advance together while scrubbing. Qt input
+                     // still repaints immediately; this is the fallback when
+                     // the preview window cannot drive a frame.
+                     const int interval_ms = intends ? 16 : kPausedSyncIntervalMs;
                      if (edit_timer->interval() != interval_ms) {
                        edit_timer->setInterval(interval_ms);
                      }
@@ -2194,10 +2208,14 @@ int main(int argc, char** argv) {
                        return;
                      }
 
+                     // The preview's 30 Hz gate drives the active paused case;
+                     // this branch is the fallback when it cannot present (for
+                     // example a dead/hidden surface). Do not duplicate the
+                     // preview frame when one just ran.
                      if (now - *last_editor_tick < std::chrono::milliseconds(50)) return;
                      finish_editor_frame(clamped_tick_delta(now, *last_editor_tick));
                    });
-  edit_timer->start(33);
+  edit_timer->start(kPausedSyncIntervalMs);
 
   if (!open_path.isEmpty()) {
     const QByteArray utf8 = open_path.toUtf8();
