@@ -33,6 +33,10 @@ RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* p
   setVulkanInstance(instance);
   input_adapter_ = std::make_unique<QtInputAdapter>(this, input_queue_);
   idle_wakeup_timer_.setSingleShot(true);
+  // The paused present gate is re-checked on this timer. Precise keeps the
+  // 30 Hz sync slots evenly spaced while scrubbing; a coarse timer can drift
+  // into a visibly uneven 20–30 fps cadence.
+  idle_wakeup_timer_.setTimerType(Qt::PreciseTimer);
   QObject::connect(&idle_wakeup_timer_, &QTimer::timeout, this, [this] { schedule_frame(); });
   resize_settle_timer_.setSingleShot(true);
   resize_settle_timer_.setInterval(120);

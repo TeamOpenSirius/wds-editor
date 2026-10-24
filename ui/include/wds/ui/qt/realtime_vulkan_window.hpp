@@ -32,11 +32,15 @@ class RealtimeVulkanWindow final : public QWindow {
     idle_throttle_bypass_ = std::move(playing);
   }
   // While this returns false (paused, unchanged preview) no UpdateRequest is
-  // scheduled; a low-rate watchdog polls until it becomes true or request_frame
-  // forces one. Empty means always ready (legacy behaviour).
+  // scheduled; the wakeup watchdog below re-checks it. The default is one 30 Hz
+  // sync slot, so a paused seek is presented on the next sync frame instead of
+  // waiting for a slow idle poll. Empty means always ready (legacy behaviour).
   void set_idle_present_gate(std::function<bool()> ready) {
     idle_present_gate_ = std::move(ready);
   }
+  // How often the paused present gate is re-checked when it says "unchanged".
+  // This is a poll interval only: a frame is rendered when the gate later
+  // reports a change, not on every wakeup.
   void set_idle_wakeup_interval_us(int64_t us) noexcept {
     idle_wakeup_interval_us_ = us > 0 ? us : 0;
   }
@@ -80,7 +84,7 @@ class RealtimeVulkanWindow final : public QWindow {
   std::function<bool()> idle_present_gate_;
   std::chrono::steady_clock::time_point last_frame_{};
   int64_t idle_frame_interval_us_ = 0;
-  int64_t idle_wakeup_interval_us_ = 250000;
+  int64_t idle_wakeup_interval_us_ = 33333;
   int64_t pending_elapsed_us_ = 0;
   QTimer resize_settle_timer_;
   QTimer idle_wakeup_timer_;
