@@ -126,8 +126,12 @@ class ChartPreviewPanel {
   long last_seek_minflt() const noexcept { return last_seek_minflt_; }
   int64_t last_tick_preload_us() const noexcept { return last_tick_preload_us_; }
   int64_t last_tick_transport_us() const noexcept { return last_tick_transport_us_; }
+  int64_t last_tick_poll_us() const noexcept { return last_tick_poll_us_; }
+  int64_t last_tick_apply_us() const noexcept { return last_tick_apply_us_; }
+  int64_t last_tick_bass_us() const noexcept { return last_tick_bass_us_; }
   int64_t last_tick_geom_us() const noexcept { return last_tick_geom_us_; }
   int64_t last_tick_sfx_us() const noexcept { return last_tick_sfx_us_; }
+  bool last_tick_has_music() const noexcept { return last_tick_has_music_; }
 
   // One display-frame lead (µs). Used by edit scroll sync while playing and by render().
   int64_t display_frame_lead_us() const noexcept;
@@ -208,6 +212,10 @@ class ChartPreviewPanel {
   long last_seek_minflt_ = 0;
   int64_t last_tick_preload_us_ = 0;
   int64_t last_tick_transport_us_ = 0;
+  int64_t last_tick_poll_us_ = 0;
+  int64_t last_tick_apply_us_ = 0;
+  int64_t last_tick_bass_us_ = 0;
+  bool last_tick_has_music_ = false;
   int64_t last_tick_geom_us_ = 0;
   int64_t last_tick_sfx_us_ = 0;
   int64_t last_present_latency_us_ = 0;

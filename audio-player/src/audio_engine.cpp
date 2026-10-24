@@ -1233,19 +1233,30 @@ void AudioEngine::begin_timeline_control() {
 }
 
 bool AudioEngine::set_position(wds::common::Microseconds time) {
+#if WDS_DIAG_ENABLED
+  const auto t0 = std::chrono::steady_clock::now();
+  auto finish = [&](bool ok) {
+    last_set_position_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+    return ok;
+  };
+#else
+  auto finish = [](bool ok) { return ok; };
+#endif
   if (test_double_ != nullptr) {
     ++test_double_->set_position_calls;
     begin_timeline_control();
     if (!test_double_->set_position_ok) {
-      return false;
+      return finish(false);
     }
     if (test_double_->update_position_on_seek) {
       test_double_->position = time;
     }
-    return true;
+    return finish(true);
   }
   if (impl_ == nullptr || impl_->music == 0) {
-    return false;
+    return finish(false);
   }
   begin_timeline_control();
   const QWORD pos = us_to_bytes(impl_->music, time);
@@ -1257,7 +1268,7 @@ bool AudioEngine::set_position(wds::common::Microseconds time) {
   } else {
     ok = BASS_ChannelSetPosition(impl_->music, pos, BASS_POS_BYTE);
   }
-  return ok != FALSE;
+  return finish(ok != FALSE);
 }
 
 bool AudioEngine::play_music() {

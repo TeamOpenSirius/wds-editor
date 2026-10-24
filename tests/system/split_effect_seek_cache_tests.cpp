@@ -223,6 +223,59 @@ void test_effect_seeks_retain_cache(int32_t effect_id, int instances, double sta
   CHECK(stats.bytes_used <= 64ull * 1024ull * 1024ull);  // <= 64 MB
 }
 
+void test_fadein_cap_skips_collect() {
+  using wds::chart_render::split_effect_fadein_extras_open;
+  CHECK(wds::chart_render::kSplitEffectLinePlayWindowSec ==
+        wds::chart_render::kSplitEffectFadeinCollectCapSec);
+  CHECK(split_effect_fadein_extras_open(0.0f));
+  CHECK(split_effect_fadein_extras_open(10.0f));
+  CHECK(!split_effect_fadein_extras_open(-1.0e-3f));
+  CHECK(!split_effect_fadein_extras_open(10.001f));
+
+  if (wds::chart_render::official_split_effect(11710) == nullptr) {
+    std::fprintf(stderr, "11710 missing from catalog\n");
+    CHECK(false);
+    return;
+  }
+  const auto splits = make_instances(11710, 1, 0.0);
+  wds::chart_render::reset_split_effect_auto_seed_session(true);
+  wds::chart_render::split_effect_clear_caches();
+  SplitEffectFrameCollect inside;
+  collect_at(splits, 0.7, inside);
+  CHECK(inside.total > 0);
+
+  wds::chart_render::reset_split_effect_auto_seed_session(true);
+  wds::chart_render::split_effect_clear_caches();
+  SplitEffectFrameCollect past;
+  collect_at(splits, 10.5, past);
+  CHECK(past.total == 0);
+  const auto after_past = wds::chart_render::split_effect_eval_cache_stats();
+  CHECK(after_past.pool_frame_wakeups == 0);
+  CHECK(after_past.pool_frame_max_participants == 0);
+}
+
+void test_cold_empty_does_not_arm_heavy() {
+  wds::chart_render::reset_split_effect_auto_seed_session(true);
+  wds::chart_render::split_effect_clear_caches();
+  std::vector<PreviewSplitLaneInstance> empty;
+  SplitEffectFrameCollect io;
+  collect_at(empty, 1.0, io);
+  CHECK(io.total == 0);
+  const auto after_cold = wds::chart_render::split_effect_eval_cache_stats();
+  CHECK(after_cold.pool_last_call_participants == 0);
+  CHECK(after_cold.pool_frame_max_participants == 0);
+  CHECK(after_cold.pool_frame_wakeups == 0);
+
+  const auto heavy = make_instances(10380, 4, 0.2);
+  collect_at(heavy, 1.0, io);
+  CHECK(io.total > 0);
+  collect_at(empty, 0.5, io);
+  CHECK(io.total == 0);
+  const auto after_back = wds::chart_render::split_effect_eval_cache_stats();
+  CHECK(after_back.pool_frame_wakeups == 0);
+  CHECK(after_back.pool_frame_max_participants == 0);
+}
+
 void test_empty_collect_wakes_nobody() {
   const auto heavy = make_instances(10380, 4, 0.2);
   wds::chart_render::split_effect_clear_caches();
@@ -349,6 +402,8 @@ int main() {
   test_effect_seeks_retain_cache(10516, 1, 0.0);
   test_effect_seeks_retain_cache(10600, 1, 0.0);
   test_identity_no_collision_across_instances();
+  test_fadein_cap_skips_collect();
+  test_cold_empty_does_not_arm_heavy();
   test_empty_collect_wakes_nobody();
   if (failures == 0) {
     std::puts("split_effect_seek_cache_tests passed");

@@ -55,6 +55,7 @@ class ExportVideoDialog final : public QDialog {
   QLabel* eta_ = nullptr;
   QPushButton* left_ = nullptr;
   QPushButton* right_ = nullptr;
+  bool env_row_visible_ = true;
 };
 
 }  // namespace wds::ui

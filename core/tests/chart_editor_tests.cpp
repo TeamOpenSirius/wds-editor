@@ -118,12 +118,20 @@ bool charts_wdschart_persisted_equal(const NotationChart& a, const NotationChart
   if (!timing_points_equal(a.timing, b.timing)) {
     return false;
   }
-  if (a.concurrent_lines.size() != b.concurrent_lines.size()) {
+  // Sync lines are not persisted; compare what each note set derives. Chart delay
+  // is project-scoped and dropped by the native roundtrip, so zero it on both.
+  MusicTiming timing_a = a.timing;
+  MusicTiming timing_b = b.timing;
+  timing_a.offset_ms = 0;
+  timing_b.offset_ms = 0;
+  const auto lines_a = build_concurrent_lines(a.notes, timing_a);
+  const auto lines_b = build_concurrent_lines(b.notes, timing_b);
+  if (lines_a.size() != lines_b.size()) {
     return false;
   }
-  for (size_t i = 0; i < a.concurrent_lines.size(); ++i) {
-    const auto& x = a.concurrent_lines[i];
-    const auto& y = b.concurrent_lines[i];
+  for (size_t i = 0; i < lines_a.size(); ++i) {
+    const auto& x = lines_a[i];
+    const auto& y = lines_b[i];
     if (x.milliseconds != y.milliseconds || x.start_lane != y.start_lane ||
         x.width != y.width) {
       return false;
@@ -6084,6 +6092,62 @@ void test_wdschart_export_import_preserves_chart() {
   }
 }
 
+// Sync lines are a view of the note set: never written, always re-derived.
+void test_wdschart_concurrent_lines_derived_not_persisted() {
+  NotationChart chart;
+  chart.timing.bpm = 120.0;
+  chart.timing.ticks_per_quarter = 480;
+  chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  auto add = [&](int32_t lane, int32_t width) {
+    NotationNote note = make_tap(0, lane);
+    note.id = static_cast<int32_t>(chart.notes.size());
+    note.width = width;
+    chart.notes.push_back(note);
+  };
+  add(-1, 2);  // overhangs the left edge
+  add(3, 2);
+  chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
+  CHECK_EQ(static_cast<int32_t>(chart.concurrent_lines.size()), 1);
+
+  const fs::path path = temp_chart_path("concurrent_derived.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(chart, path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  SerializeResult io;
+  const std::string text = read_text_file(path.string(), io);
+  CHECK(io.error == SerializeError::Ok);
+  CHECK(text.find("CONCURRENT") == std::string::npos);
+  CHECK(text.find("\nC ") == std::string::npos);
+
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int32_t>(loaded.concurrent_lines.size()), 1);
+  CHECK_EQ(loaded.concurrent_lines[0].start_lane, -1);
+  CHECK_EQ(loaded.concurrent_lines[0].width, 6);  // lanes -1..4
+}
+
+// Older files may still carry CONCURRENT rows (including overhang lanes that
+// used to make the loader fail). They are ignored, and lines come from notes.
+void test_wdschart_ignores_legacy_concurrent_rows() {
+  const fs::path path = temp_chart_path("legacy_concurrent_ignored.wdschart");
+  {
+    std::ofstream out(path);
+    out << "WDSCHART 6\nBPM 120\nTPQ 480\nTIMING 0\n"
+           "PROFILE SiriusExtended\nNOTES 2\n"
+           "N 0 0 0 10 -4 4 0 0 -1\n"
+           "N 1 0 0 10 2 4 0 0 -1\n"
+           "SPEEDS 0\n"
+           "CONCURRENT 1\nC 0 -4 20\nEND\n";
+  }
+
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int32_t>(loaded.concurrent_lines.size()), 1);
+  CHECK_EQ(loaded.concurrent_lines[0].start_lane, -4);
+  CHECK_EQ(loaded.concurrent_lines[0].width, 10);  // lanes -4..5
+}
+
 // Slide invisible mid (type 5) must not become a visible Sound star.
 void test_sus_slide_invisible_mid_not_sound() {
   // category 3 slide: start, invisible mid (5), end — 4 slots
@@ -10858,6 +10922,8 @@ int main() {
   test_sus_start_air_only_unscratches_to_blue_hold();
   test_sus_til01_split_roundtrip();
   test_wdschart_export_import_preserves_chart();
+  test_wdschart_concurrent_lines_derived_not_persisted();
+  test_wdschart_ignores_legacy_concurrent_rows();
   test_sus_slide_invisible_mid_not_sound();
   test_sus_type3_does_not_copy_to_sibling_hold();
   test_sus_fractional_measure_length();

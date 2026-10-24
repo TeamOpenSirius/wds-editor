@@ -68,6 +68,10 @@ class AudioEngine {
   wds::common::Microseconds duration() const;
   int64_t duration_ms() const noexcept { return wds::common::us_to_ms_floor(duration()); }
   bool set_position(wds::common::Microseconds time);
+  // Last set_position wall time (µs). 0 if poll did not call it. Reset via
+  // reset_last_set_position_us() at the start of each Transport::poll.
+  int64_t last_set_position_us() const noexcept { return last_set_position_us_; }
+  void reset_last_set_position_us() noexcept { last_set_position_us_ = 0; }
   // Bumps on set_position and begin_timeline_control (seek / scrub / play resync).
   // UI uses this instead of inferring seeks from BASS playtime regressions.
   uint64_t position_generation() const noexcept { return position_generation_; }
@@ -205,6 +209,7 @@ class AudioEngine {
   float playback_rate_ = 1.0f;
   float music_base_freq_ = 0.0f;
   uint64_t position_generation_ = 0;
+  int64_t last_set_position_us_ = 0;
   std::atomic<bool> shutting_down_{false};
   int last_bass_error_ = 0;
   TestDouble* test_double_ = nullptr;

@@ -794,6 +794,32 @@ void test_rapid_toggle_collapses_to_last_intent(Transport& transport, TestDouble
   expect(transport.committed_ms() == first_anchor, "play resumes at the original anchor");
 }
 
+void test_paused_scrub_skips_mixer_seek(Transport& transport, TestDouble& fake) {
+  fake.play_music_ok = true;
+  transport.request_seek_ms(1000);
+  transport.request_play();
+  ui_tick(transport, 0);
+  expect(transport.playing(), "armed play");
+  transport.request_pause();
+  ui_tick(transport, 0);
+  expect(!transport.playing(), "paused");
+
+  const int seeks0 = fake.set_position_calls;
+  const uint64_t gen0 = transport.audio().position_generation();
+  transport.request_seek_ms(4000);
+  transport.poll(0);
+  expect(transport.committed_ms() == 4000, "paused scrub commits visual T");
+  expect(fake.set_position_calls == seeks0, "paused scrub does not set_position");
+  expect(transport.audio().position_generation() > gen0,
+         "paused scrub still bumps position_generation");
+  expect(!transport.music_seek_pending(), "paused scrub does not leave mixer seek pending");
+
+  transport.request_play();
+  ui_tick(transport, 0);
+  expect(fake.set_position_calls > seeks0, "play after paused scrub set_positions");
+  expect(transport.committed_ms() == 4000, "play keeps scrub T");
+}
+
 void test_pause_with_failed_seek_keeps_target(Transport& transport, TestDouble& fake) {
   fake.position = Microseconds{5'000'000};
   transport.request_seek_ms(5000);
@@ -1478,6 +1504,13 @@ int main() {
     bind_fake_music(fail_seek_t, fail_seek_fake);
     test_pause_with_failed_seek_keeps_target(fail_seek_t, fail_seek_fake);
     fail_seek_t.shutdown();
+  }
+  {
+    Transport scrub_t;
+    TestDouble scrub_fake;
+    bind_fake_music(scrub_t, scrub_fake);
+    test_paused_scrub_skips_mixer_seek(scrub_t, scrub_fake);
+    scrub_t.shutdown();
   }
 
   test_offline_export_clock_steps_sixtieths();

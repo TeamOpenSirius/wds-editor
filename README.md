@@ -120,6 +120,8 @@ Unlike the official CSV format, note timing is stored in integer **ticks** inste
 
 The current format also preserves editor-specific relationships such as mid-star → parent-hold binding.
 
+Concurrent (sync) lines are not stored in the file: they are derived from the note set when the chart is loaded.
+
 ### Official CSV
 
 WDS Editor understands the decrypted seven-column chart form:

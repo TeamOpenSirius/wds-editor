@@ -115,6 +115,8 @@ void ExportVideoDialog::apply_ui() {
   // Do not toggle WindowCloseButtonHint here. setWindowFlag() hides a visible
   // QDialog, which ends exec() and destroys this object while a download is live.
   const bool env_row = ui_.show_env_row();
+  const bool env_row_changed = env_row != env_row_visible_;
+  env_row_visible_ = env_row;
   env_row_->setVisible(env_row);
   hint_->setText(ui_.hint);
   env_button_->setVisible(ui_.show_env_button());
@@ -126,6 +128,20 @@ void ExportVideoDialog::apply_ui() {
   right_->setText(ui_.right_button_text());
   left_->setEnabled(ui_.left_enabled());
   right_->setEnabled(ui_.right_enabled());
+
+  // A top-level QDialog keeps its current geometry when a child row is hidden
+  // (e.g. the "download environment" hint + button after a successful download).
+  // Without this the dialog stays at the taller pre-download size and the
+  // remaining widgets get stretched / leave a gap. Re-fit height only, so a
+  // width the user chose manually is preserved. Skip while hidden: show() will
+  // use the fresh size hint anyway.
+  if (env_row_changed && isVisible() && layout() != nullptr) {
+    layout()->activate();
+    const int target_height = sizeHint().height();
+    if (target_height > 0 && target_height != height()) {
+      resize(width(), target_height);
+    }
+  }
 }
 
 void ExportVideoDialog::probe_env() {

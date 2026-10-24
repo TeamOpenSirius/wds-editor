@@ -61,12 +61,22 @@ struct SplitEffectParentMotion {
 // Note hit VFX (BomSquare / BomFlare) are a separate uncapped list.
 inline constexpr int kSplitEffectParticlePool = 16384;
 // Preview seed window in now_t seconds (t=0 is fadeIn / OnFadeIn Play).
-// Official catalog: looping 0/1872; max non-loop wall-clock is 4s. 8s is a
-// fixed pad for !looping seed death. Draw is not gated here — Unity 2022.3
-// Looping keeps emitting on the same Play() until Stop/Destroy. Seek before
-// 0 or past this remints auto seeds; a line still on screen past 8s keeps
-// the last generation.
-inline constexpr float kSplitEffectLinePlayWindowSec = 8.0f;
+// Engineering pad (hop, not 2022.3), same upper bound as
+// kSplitEffectFadeinCollectCapSec. Official catalog looping is 0; conservative
+// tree last-alive max is 9.0s. Draw of the line plate is not gated here.
+// Unity 2022.3 useAutoRandomSeed remints on Play(), not seek/pause. Preview
+// remints when a line leaves this window and later re-enters; a line still
+// on screen past 10s keeps the last generation.
+inline constexpr float kSplitEffectLinePlayWindowSec = 10.0f;
+// Engineering cap (hop, not 2022.3) on fade-in extras collect. OnFadeIn
+// Play()s every LineEffect once; catalog looping is 0. Conservative
+// tree last-alive max is 9.0s (11710/11711/11712). This is not Unity
+// Duration. Same 10s bound as the seed remint window above. Draw of the
+// line plate is independent. Raise both if a future catalog tree exceeds 10s.
+inline constexpr float kSplitEffectFadeinCollectCapSec = 10.0f;
+inline bool split_effect_fadein_extras_open(float now_t) noexcept {
+  return now_t >= 0.0f && now_t <= kSplitEffectFadeinCollectCapSec;
+}
 // Storage cap only. Unity Trails has no published max; official Particle-mode
 // worst path is ~481 verts (startSpeed 80 / minVertex 0.2).
 inline constexpr int kSplitEffectTrailMaxPoints = 512;
@@ -358,8 +368,10 @@ void split_effect_clear_caches() noexcept;
 // (proved by wds_split_effect_seek_cache_tests).
 void split_effect_clear_seek_state() noexcept;
 
-// After seek: wake collect workers and keep them INTERACTIVE for hold_ms
-// so the first cold collect does not pay idle-core clock/QoS ramp.
+// Wake collect workers and keep them INTERACTIVE for hold_ms so the first
+// parallel eval does not pay idle-core clock/QoS ramp. Callers must only
+// arm when fade-in extras will actually parallelize (not on empty / past
+// last-alive / past kSplitEffectFadeinCollectCapSec / hint-inline).
 void split_effect_prepare_heavy_collect(int hold_ms = 50) noexcept;
 
 // Previous frame work time in milliseconds (editor: tick+render; bench:

@@ -163,11 +163,9 @@ SerializeResult ChartSerializer::save_to_file(const NotationChart& chart,
     }
     ss << "S " << point.tick << ' ' << point.multiplier << '\n';
   }
-  ss << "CONCURRENT " << chart.concurrent_lines.size() << '\n';
-  for (const auto& line : chart.concurrent_lines) {
-    ss << "C " << line.milliseconds << ' ' << line.start_lane << ' ' << line.width << '\n';
-  }
-
+  // Concurrent (sync) lines are a pure rendering product of the note set and are
+  // recomputed on load — never persisted, so they can never go stale or carry
+  // lanes that the note rows do not.
   ss << "END\n";
   return write_text_atomic(path, ss.str());
 }
@@ -192,7 +190,6 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   std::string key;
   size_t note_count = 0;
   size_t notes_seen = 0;
-  size_t concurrent_count = 0;
   size_t speed_count = 0;
   // Legacy SUPPRESSED_EIGHTHS / X rows are validated and counted but otherwise ignored
   // (HoldEighth is derived from its hold, so tombstones carry no information).
@@ -201,7 +198,6 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   size_t timing_count = 0;
   bool saw_timing = false;
   bool saw_notes = false;
-  bool saw_concurrent = false;
   bool saw_speeds = false;
   bool saw_suppressed = false;
   bool saw_profile = false;
@@ -364,13 +360,14 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
       }
       ++suppressed_rows_seen;
     } else if (key == "CONCURRENT") {
-      file >> concurrent_count;
+      // Legacy section: sync lines are derived from notes on load and are no
+      // longer written. Keep parsing the count so old files stay readable.
+      size_t ignored_count = 0;
+      file >> ignored_count;
       if (!file) return {SerializeError::ParseError, "malformed CONCURRENT count"};
-      if (concurrent_count > kMaxSerializedCount) {
+      if (ignored_count > kMaxSerializedCount) {
         return {SerializeError::ParseError, "CONCURRENT count exceeds limit"};
       }
-      saw_concurrent = true;
-      chart.concurrent_lines.reserve(concurrent_count);
     } else if (key == "SPEEDS") {
       file >> speed_count;
       if (!file) return {SerializeError::ParseError, "malformed SPEEDS count"};
@@ -400,16 +397,16 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
         return {SerializeError::ParseError, "unknown chart compatibility profile"};
       }
     } else if (key == "C") {
-      ConcurrentLineNote line;
-      file >> line.milliseconds >> line.start_lane >> line.width;
+      // Legacy sync-line row. Values are ignored (and deliberately not range
+      // checked: old writers could emit overhang lanes that were never valid
+      // input). The line is recomputed from the notes below.
+      int64_t ignored_ms = 0;
+      int64_t ignored_lane = 0;
+      int64_t ignored_width = 0;
+      file >> ignored_ms >> ignored_lane >> ignored_width;
       if (!file) {
         return {SerializeError::ParseError, "malformed concurrent line record"};
       }
-      if (line.start_lane < 0 || line.width < 0 || line.width > 12 ||
-          static_cast<int64_t>(line.start_lane) + static_cast<int64_t>(line.width) > 12) {
-        return {SerializeError::ParseError, "concurrent lane/width out of range"};
-      }
-      chart.concurrent_lines.push_back(line);
     } else if (key == "END") {
       saw_end = true;
       break;
@@ -429,9 +426,6 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   }
   if (saw_notes && notes_seen != note_count) {
     return {SerializeError::ParseError, "NOTES count mismatch"};
-  }
-  if (saw_concurrent && chart.concurrent_lines.size() != concurrent_count) {
-    return {SerializeError::ParseError, "CONCURRENT count mismatch"};
   }
   if (saw_speeds && chart.scroll_speed_points.size() != speed_count) {
     return {SerializeError::ParseError, "SPEEDS count mismatch"};
@@ -473,6 +467,9 @@ SerializeResult ChartSerializer::load_from_file(const std::string& path, Notatio
   }
 
   normalize_timing_points(chart.timing);
+  // Sync lines are a rendering product of the note set, so derive them from the
+  // fully normalized chart instead of trusting file state.
+  chart.concurrent_lines = build_concurrent_lines(chart.notes, chart.timing);
   out_chart = std::move(chart);
   return {SerializeError::Ok, {}};
 }

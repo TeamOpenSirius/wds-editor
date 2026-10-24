@@ -731,6 +731,10 @@ class FrameDiagLogger {
       const int64_t seek_us = preview_panel.last_seek_handle_us();
       const int64_t tick_preload = preview_panel.last_tick_preload_us();
       const int64_t tick_transport = preview_panel.last_tick_transport_us();
+      const int64_t tick_poll = preview_panel.last_tick_poll_us();
+      const int64_t tick_apply = preview_panel.last_tick_apply_us();
+      const int64_t tick_bass = preview_panel.last_tick_bass_us();
+      const int tick_has_music = preview_panel.last_tick_has_music() ? 1 : 0;
       const int64_t tick_geom = preview_panel.last_tick_geom_us();
       const int64_t tick_sfx = preview_panel.last_tick_sfx_us();
       const int64_t tick_explained = tick_preload + tick_transport + tick_geom + tick_sfx;
@@ -745,13 +749,14 @@ class FrameDiagLogger {
       const long dminflt = last_minflt_ > 0 ? minflt - last_minflt_ : minflt;
       last_minflt_ = minflt;
       const long seek_minflt = preview_panel.last_seek_minflt();
-      char fbuf[960];
+      char fbuf[1120];
       const int fn = std::snprintf(
           fbuf, sizeof(fbuf),
           "FRAME i=%d/%d why=%s playing=%d chart_sec=%.3f wall=%.3f tick=%.3f render=%.3f "
           "collect=%.3f verts=%.3f lanes=%.3f paint=%.3f ui=%.3f record=%.3f "
           "submit_cpu=%.3f submit_wait=%.3f fence=%.3f acquire=%.3f present=%.3f "
           "tex=%.3f upload=%.3f seek=%.3f tick_preload=%.3f tick_transport=%.3f "
+          "tick_poll=%.3f tick_apply=%.3f bass=%.3f has_music=%d "
           "tick_geom=%.3f tick_sfx=%.3f leftover_tick=%.3f leftover_render=%.3f "
           "leftover_work=%.3f display_gap=%.3f leftover_wall=%.3f particles=%d epoch=%u "
           "dminflt=%ld seek_minflt=%ld\n",
@@ -762,7 +767,8 @@ class FrameDiagLogger {
           static_cast<double>(cpu.record_us) / 1000.0, ms(submit_cpu), ms(submit_wait),
           ms(fence_us), ms(acquire_us), ms(present_us), static_cast<double>(d.tex_us) / 1000.0,
           static_cast<double>(d.upload_us) / 1000.0, ms(seek_us), ms(tick_preload),
-          ms(tick_transport), ms(tick_geom), ms(tick_sfx), ms(leftover_tick), ms(leftover_render),
+          ms(tick_transport), ms(tick_poll), ms(tick_apply), ms(tick_bass), tick_has_music,
+          ms(tick_geom), ms(tick_sfx), ms(leftover_tick), ms(leftover_render),
           ms(leftover_work), ms(display_gap), ms(display_gap), d.particles, d.cache_epoch,
           dminflt, seek_minflt);
       if (fn > 0) pending_.append(fbuf, static_cast<std::size_t>(fn));
@@ -1848,6 +1854,7 @@ int main(int argc, char** argv) {
   auto ui_alive = std::make_shared<std::atomic<bool>>(true);
 
   QString open_path;
+  QString music_cli;
   // `--screenshot <path>[@<ms>]` may repeat; each entry schedules its own grab.
   QList<std::pair<QString, int>> screenshots;
   CaptureJob capture_job;
@@ -1874,6 +1881,8 @@ int main(int argc, char** argv) {
   for (int i = 1; i < args.size(); ++i) {
     if (args[i] == QLatin1String("--open") && i + 1 < args.size()) {
       open_path = args[++i];
+    } else if (args[i] == QLatin1String("--music") && i + 1 < args.size()) {
+      music_cli = args[++i];
     } else if (args[i] == QLatin1String("--chart") && i + 1 < args.size()) {
       capture_job.chart_path = args[++i];
     } else if (args[i] == QLatin1String("--capture-preview") && i + 1 < args.size()) {
@@ -2026,7 +2035,7 @@ int main(int argc, char** argv) {
                                       &frame_diag,
 #endif  // WDS_DIAG_ENABLED
                                       editor_widget,
-                                      ui_alive, &finish_editor_frame, &window](
+                                      ui_alive, &finish_editor_frame, &window, music_cli](
                                          float delta, int logical_w, int logical_h, int fb_w,
                                          int fb_h,
                                          const std::vector<wds::interaction::InputEvent>& events) mutable {
@@ -2069,8 +2078,10 @@ int main(int argc, char** argv) {
       if (editor.session().chart_count() == 0) {
         (void)editor.session().new_project();
       }
-      if (!editor.session().music_path().empty()) {
-        const std::string music = editor.session().music_path();
+      if (!editor.session().music_path().empty() || !music_cli.isEmpty()) {
+        const std::string music = !music_cli.isEmpty()
+                                      ? std::string(music_cli.toUtf8().constData())
+                                      : editor.session().music_path();
         QTimer::singleShot(0, &window, [ui_alive, &editor, music] {
           if (!ui_alive->load()) return;
           (void)editor.chart_preview().load_music(music, false);

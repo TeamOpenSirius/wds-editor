@@ -171,8 +171,8 @@ uint64_t g_split_frame_seq = 0;
 // Diagnostics only: why the next collect is cold (0 none, 1 seek, 2 doc,
 // 3 preload). Set by the invalidation entry points, consumed by collect.
 std::atomic<int> g_cold_reason{0};
-// Set by split_effect_prepare_heavy_collect (seek pre-roll) so the very next
-// cold collect can label itself even when the epoch also changed.
+// Set by split_effect_prepare_heavy_collect so the next cold collect can
+// label itself even when the epoch also changed.
 std::atomic<int> g_preload_armed{0};
 
 // Set once per second to emit the POOLSTAT rollup (diagnostics only).
@@ -1266,6 +1266,19 @@ void note_eval_work(FrameScratch& fs, size_t n) noexcept {
   split_collect_note_work(n, eval_work_hint(fs, n));
 }
 
+void maybe_arm_heavy_collect(FrameScratch& fs, bool want) noexcept {
+  if (!want || fs.task_used == 0) {
+    return;
+  }
+  uint64_t hint = 0;
+  for (size_t i = 0; i < fs.task_used; ++i) {
+    hint += estimate_realize_cost(fs.tasks[i]);
+  }
+  if (split_collect_choose_participants(fs.task_used, hint) > 1) {
+    split_collect_prepare_heavy(50);
+  }
+}
+
 void sort_eval_order(FrameScratch& fs) {
   std::sort(fs.order.begin(), fs.order.end(), [&](size_t a, size_t b) {
     return estimate_realize_cost(fs.tasks[a]) > estimate_realize_cost(fs.tasks[b]);
@@ -1439,13 +1452,16 @@ void prepare_split_tasks(FrameScratch& fs, SplitPrep& prep,
   if (!clock.visible) {
     return;
   }
+  if (!split_effect_fadein_extras_open(clock.now_t)) {
+    return;
+  }
 
   const auto* entry = official_split_effect(clock.color_id);
   if (entry == nullptr || entry->particle_count == 0) {
     return;
   }
   prep.entry = entry;
-  if (playing) {
+  {
     const DeadLatchKey key{clock.color_id, split.start_ms};
     auto& latches = dead_latches();
     const auto it = latches.find(key);
@@ -2765,17 +2781,16 @@ void collect_split_effect_frame(
 #endif  // WDS_DIAG_ENABLED
   split_collect_begin_frame();
   shuriken::begin_eval_system_hash_frame();
+  bool collect_cold = false;
+  bool collect_backward = false;
   {
     thread_local double tls_collect_now = std::numeric_limits<double>::quiet_NaN();
     thread_local std::uint32_t tls_epoch = 0;
     const std::uint32_t epoch = shuriken::split_eval_cache_epoch();
-    const bool backward = std::isfinite(tls_collect_now) && now_sec + 1e-9 < tls_collect_now;
-    const bool cold = epoch != tls_epoch || !std::isfinite(tls_collect_now);
-    split_collect_set_burst(cold || backward);
-    if (cold || backward) {
-      split_collect_prepare_heavy(50);
-    }
-    if (backward) {
+    collect_backward = std::isfinite(tls_collect_now) && now_sec + 1e-9 < tls_collect_now;
+    collect_cold = epoch != tls_epoch || !std::isfinite(tls_collect_now);
+    split_collect_set_burst(collect_cold || collect_backward);
+    if (collect_backward) {
       shuriken::split_eval_persist_clear();
     }
 #if WDS_DIAG_ENABLED
@@ -2788,7 +2803,7 @@ void collect_split_effect_frame(
       //   preload - the seek pre-roll armed it and no explicit marker arrived
       //   seek    - fallback: a timeline jump with no explicit invalidation
       int reason = 0;
-      if (cold || backward) {
+      if (collect_cold || collect_backward) {
         reason = g_cold_reason.exchange(0, std::memory_order_relaxed);
         if (reason == 0) {
           reason = g_preload_armed.exchange(0, std::memory_order_relaxed) != 0 ? 3 : 1;
@@ -2839,9 +2854,6 @@ void collect_split_effect_frame(
     diag_finish_frame(true);
     return;
   }
-  if (!playing) {
-    clear_dead_latches();
-  }
   if (playing) {
     shuriken::split_eval_cache_begin_play_frame();
   }
@@ -2873,6 +2885,7 @@ void collect_split_effect_frame(
         prepare_split_tasks(fs, fs.preps[k], splits[k], quality, now_sec, nullptr, playing);
       }
     }
+    maybe_arm_heavy_collect(fs, collect_cold || collect_backward);
     {
       SplitWallScope wall_b(SplitWallSec::PhaseB);
       SplitDiagScope diag_b(SplitDiagPhase::Evaluate);
@@ -2903,7 +2916,7 @@ void collect_split_effect_frame(
         // (may_emit) stays true for a while after the last particle dies;
         // remaking RoD + include_expired parents there is the empty-frame
         // collect tax. Looping never latches (emission never closes).
-        if (playing && n == 0 && fs.preps[k].entry != nullptr &&
+        if (n == 0 && fs.preps[k].entry != nullptr &&
             shuriken::dead_system_skip_enabled() && !shuriken::observers_installed() &&
             catalog_effect_emission_closed(*fs.preps[k].entry, fs.preps[k].now_t) &&
             !split_tasks_have_life(fs, fs.preps[k])) {

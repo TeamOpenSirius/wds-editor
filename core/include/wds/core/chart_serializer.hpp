@@ -25,6 +25,8 @@ struct SerializeResult {
 // Native .wdschart v2 note records mirror official CSV columns (tick-based times).
 // v5 appends parent_hold_id on N rows; v6 adds SPEEDS / PROFILE records:
 //   N id start_tick end_tick type lane width gimmick_type scratch_length parent_hold_id
+// Concurrent (sync) lines are never persisted: load derives them from the note set.
+// Legacy CONCURRENT / C sections are parsed and ignored.
 // MusicTiming::offset_ms is NOT serialized here (see .wdsproject CHART_DELAY_MS).
 class ChartSerializer {
  public:
@@ -34,6 +36,7 @@ class ChartSerializer {
   // Native .wdschart format (always writes latest).
   // v3 adds TIMING points (BPM + meter). v4 adds has_bpm/has_meter flags on T rows.
   // v5 adds parent_hold_id on N rows; v6 adds scroll-speed points and compatibility profile.
+  // Save never writes concurrent/sync lines; load derives them from the notes.
   // Load treats -1 / missing / non-hold parents as
   // unbound and infers binds (type + open span + exact lanes) on every version.
   // v1/v2 load creates a default tick-0 point.
