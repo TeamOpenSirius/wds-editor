@@ -157,21 +157,30 @@ void test_ranked_macos_prefers_vt() {
 void test_download_spec_is_pinned() {
   const auto spec = wds::ui::ffmpeg_download_spec();
   expect(!spec.filename.isEmpty(), "filename pinned");
-  expect(!spec.sha256.isEmpty(), "sha256 pinned");
-  expect(!spec.urls.isEmpty(), "url list");
-#if defined(Q_OS_MACOS)
-  // No npmmirror host for this artifact; CN GitHub proxies first, then origin.
-  expect(spec.archive_kind == QLatin1String("tar.gz"), "macos uses tar.gz");
-  expect(spec.urls.size() >= 3, "macos has three sources");
-  expect(spec.urls.front().contains(QStringLiteral("gh-proxy.com")), "china proxy first");
-  expect(spec.urls.back().startsWith(QStringLiteral("https://github.com/")), "origin last");
-  expect(spec.urls.front().contains(QStringLiteral("ffmpeg-lgpl-builds")), "macos uses lgpl-builds");
-#else
-  expect(spec.urls.front().contains(QStringLiteral("npmmirror")), "china mirror first");
-#endif
+  expect(spec.filename.startsWith(QStringLiteral("WDS-ffmpeg-")), "self-hosted pack name");
+  expect(spec.filename.endsWith(QStringLiteral(".zip")), "zip transport");
+  expect(spec.sha256.size() == 64, "sha256 pinned");
+  expect(spec.archive_kind == QLatin1String("zip"), "zip archive kind");
+  expect(spec.urls.size() == 2, "primary + backup only");
+  expect(spec.urls[0].startsWith(
+             QStringLiteral("https://pub-4e210b43da564502890776c09608b88d.r2.dev/ffmpeg/")),
+         "r2 primary");
+  expect(spec.urls[1].startsWith(
+             QStringLiteral("https://dl-ffmpeg.ginojin.top/aB3xK9mQ2pL7vN4wR8tY1cF6hJ0dS5gZ/")),
+         "backup host");
   for (const auto& url : spec.urls) {
+    expect(url.endsWith(spec.filename), "url ends with pinned filename");
     expect(!url.contains(QStringLiteral("/latest/")), "no unpinned latest");
   }
+#if defined(_WIN32)
+  expect(spec.filename == QStringLiteral("WDS-ffmpeg-win-x86_64.zip"), "windows pack");
+#elif defined(Q_OS_MACOS)
+  expect(spec.filename == QStringLiteral("WDS-ffmpeg-macos-arm64.zip"), "macos pack");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  expect(spec.filename == QStringLiteral("WDS-ffmpeg-linux-arm64.zip"), "linux arm64 pack");
+#else
+  expect(spec.filename == QStringLiteral("WDS-ffmpeg-linux-x86_64.zip"), "linux x64 pack");
+#endif
 }
 
 void test_export_video_span_pads_music_and_chart() {

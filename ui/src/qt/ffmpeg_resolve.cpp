@@ -16,6 +16,7 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QSysInfo>
+#include <QTemporaryDir>
 #include <QUrl>
 
 #if defined(Q_OS_MACOS)
@@ -39,6 +40,25 @@ QString run_ffmpeg(const QString& bin, const QStringList& args, int timeout_ms =
     return {};
   }
   return QString::fromUtf8(proc.readAll());
+}
+
+// Run a system unpacking tool. QProcess::start() fails cleanly when the tool is
+// absent, so callers can try the next candidate without probing PATH first.
+bool run_tool(const QString& program, const QStringList& args, int timeout_ms) {
+  QProcess proc;
+  proc.setProgram(program);
+  proc.setArguments(args);
+  proc.setProcessChannelMode(QProcess::MergedChannels);
+  proc.start();
+  if (!proc.waitForStarted(5000)) {
+    return false;
+  }
+  if (!proc.waitForFinished(timeout_ms)) {
+    proc.kill();
+    proc.waitForFinished(1000);
+    return false;
+  }
+  return proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0;
 }
 
 bool looks_like_windows_store_stub(const QString& path) {
@@ -231,57 +251,29 @@ FfmpegDownloadSpec ffmpeg_download_spec() {
 #else
       QStringLiteral("ffmpeg");
 #endif
-  // Win/Linux: BtbN autobuild-2026-07-23-14-16 (n8.1.2-30-g45f1910444) LGPL.
-  // macOS: serversideup/ffmpeg-lgpl-builds v8.1.2-27 (disable-gpl, disable-nonfree,
-  // VideoToolbox). Same sha256 on every URL of a platform. Prefer mirrors, then origin.
+  // Self-hosted offline packs (zip). Keep both mirrors byte-identical; the
+  // downloader verifies the pinned sha256 before extracting and then deletes the
+  // archive. The primary is a Cloudflare R2 public bucket, the backup is our own
+  // nginx mirror. Network requests still go through the OS proxy (use_system_proxy).
+  const QString primary =
+      QStringLiteral("https://pub-4e210b43da564502890776c09608b88d.r2.dev/ffmpeg/");
+  const QString backup =
+      QStringLiteral("https://dl-ffmpeg.ginojin.top/aB3xK9mQ2pL7vN4wR8tY1cF6hJ0dS5gZ/");
 #if defined(_WIN32)
-  spec.filename = QStringLiteral("ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip");
-  spec.archive_kind = QStringLiteral("zip");
-  spec.sha256 = QStringLiteral("0c6dc759eb1c70804ca04e11d83c583a6b03ae0630474f862e97400c715c6376");
-  spec.urls = {
-      QStringLiteral("https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"),
-      QStringLiteral("https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"),
-      QStringLiteral("https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"),
-      QStringLiteral("https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"),
-  };
+  spec.filename = QStringLiteral("WDS-ffmpeg-win-x86_64.zip");
+  spec.sha256 = QStringLiteral("0354947dbb1c77ba1f964e241682c5502b2ae95504cf7aef5160902a497f1f15");
 #elif defined(Q_OS_MACOS)
-  // LGPL-only Apple Silicon build (no --enable-nonfree / --enable-gpl).
-  // npmmirror does not host this artifact; use CN GitHub release proxies first.
-  spec.filename = QStringLiteral("ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz");
-  spec.archive_kind = QStringLiteral("tar.gz");
-  spec.sha256 = QStringLiteral("ac0babf65798bf681da1dc81c4fe4ae049d0d26e161410174b0e120e3e783332");
-  spec.urls = {
-      QStringLiteral(
-          "https://gh-proxy.com/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/"
-          "download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"),
-      QStringLiteral(
-          "https://ghfast.top/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/"
-          "v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"),
-      QStringLiteral(
-          "https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/"
-          "ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"),
-  };
+  spec.filename = QStringLiteral("WDS-ffmpeg-macos-arm64.zip");
+  spec.sha256 = QStringLiteral("e7e0df7a687ab30f5d186baf3a112ce0f6589dca576e5d9125951bade54c69ac");
 #elif defined(__aarch64__) || defined(_M_ARM64)
-  spec.filename = QStringLiteral("ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz");
-  spec.archive_kind = QStringLiteral("tar.xz");
-  spec.sha256 = QStringLiteral("c9c7653babc8ae7191100fc570703fb6a4e7fe11a1696da6e94fbf3b71a5a4a6");
-  spec.urls = {
-      QStringLiteral("https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz"),
-      QStringLiteral("https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz"),
-      QStringLiteral("https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz"),
-      QStringLiteral("https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz"),
-  };
+  spec.filename = QStringLiteral("WDS-ffmpeg-linux-arm64.zip");
+  spec.sha256 = QStringLiteral("9e7eaabf2e13254b6780e0f5e92a353b9787833ecf9b21f483bcc6e71aa7370a");
 #else
-  spec.filename = QStringLiteral("ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz");
-  spec.archive_kind = QStringLiteral("tar.xz");
-  spec.sha256 = QStringLiteral("759149752aab56335d3234f82e118c6f7d441e5b635467ff8bff307729b02e6b");
-  spec.urls = {
-      QStringLiteral("https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz"),
-      QStringLiteral("https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz"),
-      QStringLiteral("https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz"),
-      QStringLiteral("https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz"),
-  };
+  spec.filename = QStringLiteral("WDS-ffmpeg-linux-x86_64.zip");
+  spec.sha256 = QStringLiteral("fd371e0c5331e1c7e39dd1ba25ebc13f2d4efec41f868200de7f53510b3226a5");
 #endif
+  spec.archive_kind = QStringLiteral("zip");
+  spec.urls = {primary + spec.filename, backup + spec.filename};
   return spec;
 }
 
@@ -369,12 +361,14 @@ void FfmpegDownloader::try_next() {
       }
     }
     QString err;
-    if (!extract_archive(archive, spec_, &err)) {
-      QFile::remove(archive);
+    const bool unpacked = extract_archive(archive, spec_, &err);
+    // The zip is only a transport container: after unpacking (success or not)
+    // it must not stay in the cache next to the binary.
+    QFile::remove(archive);
+    if (!unpacked) {
       finish_fail(err.isEmpty() ? QStringLiteral("环境解压失败") : err);
       return;
     }
-    QFile::remove(archive);
     const QString bin = cached_ffmpeg_path();
     if (bin.isEmpty()) {
       finish_fail(QStringLiteral("环境解压失败"));
@@ -402,9 +396,13 @@ void FfmpegDownloader::finish_ok(const QString& path) {
   if (url_index_ > 0 && url_index_ <= spec_.urls.size()) {
     manifest.insert(QStringLiteral("url"), spec_.urls[url_index_ - 1]);
   }
-  QFile file(preview_renderer_dir() + QStringLiteral("/manifest.json"));
-  if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-    file.write(QJsonDocument(manifest).toJson(QJsonDocument::Indented));
+  {
+    QFile file(preview_renderer_dir() + QStringLiteral("/manifest.json"));
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+      file.write(QJsonDocument(manifest).toJson(QJsonDocument::Indented));
+      // Close before on_finished: callers may read the manifest from the callback.
+      file.close();
+    }
   }
   if (on_finished) on_finished(true, {});
 }
@@ -417,10 +415,9 @@ bool FfmpegDownloader::extract_archive(const QString& archive, const FfmpegDownl
                                        QString* error) {
   const QString dest = preview_renderer_dir();
   QDir().mkpath(dest + QStringLiteral("/bin"));
-  QProcess proc;
-  proc.setWorkingDirectory(dest);
   if (spec.archive_kind == QLatin1String("gz")) {
     const QString out = dest + QStringLiteral("/bin/") + spec.binary_name;
+    QProcess proc;
     proc.setProgram(QStringLiteral("gzip"));
     proc.setArguments({QStringLiteral("-dc"), archive});
     proc.setStandardOutputFile(out);
@@ -432,20 +429,65 @@ bool FfmpegDownloader::extract_archive(const QString& archive, const FfmpegDownl
     chmod_exec(out);
     return true;
   }
-  proc.setProgram(QStringLiteral("tar"));
-  QStringList args;
-  if (spec.archive_kind == QLatin1String("tar.xz")) {
-    args << QStringLiteral("-xJf") << archive << QStringLiteral("-C") << dest;
-  } else {
-    args << QStringLiteral("-xf") << archive << QStringLiteral("-C") << dest;
-  }
-  proc.setArguments(args);
-  proc.start();
-  if (!proc.waitForFinished(180000) || proc.exitCode() != 0) {
+
+  // Unpack into a throwaway directory, copy ffmpeg into bin/, then drop the
+  // whole extraction tree. Nothing but the binary survives in the cache.
+  QTemporaryDir temp(dest + QStringLiteral("/extract-XXXXXX"));
+  if (!temp.isValid()) {
     if (error) *error = QStringLiteral("解压失败");
     return false;
   }
-  const QString found = find_ffmpeg_in_dir(dest);
+  const QString unpack_dir = temp.path();
+  bool ok = false;
+  if (spec.archive_kind == QLatin1String("zip")) {
+#if defined(_WIN32)
+    ok = run_tool(QStringLiteral("tar"),
+                  {QStringLiteral("-xf"), archive, QStringLiteral("-C"), unpack_dir}, 180000);
+#elif defined(Q_OS_MACOS)
+    // ditto keeps file modes; unzip/python are fallbacks for minimal systems.
+    ok = run_tool(QStringLiteral("ditto"),
+                  {QStringLiteral("-x"), QStringLiteral("-k"), archive, unpack_dir}, 180000);
+    if (!ok) {
+      ok = run_tool(QStringLiteral("unzip"),
+                    {QStringLiteral("-q"), QStringLiteral("-o"), archive, QStringLiteral("-d"),
+                     unpack_dir}, 180000);
+    }
+    if (!ok) {
+      ok = run_tool(QStringLiteral("python3"),
+                    {QStringLiteral("-m"), QStringLiteral("zipfile"), QStringLiteral("-e"),
+                     archive, unpack_dir}, 180000);
+    }
+#else
+    ok = run_tool(QStringLiteral("unzip"),
+                  {QStringLiteral("-q"), QStringLiteral("-o"), archive, QStringLiteral("-d"),
+                   unpack_dir}, 180000);
+    if (!ok) {
+      ok = run_tool(QStringLiteral("bsdtar"),
+                    {QStringLiteral("-xf"), archive, QStringLiteral("-C"), unpack_dir}, 180000);
+    }
+    if (!ok) {
+      ok = run_tool(QStringLiteral("python3"),
+                    {QStringLiteral("-m"), QStringLiteral("zipfile"), QStringLiteral("-e"),
+                     archive, unpack_dir}, 180000);
+    }
+    if (!ok) {
+      ok = run_tool(QStringLiteral("tar"),
+                    {QStringLiteral("-xf"), archive, QStringLiteral("-C"), unpack_dir}, 180000);
+    }
+#endif
+  } else if (spec.archive_kind == QLatin1String("tar.xz")) {
+    ok = run_tool(QStringLiteral("tar"),
+                  {QStringLiteral("-xJf"), archive, QStringLiteral("-C"), unpack_dir}, 180000);
+  } else {
+    ok = run_tool(QStringLiteral("tar"),
+                  {QStringLiteral("-xf"), archive, QStringLiteral("-C"), unpack_dir}, 180000);
+  }
+  if (!ok) {
+    if (error) *error = QStringLiteral("解压失败");
+    return false;
+  }
+
+  const QString found = find_ffmpeg_in_dir(unpack_dir);
   if (found.isEmpty()) {
     if (error) *error = QStringLiteral("解压失败");
     return false;
@@ -454,7 +496,10 @@ bool FfmpegDownloader::extract_archive(const QString& archive, const FfmpegDownl
   if (QDir::fromNativeSeparators(found) != QDir::fromNativeSeparators(dest_bin)) {
     QDir().mkpath(QFileInfo(dest_bin).absolutePath());
     QFile::remove(dest_bin);
-    QFile::copy(found, dest_bin);
+    if (!QFile::copy(found, dest_bin)) {
+      if (error) *error = QStringLiteral("解压失败");
+      return false;
+    }
   }
   chmod_exec(dest_bin);
   return QFileInfo::exists(dest_bin);

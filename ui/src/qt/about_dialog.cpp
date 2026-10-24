@@ -58,7 +58,8 @@ OBS Studio theme "Yami" (GPL v2 or later)
 ────────────────────────────────────────
 FFmpeg (LGPL v2.1 or later)
   Optional helper downloaded for video export; run as a separate process.
-  Windows/Linux: BtbN FFmpeg-Builds LGPL builds.
+  Self-hosted LGPL builds of FFmpeg 8.1.2.
+  Windows/Linux: npmmirror ffmpeg-builds LGPL builds.
   macOS: serversideup/ffmpeg-lgpl-builds (--disable-gpl --disable-nonfree).
   Binaries with --enable-nonfree are rejected. Source:
   https://ffmpeg.org/releases/ — see licenses/FFmpeg-NOTICE.txt.

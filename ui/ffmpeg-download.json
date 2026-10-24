@@ -1,47 +1,43 @@
 {
-  "note": "Pinned ffmpeg download specs. Runtime copy lives in ffmpeg_download_spec().",
-  "macos-arm64": {
-    "filename": "ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz",
-    "archive": "tar.gz",
-    "sha256": "ac0babf65798bf681da1dc81c4fe4ae049d0d26e161410174b0e120e3e783332",
-    "note": "serversideup/ffmpeg-lgpl-builds v8.1.2-27: --disable-gpl --disable-nonfree + VideoToolbox. No npmmirror host; CN GH proxies then origin.",
-    "urls": [
-      "https://gh-proxy.com/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz",
-      "https://ghfast.top/https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz",
-      "https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-aarch64-apple-darwin.tar.gz"
-    ]
-  },
+  "note": "Pinned ffmpeg download specs. Runtime copy lives in ffmpeg_download_spec(). Archives are self-hosted (Cloudflare R2 primary + nginx backup); the downloader verifies sha256, unpacks, then deletes the zip.",
   "win-x86_64": {
-    "filename": "ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
+    "filename": "WDS-ffmpeg-win-x86_64.zip",
     "archive": "zip",
-    "sha256": "0c6dc759eb1c70804ca04e11d83c583a6b03ae0630474f862e97400c715c6376",
+    "sha256": "0354947dbb1c77ba1f964e241682c5502b2ae95504cf7aef5160902a497f1f15",
+    "note": "FFmpeg 8.1.2 LGPL static build (npmmirror ffmpeg-builds), repacked with licenses/source info.",
     "urls": [
-      "https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
-      "https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
-      "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip",
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-win64-lgpl-8.1.zip"
+      "https://pub-4e210b43da564502890776c09608b88d.r2.dev/ffmpeg/WDS-ffmpeg-win-x86_64.zip",
+      "https://dl-ffmpeg.ginojin.top/aB3xK9mQ2pL7vN4wR8tY1cF6hJ0dS5gZ/WDS-ffmpeg-win-x86_64.zip"
     ]
   },
   "linux-x86_64": {
-    "filename": "ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
-    "archive": "tar.xz",
-    "sha256": "759149752aab56335d3234f82e118c6f7d441e5b635467ff8bff307729b02e6b",
+    "filename": "WDS-ffmpeg-linux-x86_64.zip",
+    "archive": "zip",
+    "sha256": "fd371e0c5331e1c7e39dd1ba25ebc13f2d4efec41f868200de7f53510b3226a5",
+    "note": "FFmpeg 8.1.2 LGPL static build (npmmirror ffmpeg-builds), repacked with licenses/source info.",
     "urls": [
-      "https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
-      "https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
-      "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz",
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linux64-lgpl-8.1.tar.xz"
+      "https://pub-4e210b43da564502890776c09608b88d.r2.dev/ffmpeg/WDS-ffmpeg-linux-x86_64.zip",
+      "https://dl-ffmpeg.ginojin.top/aB3xK9mQ2pL7vN4wR8tY1cF6hJ0dS5gZ/WDS-ffmpeg-linux-x86_64.zip"
     ]
   },
   "linux-arm64": {
-    "filename": "ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
-    "archive": "tar.xz",
-    "sha256": "c9c7653babc8ae7191100fc570703fb6a4e7fe11a1696da6e94fbf3b71a5a4a6",
+    "filename": "WDS-ffmpeg-linux-arm64.zip",
+    "archive": "zip",
+    "sha256": "9e7eaabf2e13254b6780e0f5e92a353b9787833ecf9b21f483bcc6e71aa7370a",
+    "note": "FFmpeg 8.1.2 LGPL static build (npmmirror ffmpeg-builds), repacked with licenses/source info.",
     "urls": [
-      "https://cdn.npmmirror.com/binaries/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
-      "https://registry.npmmirror.com/-/binary/ffmpeg-builds/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
-      "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz",
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-23-14-16/ffmpeg-n8.1.2-30-g45f1910444-linuxarm64-lgpl-8.1.tar.xz"
+      "https://pub-4e210b43da564502890776c09608b88d.r2.dev/ffmpeg/WDS-ffmpeg-linux-arm64.zip",
+      "https://dl-ffmpeg.ginojin.top/aB3xK9mQ2pL7vN4wR8tY1cF6hJ0dS5gZ/WDS-ffmpeg-linux-arm64.zip"
+    ]
+  },
+  "macos-arm64": {
+    "filename": "WDS-ffmpeg-macos-arm64.zip",
+    "archive": "zip",
+    "sha256": "e7e0df7a687ab30f5d186baf3a112ce0f6589dca576e5d9125951bade54c69ac",
+    "note": "FFmpeg 8.1.2 LGPL build (serversideup/ffmpeg-lgpl-builds v8.1.2-27, VideoToolbox), repacked with licenses/source info.",
+    "urls": [
+      "https://pub-4e210b43da564502890776c09608b88d.r2.dev/ffmpeg/WDS-ffmpeg-macos-arm64.zip",
+      "https://dl-ffmpeg.ginojin.top/aB3xK9mQ2pL7vN4wR8tY1cF6hJ0dS5gZ/WDS-ffmpeg-macos-arm64.zip"
     ]
   }
 }

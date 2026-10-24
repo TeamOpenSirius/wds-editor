@@ -6,12 +6,18 @@ That binary is invoked as a separate process (not linked into the editor).
 
 Pinned builds (see ui/ffmpeg-download.json and ffmpeg_download_spec()):
 
+  All platforms
+    Self-hosted WDS-ffmpeg-<platform>.zip archives (Cloudflare R2 primary,
+    nginx backup). Each archive contains the binary, the exact license texts of
+    its build and SOURCE.txt with the upstream archive URL and SHA256.
+
   Windows / Linux
-    BtbN FFmpeg-Builds LGPL variants (filename contains "-lgpl-").
-    https://github.com/BtbN/FFmpeg-Builds
+    FFmpeg 8.1.2 LGPL static builds from npmmirror ffmpeg-builds
+    (variant name contains "-lgpl", no GPL-only libraries).
+    https://registry.npmmirror.com/-/binary/ffmpeg-builds/v8.1.2/
 
   macOS (Apple Silicon)
-    serversideup/ffmpeg-lgpl-builds (configure uses --disable-gpl
+    serversideup/ffmpeg-lgpl-builds v8.1.2-27 (configure uses --disable-gpl
     --disable-nonfree --disable-version3), with VideoToolbox for H.264.
     https://github.com/serversideup/ffmpeg-lgpl-builds
 
@@ -24,5 +30,6 @@ Corresponding source
   inside the downloaded archive.
 
 License texts
-  LGPLv2.1 applies to these builds. See https://ffmpeg.org/legal.html
-  and COPYING.LGPLv2.1 in the FFmpeg source tree.
+  LGPLv2.1-or-later. Each pack carries the exact license text of its build
+  (LGPLv2.1 for macOS, LGPLv3 for the npmmirror Windows/Linux builds).
+  See https://ffmpeg.org/legal.html and the FFmpeg source tree.
