@@ -235,24 +235,24 @@ void test_shutdown_releases_pool(const FixturePaths& paths) {
          "inspect fails after pool release");
 }
 
-// Number of sources in the engine's BASS mixer (music + Hold + live one-shots).
-// -1 when the mixer cannot be reached through the Hold channel.
+// Number of sources in the engine's BASS mixer (music + live Hold/one-shots).
+// Silent Hold is unplugged. -1 when the mixer handle is missing.
 int mixer_source_count(const AudioEngine& engine) {
-  const auto hold = static_cast<DWORD>(engine.hold_channel_handle());
-  if (hold == 0) {
+  const auto mixer = static_cast<HSTREAM>(engine.mixer_handle());
+  if (mixer == 0) {
     return -1;
   }
-  const HSTREAM mixer = BASS_Mixer_ChannelGetMixer(hold);
-  if (mixer == 0) {
+  BASS_CHANNELINFO info{};
+  if (!BASS_ChannelGetInfo(mixer, &info)) {
     return -1;
   }
   const DWORD n = BASS_Mixer_StreamGetChannels(mixer, nullptr, 0);
   return n == static_cast<DWORD>(-1) ? -1 : static_cast<int>(n);
 }
 
-// The Hold stream is created once, survives stop/seek/rate teardown as a single
-// paused mixer source, and one-shot sources added to the mixer are released by
-// stop_all_sfx (nothing accumulates across cycles).
+// The Hold stream is created once, survives stop/seek/rate teardown unplugged,
+// and one-shot sources added to the mixer are released by stop_all_sfx (nothing
+// accumulates across cycles).
 void test_hold_stream_not_leaked(const FixturePaths& paths) {
   AudioEngine engine;
   if (!init_or_skip(engine, paths)) {
@@ -261,7 +261,9 @@ void test_hold_stream_not_leaked(const FixturePaths& paths) {
   const auto hold0 = engine.hold_channel_handle();
   expect(hold0 != 0, "Hold stream exists after initialize");
   const int baseline = mixer_source_count(engine);
-  expect(baseline == 2, "mixer holds exactly music + Hold at baseline");
+  expect(baseline == 1, "mixer holds exactly music at baseline (Hold unplugged)");
+  expect(BASS_Mixer_ChannelGetMixer(static_cast<DWORD>(hold0)) == 0,
+         "silent Hold is not a mixer source");
 
   for (int i = 0; i < 40; ++i) {
     engine.set_hold_looping(true);
@@ -289,7 +291,9 @@ void test_hold_stream_not_leaked(const FixturePaths& paths) {
     expect(!engine.hold_looping(), "stop/seek/rate silences Hold");
     expect(engine.hold_channel_handle() == hold0, "Hold stream is reused, not recreated");
     expect(mixer_source_count(engine) == baseline,
-           "stop_all_sfx leaves only music + the single Hold stream");
+           "stop_all_sfx leaves only music (Hold unplugged)");
+    expect(BASS_Mixer_ChannelGetMixer(static_cast<DWORD>(hold0)) == 0,
+           "stop/seek/rate unplugs Hold");
   }
   BASS_CHANNELINFO info{};
   expect(BASS_ChannelGetInfo(static_cast<DWORD>(hold0), &info) != FALSE,
@@ -393,7 +397,7 @@ void test_hold_gates_vs_control_thread(const FixturePaths& paths, bool region_lo
   expect(snapshotted.load() > 0, "control thread snapshotted pending hold gates");
   expect(fired.load() > 0, "mixer-thread emulation delivered gate callbacks");
   expect(!engine.hold_looping(), "stop_all_sfx leaves Hold silent after gate traffic");
-  expect(mixer_source_count(engine) == 2, "no extra Hold/one-shot streams after gate traffic");
+  expect(mixer_source_count(engine) == 1, "no extra Hold/one-shot streams after gate traffic");
   (void)region_loop;
   engine.shutdown();
   expect(engine.hold_channel_handle() == 0, "shutdown releases the Hold stream");
@@ -591,7 +595,7 @@ void test_reload_music_keeps_device(const FixturePaths& paths) {
   expect(engine.position_generation() > gen0, "reload: position generation bumped");
   expect(!engine.stream_playing(), "reload: paused, like a fresh initialize");
   expect(engine.position().count() < 100'000, "reload: new song starts at 0");
-  expect(mixer_source_count(engine) == 2, "reload: mixer holds exactly new music + Hold");
+  expect(mixer_source_count(engine) == 1, "reload: mixer holds exactly new music (Hold unplugged)");
   BASS_CHANNELINFO ci{};
   expect(BASS_ChannelGetInfo(static_cast<DWORD>(hold0), &ci) != FALSE, "reload: Hold handle is live");
 #if defined(WDS_AUDIO_FAKE_BASS)
