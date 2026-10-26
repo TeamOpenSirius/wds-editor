@@ -291,8 +291,10 @@ const TextureInfo* syuriken_plate_for(const SkinCatalog& skin,
 // OpenWDS SplitEffectSyuriken shades per fragment (renderer/shaders/syuriken.frag).
 // One projective quad per Line: U spans the sprite textureRect, V is local_y /
 // sprite at each end, rgb is LineColor premultiplied by its alpha and vertex
-// alpha carries Unity world Y + kOfficialSyurikenPulseWorldYBias (batched
-// SpriteRenderer ObjectToWorld is identity; pulse = sin(positionWS.y - 20 t)).
+// alpha carries (Unity world Y + bias) * q — the same Heckbert q already in
+// geom[].q for UV (batched SpriteRenderer ObjectToWorld is identity;
+// pulse = sin(positionWS.y - 20 t); 2D ortho needs q so worldY is not
+// screen-linear).
 void emit_syuriken_line_quad(const SplitLanePlateShared& sh, const Quad& quad, float pa, float pb,
                              int32_t color_id, float fade_scale, float r, float g, float b,
                              float a, DrawBatch& out) {
@@ -303,8 +305,7 @@ void emit_syuriken_line_quad(const SplitLanePlateShared& sh, const Quad& quad, f
   };
   auto wy_at = [&](float percent) {
     return wds::chart_editor::official_syuriken_pulse_position_ws_y(
-               wds::chart_editor::official_percent_to_main_y(percent)) +
-           wds::chart_editor::kOfficialSyurikenPulseWorldYBias;
+        wds::chart_editor::official_percent_to_main_y(percent));
   };
   // The Syuriken pipeline culls back faces (material _Cull=2); fill_quad_corner_geom
   // winds lb→lt→rt clockwise, so hand it the mirrored quad with U swapped.
@@ -319,8 +320,12 @@ void emit_syuriken_line_quad(const SplitLanePlateShared& sh, const Quad& quad, f
   const float pr = r * a;
   const float pg = g * a;
   const float pbl = b * a;
-  out.add_quad_from_geom(sh.plate->id, geom, wy_b, wy_b, wy_a, wy_a, pr, pg, pbl, pr, pg, pbl, pr,
-                         pg, pbl, pr, pg, pbl);
+  out.add_quad_from_geom(sh.plate->id, geom,
+                        wds::chart_editor::official_syuriken_pulse_pack_alpha(wy_b, geom[0].q),
+                        wds::chart_editor::official_syuriken_pulse_pack_alpha(wy_b, geom[5].q),
+                        wds::chart_editor::official_syuriken_pulse_pack_alpha(wy_a, geom[1].q),
+                        wds::chart_editor::official_syuriken_pulse_pack_alpha(wy_a, geom[2].q), pr,
+                        pg, pbl, pr, pg, pbl, pr, pg, pbl, pr, pg, pbl);
 }
 
 Quad split_line_plate_quad(const SplitLanePlateShared& sh, float world_x, float pa, float pb) {

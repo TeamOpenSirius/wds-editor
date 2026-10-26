@@ -108,12 +108,30 @@ inline OfficialSyurikenStatic official_syuriken_static(float u, float v, float l
 // cos(tilt) = project_main_xyz wy. Shared path, not per ID.
 //
 // Vertex alpha packing: DrawBatch culls quads with all a<=0, so emit stores
-// worldY + kOfficialSyurikenPulseWorldYBias and the fragment subtracts it.
+// (worldY + kOfficialSyurikenPulseWorldYBias) * q. Preview plates are already
+// projected 2D trapezoids drawn with an ortho MVP (clip w=1); GPU interpolation
+// of raw worldY is screen-linear and makes far-lane dark bands travel ~8× the
+// official screen speed. q is the same Heckbert / parallel-edge ratio
+// fill_quad_corner_geom already writes for UV (hop: 2D overlay stand-in for
+// Unity perspective-correct positionWS.y). Fragment: packed / q − bias.
+// Do not label 2022.3.
 inline constexpr float kOfficialSyurikenPulseWorldYBias = 64.0f;
+
+inline float official_syuriken_pulse_q(float q) noexcept {
+  return std::max(q, 1e-6f);
+}
 
 inline float official_syuriken_pulse_position_ws_y(float main_y) noexcept {
   const float rad = official_deg_to_rad(kOfficialLaneTiltDeg);
   return main_y * std::cos(rad);
+}
+
+inline float official_syuriken_pulse_pack_alpha(float position_ws_y, float q) noexcept {
+  return (position_ws_y + kOfficialSyurikenPulseWorldYBias) * official_syuriken_pulse_q(q);
+}
+
+inline float official_syuriken_pulse_unpack_ws_y(float packed_alpha, float q) noexcept {
+  return packed_alpha / official_syuriken_pulse_q(q) - kOfficialSyurikenPulseWorldYBias;
 }
 
 // Unbatched ObjectToWorld row-1 length. Kept for the GPU-probe record; pulse

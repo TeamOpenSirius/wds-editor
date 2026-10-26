@@ -2527,6 +2527,10 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   CHECK(project.jacket_path.empty());
   CHECK_EQ(project.offset_ms, 3019);
   CHECK_EQ(project.chart_path(), std::string("chart.wdschart"));
+  // v1 fixture has no resume pair → first chart, tick 0.
+  CHECK_EQ(project.resume_chart_index, -1);
+  CHECK_EQ(project.resume_tick, 0);
+  CHECK(!project.has_resume_position());
 
   const std::string resolved_chart =
       ProjectSerializer::resolve_path(project_path.string(), project.chart_path());
@@ -2556,6 +2560,8 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   to_save.music_path = temp_music.string();  // absolute → should relativize
   to_save.chart_paths = {"notes.wdschart"};
   to_save.offset_ms = 0;  // overwritten from document on save
+  to_save.resume_chart_index = 0;
+  to_save.resume_tick = 1920;
 
   const auto save = engine.save_project_to_file(temp_project.string(), to_save);
   CHECK_EQ(static_cast<int>(save.error), static_cast<int>(SerializeError::Ok));
@@ -2569,6 +2575,9 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
   CHECK_EQ(reloaded_meta.chart_path(), std::string("notes.wdschart"));
   CHECK_EQ(reloaded_meta.music_path, std::string("bgm/track.ogg"));
   CHECK(reloaded_meta.jacket_path.empty());
+  CHECK_EQ(reloaded_meta.resume_chart_index, 0);
+  CHECK_EQ(reloaded_meta.resume_tick, 1920);
+  CHECK(reloaded_meta.has_resume_position());
 
   ChartEditorEngine opened;
   WdsProject opened_meta;
@@ -2594,12 +2603,16 @@ void test_wdsproject_format_roundtrip_and_relative_paths() {
     CHECK(contents.find("CHART_DELAY_MS") == std::string::npos);
   }
 
-  // Saved .wdsproject uses CHART_DELAY_MS (legacy OFFSET_MS still loads).
+  // Saved .wdsproject uses CHART_DELAY_MS (legacy OFFSET_MS still loads) and
+  // carries the v3 resume pair.
   {
     std::ifstream project_file(temp_project.string(), std::ios::binary);
     std::string contents((std::istreambuf_iterator<char>(project_file)),
                          std::istreambuf_iterator<char>());
+    CHECK(contents.find("WDSPROJECT 3") != std::string::npos);
     CHECK(contents.find("CHART_DELAY_MS") != std::string::npos);
+    CHECK(contents.find("RESUME_CHART 0") != std::string::npos);
+    CHECK(contents.find("RESUME_TICK 1920") != std::string::npos);
   }
 
   const fs::path temp_jacket = temp_dir / "jacket.png";
@@ -3756,6 +3769,8 @@ void test_history_hold_eighths_and_project_v2() {
   project.music_path = "music.ogg";
   project.chart_paths = {"a.wdschart", "b.wdschart"};
   project.active_chart_index = 1;
+  project.resume_chart_index = 0;
+  project.resume_tick = 240;
   CHECK_EQ(static_cast<int>(ProjectSerializer::save_to_file(project, path.string()).error),
            static_cast<int>(SerializeError::Ok));
   WdsProject loaded;
@@ -3763,6 +3778,29 @@ void test_history_hold_eighths_and_project_v2() {
            static_cast<int>(SerializeError::Ok));
   CHECK_EQ(static_cast<int32_t>(loaded.chart_paths.size()), 2);
   CHECK_EQ(loaded.chart_path(), std::string("b.wdschart"));
+  CHECK(loaded.has_resume_position());
+  CHECK_EQ(loaded.resume_chart_index, 0);
+  CHECK_EQ(loaded.resume_tick, 240);
+
+  // A resume index that no longer names a chart is tolerated (file may have
+  // been edited/reordered): open falls back to the first chart's start.
+  {
+    std::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
+    out << "WDSPROJECT 3\n"
+           "MUSIC music.ogg\n"
+           "CHART_DELAY_MS 0\n"
+           "ACTIVE_CHART 1\n"
+           "RESUME_CHART 9\n"
+           "RESUME_TICK 240\n"
+           "CHART a.wdschart\n"
+           "CHART b.wdschart\n"
+           "END\n";
+  }
+  WdsProject stale_resume;
+  CHECK_EQ(static_cast<int>(ProjectSerializer::load_from_file(path.string(), stale_resume).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK(!stale_resume.has_resume_position());
+  CHECK_EQ(stale_resume.resume_chart_index, 9);
 }
 
 }  // namespace

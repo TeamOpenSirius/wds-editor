@@ -114,8 +114,10 @@ class AudioEngine {
   // earlier than audible). Defers to the gate until the two agree.
   void reconcile_hold_looping(bool desired_by_clock);
   bool hold_looping() const noexcept;
-  // Diagnostics/tests: current Hold stream handle (0 when none).
+  // Diagnostics/tests: current Hold stream handle (0 when none). Silent Hold is
+  // unplugged from the mixer so HoldOn can StreamAddChannel like a one-shot.
   unsigned long long hold_channel_handle() const noexcept;
+  unsigned long long mixer_handle() const noexcept;
   // Stop currently audible sample voices (one-shots / Hold). Pending music
   // syncs are cleared via clear_scheduled_sfx.
   void stop_playing_sfx();
@@ -185,7 +187,7 @@ class AudioEngine {
   void retire_hold_channel();              // control thread: free stream + sync
   void park_hold_channel();                // control thread: silence, keep stream
   void apply_hold_gate(bool on);           // BASS mixer thread (MIXTIME gate)
-  void apply_hold_pause_state();           // either thread
+  void apply_hold_mix_presence();          // control thread: plug / unplug Hold
   void load_hold_loop_sidecar(const std::string& effects_directory);
   bool resolve_hold_loop_bytes();
   void cache_music_format();

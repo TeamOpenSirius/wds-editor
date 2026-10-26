@@ -328,12 +328,14 @@ struct AudioEngine::Impl {
   std::array<HSAMPLE, static_cast<size_t>(HitSfxClip::Count)> samples{};
   std::array<bool, static_cast<size_t>(HitSfxClip::Count)> sample_ok{};
   // Hold stream ownership (see "Hold threading" above set_hold_looping):
-  //  * hold_ch / hold_loop_sync are created, replaced and freed ONLY by the
-  //    control (GUI) thread. hold_ch is atomic because MIXTIME gate callbacks
-  //    read it; it is published after the stream and its loop sync exist and is
-  //    zeroed before they are torn down.
+  //  * hold_ch / hold_loop_sync are created, Removed, and freed ONLY by the
+  //    control (GUI) thread. The mixer thread may StreamAddChannel the published
+  //    handle. hold_ch is atomic because MIXTIME gate callbacks read it; it is
+  //    published after the stream and its loop sync exist and is zeroed before
+  //    they are torn down.
   //  * hold_state is the only value both sides write; every writer uses CAS and
-  //    then re-applies the pause flag from the latest state.
+  //    then applies mixer presence from the latest state (control: Add/Remove;
+  //    mixer thread: Add or PAUSE+vol, never Remove).
   //  * hold_custom_loop / hold_loop_*_bytes are written during initialize()
   //    before any stream or sync exists and are read-only afterwards.
   std::atomic<HCHANNEL> hold_ch{0};
@@ -1601,10 +1603,10 @@ void AudioEngine::remove_mixer_sfx_sources() {
   if (impl_ == nullptr || impl_->mixer == 0) {
     return;
   }
-  // The Hold stream stays in the mixer (paused) across seek/pause/rate change:
-  // it is re-armed by position reset, so there is nothing to recreate or leak,
-  // and it exists before any HoldOn gate can fire. It is freed by
-  // retire_hold_channel (shutdown / error paths) only.
+  // The Hold stream stays allocated (unplugged while silent) across
+  // seek/pause/rate change: it is re-armed by position reset + AddChannel, so
+  // there is nothing to recreate or leak, and it exists before any HoldOn gate
+  // can fire. It is freed by retire_hold_channel (shutdown / error paths) only.
   park_hold_channel();
   const HCHANNEL hold = impl_->hold_ch.load(std::memory_order_acquire);
   const DWORD count = BASS_Mixer_StreamGetChannels(impl_->mixer, nullptr, 0);
@@ -1664,8 +1666,8 @@ void AudioEngine::handle_sfx_sync(unsigned long long sync_handle, void* payload,
     }
     if (won_play && !shutting_down_.load(std::memory_order_seq_cst) &&
         std::atomic_load(&impl_).get() == impl.get()) {
-      // Runs on the BASS mixer thread (MIXTIME). Hold gates touch only the
-      // already-published Hold channel; structural Hold work stays on the control thread.
+      // Runs on the BASS mixer thread (MIXTIME). HoldOn AddChannel-s the
+      // already-published Hold stream (same as one-shots). HoldOff only vol/PAUSE.
       fire_sync_action(slot->kind, clip, /*on_mixer_thread=*/true);
     }
   }
@@ -1767,6 +1769,10 @@ bool AudioEngine::hold_looping() const noexcept {
 
 unsigned long long AudioEngine::hold_channel_handle() const noexcept {
   return impl_ != nullptr ? impl_->hold_ch.load(std::memory_order_acquire) : 0;
+}
+
+unsigned long long AudioEngine::mixer_handle() const noexcept {
+  return impl_ != nullptr ? impl_->mixer : 0;
 }
 
 bool AudioEngine::schedule_music_sync(SfxSyncKind kind, HitSfxClip clip,
@@ -2135,13 +2141,18 @@ bool AudioEngine::resolve_hold_loop_bytes() {
 //  * BASS mixer thread: MIXTIME HoldOn/HoldOff gates (apply_hold_gate) and the
 //    persistent region-loop sync (hold_region_sync_proc).
 //
-// Ownership: the control thread alone creates/adds/removes/frees the Hold
+// Ownership: the control thread alone creates, Removes, and frees the Hold
 // stream and arms/removes its loop sync. The stream is created (warmup,
 // schedule_hold_gate) and published in hold_ch BEFORE any gate that could use it
-// is armed; it stays in the mixer, paused, across seek/pause/rate change. A gate
-// callback only does thread-safe BASS calls on the published channel
-// (BASS_ChannelSetPosition, BASS_Mixer_ChannelFlags PAUSE) and updates the atomic
-// hold_state; it never creates, frees, or re-arms anything and does not log.
+// is armed; it stays allocated across seek/pause/rate change but is unplugged
+// while silent. A gate callback never creates, frees, Removes, or re-arms the
+// loop sync, and does not log. HoldOn StreamAddChannel-s the published stream
+// into the current mix the same way one-shots do (mix_sfx_on_mixer from
+// MIXTIME). ChannelFlags(PAUSE) alone is not used to start: BASS applies
+// source-flag changes on the next mixer block, which made Hold start and end
+// later than Perfect / tail hits. ChannelRemove from a MIXTIME SYNCPROC waits
+// for the current mix block and deadlocks, so HoldOff only vol=0 + PAUSE;
+// the control thread unplugs afterwards.
 //
 // BASS semantics relied on (bass.h/bassmix.h are silent; from the BASS docs):
 //  * BASS API calls are thread-safe and may be made from a SYNCPROC; a call with
@@ -2157,6 +2168,8 @@ bool AudioEngine::resolve_hold_loop_bytes() {
 //  * BASS_Mixer_ChannelRemove does not document freeing the source, and
 //    BASS_STREAM_AUTOFREE on a mixer source means "free when it ends"; sources
 //    are freed explicitly with BASS_StreamFree.
+//  * StreamAddChannel from a mixtime SYNCPROC on music plugs the source into the
+//    mix at the synced music byte (same path as one-shots).
 //
 // Mix time vs heard time: a gate fires when the mixer decodes the music byte,
 // ahead of what is audible by the device buffer. Gates therefore mark
@@ -2164,10 +2177,9 @@ bool AudioEngine::resolve_hold_loop_bytes() {
 // stands down until the heard clock agrees, so the two writers do not undo each
 // other (HoldOn switched straight back off / HoldOff immediately restarted).
 
-void AudioEngine::apply_hold_pause_state() {
-  // Safe from either thread. Every writer updates hold_state first and calls
-  // this afterwards; re-checking the state makes the last writer's value win
-  // even when the GUI and a gate interleave.
+void AudioEngine::apply_hold_mix_presence() {
+  // Control thread only. May Remove: waiting for the current mix block is safe
+  // here because this is not a MIXTIME SYNCPROC.
   const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
   if (!impl || impl->mixer == 0) {
     return;
@@ -2178,8 +2190,22 @@ void AudioEngine::apply_hold_pause_state() {
     if (ch == 0) {
       return;
     }
-    BASS_Mixer_ChannelFlags(ch, (state & kHoldPlaying) != 0 ? 0 : BASS_MIXER_CHAN_PAUSE,
-                            BASS_MIXER_CHAN_PAUSE);
+    const bool want_play = (state & kHoldPlaying) != 0;
+    const bool in_mixer = BASS_Mixer_ChannelGetMixer(ch) == impl->mixer;
+    if (want_play) {
+      BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+      if (in_mixer) {
+        const DWORD flags = BASS_Mixer_ChannelFlags(ch, 0, 0);
+        if ((flags & BASS_MIXER_CHAN_PAUSE) != 0) {
+          BASS_Mixer_ChannelRemove(ch);
+          (void)BASS_Mixer_StreamAddChannel(impl->mixer, ch, BASS_MIXER_CHAN_NORAMPIN);
+        }
+      } else if (!BASS_Mixer_StreamAddChannel(impl->mixer, ch, BASS_MIXER_CHAN_NORAMPIN)) {
+        BASS_Mixer_ChannelFlags(ch, 0, BASS_MIXER_CHAN_PAUSE);
+      }
+    } else if (in_mixer) {
+      BASS_Mixer_ChannelRemove(ch);
+    }
     if (impl->hold_state.load(std::memory_order_seq_cst) == state) {
       return;
     }
@@ -2187,7 +2213,7 @@ void AudioEngine::apply_hold_pause_state() {
 }
 
 void AudioEngine::apply_hold_gate(bool on) {
-  // BASS mixer thread (MIXTIME). No allocation, no logging, no structural change.
+  // BASS mixer thread (MIXTIME). No allocation, no logging, no create/free/Remove.
   const std::shared_ptr<Impl> impl = std::atomic_load(&impl_);
   if (!impl || impl->mixer == 0) {
     return;
@@ -2198,14 +2224,25 @@ void AudioEngine::apply_hold_gate(bool on) {
   }
   std::uint8_t state = impl->hold_state.load(std::memory_order_seq_cst);
   if (on && (state & kHoldPlaying) == 0) {
-    // Rewind while still paused so the first mixed block starts at the attack.
     BASS_ChannelSetPosition(ch, 0, BASS_POS_BYTE);
   }
   const std::uint8_t next = on ? static_cast<std::uint8_t>(kHoldPlaying | kHoldGateOwned)
                                : kHoldGateOwned;
   while (!impl->hold_state.compare_exchange_weak(state, next, std::memory_order_seq_cst)) {
   }
-  apply_hold_pause_state();
+  if (on) {
+    BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+    if (BASS_Mixer_ChannelGetMixer(ch) != impl->mixer) {
+      if (!BASS_Mixer_StreamAddChannel(impl->mixer, ch, BASS_MIXER_CHAN_NORAMPIN)) {
+        BASS_Mixer_ChannelFlags(ch, 0, BASS_MIXER_CHAN_PAUSE);
+      }
+    } else {
+      BASS_Mixer_ChannelFlags(ch, 0, BASS_MIXER_CHAN_PAUSE);
+    }
+  } else {
+    BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, 0.0f);
+    BASS_Mixer_ChannelFlags(ch, BASS_MIXER_CHAN_PAUSE, BASS_MIXER_CHAN_PAUSE);
+  }
 }
 
 void AudioEngine::install_hold_loop_sync(std::uint32_t ch) {
@@ -2259,12 +2296,12 @@ void AudioEngine::park_hold_channel() {
     }
     return;
   }
-  apply_hold_pause_state();
+  apply_hold_mix_presence();
   // Gates are cleared before this runs, but one that already won its claim may
-  // still be mid-callback and unpause after us. Drain it, then pause again.
+  // still be mid-callback and plug after us. Drain it, then unplug again.
   impl_->wait_sync_in_flight("hold-park");
   impl_->hold_state.store(0, std::memory_order_seq_cst);
-  apply_hold_pause_state();
+  apply_hold_mix_presence();
 }
 
 void AudioEngine::warmup_hold_channel() {
@@ -2283,13 +2320,8 @@ void AudioEngine::warmup_hold_channel() {
       return;
     }
     BASS_ChannelSetAttribute(ch, BASS_ATTRIB_VOL, effective_sfx_volume());
+    // Stay unplugged while silent so HoldOn can StreamAddChannel like a one-shot.
     // No BASS_STREAM_AUTOFREE: this stream is owned and freed by retire_hold_channel.
-    if (!BASS_Mixer_StreamAddChannel(impl_->mixer, ch,
-                                     BASS_MIXER_CHAN_PAUSE | BASS_MIXER_CHAN_NORAMPIN)) {
-      WDS_LOG("AudioEngine: Mixer warmup Hold failed code=%d\n", BASS_ErrorGetCode());
-      BASS_StreamFree(ch);
-      return;
-    }
     impl_->hold_state.store(0, std::memory_order_seq_cst);
     install_hold_loop_sync(ch);
     impl_->hold_ch.store(ch, std::memory_order_release);  // publish last
@@ -2321,6 +2353,9 @@ void AudioEngine::set_hold_looping(bool enabled) {
   if (enabled == playing) {
     impl_->hold_state.fetch_and(static_cast<std::uint8_t>(~kHoldGateOwned),
                                 std::memory_order_seq_cst);
+    if (!enabled && impl_->mixer != 0) {
+      apply_hold_mix_presence();
+    }
     return;
   }
   if (enabled) {
@@ -2333,7 +2368,7 @@ void AudioEngine::set_hold_looping(bool enabled) {
     BASS_ChannelSetPosition(ch, 0, BASS_POS_BYTE);
     if (impl_->mixer != 0) {
       impl_->hold_state.store(kHoldPlaying, std::memory_order_seq_cst);
-      apply_hold_pause_state();
+      apply_hold_mix_presence();
       return;
     }
     if (!BASS_ChannelPlay(ch, TRUE)) {
@@ -2352,7 +2387,7 @@ void AudioEngine::set_hold_looping(bool enabled) {
   }
   impl_->hold_state.store(0, std::memory_order_seq_cst);
   if (impl_->mixer != 0) {
-    apply_hold_pause_state();
+    apply_hold_mix_presence();
   } else {
     const HCHANNEL ch = impl_->hold_ch.load(std::memory_order_acquire);
     if (ch != 0) {
@@ -2378,6 +2413,9 @@ void AudioEngine::reconcile_hold_looping(bool desired_by_clock) {
       }
       const std::uint8_t cleared = static_cast<std::uint8_t>(state & ~kHoldGateOwned);
       if (impl_->hold_state.compare_exchange_weak(state, cleared, std::memory_order_seq_cst)) {
+        if (!playing && impl_->mixer != 0) {
+          apply_hold_mix_presence();
+        }
         return;
       }
       continue;

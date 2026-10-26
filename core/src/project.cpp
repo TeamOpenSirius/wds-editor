@@ -65,6 +65,11 @@ std::string& WdsProject::chart_path() {
   return chart_paths[static_cast<size_t>(active_chart_index)];
 }
 
+bool WdsProject::has_resume_position() const noexcept {
+  return resume_chart_index >= 0 &&
+         resume_chart_index < static_cast<int32_t>(chart_paths.size());
+}
+
 std::string ProjectSerializer::project_directory(const std::string& project_file_path) {
   const fs::path parent = path_from_utf8(project_file_path).parent_path();
   if (parent.empty()) {
@@ -127,6 +132,13 @@ SerializeResult ProjectSerializer::save_to_file(const WdsProject& project,
                              : std::clamp(project.active_chart_index, 0,
                                           static_cast<int32_t>(project.chart_paths.size()) - 1);
   ss << "ACTIVE_CHART " << active << '\n';
+  // Legacy callers leave resume_chart_index at -1; a resume entry that does not
+  // name an existing chart would only be ignored on open, so write the active
+  // chart instead and keep the pair valid.
+  const int32_t resume =
+      project.has_resume_position() ? project.resume_chart_index : active;
+  ss << "RESUME_CHART " << resume << '\n';
+  ss << "RESUME_TICK " << std::max<int32_t>(0, project.resume_tick) << '\n';
   for (const auto& chart_path : project.chart_paths) ss << "CHART " << chart_path << '\n';
   ss << "END\n";
   return write_text_atomic(path, ss.str());
@@ -179,6 +191,14 @@ SerializeResult ProjectSerializer::load_from_file(const std::string& path,
       file >> project.active_chart_index;
       if (!file) return {SerializeError::ParseError, "malformed ACTIVE_CHART"};
       read_rest_of_line(file);
+    } else if (key == "RESUME_CHART") {
+      file >> project.resume_chart_index;
+      if (!file) return {SerializeError::ParseError, "malformed RESUME_CHART"};
+      read_rest_of_line(file);
+    } else if (key == "RESUME_TICK") {
+      file >> project.resume_tick;
+      if (!file) return {SerializeError::ParseError, "malformed RESUME_TICK"};
+      read_rest_of_line(file);
     } else if (key == "CHART") {
       project.chart_paths.push_back(read_rest_of_line(file));
     } else if (key == "END") {
@@ -201,6 +221,11 @@ SerializeResult ProjectSerializer::load_from_file(const std::string& path,
       project.active_chart_index >= static_cast<int32_t>(project.chart_paths.size())) {
     return {SerializeError::ParseError, "ACTIVE_CHART is out of range"};
   }
+  // Resume position is optional session state (absent on v1/v2 files). Keep an
+  // out-of-range index as "no position" instead of rejecting the project; the
+  // open path then falls back to the first chart's start.
+  if (project.resume_chart_index < 0) project.resume_chart_index = -1;
+  if (project.resume_tick < 0) project.resume_tick = 0;
 
   out_project = std::move(project);
   return {SerializeError::Ok, {}};

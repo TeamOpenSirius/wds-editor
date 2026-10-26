@@ -102,16 +102,20 @@ WDS Editor 拥有自己的可编辑工程与谱面格式，同时兼容已有 WD
 概念格式：
 
 ```text
-WDSPROJECT 2
+WDSPROJECT 3
 MUSIC music.ogg
 CHART_DELAY_MS 3019
 ACTIVE_CHART 0
+RESUME_CHART 0
+RESUME_TICK 1920
 CHART chart-a.wdschart
 CHART chart-b.wdschart
 END
 ```
 
 工程在可能的情况下使用相对路径，因此整个工程目录可以比较方便地一起移动。
+
+`RESUME_CHART` / `RESUME_TICK` 记录上次正常退出时正在编辑的谱面与 tick 位置；再次打开工程会直接跳转回去。旧工程没有这两个条目时会进入第一张谱面的开头。
 
 ### `.wdschart`
 

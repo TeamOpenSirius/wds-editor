@@ -578,6 +578,12 @@ struct AliveCapTls {
   std::vector<size_t> mine;
   std::vector<Birth> cand;
   std::vector<uint8_t> ref_keep;
+  // ChildCap CSR buckets: refs grouped by local_child, output order = ri ascending
+  // (same as the old per-child rescan). off has count+1 entries, cur is the
+  // placement cursor, ref holds the bucketed ri values.
+  std::vector<size_t> bucket_off;
+  std::vector<size_t> bucket_cur;
+  std::vector<size_t> bucket_ref;
 };
 thread_local AliveCapTls g_alive_cap_tls;
 
@@ -4361,17 +4367,43 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
       SplitWallScope wall_ccap(SplitWallSec::ChildCap);
       auto& ref_keep = g_alive_cap_tls.ref_keep;
       ref_keep.assign(refs.size(), 1);
+      // Bucket refs by local_child once per frame (counting sort / CSR): count,
+      // prefix-sum, then place ri in ascending order. Replaces the per-child
+      // rescan of all refs (O(count * refs)) with O(refs + count); the bucket
+      // content order is exactly the old ri-ascending `mine` order.
+      auto& bucket_off = g_alive_cap_tls.bucket_off;
+      auto& bucket_cur = g_alive_cap_tls.bucket_cur;
+      auto& bucket_ref = g_alive_cap_tls.bucket_ref;
+      const size_t bucket_n = static_cast<size_t>(count);
+      bucket_off.assign(bucket_n + 1, 0);
+      for (size_t ri = 0; ri < refs.size(); ++ri) {
+        const ChildRef& r = refs[ri];
+        const uint32_t lc = events[r.ev].slots[r.sl].local_child;
+        // Refs whose local_child is outside [0, count) matched no ci before,
+        // so they stay out of every bucket (and therefore off ref_keep).
+        if (lc < count) {
+          ++bucket_off[static_cast<size_t>(lc) + 1];
+        }
+      }
+      for (size_t bi = 0; bi < bucket_n; ++bi) {
+        bucket_off[bi + 1] += bucket_off[bi];
+      }
+      bucket_cur.assign(bucket_off.begin(), bucket_off.end());
+      bucket_ref.resize(refs.size());
+      for (size_t ri = 0; ri < refs.size(); ++ri) {
+        const ChildRef& r = refs[ri];
+        const uint32_t lc = events[r.ev].slots[r.sl].local_child;
+        if (lc < count) {
+          bucket_ref[bucket_cur[lc]++] = ri;
+        }
+      }
       for (uint16_t ci = 0; ci < count; ++ci) {
         const SplitEffectParticle& child = particles[ci];
         const int cap = child.max_particles > 0 ? static_cast<int>(child.max_particles)
                                                 : kSplitEffectParticlePool;
         auto& mine = g_alive_cap_tls.mine;
-        mine.clear();
-        for (size_t ri = 0; ri < refs.size(); ++ri) {
-          if (events[refs[ri].ev].slots[refs[ri].sl].local_child == ci) {
-            mine.push_back(ri);
-          }
-        }
+        mine.assign(bucket_ref.begin() + bucket_off[ci],
+                    bucket_ref.begin() + bucket_off[ci + 1]);
         if (static_cast<int>(mine.size()) <= cap) {
           continue;
         }

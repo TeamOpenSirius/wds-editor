@@ -1081,6 +1081,9 @@ void EditorMainWindow::bind_ui_manager(UiManager* manager) {
   ui_manager_->session().set_backup_sink([this](std::vector<ChartBackupItem> items) {
     enqueue_backup_write(ChartBackupKind::Manual, std::move(items));
   });
+  // Quit from the macOS application menu can terminate without a closeEvent.
+  connect(qApp, &QCoreApplication::aboutToQuit, this,
+          [this] { save_resume_position_on_exit(); });
   connect(open_action_, &QAction::triggered, this, [this] {
     journal_menu_action("menu.open");
     open_project();
@@ -1675,6 +1678,7 @@ void EditorMainWindow::check_chart() {
 void EditorMainWindow::discard_unsaved_on_close() {
   force_close_ = true;
   persist_chrome_layout_ = false;
+  persist_resume_position_ = false;
 }
 
 void EditorMainWindow::set_viewport_windows(QWindow* preview, QWindow* editor) {
@@ -2014,7 +2018,22 @@ void EditorMainWindow::closeEvent(QCloseEvent* event) {
   save_chrome_layout();
   ++open_generation_;
   wait_open_project_watchers();
+  save_resume_position_on_exit();
   event->accept();
+}
+
+void EditorMainWindow::save_resume_position_on_exit() {
+  // Normal exit always records the chart + tick being edited so the next open
+  // jumps straight back. Skipped for automation closes (smoke tests,
+  // --quit-after) that must not rewrite the user's project entry.
+  if (!persist_resume_position_ || resume_position_saved_ || ui_manager_ == nullptr) return;
+  resume_position_saved_ = true;
+  auto& session = ui_manager_->session();
+  if (session.project_path().empty() || session.read_only()) return;
+  if (!session.save_resume_position()) {
+    WDS_LOG("exit: failed to save resume position for %s\n",
+            session.project_path().c_str());
+  }
 }
 
 void EditorMainWindow::hideEvent(QHideEvent* event) {
