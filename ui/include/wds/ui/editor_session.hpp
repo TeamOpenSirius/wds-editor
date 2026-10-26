@@ -33,6 +33,8 @@ struct PreparedWdsProject {
   std::string error;
   std::size_t active_chart_index = 0;
   int64_t offset_ms = 0;
+  // Tick to restore on the activated chart; 0 = that chart's start.
+  int32_t resume_tick = 0;
 
   bool valid() const noexcept { return error.empty() && !charts.empty(); }
 };
@@ -100,6 +102,12 @@ class EditorSession {
   bool open_wdsproject(const std::string& path);
   bool save();
   bool save_as(const std::string& path);
+  // Current playhead as a chart tick (clamped to >= 0).
+  int32_t edit_tick() const;
+  // Normal-exit hook: rewrite only RESUME_CHART / RESUME_TICK in the bound
+  // project file, leaving chart files and other project fields untouched.
+  // No-op (false) when there is no bound project or the project is read-only.
+  bool save_resume_position();
   // Auto-detect: music_config.csv pack / .sus / official CSV. All imports are read-only
   // unless SUS auto-convert is enabled (in-memory → editable .wdschart, unbound path).
   bool import_official(const std::string& chart_path, const std::string& music_config_path = {});

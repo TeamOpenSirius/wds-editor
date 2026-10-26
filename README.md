@@ -101,16 +101,20 @@ A native project references one song and one or more charts.
 Conceptually:
 
 ```text
-WDSPROJECT 2
+WDSPROJECT 3
 MUSIC music.ogg
 CHART_DELAY_MS 3019
 ACTIVE_CHART 0
+RESUME_CHART 0
+RESUME_TICK 1920
 CHART chart-a.wdschart
 CHART chart-b.wdschart
 END
 ```
 
 Paths are stored relative to the project file when possible, making projects easier to move as a directory.
+
+`RESUME_CHART` / `RESUME_TICK` record the chart and tick the editor was on when it last exited normally; opening the project jumps straight back there. Older projects without these keys open at the start of their first chart.
 
 ### Native `.wdschart`
 

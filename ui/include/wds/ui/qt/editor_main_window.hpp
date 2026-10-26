@@ -114,6 +114,9 @@ class EditorMainWindow final : public QMainWindow {
   void fire_auto_backup();
   void enqueue_backup_write(ChartBackupKind kind, std::vector<ChartBackupItem> items);
   void save_project_then(std::function<void()> done);
+  // Normal-exit hook: writes RESUME_CHART / RESUME_TICK once. Reached both from
+  // closeEvent (last window) and aboutToQuit (macOS Cmd+Q, which can bypass it).
+  void save_resume_position_on_exit();
   QString pick_wdsproject_save_path(QWidget* parent);
   void start_busy_job();
   void track_open_watcher(QObject* watcher);
@@ -181,6 +184,9 @@ class EditorMainWindow final : public QMainWindow {
   std::vector<QWidget*> concealed_floating_chrome_;
   bool chrome_revealed_ = false;
   bool persist_chrome_layout_ = true;
+  // Automation closes must not overwrite the user's project resume position.
+  bool persist_resume_position_ = true;
+  bool resume_position_saved_ = false;
   bool native_resizing_ = false;
   std::uint8_t click_record_held_ = 0;
 };

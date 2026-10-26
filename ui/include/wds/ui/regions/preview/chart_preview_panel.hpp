@@ -112,6 +112,8 @@ class ChartPreviewPanel {
   bool want_spectrogram() const noexcept { return want_spectrogram_; }
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
   void reset_playback();
+  // Pause and seek transport + engine to a saved position (project resume).
+  void restore_playback_position(int64_t time_ms);
   // Join speculative collect, then queue a user seek (scrub / jump / CLI).
   void request_seek_ms(int64_t time_ms);
   // Document-function high-water request. fill_now (chart load / new project)

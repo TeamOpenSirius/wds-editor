@@ -7,6 +7,7 @@
 #include "wds/ui/toolbar_curve_selection.hpp"
 
 #include <wds/core/chart_serializer.hpp>
+#include <wds/core/project.hpp>
 
 #include <wds/interaction/events.hpp>
 #include <wds/interaction/font_atlas.hpp>
@@ -26,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -872,6 +874,73 @@ void test_auto_backup_normalizes_ids_without_mutating_session() {
   fs::remove_all(dir);
 }
 
+void test_project_resume_position_roundtrip_and_legacy_fallback() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_resume_position" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+
+  int32_t expected_tick = 0;
+  {
+    wds::ui::ChartPreviewPanel preview;
+    wds::ui::EditorSession session(preview);
+    CHECK(session.create_project(project.string()));
+    CHECK(session.add_chart());
+    CHECK(session.add_chart());
+    CHECK_EQ(session.active_chart_index(), 2u);
+    session.engine().seek(1500);
+    expected_tick = wds::chart_editor::milliseconds_to_tick(
+        1500, session.engine().document().timing());
+    CHECK(expected_tick > 0);
+    CHECK_EQ(session.edit_tick(), expected_tick);
+    // Normal-exit write: only the resume pair changes (chart files untouched).
+    CHECK(session.save_resume_position());
+
+    wds::chart_editor::WdsProject disk;
+    CHECK_EQ(static_cast<int>(
+                 wds::chart_editor::ProjectSerializer::load_from_file(project.string(), disk)
+                     .error),
+             static_cast<int>(wds::chart_editor::SerializeError::Ok));
+    CHECK_EQ(disk.resume_chart_index, 2);
+    CHECK_EQ(disk.resume_tick, expected_tick);
+  }
+
+  // Opening the project restores both the chart and the tick.
+  {
+    wds::ui::PreparedWdsProject prepared =
+        wds::ui::EditorSession::prepare_wdsproject(project.string());
+    CHECK(prepared.valid());
+    CHECK_EQ(prepared.active_chart_index, 2u);
+    CHECK_EQ(prepared.resume_tick, expected_tick);
+  }
+
+  // Downgrade to a v2-style file: no RESUME_* keys, ACTIVE_CHART still 1.
+  {
+    std::istringstream in(read_all(project));
+    std::string line;
+    std::string legacy;
+    while (std::getline(in, line)) {
+      if (line.rfind("RESUME_", 0) == 0) continue;
+      if (line.rfind("ACTIVE_CHART ", 0) == 0) line = "ACTIVE_CHART 1";
+      if (line.rfind("WDSPROJECT ", 0) == 0) line = "WDSPROJECT 2";
+      legacy += line;
+      legacy += '\n';
+    }
+    std::ofstream out(project, std::ios::binary | std::ios::trunc);
+    out << legacy;
+  }
+  {
+    // Legacy fallback is the first chart's start, not ACTIVE_CHART.
+    wds::ui::PreparedWdsProject prepared =
+        wds::ui::EditorSession::prepare_wdsproject(project.string());
+    CHECK(prepared.valid());
+    CHECK_EQ(prepared.active_chart_index, 0u);
+    CHECK_EQ(prepared.resume_tick, 0);
+  }
+  fs::remove_all(dir);
+}
+
 void test_settings_section_order_includes_format() {
   CHECK_EQ(wds::ui::settings_section_count(), 10);
   CHECK(std::string(wds::ui::settings_section_journal_id(0)) == "settings.tab_appearance");
@@ -898,6 +967,7 @@ int main() {
   test_first_save_skips_manual_backup();
   test_second_save_manual_backup_keeps_previous_disk();
   test_auto_backup_normalizes_ids_without_mutating_session();
+  test_project_resume_position_roundtrip_and_legacy_fallback();
   test_settings_section_order_includes_format();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

@@ -652,8 +652,13 @@ PreparedWdsProject EditorSession::prepare_wdsproject(const std::string& path) {
     return prepared;
   }
 
-  prepared.active_chart_index = static_cast<std::size_t>(std::clamp(
-      project.active_chart_index, 0, static_cast<int32_t>(prepared.charts.size() - 1)));
+  // RESUME_CHART is written on normal exit. Legacy projects (v1/v2) carry no
+  // resume position, so land on the first chart's start; ACTIVE_CHART has no
+  // associated tick and is not a resume target.
+  const bool has_resume = project.has_resume_position();
+  prepared.active_chart_index =
+      has_resume ? static_cast<std::size_t>(project.resume_chart_index) : 0;
+  prepared.resume_tick = has_resume ? std::max<int32_t>(0, project.resume_tick) : 0;
   prepared.offset_ms = project.offset_ms;
   return prepared;
 }
@@ -709,7 +714,10 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
     status("打开失败：无法激活谱面", StatusLevel::Error);
     return false;
   }
-  preview_.reset_playback();
+  // Resume at the tick saved on exit. Legacy projects pass 0 → chart start.
+  const int64_t resume_ms = wds::chart_editor::tick_to_milliseconds(
+      prepared.resume_tick, engine().document().timing());
+  preview_.restore_playback_position(resume_ms);
   status("已打开工程：" + project_path_ + music_note + jacket_note, StatusLevel::Info);
   notify_project_reloaded();
   publish_crash_context();
@@ -791,6 +799,8 @@ bool EditorSession::write_project_file(const std::string& project_path) {
   project.jacket_path = jacket_path_;
   project.offset_ms = offset_ms_;
   project.active_chart_index = static_cast<int32_t>(active_chart_index_);
+  project.resume_chart_index = static_cast<int32_t>(active_chart_index_);
+  project.resume_tick = edit_tick();
   project.chart_paths.clear();
   project.chart_paths.reserve(charts_.size());
   for (const auto& slot : charts_) {
@@ -872,6 +882,36 @@ bool EditorSession::save_as(const std::string& path) {
   }
   if (path.empty()) return false;
   return write_all_charts_and_project(path);
+}
+
+int32_t EditorSession::edit_tick() const {
+  if (charts_.empty()) return 0;
+  const int32_t tick = wds::chart_editor::milliseconds_to_tick(
+      engine().timeline_ms(), engine().document().timing());
+  return std::max<int32_t>(0, tick);
+}
+
+bool EditorSession::save_resume_position() {
+  if (read_only_ || project_path_.empty()) return false;
+  // Reload the on-disk project so a regular save that was discarded at exit
+  // cannot leak in-memory metadata; only the resume pair is replaced.
+  wds::chart_editor::WdsProject project;
+  if (!ok(wds::chart_editor::ProjectSerializer::load_from_file(project_path_, project))) {
+    return false;
+  }
+  int32_t chart = static_cast<int32_t>(active_chart_index_);
+  int32_t tick = edit_tick();
+  if (chart < 0 || chart >= static_cast<int32_t>(project.chart_paths.size())) {
+    // The active in-memory chart is not in the file (chart list changed without
+    // a successful project write). Fall back to what the file can represent.
+    chart = 0;
+    tick = 0;
+  }
+  project.resume_chart_index = chart;
+  project.resume_tick = tick;
+  // Stored paths are already relative to the project file; rewriting them as-is
+  // preserves the rest of the project entry.
+  return ok(wds::chart_editor::ProjectSerializer::save_to_file(project, project_path_));
 }
 
 bool EditorSession::import_official_pack(const std::string& music_config_path) {

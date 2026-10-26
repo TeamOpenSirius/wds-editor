@@ -1148,6 +1148,14 @@ void ChartPreviewPanel::reset_playback() {
   request_seek_ms(transport_.chart_start_ms());
 }
 
+void ChartPreviewPanel::restore_playback_position(int64_t time_ms) {
+  if (!ready_) {
+    return;
+  }
+  transport_.request_pause();
+  request_seek_ms(time_ms);
+}
+
 bool ChartPreviewPanel::load_chart(const std::string& chart_path,
                                    const std::string& music_config_path) {
   const auto result = engine_.load_official_from_file(chart_path, music_config_path);
