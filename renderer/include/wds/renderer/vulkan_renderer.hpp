@@ -875,7 +875,7 @@ class VulkanRenderer {
   // `plate_tex` buckets in early_additive use this pipeline; other Add textures stay
   // on textured_quad. No-op if the SPIR-V failed to load. Pulse world Y
   // (batched identity ObjectToWorld, live dump darkband-orig-v1) rides in
-  // vertex alpha as positionWS.y + 64 (syuriken.frag).
+  // vertex alpha as (positionWS.y + 64) * q; syuriken.frag divides by uvq.z.
   void set_syuriken_uniforms(float time_sec, TextureId plate_tex) noexcept;
   bool syuriken_ready() const noexcept;
 

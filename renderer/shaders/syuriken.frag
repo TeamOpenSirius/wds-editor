@@ -3,12 +3,15 @@
 // OpenWDS SplitEffectSyuriken.shader (Vulkan Universal Forward
 // path 777288701855927481 program 0). inner = uv.xxyx (iz on V, iw on U).
 //
-// Vertex colour: rgb = LineColor.rgb * LineColor.a, a = Unity world Y + 64
-// (kOfficialSyurikenPulseWorldYBias). Pulse is sin(positionWS.y - 20 t):
-// SpriteRenderer dynamic/sprite batching leaves ObjectToWorld identity
-// (live dump darkband-orig-v1; not the unbatched GPU-probe wys=13.49).
-// Blend is SrcAlpha One into a float target, so folding LineColor.a into
-// rgb leaves rgb * alpha unchanged.
+// Vertex colour: rgb = LineColor.rgb * LineColor.a,
+// a = (Unity world Y + 64) * q (kOfficialSyurikenPulseWorldYBias;
+// q = uvq.z, same Heckbert weight as UV). Pulse is
+// sin(positionWS.y - 20 t): SpriteRenderer dynamic/sprite batching leaves
+// ObjectToWorld identity (live dump darkband-orig-v1; not the unbatched
+// GPU-probe wys=13.49). Preview plates are 2D trapezoids + ortho MVP, so
+// raw worldY would interpolate screen-linear; divide by q to recover
+// Unity perspective-correct positionWS.y. Blend is SrcAlpha One into a
+// float target, so folding LineColor.a into rgb leaves rgb * alpha unchanged.
 
 layout(push_constant) uniform PushConstants {
   mat4 mvp;
@@ -41,7 +44,7 @@ void main() {
   float u = uv.x;
   float v = uv.y;
   float time_sec = pc.params.x;
-  float world_y = v_color.a - 64.0;
+  float world_y = v_color.a / max(v_uvq.z, 1e-6) - 64.0;
 
   float ox = hermite((u - 0.425000012) * 1.73913050);
   float oy = hermite((u - 0.574999988) * -1.73913050);
