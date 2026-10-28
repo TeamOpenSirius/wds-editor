@@ -622,16 +622,28 @@ SerializeResult OfficialChartFormat::serialize_chart(const NotationChart& chart,
       scratch_length = 0;
     } else if (is_flick_like(note.note_type)) {
       if (is_jump_scratch(gimmick)) {
-        scratch_length = note.scratch_length;
-      } else if (is_one_direction(gimmick)) {
-        scratch_length = note.scratch_length <= 0 ? 0 : 1;
-      } else if (note.scratch_length == 0) {
+        if (note.scratch_length == 0) {
+          // JumpScratch without a span is a bidirectional Flick: official GV 0
+          // would show one right-pointing full-note group.
+          gimmick = GimmickType::None;
+          scratch_length = 0;
+        } else {
+          scratch_length = note.scratch_length;
+        }
+      } else if (note.scratch_length != 0 || is_one_direction(gimmick)) {
+        // One-sided Flick: editor memory is None + ±width; an imported
+        // OneDirection row may still carry 0/1. Official OneDirection only
+        // paints one half-note arrow group, so a multi-lane note must go out as
+        // JumpScratch ±laneLength (see official_flick_direction_encoding).
+        // GV 0 without a span is official OneDirection left.
+        const bool left = note.scratch_length < 0 ||
+                          (note.scratch_length == 0 && is_one_direction(gimmick));
+        const auto encoded = official_flick_direction_encoding(left ? -1 : 1, note.width);
+        gimmick = encoded.gimmick;
+        scratch_length = encoded.scratch_length;
+      } else {
         gimmick = GimmickType::None;
         scratch_length = 0;
-      } else {
-        // Editor-internal / old-chart ±1 or ±width → official OneDirection 0/1.
-        gimmick = GimmickType::OneDirection;
-        scratch_length = note.scratch_length < 0 ? 0 : 1;
       }
     } else if (is_hold_chain_body(note.note_type)) {
       if (scratch_length == 0 && is_jump_scratch(gimmick)) {

@@ -53,10 +53,11 @@ int32_t split_color_slot(int32_t scratch_length, int32_t split_count,
 
 // Official FlickNoteObject / CSV rules (game memory, not editor notes):
 //   None            → both arrows (GimmickValue ignored)
-//   OneDirection    → 0 = left, 1 = right
-//   JumpScratch     → signed span; sign selects the side; laneCount = abs(GV)
+//   OneDirection    → 0 = left, 1 = right; only one half-note arrow group
+//   JumpScratch     → signed span; sign selects the side; laneCount = abs(GV);
+//                     one full-note arrow group
 // Editor-authored Flick stays None + 0/±width. official_chart maps official
-// OneDirection 0/1 ↔ that encoding on import/export; old None+nonzero is kept.
+// OneDirection 0/1 ↔ that encoding on import; old None+nonzero is kept.
 bool official_scratch_is_directional(GimmickType gimmick) noexcept;
 int32_t official_scratch_arrow_side_sign(GimmickType gimmick, int32_t gimmick_value) noexcept;
 int32_t official_scratch_arrow_lane_count(const NotationNote& note) noexcept;
@@ -65,6 +66,26 @@ int32_t official_scratch_arrow_lane_count(const NotationNote& note) noexcept;
 int32_t encode_flick_scratch_length(int32_t direction, int32_t width) noexcept;
 int32_t official_flick_scratch_length(int32_t scratch_length, int32_t width) noexcept;
 void sync_flick_scratch_length_for_width(NotationNote& note, int32_t previous_width) noexcept;
+
+// Official CSV encoding for a one-sided Flick (editor memory is None + ±width).
+// FlickNoteObject.Set picks the arrow groups from GimmickType, then SetActive
+// fills tables from Width via official_scratch_arrow_count() (arrow sprite
+// 68x112 @ 100 ppu, interval 0.35/0.36, group scale 0.7):
+//   None          both halves (GimmickValue ignored)
+//   OneDirection  one half group anchored at that note edge → covers half the note
+//   JumpScratch   one group of jump count ≈ 2 × flick count, offset
+//                 interval·count·0.7/2 → covers the full note width
+// So a multi-lane one-sided Flick must be JumpScratch with |GValue| = laneLength
+// (official StandardCharts/AnotherNotations: every one-sided Flick row is
+// JumpScratch ±laneLength; none use OneDirection). A 1-lane note is already
+// covered by the half group and the Width-1 jump group spans ~1.86 lanes, so
+// width 1 keeps OneDirection 0/1.
+struct OfficialFlickDirection {
+  GimmickType gimmick = GimmickType::None;
+  int32_t scratch_length = 0;
+};
+OfficialFlickDirection official_flick_direction_encoding(int32_t direction,
+                                                         int32_t width) noexcept;
 
 // Sirius ScratchHoldEnd / JumpScratch end span from scratchLength (signed):
 //   sl == 0 → [lane, endLane] (bidirectional arrows)

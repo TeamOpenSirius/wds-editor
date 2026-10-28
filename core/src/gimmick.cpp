@@ -79,6 +79,22 @@ void sync_flick_scratch_length_for_width(NotationNote& note, int32_t previous_wi
   }
 }
 
+OfficialFlickDirection official_flick_direction_encoding(int32_t direction,
+                                                         int32_t width) noexcept {
+  const int32_t lanes = std::max(1, width);
+  const bool left = direction < 0;
+  if (lanes <= 1) {
+    // Single lane: the OneDirection half group already spans the note
+    // (count 3, edge offset width/2 - 0.145), while the jump group for Width 1
+    // is 6 arrows over ~1.86 lanes and spills into neighbouring lanes.
+    return {GimmickType::OneDirection, left ? 0 : 1};
+  }
+  // Multi-lane: JumpScratch is the official one-sided span. GimmickValue
+  // magnitude is the arrow lane count (= laneLength in every official chart);
+  // sign selects the side (negative = left).
+  return {GimmickType::JumpScratch, left ? -lanes : lanes};
+}
+
 bool is_one_direction(GimmickType gimmick) noexcept {
   return gimmick == GimmickType::OneDirection;
 }
