@@ -937,32 +937,43 @@ std::pair<const NotationNote*, const NotationNote*> ChartEditPanel::notes_near_y
 std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2 point) const {
   sync_viewport();
   const NotationNote* best = nullptr;
+  bool best_selected = false;
   float best_dist = 1e9f;
   int best_priority = 0;  // higher wins ties (prefer JumpScratch end / head over body)
   int64_t best_start = 0;
   int32_t best_type = 0;
 
   auto consider = [&](float dist, int priority, const NotationNote& note) {
-    // Keep the selected segment as the owner of an overlapping ScratchHold
-    // joint, so the previous tail and next head can be adjusted independently.
-    if (selected_.count(note.id) != 0) priority += 8;
+    const bool is_selected = selected_.count(note.id) != 0;
     const int64_t start = static_cast<int64_t>(note.start_tick);
     const int32_t type = static_cast<int32_t>(note.note_type);
-    bool better = dist < best_dist - 0.5f;
-    if (!better && std::abs(dist - best_dist) <= 0.5f) {
-      if (priority > best_priority) {
-        better = true;
-      } else if (priority == best_priority && best != nullptr) {
-        // Same geometry priority: prefer the note that draws visually on top.
-        better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+    // The selection owns the pointer between unrelated notes: when several hit
+    // boxes overlap, an already selected note wins even when another note is
+    // closer or would offer a different operation (edge / end cap). Pieces of one
+    // hold object (body, head, star, connected chain segments) keep their
+    // geometry-based joint rules below, so a chain joint / paired head stays
+    // reachable. Notes in the same selection state also use those rules.
+    if (best != nullptr && is_selected != best_selected &&
+        !same_hold_object(note, *best)) {
+      if (!is_selected) return;
+    } else {
+      bool better = dist < best_dist - 0.5f;
+      if (!better && std::abs(dist - best_dist) <= 0.5f) {
+        if (priority > best_priority) {
+          better = true;
+        } else if (priority == best_priority && best != nullptr) {
+          // Same geometry priority: prefer the note that draws visually on top.
+          better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+        }
       }
+      if (!better) return;
     }
-    if (!better) return;
     best_dist = dist;
     best_priority = priority;
     best_start = start;
     best_type = type;
     best = &note;
+    best_selected = is_selected;
   };
 
   // Only notes whose time span can reach the pointer's y (±hit padding / star
@@ -1052,15 +1063,15 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
       const bool next_segment_side =
           point.y < viewport_.y_at(note.end_tick) &&
           wds::chart_editor::chained_next_scratch_hold(engine_.document(), note).has_value();
-      // Cancel the selected-note tie bonus on the next-segment half as well;
-      // otherwise a selected tail would make the head unreachable again.
+      // On the next-segment half the next head drops below this tail instead, so
+      // both sides of the shared joint stay reachable.
       priority = next_segment_side ? -8 : 3;
     } else {
       dist = std::abs(point.y - y0);
       if (wds::chart_editor::is_hold_head_note(note)) {
         priority = 2;
-        // Mirror the joint-half rule for a currently selected next head, so a
-        // click on the previous-segment side can switch back to its tail.
+        // Mirror the joint-half rule for the next head, so a click on the
+        // previous-segment side can switch back to its tail.
         if (point.y > y0) {
           const auto body =
               wds::chart_editor::paired_hold_body_for(engine_.document(), note);
@@ -1071,8 +1082,8 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
         }
       } else if (body_here) {
         // The body ribbon is visually below flats. At a start with no covering
-        // head art, keep it below even a selected note's +8 bonus so the topmost
-        // note (e.g. a tap on a headless hold's start tick) wins the tie.
+        // head art, keep it below the topmost note (e.g. a tap on a headless
+        // hold's start tick) so that note wins the tie.
         priority = (start_side && !head_covers_point) ? -9 : 1;
       } else {
         priority = 0;
@@ -1165,6 +1176,28 @@ bool ChartEditPanel::near_scratch_end_cap(const NotationNote& note, float y) con
   return std::abs(y - viewport_.y_at(note.end_tick)) <= pad;
 }
 
+std::optional<NotationNote> ChartEditPanel::scratch_end_edge_owner(
+    wds::interaction::Vec2 point) const {
+  std::optional<NotationNote> owner;
+  float owner_dist = 1e9f;
+  // Chain-body end caps only matter within the cap padding of the pointer's y.
+  const float cap_pad = viewport_.note_height_px() * 0.55f;
+  const auto cap_window = notes_near_y(point.y, cap_pad + 1.0f, note_spans().chain_span);
+  for (const NotationNote* it = cap_window.first; it != cap_window.second; ++it) {
+    const NotationNote& note = *it;
+    if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
+    if (!near_scratch_end_cap(note, point.y)) continue;
+    if (!near_scratch_end_left(note, point.x) && !near_scratch_end_right(note, point.x)) {
+      continue;
+    }
+    const float dist = std::abs(point.y - viewport_.y_at(note.end_tick));
+    if (dist >= owner_dist) continue;
+    owner_dist = dist;
+    owner = note;
+  }
+  return owner;
+}
+
 void ChartEditPanel::set_hover_cursor(wds::interaction::CursorKind kind) {
   if (kind == hover_cursor_) return;
   hover_cursor_ = kind;
@@ -1199,35 +1232,30 @@ void ChartEditPanel::update_hover_cursor(wds::interaction::Vec2 point) {
     return;
   }
   // Edge handles work without a selection. The center band still selects or moves.
-  // Prefer JumpScratch side edges over hold time edges at chain joints.
-  if (wds::chart_editor::is_hold_chain_body(hit->note_type) && near_scratch_end_cap(*hit, point.y) &&
-      (near_scratch_end_left(*hit, point.x) || near_scratch_end_right(*hit, point.x))) {
+  // Prefer JumpScratch side edges over hold time edges at chain joints, but let an
+  // unrelated selected note keep the pointer (same rule as the click path).
+  const auto scratch_edge_owner = scratch_end_edge_owner(point);
+  const bool scratch_edge_wins =
+      scratch_edge_owner.has_value() &&
+      !selected_owns_pointer(*hit, *scratch_edge_owner);
+  const NotationNote& target = scratch_edge_wins ? *scratch_edge_owner : *hit;
+  if (wds::chart_editor::is_hold_chain_body(target.note_type) &&
+      near_scratch_end_cap(target, point.y) &&
+      (near_scratch_end_left(target, point.x) || near_scratch_end_right(target, point.x))) {
     set_hover_cursor(CursorKind::ResizeHorizontal);
     return;
   }
-  // Chain-body end caps only matter within the cap padding of the pointer's y.
-  const float cap_pad = viewport_.note_height_px() * 0.55f;
-  const auto cap_window = notes_near_y(point.y, cap_pad + 1.0f, note_spans().chain_span);
-  for (const NotationNote* it = cap_window.first; it != cap_window.second; ++it) {
-    const NotationNote& note = *it;
-    if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-    if (!near_scratch_end_cap(note, point.y)) continue;
-    if (near_scratch_end_left(note, point.x) || near_scratch_end_right(note, point.x)) {
-      set_hover_cursor(CursorKind::ResizeHorizontal);
-      return;
-    }
-  }
-  if (wds::chart_editor::is_hold_chain_body(hit->note_type) &&
-      near_scratch_end_cap(*hit, point.y)) {
+  if (wds::chart_editor::is_hold_chain_body(target.note_type) &&
+      near_scratch_end_cap(target, point.y)) {
     set_hover_cursor(CursorKind::ResizeVertical);
     return;
   }
-  if (wds::chart_editor::is_bindable_hold_body(hit->note_type) &&
-      (near_start_time(*hit, point.y) || near_end_time(*hit, point.y))) {
+  if (wds::chart_editor::is_bindable_hold_body(target.note_type) &&
+      (near_start_time(target, point.y) || near_end_time(target, point.y))) {
     set_hover_cursor(CursorKind::ResizeVertical);
     return;
   }
-  if (near_left_edge(*hit, point.x) || near_right_edge(*hit, point.x)) {
+  if (near_left_edge(target, point.x) || near_right_edge(target, point.x)) {
     set_hover_cursor(CursorKind::ResizeHorizontal);
     return;
   }
@@ -1757,6 +1785,22 @@ bool ChartEditPanel::hold_bodies_connected(const NotationNote& a,
     cur = *next;
   }
   return false;
+}
+
+bool ChartEditPanel::same_hold_object(const NotationNote& a, const NotationNote& b) const {
+  if (a.id == b.id) return true;
+  const auto a_body = resolve_hold_body(a);
+  const auto b_body = resolve_hold_body(b);
+  if (!a_body || !b_body) return false;
+  if (a_body->id == b_body->id) return true;
+  return hold_bodies_connected(*a_body, *b_body);
+}
+
+bool ChartEditPanel::selected_owns_pointer(const NotationNote& candidate,
+                                           const NotationNote& other) const {
+  if (candidate.id == other.id) return false;
+  if (same_hold_object(candidate, other)) return false;
+  return selected_.count(candidate.id) != 0 && selected_.count(other.id) == 0;
 }
 
 std::vector<ChartEditPanel::HoldSelLayer> ChartEditPanel::hold_layer_order(
@@ -5350,29 +5394,14 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
       return;
     }
     if (wds::interaction::is_select_or_edit_note(event)) {
-      // JumpScratch side edges win over the next body's start-time hit at chain joints.
-      std::optional<NotationNote> scratch_edge_owner;
-      float scratch_edge_dist = 1e9f;
-      // Chain-body end caps only matter within the cap padding of the click's y
-      // (same windowed walk, in notes() order, as the hover-cursor path).
-      const float cap_pad = viewport_.note_height_px() * 0.55f;
-      const auto cap_window =
-          notes_near_y(event.position.y, cap_pad + 1.0f, note_spans().chain_span);
-      for (const NotationNote* cap_it = cap_window.first; cap_it != cap_window.second; ++cap_it) {
-        const NotationNote& note = *cap_it;
-        if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-        if (!near_scratch_end_cap(note, event.position.y)) continue;
-        if (!near_scratch_end_left(note, event.position.x) &&
-            !near_scratch_end_right(note, event.position.x)) {
-          continue;
-        }
-        const float d = std::abs(event.position.y - viewport_.y_at(note.end_tick));
-        if (d < scratch_edge_dist) {
-          scratch_edge_dist = d;
-          scratch_edge_owner = note;
-        }
-      }
-      const NotationNote* hit_note = scratch_edge_owner ? &*scratch_edge_owner : &*hit;
+      // JumpScratch side edges win over the next body's start-time hit at chain
+      // joints. A selected note under the pointer keeps the click unless that
+      // chain end is part of the same hold object (then the joint rules decide).
+      const auto scratch_edge_owner = scratch_end_edge_owner(event.position);
+      const bool scratch_edge_wins =
+          scratch_edge_owner.has_value() &&
+          !selected_owns_pointer(*hit, *scratch_edge_owner);
+      const NotationNote* hit_note = scratch_edge_wins ? &*scratch_edge_owner : &*hit;
       bool alt_chain_part = false;
       if (event.mods.alt) {
         if (auto body = resolve_hold_body(*hit_note);
@@ -5391,7 +5420,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
           pair_partner.has_value() && selected_.count(pair_partner->id) != 0;
 
       const bool hitting_scratch_end =
-          scratch_edge_owner.has_value() ||
+          scratch_edge_wins ||
           (wds::chart_editor::is_hold_chain_body(hit_note->note_type) &&
            near_scratch_end_cap(*hit_note, event.position.y) &&
            (near_scratch_end_left(*hit_note, event.position.x) ||

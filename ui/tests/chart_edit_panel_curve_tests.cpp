@@ -1966,6 +1966,110 @@ void test_headless_hold_start_tap_wins_visual_order() {
   CHECK(h.panel.selected().count(hold_id) == 0);
 }
 
+// When the pointer sits inside several notes' hit boxes, the selected note owns
+// the interaction (move, width, duration) over unrelated unselected notes. Notes
+// in the same selection state keep the nearest / visual-order rules.
+void test_selected_note_owns_overlapping_pointer() {
+  const auto add_tap = [](Harness& h, int32_t tick, int32_t lane, int32_t width) {
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = tick;
+    tap.end_tick = tick;
+    tap.lane = lane;
+    tap.width = width;
+    const int32_t id = h.engine.add_note(tap);
+    CHECK(id >= 0);
+    return id;
+  };
+
+  {  // Move: the unselected tap is under the pointer, the selected one overlaps it.
+    Harness h;
+    const int32_t selected_id = add_tap(h, 1040, 4, 1);
+    const int32_t other_id = add_tap(h, 1080, 4, 1);
+    h.panel.set_selected({selected_id});
+
+    const auto grab = h.at_tick_lane(1080, 4);
+    const auto dest = h.at_tick_lane(1560, 4);
+    h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+    CHECK_EQ(h.panel.selected().size(), 1u);
+    CHECK(h.panel.selected().count(selected_id));
+    h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+    h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+
+    const auto selected_after = h.engine.document().find_note(selected_id);
+    const auto other_after = h.engine.document().find_note(other_id);
+    CHECK(selected_after.has_value());
+    if (selected_after) CHECK_EQ(selected_after->start_tick, 1560);
+    CHECK(other_after.has_value());
+    if (other_after) CHECK_EQ(other_after->start_tick, 1080);
+  }
+
+  {  // Width: the pointer is on both left handles; the selected note resizes.
+    Harness h;
+    const int32_t selected_id = add_tap(h, 1040, 3, 2);
+    const int32_t other_id = add_tap(h, 1080, 3, 2);
+    h.panel.set_selected({selected_id});
+
+    const float left_x = h.panel.viewport().x_at(3) + 1.0f;
+    const float y = h.at_tick_lane(1080, 3).y;
+    h.panel.on_pointer_down(PointerDownEvent{{left_x, y}, PointerButton::Left, {}});
+    const float wider_x = h.panel.viewport().x_at(2) + 1.0f;
+    h.panel.on_pointer_move(PointerMoveEvent{{wider_x, y}, {}});
+    h.panel.on_pointer_up(PointerUpEvent{{wider_x, y}, PointerButton::Left, {}});
+
+    const auto selected_after = h.engine.document().find_note(selected_id);
+    const auto other_after = h.engine.document().find_note(other_id);
+    CHECK(selected_after.has_value());
+    if (selected_after) {
+      CHECK_EQ(selected_after->lane, 2);
+      CHECK_EQ(selected_after->width, 3);
+    }
+    CHECK(other_after.has_value());
+    if (other_after) {
+      CHECK_EQ(other_after->lane, 3);
+      CHECK_EQ(other_after->width, 2);
+    }
+    CHECK(h.panel.selected().count(selected_id));
+  }
+
+  {  // Duration: the unselected tap is under the pointer on the selected hold's
+     // end-cap edge (the tap is nearer, the selected hold still owns the drag).
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 960, 1440, 3, 1);
+    const int32_t tap_id = add_tap(h, 1460, 3, 1);
+    h.panel.set_selected({hold_id});
+
+    const auto tail = h.at_tick_lane(1460, 3);
+    h.panel.on_pointer_move(PointerMoveEvent{tail, {}});
+    CHECK(h.panel.hover_cursor() == CursorKind::ResizeVertical);
+    const auto longer = h.at_tick_lane(1920, 3);
+    h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Left, {}});
+    CHECK(h.panel.selected().count(hold_id));
+    h.panel.on_pointer_move(PointerMoveEvent{longer, {}});
+    h.panel.on_pointer_up(PointerUpEvent{longer, PointerButton::Left, {}});
+
+    const auto hold_after = h.engine.document().find_note(hold_id);
+    const auto tap_after = h.engine.document().find_note(tap_id);
+    CHECK(hold_after.has_value());
+    if (hold_after) CHECK_EQ(hold_after->end_tick, 1920);
+    CHECK(tap_after.has_value());
+    if (tap_after) CHECK_EQ(tap_after->start_tick, 1460);
+    CHECK(h.panel.selected().count(hold_id));
+  }
+
+  {  // Neither selected: the old nearest-note rule still picks the closer tap.
+    Harness h;
+    const int32_t farther_id = add_tap(h, 1040, 4, 1);
+    const int32_t nearer_id = add_tap(h, 1080, 4, 1);
+    const auto spot = h.at_tick_lane(1080, 4);
+    h.panel.on_pointer_down(PointerDownEvent{spot, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{spot, PointerButton::Left, {}});
+    CHECK_EQ(h.panel.selected().size(), 1u);
+    CHECK(h.panel.selected().count(nearer_id));
+    CHECK(!h.panel.selected().count(farther_id));
+  }
+}
+
 void test_headless_hold_start_caps_are_tightened() {
   Harness h;
   const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
@@ -3355,7 +3459,8 @@ void test_toolbox_scratch_hold_uses_regular_hold_buttons() {
 }
 
 // ---------------------------------------------------------------------------
-// Hit-test windowing: oracle = the original O(N) full-scan algorithm.
+// Hit-test windowing: oracle = full O(N) scan of hit_test_note's rules
+// (selection first between unrelated notes, then distance / priority / draw order).
 // ---------------------------------------------------------------------------
 
 using wds::ui::ChartEditPanelTestAccess;
@@ -3380,28 +3485,67 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
   };
 
   std::optional<NotationNote> best;
+  bool best_selected = false;
   float best_dist = 1e9f;
   int best_priority = 0;
   int64_t best_start = 0;
   int32_t best_type = 0;
+  // Mirrors ChartEditPanel::same_hold_object: body / paired head / bound star of
+  // one hold, or connected ScratchHold chain segments.
+  auto resolve_body = [&](const NotationNote& note) -> std::optional<NotationNote> {
+    if (ce::is_bindable_hold_body(note.note_type)) return note;
+    if (ce::is_hold_head_note(note)) return ce::paired_hold_body_for(doc, note);
+    if (is_star(note.note_type)) return ce::parent_hold_for(doc, note);
+    return std::nullopt;
+  };
+  auto same_hold_object = [&](const NotationNote& a, const NotationNote& b) {
+    if (a.id == b.id) return true;
+    const auto a_body = resolve_body(a);
+    const auto b_body = resolve_body(b);
+    if (!a_body || !b_body) return false;
+    if (a_body->id == b_body->id) return true;
+    if (!ce::is_hold_chain_body(a_body->note_type) ||
+        !ce::is_hold_chain_body(b_body->note_type)) {
+      return false;
+    }
+    NotationNote cur = *a_body;
+    for (int guard = 0; guard < 64; ++guard) {
+      auto prev = ce::chained_prev_scratch_hold(doc, cur);
+      if (!prev) break;
+      cur = *prev;
+    }
+    for (int guard = 0; guard < 64; ++guard) {
+      if (cur.id == b_body->id) return true;
+      auto next = ce::chained_next_scratch_hold(doc, cur);
+      if (!next) break;
+      cur = *next;
+    }
+    return false;
+  };
   auto consider = [&](float dist, int priority, const NotationNote& note) {
-    if (selected.count(note.id) != 0) priority += 8;
+    const bool is_selected = selected.count(note.id) != 0;
     const int64_t start = static_cast<int64_t>(note.start_tick);
     const int32_t type = static_cast<int32_t>(note.note_type);
-    bool better = dist < best_dist - 0.5f;
-    if (!better && std::abs(dist - best_dist) <= 0.5f) {
-      if (priority > best_priority) {
-        better = true;
-      } else if (priority == best_priority && best.has_value()) {
-        better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+    if (best.has_value() && is_selected != best_selected &&
+        !same_hold_object(note, *best)) {
+      if (!is_selected) return;
+    } else {
+      bool better = dist < best_dist - 0.5f;
+      if (!better && std::abs(dist - best_dist) <= 0.5f) {
+        if (priority > best_priority) {
+          better = true;
+        } else if (priority == best_priority && best.has_value()) {
+          better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+        }
       }
+      if (!better) return;
     }
-    if (!better) return;
     best_dist = dist;
     best_priority = priority;
     best_start = start;
     best_type = type;
     best = note;
+    best_selected = is_selected;
   };
 
   for (const auto& note : doc.notes()) {
@@ -4255,6 +4399,7 @@ int main() {
   test_selected_regular_terminal_tail_shows_resize_cursor();
   test_selected_scratch_terminal_tail_keeps_resize_cursor();
   test_headless_hold_start_tap_wins_visual_order();
+  test_selected_note_owns_overlapping_pointer();
   test_headless_hold_start_caps_are_tightened();
   test_double_click_inside_hold_after_edge_grab_selects_segment();
   test_right_click_selected_hold_tail_continues_draw();

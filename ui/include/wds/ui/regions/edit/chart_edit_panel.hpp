@@ -386,6 +386,19 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool near_scratch_end_right(const wds::chart_editor::NotationNote& note, float x) const;
   // Vertical band around the JumpScratch end-cap (same pad as hit_test end zone).
   bool near_scratch_end_cap(const wds::chart_editor::NotationNote& note, float y) const;
+  // Nearest hold-chain end-cap side edge under `point` (geometry only; callers
+  // reconcile it with hit_test_note through selection).
+  std::optional<wds::chart_editor::NotationNote> scratch_end_edge_owner(
+      wds::interaction::Vec2 point) const;
+  // True when both notes are pieces of one hold object: the same hold body (body,
+  // paired head / bound star) or connected ScratchHold chain segments. Geometry
+  // (not selection) resolves the pointer inside one hold object.
+  bool same_hold_object(const wds::chart_editor::NotationNote& a,
+                        const wds::chart_editor::NotationNote& b) const;
+  // True when `candidate` is selected, `other` is not, and they are unrelated
+  // notes: the selection then owns the pointer.
+  bool selected_owns_pointer(const wds::chart_editor::NotationNote& candidate,
+                             const wds::chart_editor::NotationNote& other) const;
   void update_hover_cursor(wds::interaction::Vec2 point);
   void set_hover_cursor(wds::interaction::CursorKind kind);
 
