@@ -429,6 +429,8 @@ uint64_t ChartEditPanel::visual_revision() const {
   h = mix(h, static_cast<uint64_t>(selected_.size()));
   h = mix(h, selected_speed_ticks_.generation());
   h = mix(h, static_cast<uint64_t>(selected_speed_ticks_.size()));
+  h = mix(h, back_layer_.generation());
+  h = mix(h, static_cast<uint64_t>(back_layer_.size()));
 
   h = mix(h, static_cast<uint64_t>(hover_cursor_));
   h = mix(h, ghost_.visible ? 1ull : 0ull);
@@ -525,15 +527,108 @@ PlaceIntent ChartEditPanel::effective_place_intent(PlaceIntent intent) const noe
   return intent;
 }
 
+void ChartEditPanel::select_note_id(int32_t id) {
+  if (is_back_layer(id)) return;
+  selected_.insert(id);
+}
+
 void ChartEditPanel::set_selected(std::unordered_set<int32_t> ids) {
   selected_.clear();
   selected_speed_ticks_.clear();
   for (const int32_t id : ids) {
     const auto note = engine_.document().find_note(id);
     if (!note || !is_user_selectable(*note)) continue;
-    selected_.insert(id);
+    select_note_id(id);
   }
   sync_hold_sel_focus_to_selection();
+}
+
+std::size_t ChartEditPanel::send_selection_to_back_layer() {
+  // Moving the captured notes out from under an in-flight drag/resize would
+  // desynchronize the gesture from its selection; the shortcut only acts idle.
+  if (mode_ != Mode::Idle || has_modal_popup()) return 0;
+  const auto& doc = engine_.document();
+  std::vector<int32_t> touched_ids;
+  std::vector<int32_t> moved_ids;
+  std::unordered_set<int32_t> touched_set;
+  const auto add_back = [&](const NotationNote& note) {
+    if (!is_user_selectable(note)) return;
+    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
+    // Derived eighths never enter the layer: they draw no sprite, are not hit-
+    // testable/selectable, and are regenerated from their hold on every edit.
+    if (note.note_type == NoteType::HoldEighth) return;
+    if (!touched_set.insert(note.id).second) return;
+    touched_ids.push_back(note.id);
+    if (back_layer_.insert(note.id)) moved_ids.push_back(note.id);
+  };
+  const auto add_attached_stars = [&](const NotationNote& body) {
+    for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, body)) {
+      if (dep.note_type == NoteType::HoldEighth) continue;
+      if (is_visible_mid_star(dep.note_type)) add_back(dep);
+    }
+  };
+  for (const int32_t id : selected_) {
+    const auto note = doc.find_note(id);
+    if (!note) continue;
+    if (wds::chart_editor::is_bindable_hold_body(note->note_type)) {
+      // Match hold layer selection: only the selected body (plus the parts it
+      // contains, i.e. its bound mid-stars) moves. A paired head or chained
+      // neighbour is separate and must be selected explicitly to come along.
+      add_back(*note);
+      add_attached_stars(*note);
+      continue;
+    }
+    add_back(*note);
+  }
+  if (moved_ids.empty()) return 0;
+  // The moved notes leave the selection immediately, so the next click
+  // places/selects on top of the hold body instead of grabbing it. A split
+  // selection is unrelated to this layer and stays selected.
+  for (const int32_t id : touched_ids) selected_.erase(id);
+  if (selected_.empty()) {
+    clear_hold_sel_focus();
+  } else {
+    sync_hold_sel_focus_to_selection();
+  }
+  if (on_back_layer_changed_) on_back_layer_changed_();
+  return moved_ids.size();
+}
+
+std::size_t ChartEditPanel::restore_all_back_layer_notes() {
+  std::size_t restored = 0;
+  for (const int32_t id : back_layer_) {
+    if (engine_.document().find_note(id)) ++restored;
+  }
+  const bool changed = !back_layer_.empty();
+  back_layer_.clear();
+  if (changed && on_back_layer_changed_) on_back_layer_changed_();
+  return restored;
+}
+
+void ChartEditPanel::set_back_layer(std::unordered_set<int32_t> ids) {
+  std::unordered_set<int32_t> filtered;
+  filtered.reserve(ids.size());
+  for (const int32_t id : ids) {
+    const auto note = engine_.document().find_note(id);
+    if (!note || !is_user_selectable(*note)) continue;
+    if (note->note_type == NoteType::HoldEighth) continue;  // derived, never a layer member
+    if (wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) continue;
+    filtered.insert(id);
+  }
+  back_layer_ = std::move(filtered);
+  // Session-owned layer state is applied after a chart switch; never leave a
+  // back-layer id in the selection.
+  bool selection_changed = false;
+  for (const int32_t id : back_layer_) {
+    if (selected_.erase(id) != 0) selection_changed = true;
+  }
+  if (selection_changed) sync_hold_sel_focus_to_selection();
+}
+
+void ChartEditPanel::clear_back_layer() {
+  if (back_layer_.empty()) return;
+  back_layer_.clear();
+  if (on_back_layer_changed_) on_back_layer_changed_();
 }
 
 void ChartEditPanel::set_selected_speed_ticks(std::unordered_set<int32_t> ticks) {
@@ -937,32 +1032,43 @@ std::pair<const NotationNote*, const NotationNote*> ChartEditPanel::notes_near_y
 std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2 point) const {
   sync_viewport();
   const NotationNote* best = nullptr;
+  bool best_selected = false;
   float best_dist = 1e9f;
   int best_priority = 0;  // higher wins ties (prefer JumpScratch end / head over body)
   int64_t best_start = 0;
   int32_t best_type = 0;
 
   auto consider = [&](float dist, int priority, const NotationNote& note) {
-    // Keep the selected segment as the owner of an overlapping ScratchHold
-    // joint, so the previous tail and next head can be adjusted independently.
-    if (selected_.count(note.id) != 0) priority += 8;
+    const bool is_selected = selected_.count(note.id) != 0;
     const int64_t start = static_cast<int64_t>(note.start_tick);
     const int32_t type = static_cast<int32_t>(note.note_type);
-    bool better = dist < best_dist - 0.5f;
-    if (!better && std::abs(dist - best_dist) <= 0.5f) {
-      if (priority > best_priority) {
-        better = true;
-      } else if (priority == best_priority && best != nullptr) {
-        // Same geometry priority: prefer the note that draws visually on top.
-        better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+    // The selection owns the pointer between unrelated notes: when several hit
+    // boxes overlap, an already selected note wins even when another note is
+    // closer or would offer a different operation (edge / end cap). Pieces of one
+    // hold object (body, head, star, connected chain segments) keep their
+    // geometry-based joint rules below, so a chain joint / paired head stays
+    // reachable. Notes in the same selection state also use those rules.
+    if (best != nullptr && is_selected != best_selected &&
+        !same_hold_object(note, *best)) {
+      if (!is_selected) return;
+    } else {
+      bool better = dist < best_dist - 0.5f;
+      if (!better && std::abs(dist - best_dist) <= 0.5f) {
+        if (priority > best_priority) {
+          better = true;
+        } else if (priority == best_priority && best != nullptr) {
+          // Same geometry priority: prefer the note that draws visually on top.
+          better = wds::chart_render::is_visually_above(start, type, best_start, best_type);
+        }
       }
+      if (!better) return;
     }
-    if (!better) return;
     best_dist = dist;
     best_priority = priority;
     best_start = start;
     best_type = type;
     best = &note;
+    best_selected = is_selected;
   };
 
   // Only notes whose time span can reach the pointer's y (±hit padding / star
@@ -974,6 +1080,7 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
   const auto window = notes_near_y(point.y, reach, note_spans().hit_span);
   for (const NotationNote* it = window.first; it != window.second; ++it) {
     const NotationNote& note = *it;
+    if (is_back_layer(note.id)) continue;
     if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) continue;
     if (note.note_type == NoteType::HoldEighth) continue;
     if (!viewport_.lane_span_visible(note.lane, note.width)) {
@@ -1052,15 +1159,18 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
       const bool next_segment_side =
           point.y < viewport_.y_at(note.end_tick) &&
           wds::chart_editor::chained_next_scratch_hold(engine_.document(), note).has_value();
-      // Cancel the selected-note tie bonus on the next-segment half as well;
-      // otherwise a selected tail would make the head unreachable again.
+      // On the next-segment half the next head drops below this tail instead, so
+      // both sides of the shared joint stay reachable.
       priority = next_segment_side ? -8 : 3;
     } else {
       dist = std::abs(point.y - y0);
-      if (wds::chart_editor::is_hold_head_note(note)) {
+      const bool tap_head =
+          wds::chart_editor::is_hold_tap_head_note(note) &&
+          wds::chart_editor::paired_hold_body_for(engine_.document(), note).has_value();
+      if (wds::chart_editor::is_hold_head_note(note) || tap_head) {
         priority = 2;
-        // Mirror the joint-half rule for a currently selected next head, so a
-        // click on the previous-segment side can switch back to its tail.
+        // Mirror the joint-half rule for the next head, so a click on the
+        // previous-segment side can switch back to its tail.
         if (point.y > y0) {
           const auto body =
               wds::chart_editor::paired_hold_body_for(engine_.document(), note);
@@ -1071,8 +1181,8 @@ std::optional<NotationNote> ChartEditPanel::hit_test_note(wds::interaction::Vec2
         }
       } else if (body_here) {
         // The body ribbon is visually below flats. At a start with no covering
-        // head art, keep it below even a selected note's +8 bonus so the topmost
-        // note (e.g. a tap on a headless hold's start tick) wins the tie.
+        // head art, keep it below the topmost note (e.g. a tap on a headless
+        // hold's start tick) so that note wins the tie.
         priority = (start_side && !head_covers_point) ? -9 : 1;
       } else {
         priority = 0;
@@ -1165,6 +1275,29 @@ bool ChartEditPanel::near_scratch_end_cap(const NotationNote& note, float y) con
   return std::abs(y - viewport_.y_at(note.end_tick)) <= pad;
 }
 
+std::optional<NotationNote> ChartEditPanel::scratch_end_edge_owner(
+    wds::interaction::Vec2 point) const {
+  std::optional<NotationNote> owner;
+  float owner_dist = 1e9f;
+  // Chain-body end caps only matter within the cap padding of the pointer's y.
+  const float cap_pad = viewport_.note_height_px() * 0.55f;
+  const auto cap_window = notes_near_y(point.y, cap_pad + 1.0f, note_spans().chain_span);
+  for (const NotationNote* it = cap_window.first; it != cap_window.second; ++it) {
+    const NotationNote& note = *it;
+    if (is_back_layer(note.id)) continue;
+    if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
+    if (!near_scratch_end_cap(note, point.y)) continue;
+    if (!near_scratch_end_left(note, point.x) && !near_scratch_end_right(note, point.x)) {
+      continue;
+    }
+    const float dist = std::abs(point.y - viewport_.y_at(note.end_tick));
+    if (dist >= owner_dist) continue;
+    owner_dist = dist;
+    owner = note;
+  }
+  return owner;
+}
+
 void ChartEditPanel::set_hover_cursor(wds::interaction::CursorKind kind) {
   if (kind == hover_cursor_) return;
   hover_cursor_ = kind;
@@ -1199,35 +1332,30 @@ void ChartEditPanel::update_hover_cursor(wds::interaction::Vec2 point) {
     return;
   }
   // Edge handles work without a selection. The center band still selects or moves.
-  // Prefer JumpScratch side edges over hold time edges at chain joints.
-  if (wds::chart_editor::is_hold_chain_body(hit->note_type) && near_scratch_end_cap(*hit, point.y) &&
-      (near_scratch_end_left(*hit, point.x) || near_scratch_end_right(*hit, point.x))) {
+  // Prefer JumpScratch side edges over hold time edges at chain joints, but let an
+  // unrelated selected note keep the pointer (same rule as the click path).
+  const auto scratch_edge_owner = scratch_end_edge_owner(point);
+  const bool scratch_edge_wins =
+      scratch_edge_owner.has_value() &&
+      !selected_owns_pointer(*hit, *scratch_edge_owner);
+  const NotationNote& target = scratch_edge_wins ? *scratch_edge_owner : *hit;
+  if (wds::chart_editor::is_hold_chain_body(target.note_type) &&
+      near_scratch_end_cap(target, point.y) &&
+      (near_scratch_end_left(target, point.x) || near_scratch_end_right(target, point.x))) {
     set_hover_cursor(CursorKind::ResizeHorizontal);
     return;
   }
-  // Chain-body end caps only matter within the cap padding of the pointer's y.
-  const float cap_pad = viewport_.note_height_px() * 0.55f;
-  const auto cap_window = notes_near_y(point.y, cap_pad + 1.0f, note_spans().chain_span);
-  for (const NotationNote* it = cap_window.first; it != cap_window.second; ++it) {
-    const NotationNote& note = *it;
-    if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-    if (!near_scratch_end_cap(note, point.y)) continue;
-    if (near_scratch_end_left(note, point.x) || near_scratch_end_right(note, point.x)) {
-      set_hover_cursor(CursorKind::ResizeHorizontal);
-      return;
-    }
-  }
-  if (wds::chart_editor::is_hold_chain_body(hit->note_type) &&
-      near_scratch_end_cap(*hit, point.y)) {
+  if (wds::chart_editor::is_hold_chain_body(target.note_type) &&
+      near_scratch_end_cap(target, point.y)) {
     set_hover_cursor(CursorKind::ResizeVertical);
     return;
   }
-  if (wds::chart_editor::is_bindable_hold_body(hit->note_type) &&
-      (near_start_time(*hit, point.y) || near_end_time(*hit, point.y))) {
+  if (wds::chart_editor::is_bindable_hold_body(target.note_type) &&
+      (near_start_time(target, point.y) || near_end_time(target, point.y))) {
     set_hover_cursor(CursorKind::ResizeVertical);
     return;
   }
-  if (near_left_edge(*hit, point.x) || near_right_edge(*hit, point.x)) {
+  if (near_left_edge(target, point.x) || near_right_edge(target, point.x)) {
     set_hover_cursor(CursorKind::ResizeHorizontal);
     return;
   }
@@ -1632,7 +1760,7 @@ void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
   }
   selected_.clear();
   for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
-    if (is_user_selectable(n)) selected_.insert(n.id);
+    if (is_user_selectable(n)) select_note_id(n.id);
   });
   clear_hold_sel_focus();
 }
@@ -1648,10 +1776,10 @@ void ChartEditPanel::clear_hold_chain_state() {
 void ChartEditPanel::select_hold_chain() {
   selected_.clear();
   for (const int32_t id : hold_chain_ids_) {
-    selected_.insert(id);
+    select_note_id(id);
     if (auto note = engine_.document().find_note(id)) {
       if (auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), *note)) {
-        selected_.insert(head->id);
+        select_note_id(head->id);
       }
     }
   }
@@ -1663,7 +1791,8 @@ int32_t ChartEditPanel::min_hold_duration_ticks() const {
 
 void ChartEditPanel::select_scratch_hold_chain_from(const NotationNote& seed) {
   NotationNote body = seed;
-  if (wds::chart_editor::is_hold_head_note(seed)) {
+  if (wds::chart_editor::is_hold_head_note(seed) ||
+      wds::chart_editor::is_hold_tap_head_note(seed)) {
     auto paired = wds::chart_editor::paired_hold_body_for(engine_.document(), seed);
     if (!paired || !wds::chart_editor::is_hold_chain_body(paired->note_type)) return;
     body = *paired;
@@ -1674,18 +1803,18 @@ void ChartEditPanel::select_scratch_hold_chain_from(const NotationNote& seed) {
   NotationNote cur = body;
   for (int guard = 0; guard < 64; ++guard) {
     auto prev = wds::chart_editor::chained_prev_scratch_hold(engine_.document(), cur);
-    if (!prev) break;
+    if (!prev || is_back_layer(prev->id)) break;
     cur = *prev;
   }
 
   selected_.clear();
   for (int guard = 0; guard < 64; ++guard) {
-    selected_.insert(cur.id);
+    select_note_id(cur.id);
     if (auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), cur)) {
-      selected_.insert(head->id);
+      select_note_id(head->id);
     }
     auto next = wds::chart_editor::chained_next_scratch_hold(engine_.document(), cur);
-    if (!next) break;
+    if (!next || is_back_layer(next->id)) break;
     cur = *next;
   }
 }
@@ -1720,7 +1849,8 @@ void ChartEditPanel::sync_hold_sel_focus_to_selection() {
 
 std::optional<NotationNote> ChartEditPanel::resolve_hold_body(const NotationNote& hit) const {
   if (wds::chart_editor::is_bindable_hold_body(hit.note_type)) return hit;
-  if (wds::chart_editor::is_hold_head_note(hit)) {
+  if (wds::chart_editor::is_hold_head_note(hit) ||
+      wds::chart_editor::is_hold_tap_head_note(hit)) {
     return wds::chart_editor::paired_hold_body_for(engine_.document(), hit);
   }
   if (is_visible_mid_star(hit.note_type)) {
@@ -1757,6 +1887,22 @@ bool ChartEditPanel::hold_bodies_connected(const NotationNote& a,
     cur = *next;
   }
   return false;
+}
+
+bool ChartEditPanel::same_hold_object(const NotationNote& a, const NotationNote& b) const {
+  if (a.id == b.id) return true;
+  const auto a_body = resolve_hold_body(a);
+  const auto b_body = resolve_hold_body(b);
+  if (!a_body || !b_body) return false;
+  if (a_body->id == b_body->id) return true;
+  return hold_bodies_connected(*a_body, *b_body);
+}
+
+bool ChartEditPanel::selected_owns_pointer(const NotationNote& candidate,
+                                           const NotationNote& other) const {
+  if (candidate.id == other.id) return false;
+  if (same_hold_object(candidate, other)) return false;
+  return selected_.count(candidate.id) != 0 && selected_.count(other.id) == 0;
 }
 
 std::vector<ChartEditPanel::HoldSelLayer> ChartEditPanel::hold_layer_order(
@@ -1818,9 +1964,9 @@ void ChartEditPanel::select_hold_outer(const NotationNote& body) {
 
 void ChartEditPanel::select_hold_segment(const NotationNote& body) {
   selected_.clear();
-  selected_.insert(body.id);
+  select_note_id(body.id);
   if (auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), body)) {
-    selected_.insert(head->id);
+    select_note_id(head->id);
   }
   hold_sel_body_id_ = body.id;
   hold_sel_layer_ = HoldSelLayer::Whole;
@@ -1830,12 +1976,15 @@ void ChartEditPanel::select_hold_part(const NotationNote& hit, const NotationNot
   selected_.clear();
   hold_sel_body_id_ = body.id;
   hold_sel_layer_ = HoldSelLayer::Parts;
-  if (wds::chart_editor::is_hold_head_note(hit)) {
-    selected_.insert(hit.id);
+  const auto paired_head = wds::chart_editor::paired_hold_head_for(engine_.document(), body);
+  if ((wds::chart_editor::is_hold_head_note(hit) ||
+       wds::chart_editor::is_hold_tap_head_note(hit)) &&
+      paired_head && paired_head->id == hit.id && !is_back_layer(hit.id)) {
+    select_note_id(hit.id);
     return;
   }
   // Body, mid-star (drill), or body-area click → select body only.
-  selected_.insert(body.id);
+  select_note_id(body.id);
 }
 
 void ChartEditPanel::select_hold_stars(const NotationNote& body) {
@@ -1844,7 +1993,7 @@ void ChartEditPanel::select_hold_stars(const NotationNote& body) {
   hold_sel_layer_ = HoldSelLayer::Stars;
   for (const auto& note :
        wds::chart_editor::hold_attached_notes_for(engine_.document(), body)) {
-    if (is_visible_mid_star(note.note_type)) selected_.insert(note.id);
+    if (is_visible_mid_star(note.note_type)) select_note_id(note.id);
   }
 }
 
@@ -1858,13 +2007,15 @@ NotationNote ChartEditPanel::hold_drill_target(const NotationNote& body,
     for (const auto& note :
          wds::chart_editor::hold_attached_notes_for(engine_.document(), body)) {
       if (!is_visible_mid_star(note.note_type)) continue;
+      if (is_back_layer(note.id)) continue;
       if (viewport_.mid_star_screen_rect(note).contains(point)) return note;
     }
   }
   // The paired head owns a note-height sprite at the start tick. Resolve it from
   // geometry instead of hit_test_note(): the selected body's +8 tie bonus would
   // otherwise win at the shared start tick and make the head unreachable.
-  if (const auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), body)) {
+  if (const auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), body);
+      head && !is_back_layer(head->id)) {
     const float y0 = viewport_.y_at(body.start_tick);
     const float half_h = viewport_.note_height_px() * 0.5f;
     const float x0 = viewport_.x_at(head->lane);
@@ -1897,7 +2048,7 @@ void ChartEditPanel::drill_hold_selection(const NotationNote& hit) {
     auto parent = wds::chart_editor::parent_hold_for(engine_.document(), hit);
     if (!parent) return;
     selected_.clear();
-    selected_.insert(hit.id);
+    select_note_id(hit.id);
     hold_sel_body_id_ = parent->id;
     hold_sel_layer_ = HoldSelLayer::Stars;
     return;
@@ -1985,9 +2136,10 @@ bool ChartEditPanel::switch_hold_selection_layer(const NotationNote& hit,
       for (const auto& note :
            wds::chart_editor::hold_attached_notes_for(engine_.document(), *body)) {
         if (!is_visible_mid_star(note.note_type)) continue;
+        if (is_back_layer(note.id)) continue;
         if (viewport_.mid_star_screen_rect(note).contains(point)) {
           selected_.clear();
-          selected_.insert(note.id);
+          select_note_id(note.id);
           hold_sel_body_id_ = body->id;
           hold_sel_layer_ = HoldSelLayer::Stars;
           return true;
@@ -2287,6 +2439,7 @@ std::optional<NotationNote> ChartEditPanel::hold_body_under_pointer(
   const auto window = notes_near_y(point.y, 1.0f, note_spans().hit_span);
   for (const NotationNote* it = window.first; it != window.second; ++it) {
     const NotationNote& hold = *it;
+    if (is_back_layer(hold.id)) continue;
     if (!wds::chart_editor::is_bindable_hold_body(hold.note_type)) continue;
     if (hold.end_tick <= hold.start_tick) continue;
     if (tick <= hold.start_tick || tick >= hold.end_tick) continue;
@@ -2373,12 +2526,13 @@ bool ChartEditPanel::add_star_to_selected_hold(wds::interaction::Vec2 point,
     std::optional<NotationNote> body;
     if (wds::chart_editor::is_bindable_hold_body(note->note_type)) {
       body = *note;
-    } else if (wds::chart_editor::is_hold_head_note(*note)) {
+    } else if (wds::chart_editor::is_hold_head_note(*note) ||
+               wds::chart_editor::is_hold_tap_head_note(*note)) {
       body = wds::chart_editor::paired_hold_body_for(engine_.document(), *note);
     } else if (is_visible_mid_star(note->note_type)) {
       body = wds::chart_editor::parent_hold_for(engine_.document(), *note);
     }
-    if (!body || !hold_body_selected_for_stars(*body)) continue;
+    if (!body || is_back_layer(body->id) || !hold_body_selected_for_stars(*body)) continue;
     if (tick <= body->start_tick || tick >= body->end_tick) continue;
     if (lane < body->lane || lane > body->end_lane()) continue;
     target = *body;
@@ -2504,7 +2658,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
         std::vector<NotationNote>{flat}, hold_scratch_ ? "Place flick" : "Place note"));
     selected_.clear();
     for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
-      if (is_user_selectable(n)) selected_.insert(n.id);
+      if (is_user_selectable(n)) select_note_id(n.id);
     });
     mode_ = Mode::Idle;
     hold_stars_.clear();
@@ -2641,13 +2795,13 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // only and must not hide a shortened auto head.
   clear_hold_sel_focus();
   selected_.clear();
-  for (const int32_t id : hold_chain_ids_) selected_.insert(id);
+  for (const int32_t id : hold_chain_ids_) select_note_id(id);
   // New head / body / mid-stars / eighths all carry ids >= first_new_id (ids taken
   // from the document's allocator before the edit); `before` holds only older ids.
   for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
     if (wds::chart_editor::is_hold_head_note(n) ||
         wds::chart_editor::is_hold_with_tail(n.note_type)) {
-      selected_.insert(n.id);
+      select_note_id(n.id);
     }
   });
 
@@ -2833,7 +2987,7 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
       const NotationNote& note = doc_notes[index];
       if (!wds::chart_editor::is_playfield_selectable(note)) continue;
       if (note.lane <= std::max(l0, l1) && note.end_lane() >= std::min(l0, l1)) {
-        selected_.insert(note.id);
+        select_note_id(note.id);
       }
     }
   }
@@ -2844,7 +2998,7 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
   const bool box_over_split_gutter =
       box.x < left_gutter_.right() && box.right() > left_gutter_.x;
   for (const auto& hit : split_hits) {
-    if (rects_overlap(hit.bounds, box)) selected_.insert(hit.note_id);
+    if (rects_overlap(hit.bounds, box)) select_note_id(hit.note_id);
   }
   if (box_over_split_gutter) {
     const auto& doc = engine_.document();
@@ -2871,7 +3025,7 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
       const int32_t end_tick = std::max(note->start_tick, note->end_tick);
       if ((note->start_tick >= lo_tick && note->start_tick <= hi_tick) ||
           (end_tick >= lo_tick && end_tick <= hi_tick)) {
-        selected_.insert(note->id);
+        select_note_id(note->id);
       }
     }
   }
@@ -3145,30 +3299,37 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   if (anchor_it == drag_originals_.end()) return;
   const NotationNote& anchor_orig = anchor_it->second;
 
-  // Keep HoldEighth / mid-stars inside their parent hold after body edges move.
+  // Edge drags only move one hold boundary. Stars are independent notes and keep
+  // their tick, but a star the boundary crosses is no longer inside the hold: hide
+  // it live, restore it when the pointer comes back, and let finish_move() commit
+  // the real deletion (so it stays inside the same undo step).
   auto collect_attached_updates = [&](std::unordered_map<int32_t, NotationNote>& pending) {
+    std::vector<int32_t> hidden;
+    std::vector<NotationNote> restored;
     for (const auto& [id, orig] : drag_originals_) {
-      if (!is_visible_mid_star(orig.note_type) && orig.note_type != NoteType::HoldEighth) {
-        continue;
-      }
+      if (!is_visible_mid_star(orig.note_type)) continue;
       auto parent = bound_parent_hold(orig, pending, engine_.document());
       if (!parent) continue;
       NotationNote n = orig;
       n.lane = parent->lane;
       n.width = parent->width;
-      const int32_t lo = parent->start_tick + 1;
-      const int32_t hi = parent->end_tick - 1;
-      if (lo < hi) {
-        n.start_tick = std::clamp(orig.start_tick, lo, hi);
-        // Prefer preserving relative offset when the whole span shifts.
-        if (auto hold_orig = drag_originals_.find(parent->id); hold_orig != drag_originals_.end()) {
-          const int32_t delta = parent->start_tick - hold_orig->second.start_tick;
-          n.start_tick = std::clamp(orig.start_tick + delta, lo, hi);
-        }
-        n.end_tick = n.start_tick;
-        pending[id] = n;
+      n.start_tick = orig.start_tick;
+      n.end_tick = n.start_tick;
+      const bool inside =
+          orig.start_tick > parent->start_tick && orig.start_tick < parent->end_tick;
+      const bool live = engine_.document().find_note(id).has_value();
+      if (!inside) {
+        if (live) hidden.push_back(id);
+        continue;
       }
+      if (!live) {
+        restored.push_back(n);
+        continue;
+      }
+      pending[id] = n;
     }
+    if (!hidden.empty()) engine_.document().remove_notes(hidden);
+    if (!restored.empty()) engine_.document().add_notes(restored);
   };
 
   // JumpScratch vertical hinge: move the joint tick; adjacent bodies change length.
@@ -3250,7 +3411,10 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   // Paired head follows hold start when the start edge is dragged.
   if (!adjust_end_ && new_start >= 0) {
     for (const auto& [id, orig] : drag_originals_) {
-      if (!wds::chart_editor::is_hold_head_note(orig)) continue;
+      if (!wds::chart_editor::is_hold_head_note(orig) &&
+          !wds::chart_editor::is_hold_tap_head_note(orig)) {
+        continue;
+      }
       NotationNote n = orig;
       n.start_tick = new_start;
       n.end_tick = new_start;
@@ -3410,9 +3574,26 @@ void ChartEditPanel::finish_resize() {
 void ChartEditPanel::finish_hold_adjust() {
   resize_chain_peer_id_ = -1;
   resize_chain_next_id_ = -1;
+  // Restore every star hidden live during the drag before committing. finish_move()
+  // then prunes the ones still outside the final span inside the same history step,
+  // so an undo brings them back with the old hold geometry.
+  std::vector<NotationNote> restore;
+  std::vector<int32_t> attached_star_ids;
+  restore.reserve(drag_originals_.size());
+  for (const auto& [id, orig] : drag_originals_) {
+    if (!is_visible_mid_star(orig.note_type)) continue;
+    attached_star_ids.push_back(id);
+    if (engine_.document().find_note(id)) continue;
+    restore.push_back(orig);
+  }
+  if (!restore.empty()) engine_.document().add_notes(restore);
   // Move + star prune + eighth regeneration for every hold in drag_originals_ (chain
   // neighbours included) commit as ONE history step.
   finish_move(true, true);
+  // A pruned star must not linger in the selection set.
+  for (const int32_t id : attached_star_ids) {
+    if (!engine_.document().find_note(id)) selected_.erase(id);
+  }
   engine_.rebuild_snapshot();
 }
 
@@ -3663,8 +3844,12 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   for (const auto& n : clipboard_) src_earliest = std::min(src_earliest, n.start_tick);
   for (const auto& p : clipboard_speed_) src_earliest = std::min(src_earliest, p.tick);
   if (src_earliest == std::numeric_limits<int32_t>::max()) return false;
-  int32_t snapped_anchor = wds::chart_editor::snap_tick(static_cast<float>(anchor), viewport_.grid());
-  if (snapped_anchor < src_earliest) snapped_anchor = src_earliest;
+  // The pointer is where the clipboard's earliest item should land, in either
+  // direction: a block copied further down may be pasted above its source. snap_tick
+  // keeps the anchor non-negative, and `shift` below pushes the whole block forward
+  // only where the destination is not allowed.
+  const int32_t snapped_anchor =
+      wds::chart_editor::snap_tick(static_cast<float>(anchor), viewport_.grid());
   const int32_t base_delta = snapped_anchor - src_earliest;
 
   auto pasted = clipboard_;
@@ -3766,7 +3951,7 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   // Pasted notes (ids from first_new_id up) and their generated eighths are the only
   // notes with ids >= first_new_id.
   for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
-    if (is_user_selectable(n)) selected_.insert(n.id);
+    if (is_user_selectable(n)) select_note_id(n.id);
   });
   selected_speed_ticks_ = std::move(pasted_speed_ticks);
   clear_hold_sel_focus();
@@ -3803,7 +3988,8 @@ void collect_drag_originals(const wds::chart_editor::ChartDocument& doc,
       if (auto head = wds::chart_editor::paired_hold_head_for(doc, *n)) {
         out.emplace(head->id, *head);
       }
-    } else if (wds::chart_editor::is_hold_head_note(*n)) {
+    } else if (wds::chart_editor::is_hold_head_note(*n) ||
+               wds::chart_editor::is_hold_tap_head_note(*n)) {
       if (auto body = wds::chart_editor::paired_hold_body_for(doc, *n)) {
         out.emplace(body->id, *body);
         for (const auto& dep : wds::chart_editor::hold_attached_notes_for(doc, *body)) {
@@ -3854,7 +4040,8 @@ std::optional<NotationNote> hold_width_pair_partner(const wds::chart_editor::Cha
   if (wds::chart_editor::is_bindable_hold_body(note.note_type)) {
     return wds::chart_editor::paired_hold_head_for(doc, note);
   }
-  if (wds::chart_editor::is_hold_head_note(note)) {
+  if (wds::chart_editor::is_hold_head_note(note) ||
+      wds::chart_editor::is_hold_tap_head_note(note)) {
     return wds::chart_editor::paired_hold_body_for(doc, note);
   }
   return std::nullopt;
@@ -4823,7 +5010,7 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
     if (wds::interaction::is_toggle_select(event)) {
       clear_hold_sel_focus();
       if (selected_.count(hit.note_id)) selected_.erase(hit.note_id);
-      else selected_.insert(hit.note_id);
+      else select_note_id(hit.note_id);
       hide_gutter_ghost();
       return true;
     }
@@ -5210,7 +5397,8 @@ void ChartEditPanel::append_skin_batch(wds::renderer::DrawBatch& batch,
   renderer_.append_skinned_backdrop(batch, skin, viewport_, fb_w, fb_h, screen, stage_opacity);
   renderer_.append_skinned_notes(batch, skin, viewport_, engine_.document().notes(), selected_,
                                  fb_w, fb_h, screen, &offset_violation_ids_,
-                                 offset_violation_strength());
+                                 offset_violation_strength(), &back_layer_.set(),
+                                 kBackLayerAlpha);
   renderer_.append_skinned_ghosts(batch, skin, viewport_, std::nullopt, skinned_ghosts(), fb_w,
                                  fb_h, screen);
 }
@@ -5342,33 +5530,18 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     if (wds::interaction::is_toggle_select(event)) {
       clear_hold_sel_focus();
       if (selected_.count(hit->id)) selected_.erase(hit->id);
-      else selected_.insert(hit->id);
+      else select_note_id(hit->id);
       return;
     }
     if (wds::interaction::is_select_or_edit_note(event)) {
-      // JumpScratch side edges win over the next body's start-time hit at chain joints.
-      std::optional<NotationNote> scratch_edge_owner;
-      float scratch_edge_dist = 1e9f;
-      // Chain-body end caps only matter within the cap padding of the click's y
-      // (same windowed walk, in notes() order, as the hover-cursor path).
-      const float cap_pad = viewport_.note_height_px() * 0.55f;
-      const auto cap_window =
-          notes_near_y(event.position.y, cap_pad + 1.0f, note_spans().chain_span);
-      for (const NotationNote* cap_it = cap_window.first; cap_it != cap_window.second; ++cap_it) {
-        const NotationNote& note = *cap_it;
-        if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-        if (!near_scratch_end_cap(note, event.position.y)) continue;
-        if (!near_scratch_end_left(note, event.position.x) &&
-            !near_scratch_end_right(note, event.position.x)) {
-          continue;
-        }
-        const float d = std::abs(event.position.y - viewport_.y_at(note.end_tick));
-        if (d < scratch_edge_dist) {
-          scratch_edge_dist = d;
-          scratch_edge_owner = note;
-        }
-      }
-      const NotationNote* hit_note = scratch_edge_owner ? &*scratch_edge_owner : &*hit;
+      // JumpScratch side edges win over the next body's start-time hit at chain
+      // joints. A selected note under the pointer keeps the click unless that
+      // chain end is part of the same hold object (then the joint rules decide).
+      const auto scratch_edge_owner = scratch_end_edge_owner(event.position);
+      const bool scratch_edge_wins =
+          scratch_edge_owner.has_value() &&
+          !selected_owns_pointer(*hit, *scratch_edge_owner);
+      const NotationNote* hit_note = scratch_edge_wins ? &*scratch_edge_owner : &*hit;
       bool alt_chain_part = false;
       if (event.mods.alt) {
         if (auto body = resolve_hold_body(*hit_note);
@@ -5387,7 +5560,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
           pair_partner.has_value() && selected_.count(pair_partner->id) != 0;
 
       const bool hitting_scratch_end =
-          scratch_edge_owner.has_value() ||
+          scratch_edge_wins ||
           (wds::chart_editor::is_hold_chain_body(hit_note->note_type) &&
            near_scratch_end_cap(*hit_note, event.position.y) &&
            (near_scratch_end_left(*hit_note, event.position.x) ||
@@ -5425,7 +5598,8 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
           if (const auto body = resolve_hold_body(*hit_note)) {
             const NotationNote target =
                 hold_drill_target(*body, event.position, false);
-            click_is_head = wds::chart_editor::is_hold_head_note(target);
+            click_is_head = wds::chart_editor::is_hold_head_note(target) ||
+                            wds::chart_editor::is_hold_tap_head_note(target);
             const int32_t target_id = click_is_head ? target.id : body->id;
             part_changes = selected_.count(target_id) == 0;
           }
@@ -5481,10 +5655,10 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
             select_hold_outer(*hold_body);
           } else {
             selected_.clear();
-            selected_.insert(hit_note->id);
+            select_note_id(hit_note->id);
             // Pair head↔body so a plain body grab keeps its head.
             if (auto partner = hold_width_pair_partner(engine_.document(), *hit_note)) {
-              selected_.insert(partner->id);
+              select_note_id(partner->id);
             }
           }
         }
@@ -5659,7 +5833,8 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
         const NotationNote* segment = hit_note;
         std::optional<NotationNote> resolved_body;
         if (!wds::chart_editor::is_hold_chain_body(hit_note->note_type) &&
-            wds::chart_editor::is_hold_head_note(*hit_note)) {
+            (wds::chart_editor::is_hold_head_note(*hit_note) ||
+             wds::chart_editor::is_hold_tap_head_note(*hit_note))) {
           resolved_body = wds::chart_editor::paired_hold_body_for(engine_.document(), *hit_note);
           if (resolved_body && wds::chart_editor::is_hold_chain_body(resolved_body->note_type)) {
             segment = &*resolved_body;
@@ -6322,7 +6497,10 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
       if (prev_orig_it != drag_originals_.end() && prev_body_changed) {
         const auto& prev_for_head = prev_orig_it->second;
         for (const auto& [hid, head_orig] : drag_originals_) {
-          if (!wds::chart_editor::is_hold_head_note(head_orig)) continue;
+          if (!wds::chart_editor::is_hold_head_note(head_orig) &&
+              !wds::chart_editor::is_hold_tap_head_note(head_orig)) {
+            continue;
+          }
           if (head_orig.start_tick != prev_for_head.start_tick) continue;
           if (head_orig.width != prev_for_head.width) continue;
           if (!(head_orig.lane <= prev_for_head.end_lane() &&
@@ -6360,7 +6538,10 @@ void ChartEditPanel::on_pointer_move(const wds::interaction::PointerMoveEvent& e
         if (body_orig_it == drag_originals_.end()) continue;
         const auto& body_orig = body_orig_it->second;
         for (const auto& [hid, head_orig] : drag_originals_) {
-          if (!wds::chart_editor::is_hold_head_note(head_orig)) continue;
+          if (!wds::chart_editor::is_hold_head_note(head_orig) &&
+              !wds::chart_editor::is_hold_tap_head_note(head_orig)) {
+            continue;
+          }
           if (head_orig.start_tick != body_orig.start_tick) continue;
           if (head_orig.width != body_orig.width) continue;
           if (!(head_orig.lane <= body_orig.end_lane() && body_orig.lane <= head_orig.end_lane())) {
@@ -6844,7 +7025,8 @@ void ChartEditPanel::on_double_click(const wds::interaction::DoubleClickEvent& e
   // even after the pointer left the narrow edge handle.
   if (wds::interaction::is_left_button(event.button) && last_hold_edge_body_id_ >= 0) {
     const auto body = engine_.document().find_note(last_hold_edge_body_id_);
-    if (body && wds::chart_editor::is_bindable_hold_body(body->note_type) &&
+    if (body && !is_back_layer(body->id) &&
+        wds::chart_editor::is_bindable_hold_body(body->note_type) &&
         body->end_tick > body->start_tick) {
       const float y0 = viewport_.y_at(body->start_tick);
       const float y1 = viewport_.y_at(body->end_tick);
@@ -7195,14 +7377,14 @@ bool ChartEditPanel::commit_curve_fill() {
 
   clear_hold_sel_focus();
   selected_.clear();
-  for (const int32_t id : hold_chain_ids_) selected_.insert(id);
+  for (const int32_t id : hold_chain_ids_) select_note_id(id);
   // Every note the commit introduced (head, bodies, eighths) got an id >= the
   // document's next id at build time; everything in commit->before is older.
   for_each_note_allocated_since(engine_.document(), input.next_id,
                                 [&](const NotationNote& note) {
     if (wds::chart_editor::is_hold_head_note(note) ||
         wds::chart_editor::is_hold_with_tail(note.note_type)) {
-      selected_.insert(note.id);
+      select_note_id(note.id);
     }
   });
 

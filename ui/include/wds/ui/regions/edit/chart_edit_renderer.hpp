@@ -23,6 +23,9 @@ inline constexpr wds::interaction::Color kChartErrorMarkerColor{1.0f, 0.92f, 0.1
 inline constexpr float kChartErrorMarkerThickness = 1.5f;
 inline constexpr wds::interaction::Color kEditWaveformColor{0.56f, 0.56f, 0.58f, 0.38f};
 inline constexpr float kEditWaveformZ = 0.868f;
+// Back-layer notes use the same translucency as placement ghosts. The layer is
+// editor-only state: it is never written to a chart and never affects preview.
+inline constexpr float kBackLayerAlpha = 0.45f;
 
 struct EditGhost {
   wds::chart_editor::NotationNote note;
@@ -77,7 +80,10 @@ class ChartEditRenderer {
                             const std::unordered_set<int32_t>& selected, int fb_w, int fb_h,
                             wds::renderer::ScreenBounds screen,
                             const std::unordered_set<int32_t>* violation_note_ids = nullptr,
-                            float violation_strength = 0.0f) const;
+                            float violation_strength = 0.0f,
+                            // Back-layer notes draw behind front notes, translucent.
+                            const std::unordered_set<int32_t>* back_layer_note_ids = nullptr,
+                            float back_layer_alpha = kBackLayerAlpha) const;
 
   void append_skinned_ghosts(wds::renderer::DrawBatch& batch,
                              const wds::renderer::SkinCatalog& skin,

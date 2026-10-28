@@ -99,6 +99,12 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void set_extra_visible_lanes_changed_handler(std::function<void()> handler) {
     on_extra_visible_lanes_changed_ = std::move(handler);
   }
+  // Fired after a user action or explicit clear changes the back layer. The host
+  // mirrors it into session-owned per-chart state (applying it via set_back_layer
+  // does not fire, avoiding a redundant write-back).
+  void set_back_layer_changed_handler(std::function<void()> handler) {
+    on_back_layer_changed_ = std::move(handler);
+  }
   void set_cursor_setter(std::function<void(wds::interaction::CursorKind)> setter) {
     cursor_setter_ = std::move(setter);
   }
@@ -138,6 +144,34 @@ class ChartEditPanel final : public wds::interaction::Widget {
   }
   void set_selected(std::unordered_set<int32_t> ids);
   void set_selected_speed_ticks(std::unordered_set<int32_t> ticks);
+
+  // ---- Editor-only back layer (never written to a chart) ---------------------
+  // Sending the selection back is a temporary authoring aid: the notes stay in
+  // the document (preview / overlap check / save / export all see them), but draw
+  // translucent and ignore every editing interaction (hit testing, marquee,
+  // dragging, resizing, deletion, star targeting, split-label editing, ...).
+  // The state lives only in memory and is reset when the active chart changes.
+  bool is_back_layer(int32_t note_id) const noexcept { return back_layer_.count(note_id) != 0; }
+  const std::unordered_set<int32_t>& back_layer_notes() const noexcept {
+    return back_layer_.set();
+  }
+  // Move the selected notes into the back layer and clear the note selection.
+  // Mirrors hold layer selection: only each selected piece and the parts it
+  // contains are hidden (a selected hold body carries its own bound mid-stars;
+  // a selected head, star, or chain neighbour does not pull other hold pieces
+  // along). Derived HoldEighth rows never enter the layer. Returns how many
+  // notes moved (0 leaves the selection untouched). Split-lane gimmicks and
+  // scroll-speed labels are not part of this editor layer.
+  std::size_t send_selection_to_back_layer();
+  // Bring every back-layer note to the front layer. Does not change selection
+  // (back-layer notes can never be selected). Returns how many exist.
+  std::size_t restore_all_back_layer_notes();
+  // Replace the back layer from session-owned per-chart state (chart switch).
+  // Only existing playfield notes are accepted; split lines and derived
+  // HoldEighth rows stay front.
+  void set_back_layer(std::unordered_set<int32_t> ids);
+  // Forget the back layer without touching selection (explicit reset / tests).
+  void clear_back_layer();
 
   int default_width() const noexcept { return default_width_; }
   void set_default_width(int width) noexcept;
@@ -386,6 +420,19 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool near_scratch_end_right(const wds::chart_editor::NotationNote& note, float x) const;
   // Vertical band around the JumpScratch end-cap (same pad as hit_test end zone).
   bool near_scratch_end_cap(const wds::chart_editor::NotationNote& note, float y) const;
+  // Nearest hold-chain end-cap side edge under `point` (geometry only; callers
+  // reconcile it with hit_test_note through selection).
+  std::optional<wds::chart_editor::NotationNote> scratch_end_edge_owner(
+      wds::interaction::Vec2 point) const;
+  // True when both notes are pieces of one hold object: the same hold body (body,
+  // paired head / bound star) or connected ScratchHold chain segments. Geometry
+  // (not selection) resolves the pointer inside one hold object.
+  bool same_hold_object(const wds::chart_editor::NotationNote& a,
+                        const wds::chart_editor::NotationNote& b) const;
+  // True when `candidate` is selected, `other` is not, and they are unrelated
+  // notes: the selection then owns the pointer.
+  bool selected_owns_pointer(const wds::chart_editor::NotationNote& candidate,
+                             const wds::chart_editor::NotationNote& other) const;
   void update_hover_cursor(wds::interaction::Vec2 point);
   void set_hover_cursor(wds::interaction::CursorKind kind);
 
@@ -595,10 +642,17 @@ class ChartEditPanel final : public wds::interaction::Widget {
   std::function<void(int64_t)> seek_ms_;
   std::function<void()> on_visible_range_changed_;
   std::function<void()> on_extra_visible_lanes_changed_;
+  std::function<void()> on_back_layer_changed_;
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
   TrackedIdSet selected_;
   TrackedIdSet selected_speed_ticks_;
+  // Editor-only; never serialized. TrackedIdSet gives visual_revision() an O(1)
+  // change signal so both the Vulkan batch and the Qt canvas repaint.
+  TrackedIdSet back_layer_;
+  // Single gate for every selection insert: a back-layer note never joins the
+  // selection, even when reached through a front note's hold/chain dependency.
+  void select_note_id(int32_t id);
   mutable NoteSpanCache note_span_cache_{};
   mutable std::vector<int32_t> split_mids_scratch_{};
   mutable std::vector<int32_t> split_one_scratch_{};

@@ -125,6 +125,12 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
         notify_ui_change(UiChange::Offset);
         break;
       case SessionUiChange::Charts:
+        // The back layer follows the chart slot: switching within a project
+        // restores that chart's in-memory layer, while opening/importing/new use
+        // fresh slots (empty) so every note starts on the front layer.
+        if (edit_panel_ != nullptr && session_ != nullptr) {
+          edit_panel_->set_back_layer(session_->active_back_layer_ids());
+        }
         notify_ui_change(UiChange::Charts);
         notify_ui_change(UiChange::History);
         break;
@@ -149,6 +155,11 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit_panel_ = edit.get();
+  edit->set_back_layer_changed_handler([this] {
+    if (edit_panel_ != nullptr && session_ != nullptr) {
+      session_->set_active_back_layer_ids(edit_panel_->back_layer_notes());
+    }
+  });
   edit->set_seek_ms([this](int64_t ms) { chart_preview_->request_seek_ms(ms); });
   edit->set_visible_range_changed_handler([this] {
     if (auto* toolbar_panel = this->toolbar_panel()) {
@@ -490,6 +501,19 @@ void UiManager::bind_editor_shortcuts() {
   editor.bind(chord_delete_selection(), [this] {
     if (auto* panel = edit_panel()) panel->delete_selected();
   });
+  // Editor-only note layer: Ctrl/Cmd+B sends the selection behind everything;
+  // Ctrl/Cmd+N brings every back-layer note to the front. Neither mutates the
+  // document, so neither is a history step or a save/export change.
+  editor.bind(wds::interaction::editor_shortcut(
+                  wds::interaction::EditorShortcut::SendSelectionToBackLayer),
+              [this] {
+                if (auto* panel = edit_panel()) panel->send_selection_to_back_layer();
+              });
+  editor.bind(wds::interaction::editor_shortcut(
+                  wds::interaction::EditorShortcut::RestoreBackLayerNotes),
+              [this] {
+                if (auto* panel = edit_panel()) panel->restore_all_back_layer_notes();
+              });
   // Width slots → default place width. Bound globally so focus on toolbar/settings
   // still updates the edit panel (widget key path only reaches the focused widget).
   for (int slot = 0; slot < 6; ++slot) {

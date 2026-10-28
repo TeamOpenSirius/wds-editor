@@ -132,7 +132,8 @@ class ChartEditWidget final : public QWidget {
   void sync_audio_backdrop(const EditViewport& v, const wds::interaction::Rect& bounds);
   void fill_audio_backdrop_rows(const EditViewport& v, const wds::audio::WaveformOverview& waveform,
                                 EditSpectrumMode mode, int row0, int row1);
-  // Refills visible_note_indices_ with the notes touching [range_lo, range_hi] (tick space).
+  // Refills visible_note_indices_ / visible_back_note_indices_ with the notes
+  // touching [range_lo, range_hi] (tick space).
   void sync_visible_notes(const std::vector<wds::chart_editor::NotationNote>& notes,
                           int32_t range_lo, int32_t range_hi);
   // Content-generation-keyed span metadata that lets the tick windows binary-search the
@@ -166,6 +167,9 @@ class ChartEditWidget final : public QWidget {
   int64_t last_paint_us_ = 0;
   uint64_t paint_count_ = 0;
   std::vector<std::size_t> visible_note_indices_;
+  // Editor-only back layer: culled separately so it paints first (behind the
+  // interactive notes) at the shared ghost alpha and without selection boxes.
+  std::vector<std::size_t> visible_back_note_indices_;
   std::vector<std::size_t> note_draw_order_;
   std::vector<int64_t> note_draw_key_ms_;
   std::vector<wds::chart_editor::NotationNote> ghost_scratch_;

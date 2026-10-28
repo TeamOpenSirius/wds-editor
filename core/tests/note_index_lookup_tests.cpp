@@ -23,6 +23,7 @@
 #include <optional>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -588,11 +589,31 @@ NoteType o_migrate_legacy_head_type(const NotationNote& head, const NotationNote
   return NoteType::ScratchHoldStart;
 }
 
+std::optional<NotationNote> old_chained_prev(const std::vector<NotationNote>& notes,
+                                             const NotationNote& body);
+std::optional<NotationNote> old_paired_hold_head_for(const std::vector<NotationNote>& notes,
+                                                     const NotationNote& hold);
+
+std::optional<NotationNote> old_strict_head_for(const std::vector<NotationNote>& notes,
+                                                const NotationNote& hold) {
+  if (!is_bindable_hold_body(hold.note_type)) return std::nullopt;
+  for (const auto& note : notes) {
+    if (note.id == hold.id || !is_hold_head_note(note)) continue;
+    if (hold_head_pairs_with_body(note, hold)) return note;
+  }
+  return std::nullopt;
+}
+
 std::optional<NotationNote> old_legacy_scratch_head_for(const std::vector<NotationNote>& notes,
                                                         const NotationNote& hold) {
   if (!is_scratch_hold_body(hold.note_type) || !is_hold_with_tail(hold.note_type)) {
     return std::nullopt;
   }
+  if (auto assigned = old_paired_hold_head_for(notes, hold);
+      assigned && is_hold_head_note(*assigned)) {
+    return std::nullopt;
+  }
+  if (old_chained_prev(notes, hold)) return std::nullopt;
   for (const auto& note : notes) {
     if (note.id == hold.id || !o_is_legacy_scratch_hold_head(note)) continue;
     if (note.start_tick != hold.start_tick || note.lane != hold.lane ||
@@ -604,23 +625,110 @@ std::optional<NotationNote> old_legacy_scratch_head_for(const std::vector<Notati
   return std::nullopt;
 }
 
+struct OldTickPairing {
+  int32_t body_id = -1;
+  int32_t head_id = -1;
+  int32_t prev_tail_id = -1;
+};
+
+// Reference greedy matching for one tick: bodies in notes order claim the first
+// unused connecting previous tail, else the first unused strict head, else the
+// first unused tap. A head/tail is consumed by at most one body.
+std::vector<OldTickPairing> old_pair_tick(const std::vector<NotationNote>& notes, int32_t tick) {
+  std::vector<std::size_t> starting;
+  std::vector<std::size_t> ending;
+  for (std::size_t i = 0; i < notes.size(); ++i) {
+    if (notes[i].start_tick == tick) starting.push_back(i);
+    if (is_hold_chain_body(notes[i].note_type) && notes[i].end_tick == tick) {
+      ending.push_back(i);
+    }
+  }
+  std::vector<char> tail_used(ending.size(), 0);
+  std::unordered_set<int32_t> used_heads;
+  std::vector<OldTickPairing> out;
+  for (const std::size_t body_index : starting) {
+    const NotationNote& body = notes[body_index];
+    if (!is_bindable_hold_body(body.note_type)) continue;
+    OldTickPairing pairing;
+    pairing.body_id = body.id;
+    if (body.end_tick > body.start_tick && is_hold_chain_body(body.note_type)) {
+      for (std::size_t t = 0; t < ending.size(); ++t) {
+        if (tail_used[t]) continue;
+        const NotationNote& tail = notes[ending[t]];
+        if (!same_hold_chain_family(tail.note_type, body.note_type)) continue;
+        if (!hold_chain_lanes_connected(tail, body)) continue;
+        pairing.prev_tail_id = tail.id;
+        tail_used[t] = 1;
+        break;
+      }
+    }
+    if (pairing.prev_tail_id < 0) {
+      for (const std::size_t head_index : starting) {
+        const NotationNote& head = notes[head_index];
+        if (used_heads.count(head.id) != 0 || !is_hold_head_note(head)) continue;
+        if (!hold_head_pairs_with_body(head, body)) continue;
+        pairing.head_id = head.id;
+        used_heads.insert(head.id);
+        break;
+      }
+      if (pairing.head_id < 0) {
+        for (const std::size_t head_index : starting) {
+          const NotationNote& head = notes[head_index];
+          if (used_heads.count(head.id) != 0 || !is_hold_tap_head_note(head)) continue;
+          if (!hold_head_pairs_with_body(head, body)) continue;
+          pairing.head_id = head.id;
+          used_heads.insert(head.id);
+          break;
+        }
+      }
+    }
+    out.push_back(pairing);
+  }
+  return out;
+}
+
 std::optional<NotationNote> old_paired_hold_head_for(const std::vector<NotationNote>& notes,
                                                      const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type) && !is_nontail_hold_body(hold.note_type)) {
+  if (!is_bindable_hold_body(hold.note_type)) return std::nullopt;
+  if (hold.id < 0) {
+    if (is_hold_chain_body(hold.note_type) && hold.end_tick > hold.start_tick &&
+        old_chained_prev(notes, hold)) {
+      return std::nullopt;
+    }
+    if (auto strict = old_strict_head_for(notes, hold)) return strict;
+    for (const auto& note : notes) {
+      if (!is_hold_tap_head_note(note)) continue;
+      if (hold_head_pairs_with_body(note, hold)) return note;
+    }
     return std::nullopt;
   }
-  for (const auto& note : notes) {
-    if (note.id == hold.id) continue;
-    if (hold_head_pairs_with_body(note, hold)) return note;
+  for (const auto& pairing : old_pair_tick(notes, hold.start_tick)) {
+    if (pairing.body_id != hold.id) continue;
+    if (pairing.head_id < 0) return std::nullopt;
+    const auto it = std::find_if(notes.begin(), notes.end(), [&](const NotationNote& n) {
+      return n.id == pairing.head_id;
+    });
+    return it == notes.end() ? std::nullopt : std::optional<NotationNote>(*it);
   }
   return std::nullopt;
 }
 
 std::optional<NotationNote> old_paired_hold_body_for(const std::vector<NotationNote>& notes,
                                                      const NotationNote& head) {
-  if (!is_hold_head_note(head)) return std::nullopt;
-  for (const auto& note : notes) {
-    if (hold_head_pairs_with_body(head, note)) return note;
+  if (!is_hold_head_note(head) && !is_hold_tap_head_note(head)) return std::nullopt;
+  if (head.id < 0) {
+    for (const auto& note : notes) {
+      if (note.id == head.id || !is_bindable_hold_body(note.note_type)) continue;
+      if (hold_head_pairs_with_body(head, note)) return note;
+    }
+    return std::nullopt;
+  }
+  for (const auto& pairing : old_pair_tick(notes, head.start_tick)) {
+    if (pairing.head_id != head.id) continue;
+    const auto it = std::find_if(notes.begin(), notes.end(), [&](const NotationNote& n) {
+      return n.id == pairing.body_id;
+    });
+    return it == notes.end() ? std::nullopt : std::optional<NotationNote>(*it);
   }
   return std::nullopt;
 }
@@ -630,13 +738,22 @@ std::optional<NotationNote> old_chained_next(const std::vector<NotationNote>& no
   if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
-  for (const auto& note : notes) {
-    if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
-    if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
-    if (note.start_tick != body.end_tick) continue;
-    if (old_paired_hold_head_for(notes, note)) continue;
-    if (!hold_chain_lanes_connected(body, note)) continue;
-    return note;
+  if (body.id < 0) {
+    for (const auto& note : notes) {
+      if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
+      if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
+      if (note.start_tick != body.end_tick) continue;
+      if (!hold_chain_lanes_connected(body, note)) continue;
+      return note;
+    }
+    return std::nullopt;
+  }
+  for (const auto& pairing : old_pair_tick(notes, body.end_tick)) {
+    if (pairing.prev_tail_id != body.id) continue;
+    const auto it = std::find_if(notes.begin(), notes.end(), [&](const NotationNote& n) {
+      return n.id == pairing.body_id;
+    });
+    return it == notes.end() ? std::nullopt : std::optional<NotationNote>(*it);
   }
   return std::nullopt;
 }
@@ -646,13 +763,23 @@ std::optional<NotationNote> old_chained_prev(const std::vector<NotationNote>& no
   if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
-  if (old_paired_hold_head_for(notes, body)) return std::nullopt;
-  for (const auto& note : notes) {
-    if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
-    if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
-    if (note.end_tick != body.start_tick) continue;
-    if (!hold_chain_lanes_connected(note, body)) continue;
-    return note;
+  if (body.id < 0) {
+    for (const auto& note : notes) {
+      if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
+      if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
+      if (note.end_tick != body.start_tick) continue;
+      if (!hold_chain_lanes_connected(note, body)) continue;
+      return note;
+    }
+    return std::nullopt;
+  }
+  for (const auto& pairing : old_pair_tick(notes, body.start_tick)) {
+    if (pairing.body_id != body.id) continue;
+    if (pairing.prev_tail_id < 0) return std::nullopt;
+    const auto it = std::find_if(notes.begin(), notes.end(), [&](const NotationNote& n) {
+      return n.id == pairing.prev_tail_id;
+    });
+    return it == notes.end() ? std::nullopt : std::optional<NotationNote>(*it);
   }
   return std::nullopt;
 }

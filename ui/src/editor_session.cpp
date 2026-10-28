@@ -1490,6 +1490,17 @@ bool EditorSession::extended_editing_active() const {
 
 std::size_t EditorSession::chart_count() const noexcept { return charts_.size(); }
 
+const std::unordered_set<int32_t>& EditorSession::active_back_layer_ids() const noexcept {
+  static const std::unordered_set<int32_t> empty;
+  if (charts_.empty() || active_chart_index_ >= charts_.size()) return empty;
+  return charts_[active_chart_index_].back_layer_ids;
+}
+
+void EditorSession::set_active_back_layer_ids(std::unordered_set<int32_t> ids) {
+  if (charts_.empty() || active_chart_index_ >= charts_.size()) return;
+  charts_[active_chart_index_].back_layer_ids = std::move(ids);
+}
+
 const std::string& EditorSession::chart_path(std::size_t index) const noexcept {
   static const std::string empty;
   if (index >= charts_.size()) return empty;

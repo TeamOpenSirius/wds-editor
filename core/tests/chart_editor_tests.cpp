@@ -4769,7 +4769,11 @@ void test_repair_legacy_scratch_hold_heads() {
   legacy.note_type = NoteType::Normal;  // pre-alignment auto-head
   CHECK(doc.add_note(legacy) == 2);
 
-  CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  // The tap stand-in already pairs before repair; repair then migrates it to the
+  // official scratch head type (both keep the body headed).
+  auto tap_head = paired_hold_head_for(doc, *doc.find_note(1));
+  CHECK(tap_head.has_value());
+  CHECK(tap_head->note_type == NoteType::Normal);
   CHECK_EQ(repair_legacy_hold_heads(doc), 1);
   auto head = paired_hold_head_for(doc, *doc.find_note(1));
   CHECK(head.has_value());
@@ -4870,6 +4874,205 @@ void test_hold_head_pairs_exact_span_and_family() {
     CHECK(doc.add_note(body) == 1);
     add_head(doc, 2, 0, 3, 5, NoteType::ScratchHoldStart);  // wider than start span
     CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
+}
+
+void test_tap_stand_in_hold_heads() {
+  auto add = [](ChartDocument& doc, int32_t id, NoteType type, int32_t tick, int32_t lane,
+                int32_t width, int32_t end_tick) {
+    NotationNote note = make_tap(tick, lane);
+    note.id = id;
+    note.note_type = type;
+    note.width = width;
+    note.end_tick = end_tick;
+    CHECK(doc.add_note(note) == id);
+  };
+  auto add_body = [&](ChartDocument& doc, int32_t id, NoteType type, int32_t lane,
+                      int32_t width, int32_t start = 0, int32_t end = 960) {
+    add(doc, id, type, start, lane, width, end);
+  };
+  auto add_tap = [&](ChartDocument& doc, int32_t id, NoteType type, int32_t lane,
+                     int32_t width, int32_t tick = 0) {
+    add(doc, id, type, tick, lane, width, tick);
+  };
+
+  // ExTap (Critical) stands in for a normal hold head; a plain Tap does not.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, NoteType::Hold, 3, 2);
+    add_tap(doc, 2, NoteType::Normal, 3, 2);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+    add_tap(doc, 3, NoteType::Critical, 3, 2);
+    auto head = paired_hold_head_for(doc, *doc.find_note(1));
+    CHECK(head.has_value());
+    if (head) CHECK_EQ(head->id, 3);
+    CHECK(is_hold_tap_head_note(*doc.find_note(3)));
+    CHECK(!is_hold_head_note(*doc.find_note(3)));
+    CHECK(hold_head_pairs_with_body(*doc.find_note(3), *doc.find_note(1)));
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(3))->id, 1);
+    // Already headed by the tap: ensure must not add an auto HoldStart.
+    const size_t before = doc.notes().size();
+    CHECK(ensure_hold_head_if_needed(doc, *doc.find_note(1)));
+    CHECK_EQ(doc.notes().size(), before);
+  }
+
+  // Scratch bodies accept both ExTap and a plain Tap; mismatched span does not pair.
+  for (const NoteType tap_type : {NoteType::Critical, NoteType::Normal}) {
+    ChartDocument doc;
+    add_body(doc, 1, NoteType::ScratchHold, 3, 2);
+    add_tap(doc, 2, tap_type, 3, 1);  // narrower than the body → no pair
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+    add_tap(doc, 3, tap_type, 3, 2);
+    auto head = paired_hold_head_for(doc, *doc.find_note(1));
+    CHECK(head.has_value());
+    if (head) CHECK_EQ(head->id, 3);
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(3))->id, 1);
+  }
+  {
+    ChartDocument doc;
+    CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+    add_body(doc, 1, NoteType::NontailScratchHold, 3, 2);
+    add_tap(doc, 2, NoteType::Normal, 3, 2);
+    CHECK(paired_hold_head_for(doc, *doc.find_note(1)).has_value());
+  }
+
+  // An official HoldStart always wins; the tap is then not a head.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, NoteType::Hold, 3, 2);
+    add_tap(doc, 2, NoteType::Critical, 3, 2);
+    add(doc, 3, NoteType::HoldStart, 0, 3, 2, 0);
+    auto head = paired_hold_head_for(doc, *doc.find_note(1));
+    CHECK(head.has_value());
+    if (head) CHECK_EQ(head->id, 3);
+    CHECK(!paired_hold_body_for(doc, *doc.find_note(2)).has_value());
+  }
+
+  // A chain continuation is already paired with the previous hold's tail:
+  // it must not also claim the tap at its start.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, NoteType::ScratchHold, 2, 2, 0, 480);
+    add_body(doc, 2, NoteType::ScratchHold, 2, 2, 480, 960);
+    add_tap(doc, 3, NoteType::Normal, 2, 2, 480);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(2)).has_value());
+    CHECK(!paired_hold_body_for(doc, *doc.find_note(3)).has_value());
+    // ensure must not add a second head to the continuation.
+    const size_t before = doc.notes().size();
+    CHECK(ensure_hold_head_if_needed(doc, *doc.find_note(2)));
+    CHECK_EQ(doc.notes().size(), before);
+    auto prev = chained_prev_scratch_hold(doc, *doc.find_note(2));
+    CHECK(prev.has_value());
+    if (prev) CHECK_EQ(prev->id, 1);
+    auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, 2);
+  }
+
+  // Chain pairing outranks an official HoldStart at the same joint: the body is
+  // a continuation, so it has no head and its official start note pairs with no
+  // body. The chain itself is still detected from the previous tail.
+  {
+    ChartDocument doc;
+    add_body(doc, 1, NoteType::ScratchHold, 2, 2, 0, 480);
+    add_body(doc, 2, NoteType::ScratchHold, 2, 2, 480, 960);
+    add(doc, 3, NoteType::ScratchHoldStart, 480, 2, 2, 480);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(2)).has_value());
+    CHECK(!paired_hold_body_for(doc, *doc.find_note(3)).has_value());
+    auto prev = chained_prev_scratch_hold(doc, *doc.find_note(2));
+    CHECK(prev.has_value());
+    if (prev) CHECK_EQ(prev->id, 1);
+    auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, 2);
+  }
+}
+
+void test_hold_pairing_is_one_to_one() {
+  auto add_note = [](ChartDocument& doc, NotationNote note) {
+    CHECK(doc.add_note(note) == note.id);
+  };
+  auto make_body = [](int32_t id, int32_t tick, int32_t lane, int32_t width, NoteType type) {
+    NotationNote body = make_tap(tick, lane);
+    body.id = id;
+    body.width = width;
+    body.end_tick = tick + 480;
+    body.note_type = type;
+    return body;
+  };
+  auto make_head = [](int32_t id, int32_t tick, int32_t lane, int32_t width, NoteType type) {
+    NotationNote head = make_tap(tick, lane);
+    head.id = id;
+    head.width = width;
+    head.note_type = type;
+    return head;
+  };
+
+  {  // One head, two identical bodies: only the first body owns it.
+    ChartDocument doc;
+    add_note(doc, make_body(1, 0, 3, 2, NoteType::Hold));
+    add_note(doc, make_body(2, 0, 3, 2, NoteType::Hold));
+    add_note(doc, make_head(3, 0, 3, 2, NoteType::HoldStart));
+    CHECK_EQ(paired_hold_head_for(doc, *doc.find_note(1))->id, 3);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(2)).has_value());
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(3))->id, 1);
+  }
+
+  {  // Two heads, two identical bodies: one-to-one in notes order.
+    ChartDocument doc;
+    add_note(doc, make_body(1, 0, 3, 2, NoteType::Hold));
+    add_note(doc, make_body(2, 0, 3, 2, NoteType::Hold));
+    add_note(doc, make_head(3, 0, 3, 2, NoteType::HoldStart));
+    add_note(doc, make_head(4, 0, 3, 2, NoteType::HoldStart));
+    CHECK_EQ(paired_hold_head_for(doc, *doc.find_note(1))->id, 3);
+    CHECK_EQ(paired_hold_head_for(doc, *doc.find_note(2))->id, 4);
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(3))->id, 1);
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(4))->id, 2);
+  }
+
+  {  // One body, two identical heads: only the first is bound.
+    ChartDocument doc;
+    add_note(doc, make_body(1, 0, 3, 2, NoteType::Hold));
+    add_note(doc, make_head(2, 0, 3, 2, NoteType::HoldStart));
+    add_note(doc, make_head(3, 0, 3, 2, NoteType::HoldStart));
+    CHECK_EQ(paired_hold_head_for(doc, *doc.find_note(1))->id, 2);
+    CHECK(!paired_hold_body_for(doc, *doc.find_note(3)).has_value());
+  }
+
+  {  // One previous tail, two identical next bodies: the tail feeds only the first.
+    ChartDocument doc;
+    NotationNote prev = make_body(1, 0, 2, 2, NoteType::ScratchHold);
+    prev.gimmick_type = GimmickType::JumpScratch;
+    set_scratch_hold_end_lanes(prev, 2, 3);
+    add_note(doc, prev);
+    add_note(doc, make_body(2, 480, 2, 2, NoteType::ScratchHold));
+    add_note(doc, make_body(3, 480, 2, 2, NoteType::ScratchHold));
+    add_note(doc, make_head(4, 480, 2, 2, NoteType::ScratchHoldStart));
+    const auto prev_again = chained_prev_scratch_hold(doc, *doc.find_note(2));
+    CHECK(prev_again.has_value());
+    if (prev_again) CHECK_EQ(prev_again->id, 1);
+    CHECK(!chained_prev_scratch_hold(doc, *doc.find_note(3)).has_value());
+    const auto next = chained_next_scratch_hold(doc, *doc.find_note(1));
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, 2);
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(2)).has_value());
+    // The unused official head falls to the second body, not back to the tail owner.
+    const auto second_head = paired_hold_head_for(doc, *doc.find_note(3));
+    CHECK(second_head.has_value());
+    if (second_head) CHECK_EQ(second_head->id, 4);
+    CHECK_EQ(paired_hold_body_for(doc, *doc.find_note(4))->id, 3);
+  }
+
+  {  // Tail and head on one body: chain wins, head is not consumed by this body.
+    ChartDocument doc;
+    NotationNote prev = make_body(1, 0, 2, 2, NoteType::ScratchHold);
+    prev.gimmick_type = GimmickType::JumpScratch;
+    set_scratch_hold_end_lanes(prev, 2, 3);
+    add_note(doc, prev);
+    add_note(doc, make_body(2, 480, 2, 2, NoteType::ScratchHold));
+    add_note(doc, make_head(3, 480, 2, 2, NoteType::ScratchHoldStart));
+    CHECK(!paired_hold_head_for(doc, *doc.find_note(2)).has_value());
+    CHECK(!paired_hold_body_for(doc, *doc.find_note(3)).has_value());
   }
 }
 
@@ -10823,6 +11026,8 @@ int main() {
   test_scratch_hold_auto_head_is_scratch_hold_start();
   test_repair_legacy_scratch_hold_heads();
   test_hold_head_pairs_exact_span_and_family();
+  test_tap_stand_in_hold_heads();
+  test_hold_pairing_is_one_to_one();
   test_resolve_convert_target_is_identity();
   test_convert_notes_in_selection_hold_stars();
   test_convert_notes_in_selection_stars();

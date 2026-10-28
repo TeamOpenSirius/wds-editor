@@ -661,7 +661,8 @@ void ChartEditRenderer::append_skinned_notes(
     const EditViewport& viewport, const std::vector<wds::chart_editor::NotationNote>& notes,
     const std::unordered_set<int32_t>& selected, int fb_w, int fb_h,
     wds::renderer::ScreenBounds screen, const std::unordered_set<int32_t>* violation_note_ids,
-    float violation_strength) const {
+    float violation_strength, const std::unordered_set<int32_t>* back_layer_note_ids,
+    float back_layer_alpha) const {
   const auto layer_z = [&](float base, float start_tick) {
     return base - start_tick * depth_.tick_bias;
   };
@@ -690,20 +691,33 @@ void ChartEditRenderer::append_skinned_notes(
       {NoteVisualPass::MidStar, depth_.mid_star},
       {NoteVisualPass::Arrow, depth_.flick_arrow},
   };
-  for (const auto& layer : passes) {
-    for (size_t idx : order) {
-      const auto& note = notes[idx];
-      if (!in_window(note)) continue;
-      const float alpha = selected.count(note.id) != 0 ? 1.0f : 0.92f;
-      const float z = layer_z(layer.base_z, static_cast<float>(note.start_tick));
-      wds::interaction::Color tint{1.0f, 1.0f, 1.0f, 1.0f};
-      if (violation_note_ids != nullptr && violation_strength > 0.0f &&
-          violation_note_ids->count(note.id) != 0) {
-        tint = tint.lerp(wds::interaction::theme::kError, violation_strength);
+  const bool has_back_layer =
+      back_layer_note_ids != nullptr && !back_layer_note_ids->empty();
+  // Group 0 (when any back-layer note exists) draws every back pass before the
+  // front passes, so back notes genuinely sit behind the interactive layer.
+  const int groups = has_back_layer ? 2 : 1;
+  for (int group = 0; group < groups; ++group) {
+    const bool draw_back = has_back_layer && group == 0;
+    for (const auto& layer : passes) {
+      for (size_t idx : order) {
+        const auto& note = notes[idx];
+        if (!in_window(note)) continue;
+        const bool is_back =
+            has_back_layer && back_layer_note_ids->count(note.id) != 0;
+        if (is_back != draw_back) continue;
+        const float alpha = is_back
+                                ? back_layer_alpha
+                                : (selected.count(note.id) != 0 ? 1.0f : 0.92f);
+        const float z = layer_z(layer.base_z, static_cast<float>(note.start_tick));
+        wds::interaction::Color tint{1.0f, 1.0f, 1.0f, 1.0f};
+        if (violation_note_ids != nullptr && violation_strength > 0.0f &&
+            violation_note_ids->count(note.id) != 0) {
+          tint = tint.lerp(wds::interaction::theme::kError, violation_strength);
+        }
+        draw_skinned_note(batch, skin, viewport, note, alpha, z,
+                          layer_z(depth_.flick_arrow, static_cast<float>(note.start_tick)), fb_w,
+                          fb_h, screen, layer.pass, tint.r, tint.g, tint.b);
       }
-      draw_skinned_note(batch, skin, viewport, note, alpha, z,
-                        layer_z(depth_.flick_arrow, static_cast<float>(note.start_tick)), fb_w,
-                        fb_h, screen, layer.pass, tint.r, tint.g, tint.b);
     }
   }
 }

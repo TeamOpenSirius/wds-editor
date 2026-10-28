@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace wds::chart_editor {
@@ -154,6 +155,11 @@ class EditorSession {
   bool delay_editable() const noexcept { return !read_only_ || allow_delay_when_read_only_; }
   std::size_t chart_count() const noexcept;
   std::size_t active_chart_index() const noexcept { return active_chart_index_; }
+  // Editor-only back-layer note ids for the active chart. This lives beside the
+  // in-memory chart slot: switching charts keeps it, while opening/importing a
+  // project or creating a new chart creates fresh slots with an empty set.
+  const std::unordered_set<int32_t>& active_back_layer_ids() const noexcept;
+  void set_active_back_layer_ids(std::unordered_set<int32_t> ids);
   const std::string& chart_path(std::size_t index) const noexcept;
   // Official default name for the active chart (e.g. "1.csv").
   std::string official_chart_filename(std::size_t index) const;
@@ -166,6 +172,8 @@ class EditorSession {
     bool dirty = false;
     // Per-chart undo stack; swapped with the engine history on chart switch.
     wds::chart_editor::EditHistory history;
+    // Editor-only note-layer state (never serialized with the chart).
+    std::unordered_set<int32_t> back_layer_ids;
 
     ChartSlot() = default;
     ChartSlot(ChartSlot&&) noexcept = default;

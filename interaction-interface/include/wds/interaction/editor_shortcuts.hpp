@@ -54,6 +54,11 @@ enum class EditorShortcut : int {
   ClickRecord1,
   ClickRecord2,
   ClickRecord3,
+  // Editor-only note layers: send the selection behind everything else / bring
+  // every back-layer note to the front again. Appended so persisted config ids
+  // (stored by name) and existing enum values stay stable.
+  SendSelectionToBackLayer,
+  RestoreBackLayerNotes,
   Count
 };
 
