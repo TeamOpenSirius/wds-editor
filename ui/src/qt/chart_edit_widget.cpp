@@ -1016,6 +1016,9 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
   }
 
   sync_visible_notes(notes, cull_lo, cull_hi);
+  // Back layer first (hidden behind every interactive note), ghost-translucent
+  // and without selection boxes; the normal layer follows.
+  paint_notes(p, notes, visible_back_note_indices_, kBackLayerAlpha, false);
   paint_notes(p, notes, visible_note_indices_, 1.0f, true);
   {
     // Prefetch first, visible requests second: the builder is LIFO so the visible clusters are built first.
@@ -1277,8 +1280,16 @@ void ChartEditWidget::sync_visible_notes(const std::vector<wds::chart_editor::No
   // so a (lo, hi) key would never hit, and the indices must not outlive an in-place edit.
   ensure_note_span_cache(notes);
   visible_note_indices_.clear();
+  visible_back_note_indices_.clear();
+  const bool has_back_layer = panel_ != nullptr && !panel_->back_layer_notes().empty();
   for_each_note_in_tick_window(notes, note_sorted_, note_max_span_ticks_, range_lo, range_hi,
-                               [&](std::size_t i) { visible_note_indices_.push_back(i); });
+                               [&](std::size_t i) {
+                                 if (has_back_layer && panel_->is_back_layer(notes[i].id)) {
+                                   visible_back_note_indices_.push_back(i);
+                                 } else {
+                                   visible_note_indices_.push_back(i);
+                                 }
+                               });
 }
 
 void ChartEditWidget::playfield_cull_ticks(int32_t& lo, int32_t& hi) const {

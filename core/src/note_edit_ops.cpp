@@ -426,15 +426,27 @@ bool is_hold_head_note(const NotationNote& note) noexcept {
   return is_hold_start(note.note_type);
 }
 
-bool hold_head_pairs_with_body(const NotationNote& head, const NotationNote& body) noexcept {
+bool is_hold_tap_head_note(const NotationNote& note) noexcept {
+  // Visual stand-ins users place at a hold start: ExTap (Critical) on any hold,
+  // plain Tap (Normal) on scratch holds. Never official head types.
+  if (note.end_tick > note.start_tick) return false;
+  return note.note_type == NoteType::Critical || note.note_type == NoteType::Normal;
+}
+
+namespace {
+
+bool same_head_start_span(const NotationNote& head, const NotationNote& body) noexcept {
+  return same_tick(head.start_tick, body.start_tick) && head.lane == body.lane &&
+         head.width == body.width;
+}
+
+bool strict_hold_head_pairs_with_body(const NotationNote& head,
+                                      const NotationNote& body) noexcept {
   if (!is_hold_head_note(head)) return false;
   if (!is_hold_with_tail(body.note_type) && !is_nontail_hold_body(body.note_type)) {
     return false;
   }
-  if (!same_tick(head.start_tick, body.start_tick) || head.lane != body.lane ||
-      head.width != body.width) {
-    return false;
-  }
+  if (!same_head_start_span(head, body)) return false;
   const bool scratch_body = is_scratch_hold_body(body.note_type);
   switch (head.note_type) {
     case NoteType::HoldStart:
@@ -448,6 +460,37 @@ bool hold_head_pairs_with_body(const NotationNote& head, const NotationNote& bod
   }
 }
 
+bool tap_hold_head_pairs_with_body(const NotationNote& head,
+                                   const NotationNote& body) noexcept {
+  if (!is_hold_tap_head_note(head)) return false;
+  if (!is_bindable_hold_body(body.note_type)) return false;
+  if (!same_head_start_span(head, body)) return false;
+  if (head.note_type == NoteType::Critical) return true;  // ExTap: both families.
+  // Plain Tap is visually the scratch head sprite only.
+  return head.note_type == NoteType::Normal && is_scratch_hold_body(body.note_type);
+}
+
+std::optional<NotationNote> strict_paired_hold_head_for(const ChartDocument& doc,
+                                                        const NotationNote& hold) {
+  if (!is_bindable_hold_body(hold.note_type)) return std::nullopt;
+  std::vector<std::size_t> starting;
+  doc.note_indices_starting_at(hold.start_tick, starting);
+  const auto& all = doc.notes();
+  for (const std::size_t index : starting) {
+    const NotationNote& note = all[index];
+    if (note.id == hold.id) continue;
+    if (strict_hold_head_pairs_with_body(note, hold)) return note;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
+bool hold_head_pairs_with_body(const NotationNote& head, const NotationNote& body) noexcept {
+  return strict_hold_head_pairs_with_body(head, body) ||
+         tap_hold_head_pairs_with_body(head, body);
+}
+
 namespace {
 
 bool same_start_span(const NotationNote& a, const NotationNote& b) noexcept {
@@ -459,6 +502,14 @@ std::optional<NotationNote> legacy_scratch_head_for(const ChartDocument& doc,
   if (!is_scratch_hold_body(hold.note_type) || !is_hold_with_tail(hold.note_type)) {
     return std::nullopt;
   }
+  // Do not rewrite a tap into a head when this body actually owns an official
+  // head under the one-to-one matching, or when it is a chain continuation.
+  // (A head bound to an earlier identical body must not block this body.)
+  if (auto assigned = paired_hold_head_for(doc, hold);
+      assigned && is_hold_head_note(*assigned)) {
+    return std::nullopt;
+  }
+  if (chained_prev_scratch_hold(doc, hold)) return std::nullopt;
   // Only notes starting at the hold's tick can qualify; first match in notes() order.
   std::vector<std::size_t> starting;
   doc.note_indices_starting_at(hold.start_tick, starting);
@@ -585,37 +636,165 @@ std::optional<NotationNote> make_auto_hold_head(const NotationNote& hold,
   return head;
 }
 
-std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
-                                                 const NotationNote& hold) {
-  if (!is_hold_with_tail(hold.note_type) && !is_nontail_hold_body(hold.note_type)) {
-    return std::nullopt;
+namespace {
+
+struct HoldTickPairing {
+  int32_t body_id = -1;
+  int32_t head_id = -1;
+  int32_t prev_tail_id = -1;
+};
+
+struct HoldHeadQueue {
+  std::vector<int32_t> ids;
+  size_t next = 0;
+};
+
+uint64_t hold_head_span_key(const NotationNote& note) noexcept {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(note.lane)) << 32) |
+         static_cast<uint32_t>(note.width);
+}
+
+int32_t take_hold_head(HoldHeadQueue& queue, std::unordered_set<int32_t>& used) {
+  while (queue.next < queue.ids.size() && used.count(queue.ids[queue.next]) != 0) {
+    ++queue.next;
   }
-  // A head pairs only at the body's own start tick; first match in notes() order.
+  if (queue.next >= queue.ids.size()) return -1;
+  const int32_t id = queue.ids[queue.next++];
+  used.insert(id);
+  return id;
+}
+
+// Greedy one-to-one matching for one tick. Every note starts or ends exactly at
+// `tick`, so this is O(k + b*t) over that tick (never the whole chart):
+// - bodies in notes order claim at most one head or previous chain tail;
+// - a connecting previous tail outranks heads;
+// - a head/tail already claimed by an earlier body is not reused.
+std::vector<HoldTickPairing> pair_hold_notes_at_tick(const ChartDocument& doc, int32_t tick) {
   std::vector<std::size_t> starting;
-  doc.note_indices_starting_at(hold.start_tick, starting);
+  std::vector<std::size_t> ending;
+  doc.note_indices_starting_at(tick, starting);
+  doc.tail_note_indices_ending_at(tick, ending);
   const auto& all = doc.notes();
+  std::vector<std::size_t> bodies;
+  bodies.reserve(starting.size());
+  std::unordered_map<uint64_t, HoldHeadQueue> blue_strict;
+  std::unordered_map<uint64_t, HoldHeadQueue> scratch_strict;
+  std::unordered_map<uint64_t, HoldHeadQueue> blue_tap;
+  std::unordered_map<uint64_t, HoldHeadQueue> scratch_tap;
   for (const std::size_t index : starting) {
     const NotationNote& note = all[index];
-    if (note.id == hold.id) continue;
-    if (hold_head_pairs_with_body(note, hold)) return note;
+    if (is_bindable_hold_body(note.note_type)) {
+      bodies.push_back(index);
+      continue;
+    }
+    const uint64_t key = hold_head_span_key(note);
+    if (is_hold_head_note(note)) {
+      const bool scratch = note.note_type == NoteType::ScratchHoldStart ||
+                           note.note_type == NoteType::ScratchCriticalHoldStart;
+      (scratch ? scratch_strict : blue_strict)[key].ids.push_back(note.id);
+    } else if (is_hold_tap_head_note(note)) {
+      if (note.note_type == NoteType::Critical) {
+        blue_tap[key].ids.push_back(note.id);
+        scratch_tap[key].ids.push_back(note.id);
+      } else if (note.note_type == NoteType::Normal) {
+        scratch_tap[key].ids.push_back(note.id);
+      }
+    }
+  }
+  std::vector<std::size_t> tails;
+  tails.reserve(ending.size());
+  for (const std::size_t index : ending) {
+    if (is_hold_chain_body(all[index].note_type)) tails.push_back(index);
+  }
+  std::vector<char> tail_used(tails.size(), 0);
+  std::unordered_set<int32_t> used_heads;
+  std::vector<HoldTickPairing> pairings;
+  pairings.reserve(bodies.size());
+  for (const std::size_t body_index : bodies) {
+    const NotationNote& body = all[body_index];
+    HoldTickPairing pairing;
+    pairing.body_id = body.id;
+    if (body.end_tick > body.start_tick && is_hold_chain_body(body.note_type)) {
+      for (size_t i = 0; i < tails.size(); ++i) {
+        if (tail_used[i]) continue;
+        const NotationNote& tail = all[tails[i]];
+        if (!same_hold_chain_family(tail.note_type, body.note_type)) continue;
+        if (!hold_chain_lanes_connected(tail, body)) continue;
+        pairing.prev_tail_id = tail.id;
+        tail_used[i] = 1;
+        break;
+      }
+    }
+    if (pairing.prev_tail_id < 0) {
+      const uint64_t key = hold_head_span_key(body);
+      if (is_scratch_hold_body(body.note_type)) {
+        pairing.head_id = take_hold_head(scratch_strict[key], used_heads);
+        if (pairing.head_id < 0) pairing.head_id = take_hold_head(scratch_tap[key], used_heads);
+      } else {
+        pairing.head_id = take_hold_head(blue_strict[key], used_heads);
+        if (pairing.head_id < 0) pairing.head_id = take_hold_head(blue_tap[key], used_heads);
+      }
+    }
+    pairings.push_back(pairing);
+  }
+  return pairings;
+}
+
+}  // namespace
+
+std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
+                                                 const NotationNote& hold) {
+  if (!is_bindable_hold_body(hold.note_type)) return std::nullopt;
+  if (hold.id < 0) {
+    // Draft (unassigned id): no document identity to occupy a one-to-one slot.
+    // Keep the per-note preview resolution.
+    if (is_hold_chain_body(hold.note_type) && hold.end_tick > hold.start_tick &&
+        chained_prev_scratch_hold(doc, hold)) {
+      return std::nullopt;
+    }
+    if (auto strict = strict_paired_hold_head_for(doc, hold)) return strict;
+    std::vector<std::size_t> starting;
+    doc.note_indices_starting_at(hold.start_tick, starting);
+    const auto& all = doc.notes();
+    for (const std::size_t index : starting) {
+      if (tap_hold_head_pairs_with_body(all[index], hold)) return all[index];
+    }
+    return std::nullopt;
+  }
+  for (const auto& pairing : pair_hold_notes_at_tick(doc, hold.start_tick)) {
+    if (pairing.body_id != hold.id) continue;
+    if (pairing.head_id >= 0) return doc.find_note(pairing.head_id);
+    return std::nullopt;
   }
   return std::nullopt;
 }
 
 std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
                                                  const NotationNote& head) {
-  if (!is_hold_head_note(head)) return std::nullopt;
-  std::vector<std::size_t> starting;
-  doc.note_indices_starting_at(head.start_tick, starting);
-  const auto& all = doc.notes();
-  for (const std::size_t index : starting) {
-    if (hold_head_pairs_with_body(head, all[index])) return all[index];
+  if (!is_hold_head_note(head) && !is_hold_tap_head_note(head)) return std::nullopt;
+  if (head.id < 0) {
+    // Draft: no one-to-one slot; return the first geometrically matching body.
+    std::vector<std::size_t> starting;
+    doc.note_indices_starting_at(head.start_tick, starting);
+    const auto& all = doc.notes();
+    for (const std::size_t index : starting) {
+      const NotationNote& body = all[index];
+      if (body.id == head.id || !is_bindable_hold_body(body.note_type)) continue;
+      if (hold_head_pairs_with_body(head, body)) return body;
+    }
+    return std::nullopt;
+  }
+  for (const auto& pairing : pair_hold_notes_at_tick(doc, head.start_tick)) {
+    if (pairing.head_id == head.id) return doc.find_note(pairing.body_id);
   }
   return std::nullopt;
 }
 
 bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold) {
   if (!is_bindable_hold_body(hold.note_type)) return false;
+  // A chain continuation is already paired with the previous tail; it must not
+  // gain a head even when an official HoldStart sits at its start.
+  if (is_hold_chain_body(hold.note_type) && chained_prev_scratch_hold(doc, hold)) return true;
   if (paired_hold_head_for(doc, hold)) return true;
   if (auto legacy = legacy_scratch_head_for(doc, hold)) {
     NotationNote fixed = *legacy;
@@ -1009,7 +1188,15 @@ std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
   if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
-  // Candidates start exactly at body.end_tick; first match in notes() order.
+  if (body.id >= 0) {
+    // The end-tick matching assigns this tail to at most one next body.
+    for (const auto& pairing : pair_hold_notes_at_tick(doc, body.end_tick)) {
+      if (pairing.prev_tail_id != body.id) continue;
+      return doc.find_note(pairing.body_id);
+    }
+    return std::nullopt;
+  }
+  // Draft (unassigned id): per-note preview scan.
   std::vector<std::size_t> starting;
   doc.note_indices_starting_at(body.end_tick, starting);
   const auto& all = doc.notes();
@@ -1018,8 +1205,6 @@ std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
     if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
     if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.start_tick, body.end_tick)) continue;
-    // A head at the next start means a new chain, not a continuation.
-    if (paired_hold_head_for(doc, note)) continue;
     if (!hold_chain_lanes_connected(body, note)) continue;
     return note;
   }
@@ -1031,10 +1216,16 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
   if (!is_hold_chain_body(body.note_type) || body.end_tick <= body.start_tick) {
     return std::nullopt;
   }
-  // A head on this body starts a new chain; it is not a continuation.
-  if (paired_hold_head_for(doc, body)) return std::nullopt;
-  // Hold-chain bodies are a subset of tailed types, so the end tree holds every
-  // candidate; first match in notes() order.
+  if (body.id >= 0) {
+    // The start-tick matching assigns at most one previous tail to this body.
+    for (const auto& pairing : pair_hold_notes_at_tick(doc, body.start_tick)) {
+      if (pairing.body_id != body.id) continue;
+      if (pairing.prev_tail_id >= 0) return doc.find_note(pairing.prev_tail_id);
+      return std::nullopt;
+    }
+    return std::nullopt;
+  }
+  // Draft (unassigned id): per-note preview scan.
   std::vector<std::size_t> ending;
   doc.tail_note_indices_ending_at(body.start_tick, ending);
   const auto& all = doc.notes();
@@ -1043,8 +1234,6 @@ std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
     if (note.id == body.id || !is_hold_chain_body(note.note_type)) continue;
     if (!same_hold_chain_family(body.note_type, note.note_type)) continue;
     if (!same_chain_tick(note.end_tick, body.start_tick)) continue;
-    // Prev may have its own head (first segment of a chain). Connection is decided
-    // by time abutment + prev tail exactly covering both bodies.
     if (!hold_chain_lanes_connected(note, body)) continue;
     return note;
   }

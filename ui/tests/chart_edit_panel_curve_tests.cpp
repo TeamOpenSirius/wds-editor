@@ -1,4 +1,5 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 #include "wds/ui/regions/settings/curve_templates_dialog.hpp"
@@ -6,11 +7,13 @@
 #include "wds/ui/ui_manager.hpp"
 
 #include <wds/core/chart_editor_engine.hpp>
+#include <wds/core/chart_validation.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/notation.hpp>
 #include <wds/core/note_edit_ops.hpp>
 #include <wds/core/scratch_hold_curve.hpp>
 #include <wds/interaction/editor_input.hpp>
+#include <wds/interaction/editor_shortcuts.hpp>
 #include <wds/interaction/events.hpp>
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/interaction/widgets/button.hpp>
@@ -20,6 +23,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -57,6 +61,9 @@ struct ChartEditPanelTestAccess {
   }
   static std::pair<float, float> marquee_track_x_span(const ChartEditPanel& panel, float x) {
     return panel.marquee_track_x_span(x);
+  }
+  static bool delete_split_note(ChartEditPanel& panel, int32_t note_id) {
+    return panel.delete_split_note(note_id);
   }
 };
 }  // namespace wds::ui
@@ -1434,6 +1441,281 @@ int32_t add_bound_star(Harness& h, int32_t hold_id, int32_t tick, int32_t lane, 
   const int32_t id = h.engine.add_note(star);
   CHECK(id >= 0);
   return id;
+}
+
+void test_hold_head_adjust_keeps_mid_stars() {
+  // Both hold families (blue/purple, ordinary/gold) resize their start edge without
+  // carrying the stars inside: stars are independent notes and keep their own tick.
+  for (const NoteType type : {NoteType::Hold, NoteType::CriticalHold, NoteType::ScratchHold,
+                              NoteType::ScratchCriticalHold}) {
+    Harness h;
+    const int32_t body_id = add_hold_body(h, type, 0, 960, 3, 3);
+    const int32_t star_id = add_bound_star(h, body_id, 480, 3, 3);
+    h.panel.set_selected({body_id});
+    const auto grab = h.at_tick_lane(0, 4);
+    const auto dest = h.at_tick_lane(240, 4);
+    h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+
+    const auto* body_mid = find_note_id(h.engine.document().notes(), body_id);
+    const auto* star_mid = find_note_id(h.engine.document().notes(), star_id);
+    CHECK(body_mid != nullptr);
+    CHECK(star_mid != nullptr);
+    if (body_mid != nullptr) {
+      CHECK_EQ(body_mid->start_tick, 240);
+      CHECK_EQ(body_mid->end_tick, 960);
+    }
+    if (star_mid != nullptr) CHECK_EQ(star_mid->start_tick, 480);
+
+    h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+    const auto* body_after = find_note_id(h.engine.document().notes(), body_id);
+    const auto* star_after = find_note_id(h.engine.document().notes(), star_id);
+    CHECK(body_after != nullptr);
+    CHECK(star_after != nullptr);
+    if (body_after != nullptr) {
+      CHECK_EQ(body_after->start_tick, 240);
+      CHECK_EQ(body_after->end_tick, 960);
+    }
+    if (star_after != nullptr) {
+      CHECK_EQ(star_after->start_tick, 480);
+      CHECK_EQ(star_after->parent_hold_id, body_id);
+    }
+  }
+}
+
+void test_jumpscratch_joint_adjust_keeps_next_mid_star() {
+  // The same shared helper runs for the JumpScratch joint: moving the joint resizes
+  // the next segment's start but must leave its internal star at its tick.
+  Harness h;
+  const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+  const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  const int32_t star_id = add_bound_star(h, next_id, 720, 2, 2);
+  h.panel.set_selected({prev_id});
+  const auto grab = h.at_tick_lane(480, 2);
+  const auto dest = h.at_tick_lane(600, 2);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+
+  const auto* prev = find_note_id(h.engine.document().notes(), prev_id);
+  const auto* next = find_note_id(h.engine.document().notes(), next_id);
+  const auto* star = find_note_id(h.engine.document().notes(), star_id);
+  CHECK(prev != nullptr);
+  CHECK(next != nullptr);
+  CHECK(star != nullptr);
+  if (prev != nullptr) CHECK_EQ(prev->end_tick, 600);
+  if (next != nullptr) CHECK_EQ(next->start_tick, 600);
+  if (star != nullptr) CHECK_EQ(star->start_tick, 720);
+
+  h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+  const auto* star_after = find_note_id(h.engine.document().notes(), star_id);
+  CHECK(star_after != nullptr);
+  if (star_after != nullptr) CHECK_EQ(star_after->start_tick, 720);
+}
+
+void test_hold_head_adjust_hides_crossed_star_until_release() {
+  // A star the start edge crosses disappears during the drag, comes back when the
+  // pointer returns inside, and is only deleted for real on release (undoable).
+  for (const NoteType type : {NoteType::Hold, NoteType::ScratchHold}) {
+    Harness h;
+    const int32_t body_id = add_hold_body(h, type, 0, 960, 3, 3);
+    const int32_t star_id = add_bound_star(h, body_id, 240, 3, 3);
+    h.panel.set_selected({body_id, star_id});
+    const size_t undo_before = h.engine.history().undo_count();
+    const auto grab = h.at_tick_lane(0, 4);
+    const auto crossed = h.at_tick_lane(360, 4);
+    const auto back = h.at_tick_lane(60, 4);
+    h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+
+    h.panel.on_pointer_move(PointerMoveEvent{crossed, {}});
+    CHECK(!h.engine.document().find_note(star_id).has_value());
+    const auto* body = find_note_id(h.engine.document().notes(), body_id);
+    CHECK(body != nullptr);
+    if (body != nullptr) {
+      CHECK_EQ(body->start_tick, 360);
+      CHECK_EQ(body->end_tick, 960);
+    }
+
+    // Pull back inside: the star is restored at its own tick.
+    h.panel.on_pointer_move(PointerMoveEvent{back, {}});
+    const auto restored = h.engine.document().find_note(star_id);
+    CHECK(restored.has_value());
+    if (restored) CHECK_EQ(restored->start_tick, 240);
+
+    // Cross again and release: only now is the star really deleted.
+    h.panel.on_pointer_move(PointerMoveEvent{crossed, {}});
+    CHECK(!h.engine.document().find_note(star_id).has_value());
+    h.panel.on_pointer_up(PointerUpEvent{crossed, PointerButton::Left, {}});
+    CHECK(!h.engine.document().find_note(star_id).has_value());
+    CHECK(!h.panel.selected().count(star_id));
+    CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+
+    CHECK(h.engine.undo());
+    const auto undone_star = h.engine.document().find_note(star_id);
+    const auto undone_body = h.engine.document().find_note(body_id);
+    CHECK(undone_star.has_value());
+    if (undone_star) CHECK_EQ(undone_star->start_tick, 240);
+    CHECK(undone_body.has_value());
+    if (undone_body) {
+      CHECK_EQ(undone_body->start_tick, 0);
+      CHECK_EQ(undone_body->end_tick, 960);
+    }
+  }
+}
+
+void test_hold_tail_adjust_hides_crossed_star_until_release() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+  const int32_t star_id = add_bound_star(h, body_id, 720, 3, 3);
+  h.panel.set_selected({body_id});
+  const auto grab = h.at_tick_lane(960, 4);
+  const auto crossed = h.at_tick_lane(600, 4);
+  const auto back = h.at_tick_lane(840, 4);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+
+  h.panel.on_pointer_move(PointerMoveEvent{crossed, {}});
+  CHECK(!h.engine.document().find_note(star_id).has_value());
+  const auto* body = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(body != nullptr);
+  if (body != nullptr) CHECK_EQ(body->end_tick, 600);
+
+  h.panel.on_pointer_move(PointerMoveEvent{back, {}});
+  const auto restored = h.engine.document().find_note(star_id);
+  CHECK(restored.has_value());
+  if (restored) CHECK_EQ(restored->start_tick, 720);
+
+  h.panel.on_pointer_move(PointerMoveEvent{crossed, {}});
+  CHECK(!h.engine.document().find_note(star_id).has_value());
+  h.panel.on_pointer_up(PointerUpEvent{crossed, PointerButton::Left, {}});
+  CHECK(!h.engine.document().find_note(star_id).has_value());
+
+  CHECK(h.engine.undo());
+  const auto undone_star = h.engine.document().find_note(star_id);
+  const auto undone_body = h.engine.document().find_note(body_id);
+  CHECK(undone_star.has_value());
+  if (undone_star) CHECK_EQ(undone_star->start_tick, 720);
+  CHECK(undone_body.has_value());
+  if (undone_body) CHECK_EQ(undone_body->end_tick, 960);
+}
+
+void test_tap_stand_in_hold_heads_in_editor() {
+  auto add_flat = [](Harness& h, NoteType type, int32_t tick, int32_t lane, int32_t width) {
+    NotationNote note;
+    note.note_type = type;
+    note.start_tick = tick;
+    note.end_tick = tick;
+    note.lane = lane;
+    note.width = width;
+    const int32_t id = h.engine.add_note(note);
+    CHECK(id >= 0);
+    return id;
+  };
+
+  {  // ExTap is the head of a normal hold: Whole selection + group move include it.
+    Harness h;
+    const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+    const int32_t tap_id = add_flat(h, NoteType::Critical, 0, 3, 3);
+    const auto head = wds::chart_editor::paired_hold_head_for(h.engine.document(),
+                                                              *h.engine.document().find_note(body_id));
+    CHECK(head.has_value());
+    if (head) CHECK_EQ(head->id, tap_id);
+
+    // The stand-in head owns the start sprite in the hit test, like a real head.
+    const auto hit = wds::ui::ChartEditPanelTestAccess::hit_test_note(
+        h.panel, h.at_tick_lane(0, 4));
+    CHECK(hit.has_value());
+    if (hit) CHECK_EQ(hit->id, tap_id);
+
+    const auto mid = h.at_tick_lane(480, 4);
+    h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
+    CHECK(h.panel.selected().count(body_id));
+    CHECK(h.panel.selected().count(tap_id));
+
+    const auto dest = h.at_tick_lane(720, 4);
+    h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+    const auto body_after = h.engine.document().find_note(body_id);
+    const auto tap_after = h.engine.document().find_note(tap_id);
+    CHECK(body_after.has_value());
+    if (body_after) {
+      CHECK_EQ(body_after->start_tick, 240);
+      CHECK_EQ(body_after->end_tick, 1200);
+    }
+    CHECK(tap_after.has_value());
+    if (tap_after) CHECK_EQ(tap_after->start_tick, 240);
+    h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+  }
+
+  {  // An official scratch head wins over a plain-Tap stand-in.
+    Harness h;
+    const int32_t body_id = add_hold_body(h, NoteType::ScratchHold, 0, 960, 3, 3);
+    const int32_t tap_id = add_flat(h, NoteType::Normal, 0, 3, 3);
+    CHECK_EQ(wds::chart_editor::paired_hold_head_for(h.engine.document(),
+                                                     *h.engine.document().find_note(body_id))
+                 ->id,
+             tap_id);
+    NotationNote head;
+    head.note_type = NoteType::ScratchHoldStart;
+    head.start_tick = 0;
+    head.end_tick = 0;
+    head.lane = 3;
+    head.width = 3;
+    const int32_t head_id = h.engine.add_note(head);
+    const auto paired = wds::chart_editor::paired_hold_head_for(
+        h.engine.document(), *h.engine.document().find_note(body_id));
+    CHECK(paired.has_value());
+    if (paired) CHECK_EQ(paired->id, head_id);
+
+    const auto mid = h.at_tick_lane(480, 4);
+    h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
+    CHECK(h.panel.selected().count(body_id));
+    CHECK(h.panel.selected().count(head_id));
+    CHECK(!h.panel.selected().count(tap_id));
+  }
+
+  {  // A chain continuation is paired with the previous tail, not the joint Tap.
+    Harness h;
+    const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+    const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+    const int32_t tap_id = add_flat(h, NoteType::Normal, 480, 2, 2);
+    const auto& doc = h.engine.document();
+    CHECK(!wds::chart_editor::paired_hold_head_for(doc, *doc.find_note(next_id)).has_value());
+    const auto prev = wds::chart_editor::chained_prev_scratch_hold(doc, *doc.find_note(next_id));
+    CHECK(prev.has_value());
+    if (prev) CHECK_EQ(prev->id, prev_id);
+
+    const auto mid = h.at_tick_lane(240, 2);
+    h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
+    CHECK(h.panel.selected().count(prev_id));
+    CHECK(h.panel.selected().count(next_id));
+    CHECK(!h.panel.selected().count(tap_id));
+  }
+
+  {  // Chain priority also outranks an official HoldStart at the joint.
+    Harness h;
+    const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+    const int32_t next_id = add_hold_body(h, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+    NotationNote head;
+    head.note_type = NoteType::ScratchHoldStart;
+    head.start_tick = 480;
+    head.end_tick = 480;
+    head.lane = 2;
+    head.width = 2;
+    const int32_t head_id = h.engine.add_note(head);
+    const auto& doc = h.engine.document();
+    CHECK(!wds::chart_editor::paired_hold_head_for(doc, *doc.find_note(next_id)).has_value());
+    CHECK(!wds::chart_editor::paired_hold_body_for(doc, *doc.find_note(head_id)).has_value());
+    CHECK(wds::chart_editor::chained_prev_scratch_hold(doc, *doc.find_note(next_id)).has_value());
+
+    const auto mid = h.at_tick_lane(240, 2);
+    h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Left, {}});
+    h.panel.on_pointer_up(PointerUpEvent{mid, PointerButton::Left, {}});
+    CHECK(h.panel.selected().count(prev_id));
+    CHECK(h.panel.selected().count(next_id));
+    CHECK(!h.panel.selected().count(head_id));
+  }
 }
 
 Vec2 body_right_edge_on_note(const Harness& h, const NotationNote& note) {
@@ -3494,7 +3776,9 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
   // one hold, or connected ScratchHold chain segments.
   auto resolve_body = [&](const NotationNote& note) -> std::optional<NotationNote> {
     if (ce::is_bindable_hold_body(note.note_type)) return note;
-    if (ce::is_hold_head_note(note)) return ce::paired_hold_body_for(doc, note);
+    if (ce::is_hold_head_note(note) || ce::is_hold_tap_head_note(note)) {
+      return ce::paired_hold_body_for(doc, note);
+    }
     if (is_star(note.note_type)) return ce::parent_hold_for(doc, note);
     return std::nullopt;
   };
@@ -3607,7 +3891,9 @@ std::optional<NotationNote> oracle_hit_test(const ChartEditPanel& panel, Vec2 po
       priority = next_segment_side ? -8 : 3;
     } else {
       dist = std::abs(point.y - y0);
-      if (ce::is_hold_head_note(note)) {
+      const bool tap_head =
+          ce::is_hold_tap_head_note(note) && ce::paired_hold_body_for(doc, note).has_value();
+      if (ce::is_hold_head_note(note) || tap_head) {
         priority = 2;
         if (point.y > y0) {
           const auto body = ce::paired_hold_body_for(doc, note);
@@ -4379,6 +4665,398 @@ void test_visual_revision_changes_on_every_selection_change() {
   }
 }
 
+void test_back_layer_ignores_editing_interactions() {
+  Harness h;
+  NotationNote hold;
+  hold.note_type = NoteType::Hold;
+  hold.start_tick = 0;
+  hold.end_tick = 960;
+  hold.lane = 3;
+  hold.width = 2;
+  const int32_t body_id = h.engine.add_note(hold);
+  CHECK(body_id >= 0);
+  h.panel.sync_to_timeline_ms(0.0);
+
+  const auto body_point = h.at_tick_lane(480, 3);
+  h.panel.set_selected({body_id});
+  CHECK_EQ(h.panel.selected().size(), 1u);
+  CHECK(ChartEditPanelTestAccess::hit_test_note(h.panel, body_point).has_value());
+  const uint64_t before_rev = h.panel.visual_revision();
+  const uint64_t before_generation = h.engine.document().content_generation();
+  const bool before_undo = h.engine.history().can_undo();
+
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 1u);
+  CHECK(h.panel.selected().empty());
+  CHECK(h.panel.is_back_layer(body_id));
+  CHECK(h.panel.back_layer_notes().count(body_id) == 1u);
+  CHECK(h.panel.visual_revision() != before_rev);
+  CHECK_EQ(h.engine.document().content_generation(), before_generation);
+  CHECK_EQ(h.engine.history().can_undo(), before_undo);
+  // Not hit-testable, not deletable, and programmatic selection refuses it.
+  CHECK(!ChartEditPanelTestAccess::hit_test_note(h.panel, body_point).has_value());
+  CHECK(!h.panel.delete_note_at(body_point));
+  h.panel.on_pointer_down(
+      PointerDownEvent{body_point, PointerButton::Middle, Modifiers{}});
+  CHECK(h.panel.selected().empty());
+  CHECK(h.engine.document().find_note(body_id).has_value());
+  h.panel.set_selected({body_id});
+  CHECK(h.panel.selected().empty());
+
+  // Marquee sees the back note as empty space.
+  ChartEditPanelTestAccess::marquee(h.panel, h.at_tick_lane(0, 0), h.at_tick_lane(1000, 11));
+  CHECK(h.panel.selected().empty());
+
+  // A front note placed in the same place owns every interaction; deleting it
+  // leaves the back hold untouched.
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 480;
+  tap.lane = 3;
+  tap.width = 2;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+  h.panel.sync_to_timeline_ms(0.0);
+  const auto hit = ChartEditPanelTestAccess::hit_test_note(h.panel, body_point);
+  CHECK(hit.has_value());
+  CHECK_EQ(hit ? hit->id : -1, tap_id);
+  CHECK(h.panel.delete_note_at(body_point));
+  CHECK(!h.engine.document().find_note(tap_id).has_value());
+  CHECK(h.engine.document().find_note(body_id).has_value());
+
+  // Ctrl/Cmd+N restores every back note without touching the selection.
+  h.panel.set_selected({});
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 1u);
+  CHECK(!h.panel.is_back_layer(body_id));
+  CHECK(h.panel.selected().empty());
+  CHECK(ChartEditPanelTestAccess::hit_test_note(h.panel, body_point).has_value());
+
+  h.panel.set_selected({body_id});
+  const uint64_t selected_rev = h.panel.visual_revision();
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 0u);
+  CHECK_EQ(h.panel.selected().size(), 1u);
+  CHECK(h.panel.visual_revision() == selected_rev);  // empty restore is a no-op
+}
+
+void test_back_layer_shortcuts_and_chart_reload_reset() {
+  using wds::interaction::EditorShortcut;
+  wds::interaction::reset_editor_shortcuts();
+  const auto send_chord =
+      wds::interaction::default_editor_shortcut(EditorShortcut::SendSelectionToBackLayer);
+  CHECK(send_chord.key == static_cast<KeyCode>('B'));
+  CHECK(send_chord.mods.control);
+  CHECK(!send_chord.mods.shift && !send_chord.mods.alt && !send_chord.mods.super);
+  const auto restore_chord =
+      wds::interaction::default_editor_shortcut(EditorShortcut::RestoreBackLayerNotes);
+  CHECK(restore_chord.key == static_cast<KeyCode>('N'));
+  CHECK(restore_chord.mods.control);
+  CHECK(!wds::interaction::editor_shortcut_conflicts(
+      EditorShortcut::SendSelectionToBackLayer, send_chord));
+  CHECK(!wds::interaction::editor_shortcut_conflicts(
+      EditorShortcut::RestoreBackLayerNotes, restore_chord));
+  CHECK(std::string(wds::interaction::editor_shortcut_id(
+            EditorShortcut::SendSelectionToBackLayer)) == "send_selection_to_back_layer");
+  CHECK(std::string(wds::interaction::editor_shortcut_id(
+            EditorShortcut::RestoreBackLayerNotes)) == "restore_back_layer_notes");
+  CHECK(std::string(wds::interaction::editor_shortcut_label(
+            EditorShortcut::SendSelectionToBackLayer)) == "移到背图层");
+
+  UiManager ui;
+  ui.resize(1600, 900, 1600, 900);
+  auto* panel = ui.edit_panel();
+  CHECK(panel != nullptr);
+  NotationNote note;
+  note.note_type = NoteType::Normal;
+  note.start_tick = 0;
+  note.lane = 2;
+  note.width = 1;
+  const int32_t id = ui.session().engine().add_note(note);
+  CHECK(id >= 0);
+  panel->set_selected({id});
+  CHECK_EQ(panel->selected().size(), 1u);
+
+  const KeyDownEvent send{static_cast<KeyCode>('B'), primary_mods(), false};
+  CHECK(ui.shortcuts().contains(send));
+  CHECK(ui.dispatch_shortcut(send));
+  CHECK(panel->selected().empty());
+  CHECK(panel->is_back_layer(id));
+
+  const KeyDownEvent restore{static_cast<KeyCode>('N'), primary_mods(), false};
+  CHECK(ui.shortcuts().contains(restore));
+  CHECK(ui.dispatch_shortcut(restore));
+  CHECK(!panel->is_back_layer(id));
+  CHECK(ui.session().engine().document().find_note(id).has_value());
+
+  // Re-opening / switching charts starts every note on the front layer.
+  panel->set_selected({id});
+  CHECK_EQ(panel->send_selection_to_back_layer(), 1u);
+  CHECK(panel->is_back_layer(id));
+  CHECK(ui.session().new_project());
+  CHECK(panel->back_layer_notes().empty());
+  CHECK(!panel->is_back_layer(id));
+}
+
+void test_back_layer_still_checked_and_exported() {
+  Harness h;
+  NotationNote first;
+  first.note_type = NoteType::Normal;
+  first.start_tick = 480;
+  first.lane = 4;
+  first.width = 2;
+  const int32_t first_id = h.engine.add_note(first);
+  const int32_t second_id = h.engine.add_note(first);
+  CHECK(first_id >= 0 && second_id >= 0);
+  const bool dirty_before_layer = h.engine.document().is_dirty();
+  h.panel.set_selected({second_id});
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 1u);
+  CHECK_EQ(h.engine.document().is_dirty(), dirty_before_layer);
+
+  // The layer is editor bookkeeping only: overlap checks still see both notes,
+  // and the chart round-trips with no extra field.
+  const auto overlaps = wds::chart_editor::find_note_overlaps(h.engine.document().notes());
+  CHECK(!overlaps.error_ticks.empty());
+  const auto chart = h.engine.document().to_notation_chart();
+  CHECK_EQ(chart.notes.size(), 2u);
+}
+
+void test_back_layer_ignores_split_and_speed_editor_items() {
+  Harness h;
+  CHECK(h.panel.add_split_effect(0, 2, 1, wds::chart_editor::SplitLaneType::Full));
+  int32_t split_id = -1;
+  for (const auto& note : h.engine.document().notes()) {
+    if (wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) split_id = note.id;
+  }
+  CHECK(split_id >= 0);
+  h.panel.set_selected({split_id});
+  CHECK_EQ(h.panel.selected().size(), 1u);
+
+  // Split-lane gimmicks are not part of the note layer: the shortcut is a no-op
+  // for a split-only selection, and a mixed selection keeps the split selected.
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 0u);
+  CHECK(!h.panel.is_back_layer(split_id));
+  CHECK_EQ(h.panel.selected().size(), 1u);
+
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 480;
+  tap.lane = 5;
+  tap.width = 1;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+  h.panel.set_selected({split_id, tap_id});
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 1u);
+  CHECK(h.panel.is_back_layer(tap_id));
+  CHECK(!h.panel.is_back_layer(split_id));
+  CHECK_EQ(h.panel.selected().count(split_id), 1u);
+  CHECK_EQ(h.panel.selected().count(tap_id), 0u);
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 1u);
+
+  // Deleting a front split still follows the normal gutter path.
+  CHECK(ChartEditPanelTestAccess::delete_split_note(h.panel, split_id));
+  CHECK(!h.engine.document().find_note(split_id).has_value());
+
+  // Scroll-speed labels are not notes either; their selection is untouched.
+  h.panel.set_extended_editing_active(true);
+  CHECK(h.engine.document().set_compatibility_profile(
+      wds::chart_editor::ChartCompatibilityProfile::SiriusExtended));
+  wds::chart_editor::ScrollSpeedPoint point;
+  point.tick = 480;
+  point.multiplier = 2.0;
+  CHECK(h.engine.document().set_scroll_speed_points({point}));
+  h.panel.set_selected_speed_ticks({480});
+  CHECK_EQ(h.panel.selected_speed_ticks().size(), 1u);
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 0u);
+  CHECK_EQ(h.panel.selected_speed_ticks().size(), 1u);
+  CHECK(h.panel.back_layer_notes().empty());
+}
+
+void test_back_layer_does_not_carry_through_copy_paste() {
+  Harness h;
+  NotationNote note;
+  note.note_type = NoteType::Normal;
+  note.start_tick = 0;
+  note.lane = 2;
+  note.width = 1;
+  const int32_t source_id = h.engine.add_note(note);
+  CHECK(source_id >= 0);
+  h.panel.set_selected({source_id});
+  CHECK(h.panel.copy_selected());
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 1u);
+  CHECK(h.panel.is_back_layer(source_id));
+
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 5), {}});
+  CHECK(h.panel.paste_at_pointer());
+  int32_t pasted_id = -1;
+  for (const auto& pasted : h.engine.document().notes()) {
+    if (pasted.id != source_id) pasted_id = std::max(pasted_id, pasted.id);
+  }
+  CHECK(pasted_id >= 0);
+  CHECK(!h.panel.is_back_layer(pasted_id));
+  CHECK_EQ(h.panel.selected().count(pasted_id), 1u);
+  // The source stays behind; paste always lands on the front layer.
+  CHECK(h.panel.is_back_layer(source_id));
+}
+
+void test_back_layer_survives_chart_switch_in_same_project() {
+  namespace fs = std::filesystem;
+  wds::interaction::reset_editor_shortcuts();
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_back_layer_chart_switch" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path project = dir / "song.wdsproject";
+  {
+    UiManager ui;
+    ui.resize(1600, 900, 1600, 900);
+    CHECK(ui.session().create_project(project.string()));
+    auto* panel = ui.edit_panel();
+    CHECK(panel != nullptr);
+    NotationNote first;
+    first.note_type = NoteType::Normal;
+    first.start_tick = 0;
+    first.lane = 2;
+    first.width = 1;
+    const int32_t first_id = ui.session().engine().add_note(first);
+    CHECK(first_id >= 0);
+    panel->set_selected({first_id});
+    CHECK(ui.dispatch_shortcut(
+        KeyDownEvent{static_cast<KeyCode>('B'), primary_mods(), false}));
+    CHECK(panel->is_back_layer(first_id));
+    CHECK_EQ(ui.session().active_back_layer_ids().count(first_id), 1u);
+
+    // A new chart starts front-only and gets its own layer state. Add a front
+    // filler so this chart's back-layer note id differs from chart 0's.
+    CHECK(ui.session().add_chart());
+    CHECK_EQ(ui.session().chart_count(), 2u);
+    CHECK(panel->back_layer_notes().empty());
+    NotationNote filler = first;
+    filler.lane = 4;
+    const int32_t filler_id = ui.session().engine().add_note(filler);
+    CHECK(filler_id >= 0);
+    NotationNote second = first;
+    second.lane = 5;
+    const int32_t second_id = ui.session().engine().add_note(second);
+    CHECK(second_id >= 0);
+    CHECK(second_id != first_id);
+    panel->set_selected({second_id});
+    CHECK(ui.dispatch_shortcut(
+        KeyDownEvent{static_cast<KeyCode>('B'), primary_mods(), false}));
+    CHECK(panel->is_back_layer(second_id));
+
+    // Same-project switching restores each chart's own in-memory layer (the
+    // other chart's id must not be in this chart's set).
+    CHECK(ui.session().switch_chart(0));
+    CHECK(panel->is_back_layer(first_id));
+    CHECK_EQ(panel->back_layer_notes().count(second_id), 0u);
+    CHECK(ui.session().switch_chart(1));
+    CHECK(panel->is_back_layer(second_id));
+    CHECK_EQ(panel->back_layer_notes().count(first_id), 0u);
+
+    // Re-opening the project (like importing) creates fresh chart slots, so the
+    // layer does not survive beyond the in-memory session chart list.
+    CHECK(ui.session().open_wdsproject(project.string()));
+    CHECK(panel->back_layer_notes().empty());
+  }
+  fs::remove_all(dir);
+}
+
+void test_back_layer_hold_parts_follow_layer_selection() {
+  Harness h;
+  NotationNote hold;
+  hold.note_type = NoteType::Hold;
+  hold.start_tick = 0;
+  hold.end_tick = 1920;
+  hold.lane = 3;
+  hold.width = 2;
+  const int32_t body_id = h.engine.add_note(hold);
+  CHECK(body_id >= 0);
+
+  NotationNote head;
+  head.note_type = NoteType::HoldStart;
+  head.start_tick = 0;
+  head.end_tick = 0;
+  head.lane = 3;
+  head.width = 2;
+  const int32_t head_id = h.engine.add_note(head);
+  CHECK(head_id >= 0);
+
+  NotationNote star;
+  star.note_type = NoteType::Sound;
+  star.start_tick = 480;
+  star.end_tick = 480;
+  star.lane = 3;
+  star.width = 2;
+  star.parent_hold_id = body_id;
+  const int32_t star_id = h.engine.add_note(star);
+  CHECK(star_id >= 0);
+
+  auto notes = h.engine.document().notes();
+  const auto body = h.engine.document().find_note(body_id);
+  CHECK(body.has_value());
+  notes = wds::chart_editor::with_recomputed_hold_eighths(
+      std::move(notes), *body, h.engine.document().timing().ticks_per_quarter);
+  CHECK(h.engine.document().set_notes(std::move(notes)));
+
+  std::vector<int32_t> eighth_ids;
+  for (const auto& note : h.engine.document().notes()) {
+    if (note.note_type == NoteType::HoldEighth) eighth_ids.push_back(note.id);
+  }
+  CHECK(!eighth_ids.empty());
+
+  // Same rule as hold layer selection: a selected head hides only that head.
+  h.panel.set_selected({head_id});
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 1u);
+  CHECK(h.panel.is_back_layer(head_id));
+  CHECK(!h.panel.is_back_layer(body_id));
+  CHECK(!h.panel.is_back_layer(star_id));
+  CHECK(h.panel.selected().empty());
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 1u);
+  CHECK(!h.panel.is_back_layer(head_id));
+
+  // A selected star hides only itself.
+  h.panel.set_selected({star_id});
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 1u);
+  CHECK(h.panel.is_back_layer(star_id));
+  CHECK(!h.panel.is_back_layer(body_id));
+  CHECK(!h.panel.is_back_layer(head_id));
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 1u);
+
+  // A selected body hides the body and the parts it contains (its bound stars),
+  // but not the paired head.
+  h.panel.set_selected({body_id});
+  CHECK_EQ(h.panel.selected().size(), 1u);
+  CHECK_EQ(h.panel.selected().count(star_id), 0u);
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 2u);
+  CHECK(h.panel.is_back_layer(body_id));
+  CHECK(h.panel.is_back_layer(star_id));
+  CHECK(!h.panel.is_back_layer(head_id));
+  CHECK(h.panel.selected().empty());
+
+  // Eighths are derived and inert: never layer members, still present.
+  for (const int32_t id : eighth_ids) {
+    CHECK(!h.panel.is_back_layer(id));
+    CHECK(h.engine.document().find_note(id).has_value());
+  }
+  CHECK(!ChartEditPanelTestAccess::hit_test_note(h.panel, h.at_tick_lane(480, 3)).has_value());
+
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 2u);
+  CHECK(!h.panel.is_back_layer(body_id));
+  CHECK(!h.panel.is_back_layer(star_id));
+  CHECK(!h.panel.is_back_layer(head_id));
+
+  // Whole segment selection (body + head) hides both, and the body still brings
+  // its contained star.
+  h.panel.set_selected({body_id, head_id});
+  CHECK_EQ(h.panel.send_selection_to_back_layer(), 3u);
+  CHECK(h.panel.is_back_layer(body_id));
+  CHECK(h.panel.is_back_layer(head_id));
+  CHECK(h.panel.is_back_layer(star_id));
+  CHECK_EQ(h.panel.restore_all_back_layer_notes(), 3u);
+
+  for (const int32_t id : eighth_ids) {
+    CHECK(!h.panel.is_back_layer(id));
+    CHECK(h.engine.document().find_note(id).has_value());
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -4416,6 +5094,11 @@ int main() {
   test_option_horizontal_wheel_updates_visible_range();
   test_primary_wheel_does_not_change_visible_range();
   test_curve_fill_wheel_does_not_change_visible_range();
+  test_hold_head_adjust_keeps_mid_stars();
+  test_hold_head_adjust_hides_crossed_star_until_release();
+  test_hold_tail_adjust_hides_crossed_star_until_release();
+  test_tap_stand_in_hold_heads_in_editor();
+  test_jumpscratch_joint_adjust_keeps_next_mid_star();
   test_hold_tail_adjust_follows_playback_resync();
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
@@ -4461,6 +5144,13 @@ int main() {
   test_marquee_snaps_x_to_tracks_including_gutters();
   test_place_selection_picks_only_new_notes_in_dense_chart();
   test_visual_revision_changes_on_every_selection_change();
+  test_back_layer_ignores_editing_interactions();
+  test_back_layer_shortcuts_and_chart_reload_reset();
+  test_back_layer_still_checked_and_exported();
+  test_back_layer_ignores_split_and_speed_editor_items();
+  test_back_layer_does_not_carry_through_copy_paste();
+  test_back_layer_survives_chart_switch_in_same_project();
+  test_back_layer_hold_parts_follow_layer_selection();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

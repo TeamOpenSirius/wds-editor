@@ -392,11 +392,14 @@ Common defaults include:
 | `Ctrl/Cmd + Z` | Undo |
 | `Ctrl/Cmd + Y` | Redo |
 | `Ctrl/Cmd + C` / `V` | Copy / paste |
+| `Ctrl/Cmd + B` / `N` | Move selected notes to the back layer / restore all back-layer notes |
 | Arrow keys | Nudge selection |
 | `Q / W / E / A / S / D` | Set default width to 1 / 2 / 3 / 4 / 6 / 12 |
 | `9` / `0` | With Ched-like placement enabled, select Sound / SoundPurple placement |
 
 Shortcuts are configurable in the editor settings.
+
+The back layer is an in-memory authoring aid only: it is never written to chart files, and preview, overlap checks, saving, and export still treat its notes like any other note. Opening or importing a project puts every note back on the front layer, while switching charts inside one project keeps each chart's back layer. Back-layer notes draw translucent and ignore selection, dragging, resizing, deletion, and other editing interactions. The move follows hold layer selection: only the selected part and the parts it contains are hidden (selecting a hold body carries its internal stars; selecting a head hides just that head; paired parts never join automatically). HoldEighth rows are derived and never enter the layer. Split lines and scroll-speed labels are not part of the layer feature, and pasted notes always land on the front layer.
 
 ## Installation
 

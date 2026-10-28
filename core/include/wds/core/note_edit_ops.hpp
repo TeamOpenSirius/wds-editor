@@ -118,21 +118,34 @@ bool ensure_hold_head_if_needed(ChartDocument& doc, const NotationNote& hold);
 // ScratchCriticalHoldStart (instantaneous).
 bool is_hold_head_note(const NotationNote& note) noexcept;
 
-// True when `head` is the official start of `body`: same tick, same start
+// Instantaneous Tap / ExTap that can stand in for a hold head by visual
+// equivalence: ExTap (Critical) for either hold family, plain Tap (Normal)
+// only for Scratch* bodies. Official head types are not included.
+bool is_hold_tap_head_note(const NotationNote& note) noexcept;
+
+// True when `head` looks like the start of `body`: same tick, same start
 // span (lane + width), and family-compatible types. Blue/CriticalHold bodies
 // accept HoldStart / CriticalHoldStart; Scratch* bodies accept
-// ScratchHoldStart / ScratchCriticalHoldStart. First ScratchHold segment
-// uses this same rule (no overlap / JumpScratch matching).
+// ScratchHoldStart / ScratchCriticalHoldStart. Either family also accepts an
+// exact-span ExTap head; Scratch* bodies additionally accept a plain Tap.
+// Document-level pairing priority (a chain continuation beats every head; then
+// official head; then tap) lives in paired_hold_head_for().
 bool hold_head_pairs_with_body(const NotationNote& head, const NotationNote& body) noexcept;
 
 // Rewrite legacy ScratchHold auto-heads (Normal / Critical / BlueTap) to
 // ScratchHoldStart / ScratchCriticalHoldStart. Returns how many notes changed.
 int repair_legacy_hold_heads(ChartDocument& doc);
 
-// Official paired head at the hold body's start, if any.
+// Paired head at the hold body's start, if any. Bodies are matched one-to-one
+// per tick in notes order: a previous chain tail outranks every head, so a
+// continuation returns nullopt even when an official HoldStart sits at its start;
+// otherwise an official HoldStart-family note wins, then an exact-span ExTap (or
+// plain Tap on Scratch* bodies). A head already bound to an earlier body is not
+// returned for a later one.
 std::optional<NotationNote> paired_hold_head_for(const ChartDocument& doc,
                                                  const NotationNote& hold);
-// Official hold body paired with an instantaneous head, if any.
+// Hold body whose effective paired head is this official head / tap stand-in.
+// One head binds at most one body; used heads are never returned again.
 std::optional<NotationNote> paired_hold_body_for(const ChartDocument& doc,
                                                  const NotationNote& head);
 
@@ -148,9 +161,11 @@ std::vector<NotationNote> hold_attached_notes_for(const ChartDocument& doc,
 std::optional<NotationNote> parent_hold_for(const ChartDocument& doc, const NotationNote& note);
 
 // Chained hold neighbors (regular or scratch, same family): next starts at this
-// end, has no own head, and prev's current tail exactly covers both bodies.
-// Looking up prev also requires this body to have no head; the previous segment
-// itself may own a head (first segment of a chain).
+// end and prev's current tail exactly covers both bodies. The tail pairing
+// outranks any head on the next body (official HoldStart or tap stand-in), so a
+// geometrically covered joint is a continuation even when a head note sits on it.
+// Each tail binds at most one next body; a tail already consumed by an earlier
+// body is not returned again. The first segment may still own a head.
 std::optional<NotationNote> chained_next_scratch_hold(const ChartDocument& doc,
                                                       const NotationNote& body);
 std::optional<NotationNote> chained_prev_scratch_hold(const ChartDocument& doc,
