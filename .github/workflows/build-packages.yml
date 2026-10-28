@@ -171,7 +171,10 @@ jobs:
 
   macos-arm:
     name: macos-arm
-    runs-on: macos-14
+    # macos-14 images retire on 2026-11-02 and GitHub already trims their
+    # capacity, which left this job queued until it was cancelled.
+    runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -199,7 +202,10 @@ jobs:
         run: ./scripts/build-target.sh macos-arm --no-package
 
       - name: Test
-        run: ctest --test-dir build-macos-arm --output-on-failure
+        # A stuck test must fail fast instead of pinning a shared runner for
+        # ~28 minutes with no log line (2026-10-28 main run).
+        timeout-minutes: 15
+        run: ctest --test-dir build-macos-arm --timeout 180 --output-on-failure
 
       - name: Package
         run: |

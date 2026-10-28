@@ -84,7 +84,9 @@ struct NotationNote {
   GimmickType gimmick_type = GimmickType::None;
   // Editor: Flick/scratch signed span (0 / ±width); JumpScratch span; split
   // Addressable SplitEffects/{id}. Official CSV Flick OneDirection 0/1 is
-  // mapped to ±width on import and written back on export.
+  // mapped to ±width on import; export writes JumpScratch ±width for one-sided
+  // multi-lane Flicks (OneDirection only fills half the note) and keeps
+  // OneDirection 0/1 for 1-lane notes.
   int32_t scratch_length = 0;
   // Editor-only: Sound / ScratchSound / HoldEighth parent hold body id.
   // Not an official CSV column. kNoBoundHoldId = unbound.

@@ -360,6 +360,18 @@ struct AudioEngine::Impl {
   std::vector<SfxSyncSlot*> free_list;
   std::atomic<int> sync_in_flight{0};
   std::atomic<bool>* shutting_down = nullptr;
+  // Mixer-structure ownership: the control thread holds it while it adds,
+  // removes, or frees mixer channels; MIXTIME gate callbacks bail out instead
+  // of waiting (waiting there deadlocks against BASS' "wait for the current mix
+  // block" inside BASS_Mixer_ChannelRemove). mixer_users counts gate callbacks
+  // that already passed the check, so the owner can let them drain first.
+  std::atomic<bool> mixer_owner{false};
+  std::atomic<int> mixer_users{0};
+  // One-shot mixer sources we added, so stop_all_sfx never enumerates the mixer
+  // (BASS_Mixer_StreamGetChannels races BASS_Mixer_StreamAddChannel from a
+  // MIXTIME callback and corrupts bassmix's channel array).
+  std::mutex sfx_src_mu;
+  std::vector<HSTREAM> sfx_srcs;
   // Full-pool recovery sweeps (slow path only, see acquire_slot_locked). Stays 0
   // unless the free list ran dry; tests assert the schedule hot path never scans.
   std::atomic<std::uint64_t> pool_sweeps{0};
@@ -374,6 +386,9 @@ struct AudioEngine::Impl {
   void sweep_stranded_locked();
   void unlink_pending_locked(SfxSyncSlot* slot);
   void wait_sync_in_flight(const char* where);
+  void enter_mixer_struct();
+  void leave_mixer_struct();
+  void track_sfx_source(HSTREAM stream);
 };
 
 void AudioEngine::Impl::init_slot_pool(AudioEngine* engine) {
@@ -463,6 +478,52 @@ void AudioEngine::Impl::wait_sync_in_flight(const char* where) {
     }
     std::this_thread::yield();
   }
+}
+
+namespace {
+// Nesting depth of the control-thread mixer-structure lock (one engine per
+// thread at a time, so a file-scope thread_local is enough).
+thread_local int g_mixer_struct_depth = 0;
+}  // namespace
+
+void AudioEngine::Impl::enter_mixer_struct() {
+  if (g_mixer_struct_depth++ != 0) {
+    return;
+  }
+  mixer_owner.store(true, std::memory_order_seq_cst);
+  // Gate callbacks that already entered must finish before the control thread
+  // touches the mixer. They are a handful of BASS calls long; the bound is only
+  // a backstop so a wedged callback cannot hang a seek forever.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  while (mixer_users.load(std::memory_order_seq_cst) != 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+}
+
+void AudioEngine::Impl::leave_mixer_struct() {
+  if (--g_mixer_struct_depth == 0) {
+    mixer_owner.store(false, std::memory_order_release);
+  }
+}
+
+void AudioEngine::Impl::track_sfx_source(HSTREAM stream) {
+  if (stream == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(sfx_src_mu);
+  sfx_srcs.push_back(stream);
+  if (sfx_srcs.size() <= 256) {
+    return;
+  }
+  // Prune streams that ended (BASS_STREAM_AUTOFREE already freed them); a stale
+  // handle reports no mixer.
+  const HSTREAM mixer = this->mixer;
+  sfx_srcs.erase(std::remove_if(sfx_srcs.begin(), sfx_srcs.end(),
+                                [mixer](HSTREAM h) {
+                                  return h == 0 || BASS_Mixer_ChannelGetMixer(h) != mixer;
+                                }),
+                 sfx_srcs.end());
 }
 
 namespace {
@@ -1596,6 +1657,7 @@ bool AudioEngine::mix_sfx_on_mixer(HitSfxClip clip) {
     BASS_StreamFree(sfx);
     return false;
   }
+  impl->track_sfx_source(sfx);
   return true;
 }
 
@@ -1603,28 +1665,35 @@ void AudioEngine::remove_mixer_sfx_sources() {
   if (impl_ == nullptr || impl_->mixer == 0) {
     return;
   }
+  struct StructLock {
+    Impl* impl;
+    explicit StructLock(Impl* i) : impl(i) { impl->enter_mixer_struct(); }
+    ~StructLock() { impl->leave_mixer_struct(); }
+  } struct_lock(impl_.get());
   // The Hold stream stays allocated (unplugged while silent) across
   // seek/pause/rate change: it is re-armed by position reset + AddChannel, so
   // there is nothing to recreate or leak, and it exists before any HoldOn gate
   // can fire. It is freed by retire_hold_channel (shutdown / error paths) only.
   park_hold_channel();
-  const HCHANNEL hold = impl_->hold_ch.load(std::memory_order_acquire);
-  const DWORD count = BASS_Mixer_StreamGetChannels(impl_->mixer, nullptr, 0);
-  if (count == 0 || count == static_cast<DWORD>(-1)) {
-    return;
+  std::vector<HSTREAM> sources;
+  {
+    std::lock_guard<std::mutex> lock(impl_->sfx_src_mu);
+    sources.swap(impl_->sfx_srcs);
   }
-  std::vector<DWORD> chans(count);
-  const DWORD got = BASS_Mixer_StreamGetChannels(impl_->mixer, chans.data(), count);
-  for (DWORD i = 0; i < got; ++i) {
-    if (chans[i] == 0 || chans[i] == impl_->music || chans[i] == hold) {
+  const HCHANNEL hold = impl_->hold_ch.load(std::memory_order_acquire);
+  for (HSTREAM source : sources) {
+    // BASS_STREAM_AUTOFREE frees one-shots when they end; the handle of an
+    // ended stream simply reports no mixer.
+    if (source == 0 || source == impl_->music || source == hold ||
+        BASS_Mixer_ChannelGetMixer(source) != impl_->mixer) {
       continue;
     }
     // bassmix documents BASS_STREAM_AUTOFREE on a mixer source as "free when it
     // ends"; bass.h/bassmix.h do not say BASS_Mixer_ChannelRemove frees it, so
     // do not rely on that. Free explicitly: if the library already freed it the
     // call just fails with BASS_ERROR_HANDLE.
-    BASS_Mixer_ChannelRemove(chans[i]);
-    BASS_StreamFree(chans[i]);
+    BASS_Mixer_ChannelRemove(source);
+    BASS_StreamFree(source);
   }
 }
 
@@ -2184,6 +2253,11 @@ void AudioEngine::apply_hold_mix_presence() {
   if (!impl || impl->mixer == 0) {
     return;
   }
+  struct StructLock {
+    Impl* impl;
+    explicit StructLock(Impl* i) : impl(i) { impl->enter_mixer_struct(); }
+    ~StructLock() { impl->leave_mixer_struct(); }
+  } struct_lock(impl.get());
   for (int attempt = 0; attempt < 4; ++attempt) {
     const std::uint8_t state = impl->hold_state.load(std::memory_order_seq_cst);
     const HCHANNEL ch = impl->hold_ch.load(std::memory_order_acquire);
@@ -2218,6 +2292,20 @@ void AudioEngine::apply_hold_gate(bool on) {
   if (!impl || impl->mixer == 0) {
     return;
   }
+  // The control thread owns mixer structure right now: drop this gate instead
+  // of racing its BASS calls. The owner reconciles hold_state afterwards.
+  if (impl->mixer_owner.load(std::memory_order_seq_cst)) {
+    return;
+  }
+  impl->mixer_users.fetch_add(1, std::memory_order_seq_cst);
+  if (impl->mixer_owner.load(std::memory_order_seq_cst)) {
+    impl->mixer_users.fetch_sub(1, std::memory_order_seq_cst);
+    return;
+  }
+  struct UserCount {
+    std::atomic<int>* count;
+    ~UserCount() { count->fetch_sub(1, std::memory_order_seq_cst); }
+  } user_count{&impl->mixer_users};
   const HCHANNEL ch = impl->hold_ch.load(std::memory_order_acquire);
   if (ch == 0) {
     return;
@@ -2261,6 +2349,11 @@ void AudioEngine::retire_hold_channel() {
   if (impl_ == nullptr) {
     return;
   }
+  struct StructLock {
+    Impl* impl;
+    explicit StructLock(Impl* i) : impl(i) { impl->enter_mixer_struct(); }
+    ~StructLock() { impl->leave_mixer_struct(); }
+  } struct_lock(impl_.get());
   const HCHANNEL ch = impl_->hold_ch.exchange(0, std::memory_order_seq_cst);
   impl_->hold_state.store(0, std::memory_order_seq_cst);
   const HSYNC sync = impl_->hold_loop_sync;

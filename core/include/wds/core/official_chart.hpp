@@ -30,9 +30,9 @@ namespace wds::chart_editor {
 //                   split rows use -1
 //   laneLength    — width in lanes; split rows use 0
 //   gimmickType   — numeric GimmickType, or "JumpScratch" / "OneDirection"
-//                   Official Flick: None = both arrows; OneDirection / JumpScratch
-//                   = one side from GimmickValue. Editor memory still uses
-//                   None + 0/±width for Flick direction.
+//                   Official Flick: None = both arrows; OneDirection = one
+//                   half-note arrow group; JumpScratch = one full-note group.
+//                   Editor memory still uses None + 0/±width for Flick direction.
 //   scratchLength — official GimmickValue: OneDirection 0/1 (left/right);
 //                   JumpScratch signed lane span (may differ from Width);
 //                   hold-chain JumpScratch requires nonzero scratchLength
@@ -41,7 +41,10 @@ namespace wds::chart_editor {
 //                   LineHight rotation). Flick Width is laneLength, not this.
 //                   Import maps official OneDirection 0/1 → None + ±width;
 //                   old editor None + nonzero is kept as left/right.
-//                   Export writes official None,0 / OneDirection,0/1.
+//                   Export writes official None,0 for both arrows and
+//                   JumpScratch ±laneLength for a one-sided multi-lane Flick
+//                   (OneDirection would only fill half the note); a 1-lane
+//                   one-sided Flick keeps OneDirection 0/1.
 //                   → stored as NotationNote::scratch_length
 //
 // Times are converted to ticks (BPM 60 + TPQ 480 by default) for editor precision;

@@ -3244,7 +3244,9 @@ void test_official_csv_tempo_map_export() {
   CHECK(std::abs(start_sec - 0.75) < 1e-3);
 }
 
-// Editor Flick stays 0/±width; official CSV writes OneDirection 0/1.
+// Editor Flick stays 0/±width; official CSV writes JumpScratch ±width
+// (full-note arrow group) for multi-lane one-sided flicks, OneDirection 0/1
+// for a single lane, and None,0 for both arrows.
 void test_official_csv_flick_scratch_length_encodes_width() {
   CHECK_EQ(encode_flick_scratch_length(-1, 4), -4);
   CHECK_EQ(encode_flick_scratch_length(1, 3), 3);
@@ -3254,6 +3256,22 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   CHECK_EQ(official_flick_scratch_length(0, 6), 0);
   CHECK_EQ(official_flick_scratch_length(-12, 12), -12);
   CHECK_EQ(official_flick_scratch_length(6, 5), 6);
+
+  // One-sided official encoding: |GValue| = laneLength above one lane.
+  {
+    const auto left4 = official_flick_direction_encoding(-1, 4);
+    CHECK_EQ(static_cast<int>(left4.gimmick), static_cast<int>(GimmickType::JumpScratch));
+    CHECK_EQ(left4.scratch_length, -4);
+    const auto right3 = official_flick_direction_encoding(1, 3);
+    CHECK_EQ(static_cast<int>(right3.gimmick), static_cast<int>(GimmickType::JumpScratch));
+    CHECK_EQ(right3.scratch_length, 3);
+    const auto left1 = official_flick_direction_encoding(-1, 1);
+    CHECK_EQ(static_cast<int>(left1.gimmick), static_cast<int>(GimmickType::OneDirection));
+    CHECK_EQ(left1.scratch_length, 0);
+    const auto right1 = official_flick_direction_encoding(1, 1);
+    CHECK_EQ(static_cast<int>(right1.gimmick), static_cast<int>(GimmickType::OneDirection));
+    CHECK_EQ(right1.scratch_length, 1);
+  }
 
   NotationChart chart;
   chart.timing.bpm = 60.0;
@@ -3271,6 +3289,8 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   add_flick(480, 2, 3, 1);
   add_flick(960, 0, 6, 0);
   add_flick(1440, 1, 5, -5);  // already official
+  add_flick(2400, 4, 1, -1);  // 1-lane: OneDirection already spans the note
+  add_flick(2880, 4, 1, 1);
   {
     NotationNote hold = make_tap(1920, 0);
     hold.id = static_cast<int32_t>(chart.notes.size());
@@ -3286,8 +3306,15 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   save_opt.convert_lane_to_one_based = true;
   CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(chart, csv, save_opt).error),
            static_cast<int>(SerializeError::Ok));
-  CHECK(csv.find("OneDirection,0") != std::string::npos);
-  CHECK(csv.find("OneDirection,1") != std::string::npos);
+  // One-sided multi-lane Flick → official JumpScratch ±laneLength, not
+  // OneDirection (which only paints one half-note arrow group).
+  CHECK(csv.find(",50,1,4,JumpScratch,-4\n") != std::string::npos);
+  CHECK(csv.find(",50,3,3,JumpScratch,3\n") != std::string::npos);
+  CHECK(csv.find(",50,1,6,0,0\n") != std::string::npos);
+  CHECK(csv.find(",50,2,5,JumpScratch,-5\n") != std::string::npos);
+  // One lane is already covered by the OneDirection half group.
+  CHECK(csv.find(",50,5,1,OneDirection,0\n") != std::string::npos);
+  CHECK(csv.find(",50,5,1,OneDirection,1\n") != std::string::npos);
 
   NotationChart parsed;
   OfficialChartLoadOptions load_opt;
@@ -3311,14 +3338,17 @@ void test_official_csv_flick_scratch_length_encodes_width() {
   if (left) {
     CHECK_EQ(left->width, 4);
     CHECK_EQ(left->scratch_length, -4);
+    CHECK_EQ(static_cast<int>(left->gimmick_type), static_cast<int>(GimmickType::JumpScratch));
   }
   if (right) {
     CHECK_EQ(right->width, 3);
     CHECK_EQ(right->scratch_length, 3);
+    CHECK_EQ(static_cast<int>(right->gimmick_type), static_cast<int>(GimmickType::JumpScratch));
   }
   if (both) {
     CHECK_EQ(both->width, 6);
     CHECK_EQ(both->scratch_length, 0);
+    CHECK_EQ(static_cast<int>(both->gimmick_type), static_cast<int>(GimmickType::None));
   }
   if (authored) {
     CHECK_EQ(authored->width, 5);
@@ -3407,10 +3437,13 @@ void test_official_csv_flick_scratch_length_encodes_width() {
     CHECK_EQ(static_cast<int>(
                  OfficialChartFormat::serialize_chart(official_chart, exported, save_opt).error),
              static_cast<int>(SerializeError::Ok));
-    CHECK(exported.find("OneDirection,0") != std::string::npos);
-    CHECK(exported.find("OneDirection,1") != std::string::npos);
+    // Imported OneDirection flicks become editor None±width, so re-export
+    // promotes them to the full-note JumpScratch ±laneLength encoding.
+    CHECK(exported.find(",50,2,3,JumpScratch,-3\n") != std::string::npos);
+    CHECK(exported.find(",50,2,3,JumpScratch,3\n") != std::string::npos);
     CHECK(exported.find("JumpScratch,6") != std::string::npos);
     CHECK(exported.find("JumpScratch,-6") != std::string::npos);
+    CHECK(exported.find("OneDirection") == std::string::npos);
   }
 
   CHECK_EQ(official_scratch_arrow_side_sign(GimmickType::None, -4), 0);

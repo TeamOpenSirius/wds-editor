@@ -211,6 +211,42 @@ void test_official_scratch_arrow_table() {
   CHECK(std::abs(official_scratch_arrow_interval(12) - 0.36f) < 1e-6f);
 }
 
+void test_official_one_sided_flick_needs_jump_table() {
+  // FlickNoteEntity.SetActive, 4-lane one-sided flick with real prefab numbers
+  // (note world 3.69 → visual ±1.77, arrow 0.68×0.7, interval 0.36×0.7).
+  // OneDirection paints one half group (kFlick[4]=5) from the note edge, so
+  // the far half stays bare; JumpScratch paints kJump[4]=11 arrows offset by
+  // count·interval/2 and spans the whole note. CSV export therefore writes
+  // JumpScratch ±laneLength (official_flick_direction_encoding).
+  AnimatedArrowLayoutParams p;
+  p.span_left = -1.77f;
+  p.span_right = 1.77f;
+  p.arrow_w = 0.68f * 0.7f;
+  p.arrow_step = 0.36f * 0.7f;
+  p.anim_time_sec = 0.0f;
+  p.arrow_speed = 1.0f;
+
+  p.official_one_direction = true;
+  p.scratch_length = 0;  // OneDirection 0 = left
+  p.group_offset = 3.69f * 0.5f - 0.145f;
+  p.arrow_count = 5;
+  const auto half = layout_animated_scratch_arrows(p);
+  CHECK(!half.empty());
+  float half_far = -1e9f;
+  for (const auto& a : half) half_far = std::max(half_far, std::max(a.x0, a.x1));
+  CHECK(half_far < 0.0f);  // stops at the centre: far half of the note is bare
+
+  p.official_one_direction = false;
+  p.scratch_length = -4;  // JumpScratch -laneLength
+  p.arrow_count = 11;     // kJump[4]
+  p.group_offset = p.arrow_step * 11.0f * 0.5f;
+  const auto full = layout_animated_scratch_arrows(p);
+  CHECK(!full.empty());
+  float full_far = -1e9f;
+  for (const auto& a : full) full_far = std::max(full_far, std::max(a.x0, a.x1));
+  CHECK(full_far > p.span_right * 0.7f);
+}
+
 void test_hold_tail_layers() {
   SkinCatalog skin;
   skin.note_bottom.id = static_cast<TextureId>(1);
@@ -281,6 +317,7 @@ int main() {
   test_official_bidirectional_does_not_cross_center();
   test_one_way_fills_without_tail_or_uv_clip();
   test_official_scratch_arrow_table();
+  test_official_one_sided_flick_needs_jump_table();
   test_hold_tail_layers();
   test_combo_count_anim_matches_openwds_clip();
   std::puts("note_visual_policy_tests OK");
