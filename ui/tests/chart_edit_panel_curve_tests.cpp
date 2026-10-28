@@ -2973,6 +2973,125 @@ void test_paste_mirror_is_one_history_step_and_skips_splits() {
   if (original_tap) CHECK_EQ(original_tap->lane, 3);
 }
 
+// Paste follows the pointer in both directions: the clipboard's earliest item lands
+// under the pointer even when that is above the copied source, and only the parts
+// that would leave the allowed range (music not started, negative tick) are pushed.
+void test_paste_can_move_backwards() {
+  {  // Hold + bound star keep their internal offsets when pasted above the source.
+    Harness h;
+    const int32_t hold_id = add_hold_body(h, NoteType::Hold, 960, 1440, 3, 1);
+    const int32_t star_id = add_bound_star(h, hold_id, 1200, 3, 1);
+    regenerate_eighths(h, hold_id);
+
+    h.panel.set_selected({hold_id});
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 3), {}});
+    CHECK(h.panel.paste_at_pointer());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 2);
+
+    int32_t pasted_hold_id = -1;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type == NoteType::Hold && n.id != hold_id) pasted_hold_id = n.id;
+    }
+    CHECK(pasted_hold_id >= 0);
+    const auto pasted_hold = h.engine.document().find_note(pasted_hold_id);
+    CHECK(pasted_hold.has_value());
+    if (pasted_hold) {
+      CHECK_EQ(pasted_hold->start_tick, 480);
+      CHECK_EQ(pasted_hold->end_tick, 960);
+    }
+    const auto original_hold = h.engine.document().find_note(hold_id);
+    CHECK(original_hold.has_value());
+    if (original_hold) {
+      CHECK_EQ(original_hold->start_tick, 960);
+      CHECK_EQ(original_hold->end_tick, 1440);
+    }
+    int32_t pasted_star_tick = -1;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type != NoteType::Sound || n.id == star_id) continue;
+      CHECK_EQ(n.parent_hold_id, pasted_hold_id);
+      pasted_star_tick = n.start_tick;
+    }
+    CHECK_EQ(pasted_star_tick, 720);
+  }
+
+  {  // Destination above the music start: shift to the first legal tick, never negative.
+    Harness h;
+    CHECK(h.engine.document().set_offset_ms(-2000));  // Music starts at tick 1920.
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 2880;
+    tap.lane = 4;
+    tap.width = 1;
+    const int32_t tap_id = h.engine.add_note(tap);
+    CHECK(tap_id >= 0);
+
+    h.panel.set_selected({tap_id});
+    CHECK(h.panel.copy_selected());
+    h.panel.sync_to_timeline_ms(-1500.0);  // Show the leading blank above the music.
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 4), {}});
+    CHECK(h.panel.paste_at_pointer());
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Normal), 2);
+    int32_t pasted_tick = -1;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type != NoteType::Normal || n.id == tap_id) continue;
+      pasted_tick = n.start_tick;
+    }
+    CHECK_EQ(pasted_tick, 1920);
+  }
+
+  {  // Mirror paste shares the same backward anchor.
+    Harness h;
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 1440;
+    tap.lane = 3;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+
+    h.panel.set_selected({tap_id});
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(960, 3), {}});
+    CHECK(h.panel.paste_at_pointer(true));
+    int32_t pasted_tick = -1;
+    int32_t pasted_lane = -1;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.note_type != NoteType::Normal || n.id == tap_id) continue;
+      pasted_tick = n.start_tick;
+      pasted_lane = n.lane;
+    }
+    CHECK_EQ(pasted_tick, 960);
+    CHECK_EQ(pasted_lane, 7);
+  }
+
+  {  // Scroll speed points follow the same backward delta.
+    Harness h;
+    h.panel.set_extended_editing_active(true);
+    CHECK(h.panel.apply_scroll_speed(960, 1.5));
+    h.panel.sync_to_timeline_ms(0.0);
+    const auto hits = wds::ui::build_speed_label_hits(h.panel.viewport(), h.panel.speed_gutter(),
+                                                      h.engine.document().scroll_speed_points());
+    CHECK(!hits.empty());
+    if (hits.empty()) return;
+    const auto c = chip_center(hits.front().bounds);
+    h.panel.on_pointer_down(PointerDownEvent{c, PointerButton::Left, primary_mods()});
+    h.panel.on_pointer_up(PointerUpEvent{c, PointerButton::Left, primary_mods()});
+    CHECK(h.panel.selected_speed_ticks().count(960));
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(480, 3), {}});
+    CHECK(h.panel.paste_at_pointer());
+    std::vector<int32_t> ticks;
+    for (const auto& p : h.engine.document().scroll_speed_points()) ticks.push_back(p.tick);
+    std::sort(ticks.begin(), ticks.end());
+    CHECK_EQ(ticks.size(), 2u);
+    if (ticks.size() == 2) {
+      CHECK_EQ(ticks[0], 480);
+      CHECK_EQ(ticks[1], 960);
+    }
+  }
+}
+
 void test_split_width_follow_closed_interval_includes_endpoints() {
   using wds::chart_editor::GimmickType;
   // Split3 covers [0, 480], Split2 covers [480, 960]. Tick 480 is in both.
@@ -4184,6 +4303,7 @@ int main() {
   test_marquee_and_convert_ignore_split_lines();
   test_gutter_label_select_copy_mirror_and_move();
   test_paste_mirror_is_one_history_step_and_skips_splits();
+  test_paste_can_move_backwards();
   test_split_width_follow_closed_interval_includes_endpoints();
   test_toolbox_left_click_places_selected_type_and_ignores_swipe();
   test_toolbox_hold_click_min_length_equal_tail_and_gold();

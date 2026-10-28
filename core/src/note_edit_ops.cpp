@@ -1090,11 +1090,10 @@ std::vector<NotationNote> paste_notes_aligned(const std::vector<NotationNote>& c
                                               return a.start_tick < b.start_tick;
                                             })
                                ->start_tick;
-  int32_t snapped_anchor = snap_tick(static_cast<float>(anchor_tick), grid);
-  // Keep all pasted notes at non-negative ticks.
-  if (snapped_anchor < earliest) {
-    snapped_anchor = earliest;
-  }
+  // The anchor is the destination of the earliest note, in either direction. snap_tick
+  // keeps it non-negative, so every pasted note stays non-negative too (note starts are
+  // >= earliest, so start + snapped_anchor - earliest >= snapped_anchor >= 0).
+  const int32_t snapped_anchor = snap_tick(static_cast<float>(anchor_tick), grid);
   std::vector<NotationNote> result = clipboard;
   for (auto& note : result) {
     note.start_tick += snapped_anchor - earliest;

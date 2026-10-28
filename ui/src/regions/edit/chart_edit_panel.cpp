@@ -3663,8 +3663,12 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   for (const auto& n : clipboard_) src_earliest = std::min(src_earliest, n.start_tick);
   for (const auto& p : clipboard_speed_) src_earliest = std::min(src_earliest, p.tick);
   if (src_earliest == std::numeric_limits<int32_t>::max()) return false;
-  int32_t snapped_anchor = wds::chart_editor::snap_tick(static_cast<float>(anchor), viewport_.grid());
-  if (snapped_anchor < src_earliest) snapped_anchor = src_earliest;
+  // The pointer is where the clipboard's earliest item should land, in either
+  // direction: a block copied further down may be pasted above its source. snap_tick
+  // keeps the anchor non-negative, and `shift` below pushes the whole block forward
+  // only where the destination is not allowed.
+  const int32_t snapped_anchor =
+      wds::chart_editor::snap_tick(static_cast<float>(anchor), viewport_.grid());
   const int32_t base_delta = snapped_anchor - src_earliest;
 
   auto pasted = clipboard_;
