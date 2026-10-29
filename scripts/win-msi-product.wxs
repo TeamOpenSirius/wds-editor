@@ -119,6 +119,20 @@
     <Condition Message="A newer build of WDS Editor is already installed (build [WDS_INSTALLED_ID]). Uninstall it first, or pass WDS_ALLOW_DOWNGRADE=1 to install this older build anyway.">NOT Installed OR NOT WDS_INSTALLED_TS OR WDS_INSTALLED_TS &lt;= WDS_BUILD_TS OR WDS_ALLOW_DOWNGRADE</Condition>
     <MediaTemplate EmbedCab="yes"/>
 
+    <!-- Windows Installer saves a system restore point for a per-machine install
+         by default. It does that inside the execute sequence, around
+         InstallInitialize - after ProgressDlg is up (it is shown
+         Before="ExecuteAction") but before InstallFiles starts ticking the
+         progress bar, and while no ActionText is being sent. On a machine with
+         System Protection enabled that is the "bar sits at 0, status line is
+         empty, then the install runs" phase. 1 = no restore point for this
+         installation (Windows Installer 5.0, i.e. Windows 7+, which this
+         package already requires via InstallerVersion 500). Value 2 (skip
+         everything but file costing, 3 to combine) is the further step if a
+         verbose log still shows a long CostInitialize/FileCost stretch; do NOT
+         add 4, it throttles the progress messages this dialog exists for. -->
+    <Property Id="MSIFASTINSTALL" Value="1"/>
+
     <Property Id="ARPPRODUCTICON" Value="WdsEditorIcon"/>
     <!-- Overwrite mode for a normal install (no prior product, or a legacy
          Id='*' product that RemoveExistingProducts already removed): force every
