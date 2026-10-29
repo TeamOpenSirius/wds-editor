@@ -97,8 +97,8 @@ constexpr EditorShortcut kFileShortcuts[] = {
 
 constexpr EditorShortcut kEditShortcuts[] = {
     EditorShortcut::Undo,       EditorShortcut::Redo,
-    EditorShortcut::Copy,       EditorShortcut::Paste,
-    EditorShortcut::PasteMirror,
+    EditorShortcut::Copy,       EditorShortcut::Cut,
+    EditorShortcut::Paste,      EditorShortcut::PasteMirror,
     EditorShortcut::DeleteSelection,
     EditorShortcut::Mirror,     EditorShortcut::MirrorAboutCenter,
     EditorShortcut::NudgeUp,    EditorShortcut::NudgeDown,

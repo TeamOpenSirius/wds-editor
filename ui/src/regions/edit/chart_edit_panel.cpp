@@ -3835,6 +3835,17 @@ bool ChartEditPanel::copy_selected() {
   return !clipboard_.empty() || !clipboard_speed_.empty();
 }
 
+bool ChartEditPanel::cut_selected() {
+  // Cut is exactly Copy plus a delete of the clipboard payload: it writes the
+  // same notes Copy writes (copy_selected) and removes exactly those notes, so
+  // a note Copy filtered out (a mid-star whose hold is not in the set) stays in
+  // the chart instead of disappearing without a way to paste it back. The
+  // removal is one history step; derived rows that cannot outlive a deleted
+  // hold are handled by remove_notes_and_speeds itself.
+  if (!engine_.is_editable() || !copy_selected()) return false;
+  return remove_notes_and_speeds(clipboard_, clipboard_speed_, "Cut");
+}
+
 bool ChartEditPanel::paste_at_pointer(bool mirror) {
   if (!engine_.is_editable() || (clipboard_.empty() && clipboard_speed_.empty())) return false;
   sync_viewport();
@@ -4049,37 +4060,69 @@ std::optional<NotationNote> hold_width_pair_partner(const wds::chart_editor::Cha
 
 }  // namespace
 
-bool ChartEditPanel::delete_selected() {
-  if (!engine_.is_editable() ||
-      (selected_.empty() && selected_speed_ticks_.empty())) {
-    return false;
+bool ChartEditPanel::remove_notes_and_speeds(std::vector<NotationNote> notes,
+                                             std::vector<wds::chart_editor::ScrollSpeedPoint> speeds,
+                                             const std::string& label) {
+  // A removed hold takes its derived HoldEighth rows with it: they cannot be
+  // re-parented, and Copy never puts them in the clipboard (paste regenerates
+  // them from the hold). Expanding the removal here keeps Cut's payload exactly
+  // the clipboard while the document still ends up without orphaned rows.
+  std::unordered_set<int32_t> removed_ids;
+  std::unordered_set<int32_t> removed_hold_ids;
+  for (const auto& note : notes) {
+    removed_ids.insert(note.id);
+    if (wds::chart_editor::is_bindable_hold_body(note.note_type)) removed_hold_ids.insert(note.id);
   }
-  const auto notes = selected_with_hold_dependents(engine_.document(), selected_);
+  if (!removed_hold_ids.empty()) {
+    for (const auto& note : engine_.document().notes()) {
+      if (note.note_type != NoteType::HoldEighth) continue;
+      if (removed_hold_ids.count(note.parent_hold_id) == 0) continue;
+      if (removed_ids.insert(note.id).second) notes.push_back(note);
+    }
+  }
+
   auto speed_before = engine_.document().scroll_speed_points();
   auto speed_after = speed_before;
-  speed_after.erase(std::remove_if(speed_after.begin(), speed_after.end(),
-                                   [&](const auto& p) {
-                                     return selected_speed_ticks_.count(p.tick) != 0;
-                                   }),
-                    speed_after.end());
+  std::unordered_set<int32_t> removed_ticks;
+  for (const auto& point : speeds) removed_ticks.insert(point.tick);
+  if (!removed_ticks.empty()) {
+    speed_after.erase(std::remove_if(speed_after.begin(), speed_after.end(),
+                                     [&](const auto& p) {
+                                       return removed_ticks.count(p.tick) != 0;
+                                     }),
+                      speed_after.end());
+  }
   const bool delete_speeds = speed_after.size() != speed_before.size();
   const bool delete_notes = !notes.empty();
   if (!delete_notes && !delete_speeds) return false;
 
-  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Delete");
+  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>(label);
   if (delete_notes) {
     // Deleted mid-stars free their ticks: surviving holds regain the eighth there,
     // inside this same undo step.
-    append_remove_with_eighth_refresh(*composite, engine_.document(), notes, "Delete");
+    append_remove_with_eighth_refresh(*composite, engine_.document(), notes, label);
   }
   if (delete_speeds) {
     composite->add(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
-        std::move(speed_before), std::move(speed_after), "Delete scroll speed"));
+        std::move(speed_before), std::move(speed_after), label + " scroll speed"));
   }
   if (!engine_.execute_command(std::move(composite))) return false;
   selected_.clear();
   selected_speed_ticks_.clear();
   return true;
+}
+
+bool ChartEditPanel::delete_selected() {
+  if (!engine_.is_editable() ||
+      (selected_.empty() && selected_speed_ticks_.empty())) {
+    return false;
+  }
+  auto notes = selected_with_hold_dependents(engine_.document(), selected_);
+  std::vector<wds::chart_editor::ScrollSpeedPoint> speeds;
+  for (const auto& point : engine_.document().scroll_speed_points()) {
+    if (selected_speed_ticks_.count(point.tick) != 0) speeds.push_back(point);
+  }
+  return remove_notes_and_speeds(std::move(notes), std::move(speeds), "Delete");
 }
 
 bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {

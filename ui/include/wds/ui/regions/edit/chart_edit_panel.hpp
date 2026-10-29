@@ -231,6 +231,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool mirror_selected(bool about_center);
   bool nudge_selected(int32_t delta_tick, int32_t delta_lane);
   bool copy_selected();
+  // Copy, then remove exactly the notes Copy put in the clipboard (one history
+  // step): Cut differs from Copy only by that deletion, so no note is ever
+  // removed without a paste payload while Copy's filtering still applies.
+  bool cut_selected();
   // `mirror`: same as paste then playfield-mirror, one history step. Splits skip the flip.
   bool paste_at_pointer(bool mirror = false);
   bool delete_selected();
@@ -485,6 +489,13 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool commit_updates(const std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair>&
                           changes,
                       const std::string& label);
+  // Remove `notes` and `speeds` in one history step. A removed hold also takes
+  // its derived HoldEighth rows (they cannot outlive it), but no other note is
+  // touched. Delete derives the payload from the selection; Cut passes the
+  // clipboard payload so deletion and copy stay in sync.
+  bool remove_notes_and_speeds(std::vector<wds::chart_editor::NotationNote> notes,
+                               std::vector<wds::chart_editor::ScrollSpeedPoint> speeds,
+                               const std::string& label);
 
   void place_instant(wds::chart_editor::NoteType type, wds::interaction::Vec2 point,
                      int32_t scratch_length = 0);

@@ -159,7 +159,7 @@ ui.session();
 | Space | 播放 / 暂停 |
 | Primary+O / S | 打开 / 保存 |
 | Primary+Z / Y | 撤销 / 重做 |
-| Primary+C / V | 复制 / 粘贴 |
+| Primary+C / X / V | 复制 / 剪切 / 粘贴 |
 | Arrows | 微移选区 |
 | Q/W/E/A/S/D | 默认宽度 1/2/3/4/6/12 |
 

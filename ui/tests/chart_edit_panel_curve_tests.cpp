@@ -2765,6 +2765,136 @@ void test_copy_hold_with_star_pastes_bound_star_and_regenerated_eighths() {
   }
 }
 
+void test_cut_copies_then_deletes_in_one_history_step() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+
+  h.panel.set_selected({hold_id, head_id});
+  const size_t undo_before = h.engine.history().undo_count();
+  CHECK(h.panel.cut_selected());
+  // Copy is not a history step; the removal it feeds is exactly one.
+  CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 0);
+  CHECK(h.panel.selected().empty());
+
+  // That single entry is the whole cut: one undo brings back the hold, its head,
+  // the bound star and the derived eighths; one redo removes them again.
+  CHECK(h.engine.undo());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+  CHECK(count_type(h.engine.document().notes(), NoteType::HoldEighth) > 0);
+  CHECK(h.engine.redo());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
+
+  // The cut payload pastes back as a new hold with its bound star and derived eighths.
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+  CHECK(h.panel.paste_at_pointer());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+  CHECK(count_type(h.engine.document().notes(), NoteType::HoldEighth) > 0);
+  int32_t new_hold_id = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Hold) new_hold_id = n.id;
+  }
+  CHECK(new_hold_id >= 0 && new_hold_id != hold_id);
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Sound) CHECK_EQ(n.parent_hold_id, new_hold_id);
+  }
+}
+
+void test_cut_lone_mid_star_keeps_chart_untouched() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+  h.panel.set_selected({star_id});
+  const auto before = h.engine.document().notes();
+  const size_t undo_before = h.engine.history().undo_count();
+  // A lone star is not copyable, so cut must not remove it without a payload.
+  CHECK(!h.panel.cut_selected());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before);
+  CHECK(notes_eq(h.engine.document().notes(), before));
+  CHECK_EQ(h.panel.selected().size(), 1u);
+}
+
+void test_cut_deletes_only_the_copy_payload() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 480;
+  tap.lane = 10;
+  tap.width = 1;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+
+  // Copy keeps the tap but drops the star (its hold is not selected). Cut must
+  // remove only the copied payload, leaving the star and its hold in place.
+  h.panel.set_selected({star_id, tap_id});
+  const size_t undo_before = h.engine.history().undo_count();
+  CHECK(h.panel.cut_selected());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+  CHECK(h.engine.document().find_note(star_id).has_value());
+  CHECK(!h.engine.document().find_note(tap_id).has_value());
+  CHECK(h.engine.document().find_note(hold_id).has_value());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+
+  // The clipboard still pastes exactly the tap, not the surviving star.
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 10), {}});
+  CHECK(h.panel.paste_at_pointer());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Normal), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+}
+
+void test_cut_clipboard_matches_copy_clipboard() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+
+  // Paste the current clipboard at a fixed tick and describe the pasted payload
+  // by geometry/type (ids are renumbered on paste, and a bound star reports
+  // "held" whenever its parent is part of the same paste).
+  auto paste_shape = [&] {
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+    const int32_t first_new = h.engine.document().next_note_id();
+    CHECK(h.panel.paste_at_pointer());
+    std::vector<std::string> shape;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.id < first_new) continue;
+      shape.push_back(std::to_string(static_cast<int>(n.note_type)) + ":" +
+                      std::to_string(n.start_tick) + ":" + std::to_string(n.end_tick) + ":" +
+                      std::to_string(n.lane) + ":" + std::to_string(n.width) + ":" +
+                      (n.parent_hold_id >= first_new ? "held" : "free"));
+    }
+    std::sort(shape.begin(), shape.end());
+    return shape;
+  };
+
+  h.panel.set_selected({hold_id, head_id});
+  CHECK(h.panel.copy_selected());
+  const auto from_copy = paste_shape();
+  CHECK(!from_copy.empty());
+  CHECK(h.engine.undo());  // drop the pasted copies; the originals remain
+
+  h.panel.set_selected({hold_id, head_id});
+  CHECK(h.panel.cut_selected());
+  const auto from_cut = paste_shape();
+  // Cut writes exactly what Copy wrote, so the paste result is identical.
+  CHECK(from_copy == from_cut);
+}
+
 void test_nontail_hold_eighths_follow_paste_and_resize() {
   Harness h;
   h.engine.document().set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended);
@@ -5123,6 +5253,10 @@ int main() {
   test_nudge_star_out_of_hold_is_refused();
   test_copy_lone_mid_star_is_a_noop();
   test_copy_hold_with_star_pastes_bound_star_and_regenerated_eighths();
+  test_cut_copies_then_deletes_in_one_history_step();
+  test_cut_lone_mid_star_keeps_chart_untouched();
+  test_cut_deletes_only_the_copy_payload();
+  test_cut_clipboard_matches_copy_clipboard();
   test_nontail_hold_eighths_follow_paste_and_resize();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
