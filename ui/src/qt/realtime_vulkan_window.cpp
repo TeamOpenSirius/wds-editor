@@ -73,7 +73,18 @@ void RealtimeVulkanWindow::set_resize_suspended(bool suspended) noexcept {
 void RealtimeVulkanWindow::request_frame() {
   force_frame_ = true;
   idle_wakeup_timer_.stop();
-  if (frame_callback_ && !surface_dead_) requestUpdate();
+  last_frame_ = std::chrono::steady_clock::now();
+  pending_elapsed_us_ = 0;
+  if (!frame_callback_ || surface_dead_) return;
+  if (!isExposed()) {
+    // Qt does not necessarily deliver an UpdateRequest while the window is
+    // hidden, and win32 does not always report the expose transition when an
+    // embedded native child is restored from minimize. Keep the forced frame
+    // pending and poll for exposure instead of dropping it.
+    hold_frame_unexposed();
+    return;
+  }
+  requestUpdate();
 }
 
 void RealtimeVulkanWindow::pump_cli_frame() {
@@ -154,6 +165,25 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     // even if input is pending. Resume with one frame at the final dimensions.
     // The first-open frame is the exception: drop+no-reschedule leaves the
     // preview blank until dock layout stops restarting the settle timers.
+    const char* dump_verts = std::getenv("WDS_DUMP_VERTS");
+    const bool cli_dump = dump_verts != nullptr && dump_verts[0] != '\0';
+    // Check exposure before the paused gate: otherwise the only UpdateRequest
+    // after a restore can be swallowed as "unchanged" (and force_frame_ cleared
+    // below), leaving the loop dead and the preview black.
+    if (!isExposed() && !cli_dump) {
+      hold_frame_unexposed();
+      pending_elapsed_us_ = 0;
+      return true;
+    }
+    if (exposure_held_) {
+      // First frame after re-exposure: force it. The swapchain may have gone
+      // occluded while minimized (win32 reports a 0×0 surface), and the paused
+      // present gate would otherwise keep the stale/black image as current.
+      exposure_held_ = false;
+      force_frame_ = true;
+      last_frame_ = std::chrono::steady_clock::now();
+      pending_elapsed_us_ = 0;
+    }
     const bool startup = !presented_;
     if ((resizing_ || host_resize_suspended_) && !startup && !force_frame_) {
       note_frame_hold("resize-suspend");
@@ -163,22 +193,12 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     const bool has_input = !input_queue_.events().empty();
     if (!startup && !force_frame_ && !has_input && idle_present_gate_ &&
         !idle_present_gate_()) {
-      if (idle_wakeup_interval_us_ > 0) {
-        idle_wakeup_timer_.start(
-            std::max(1, static_cast<int>(idle_wakeup_interval_us_ / 1000)));
-      }
+      arm_idle_wakeup();
       pending_elapsed_us_ = 0;
       return true;
     }
     idle_wakeup_timer_.stop();
     force_frame_ = false;
-    initialized_ = isExposed();
-    const char* dump_verts = std::getenv("WDS_DUMP_VERTS");
-    const bool cli_dump = dump_verts != nullptr && dump_verts[0] != '\0';
-    if (!initialized_ && !cli_dump) {
-      note_frame_hold("unexposed");
-      return true;
-    }
     if (!resizing_ && !host_resize_suspended_) {
       note_frame_resume();
     }
@@ -219,7 +239,11 @@ void RealtimeVulkanWindow::exposeEvent(QExposeEvent*) {
   // Qt 6.6+ on macOS uses QMetalLayer; [QNSView displayLayer:] calls
   // handleExposeEvent on every presented frame. Resetting last_frame_ here
   // would truncate the UpdateRequest delta (wall ~16.7 ms → measured ~8 ms).
-  if (isExposed() && !was_exposed_) {
+  // Only the first expose after hidden/minimized forces a frame; the
+  // exposure_held_ arm covers platforms that never report the hidden half of
+  // the transition (win32 native child restored from the taskbar).
+  if (isExposed() && (!was_exposed_ || exposure_held_)) {
+    exposure_held_ = false;
     force_frame_ = true;
     last_frame_ = std::chrono::steady_clock::now();
     pending_elapsed_us_ = 0;
@@ -266,21 +290,43 @@ void RealtimeVulkanWindow::schedule_frame() {
     return;
   }
   if (!isExposed()) {
-    note_frame_hold("unexposed");
+    hold_frame_unexposed();
     return;
   }
-  if (presented_ && (resizing_ || host_resize_suspended_)) {
+  if (exposure_held_) {
+    // Coming back from hidden/minimized: force one frame regardless of the
+    // paused present gate. draw_frame recovers the swapchain that went
+    // occluded while minimized, which is the black preview fix.
+    exposure_held_ = false;
+    force_frame_ = true;
+    last_frame_ = std::chrono::steady_clock::now();
+    pending_elapsed_us_ = 0;
+    note_frame_resume();
+  }
+  if (presented_ && (resizing_ || host_resize_suspended_) && !force_frame_) {
     note_frame_hold("resize-suspend");
     return;
   }
   if (idle_present_gate_ && presented_ && !force_frame_ && !idle_present_gate_()) {
-    if (idle_wakeup_interval_us_ > 0) {
-      idle_wakeup_timer_.start(
-          std::max(1, static_cast<int>(idle_wakeup_interval_us_ / 1000)));
-    }
+    arm_idle_wakeup();
     return;
   }
   idle_wakeup_timer_.stop();
   requestUpdate();
+}
+
+void RealtimeVulkanWindow::arm_idle_wakeup() {
+  if (idle_wakeup_interval_us_ <= 0) return;
+  idle_wakeup_timer_.start(std::max(1, static_cast<int>(idle_wakeup_interval_us_ / 1000)));
+}
+
+void RealtimeVulkanWindow::hold_frame_unexposed() {
+  // Keep the render loop parked but alive. A dead wakeup timer here used to
+  // leave the preview black until some unrelated input forced the next frame:
+  // the paused present gate says "unchanged" after a minimize, so nothing else
+  // ever calls requestUpdate again.
+  exposure_held_ = true;
+  note_frame_hold("unexposed");
+  arm_idle_wakeup();
 }
 }

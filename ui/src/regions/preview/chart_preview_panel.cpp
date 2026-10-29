@@ -830,6 +830,16 @@ bool ChartPreviewPanel::needs_present() const noexcept {
 }
 
 void ChartPreviewPanel::note_frame_presented() noexcept {
+  // A frame that could not present must not mark this snapshot as shown. While
+  // the window is minimized win32 reports a 0×0 surface, and the renderer keeps
+  // its swapchain flagged "occluded": if the gate were cleared here, no one
+  // would ever ask for the frame that rebuilds it after restore. Keep the
+  // preview dirty so the paused tick retries until the swapchain is live again
+  // (draw_frame performs that recovery itself).
+  if (preview_.vulkan().health() == wds::renderer::RendererHealth::Occluded) {
+    present_dirty_ = true;
+    return;
+  }
   const auto& snap = engine_.snapshot();
   last_presented_doc_gen_ = engine_.document().content_generation();
   last_presented_revision_ = snap.revision;
