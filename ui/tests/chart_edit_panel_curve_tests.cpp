@@ -1172,6 +1172,64 @@ void test_jumpscratch_end_adjust_follows_wheel_resync() {
   CHECK_EQ(after->end_tick, expected);
 }
 
+void test_hold_edge_trim_allows_any_positive_length() {
+  // Holds may be trimmed to any length above zero: the floor is one tick, not the
+  // current edit subdivision (120 ticks here).
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+  h.panel.set_selected({id});
+  const auto grab = h.at_tick_lane(960, 4);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  const auto collapse = h.at_tick_lane(0, 4);
+  h.panel.on_pointer_move(PointerMoveEvent{collapse, {}});
+  h.panel.on_pointer_up(PointerUpEvent{collapse, PointerButton::Left, {}});
+
+  const auto* collapsed = find_note_id(h.engine.document().notes(), id);
+  CHECK(collapsed != nullptr);
+  if (collapsed != nullptr) {
+    CHECK_EQ(collapsed->start_tick, 0);
+    CHECK_EQ(collapsed->end_tick - collapsed->start_tick, 1);
+  }
+  CHECK(h.engine.undo());
+  const auto* restored = find_note_id(h.engine.document().notes(), id);
+  CHECK(restored != nullptr);
+  if (restored != nullptr) CHECK_EQ(restored->end_tick, 960);
+
+  // Start edge clamps at end - 1 tick instead of overshooting into zero length.
+  Harness hs;
+  const int32_t sid = add_hold_body(hs, NoteType::Hold, 0, 960, 3, 3);
+  hs.panel.set_selected({sid});
+  const auto head = hs.at_tick_lane(0, 4);
+  hs.panel.on_pointer_down(PointerDownEvent{head, PointerButton::Left, {}});
+  const auto past_end = hs.at_tick_lane(960, 4);
+  hs.panel.on_pointer_move(PointerMoveEvent{past_end, {}});
+  hs.panel.on_pointer_up(PointerUpEvent{past_end, PointerButton::Left, {}});
+  const auto* trimmed = find_note_id(hs.engine.document().notes(), sid);
+  CHECK(trimmed != nullptr);
+  if (trimmed != nullptr) {
+    CHECK_EQ(trimmed->end_tick, 960);
+    CHECK_EQ(trimmed->end_tick - trimmed->start_tick, 1);
+  }
+
+  // JumpScratch hinge: both adjacent bodies may shrink to one tick at the joint.
+  Harness hj;
+  const int32_t prev_id = add_hold_body(hj, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+  const int32_t next_id = add_hold_body(hj, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  hj.panel.set_selected({prev_id});
+  const auto joint = hj.at_tick_lane(480, 2);
+  hj.panel.on_pointer_down(PointerDownEvent{joint, PointerButton::Left, {}});
+  const auto to_start = hj.at_tick_lane(0, 2);
+  hj.panel.on_pointer_move(PointerMoveEvent{to_start, {}});
+  hj.panel.on_pointer_up(PointerUpEvent{to_start, PointerButton::Left, {}});
+  const auto* prev = find_note_id(hj.engine.document().notes(), prev_id);
+  const auto* next = find_note_id(hj.engine.document().notes(), next_id);
+  CHECK(prev != nullptr && next != nullptr);
+  if (prev != nullptr && next != nullptr) {
+    CHECK_EQ(prev->end_tick - prev->start_tick, 1);
+    CHECK_EQ(next->start_tick, prev->end_tick);
+  }
+}
+
 void test_jumpscratch_joint_adjust_follows_playback_resync() {
   Harness h;
   const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
@@ -5305,6 +5363,7 @@ int main() {
   test_tap_stand_in_hold_heads_in_editor();
   test_jumpscratch_joint_adjust_keeps_next_mid_star();
   test_hold_tail_adjust_follows_playback_resync();
+  test_hold_edge_trim_allows_any_positive_length();
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();

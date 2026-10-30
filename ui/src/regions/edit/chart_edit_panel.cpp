@@ -38,6 +38,11 @@ using wds::chart_editor::NoteType;
 using wds::interaction::PlaceIntent;
 using wds::interaction::SwipeDirection;
 
+// Hold bodies may be any positive length when an edge is trimmed: the floor is one
+// tick, not the edit subdivision. Zero length is not a hold (one-time notes cover
+// that), but the grid resolution must not also cap how short a hold can get.
+inline constexpr int32_t kMinHoldTicks = 1;
+
 bool clamps_to_nonnegative_music(const NotationNote& note) noexcept {
   if (note.note_type == NoteType::HiSpeed) return false;
   if (note.note_type == NoteType::None &&
@@ -3293,7 +3298,6 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   sync_viewport();
   const wds::interaction::Vec2 mapped = pointer_as_in_host(point);
   const int32_t tick = viewport_.tick_at(mapped.y);
-  const int32_t min_dur = min_hold_duration_ticks();
   auto anchor_it = drag_originals_.find(anchor_note_id_);
   if (anchor_it == drag_originals_.end()) return;
   const NotationNote& anchor_orig = anchor_it->second;
@@ -3332,9 +3336,10 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   };
 
   // JumpScratch vertical hinge: move the joint tick; adjacent bodies change length.
-  // Clamp so neither body collapses below one grid subdivision (cannot cross neighbors).
+  // Clamp so neither body collapses below one tick (cannot cross neighbors); any
+  // positive length above that is allowed, independent of the grid subdivision.
   if (adjust_end_ && wds::chart_editor::is_hold_chain_body(anchor_orig.note_type)) {
-    int32_t lo = static_cast<int32_t>(anchor_orig.start_tick) + min_dur;
+    int32_t lo = static_cast<int32_t>(anchor_orig.start_tick) + kMinHoldTicks;
     int32_t hi = std::numeric_limits<int32_t>::max() / 4;
     const NotationNote* next_orig = nullptr;
     auto is_chained_next = [&](const NotationNote& n) {
@@ -3363,7 +3368,7 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
       }
     }
     if (next_orig) {
-      hi = next_orig->end_tick - min_dur;
+      hi = next_orig->end_tick - kMinHoldTicks;
     }
     if (lo > hi) return;
     const int32_t joint = std::clamp(tick, lo, hi);
@@ -3396,10 +3401,10 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
       continue;
     }
     if (adjust_end_) {
-      n.end_tick = std::max({n.start_tick + min_dur, tick, first_legal_tick()});
+      n.end_tick = std::max({n.start_tick + kMinHoldTicks, tick, first_legal_tick()});
     } else {
       const int32_t legal = first_legal_tick();
-      const int32_t hi = n.end_tick - min_dur;
+      const int32_t hi = n.end_tick - kMinHoldTicks;
       if (legal <= hi) {
         n.start_tick = std::clamp(tick, legal, hi);
       }
