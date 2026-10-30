@@ -51,6 +51,7 @@
 #include <QColor>
 #include <QSizePolicy>
 #include <QWindow>
+#include <QWindowStateChangeEvent>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -1045,9 +1046,27 @@ void EditorMainWindow::clear_click_marks() {
 
 void EditorMainWindow::changeEvent(QEvent* event) {
   QMainWindow::changeEvent(event);
-  if (event != nullptr && (event->type() == QEvent::PaletteChange ||
-                           event->type() == QEvent::ApplicationPaletteChange)) {
+  if (event == nullptr) return;
+  if (event->type() == QEvent::PaletteChange ||
+      event->type() == QEvent::ApplicationPaletteChange) {
     apply_command_icons();
+    return;
+  }
+  if (event->type() == QEvent::WindowStateChange) {
+    // While the shell is minimized win32 reports a 0×0 surface for the preview,
+    // so the renderer keeps its last swapchain flagged occluded and presents
+    // nothing. An embedded native child does not reliably deliver the expose
+    // transition when the shell is restored from the taskbar, and the paused
+    // preview gate then reports "unchanged" - the preview stayed black until
+    // some unrelated input dirtied it. Force one frame as soon as the shell
+    // leaves the minimized state; draw_frame rebuilds the occluded swapchain.
+    const auto* state_event = static_cast<QWindowStateChangeEvent*>(event);
+    const bool was_minimized = (state_event->oldState() & Qt::WindowMinimized) != 0;
+    if (was_minimized && !isMinimized()) {
+      if (auto* window = dynamic_cast<RealtimeVulkanWindow*>(preview_window_)) {
+        window->request_frame();
+      }
+    }
   }
 }
 

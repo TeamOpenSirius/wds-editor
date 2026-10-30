@@ -29,6 +29,15 @@
   opens it, and its Next comes back here. Add a Show row for it if the classic
   Welcome -> three buttons pair is wanted instead.
 
+  ProgressDlg starts before the execute sequence and its bar stays at 0 until
+  InstallFiles ticks once per file, so the prologue (costing, validation,
+  script generation, removal of a previous build) needs captions of its own:
+  the ProgressText block below authors the ActionText table, which wixl's ui
+  extension does not ship (WiX has ErrorProgressText.wxs, msitools has no
+  equivalent). Without it the Status: line is blank for exactly that phase.
+  MSIFASTINSTALL=1 in the product suppresses the per-machine system restore
+  point, the other silent step taken between InstallInitialize and InstallFiles.
+
   Notes for wixl 0.103:
   - Folder is Edit (not PathEdit). PathEdit validates the path and clears the
     property when C:\Program Files\WDS Editor does not exist yet — first
@@ -58,6 +67,61 @@
       <Property Id="DefaultUIFont" Value="WixUI_Font_Normal"/>
       <Property Id="WixUI_Mode" Value="Wds"/>
       <Property Id="ARPNOMODIFY" Value="1"/>
+
+      <!--
+        ActionText (WiX ProgressText) rows: the ProgressDlg "Status:" line and
+        the log text for each action.
+
+        wixl's ui extension ships only the dialogs. WiX's UIExtension also has
+        ErrorProgressText.wxs, the ~70 stock rows (CostInitialize / FileCost /
+        CostFinalize / InstallValidate / InstallFiles / RemoveExistingProducts /
+        ...), and msitools has no equivalent. Without rows here the ActionText
+        table is empty, so the dialog has nothing of its own to show and depends
+        entirely on msiexec's built-in fallback strings - and the prologue is
+        exactly where the Status: line is observed to stay blank.
+
+        This matters for the *start* of the install: ProgressDlg is shown
+        Before="ExecuteAction", and the progress bar gets almost no ticks until
+        InstallFiles (it is one tick per copied file). Everything before it -
+        costing, InstallValidate, InstallInitialize, the previous build's
+        removal - therefore sits at 0 and, with an empty ActionText table, also
+        shows no text at all: the dialog looks hung for the first tens of
+        seconds. These rows give that phase a caption ("Validating install",
+        "Removing the previous version", ...), so motion + text explain the wait.
+
+        Descriptions must stay ASCII (package codepage is 1252). Templates ([1],
+        ...) reference the action-data record; InstallFiles uses the file name
+        (field 1), which every Windows Installer version provides. Rollback and
+        RollbackCleanup must keep Template="[1]" verbatim - the action names and
+        templates are fixed there, only the description is ours.
+      -->
+      <ProgressText Action="CostInitialize">Calculating disk space requirements</ProgressText>
+      <ProgressText Action="FileCost">Costing files</ProgressText>
+      <ProgressText Action="CostFinalize">Finalizing install cost</ProgressText>
+      <ProgressText Action="FindRelatedProducts">Checking for an existing installation</ProgressText>
+      <ProgressText Action="AppSearch">Searching for existing settings</ProgressText>
+      <ProgressText Action="LaunchConditions">Checking system requirements</ProgressText>
+      <ProgressText Action="ValidateProductID">Validating product ID</ProgressText>
+      <ProgressText Action="InstallValidate">Validating install</ProgressText>
+      <ProgressText Action="MigrateFeatureStates">Migrating feature states</ProgressText>
+      <ProgressText Action="InstallInitialize">Preparing installation</ProgressText>
+      <ProgressText Action="RemoveExistingProducts">Removing the previous version</ProgressText>
+      <ProgressText Action="ProcessComponents">Registering components</ProgressText>
+      <ProgressText Action="UnpublishFeatures">Unpublishing features</ProgressText>
+      <ProgressText Action="RemoveRegistryValues">Removing old registry values</ProgressText>
+      <ProgressText Action="RemoveShortcuts">Removing old shortcuts</ProgressText>
+      <ProgressText Action="RemoveFiles" Template="[1]">Removing old files</ProgressText>
+      <ProgressText Action="CreateFolders" Template="[1]">Creating folders</ProgressText>
+      <ProgressText Action="InstallFiles" Template="[1]">Copying new files</ProgressText>
+      <ProgressText Action="CreateShortcuts" Template="[1]">Creating shortcuts</ProgressText>
+      <ProgressText Action="WriteRegistryValues" Template="[1]">Writing registry values</ProgressText>
+      <ProgressText Action="RegisterUser" Template="[1]">Registering user</ProgressText>
+      <ProgressText Action="RegisterProduct" Template="[1]">Registering product</ProgressText>
+      <ProgressText Action="PublishFeatures" Template="[1]">Publishing features</ProgressText>
+      <ProgressText Action="PublishProduct">Publishing product information</ProgressText>
+      <ProgressText Action="InstallFinalize">Finalizing installation</ProgressText>
+      <ProgressText Action="Rollback" Template="[1]">Rolling back changes</ProgressText>
+      <ProgressText Action="RollbackCleanup" Template="[1]">Removing rollback files</ProgressText>
 
       <DialogRef Id="ErrorDlg"/>
       <DialogRef Id="FatalError"/>

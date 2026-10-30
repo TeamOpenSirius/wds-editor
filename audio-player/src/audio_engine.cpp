@@ -372,6 +372,7 @@ struct AudioEngine::Impl {
   // MIXTIME callback and corrupts bassmix's channel array).
   std::mutex sfx_src_mu;
   std::vector<HSTREAM> sfx_srcs;
+  static constexpr size_t kMaxTrackedSfxSources = 16384;
   // Full-pool recovery sweeps (slow path only, see acquire_slot_locked). Stays 0
   // unless the free list ran dry; tests assert the schedule hot path never scans.
   std::atomic<std::uint64_t> pool_sweeps{0};
@@ -511,19 +512,17 @@ void AudioEngine::Impl::track_sfx_source(HSTREAM stream) {
   if (stream == 0) {
     return;
   }
+  // Runs on the mixer thread for every hit sound: no BASS calls and no scan of
+  // the list here. Ended streams are validated by remove_mixer_sfx_sources()
+  // (control thread) and the list is dropped on every stop/seek.
   std::lock_guard<std::mutex> lock(sfx_src_mu);
   sfx_srcs.push_back(stream);
-  if (sfx_srcs.size() <= 256) {
-    return;
+  if (sfx_srcs.size() > kMaxTrackedSfxSources) {
+    // Bookkeeping only: the dropped tail is long-finished one-shots that
+    // BASS_STREAM_AUTOFREE already released.
+    sfx_srcs.erase(sfx_srcs.begin(),
+                   sfx_srcs.begin() + static_cast<std::ptrdiff_t>(kMaxTrackedSfxSources / 4));
   }
-  // Prune streams that ended (BASS_STREAM_AUTOFREE already freed them); a stale
-  // handle reports no mixer.
-  const HSTREAM mixer = this->mixer;
-  sfx_srcs.erase(std::remove_if(sfx_srcs.begin(), sfx_srcs.end(),
-                                [mixer](HSTREAM h) {
-                                  return h == 0 || BASS_Mixer_ChannelGetMixer(h) != mixer;
-                                }),
-                 sfx_srcs.end());
 }
 
 namespace {

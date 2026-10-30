@@ -55,7 +55,7 @@ The codebase is intentionally split into reusable layers. Its chart core and ren
 - **Whole-project export** to official CSV or SUS layouts.
 - **BPM and time-signature editing** with authored timing points.
 - **Chart delay / music offset** support.
-- **Undo / redo**, copy/paste, selection movement, resize, conversion, and mirroring.
+- **Undo / redo**, copy / cut / paste, selection movement, resize, conversion, and mirroring.
 - **Scratch Hold / JumpScratch editing** with chain-aware lane geometry.
 - **Nontail Hold** support for duration-only holds without a judged tail.
 - **Split lane / split effect** authoring.
@@ -246,7 +246,7 @@ The editor supports:
 - adjust hold duration;
 - Scratch Hold end-span editing;
 - delete;
-- copy / paste;
+- copy / cut / paste;
 - undo / redo;
 - horizontal mirror;
 - selection-centered mirror;
@@ -391,7 +391,7 @@ Common defaults include:
 | `Ctrl/Cmd + S` | Save |
 | `Ctrl/Cmd + Z` | Undo |
 | `Ctrl/Cmd + Y` | Redo |
-| `Ctrl/Cmd + C` / `V` | Copy / paste |
+| `Ctrl/Cmd + C` / `X` / `V` | Copy / cut / paste |
 | `Ctrl/Cmd + B` / `N` | Move selected notes to the back layer / restore all back-layer notes |
 | Arrow keys | Nudge selection |
 | `Q / W / E / A / S / D` | Set default width to 1 / 2 / 3 / 4 / 6 / 12 |

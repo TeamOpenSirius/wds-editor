@@ -250,6 +250,7 @@ ShortcutChord chord_open() noexcept { return editor_shortcut(EditorShortcut::Ope
 ShortcutChord chord_undo() noexcept { return editor_shortcut(EditorShortcut::Undo); }
 ShortcutChord chord_redo() noexcept { return editor_shortcut(EditorShortcut::Redo); }
 ShortcutChord chord_copy() noexcept { return editor_shortcut(EditorShortcut::Copy); }
+ShortcutChord chord_cut() noexcept { return editor_shortcut(EditorShortcut::Cut); }
 ShortcutChord chord_paste() noexcept { return editor_shortcut(EditorShortcut::Paste); }
 ShortcutChord chord_paste_mirror() noexcept {
   return editor_shortcut(EditorShortcut::PasteMirror);

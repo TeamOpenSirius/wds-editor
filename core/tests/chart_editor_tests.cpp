@@ -6291,6 +6291,49 @@ void test_sus_til01_split_roundtrip() {
     }
   }
   CHECK_EQ(splits, 1);
+
+  // Zero-length split effects (startTime == endTime) survive #TIL01 round-trip:
+  // the close event is written at the same tick as the open, so the importer must
+  // visit opens before closes at that tick.
+  NotationChart zero_chart = chart;
+  zero_chart.notes.clear();
+  NotationNote zero_split = split;
+  zero_split.start_tick = 960;
+  zero_split.end_tick = 960;
+  zero_chart.notes.push_back(zero_split);
+  std::string zero_text;
+  CHECK_EQ(static_cast<int>(SusChartFormat::serialize(zero_chart, options, zero_text).error),
+           static_cast<int>(SerializeError::Ok));
+  SusChartLoadResult zero_loaded;
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(zero_text, zero_loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  int zero_splits = 0;
+  for (const auto& n : zero_loaded.chart.notes) {
+    if (!is_split_lane_gimmick(n.gimmick_type)) continue;
+    ++zero_splits;
+    CHECK_EQ(n.start_tick, 960);
+    CHECK_EQ(n.end_tick, n.start_tick);
+    CHECK_EQ(get_split_count(n.gimmick_type), 3);
+    CHECK_EQ(n.scratch_length, 2);
+  }
+  CHECK_EQ(zero_splits, 1);
+
+  // A file may list the close before the open at the same tick; the importer must
+  // still pair them (zero-length split), not drop the close as an orphan.
+  SusChartLoadResult close_first;
+  const std::string close_first_text =
+      "#REQUEST \"ticks_per_beat 480\"\n#BPM01: 120\n#TIL01: \"1'0000:-3.2, 1'0000:3.2\"\n";
+  CHECK_EQ(static_cast<int>(SusChartFormat::parse(close_first_text, close_first).error),
+           static_cast<int>(SerializeError::Ok));
+  int close_first_splits = 0;
+  for (const auto& n : close_first.chart.notes) {
+    if (!is_split_lane_gimmick(n.gimmick_type)) continue;
+    ++close_first_splits;
+    CHECK_EQ(n.start_tick, n.end_tick);
+    CHECK_EQ(get_split_count(n.gimmick_type), 3);
+    CHECK_EQ(n.scratch_length, 2);
+  }
+  CHECK_EQ(close_first_splits, 1);
 }
 
 // .wdschart export → import must preserve note/timing semantics.

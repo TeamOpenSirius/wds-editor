@@ -153,6 +153,8 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "redo";
     case EditorShortcut::Copy:
       return "copy";
+    case EditorShortcut::Cut:
+      return "cut";
     case EditorShortcut::Paste:
       return "paste";
     case EditorShortcut::PasteMirror:
@@ -250,6 +252,8 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "重做";
     case EditorShortcut::Copy:
       return "复制";
+    case EditorShortcut::Cut:
+      return "剪切";
     case EditorShortcut::Paste:
       return "粘贴";
     case EditorShortcut::PasteMirror:
@@ -349,6 +353,8 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return chord_primary(static_cast<KeyCode>('Y'));
     case EditorShortcut::Copy:
       return chord_primary(static_cast<KeyCode>('C'));
+    case EditorShortcut::Cut:
+      return chord_primary(static_cast<KeyCode>('X'));
     case EditorShortcut::Paste:
       return chord_primary(static_cast<KeyCode>('V'));
     case EditorShortcut::PasteMirror:

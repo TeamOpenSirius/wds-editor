@@ -435,6 +435,15 @@ int main() {
     expect(!editor_shortcut_conflicts(EditorShortcut::PasteMirror, paste_mirror),
            "PasteMirror default does not collide");
   }
+  expect(std::string(editor_shortcut_id(EditorShortcut::Cut)) == "cut", "Cut id");
+  expect(std::string(editor_shortcut_label(EditorShortcut::Cut)) == "剪切", "Cut label");
+  {
+    const ShortcutChord cut = default_editor_shortcut(EditorShortcut::Cut);
+    expect(cut.key == static_cast<KeyCode>('X') && cut.mods.control,
+           "Cut default is Ctrl/Cmd+X");
+    expect(!editor_shortcut_conflicts(EditorShortcut::Cut, cut), "Cut default does not collide");
+    expect(chord_cut() == cut, "chord_cut follows the registry");
+  }
   expect(is_click_record_shortcut(EditorShortcut::ClickRecord2), "ClickRecord2 is click-record");
   expect(!is_click_record_shortcut(EditorShortcut::PlaceType0), "PlaceType0 is not click-record");
   {

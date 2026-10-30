@@ -72,9 +72,14 @@ class RealtimeVulkanWindow final : public QWindow {
 
  private:
   void schedule_frame();
+  // Start the paused-gate/settle poll (when the window is hidden the poll keeps
+  // checking exposure instead of letting the frame loop die).
+  void arm_idle_wakeup();
+  // Park the frame loop while the window is not exposed and remember that the
+  // swapchain may need one forced frame when it comes back (Windows minimize).
+  void hold_frame_unexposed();
   void note_frame_hold(const char* why);
   void note_frame_resume();
-  bool initialized_ = false;
   QVulkanInstance* instance_ = nullptr;
   wds::interaction::InputQueue input_queue_;
   std::unique_ptr<QtInputAdapter> input_adapter_;
@@ -91,6 +96,11 @@ class RealtimeVulkanWindow final : public QWindow {
   bool resizing_ = false;
   bool host_resize_suspended_ = false;
   bool was_exposed_ = false;
+  // Frames were dropped because the window was not exposed. The first frame
+  // after re-exposure is forced even if the paused present gate says the
+  // picture is unchanged: win32 reports a 0×0 surface while minimized, so the
+  // last presented image can be stale/gone.
+  bool exposure_held_ = false;
   bool presented_ = false;
   bool force_frame_ = false;
   bool frame_hold_logged_ = false;

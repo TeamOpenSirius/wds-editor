@@ -38,6 +38,11 @@ using wds::chart_editor::NoteType;
 using wds::interaction::PlaceIntent;
 using wds::interaction::SwipeDirection;
 
+// Hold bodies may be any positive length when an edge is trimmed: the floor is one
+// tick, not the edit subdivision. Zero length is not a hold (one-time notes cover
+// that), but the grid resolution must not also cap how short a hold can get.
+inline constexpr int32_t kMinHoldTicks = 1;
+
 bool clamps_to_nonnegative_music(const NotationNote& note) noexcept {
   if (note.note_type == NoteType::HiSpeed) return false;
   if (note.note_type == NoteType::None &&
@@ -2185,7 +2190,6 @@ void ChartEditPanel::apply_hold_tail_cover(NotationNote& prev, const NotationNot
 }
 
 void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*point*/) {
-  finish_chain_extend_on_right_up_ = false;
   hold_scratch_ = scratch;
   hold_draft_ = place_anchor_;
   hold_draft_.note_type = wds::chart_editor::drawn_hold_body_type(scratch, place_gold_head_);
@@ -2204,8 +2208,7 @@ void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*poin
   sync_hold_placement_ghost();
 }
 
-void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
-                                                 std::optional<bool> scratch_family) {
+void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point) {
   pending_chain_extend_id_ = -1;
   sync_viewport();
   std::optional<NotationNote> best;
@@ -2218,11 +2221,10 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
     const auto found = engine_.document().find_note(selected_id);
     if (!found) continue;
     const NotationNote& note = *found;
+    // Tail right-click chain editing is a purple ScratchHold gesture only.
+    // Regular Hold/CriticalHold tails stay independent even when selected.
+    if (!wds::chart_editor::is_scratch_hold_body(note.note_type)) continue;
     if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-    if (scratch_family.has_value() &&
-        wds::chart_editor::is_scratch_hold_body(note.note_type) != *scratch_family) {
-      continue;
-    }
     if (note.end_tick <= note.start_tick) continue;
     // Only the chain terminal (last JumpScratch) can be extended.
     if (wds::chart_editor::chained_next_scratch_hold(engine_.document(), note)) continue;
@@ -2250,13 +2252,13 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
 }
 
 void ChartEditPanel::begin_hold_chain_extend() {
-  finish_chain_extend_on_right_up_ = false;
   const int32_t prev_id = pending_chain_extend_id_;
   pending_chain_extend_id_ = -1;
   auto prev = prev_id >= 0 ? engine_.document().find_note(prev_id) : std::nullopt;
   const bool scratch =
       prev.has_value() && wds::chart_editor::is_scratch_hold_body(prev->note_type);
   if (prev_id < 0 || !prev || !wds::chart_editor::is_hold_chain_body(prev->note_type) ||
+      !wds::chart_editor::is_scratch_hold_body(prev->note_type) ||
       !selected_.count(prev->id) ||
       wds::chart_editor::chained_next_scratch_hold(engine_.document(), *prev)) {
     begin_hold_body(scratch, place_note_center());
@@ -2587,7 +2589,6 @@ void ChartEditPanel::commit_hold_chain_prev_cover() {
 
 void ChartEditPanel::cancel_placement() {
   clear_pending_chain_extend();
-  finish_chain_extend_on_right_up_ = false;
   curve_mode_active_ = false;
   curve_dismissed_ = false;
   curve_ghosts_.clear();
@@ -2611,7 +2612,6 @@ void ChartEditPanel::cancel_placement() {
 }
 
 void ChartEditPanel::finish_hold_body(bool chain_next) {
-  finish_chain_extend_on_right_up_ = false;
   curve_mode_active_ = false;
   curve_dismissed_ = false;
   curve_ghosts_.clear();
@@ -3265,18 +3265,17 @@ void ChartEditPanel::sync_split_edge_to_pointer(wds::interaction::Vec2 point) {
   const int32_t tick = viewport_.tick_at(mapped.y);
   // Hold still on the press tick so a click on the off-line label does not jump.
   if (!split_edge_ever_moved_ && tick == drag_split_press_tick_) return;
-  const int32_t min_dur = min_hold_duration_ticks();
+  // Split effects may collapse to zero length (official endTime == startTime plays
+  // fadeIn then immediately fadeOut); only negative spans are illegal, so the
+  // hold subdivision minimum does not apply here.
   const int32_t legal = first_legal_tick();
   auto note = engine_.document().find_note(drag_split_note_id_);
   if (!note) return;
   NotationNote updated = *note;
   if (drag_split_is_end_) {
-    updated.end_tick = std::max({updated.start_tick + min_dur, tick, legal});
-  } else {
-    const int32_t hi = updated.end_tick - min_dur;
-    if (legal <= hi) {
-      updated.start_tick = std::clamp(tick, legal, hi);
-    }
+    updated.end_tick = std::max({updated.start_tick, tick, legal});
+  } else if (legal <= updated.end_tick) {
+    updated.start_tick = std::clamp(tick, legal, updated.end_tick);
   }
   if (auto orig_it = drag_originals_.find(drag_split_note_id_); orig_it != drag_originals_.end()) {
     if (updated.start_tick != orig_it->second.start_tick ||
@@ -3294,7 +3293,6 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   sync_viewport();
   const wds::interaction::Vec2 mapped = pointer_as_in_host(point);
   const int32_t tick = viewport_.tick_at(mapped.y);
-  const int32_t min_dur = min_hold_duration_ticks();
   auto anchor_it = drag_originals_.find(anchor_note_id_);
   if (anchor_it == drag_originals_.end()) return;
   const NotationNote& anchor_orig = anchor_it->second;
@@ -3333,9 +3331,10 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
   };
 
   // JumpScratch vertical hinge: move the joint tick; adjacent bodies change length.
-  // Clamp so neither body collapses below one grid subdivision (cannot cross neighbors).
+  // Clamp so neither body collapses below one tick (cannot cross neighbors); any
+  // positive length above that is allowed, independent of the grid subdivision.
   if (adjust_end_ && wds::chart_editor::is_hold_chain_body(anchor_orig.note_type)) {
-    int32_t lo = static_cast<int32_t>(anchor_orig.start_tick) + min_dur;
+    int32_t lo = static_cast<int32_t>(anchor_orig.start_tick) + kMinHoldTicks;
     int32_t hi = std::numeric_limits<int32_t>::max() / 4;
     const NotationNote* next_orig = nullptr;
     auto is_chained_next = [&](const NotationNote& n) {
@@ -3364,7 +3363,7 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
       }
     }
     if (next_orig) {
-      hi = next_orig->end_tick - min_dur;
+      hi = next_orig->end_tick - kMinHoldTicks;
     }
     if (lo > hi) return;
     const int32_t joint = std::clamp(tick, lo, hi);
@@ -3397,10 +3396,10 @@ void ChartEditPanel::sync_hold_adjust_to_pointer(wds::interaction::Vec2 point) {
       continue;
     }
     if (adjust_end_) {
-      n.end_tick = std::max({n.start_tick + min_dur, tick, first_legal_tick()});
+      n.end_tick = std::max({n.start_tick + kMinHoldTicks, tick, first_legal_tick()});
     } else {
       const int32_t legal = first_legal_tick();
-      const int32_t hi = n.end_tick - min_dur;
+      const int32_t hi = n.end_tick - kMinHoldTicks;
       if (legal <= hi) {
         n.start_tick = std::clamp(tick, legal, hi);
       }
@@ -3835,6 +3834,17 @@ bool ChartEditPanel::copy_selected() {
   return !clipboard_.empty() || !clipboard_speed_.empty();
 }
 
+bool ChartEditPanel::cut_selected() {
+  // Cut is exactly Copy plus a delete of the clipboard payload: it writes the
+  // same notes Copy writes (copy_selected) and removes exactly those notes, so
+  // a note Copy filtered out (a mid-star whose hold is not in the set) stays in
+  // the chart instead of disappearing without a way to paste it back. The
+  // removal is one history step; derived rows that cannot outlive a deleted
+  // hold are handled by remove_notes_and_speeds itself.
+  if (!engine_.is_editable() || !copy_selected()) return false;
+  return remove_notes_and_speeds(clipboard_, clipboard_speed_, "Cut");
+}
+
 bool ChartEditPanel::paste_at_pointer(bool mirror) {
   if (!engine_.is_editable() || (clipboard_.empty() && clipboard_speed_.empty())) return false;
   sync_viewport();
@@ -4049,37 +4059,69 @@ std::optional<NotationNote> hold_width_pair_partner(const wds::chart_editor::Cha
 
 }  // namespace
 
-bool ChartEditPanel::delete_selected() {
-  if (!engine_.is_editable() ||
-      (selected_.empty() && selected_speed_ticks_.empty())) {
-    return false;
+bool ChartEditPanel::remove_notes_and_speeds(std::vector<NotationNote> notes,
+                                             std::vector<wds::chart_editor::ScrollSpeedPoint> speeds,
+                                             const std::string& label) {
+  // A removed hold takes its derived HoldEighth rows with it: they cannot be
+  // re-parented, and Copy never puts them in the clipboard (paste regenerates
+  // them from the hold). Expanding the removal here keeps Cut's payload exactly
+  // the clipboard while the document still ends up without orphaned rows.
+  std::unordered_set<int32_t> removed_ids;
+  std::unordered_set<int32_t> removed_hold_ids;
+  for (const auto& note : notes) {
+    removed_ids.insert(note.id);
+    if (wds::chart_editor::is_bindable_hold_body(note.note_type)) removed_hold_ids.insert(note.id);
   }
-  const auto notes = selected_with_hold_dependents(engine_.document(), selected_);
+  if (!removed_hold_ids.empty()) {
+    for (const auto& note : engine_.document().notes()) {
+      if (note.note_type != NoteType::HoldEighth) continue;
+      if (removed_hold_ids.count(note.parent_hold_id) == 0) continue;
+      if (removed_ids.insert(note.id).second) notes.push_back(note);
+    }
+  }
+
   auto speed_before = engine_.document().scroll_speed_points();
   auto speed_after = speed_before;
-  speed_after.erase(std::remove_if(speed_after.begin(), speed_after.end(),
-                                   [&](const auto& p) {
-                                     return selected_speed_ticks_.count(p.tick) != 0;
-                                   }),
-                    speed_after.end());
+  std::unordered_set<int32_t> removed_ticks;
+  for (const auto& point : speeds) removed_ticks.insert(point.tick);
+  if (!removed_ticks.empty()) {
+    speed_after.erase(std::remove_if(speed_after.begin(), speed_after.end(),
+                                     [&](const auto& p) {
+                                       return removed_ticks.count(p.tick) != 0;
+                                     }),
+                      speed_after.end());
+  }
   const bool delete_speeds = speed_after.size() != speed_before.size();
   const bool delete_notes = !notes.empty();
   if (!delete_notes && !delete_speeds) return false;
 
-  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>("Delete");
+  auto composite = std::make_unique<wds::chart_editor::CompositeCommand>(label);
   if (delete_notes) {
     // Deleted mid-stars free their ticks: surviving holds regain the eighth there,
     // inside this same undo step.
-    append_remove_with_eighth_refresh(*composite, engine_.document(), notes, "Delete");
+    append_remove_with_eighth_refresh(*composite, engine_.document(), notes, label);
   }
   if (delete_speeds) {
     composite->add(std::make_unique<wds::chart_editor::SetScrollSpeedPointsCommand>(
-        std::move(speed_before), std::move(speed_after), "Delete scroll speed"));
+        std::move(speed_before), std::move(speed_after), label + " scroll speed"));
   }
   if (!engine_.execute_command(std::move(composite))) return false;
   selected_.clear();
   selected_speed_ticks_.clear();
   return true;
+}
+
+bool ChartEditPanel::delete_selected() {
+  if (!engine_.is_editable() ||
+      (selected_.empty() && selected_speed_ticks_.empty())) {
+    return false;
+  }
+  auto notes = selected_with_hold_dependents(engine_.document(), selected_);
+  std::vector<wds::chart_editor::ScrollSpeedPoint> speeds;
+  for (const auto& point : engine_.document().scroll_speed_points()) {
+    if (selected_speed_ticks_.count(point.tick) != 0) speeds.push_back(point);
+  }
+  return remove_notes_and_speeds(std::move(notes), std::move(speeds), "Delete");
 }
 
 bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {
@@ -5886,11 +5928,12 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     place_gold_head_ = event.mods.shift;
     const bool scratch = toolbox_place_intent() == PlaceIntent::ScratchHoldBody;
     if (wds::interaction::is_right_button(event.button)) {
-      if (toolbox_hold_selected()) {
-        try_arm_pending_chain_extend(event.position, scratch);
+      // Only the ScratchHold tool continues a selected scratch tail; a regular
+      // Hold tool never chains from the tail.
+      if (toolbox_hold_selected() && scratch) {
+        try_arm_pending_chain_extend(event.position);
         if (pending_chain_extend_id_ >= 0) {
-          if (scratch) begin_scratch_hold_placement(place_note_center());
-          else begin_regular_hold_placement(place_note_center());
+          begin_scratch_hold_placement(place_note_center());
         }
       }
       return;
@@ -5910,14 +5953,14 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   }
 
   // Empty area: start placement. Right-click on the end-cap of an already-selected
-  // hold (including outer-edge slop that hit_test misses) continues drawing that
-  // hold instead of starting an unrelated flick. Both chain families qualify.
+  // purple ScratchHold (including outer-edge slop that hit_test misses) continues
+  // drawing that hold instead of starting an unrelated flick. Regular holds do not
+  // arm this gesture.
   clear_pending_chain_extend();
   if (wds::interaction::is_right_button(event.button)) {
     try_arm_pending_chain_extend(event.position);
     if (pending_chain_extend_id_ >= 0) {
       begin_hold_chain_extend();
-      finish_chain_extend_on_right_up_ = true;
       return;
     }
   }
@@ -6971,14 +7014,6 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     return;
   }
   if (mode_ == Mode::PlaceHoldBody) {
-    // A chain continued from an existing tail starts on right-down without a
-    // place-gesture swipe, so that same right-up must finish it even for a
-    // regular Hold (whose normal finish button is Left).
-    if (finish_chain_extend_on_right_up_ &&
-        wds::interaction::is_right_button(event.button)) {
-      finish_hold_body(false);
-      return;
-    }
     // Chain/star use the opposite button (down); only the hold's primary button
     // release finishes. ScratchHold finishes on right-up; normal Hold on left-up.
     if (curve_mode_active_ &&

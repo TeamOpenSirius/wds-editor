@@ -126,6 +126,7 @@ ShortcutChord chord_open() noexcept;
 ShortcutChord chord_undo() noexcept;
 ShortcutChord chord_redo() noexcept;
 ShortcutChord chord_copy() noexcept;
+ShortcutChord chord_cut() noexcept;
 ShortcutChord chord_paste() noexcept;
 ShortcutChord chord_paste_mirror() noexcept;
 ShortcutChord chord_mirror() noexcept;

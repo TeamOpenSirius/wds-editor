@@ -55,7 +55,7 @@ WDS Editor 拥有自己的可编辑工程与谱面格式，同时兼容已有 WD
 - 支持**导出当前谱面**或**导出整个工程**。
 - BPM 与拍号变化编辑。
 - 谱面延迟 / 音乐 Offset。
-- 撤销 / 重做、复制粘贴、移动、Resize、转换、镜像。
+- 撤销 / 重做、复制 / 剪切 / 粘贴、移动、Resize、转换、镜像。
 - Scratch Hold / JumpScratch 链式编辑。
 - **无尾 Hold（Nontail Hold）**。
 - Split Lane / 分割线效果编辑。
@@ -249,7 +249,7 @@ Tick `0` 始终存在 Timing Anchor，后续 Timing Point 可以单独修改 BPM
 - 调整 Hold 起止时间；
 - 调整 Scratch Hold End Span；
 - 删除；
-- 复制 / 粘贴；
+- 复制 / 剪切 / 粘贴；
 - 撤销 / 重做；
 - 水平镜像；
 - 以选区中心镜像；
@@ -394,7 +394,7 @@ Transport 统一管理：
 | `Ctrl/Cmd + S` | 保存 |
 | `Ctrl/Cmd + Z` | 撤销 |
 | `Ctrl/Cmd + Y` | 重做 |
-| `Ctrl/Cmd + C` / `V` | 复制 / 粘贴 |
+| `Ctrl/Cmd + C` / `X` / `V` | 复制 / 剪切 / 粘贴 |
 | `Ctrl/Cmd + B` / `N` | 将选中音符移到背图层 / 恢复所有背图层 |
 | 方向键 | 微移选区 |
 | `Q / W / E / A / S / D` | 默认宽度 1 / 2 / 3 / 4 / 6 / 12 |

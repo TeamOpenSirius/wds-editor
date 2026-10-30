@@ -414,6 +414,7 @@ void UiManager::bind_editor_shortcuts() {
   auto& editor = shortcuts_.namespace_for("editor");
   editor.clear();
   using wds::interaction::chord_copy;
+  using wds::interaction::chord_cut;
   using wds::interaction::chord_delete_selection;
   using wds::interaction::chord_mirror;
   using wds::interaction::chord_mirror_about_center;
@@ -472,6 +473,9 @@ void UiManager::bind_editor_shortcuts() {
   editor.bind(chord_copy(), [this] {
     if (auto* panel = edit_panel()) panel->copy_selected();
   });
+  editor.bind(chord_cut(), [this] {
+    if (auto* panel = edit_panel()) panel->cut_selected();
+  });
   editor.bind(chord_paste(), [this] {
     if (auto* panel = edit_panel()) panel->paste_at_pointer();
   });
@@ -484,13 +488,16 @@ void UiManager::bind_editor_shortcuts() {
   editor.bind(chord_mirror_about_center(), [this] {
     if (auto* panel = edit_panel()) panel->mirror_selected(true);
   });
+  // The edit view maps later ms (larger tick) to smaller screen Y, so "up" is a
+  // forward-in-time nudge and "down" goes back. Left/right are lanes (screen X),
+  // where the lane index grows to the right.
   editor.bind(chord_nudge_up(), [this] {
     if (auto* panel = edit_panel())
-      panel->nudge_selected(-wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
+      panel->nudge_selected(wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
   });
   editor.bind(chord_nudge_down(), [this] {
     if (auto* panel = edit_panel())
-      panel->nudge_selected(wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
+      panel->nudge_selected(-wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
   });
   editor.bind(chord_nudge_left(), [this] {
     if (auto* panel = edit_panel()) panel->nudge_selected(0, -1);

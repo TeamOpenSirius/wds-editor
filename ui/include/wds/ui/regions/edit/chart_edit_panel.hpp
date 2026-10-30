@@ -231,6 +231,10 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool mirror_selected(bool about_center);
   bool nudge_selected(int32_t delta_tick, int32_t delta_lane);
   bool copy_selected();
+  // Copy, then remove exactly the notes Copy put in the clipboard (one history
+  // step): Cut differs from Copy only by that deletion, so no note is ever
+  // removed without a paste payload while Copy's filtering still applies.
+  bool cut_selected();
   // `mirror`: same as paste then playfield-mirror, one history step. Splits skip the flip.
   bool paste_at_pointer(bool mirror = false);
   bool delete_selected();
@@ -485,19 +489,25 @@ class ChartEditPanel final : public wds::interaction::Widget {
   bool commit_updates(const std::unordered_map<int32_t, wds::chart_editor::UpdateNotesCommand::NotePair>&
                           changes,
                       const std::string& label);
+  // Remove `notes` and `speeds` in one history step. A removed hold also takes
+  // its derived HoldEighth rows (they cannot outlive it), but no other note is
+  // touched. Delete derives the payload from the selection; Cut passes the
+  // clipboard payload so deletion and copy stay in sync.
+  bool remove_notes_and_speeds(std::vector<wds::chart_editor::NotationNote> notes,
+                               std::vector<wds::chart_editor::ScrollSpeedPoint> speeds,
+                               const std::string& label);
 
   void place_instant(wds::chart_editor::NoteType type, wds::interaction::Vec2 point,
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
-  // Continue a selected terminal hold from its end-cap. Requires
-  // pending_chain_extend_id_ armed on pointer-down. Works for both the regular
-  // and ScratchHold chain families.
+  // Continue a selected terminal purple ScratchHold from its end-cap. Requires
+  // pending_chain_extend_id_ armed on pointer-down. Regular Hold/CriticalHold
+  // tails never arm this gesture.
   void begin_hold_chain_extend();
-  // If point is on a selected terminal hold end-cap, arm pending_chain_extend_id_.
-  // `scratch_family` restricts the search to one family (toolbox placement);
-  // nullopt accepts either family (right-click on an already-selected tail).
-  void try_arm_pending_chain_extend(wds::interaction::Vec2 point,
-                                    std::optional<bool> scratch_family = std::nullopt);
+  // If point is on a selected terminal purple ScratchHold end-cap, arm
+  // pending_chain_extend_id_. Regular Hold/CriticalHold tails never arm this
+  // gesture, so toolbox regular-Hold placement does not call this helper.
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point);
   void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
   // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
   void begin_scratch_hold_placement(wds::interaction::Vec2 point);
@@ -775,13 +785,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // current width/lane cannot represent a cover — chain stays armed for width
   // changes, but ghost looks like a disconnected independent ScratchHold.
   bool hold_chain_link_preview_ = true;
-  // Armed on RMB-down over a selected terminal hold end-cap; consumed when the
-  // gesture resolves to HoldBody / ScratchHoldBody or finishes on right-up.
+  // Armed on RMB-down over a selected terminal ScratchHold end-cap; consumed
+  // when the gesture resolves to ScratchHoldBody or finishes on right-up.
   int32_t pending_chain_extend_id_ = -1;
-  // A right-click chain-extend starts placing immediately (no place-gesture
-  // swipe), so its own right-up must finish for regular Hold too (whose finish
-  // button is normally Left).
-  bool finish_chain_extend_on_right_up_ = false;
   // Locked when PlaceGesture starts: Shift was already down at mouse press.
   // The same Shift still places stars; releasing it mid-draw does not retint.
   bool place_gold_head_ = false;

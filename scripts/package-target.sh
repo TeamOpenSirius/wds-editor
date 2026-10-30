@@ -1252,7 +1252,7 @@ PY
   # Export once with a working msiinfo (see ensure_msitools_path); empty dumps
   # used to look like "missing BrowseDlg" when libmsi was not loadable.
   local ui_seq="" events="" features="" customs="" dialogs="" regs="" upgrades=""
-  local controls="" registry="" appsearch=""
+  local controls="" registry="" appsearch="" action_text=""
   ui_seq="$(msiinfo_export "$msi_path" InstallUISequence | tr -d '\r')" || die "msiinfo failed: InstallUISequence"
   events="$(msiinfo_export "$msi_path" ControlEvent | tr -d '\r')" || die "msiinfo failed: ControlEvent"
   features="$(msiinfo_export "$msi_path" Feature | tr -d '\r')" || die "msiinfo failed: Feature"
@@ -1264,6 +1264,9 @@ PY
   controls="$(msiinfo_export "$msi_path" Control | tr -d '\r')" || die "msiinfo failed: Control"
   registry="$(msiinfo_export "$msi_path" Registry | tr -d '\r')" || die "msiinfo failed: Registry"
   appsearch="$(msiinfo_export "$msi_path" AppSearch | tr -d '\r')" || die "msiinfo failed: AppSearch"
+  # Missing table is the failure this check exists for, so it must not abort
+  # the export helper with its own die.
+  action_text="$(msiinfo_export "$msi_path" ActionText 2>/dev/null | tr -d '\r')" || true
 
   # Use <<< (not echo|grep): with pipefail, grep -q exiting early SIGPIPEs echo and
   # falsely trips `|| die` (seen as "MSI File table missing wds_editor.exe").
@@ -1359,6 +1362,23 @@ PY
     die "MSI missing FindWdsBuildTs registry search for the installed build time"
   grep -q 'FindWdsBuildId' <<<"${regs}" || \
     die "MSI missing FindWdsBuildId registry search for the installed build id"
+  # ProgressDlg is shown Before="ExecuteAction" but the bar gets almost no ticks
+  # until InstallFiles (one per copied file), so the prologue - costing,
+  # InstallValidate, InstallInitialize, removal of the previous build - needs
+  # captions of its own. wixl's ui extension ships no ProgressText rows (WiX has
+  # ErrorProgressText.wxs, msitools has no equivalent), so win-msi-ui.wxs
+  # authors them; this keeps a future edit from dropping back to a dialog that
+  # sits at 0 with a blank Status: line for the first tens of seconds.
+  local text_action=""
+  for text_action in InstallValidate InstallFiles RemoveExistingProducts InstallInitialize; do
+    grep -Eq "^${text_action}"$'\t' <<<"${action_text}" || \
+      die "MSI ActionText table has no row for ${text_action}; ProgressDlg's Status: line would stay blank during the prologue (author it in win-msi-ui.wxs)"
+  done
+  # Windows Installer saves a system restore point for a per-machine install
+  # around InstallInitialize, i.e. inside the same silent window. MSIFASTINSTALL=1
+  # opts out; without it the dialog looks hung before the first file is copied.
+  grep -Fq $'MSIFASTINSTALL\t1' <<<"${props}" || \
+    die "MSI must set MSIFASTINSTALL=1 (the per-machine restore point is the silent stall before InstallFiles)"
   grep -Fq $'SecureCustomProperties' <<<"${props}" || \
     die "MSI missing SecureCustomProperties"
   local scp_val=""

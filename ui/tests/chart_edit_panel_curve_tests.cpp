@@ -1172,6 +1172,64 @@ void test_jumpscratch_end_adjust_follows_wheel_resync() {
   CHECK_EQ(after->end_tick, expected);
 }
 
+void test_hold_edge_trim_allows_any_positive_length() {
+  // Holds may be trimmed to any length above zero: the floor is one tick, not the
+  // current edit subdivision (120 ticks here).
+  Harness h;
+  const int32_t id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 3);
+  h.panel.set_selected({id});
+  const auto grab = h.at_tick_lane(960, 4);
+  h.panel.on_pointer_down(PointerDownEvent{grab, PointerButton::Left, {}});
+  const auto collapse = h.at_tick_lane(0, 4);
+  h.panel.on_pointer_move(PointerMoveEvent{collapse, {}});
+  h.panel.on_pointer_up(PointerUpEvent{collapse, PointerButton::Left, {}});
+
+  const auto* collapsed = find_note_id(h.engine.document().notes(), id);
+  CHECK(collapsed != nullptr);
+  if (collapsed != nullptr) {
+    CHECK_EQ(collapsed->start_tick, 0);
+    CHECK_EQ(collapsed->end_tick - collapsed->start_tick, 1);
+  }
+  CHECK(h.engine.undo());
+  const auto* restored = find_note_id(h.engine.document().notes(), id);
+  CHECK(restored != nullptr);
+  if (restored != nullptr) CHECK_EQ(restored->end_tick, 960);
+
+  // Start edge clamps at end - 1 tick instead of overshooting into zero length.
+  Harness hs;
+  const int32_t sid = add_hold_body(hs, NoteType::Hold, 0, 960, 3, 3);
+  hs.panel.set_selected({sid});
+  const auto head = hs.at_tick_lane(0, 4);
+  hs.panel.on_pointer_down(PointerDownEvent{head, PointerButton::Left, {}});
+  const auto past_end = hs.at_tick_lane(960, 4);
+  hs.panel.on_pointer_move(PointerMoveEvent{past_end, {}});
+  hs.panel.on_pointer_up(PointerUpEvent{past_end, PointerButton::Left, {}});
+  const auto* trimmed = find_note_id(hs.engine.document().notes(), sid);
+  CHECK(trimmed != nullptr);
+  if (trimmed != nullptr) {
+    CHECK_EQ(trimmed->end_tick, 960);
+    CHECK_EQ(trimmed->end_tick - trimmed->start_tick, 1);
+  }
+
+  // JumpScratch hinge: both adjacent bodies may shrink to one tick at the joint.
+  Harness hj;
+  const int32_t prev_id = add_hold_body(hj, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
+  const int32_t next_id = add_hold_body(hj, NoteType::ScratchHold, 480, 960, 2, 2, 2, 3);
+  hj.panel.set_selected({prev_id});
+  const auto joint = hj.at_tick_lane(480, 2);
+  hj.panel.on_pointer_down(PointerDownEvent{joint, PointerButton::Left, {}});
+  const auto to_start = hj.at_tick_lane(0, 2);
+  hj.panel.on_pointer_move(PointerMoveEvent{to_start, {}});
+  hj.panel.on_pointer_up(PointerUpEvent{to_start, PointerButton::Left, {}});
+  const auto* prev = find_note_id(hj.engine.document().notes(), prev_id);
+  const auto* next = find_note_id(hj.engine.document().notes(), next_id);
+  CHECK(prev != nullptr && next != nullptr);
+  if (prev != nullptr && next != nullptr) {
+    CHECK_EQ(prev->end_tick - prev->start_tick, 1);
+    CHECK_EQ(next->start_tick, prev->end_tick);
+  }
+}
+
 void test_jumpscratch_joint_adjust_follows_playback_resync() {
   Harness h;
   const int32_t prev_id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 2, 2, 2, 3);
@@ -2429,29 +2487,8 @@ void test_double_click_inside_hold_after_edge_grab_selects_segment() {
   CHECK(h.panel.selected().count(star_id) != 0);
 }
 
-void test_right_click_selected_hold_tail_continues_draw() {
-  Harness h;
-  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
-  const int32_t head_id = add_hold_head(h, 0, 3);
-  h.panel.set_selected({body_id, head_id});
-  const auto* before = find_note_id(h.engine.document().notes(), body_id);
-  CHECK(before != nullptr);
-  if (before == nullptr) return;
-
-  const auto tail = h.at_tick_lane(before->end_tick, before->lane);
-  const auto pull = h.at_tick_lane(before->end_tick + 480, before->lane);
-  h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
-  h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
-  h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
-
-  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
-  const auto* first = find_note_id(h.engine.document().notes(), body_id);
-  CHECK(first != nullptr);
-  if (first) {
-    CHECK(wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *first).has_value());
-  }
-
-  // The ScratchHold family uses the same right-click continuation.
+void test_right_click_selected_hold_tail_continues_draw_for_scratch_only() {
+  // Only the purple ScratchHold family chains from a selected tail.
   {
     Harness hs;
     const int32_t scratch_id = add_hold_body(hs, NoteType::ScratchHold, 0, 480, 3, 1);
@@ -2465,7 +2502,41 @@ void test_right_click_selected_hold_tail_continues_draw() {
       hs.panel.on_pointer_move(PointerMoveEvent{scratch_pull, {}});
       hs.panel.on_pointer_up(PointerUpEvent{scratch_pull, PointerButton::Right, {}});
       CHECK_EQ(count_type(hs.engine.document().notes(), NoteType::ScratchHold), 2);
+      const auto* first = find_note_id(hs.engine.document().notes(), scratch_id);
+      CHECK(first != nullptr);
+      if (first) {
+        CHECK(
+            wds::chart_editor::chained_next_scratch_hold(hs.engine.document(), *first).has_value());
+      }
     }
+  }
+}
+
+void test_right_click_selected_regular_hold_tail_does_not_chain() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  h.panel.set_selected({body_id, head_id});
+  const auto* before = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(before != nullptr);
+  if (before == nullptr) return;
+  const int32_t tail_tick = before->end_tick;
+
+  const auto tail = h.at_tick_lane(tail_tick, before->lane);
+  const auto pull = h.at_tick_lane(tail_tick + 480, before->lane);
+  h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+  h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
+
+  // The regular hold stays a single, un-chained segment.
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  const auto* after = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(after != nullptr);
+  if (after != nullptr) {
+    CHECK_EQ(after->start_tick, 0);
+    CHECK_EQ(after->end_tick, tail_tick);
+    CHECK(!wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
   }
 }
 
@@ -2763,6 +2834,136 @@ void test_copy_hold_with_star_pastes_bound_star_and_regenerated_eighths() {
     const auto note = h.engine.document().find_note(id);
     CHECK(note.has_value() && note->note_type != NoteType::HoldEighth);
   }
+}
+
+void test_cut_copies_then_deletes_in_one_history_step() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+
+  h.panel.set_selected({hold_id, head_id});
+  const size_t undo_before = h.engine.history().undo_count();
+  CHECK(h.panel.cut_selected());
+  // Copy is not a history step; the removal it feeds is exactly one.
+  CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldEighth), 0);
+  CHECK(h.panel.selected().empty());
+
+  // That single entry is the whole cut: one undo brings back the hold, its head,
+  // the bound star and the derived eighths; one redo removes them again.
+  CHECK(h.engine.undo());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+  CHECK(count_type(h.engine.document().notes(), NoteType::HoldEighth) > 0);
+  CHECK(h.engine.redo());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 0);
+
+  // The cut payload pastes back as a new hold with its bound star and derived eighths.
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+  CHECK(h.panel.paste_at_pointer());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+  CHECK(count_type(h.engine.document().notes(), NoteType::HoldEighth) > 0);
+  int32_t new_hold_id = -1;
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Hold) new_hold_id = n.id;
+  }
+  CHECK(new_hold_id >= 0 && new_hold_id != hold_id);
+  for (const auto& n : h.engine.document().notes()) {
+    if (n.note_type == NoteType::Sound) CHECK_EQ(n.parent_hold_id, new_hold_id);
+  }
+}
+
+void test_cut_lone_mid_star_keeps_chart_untouched() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+  h.panel.set_selected({star_id});
+  const auto before = h.engine.document().notes();
+  const size_t undo_before = h.engine.history().undo_count();
+  // A lone star is not copyable, so cut must not remove it without a payload.
+  CHECK(!h.panel.cut_selected());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before);
+  CHECK(notes_eq(h.engine.document().notes(), before));
+  CHECK_EQ(h.panel.selected().size(), 1u);
+}
+
+void test_cut_deletes_only_the_copy_payload() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t star_id = add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+  NotationNote tap;
+  tap.note_type = NoteType::Normal;
+  tap.start_tick = 480;
+  tap.lane = 10;
+  tap.width = 1;
+  const int32_t tap_id = h.engine.add_note(tap);
+  CHECK(tap_id >= 0);
+
+  // Copy keeps the tap but drops the star (its hold is not selected). Cut must
+  // remove only the copied payload, leaving the star and its hold in place.
+  h.panel.set_selected({star_id, tap_id});
+  const size_t undo_before = h.engine.history().undo_count();
+  CHECK(h.panel.cut_selected());
+  CHECK_EQ(h.engine.history().undo_count(), undo_before + 1);
+  CHECK(h.engine.document().find_note(star_id).has_value());
+  CHECK(!h.engine.document().find_note(tap_id).has_value());
+  CHECK(h.engine.document().find_note(hold_id).has_value());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+
+  // The clipboard still pastes exactly the tap, not the surviving star.
+  h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 10), {}});
+  CHECK(h.panel.paste_at_pointer());
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Normal), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Sound), 1);
+}
+
+void test_cut_clipboard_matches_copy_clipboard() {
+  Harness h;
+  const int32_t hold_id = add_hold_body(h, NoteType::Hold, 0, 960, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  add_bound_star(h, hold_id, 480, 3, 1);
+  regenerate_eighths(h, hold_id);
+
+  // Paste the current clipboard at a fixed tick and describe the pasted payload
+  // by geometry/type (ids are renumbered on paste, and a bound star reports
+  // "held" whenever its parent is part of the same paste).
+  auto paste_shape = [&] {
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(1920, 3), {}});
+    const int32_t first_new = h.engine.document().next_note_id();
+    CHECK(h.panel.paste_at_pointer());
+    std::vector<std::string> shape;
+    for (const auto& n : h.engine.document().notes()) {
+      if (n.id < first_new) continue;
+      shape.push_back(std::to_string(static_cast<int>(n.note_type)) + ":" +
+                      std::to_string(n.start_tick) + ":" + std::to_string(n.end_tick) + ":" +
+                      std::to_string(n.lane) + ":" + std::to_string(n.width) + ":" +
+                      (n.parent_hold_id >= first_new ? "held" : "free"));
+    }
+    std::sort(shape.begin(), shape.end());
+    return shape;
+  };
+
+  h.panel.set_selected({hold_id, head_id});
+  CHECK(h.panel.copy_selected());
+  const auto from_copy = paste_shape();
+  CHECK(!from_copy.empty());
+  CHECK(h.engine.undo());  // drop the pasted copies; the originals remain
+
+  h.panel.set_selected({hold_id, head_id});
+  CHECK(h.panel.cut_selected());
+  const auto from_cut = paste_shape();
+  // Cut writes exactly what Copy wrote, so the paste result is identical.
+  CHECK(from_copy == from_cut);
 }
 
 void test_nontail_hold_eighths_follow_paste_and_resize() {
@@ -3300,6 +3501,81 @@ void test_gutter_label_select_copy_mirror_and_move() {
   }
 }
 
+void test_split_edge_drag_allows_zero_length() {
+  using wds::chart_editor::GimmickType;
+  auto hits_for = [](Harness& h) {
+    return wds::ui::build_split_label_hits(h.panel.viewport(), h.panel.left_gutter(),
+                                           h.engine.document().notes(), &h.engine.document());
+  };
+  auto drag_chip = [](Harness& h, const wds::ui::GutterLabelHit& hit, int32_t dest_tick) {
+    const Vec2 press = chip_center(hit.bounds);
+    const Vec2 dest{press.x, h.panel.viewport().y_at(dest_tick)};
+    h.panel.on_pointer_down(PointerDownEvent{press, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+    h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+  };
+
+  Harness h;
+  const int32_t split_id = h.engine.add_note(make_split_effect(960, 1440, GimmickType::Split3));
+  CHECK(split_id >= 0);
+  h.panel.sync_to_timeline_ms(0.0);
+
+  // End edge may collapse onto the start tick: no negative span, zero is legal.
+  {
+    const auto hits = hits_for(h);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(end != nullptr);
+    if (!end) return;
+    drag_chip(h, *end, 480);
+    const auto collapsed = h.engine.document().find_note(split_id);
+    CHECK(collapsed.has_value());
+    if (!collapsed) return;
+    CHECK_EQ(collapsed->start_tick, 960);
+    CHECK_EQ(collapsed->end_tick, 960);
+    CHECK(h.engine.undo());
+    const auto restored = h.engine.document().find_note(split_id);
+    CHECK(restored.has_value());
+    if (restored) {
+      CHECK_EQ(restored->start_tick, 960);
+      CHECK_EQ(restored->end_tick, 1440);
+    }
+    CHECK(h.engine.redo());
+  }
+
+  // A zero-length split keeps its end chip so the edge can be pulled back out.
+  {
+    const auto hits = hits_for(h);
+    const auto* start = split_hit_for(hits, split_id, true);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(start != nullptr && end != nullptr);
+    if (!start || !end) return;
+    CHECK_EQ(start->anchor_tick, end->anchor_tick);
+    CHECK_EQ(start->column, end->column);
+    drag_chip(h, *end, 1440);
+    const auto pulled = h.engine.document().find_note(split_id);
+    CHECK(pulled.has_value());
+    if (pulled) {
+      CHECK_EQ(pulled->start_tick, 960);
+      CHECK_EQ(pulled->end_tick, 1440);
+    }
+  }
+
+  // Start edge clamps at the end tick instead of overshooting into negative length.
+  {
+    const auto hits = hits_for(h);
+    const auto* start = split_hit_for(hits, split_id, true);
+    CHECK(start != nullptr);
+    if (!start) return;
+    drag_chip(h, *start, 1920);
+    const auto clamped = h.engine.document().find_note(split_id);
+    CHECK(clamped.has_value());
+    if (clamped) {
+      CHECK_EQ(clamped->start_tick, clamped->end_tick);
+      CHECK_EQ(clamped->end_tick, 1440);
+    }
+  }
+}
+
 void test_paste_mirror_is_one_history_step_and_skips_splits() {
   using wds::chart_editor::GimmickType;
   Harness h;
@@ -3738,6 +4014,81 @@ void test_toolbox_scratch_hold_uses_regular_hold_buttons() {
   h.panel.on_pointer_up(PointerUpEvent{tail, PointerButton::Left, {}});
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 2);
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Flick), 0);
+}
+
+void test_toolbox_regular_hold_chains_on_right_while_drawing() {
+  Harness h;
+  h.panel.set_toolbox_place_mode(true);
+  h.panel.set_place_intent_override(PlaceIntent::HoldBody);
+  const auto origin = h.at_tick_lane(0, 3);
+  const auto mid = h.at_tick_lane(480, 3);
+  const auto tail = h.at_tick_lane(960, 4);
+  h.panel.on_pointer_down(PointerDownEvent{origin, PointerButton::Left, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{mid, {}});
+  // While a regular hold is being drawn, right-down at its tail starts the next
+  // chained segment; this is the normal chain placement path, not the removed
+  // selected-tail idle gesture.
+  h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Right, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{tail, {}});
+  h.panel.on_pointer_up(PointerUpEvent{tail, PointerButton::Left, {}});
+
+  std::vector<NotationNote> holds;
+  for (const auto& note : h.engine.document().notes()) {
+    if (note.note_type == NoteType::Hold) holds.push_back(note);
+  }
+  std::sort(holds.begin(), holds.end(),
+            [](const NotationNote& a, const NotationNote& b) { return a.start_tick < b.start_tick; });
+  CHECK_EQ(static_cast<int>(holds.size()), 2);
+  if (holds.size() == 2) {
+    CHECK_EQ(holds[0].end_tick, holds[1].start_tick);
+    const auto next = wds::chart_editor::chained_next_scratch_hold(h.engine.document(), holds[0]);
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, holds[1].id);
+  }
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Flick), 0);
+}
+
+void test_toolbox_hold_tail_right_click_chains_scratch_only() {
+  // Regular Hold tool: the selected regular tail does not arm a chain extend.
+  {
+    Harness h;
+    const int32_t id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
+    h.panel.set_toolbox_place_mode(true);
+    h.panel.set_place_intent_override(PlaceIntent::HoldBody);
+    h.panel.set_selected({id});
+    const auto before = snapshot_doc(h.engine);
+    const auto tail = h.at_tick_lane(480, 3);
+    const auto pull = h.at_tick_lane(960, 3);
+    h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+    h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
+    CHECK(snap_eq(before, h.engine));
+    const auto* after = find_note_id(h.engine.document().notes(), id);
+    CHECK(after != nullptr);
+    if (after) {
+      CHECK(!wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
+    }
+  }
+  // ScratchHold tool still continues a selected purple tail.
+  {
+    Harness h;
+    const int32_t id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 3, 1);
+    h.panel.set_toolbox_place_mode(true);
+    h.panel.set_place_intent_override(PlaceIntent::ScratchHoldBody);
+    h.panel.set_selected({id});
+    const auto tail = h.at_tick_lane(480, 3);
+    const auto pull = h.at_tick_lane(960, 3);
+    h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+    h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 2);
+    const auto* after = find_note_id(h.engine.document().notes(), id);
+    CHECK(after != nullptr);
+    if (after) {
+      CHECK(wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -5080,7 +5431,8 @@ int main() {
   test_selected_note_owns_overlapping_pointer();
   test_headless_hold_start_caps_are_tightened();
   test_double_click_inside_hold_after_edge_grab_selects_segment();
-  test_right_click_selected_hold_tail_continues_draw();
+  test_right_click_selected_hold_tail_continues_draw_for_scratch_only();
+  test_right_click_selected_regular_hold_tail_does_not_chain();
   test_hot_switch_ghosts_and_no_document_mutation();
   test_tail_at_pointer_one_and_multiple_segments();
   test_left_click_and_right_up_commit_modifier_release_ordinary();
@@ -5100,6 +5452,7 @@ int main() {
   test_tap_stand_in_hold_heads_in_editor();
   test_jumpscratch_joint_adjust_keeps_next_mid_star();
   test_hold_tail_adjust_follows_playback_resync();
+  test_hold_edge_trim_allows_any_positive_length();
   test_jumpscratch_end_adjust_follows_wheel_resync();
   test_jumpscratch_joint_adjust_follows_playback_resync();
   test_plain_primary_does_not_clear_hold_draft_during_draw();
@@ -5123,6 +5476,10 @@ int main() {
   test_nudge_star_out_of_hold_is_refused();
   test_copy_lone_mid_star_is_a_noop();
   test_copy_hold_with_star_pastes_bound_star_and_regenerated_eighths();
+  test_cut_copies_then_deletes_in_one_history_step();
+  test_cut_lone_mid_star_keeps_chart_untouched();
+  test_cut_deletes_only_the_copy_payload();
+  test_cut_clipboard_matches_copy_clipboard();
   test_nontail_hold_eighths_follow_paste_and_resize();
   test_mirror_and_copy_hold_includes_mid_stars();
   test_convert_selected_hold_stars_and_defaults();
@@ -5130,6 +5487,7 @@ int main() {
   test_toolbox_star_placement_snaps_to_pointer_hold();
   test_marquee_and_convert_ignore_split_lines();
   test_gutter_label_select_copy_mirror_and_move();
+  test_split_edge_drag_allows_zero_length();
   test_paste_mirror_is_one_history_step_and_skips_splits();
   test_paste_can_move_backwards();
   test_split_width_follow_closed_interval_includes_endpoints();
@@ -5138,6 +5496,8 @@ int main() {
   test_toolbox_hold_ghost_follows_shift();
   test_extended_speed_gutter_slider_and_nontail();
   test_toolbox_scratch_hold_uses_regular_hold_buttons();
+  test_toolbox_regular_hold_chains_on_right_while_drawing();
+  test_toolbox_hold_tail_right_click_chains_scratch_only();
   test_hit_test_windowed_scan_matches_full_scan_on_dense_chart();
   test_split_placement_window_matches_full_scan();
   test_marquee_index_matches_full_scan_on_dense_chart();
