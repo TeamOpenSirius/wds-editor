@@ -488,13 +488,16 @@ void UiManager::bind_editor_shortcuts() {
   editor.bind(chord_mirror_about_center(), [this] {
     if (auto* panel = edit_panel()) panel->mirror_selected(true);
   });
+  // The edit view maps later ms (larger tick) to smaller screen Y, so "up" is a
+  // forward-in-time nudge and "down" goes back. Left/right are lanes (screen X),
+  // where the lane index grows to the right.
   editor.bind(chord_nudge_up(), [this] {
     if (auto* panel = edit_panel())
-      panel->nudge_selected(-wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
+      panel->nudge_selected(wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
   });
   editor.bind(chord_nudge_down(), [this] {
     if (auto* panel = edit_panel())
-      panel->nudge_selected(wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
+      panel->nudge_selected(-wds::chart_editor::subdivision_tick_step(panel->viewport().grid()), 0);
   });
   editor.bind(chord_nudge_left(), [this] {
     if (auto* panel = edit_panel()) panel->nudge_selected(0, -1);
