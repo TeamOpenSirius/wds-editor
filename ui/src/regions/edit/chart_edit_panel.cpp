@@ -2190,7 +2190,6 @@ void ChartEditPanel::apply_hold_tail_cover(NotationNote& prev, const NotationNot
 }
 
 void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*point*/) {
-  finish_chain_extend_on_right_up_ = false;
   hold_scratch_ = scratch;
   hold_draft_ = place_anchor_;
   hold_draft_.note_type = wds::chart_editor::drawn_hold_body_type(scratch, place_gold_head_);
@@ -2209,8 +2208,7 @@ void ChartEditPanel::begin_hold_body(bool scratch, wds::interaction::Vec2 /*poin
   sync_hold_placement_ghost();
 }
 
-void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
-                                                 std::optional<bool> scratch_family) {
+void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point) {
   pending_chain_extend_id_ = -1;
   sync_viewport();
   std::optional<NotationNote> best;
@@ -2223,11 +2221,10 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
     const auto found = engine_.document().find_note(selected_id);
     if (!found) continue;
     const NotationNote& note = *found;
+    // Tail right-click chain editing is a purple ScratchHold gesture only.
+    // Regular Hold/CriticalHold tails stay independent even when selected.
+    if (!wds::chart_editor::is_scratch_hold_body(note.note_type)) continue;
     if (!wds::chart_editor::is_hold_chain_body(note.note_type)) continue;
-    if (scratch_family.has_value() &&
-        wds::chart_editor::is_scratch_hold_body(note.note_type) != *scratch_family) {
-      continue;
-    }
     if (note.end_tick <= note.start_tick) continue;
     // Only the chain terminal (last JumpScratch) can be extended.
     if (wds::chart_editor::chained_next_scratch_hold(engine_.document(), note)) continue;
@@ -2255,13 +2252,13 @@ void ChartEditPanel::try_arm_pending_chain_extend(wds::interaction::Vec2 point,
 }
 
 void ChartEditPanel::begin_hold_chain_extend() {
-  finish_chain_extend_on_right_up_ = false;
   const int32_t prev_id = pending_chain_extend_id_;
   pending_chain_extend_id_ = -1;
   auto prev = prev_id >= 0 ? engine_.document().find_note(prev_id) : std::nullopt;
   const bool scratch =
       prev.has_value() && wds::chart_editor::is_scratch_hold_body(prev->note_type);
   if (prev_id < 0 || !prev || !wds::chart_editor::is_hold_chain_body(prev->note_type) ||
+      !wds::chart_editor::is_scratch_hold_body(prev->note_type) ||
       !selected_.count(prev->id) ||
       wds::chart_editor::chained_next_scratch_hold(engine_.document(), *prev)) {
     begin_hold_body(scratch, place_note_center());
@@ -2592,7 +2589,6 @@ void ChartEditPanel::commit_hold_chain_prev_cover() {
 
 void ChartEditPanel::cancel_placement() {
   clear_pending_chain_extend();
-  finish_chain_extend_on_right_up_ = false;
   curve_mode_active_ = false;
   curve_dismissed_ = false;
   curve_ghosts_.clear();
@@ -2616,7 +2612,6 @@ void ChartEditPanel::cancel_placement() {
 }
 
 void ChartEditPanel::finish_hold_body(bool chain_next) {
-  finish_chain_extend_on_right_up_ = false;
   curve_mode_active_ = false;
   curve_dismissed_ = false;
   curve_ghosts_.clear();
@@ -5933,11 +5928,12 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     place_gold_head_ = event.mods.shift;
     const bool scratch = toolbox_place_intent() == PlaceIntent::ScratchHoldBody;
     if (wds::interaction::is_right_button(event.button)) {
-      if (toolbox_hold_selected()) {
-        try_arm_pending_chain_extend(event.position, scratch);
+      // Only the ScratchHold tool continues a selected scratch tail; a regular
+      // Hold tool never chains from the tail.
+      if (toolbox_hold_selected() && scratch) {
+        try_arm_pending_chain_extend(event.position);
         if (pending_chain_extend_id_ >= 0) {
-          if (scratch) begin_scratch_hold_placement(place_note_center());
-          else begin_regular_hold_placement(place_note_center());
+          begin_scratch_hold_placement(place_note_center());
         }
       }
       return;
@@ -5957,14 +5953,14 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
   }
 
   // Empty area: start placement. Right-click on the end-cap of an already-selected
-  // hold (including outer-edge slop that hit_test misses) continues drawing that
-  // hold instead of starting an unrelated flick. Both chain families qualify.
+  // purple ScratchHold (including outer-edge slop that hit_test misses) continues
+  // drawing that hold instead of starting an unrelated flick. Regular holds do not
+  // arm this gesture.
   clear_pending_chain_extend();
   if (wds::interaction::is_right_button(event.button)) {
     try_arm_pending_chain_extend(event.position);
     if (pending_chain_extend_id_ >= 0) {
       begin_hold_chain_extend();
-      finish_chain_extend_on_right_up_ = true;
       return;
     }
   }
@@ -7018,14 +7014,6 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
     return;
   }
   if (mode_ == Mode::PlaceHoldBody) {
-    // A chain continued from an existing tail starts on right-down without a
-    // place-gesture swipe, so that same right-up must finish it even for a
-    // regular Hold (whose normal finish button is Left).
-    if (finish_chain_extend_on_right_up_ &&
-        wds::interaction::is_right_button(event.button)) {
-      finish_hold_body(false);
-      return;
-    }
     // Chain/star use the opposite button (down); only the hold's primary button
     // release finishes. ScratchHold finishes on right-up; normal Hold on left-up.
     if (curve_mode_active_ &&

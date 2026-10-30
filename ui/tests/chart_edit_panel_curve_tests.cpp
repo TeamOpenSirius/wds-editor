@@ -2487,29 +2487,8 @@ void test_double_click_inside_hold_after_edge_grab_selects_segment() {
   CHECK(h.panel.selected().count(star_id) != 0);
 }
 
-void test_right_click_selected_hold_tail_continues_draw() {
-  Harness h;
-  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
-  const int32_t head_id = add_hold_head(h, 0, 3);
-  h.panel.set_selected({body_id, head_id});
-  const auto* before = find_note_id(h.engine.document().notes(), body_id);
-  CHECK(before != nullptr);
-  if (before == nullptr) return;
-
-  const auto tail = h.at_tick_lane(before->end_tick, before->lane);
-  const auto pull = h.at_tick_lane(before->end_tick + 480, before->lane);
-  h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
-  h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
-  h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
-
-  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 2);
-  const auto* first = find_note_id(h.engine.document().notes(), body_id);
-  CHECK(first != nullptr);
-  if (first) {
-    CHECK(wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *first).has_value());
-  }
-
-  // The ScratchHold family uses the same right-click continuation.
+void test_right_click_selected_hold_tail_continues_draw_for_scratch_only() {
+  // Only the purple ScratchHold family chains from a selected tail.
   {
     Harness hs;
     const int32_t scratch_id = add_hold_body(hs, NoteType::ScratchHold, 0, 480, 3, 1);
@@ -2523,7 +2502,41 @@ void test_right_click_selected_hold_tail_continues_draw() {
       hs.panel.on_pointer_move(PointerMoveEvent{scratch_pull, {}});
       hs.panel.on_pointer_up(PointerUpEvent{scratch_pull, PointerButton::Right, {}});
       CHECK_EQ(count_type(hs.engine.document().notes(), NoteType::ScratchHold), 2);
+      const auto* first = find_note_id(hs.engine.document().notes(), scratch_id);
+      CHECK(first != nullptr);
+      if (first) {
+        CHECK(
+            wds::chart_editor::chained_next_scratch_hold(hs.engine.document(), *first).has_value());
+      }
     }
+  }
+}
+
+void test_right_click_selected_regular_hold_tail_does_not_chain() {
+  Harness h;
+  const int32_t body_id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
+  const int32_t head_id = add_hold_head(h, 0, 3);
+  h.panel.set_selected({body_id, head_id});
+  const auto* before = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(before != nullptr);
+  if (before == nullptr) return;
+  const int32_t tail_tick = before->end_tick;
+
+  const auto tail = h.at_tick_lane(tail_tick, before->lane);
+  const auto pull = h.at_tick_lane(tail_tick + 480, before->lane);
+  h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+  h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
+
+  // The regular hold stays a single, un-chained segment.
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Hold), 1);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::HoldStart), 1);
+  const auto* after = find_note_id(h.engine.document().notes(), body_id);
+  CHECK(after != nullptr);
+  if (after != nullptr) {
+    CHECK_EQ(after->start_tick, 0);
+    CHECK_EQ(after->end_tick, tail_tick);
+    CHECK(!wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
   }
 }
 
@@ -4003,6 +4016,81 @@ void test_toolbox_scratch_hold_uses_regular_hold_buttons() {
   CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Flick), 0);
 }
 
+void test_toolbox_regular_hold_chains_on_right_while_drawing() {
+  Harness h;
+  h.panel.set_toolbox_place_mode(true);
+  h.panel.set_place_intent_override(PlaceIntent::HoldBody);
+  const auto origin = h.at_tick_lane(0, 3);
+  const auto mid = h.at_tick_lane(480, 3);
+  const auto tail = h.at_tick_lane(960, 4);
+  h.panel.on_pointer_down(PointerDownEvent{origin, PointerButton::Left, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{mid, {}});
+  // While a regular hold is being drawn, right-down at its tail starts the next
+  // chained segment; this is the normal chain placement path, not the removed
+  // selected-tail idle gesture.
+  h.panel.on_pointer_down(PointerDownEvent{mid, PointerButton::Right, {}});
+  h.panel.on_pointer_move(PointerMoveEvent{tail, {}});
+  h.panel.on_pointer_up(PointerUpEvent{tail, PointerButton::Left, {}});
+
+  std::vector<NotationNote> holds;
+  for (const auto& note : h.engine.document().notes()) {
+    if (note.note_type == NoteType::Hold) holds.push_back(note);
+  }
+  std::sort(holds.begin(), holds.end(),
+            [](const NotationNote& a, const NotationNote& b) { return a.start_tick < b.start_tick; });
+  CHECK_EQ(static_cast<int>(holds.size()), 2);
+  if (holds.size() == 2) {
+    CHECK_EQ(holds[0].end_tick, holds[1].start_tick);
+    const auto next = wds::chart_editor::chained_next_scratch_hold(h.engine.document(), holds[0]);
+    CHECK(next.has_value());
+    if (next) CHECK_EQ(next->id, holds[1].id);
+  }
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 0);
+  CHECK_EQ(count_type(h.engine.document().notes(), NoteType::Flick), 0);
+}
+
+void test_toolbox_hold_tail_right_click_chains_scratch_only() {
+  // Regular Hold tool: the selected regular tail does not arm a chain extend.
+  {
+    Harness h;
+    const int32_t id = add_hold_body(h, NoteType::Hold, 0, 480, 3, 1);
+    h.panel.set_toolbox_place_mode(true);
+    h.panel.set_place_intent_override(PlaceIntent::HoldBody);
+    h.panel.set_selected({id});
+    const auto before = snapshot_doc(h.engine);
+    const auto tail = h.at_tick_lane(480, 3);
+    const auto pull = h.at_tick_lane(960, 3);
+    h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+    h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Right, {}});
+    CHECK(snap_eq(before, h.engine));
+    const auto* after = find_note_id(h.engine.document().notes(), id);
+    CHECK(after != nullptr);
+    if (after) {
+      CHECK(!wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
+    }
+  }
+  // ScratchHold tool still continues a selected purple tail.
+  {
+    Harness h;
+    const int32_t id = add_hold_body(h, NoteType::ScratchHold, 0, 480, 3, 1);
+    h.panel.set_toolbox_place_mode(true);
+    h.panel.set_place_intent_override(PlaceIntent::ScratchHoldBody);
+    h.panel.set_selected({id});
+    const auto tail = h.at_tick_lane(480, 3);
+    const auto pull = h.at_tick_lane(960, 3);
+    h.panel.on_pointer_down(PointerDownEvent{tail, PointerButton::Right, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{pull, {}});
+    h.panel.on_pointer_up(PointerUpEvent{pull, PointerButton::Left, {}});
+    CHECK_EQ(count_type(h.engine.document().notes(), NoteType::ScratchHold), 2);
+    const auto* after = find_note_id(h.engine.document().notes(), id);
+    CHECK(after != nullptr);
+    if (after) {
+      CHECK(wds::chart_editor::chained_next_scratch_hold(h.engine.document(), *after).has_value());
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Hit-test windowing: oracle = full O(N) scan of hit_test_note's rules
 // (selection first between unrelated notes, then distance / priority / draw order).
@@ -5343,7 +5431,8 @@ int main() {
   test_selected_note_owns_overlapping_pointer();
   test_headless_hold_start_caps_are_tightened();
   test_double_click_inside_hold_after_edge_grab_selects_segment();
-  test_right_click_selected_hold_tail_continues_draw();
+  test_right_click_selected_hold_tail_continues_draw_for_scratch_only();
+  test_right_click_selected_regular_hold_tail_does_not_chain();
   test_hot_switch_ghosts_and_no_document_mutation();
   test_tail_at_pointer_one_and_multiple_segments();
   test_left_click_and_right_up_commit_modifier_release_ordinary();
@@ -5407,6 +5496,8 @@ int main() {
   test_toolbox_hold_ghost_follows_shift();
   test_extended_speed_gutter_slider_and_nontail();
   test_toolbox_scratch_hold_uses_regular_hold_buttons();
+  test_toolbox_regular_hold_chains_on_right_while_drawing();
+  test_toolbox_hold_tail_right_click_chains_scratch_only();
   test_hit_test_windowed_scan_matches_full_scan_on_dense_chart();
   test_split_placement_window_matches_full_scan();
   test_marquee_index_matches_full_scan_on_dense_chart();

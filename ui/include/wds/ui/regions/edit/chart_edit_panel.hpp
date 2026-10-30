@@ -500,15 +500,14 @@ class ChartEditPanel final : public wds::interaction::Widget {
   void place_instant(wds::chart_editor::NoteType type, wds::interaction::Vec2 point,
                      int32_t scratch_length = 0);
   void begin_hold_body(bool scratch, wds::interaction::Vec2 point);
-  // Continue a selected terminal hold from its end-cap. Requires
-  // pending_chain_extend_id_ armed on pointer-down. Works for both the regular
-  // and ScratchHold chain families.
+  // Continue a selected terminal purple ScratchHold from its end-cap. Requires
+  // pending_chain_extend_id_ armed on pointer-down. Regular Hold/CriticalHold
+  // tails never arm this gesture.
   void begin_hold_chain_extend();
-  // If point is on a selected terminal hold end-cap, arm pending_chain_extend_id_.
-  // `scratch_family` restricts the search to one family (toolbox placement);
-  // nullopt accepts either family (right-click on an already-selected tail).
-  void try_arm_pending_chain_extend(wds::interaction::Vec2 point,
-                                    std::optional<bool> scratch_family = std::nullopt);
+  // If point is on a selected terminal purple ScratchHold end-cap, arm
+  // pending_chain_extend_id_. Regular Hold/CriticalHold tails never arm this
+  // gesture, so toolbox regular-Hold placement does not call this helper.
+  void try_arm_pending_chain_extend(wds::interaction::Vec2 point);
   void clear_pending_chain_extend() { pending_chain_extend_id_ = -1; }
   // Enter ScratchHold placement: chain-extend when pending, else fresh begin_hold_body.
   void begin_scratch_hold_placement(wds::interaction::Vec2 point);
@@ -786,13 +785,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   // current width/lane cannot represent a cover — chain stays armed for width
   // changes, but ghost looks like a disconnected independent ScratchHold.
   bool hold_chain_link_preview_ = true;
-  // Armed on RMB-down over a selected terminal hold end-cap; consumed when the
-  // gesture resolves to HoldBody / ScratchHoldBody or finishes on right-up.
+  // Armed on RMB-down over a selected terminal ScratchHold end-cap; consumed
+  // when the gesture resolves to ScratchHoldBody or finishes on right-up.
   int32_t pending_chain_extend_id_ = -1;
-  // A right-click chain-extend starts placing immediately (no place-gesture
-  // swipe), so its own right-up must finish for regular Hold too (whose finish
-  // button is normally Left).
-  bool finish_chain_extend_on_right_up_ = false;
   // Locked when PlaceGesture starts: Shift was already down at mouse press.
   // The same Shift still places stars; releasing it mid-draw does not retint.
   bool place_gold_head_ = false;
