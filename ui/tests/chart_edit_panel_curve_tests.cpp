@@ -3430,6 +3430,81 @@ void test_gutter_label_select_copy_mirror_and_move() {
   }
 }
 
+void test_split_edge_drag_allows_zero_length() {
+  using wds::chart_editor::GimmickType;
+  auto hits_for = [](Harness& h) {
+    return wds::ui::build_split_label_hits(h.panel.viewport(), h.panel.left_gutter(),
+                                           h.engine.document().notes(), &h.engine.document());
+  };
+  auto drag_chip = [](Harness& h, const wds::ui::GutterLabelHit& hit, int32_t dest_tick) {
+    const Vec2 press = chip_center(hit.bounds);
+    const Vec2 dest{press.x, h.panel.viewport().y_at(dest_tick)};
+    h.panel.on_pointer_down(PointerDownEvent{press, PointerButton::Left, {}});
+    h.panel.on_pointer_move(PointerMoveEvent{dest, {}});
+    h.panel.on_pointer_up(PointerUpEvent{dest, PointerButton::Left, {}});
+  };
+
+  Harness h;
+  const int32_t split_id = h.engine.add_note(make_split_effect(960, 1440, GimmickType::Split3));
+  CHECK(split_id >= 0);
+  h.panel.sync_to_timeline_ms(0.0);
+
+  // End edge may collapse onto the start tick: no negative span, zero is legal.
+  {
+    const auto hits = hits_for(h);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(end != nullptr);
+    if (!end) return;
+    drag_chip(h, *end, 480);
+    const auto collapsed = h.engine.document().find_note(split_id);
+    CHECK(collapsed.has_value());
+    if (!collapsed) return;
+    CHECK_EQ(collapsed->start_tick, 960);
+    CHECK_EQ(collapsed->end_tick, 960);
+    CHECK(h.engine.undo());
+    const auto restored = h.engine.document().find_note(split_id);
+    CHECK(restored.has_value());
+    if (restored) {
+      CHECK_EQ(restored->start_tick, 960);
+      CHECK_EQ(restored->end_tick, 1440);
+    }
+    CHECK(h.engine.redo());
+  }
+
+  // A zero-length split keeps its end chip so the edge can be pulled back out.
+  {
+    const auto hits = hits_for(h);
+    const auto* start = split_hit_for(hits, split_id, true);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(start != nullptr && end != nullptr);
+    if (!start || !end) return;
+    CHECK_EQ(start->anchor_tick, end->anchor_tick);
+    CHECK_EQ(start->column, end->column);
+    drag_chip(h, *end, 1440);
+    const auto pulled = h.engine.document().find_note(split_id);
+    CHECK(pulled.has_value());
+    if (pulled) {
+      CHECK_EQ(pulled->start_tick, 960);
+      CHECK_EQ(pulled->end_tick, 1440);
+    }
+  }
+
+  // Start edge clamps at the end tick instead of overshooting into negative length.
+  {
+    const auto hits = hits_for(h);
+    const auto* start = split_hit_for(hits, split_id, true);
+    CHECK(start != nullptr);
+    if (!start) return;
+    drag_chip(h, *start, 1920);
+    const auto clamped = h.engine.document().find_note(split_id);
+    CHECK(clamped.has_value());
+    if (clamped) {
+      CHECK_EQ(clamped->start_tick, clamped->end_tick);
+      CHECK_EQ(clamped->end_tick, 1440);
+    }
+  }
+}
+
 void test_paste_mirror_is_one_history_step_and_skips_splits() {
   using wds::chart_editor::GimmickType;
   Harness h;
@@ -5264,6 +5339,7 @@ int main() {
   test_toolbox_star_placement_snaps_to_pointer_hold();
   test_marquee_and_convert_ignore_split_lines();
   test_gutter_label_select_copy_mirror_and_move();
+  test_split_edge_drag_allows_zero_length();
   test_paste_mirror_is_one_history_step_and_skips_splits();
   test_paste_can_move_backwards();
   test_split_width_follow_closed_interval_includes_endpoints();

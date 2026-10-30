@@ -3265,18 +3265,17 @@ void ChartEditPanel::sync_split_edge_to_pointer(wds::interaction::Vec2 point) {
   const int32_t tick = viewport_.tick_at(mapped.y);
   // Hold still on the press tick so a click on the off-line label does not jump.
   if (!split_edge_ever_moved_ && tick == drag_split_press_tick_) return;
-  const int32_t min_dur = min_hold_duration_ticks();
+  // Split effects may collapse to zero length (official endTime == startTime plays
+  // fadeIn then immediately fadeOut); only negative spans are illegal, so the
+  // hold subdivision minimum does not apply here.
   const int32_t legal = first_legal_tick();
   auto note = engine_.document().find_note(drag_split_note_id_);
   if (!note) return;
   NotationNote updated = *note;
   if (drag_split_is_end_) {
-    updated.end_tick = std::max({updated.start_tick + min_dur, tick, legal});
-  } else {
-    const int32_t hi = updated.end_tick - min_dur;
-    if (legal <= hi) {
-      updated.start_tick = std::clamp(tick, legal, hi);
-    }
+    updated.end_tick = std::max({updated.start_tick, tick, legal});
+  } else if (legal <= updated.end_tick) {
+    updated.start_tick = std::clamp(tick, legal, updated.end_tick);
   }
   if (auto orig_it = drag_originals_.find(drag_split_note_id_); orig_it != drag_originals_.end()) {
     if (updated.start_tick != orig_it->second.start_tick ||

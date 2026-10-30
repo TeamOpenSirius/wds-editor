@@ -638,7 +638,9 @@ std::vector<GutterLabelHit> build_split_label_hits(const EditViewport& viewport,
     if (y0 >= y_lo && y0 <= y_hi) {
       drafts.push_back({note.id, true, start_tick, y0});
     }
-    if (y1 >= y_lo && y1 <= y_hi && note.end_tick > note.start_tick) {
+    // Zero-length splits still get an end chip (one above, one below the same
+    // tick) so the dragged end can be pulled back out after collapsing.
+    if (y1 >= y_lo && y1 <= y_hi) {
       drafts.push_back({note.id, false, end_tick, y1});
     }
   };

@@ -1308,7 +1308,12 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     };
     std::sort(til_splits.begin(), til_splits.end(), [&](const TilSplitPoint& a,
                                                        const TilSplitPoint& b) {
-      return til_tick(a) < til_tick(b);
+      const int64_t ta = til_tick(a);
+      const int64_t tb = til_tick(b);
+      if (ta != tb) return ta < tb;
+      // Equal tick: opens (+lines) must be visited before closes (-lines) so a
+      // zero-length split (start == end) still pairs instead of dropping its close.
+      return a.lines > b.lines;
     });
     for (const auto& p : til_splits) {
       const int64_t tick = til_tick(p);
