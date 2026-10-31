@@ -134,8 +134,17 @@ inline float official_syuriken_pulse_unpack_ws_y(float packed_alpha, float q) no
   return packed_alpha / official_syuriken_pulse_q(q) - kOfficialSyurikenPulseWorldYBias;
 }
 
-// Unbatched ObjectToWorld row-1 length. Kept for the GPU-probe record; pulse
-// no longer multiplies 20 t by this (see hop above).
+// Unbatched ObjectToWorld row-1 length. Kept only as the historical GPU-probe
+// record; pulse no longer multiplies 20 t by this (see the hop above).
+//
+// 2026-10-31 (OpenWDS bc69eb89): the official SplitEffectSyuriken.shader now
+// computes the COLUMN-1 length, length(mul((float3x3)GetObjectToWorldMatrix(),
+// float3(0,1,0))), so this row-1 helper no longer mirrors the official source.
+// That edit does not change the game path: SpriteRenderer batching leaves
+// ObjectToWorld identity, where row and column lengths are both 1, and native
+// keeps sin(worldY - 20 t). The old 13.49 probe number came from assigning
+// r.material.shader, which copies the material and breaks batching; it is
+// obsolete. Do not "correct" the pulse back to 13.5/27 from this helper.
 inline float official_syuriken_pulse_world_y_scale(int32_t color_id, float fade_scale) noexcept {
   float ex_x = kOfficialSplitLineLocalScaleX;
   float ex_y = 0.0f;

@@ -113,6 +113,14 @@ struct PreviewSplitLaneInstance {
   void assign(const PreviewSplitLaneInstance& other) noexcept;
 };
 
+// BG_LaneBorder spans outlive the pooled split effect: the border is hidden from
+// start-1s and restored over [end+1s, end+2s], while PreviewSplitLaneInstance is
+// dropped at end+1s (pool return). The stage layer therefore needs its own list.
+struct PreviewSplitBorderInstance {
+  int64_t start_ms = 0;
+  int64_t end_ms = 0;
+};
+
 struct PreviewConcurrentLineInstance {
   int64_t milliseconds = 0;
   int32_t start_lane = 0;
@@ -138,6 +146,7 @@ struct PreviewSnapshot {
   std::vector<PreviewNoteInstance> notes;
   std::vector<PreviewConcurrentLineInstance> concurrent_lines;
   std::vector<PreviewSplitLaneInstance> split_lanes;
+  std::vector<PreviewSplitBorderInstance> split_borders;
   int32_t active_lane_count = 0;
 
   // Auto-preview combo (seek-safe); updated each snapshot rebuild.

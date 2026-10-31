@@ -23,12 +23,14 @@ class Controller;
 // The crossing and update-order behavior is a candidate, not a Unity parity
 // claim; the temporary adapter records it explicitly in its introspection.
 struct SplitEffectParentMotion {
+  // Replay-only probe flag: exact parent-motion travel instead of the authored
+  // LineHight closed form. Nothing in production sets it; split_effect_bench
+  // and the live-dump replay fixtures drive it.
   bool rod_motion_candidate = false;
-  // Temporary replay-only candidate: derive the RoD random draw stream from
-  // the stable logical emitter identity (line + chart start + catalog system)
-  // instead of sharing one catalog-only sequence across all lines. This is
-  // disabled by default until the Unity per-system draw lifetime is verified.
-  bool rod_emitter_seed_candidate = false;
+  // The RoD random draw stream always comes from the split-instance identity
+  // (color + line + chart start + Play generation) now; the old catalog-only
+  // "seed candidate" flag is gone because it described a stream that ignored
+  // overlapping split instances.
   bool birth_pose_candidate = false;
   // live dump v1 hop: Σ|Δps.worldPosition| of the ParticleSystem Transform.
   // Not lossyY / chord / worldDistanceAccum / max(wda, 2·Σdt). Not 2022.3.

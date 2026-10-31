@@ -5071,6 +5071,15 @@ bool VulkanRenderer::Impl::create_bloom_resources(VkExtent2D extent) {
         (sw.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) != 0 &&
         (hdr.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0;
   }
+  // Alignment switch: the recovered OpenWDS scene sets
+  // m_RenderPostProcessing = 0, so the Unity reference draws the additive layer
+  // (split plates, particles) directly with no bloom blur. WDS_NO_BLOOM=1 takes
+  // the same direct path (the early-additive fallback in the frame encode) so
+  // the two can be compared without rebuilding.
+  if (std::getenv("WDS_NO_BLOOM") != nullptr) {
+    bloom_ready = false;
+    std::fprintf(stderr, "WDS_NO_BLOOM active\n");
+  }
   return true;
 }
 

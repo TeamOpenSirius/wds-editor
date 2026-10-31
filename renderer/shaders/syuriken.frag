@@ -12,6 +12,9 @@
 // raw worldY would interpolate screen-linear; divide by q to recover
 // Unity perspective-correct positionWS.y. Blend is SrcAlpha One into a
 // float target, so folding LineColor.a into rgb leaves rgb * alpha unchanged.
+// OpenWDS bc69eb89 changed the official shader to the COLUMN-1 length
+// (length(mul((float3x3)M, y))); under batching identity that is still 1, so
+// this fragment is unchanged. Do not reintroduce 13.49/27 here.
 
 layout(push_constant) uniform PushConstants {
   mat4 mvp;

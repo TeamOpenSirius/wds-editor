@@ -57,7 +57,6 @@ struct ChildPersistFp {
   uint32_t emitter_vy_bits = 0;
   uint32_t emitter_vz_bits = 0;
   uint8_t rod_motion_candidate = 0;
-  uint8_t rod_emitter_seed_candidate = 0;
   uint32_t distance_total_bits = 0;
   uint64_t motion_origin_seconds_bits = 0;
   uint64_t motion_now_seconds_bits = 0;
@@ -104,7 +103,6 @@ inline ChildPersistFp make_child_persist_fp(const EmitContext& ctx,
   fp.emitter_vy_bits = persist_f32_bits(m.emitter_vy);
   fp.emitter_vz_bits = persist_f32_bits(m.emitter_vz);
   fp.rod_motion_candidate = m.rod_motion_candidate ? 1 : 0;
-  fp.rod_emitter_seed_candidate = m.rod_emitter_seed_candidate ? 1 : 0;
   fp.distance_total_bits = persist_f32_bits(m.distance_total);
   fp.motion_origin_seconds_bits = persist_f64_bits(m.motion_origin_seconds);
   fp.motion_now_seconds_bits = persist_f64_bits(m.motion_now_seconds);
@@ -123,7 +121,6 @@ inline bool child_persist_fp_eq(const ChildPersistFp& a, const ChildPersistFp& b
          a.emitter_vel_candidate == b.emitter_vel_candidate &&
          a.emitter_vx_bits == b.emitter_vx_bits && a.emitter_vy_bits == b.emitter_vy_bits &&
          a.emitter_vz_bits == b.emitter_vz_bits && a.rod_motion_candidate == b.rod_motion_candidate &&
-         a.rod_emitter_seed_candidate == b.rod_emitter_seed_candidate &&
          a.distance_total_bits == b.distance_total_bits &&
          a.motion_origin_seconds_bits == b.motion_origin_seconds_bits &&
          a.motion_now_seconds_bits == b.motion_now_seconds_bits &&

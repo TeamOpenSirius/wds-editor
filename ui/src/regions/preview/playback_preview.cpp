@@ -8,6 +8,7 @@
 #include <wds/chart_render/note_strips.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/chart_render/split_effect_catalog.hpp>
+#include <wds/chart_render/split_effect_particle_playback.hpp>
 #include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <split_collect_pool.hpp>
@@ -288,6 +289,7 @@ const TextureInfo* syuriken_plate_for(const SkinCatalog& skin,
   return &skin.syuriken_plate;
 }
 
+// OpenWDS SplitEffectSyuriken shades per fragment (renderer/shaders/syuriken.frag).
 // OpenWDS SplitEffectSyuriken shades per fragment (renderer/shaders/syuriken.frag).
 // One projective quad per Line: U spans the sprite textureRect, V is local_y /
 // sprite at each end, rgb is LineColor premultiplied by its alpha and vertex
@@ -2270,14 +2272,18 @@ void PlaybackPreviewView::draw_stage(DrawBatch& batch, const PreviewSnapshot& sn
                                      TextureId solid_texture) {
   // BGShadow (−9) / BG_Lane (−8) / borders / judgeline. ingame_bg (−10) is
   // submitted earlier so its bucket is behind these (Vulkan later-bucket-wins).
-  // Editor: default lane borders stay visible; active splits fade them out via
-  // stage_cover_alpha (OpenWDS LaneGroup BG_LaneBorder starts at α=0 and fades
-  // in only during splits — intentionally not mirrored here; user 2026-10-15).
-  float border_cover = 1.0f;
-  for (const auto& split : snapshot.split_lanes) {
-    if (split.should_show && split.split_count > 0) {
-      border_cover = std::min(border_cover, split.stage_cover_alpha);
-    }
+  // BG_LaneBorder (OpenWDS bc69eb89 LaneGroup): visible by default; a split
+  // hides it from start−1s (0.5s DOTween out) and the last split restores it
+  // over [end+1s, end+2s]. The span outlives the pooled split instance (which
+  // returns at end+1s), so the stage layer uses snapshot.split_borders instead
+  // of the live split_lanes list. Overlap takes the min (approximation noted in
+  // official_split_lane_border_alpha).
+  float border_factor = 1.0f;
+  for (const auto& border : snapshot.split_borders) {
+    border_factor = std::min(
+        border_factor,
+        wds::chart_editor::official_split_lane_border_alpha(
+            static_cast<double>(snapshot.timeline_ms), border.start_ms, border.end_ms, 1.0f));
   }
 
   if (skin_.bg_shadow) {
@@ -2307,7 +2313,7 @@ void PlaybackPreviewView::draw_stage(DrawBatch& batch, const PreviewSnapshot& sn
   const int split_opacity_pct = static_cast<int>(
       std::lround(static_cast<double>(config_.split_line_opacity) * 100.0));
   const float border_a =
-      wds::chart_editor::official_lane_border_alpha(split_opacity_pct) * border_cover;
+      wds::chart_editor::official_lane_border_alpha(split_opacity_pct) * border_factor;
   if (border_a > 0.001f) {
     if (skin_.lane_border) {
       batch.add_sprite(skin_.lane_border, geometry_.stage_quad(), -0.88f, border_a);
@@ -2508,6 +2514,9 @@ void PlaybackPreviewView::persist_split_pause_vert_memo() {
 void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                                TextureId solid_texture) {
   WDS_PERF_SCOPE("preview.split_particles");
+  if (std::getenv("WDS_NO_SPLIT_PARTICLES") != nullptr) {
+    return;
+  }
   split_emit_direct_ = false;
   split_emit_direct_n_ = 0;
   split_emit_in_vb_ = false;
@@ -3477,6 +3486,17 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       tg.late->overlay_pipe = body_pipe;
       DrawBatch& dest = *tg.late;
       float size_unity = p.size;
+      // Recovered prefab references for these effects never play in Unity
+      // (see split_effect_particle_playback.hpp); do not draw a body the
+      // reference cannot show.
+      if (wds::chart_render::official_split_effect_particles_off(p.effect_id)) {
+        return;
+      }
+      if (std::getenv("WDS_SPLIT_PARTICLE_DEBUG") != nullptr && p.effect_id == 11151) {
+        std::fprintf(stderr, "PART size=%.4f cur=%.4f cur_y=%.4f sol_y=%.4f age=%.4f a=%.4f mode=%d\n",
+                     p.size, p.current_size, p.current_size_y, p.sol_y, p.age, p.a,
+                     static_cast<int>(p.render_mode));
+      }
       // live dump n7 (align2-n7-unity-v1 11520_1 Hamming-1). Not 2022.3.
       // Billboard: size' = min(GetCurrentSize, maxP * W(viewZ)),
       // W = 2 * viewZ * tan(fov/2) * aspect. viewZ<=0: no clamp.

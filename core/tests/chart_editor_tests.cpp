@@ -1584,8 +1584,8 @@ void test_official_split_fade_in_cubic_and_zero_length() {
   sim.fill_instance(fade_out, note, timing, expire_ms + 250);
   CHECK_EQ(fade_out.split_anim_phase, 2);
   CHECK(std::fabs(fade_out.split_line_alpha - 0.0740741f) < 0.005f);
-  CHECK(sim.is_split_active(note, timing, expire_ms + 499));
-  CHECK(!sim.is_split_active(note, timing, expire_ms + 500));
+  CHECK(sim.is_split_active(note, timing, expire_ms + 999));
+  CHECK(!sim.is_split_active(note, timing, expire_ms + 1000));
 }
 
 void test_official_playfield_visual_lanes_are_six() {
@@ -1960,7 +1960,8 @@ void test_official_split_fade_in_scale_is_playfield_coverage() {
 
 void test_official_split_fade_out_is_0_3s_smoothstep_from_expire() {
   // Runtime animators.bundle fadeOut keys a at t=0 / t=0.3 (1−smoothstep).
-  // Tick starts fadeOut at EndMs; Destroy 0.5s.
+  // bc69eb89: Tick starts fadeOut at EndMs and the 1.0s clip's OnExit returns
+  // the pooled instance, so the hide tail is 1000ms (was Destroy 0.5s).
   CHECK(std::fabs(PreviewConfig{}.split_line_animation_end_sec - 0.3f) < 1e-5f);
   CHECK(std::fabs(kOfficialSplitFadeOutSec - 0.3f) < 1e-5f);
   CHECK(std::fabs(official_split_fade_out_alpha(0.0f) - 1.0f) < 1e-5f);
@@ -2007,8 +2008,84 @@ void test_official_split_fade_out_is_0_3s_smoothstep_from_expire() {
   CHECK(std::fabs(quarter.split_percent_end - official_split_identity_origin_percent()) <
         1e-4f);
 
-  CHECK(sim.is_split_active(note, timing, expire_ms + 499));
-  CHECK(!sim.is_split_active(note, timing, expire_ms + 500));
+  CHECK(sim.is_split_active(note, timing, expire_ms + 999));
+  CHECK(!sim.is_split_active(note, timing, expire_ms + 1000));
+}
+
+void test_official_split_lane_border_alpha_follows_bc69eb89_lane_group() {
+  // OpenWDS bc69eb89 LaneGroup: initial a = target; Show (start−1s) fades it
+  // out over 0.5s; the last Hide (end) restores it over [end+1s, end+2s] with a
+  // 1s delay. DOTween default ease OutQuad.
+  const float target = 0.17098f;
+  const int64_t start = 10000;
+  const int64_t end = 13000;
+  CHECK(std::fabs(official_split_lane_border_alpha(start - 1001.0, start, end, target) -
+                  target) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(start - 1000.0, start, end, target) -
+                  target) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(start - 750.0, start, end, target) -
+                  target * (1.0f - official_dotween_out_quad(0.5f))) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(start - 500.0, start, end, target)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end - 1.0, start, end, target)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end, start, end, target)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end + 999.0, start, end, target)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end + 1000.0, start, end, target)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end + 1500.0, start, end, target) -
+                  target * official_dotween_out_quad(0.5f)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end + 2000.0, start, end, target) -
+                  target) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(end + 5000.0, start, end, target) -
+                  target) < 1e-6f);
+
+  // Degenerate zero-length split: end == start; the restore still starts at
+  // end+1s and never runs backwards through the hide fade.
+  const int64_t zero = 10000;
+  CHECK(std::fabs(official_split_lane_border_alpha(zero - 750.0, zero, zero, target) -
+                  target * (1.0f - official_dotween_out_quad(0.5f))) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(zero + 500.0, zero, zero, target)) < 1e-6f);
+  CHECK(std::fabs(official_split_lane_border_alpha(zero + 1500.0, zero, zero, target) -
+                  target * official_dotween_out_quad(0.5f)) < 1e-6f);
+}
+
+void test_split_border_spans_outlive_pooled_instance() {
+  ChartEditorEngine engine;
+  PreviewConfig cfg;
+  cfg.lane_count = 12;
+  engine.set_preview_config(cfg);
+  MusicTiming timing;
+  timing.bpm = 60.0;
+  timing.ticks_per_quarter = 480;
+  engine.document().set_timing(timing);
+
+  NotationNote split;
+  split.start_tick = 4800;   // 10s
+  split.end_tick = 5280;     // 11s
+  split.lane = 0;
+  split.width = 12;
+  split.note_type = NoteType::Normal;
+  split.gimmick_type = GimmickType::Split3;
+  split.scratch_length = 10392;
+  engine.add_note(split);
+
+  const int64_t start_ms = tick_to_milliseconds(4800, timing);
+  const int64_t end_ms = tick_to_milliseconds(5280, timing);
+
+  engine.seek(start_ms + 100);
+  engine.rebuild_snapshot();
+  CHECK_EQ(static_cast<int32_t>(engine.snapshot().split_borders.size()), 1);
+  CHECK_EQ(engine.snapshot().split_borders[0].start_ms, start_ms);
+  CHECK_EQ(engine.snapshot().split_borders[0].end_ms, end_ms);
+
+  // The pooled instance is gone at end+1000, but BG_LaneBorder is still inside
+  // its [end+1s, end+2s] restore window.
+  engine.seek(end_ms + 1500);
+  engine.rebuild_snapshot();
+  CHECK_EQ(static_cast<int32_t>(engine.snapshot().split_lanes.size()), 0);
+  CHECK_EQ(static_cast<int32_t>(engine.snapshot().split_borders.size()), 1);
+
+  engine.seek(end_ms + 2500);
+  engine.rebuild_snapshot();
+  CHECK_EQ(static_cast<int32_t>(engine.snapshot().split_borders.size()), 0);
 }
 
 void test_split_color_slot_mirrors_linehight_z180() {
@@ -11167,6 +11244,8 @@ int main() {
   test_official_split_fade_in_visible_hits_screen_before_clip_end();
   test_official_split_fade_in_scale_is_playfield_coverage();
   test_official_split_fade_out_is_0_3s_smoothstep_from_expire();
+  test_official_split_lane_border_alpha_follows_bc69eb89_lane_group();
+  test_split_border_spans_outlive_pooled_instance();
   test_split_color_slot_mirrors_linehight_z180();
   test_hold_start_visible_with_zero_end_tick();
   test_load_legacy_v1_wdschart();

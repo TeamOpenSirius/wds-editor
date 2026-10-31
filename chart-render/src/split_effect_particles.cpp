@@ -1093,6 +1093,7 @@ void mark_primary_fills(FrameScratch& fs, size_t begin, size_t end, int cap) {
         Candidate c;
         c.priority = t.priority;
         c.line_index = t.line_index;
+        c.instance_start_ms = t.start_ms;
         c.layer = t.layer;
         c.task_i = static_cast<uint32_t>(ti);
         c.job_i = j;
@@ -1112,6 +1113,7 @@ void mark_primary_fills(FrameScratch& fs, size_t begin, size_t end, int cap) {
         Candidate c;
         c.priority = t.priority;
         c.line_index = t.line_index;
+        c.instance_start_ms = t.start_ms;
         c.layer = t.layer;
         c.task_i = static_cast<uint32_t>(ti);
         c.job_i = static_cast<uint32_t>(i);
@@ -1646,6 +1648,7 @@ int assemble_split(FrameScratch& fs, SplitPrep& prep, SplitEffectLiveParticle* o
         Candidate c;
         c.priority = t.priority;
         c.line_index = t.line_index;
+        c.instance_start_ms = t.start_ms;
         c.layer = t.layer;
         c.task_i = static_cast<uint32_t>(ti);
         c.job_i = static_cast<uint32_t>(i);

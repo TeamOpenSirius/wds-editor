@@ -565,12 +565,26 @@ bool StageGeometry::split_particle_oriented_world_corners(
   }
   const float width = std::max(size_unity, 1e-4f);
   const float height = width * std::max(height_scale, 1e-4f);
+  // World (1) / Local (2) billboards: Unity's 3D start rotation about X / Y
+  // runs opposite to this helper's Euler in LaneGroup axes. live dump
+  // flame-axis-v1 (2026-11-01, effect 11710, Unity 2022.3 Play + BakeMesh
+  // firstVerts/firstUv): the sprite-up direction (increasing UV V, i.e. toward
+  // the tongue of Split_10160_0) measured in Main is -z for the 12
+  // renderAlignment=Local, startRotationX=90deg systems, and +y for the
+  // tilt-0 Local systems. Rotating +90deg here instead produced +z, so the
+  // flame quads drew mirrored (tongue toward the judge end). View (0) keeps
+  // its own sign: 1691 official systems were calibrated through the camera
+  // basis and the dump rows for ViewAligned systems are unchanged.
+  // Not 2022.3 wording; the numbers above are the dump output.
+  const bool world_axes = render_alignment == 1 || render_alignment == 2;
+  const float eff_tilt_x = world_axes ? -tilt_x : tilt_x;
+  const float eff_tilt_y = world_axes ? -tilt_y : tilt_y;
   const float cr = std::cos(roll);
   const float sr = std::sin(roll);
-  const float cxr = std::cos(tilt_x);
-  const float sxr = std::sin(tilt_x);
-  const float cyr = std::cos(tilt_y);
-  const float syr = std::sin(tilt_y);
+  const float cxr = std::cos(eff_tilt_x);
+  const float sxr = std::sin(eff_tilt_x);
+  const float cyr = std::cos(eff_tilt_y);
+  const float syr = std::sin(eff_tilt_y);
   auto rotate_local = [&](float lx, float ly, float lz, float& ox, float& oy, float& oz) {
     float x = lx * cr - ly * sr;
     float y = lx * sr + ly * cr;
@@ -593,7 +607,6 @@ bool StageGeometry::split_particle_oriented_world_corners(
   const float hh = height * 0.5f;
   const float lx[4] = {-hw, hw, hw, -hw};
   const float ly[4] = {-hh, -hh, hh, hh};
-  const bool world_axes = render_alignment == 1 || render_alignment == 2;
   const float tilt =
       wds::chart_editor::official_deg_to_rad(wds::chart_editor::kOfficialLaneTiltDeg);
   const float cam_up_y = std::cos(tilt);
