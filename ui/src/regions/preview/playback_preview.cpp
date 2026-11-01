@@ -1632,6 +1632,135 @@ void PlaybackPreviewView::sync_hit_sfx(const wds::chart_editor::PreviewSnapshot&
   update_hit_sfx(snapshot);
 }
 
+namespace {
+
+// A thin, long triangle is what a "stray line" looks like in the final draw
+// list: two vertices far apart, the third almost on that edge. Scanning every
+// batch catches geometry from any draw path (particles, lane plates, hits),
+// including the frames where the split list is already empty.
+struct BatchSliverStats {
+  int count = 0;
+  size_t tris = 0;
+  float len = 0.0f;
+  float width = 1.0f;
+  // Thinnest long triangle seen even when it was not classified as a sliver,
+  // so a clean log still proves the detector is looking at real geometry.
+  float min_width = 1.0f;
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float bx = 0.0f;
+  float by = 0.0f;
+  wds::renderer::TextureId tex = wds::renderer::kInvalidTextureId;
+};
+
+void scan_batch_slivers(const wds::renderer::DrawBatch& batch, BatchSliverStats& out) {
+  using wds::renderer::DrawVertex;
+  const auto edge_len = [](const DrawVertex& p, const DrawVertex& q, float& dx, float& dy) {
+    dx = q.x - p.x;
+    dy = q.y - p.y;
+    return std::sqrt(dx * dx + dy * dy);
+  };
+  for (const auto& bucket : batch.buckets) {
+    const auto& verts = bucket.vertices;
+    const auto& indices = bucket.indices;
+    if (verts.empty()) {
+      continue;
+    }
+    const size_t tri_n = indices.empty() ? verts.size() / 3u : indices.size() / 3u;
+    for (size_t t = 0; t < tri_n; ++t) {
+      DrawVertex a;
+      DrawVertex b;
+      DrawVertex c;
+      if (indices.empty()) {
+        a = verts[t * 3u + 0u];
+        b = verts[t * 3u + 1u];
+        c = verts[t * 3u + 2u];
+      } else {
+        const size_t ia = indices[t * 3u + 0u];
+        const size_t ib = indices[t * 3u + 1u];
+        const size_t ic = indices[t * 3u + 2u];
+        if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size()) {
+          continue;
+        }
+        a = verts[ia];
+        b = verts[ib];
+        c = verts[ic];
+      }
+      ++out.tris;
+      float dx0 = 0.0f;
+      float dy0 = 0.0f;
+      float dx1 = 0.0f;
+      float dy1 = 0.0f;
+      float dx2 = 0.0f;
+      float dy2 = 0.0f;
+      float l0 = edge_len(a, b, dx0, dy0);
+      float l1 = edge_len(b, c, dx1, dy1);
+      float l2 = edge_len(c, a, dx2, dy2);
+      float longest = l0;
+      float ex = dx0;
+      float ey = dy0;
+      if (l1 > longest) {
+        longest = l1;
+        ex = dx1;
+        ey = dy1;
+      }
+      if (l2 > longest) {
+        longest = l2;
+        ex = dx2;
+        ey = dy2;
+      }
+      if (longest < 0.30f) {
+        continue;
+      }
+      const float cross = std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+      const float width = cross / longest;  // parallelogram height, stage half-height = 1
+      out.min_width = std::min(out.min_width, width);
+      if (width >= 0.012f) {
+        continue;
+      }
+      ++out.count;
+      if (longest > out.len) {
+        out.len = longest;
+        out.width = width;
+        if (longest == l0) {
+          out.ax = a.x;
+          out.ay = a.y;
+          out.bx = b.x;
+          out.by = b.y;
+        } else if (longest == l1) {
+          out.ax = b.x;
+          out.ay = b.y;
+          out.bx = c.x;
+          out.by = c.y;
+        } else {
+          out.ax = c.x;
+          out.ay = c.y;
+          out.bx = a.x;
+          out.by = a.y;
+        }
+        out.tex = bucket.texture;
+      }
+    }
+  }
+}
+
+void batch_extent(const wds::renderer::DrawBatch& batch, float& max_x, float& max_y) {
+  for (const auto& bucket : batch.buckets) {
+    for (const auto& vert : bucket.vertices) {
+      const float ax = std::abs(vert.x);
+      const float ay = std::abs(vert.y);
+      if (ax > max_x) {
+        max_x = ax;
+      }
+      if (ay > max_y) {
+        max_y = ay;
+      }
+    }
+  }
+}
+
+}  // namespace
+
 void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatch* ui_overlay,
                                  TextureId ui_solid_texture, const DrawBatch* modal_overlay,
                                  const DrawBatch* modal_chrome, int64_t visual_lead_us,
@@ -1908,6 +2037,66 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
                                            &textures_);
   }
   persist_split_pause_vert_memo();
+  {
+    // Every batch that reaches the GPU is scanned for thin, long triangles: the
+    // reported artifact is a fan of stray lines, and it can outlive the split
+    // list (empty split frames used to log nothing at all).
+    static std::chrono::steady_clock::time_point next_geom{};
+    const auto geom_now = std::chrono::steady_clock::now();
+    if (geom_now >= next_geom) {
+      next_geom = geom_now + std::chrono::milliseconds(500);
+      const bool geom_playing = snapshot.playback_state == PreviewPlaybackState::Playing;
+      const struct {
+        const char* name;
+        const wds::renderer::DrawBatch* batch;
+      } refs[] = {
+          {"bg", &batch_},         {"notes", &notes_batch_},      {"glow", &glow_batch_},
+          {"lanes", &split_lanes_glow_}, {"split", &split_late_batch_},
+          {"add", &additive_batch_}, {"hud", &hud_batch_},
+      };
+      float geom_min_width = 1.0f;
+      for (const auto& ref : refs) {
+        BatchSliverStats slivers;
+        scan_batch_slivers(*ref.batch, slivers);
+        geom_min_width = std::min(geom_min_width, slivers.min_width);
+        if (slivers.count <= 0) {
+          continue;
+        }
+        wds::common::diag::emit(
+            "geom sliver batch=%s tex=%u tris=%zu n=%d len=%.3f width=%.4f a=(%.3f,%.3f) "
+            "b=(%.3f,%.3f) splits=%zu playing=%d",
+            ref.name, static_cast<unsigned>(slivers.tex), slivers.tris, slivers.count,
+            slivers.len, slivers.width, slivers.ax, slivers.ay, slivers.bx, slivers.by,
+            snapshot.split_lanes.size(), geom_playing ? 1 : 0);
+      }
+      {
+        float lanes_x = 0.0f;
+        float lanes_y = 0.0f;
+        float split_x = 0.0f;
+        float split_y = 0.0f;
+        float notes_x = 0.0f;
+        float notes_y = 0.0f;
+        batch_extent(split_lanes_glow_, lanes_x, lanes_y);
+        batch_extent(split_late_batch_, split_x, split_y);
+        batch_extent(notes_batch_, notes_x, notes_y);
+        wds::common::diag::emit_throttled(
+            "geom.extent", 1000,
+            "geom extent splits=%zu playing=%d lanes=(%.2f,%.2f) split=(%.2f,%.2f) "
+            "notes=(%.2f,%.2f)",
+            snapshot.split_lanes.size(), geom_playing ? 1 : 0, lanes_x, lanes_y, split_x,
+            split_y, notes_x, notes_y);
+      }
+      wds::common::diag::emit_throttled(
+          "geom.counts", 1000,
+          "geom counts splits=%zu playing=%d min_w=%.4f bg=%zu notes=%zu glow=%zu lanes=%zu "
+          "split=%zu add=%zu hud=%zu",
+          snapshot.split_lanes.size(), geom_playing ? 1 : 0, geom_min_width,
+          batch_.vertex_count(),
+          notes_batch_.vertex_count(), glow_batch_.vertex_count(),
+          split_lanes_glow_.vertex_count(), split_late_batch_.vertex_count(),
+          additive_batch_.vertex_count(), hud_batch_.vertex_count());
+    }
+  }
   if (split_emit_in_vb_) {
     for (size_t i = 0; i < split_emit_direct_n_ && i < split_emit_parts_.size(); ++i) {
       split_emit_parts_[i].notes.unbind_external();
@@ -2571,6 +2760,14 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     }
   }
   if (snapshot.split_lanes.empty()) {
+    // The stray lines appear right after the last split dies, so keep a slow
+    // heartbeat for the frames where there is nothing split-related to log.
+    const auto& no_split_stage = geometry_.content();
+    wds::common::diag::emit_throttled(
+        "split.scene.empty", 2000,
+        "split scene (no splits) rev=%llu t=%.3fs playing=%d stage=%.1fx%.1f content_px=%d",
+        static_cast<unsigned long long>(snapshot.revision), now, playing ? 1 : 0,
+        no_split_stage.w, no_split_stage.h, geometry_.content_height_px());
     split_pause_collect_valid_ = false;
     split_pause_verts_valid_ = false;
     split_pause_verts_pending_ = false;
