@@ -4,6 +4,7 @@
 #include "wds/renderer/upload_result.hpp"
 
 #include <wds/common/crash_handler.hpp>
+#include <wds/common/diag_log.hpp>
 #include <wds/common/perf_stages.hpp>
 #include <wds/common/utf8_path.hpp>
 
@@ -4216,6 +4217,16 @@ void log_physical_devices(VkInstance instance, VkSurfaceKHR surface, VkPhysicalD
             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
             VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
             VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion));
+    // Field reports: the GPU/driver is the only variable left when one machine
+    // paints stray lines and another does not.
+    wds::common::diag::emit("gpu[%u] '%s' type=%s vendor=0x%x id=0x%x api=%u.%u.%u "
+                            "drv=%u.%u.%u",
+                            i, name, physical_device_type_name(props.deviceType), props.vendorID,
+                            props.deviceID, VK_VERSION_MAJOR(props.apiVersion),
+                            VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion),
+                            VK_VERSION_MAJOR(props.driverVersion),
+                            VK_VERSION_MINOR(props.driverVersion),
+                            VK_VERSION_PATCH(props.driverVersion));
 
     VkPhysicalDeviceMemoryProperties mem{};
     vkGetPhysicalDeviceMemoryProperties(devices[i], &mem);

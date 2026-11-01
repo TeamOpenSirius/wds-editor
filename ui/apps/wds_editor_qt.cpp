@@ -1506,6 +1506,11 @@ void log_qt_vulkan_instance(const QVulkanInstance& vk_instance) {
   WDS_LOG("QVulkanInstance api=%d.%d.%d supported=%d.%d.%d ok=1\n", api.majorVersion(),
           api.minorVersion(), api.microVersion(), supported.majorVersion(),
           supported.minorVersion(), supported.microVersion());
+  wds::common::diag::emit("vulkan api=%d.%d.%d supported=%d.%d.%d extensions=%d layers=%d",
+                          api.majorVersion(), api.minorVersion(), api.microVersion(),
+                          supported.majorVersion(), supported.minorVersion(),
+                          supported.microVersion(), static_cast<int>(vk_instance.extensions().size()),
+                          static_cast<int>(vk_instance.layers().size()));
   const auto exts = vk_instance.extensions();
   WDS_LOG("QVulkanInstance extensions=%d\n", static_cast<int>(exts.size()));
   for (const QByteArray& ext : exts) {
