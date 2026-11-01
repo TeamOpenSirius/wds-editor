@@ -2895,6 +2895,16 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     int fallback_trail = 0;
     int real_trail = 0;
     int bodies = 0;
+    // Ribbon chains: the reported ribbons look like separate little segments,
+    // so record how many particles each chain joins and how far apart the
+    // joined stations are.
+    int chains = 0;
+    int chain_skipped = 0;
+    int chain_particles = 0;
+    int chain_max = 0;
+    int chain_gap_big = 0;
+    int chain_vertex_dup = 0;
+    int chain_tail_gap = 0;
   } diag_frame;
   const float diag_off_limit =
       std::max(std::max(content_bounds.w, content_bounds.h), 1.0f) * 16.0f;
@@ -3993,6 +4003,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     std::sort(idxs.begin(), idxs.end(),
               [&](int a, int b) { return pool[a].trail_vertex < pool[b].trail_vertex; });
     if (idxs.size() < 2) {
+      ++diag_frame.chains;
+      ++diag_frame.chain_skipped;
       return;
     }
     const auto& marker = pool[idxs.back()];
@@ -4029,6 +4041,26 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       ts.vg[static_cast<size_t>(k)] = v.trail_g * trail_k;
       ts.vb[static_cast<size_t>(k)] = v.trail_b * trail_k;
       ts.verts[static_cast<size_t>(k)] = v.trail_vertex;
+    }
+    ++diag_frame.chains;
+    diag_frame.chain_particles += cn;
+    diag_frame.chain_max = std::max(diag_frame.chain_max, cn);
+    for (int k = 1; k < cn; ++k) {
+      const size_t a = static_cast<size_t>(k - 1);
+      const size_t b = static_cast<size_t>(k);
+      const float dx = ts.xs[b] - ts.xs[a];
+      const float dy = ts.ys[b] - ts.ys[a];
+      const float dz = ts.zs[b] - ts.zs[a];
+      const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (gap > 0.5f) {
+        ++diag_frame.chain_gap_big;
+      }
+      if (gap > 2.0f) {
+        ++diag_frame.chain_tail_gap;
+      }
+      if (ts.verts[b] <= ts.verts[a]) {
+        ++diag_frame.chain_vertex_dup;
+      }
     }
     fill_ribbon_stretch_along(ts.v_along.data(), ts.xs.data(), ts.ys.data(), ts.zs.data(), cn);
     draw_clipped_trail_strip(dest, *strip_tex, ts.xs.data(), ts.ys.data(), ts.zs.data(),
@@ -4681,7 +4713,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       wds::common::diag::emit(
           "split frame t=%.3fs rev=%llu playing=%d alive=%d drawn=%d verts=%u(+%lld) "
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
-          "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d max_off=%.1f "
+          "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
+          "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
+          "chain_tail_gap=%d max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
           now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
@@ -4689,7 +4723,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           static_cast<long long>(vert_delta), trail_particles, max_trail_points, nonfinite,
           diag_frame.anomalies, diag_frame.bodies, diag_frame.missing_sprite,
           diag_frame.fallback_trail, diag_frame.real_trail, trail_span_max, trail_span_big,
-          diag_frame.max_off, diag_frame.worst_px,
+          diag_frame.chains, diag_frame.chain_skipped, diag_frame.chain_max,
+          diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
+          diag_frame.chain_tail_gap, diag_frame.max_off, diag_frame.worst_px,
           diag_frame.worst_py,
           diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
           content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
