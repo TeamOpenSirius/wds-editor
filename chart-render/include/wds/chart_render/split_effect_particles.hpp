@@ -56,12 +56,25 @@ struct SplitEffectParentMotion {
 
 // Preview draw-pool hop (not Unity Main.maxParticles). Unity 2022.3
 // maxParticles is "in the system at once"; emit/evaluate apply that as a
-// concurrent-alive cap (drop a birth that would exceed it, do not defer).
-// 16384 sits just above the official-chart peak ~15500.
-// apply_over_cap: first-come between splits, per-line share, then
-// birth-ordered selection (ribbon = one contiguous newest/head run).
+// concurrent-alive cap (drop a birth that would exceed it, do not defer), so a
+// single system never exceeds its own cap.
+// 32768 sits above the worst overlap seen so far. 16384 was sized from the
+// official 318 single-split corpus (peak ~15500), but two overlapping Full
+// splits blow through it: 3-lane + 6-lane 10630 at 120 BPM (one beat apart,
+// one beat each) holds ~16400 alive at the overlap, the cap binds, and the
+// per-frame over-cap trim cuts ribbon stations that come back the moment the
+// budget frees - visibly a strip regrowing from the far end (measured: particle
+// layer energy 1.65 s -> 1.70 s rose 1895.8 -> 1908.5 under 16384 and decayed
+// monotonically 2741 -> 1908 under 65536; both builds agree from 1.70 s on).
+// Memory is proportional to the written high-water mark, not to this constant
+// (536 B/particle, so a frame at the old peak costs ~8.4 MB either way).
+// apply_over_cap: first-come between splits, per-line share, then birth-ordered
+// selection (ribbon = one contiguous newest/head run). The trim is recomputed
+// every frame, so any chart that still binds the cap can restore stations when
+// budget frees; four overlapping 10630 instances (bench scenario) still sit at
+// the cap. Latching the cut would be the follow-up if that ever matters.
 // Note hit VFX (BomSquare / BomFlare) are a separate uncapped list.
-inline constexpr int kSplitEffectParticlePool = 16384;
+inline constexpr int kSplitEffectParticlePool = 32768;
 // Preview seed window in now_t seconds (t=0 is fadeIn / OnFadeIn Play).
 // Engineering pad (hop, not 2022.3), same upper bound as
 // kSplitEffectFadeinCollectCapSec. Official catalog looping is 0; conservative
