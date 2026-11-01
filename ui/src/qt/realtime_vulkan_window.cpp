@@ -1,4 +1,6 @@
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
+
+#include "wds/common/diag_log.hpp"
 #include "wds/ui/preview_present_policy.hpp"
 #include "wds/ui/qt/qt_input_adapter.hpp"
 
@@ -52,6 +54,15 @@ RealtimeVulkanWindow::RealtimeVulkanWindow(QVulkanInstance* instance, QWindow* p
     force_frame_ = true;
     last_frame_ = std::chrono::steady_clock::now();
     pending_elapsed_us_ = 0;
+    // Field diagnostics: the realtime preview surface size the split-effect
+    // camera aspect is derived from (one report showed the artifact only on
+    // one machine's layout).
+    const qreal settle_scale = devicePixelRatio();
+    wds::common::diag::emit(
+        "preview surface settled logical=%dx%d fb=%dx%d dpr=%.3f exposed=%d screen=%s",
+        width(), height(), std::max(1, qRound(width() * settle_scale)),
+        std::max(1, qRound(height() * settle_scale)), settle_scale, isExposed() ? 1 : 0,
+        screen() != nullptr ? screen()->name().toUtf8().constData() : "?");
     schedule_frame();
   });
 }
@@ -229,6 +240,8 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       WDS_LOG("preview first frame resize=%d suspend=%d exposed=%d logical=%dx%d fb=%dx%d\n",
               resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0, isExposed() ? 1 : 0, width(),
               height(), fb_w, fb_h);
+      wds::common::diag::emit("preview surface first frame logical=%dx%d fb=%dx%d dpr=%.3f",
+                              width(), height(), fb_w, fb_h, scale);
     }
     if (frame_callback_) {
       frame_callback_(std::clamp(static_cast<float>(pending_elapsed_us_) / 1000000.0f, 0.0f, 0.08f),

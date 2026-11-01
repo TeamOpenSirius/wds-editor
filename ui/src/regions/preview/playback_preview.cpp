@@ -13,6 +13,7 @@
 #include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <split_collect_pool.hpp>
+#include <wds/common/diag_log.hpp>
 #include <wds/common/page_touch.hpp>
 #include <wds/common/perf_stages.hpp>
 #include <wds/common/minflt_stage.hpp>
@@ -2659,6 +2660,60 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const float cam_group_z = wds::chart_editor::kOfficialLaneGroupZ;
   const float near_clip = wds::chart_editor::kOfficialCameraNearClip;
   size_t dest_reserve_chunk = 0;
+  // --- field diagnostics (always on; <crash dir>/diag-preview-*.log) -------
+  // A stray-line report (3-lane + 6-lane 10630 overlap, far end of the lanes)
+  // only reproduces on some machines. Every projected vertex is checked here:
+  // degenerate / far-out projections are logged with the split-effect particle
+  // that produced them, and a throttled digest records the surface size, the
+  // aspect the particle camera is built from and the pool state. wds::common
+  // ::diag is a no-op when WDS_DIAG=0.
+  struct SplitDiagCtx {
+    int effect_id = 0;
+    int catalog = 0;
+    int particle = -1;
+    int trail = -1;
+  } diag_ctx;
+  struct SplitDiagFrame {
+    int anomalies = 0;
+    int logged = 0;
+    float max_off = 0.0f;
+    float worst_px = 0.0f;
+    float worst_py = 0.0f;
+    float worst_x = 0.0f;
+    float worst_y = 0.0f;
+    float worst_z = 0.0f;
+    float worst_view_z = 0.0f;
+  } diag_frame;
+  const float diag_off_limit =
+      std::max(std::max(content_bounds.w, content_bounds.h), 1.0f) * 16.0f;
+  auto diag_note_projection = [&](float x, float y, float z, float view_z, float px, float py) {
+    const float off = std::max(std::abs(px - proj_cx), std::abs(py - proj_cy));
+    if (off > diag_frame.max_off) {
+      diag_frame.max_off = off;
+      diag_frame.worst_px = px;
+      diag_frame.worst_py = py;
+      diag_frame.worst_x = x;
+      diag_frame.worst_y = y;
+      diag_frame.worst_z = z;
+      diag_frame.worst_view_z = view_z;
+    }
+    const bool bad = !std::isfinite(px) || !std::isfinite(py) || !std::isfinite(view_z) ||
+                     off > diag_off_limit;
+    if (!bad) {
+      return;
+    }
+    ++diag_frame.anomalies;
+    if (diag_frame.logged >= 6) {
+      return;
+    }
+    ++diag_frame.logged;
+    wds::common::diag::emit(
+        "split vertex out of stage: px=%.1f py=%.1f off=%.1f world=(%.3f,%.3f,%.3f) "
+        "view_z=%.3f near=%.3f stage=%.0fx%.0f aspect=%.4f effect=%d catalog=%d particle=%d "
+        "trail=%d",
+        px, py, off, x, y, z, view_z, near_clip, content_bounds.w, content_bounds.h, view_aspect,
+        diag_ctx.effect_id, diag_ctx.catalog, diag_ctx.particle, diag_ctx.trail);
+  };
   auto camera_z_fast = [&](float y, float z) { return cam_group_z + y * tilt_s + z * tilt_c; };
   auto project_main_fast = [&](float x, float y, float z) {
     const float wy = y * tilt_c - z * tilt_s;
@@ -2666,7 +2721,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     const float zz = std::max(wz, 1e-4f);
     const float ndc_x = (x / zz) * focal_over_aspect;
     const float ndc_y = (wy / zz) * focal;
-    return wds::renderer::Vec2{proj_cx + ndc_x * proj_hx, proj_cy + ndc_y * proj_hy};
+    const wds::renderer::Vec2 projected{proj_cx + ndc_x * proj_hx, proj_cy + ndc_y * proj_hy};
+    diag_note_projection(x, y, z, wz, projected.x, projected.y);
+    return projected;
   };
   auto poly_in_front_of_near = [&](const float* qy, const float* qz, int n) {
     for (int i = 0; i < n; ++i) {
@@ -2924,6 +2981,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
             }
           }
           for (int k = 0; k + 1 < m; ++k) {
+            diag_ctx.trail = k;
             const int i = i0 + k;
             if (world_w[i] < 1e-5f && world_w[i + 1] < 1e-5f) {
               continue;
@@ -3314,6 +3372,81 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
 #endif  // WDS_DIAG_ENABLED
   }
   WDS_PERF_COUNT("preview.split_memo.collect", collect_memo ? 1 : 0);
+  {
+    // Scene context once a second plus one line per new split instance: this is
+    // the "3-lane + 6-lane 10630 overlap" that the stray-line report sits in,
+    // and the aspect comes from the preview surface, so a report from a
+    // different window/DPR is comparable line by line.
+    int diag_panel_w = 0;
+    int diag_panel_h = 0;
+    {
+      int px = 0;
+      int py = 0;
+      if (!geometry_.panel_framebuffer_rect(px, py, diag_panel_w, diag_panel_h)) {
+        diag_panel_w = 0;
+        diag_panel_h = 0;
+      }
+    }
+    wds::common::diag::emit_throttled(
+        "split.scene", 1000,
+        "split scene rev=%llu t=%.3fs playing=%d quality=%d stage=%.1fx%.1f content_px=%d "
+        "panel_px=%dx%d aspect=%.4f zoom=%.4f focal=%.3f near=%.3f splits=%zu alive=%d",
+        static_cast<unsigned long long>(snapshot.revision), now, playing ? 1 : 0, quality,
+        content_bounds.w, content_bounds.h, geometry_.content_height_px(), diag_panel_w,
+        diag_panel_h, view_aspect, view_zoom, focal, near_clip, snapshot.split_lanes.size(),
+        collected.total);
+    // Identity only: split_percent_* animates every frame, so hashing the whole
+    // instance would reprint the list on every frame.
+    uint64_t diag_splits_identity = 1469598103934665603ull;
+    const auto diag_mix = [](uint64_t h, uint64_t v) {
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      return h;
+    };
+    for (const auto& inst : snapshot.split_lanes) {
+      diag_splits_identity = diag_mix(diag_splits_identity,
+                                      static_cast<uint64_t>(inst.source_note_id));
+      diag_splits_identity = diag_mix(diag_splits_identity,
+                                      static_cast<uint64_t>(inst.start_ms));
+      diag_splits_identity = diag_mix(diag_splits_identity,
+                                      static_cast<uint64_t>(inst.end_ms));
+      diag_splits_identity = diag_mix(diag_splits_identity,
+                                      static_cast<uint64_t>(inst.split_count));
+      diag_splits_identity = diag_mix(diag_splits_identity,
+                                      static_cast<uint64_t>(inst.effective_lane_count));
+    }
+    static uint64_t logged_splits_identity = 0;
+    if (diag_splits_identity != logged_splits_identity) {
+      logged_splits_identity = diag_splits_identity;
+      for (size_t di = 0; di < snapshot.split_lanes.size(); ++di) {
+        const auto& inst = snapshot.split_lanes[di];
+        const int begin = di < collected.split_begin.size() ? collected.split_begin[di] : 0;
+        const int count = di < collected.split_count.size() ? collected.split_count[di] : 0;
+        int effect_ids[3] = {0, 0, 0};
+        int distinct = 0;
+        int particles = 0;
+        if (begin >= 0) {
+          const int end = std::min<int>(begin + count, static_cast<int>(collected.pool.size()));
+          for (int pi = begin; pi < end; ++pi) {
+            const int eid = collected.pool[static_cast<size_t>(pi)].effect_id;
+            if (eid == 0) continue;
+            ++particles;
+            bool seen = false;
+            for (int e = 0; e < distinct; ++e) seen = seen || effect_ids[e] == eid;
+            if (!seen && distinct < 3) effect_ids[distinct++] = eid;
+          }
+        }
+        wds::common::diag::emit(
+            "split instance i=%zu note=%d split_count=%d lane_type=%d scratch=%d start_ms=%lld "
+            "end_ms=%lld lanes=%d alpha=%.3f appear=(%.3f..%.3f) phase=%d particles=%d "
+            "effects=[%d,%d,%d]",
+            di, inst.source_note_id, inst.split_count, static_cast<int>(inst.split_lane_type),
+            inst.scratch_length, static_cast<long long>(inst.start_ms),
+            static_cast<long long>(inst.end_ms), inst.effective_lane_count,
+            inst.split_line_alpha, inst.split_percent_start, inst.split_percent_end,
+            inst.split_anim_phase, particles, effect_ids[0], effect_ids[1], effect_ids[2]);
+      }
+    }
+  }
   if (collected.total <= 0) {
     // Lines still on screen, no live particles: skip emit job walk / mapped-VB
     // / full-pool trail estimate. Collect already ran (births / dead latch).
@@ -3426,6 +3559,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   SplitEmitTargets emit_targets{&emit_notes, &emit_glow, &emit_late, &split_particles_drawn};
 
   auto emit_one = [&](const wds::chart_render::SplitEffectLiveParticle& p, SplitEmitTargets tg) {
+      diag_ctx.effect_id = p.effect_id;
+      diag_ctx.catalog = static_cast<int>(p.catalog_index);
+      diag_ctx.trail = -1;
       const bool unnamed = p.uv_name_index == wds::chart_render::kSplitEffectNoUvName;
       const bool cube = (p.flags & wds::chart_render::kSplitEffectFlagCubeMesh) != 0;
       const bool ring = (p.flags & wds::chart_render::kSplitEffectFlagRingMesh) != 0;
@@ -3852,6 +3988,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   auto run_emit_job = [&](const EmitJob& job, SplitEmitTargets tg) {
     if (job.kind == EmitJob::Particle) {
       if (job.index >= 0 && static_cast<size_t>(job.index) < pool.size()) {
+        diag_ctx.particle = job.index;
         emit_one(pool[static_cast<size_t>(job.index)], tg);
       }
       return;
@@ -3874,7 +4011,11 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
     WDS_PERF_COUNT("preview.verts.ribbon", 1);
     for_each_line_job(
-        particle_idxs, [&](int idx) { emit_one(pool[static_cast<size_t>(idx)], tg); },
+        particle_idxs,
+        [&](int idx) {
+          diag_ctx.particle = idx;
+          emit_one(pool[static_cast<size_t>(idx)], tg);
+        },
         [&](std::vector<int>& idxs) { process_chain(idxs, tg); });
   };
 
@@ -4254,6 +4395,68 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const int64_t vert_delta =
       static_cast<int64_t>(split_verts1) - static_cast<int64_t>(split_verts0);
   WDS_PERF_COUNT("preview.verts.count", vert_delta);
+  {
+    // Frame digest every 500 ms: pool composition, what was drawn and how far
+    // the furthest projected vertex landed. A clean picture stays within a
+    // few stage widths; the reported stray lines push max_off far beyond it.
+    static std::chrono::steady_clock::time_point diag_next_digest{};
+    const auto diag_now = std::chrono::steady_clock::now();
+    if (diag_now >= diag_next_digest) {
+      diag_next_digest = diag_now + std::chrono::milliseconds(500);
+      int trail_particles = 0;
+      int max_trail_points = 0;
+      int nonfinite = 0;
+      int effect_ids[4] = {0, 0, 0, 0};
+      int effect_counts[4] = {0, 0, 0, 0};
+      int distinct_effects = 0;
+      // collected.pool is reused, so only [0, total) holds this frame's
+      // particles; the tail is last frame's high-water garbage.
+      const size_t pool_n =
+          std::min<size_t>(static_cast<size_t>(std::max(collected.total, 0)),
+                           collected.pool.size());
+      for (size_t pool_i = 0; pool_i < pool_n; ++pool_i) {
+        const auto& lp = collected.pool[pool_i];
+        const bool trail = lp.trail_points >= 2;
+        if (trail) {
+          ++trail_particles;
+          max_trail_points = std::max<int>(max_trail_points, lp.trail_points);
+          if (!std::isfinite(lp.trail_x[0]) || !std::isfinite(lp.trail_y[0]) ||
+              !std::isfinite(lp.trail_z[0]) ||
+              !std::isfinite(lp.trail_x[static_cast<size_t>(lp.trail_points) - 1u]) ||
+              !std::isfinite(lp.trail_y[static_cast<size_t>(lp.trail_points) - 1u]) ||
+              !std::isfinite(lp.trail_z[static_cast<size_t>(lp.trail_points) - 1u])) {
+            ++nonfinite;
+          }
+        }
+        if (!std::isfinite(lp.world_x) || !std::isfinite(lp.main_y) || !std::isfinite(lp.z) ||
+            !std::isfinite(lp.size)) {
+          ++nonfinite;
+        }
+        int slot = -1;
+        for (int e = 0; e < distinct_effects; ++e) {
+          if (effect_ids[e] == lp.effect_id) slot = e;
+        }
+        if (slot < 0 && distinct_effects < 4) {
+          slot = distinct_effects++;
+          effect_ids[slot] = lp.effect_id;
+        }
+        if (slot >= 0) ++effect_counts[slot];
+      }
+      wds::common::diag::emit(
+          "split frame t=%.3fs rev=%llu playing=%d alive=%d drawn=%d verts=%u(+%lld) "
+          "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d max_off=%.1f "
+          "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
+          "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
+          now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
+          collected.total, split_particles_drawn, split_verts1,
+          static_cast<long long>(vert_delta), trail_particles, max_trail_points, nonfinite,
+          diag_frame.anomalies, diag_frame.max_off, diag_frame.worst_px, diag_frame.worst_py,
+          diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
+          content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
+          effect_counts[0], effect_ids[1],
+          effect_counts[1], effect_ids[2], effect_counts[2], effect_ids[3], effect_counts[3]);
+    }
+  }
   const auto cache_after = wds::chart_render::split_effect_eval_cache_stats();
   if (!playing) {
     split_pause_collect_valid_ = true;

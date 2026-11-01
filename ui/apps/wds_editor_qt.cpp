@@ -19,6 +19,7 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/types.hpp>
 #include "wds/common/crash_handler.hpp"
+#include "wds/common/diag_log.hpp"
 #include "wds/common/log.hpp"
 #include "wds/common/minflt_stage.hpp"
 #include "wds/common/perf_stages.hpp"
@@ -1723,6 +1724,11 @@ bool preview_atlases_ready(const wds::ui::ChartPreviewPanel& preview) {
 
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
+  // Field diagnostics: always-on text log next to the crash reports. The
+  // split-effect preview writes resolution / particle geometry anomalies
+  // here so a report from a machine we cannot reproduce on is still usable.
+  wds::common::diag::open("preview");
+  wds::common::diag::emit_build_banner();
   wds::common::log_open_debug_session();
   g_prev_qt_handler = qInstallMessageHandler(&wds_qt_message_handler);
   prepare_bundled_qt_plugins(argv[0]);
@@ -1759,6 +1765,23 @@ int main(int argc, char** argv) {
       QSettings("WDS", "WDS Editor").value("appearance/theme").toString();
   wds::ui::apply_wds_theme(app, theme_dir, theme_id);
   log_qt_environment(theme_id);
+  {
+    // Resolution context for the field report: a preview artifact that only
+    // shows up on one machine is usually tied to the screen / DPR the realtime
+    // preview window is laid out at.
+    wds::common::diag::emit("app argv=%d theme=%s", argc,
+                            theme_id.isEmpty() ? "default" : theme_id.toUtf8().constData());
+    for (QScreen* screen : QGuiApplication::screens()) {
+      if (screen == nullptr) continue;
+      const QRect geo = screen->geometry();
+      const QRect avail = screen->availableGeometry();
+      wds::common::diag::emit(
+          "screen name=%s logical=%dx%d available=%dx%d dpr=%.3f dpi=%.1fx%.1f",
+          screen->name().toUtf8().constData(), geo.width(), geo.height(), avail.width(),
+          avail.height(), screen->devicePixelRatio(), screen->physicalDotsPerInchX(),
+          screen->physicalDotsPerInchY());
+    }
+  }
 
   auto deps = wds::ui::check_startup_dependencies(argv[0]);
   if (!deps.ok()) {
@@ -2830,6 +2853,7 @@ int main(int argc, char** argv) {
 #if WDS_DIAG_ENABLED
   frame_diag.close();
 #endif  // WDS_DIAG_ENABLED
+  wds::common::diag::emit("app exit rc=%d (clean)", rc);
   wds::common::mark_clean_exit();
   return rc;
 }
