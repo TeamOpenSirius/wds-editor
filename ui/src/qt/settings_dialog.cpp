@@ -716,6 +716,12 @@ void SettingsPanel::load_from_config() {
 }
 
 bool SettingsPanel::capture_into_config() {
+  // Start from the live UI state instead of this panel's construction-time
+  // snapshot: other surfaces own settings this form does not expose (toolbar
+  // time range, extended-mode lane range, playback volumes, ...). Editing one
+  // field here must not write their old values back — apply_ui_config_from_qt()
+  // persists whatever it is handed.
+  if (manager_ != nullptr) manager_->snapshot_ui_config_for_qt(cfg_);
   cfg_.sus_auto_convert = sus_auto_convert_->isChecked();
   if (extended_features_ != nullptr && extended_features_->isEnabled()) {
     cfg_.extended_features = extended_features_->isChecked();
