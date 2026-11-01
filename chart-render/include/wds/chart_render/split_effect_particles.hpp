@@ -54,27 +54,29 @@ struct SplitEffectParentMotion {
   float emitter_vz = 0.0f;
 };
 
-// Preview draw-pool hop (not Unity Main.maxParticles). Unity 2022.3
-// maxParticles is "in the system at once"; emit/evaluate apply that as a
-// concurrent-alive cap (drop a birth that would exceed it, do not defer), so a
-// single system never exceeds its own cap.
-// 32768 sits above the worst overlap seen so far. 16384 was sized from the
-// official 318 single-split corpus (peak ~15500), but two overlapping Full
-// splits blow through it: 3-lane + 6-lane 10630 at 120 BPM (one beat apart,
-// one beat each) holds ~16400 alive at the overlap, the cap binds, and the
-// per-frame over-cap trim cuts ribbon stations that come back the moment the
-// budget frees - visibly a strip regrowing from the far end (measured: particle
-// layer energy 1.65 s -> 1.70 s rose 1895.8 -> 1908.5 under 16384 and decayed
-// monotonically 2741 -> 1908 under 65536; both builds agree from 1.70 s on).
-// Memory is proportional to the written high-water mark, not to this constant
-// (536 B/particle, so a frame at the old peak costs ~8.4 MB either way).
-// apply_over_cap: first-come between splits, per-line share, then birth-ordered
-// selection (ribbon = one contiguous newest/head run). The trim is recomputed
-// every frame, so any chart that still binds the cap can restore stations when
-// budget frees; four overlapping 10630 instances (bench scenario) still sit at
-// the cap. Latching the cut would be the follow-up if that ever matters.
-// Note hit VFX (BomSquare / BomFlare) are a separate uncapped list.
-inline constexpr int kSplitEffectParticlePool = 32768;
+// Unity 2022.3 MainModule.maxParticles is the only particle cap the official
+// client has: "the maximum number of particles in the system at once", applied
+// per ParticleSystem, so overlapping split instances each get their own budget.
+// That semantic cap is catalog `max_particles` and is enforced by
+// apply_max_particles_alive_cap (births beyond it are dropped, not deferred).
+//
+// kSplitEffectParticlePool is NOT that cap. It is a memory safety ceiling for
+// the preview draw list: a frame that exceeds it is trimmed by
+// apply_over_cap (first-come between splits, per-line share, then birth-ordered
+// selection, ribbon = one contiguous newest/head run). It used to be 16384,
+// sized from the official 318 single-split corpus (peak ~15500), and two
+// overlapping Full splits blew through it: 3-lane + 6-lane 10630 one beat apart
+// at 120 BPM holds ~16400 alive, the trim cut ribbon stations, and the stations
+// came back the moment the older split died - visibly a strip regrowing from
+// the far end (particle-layer energy 1.65 s -> 1.70 s rose 1895.8 -> 1908.5
+// under 16384 and decayed monotonically under 65536).
+// The ceiling now sits far above realistic overlap so it never binds in normal
+// play and only guards pathological input; the pool is no longer pre-reserved
+// to the ceiling, it grows to the written high-water mark (536 B/particle), so
+// raising it costs nothing until a frame really needs the particles.
+inline constexpr int kSplitEffectParticlePool = 131072;
+// Per-frame starting reservation. The pool grows on demand up to the ceiling.
+inline constexpr int kSplitEffectPoolReserve = 16384;
 // Preview seed window in now_t seconds (t=0 is fadeIn / OnFadeIn Play).
 // Engineering pad (hop, not 2022.3), same upper bound as
 // kSplitEffectFadeinCollectCapSec. Official catalog looping is 0; conservative

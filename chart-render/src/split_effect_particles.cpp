@@ -2838,8 +2838,10 @@ void collect_split_effect_frame(
 #endif  // WDS_DIAG_ENABLED
   }
   const int cap = kSplitEffectParticlePool;
-  if (io.pool.capacity() < static_cast<size_t>(cap)) {
-    io.pool.reserve(static_cast<size_t>(cap));
+  // Grow to the written high-water mark instead of reserving the ceiling:
+  // the ceiling is a pathological-input guard, not a per-frame budget.
+  if (io.pool.capacity() < static_cast<size_t>(kSplitEffectPoolReserve)) {
+    io.pool.reserve(static_cast<size_t>(kSplitEffectPoolReserve));
   }
 #if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.after_pool");
