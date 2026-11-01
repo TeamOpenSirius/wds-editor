@@ -29,6 +29,7 @@ add_executable(wds_editor WIN32
   src/qt/flow_layout.cpp
   src/qt/spread_layout.cpp
   src/qt/wds_theme.cpp
+  src/qt/file_open_router.cpp
   src/qt/caption_check.cpp
   src/qt/fluent_icons.cpp
   src/qt/about_dialog.cpp

@@ -751,6 +751,8 @@ struct VulkanRenderer::Impl {
   // True while the surface reports 0×0 (minimize / fullscreen transition). Keep the
   // previous swapchain alive and skip acquire/present until a valid extent returns.
   bool swapchain_occluded = false;
+  // Counts successful swapchain (re)creations; see VulkanRenderer::swapchain_serial().
+  uint64_t swapchain_serial = 0;
   uint32_t last_presented_image = UINT32_MAX;
   bool last_present_ok = false;
 
@@ -2938,6 +2940,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   } else {
     WDS_LOG("bloom ready extent=%ux%u\n", swapchain_extent.width, swapchain_extent.height);
   }
+  ++swapchain_serial;
   for (auto fb : old_framebuffers) {
     if (fb) vkDestroyFramebuffer(device, fb, nullptr);
   }
@@ -8015,6 +8018,10 @@ bool VulkanRenderer::readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& ou
   out_w = static_cast<int>(width);
   out_h = static_cast<int>(height);
   return true;
+}
+
+std::uint64_t VulkanRenderer::swapchain_serial() const noexcept {
+  return impl_ != nullptr ? impl_->swapchain_serial : 0;
 }
 
 void VulkanRenderer::sync_reported_size() noexcept {

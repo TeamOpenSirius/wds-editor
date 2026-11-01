@@ -117,6 +117,18 @@ END
 
 `RESUME_CHART` / `RESUME_TICK` 记录上次正常退出时正在编辑的谱面与 tick 位置；再次打开工程会直接跳转回去。旧工程没有这两个条目时会进入第一张谱面的开头。
 
+### 双击打开工程
+
+安装编辑器后，`.wdsproject` 会注册为由 WDS Editor 打开的工程文件：双击工程会直接载入，跳过开屏选择界面，并把该工程移到「最近编辑」列表最前面。
+
+| 平台 | 注册方式 |
+| --- | --- |
+| Windows | MSI 写入 `.wdsproject` 的 ProgId 与 shell open 命令（`"%1"`）；卸载 MSI 时这些注册表值会一并删除。 |
+| macOS | `WDS Editor.app` 在 Info.plist 里声明 `CFBundleDocumentTypes` 与导出的 `com.wds.wdsproject` UTI。应用放进 `/Applications` 后由 LaunchServices 注册；删除应用即取消注册。 |
+| Linux（开发构建） | `scripts/install-linux-desktop.sh` 写入 freedesktop desktop entry 与 MIME 类型，并设为默认打开方式；`--uninstall` 移除。 |
+
+macOS 上编辑器已打开时再次双击工程（或「打开方式」），会在当前窗口载入，并先询问未保存的修改；Windows 与 Linux 会启动第二个实例，原实例状态保持不变。
+
 ### `.wdschart`
 
 `.wdschart` 是 WDS Editor 的原生无损制谱格式。

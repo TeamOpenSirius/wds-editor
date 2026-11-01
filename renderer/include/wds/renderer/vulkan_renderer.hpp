@@ -949,6 +949,11 @@ class VulkanRenderer {
 
   int framebuffer_width() const noexcept { return width_; }
   int framebuffer_height() const noexcept { return height_; }
+  // Bumped on every successful swapchain (re)creation. The first present into a
+  // freshly created swapchain can be dropped by the platform WSI (MoltenVK hands
+  // back VK_SUBOPTIMAL_KHR and shows nothing), so a caller that sees the serial
+  // move during a frame must draw one more frame to put the picture on screen.
+  std::uint64_t swapchain_serial() const noexcept;
   uint32_t physical_vendor_id() const noexcept { return device_vendor_id_; }
 
   // Last presented swapchain image → tightly packed RGBA8 (top-left origin).

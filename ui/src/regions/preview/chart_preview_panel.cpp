@@ -816,6 +816,9 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
 bool ChartPreviewPanel::needs_present() const noexcept {
   if (!ready_) return true;
   if (present_dirty_) return true;
+  // A freshly rebuilt swapchain may not have taken the last present; keep the
+  // idle gate open for one more frame or the preview stays black while paused.
+  if (preview_.wants_follow_up_present()) return true;
   if (transport_.pending_seek()) return true;
   if (transport_.playing() || transport_.intends_playing()) return true;
   if (want_spectrogram_ != last_presented_want_spectrogram_) return true;

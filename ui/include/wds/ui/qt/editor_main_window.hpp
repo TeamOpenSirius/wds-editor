@@ -14,6 +14,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+class QDialog;
 class QWindow;
 class QWidget;
 class QDockWidget;
@@ -47,6 +48,17 @@ class EditorMainWindow final : public QMainWindow {
   // Shows the startup chooser. Returns true when the editor should continue,
   // false when the user closed the splash and the application should exit.
   bool show_startup_splash();
+  // File-association / deep-link launch: load `path` before the first frame and
+  // move it to the front of the recent list. False when it cannot load, so the
+  // caller can fall back to the startup chooser.
+  bool open_project_at_startup(const QString& path);
+  // A project requested while the editor already runs (another double-click).
+  // Confirms unsaved changes, loads it and moves it to the front of the list.
+  // While the startup chooser is up this closes it instead and parks the path,
+  // so the caller can open it right after the chooser returns.
+  void open_project_path(const QString& path);
+  // Path parked by open_project_path() while the startup chooser was open.
+  QString take_pending_startup_open();
   void maybe_auto_check_updates();
   void set_viewport_windows(QWindow* preview, QWindow* editor);
   void set_editor_widget(QWidget* editor);
@@ -75,6 +87,8 @@ class EditorMainWindow final : public QMainWindow {
   bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
   void confirm_pending_changes(std::function<void()> on_proceed);
   void open_project();
+  // Parse + apply on the GUI thread, load on a worker; callers own confirmation.
+  void begin_open_project(const QString& path);
   void save_project();
   void import_chart();
   void import_music();
@@ -103,6 +117,8 @@ class EditorMainWindow final : public QMainWindow {
   void apply_command_icons();
   void schedule_command_toolbar_relayout();
   void relayout_command_toolbar();
+  int auto_command_toolbar_budget(bool share_row_with_convert) const;
+  void capture_command_toolbar_user_budget();
   bool command_shares_row_with_convert() const;
   void refresh_history_actions();
   void refresh_clear_marks_action();
@@ -155,11 +171,22 @@ class EditorMainWindow final : public QMainWindow {
   std::vector<QToolButton*> command_buttons_;
   std::vector<QWidget*> command_gaps_;
   QWidget* command_strip_ = nullptr;
+  QWidget* command_overflow_gap_ = nullptr;
   QLabel* command_overflow_button_ = nullptr;
   QMenu* command_overflow_menu_ = nullptr;
   bool command_toolbar_relayout_pending_ = false;
   bool command_toolbar_relayouting_ = false;
   int command_layout_state_ = -1;
+  // Content width chosen by dragging a toolbar handle. Qt pins the toolbar to
+  // that width, so the overflow must stop assuming window-width-minus-convert.
+  int command_toolbar_user_budget_ = -1;
+  bool command_toolbar_handle_pressed_ = false;
+  // Set while show_startup_splash() runs; a document opened in that window
+  // closes the chooser and is opened as soon as it returns.
+  QPointer<QDialog> startup_splash_;
+  QString pending_startup_open_;
+  int command_toolbar_width_at_press_ = 0;
+  int command_toolbar_user_budget_at_press_ = -1;
   ::QToolBar* command_toolbar_ = nullptr;
   ::QToolBar* convert_toolbar_ = nullptr;
   ::QDockWidget* preview_dock_ = nullptr;

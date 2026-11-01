@@ -57,6 +57,7 @@
 #include <QHBoxLayout>
 #include <QLayout>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QAbstractSpinBox>
 #include <QAbstractItemView>
 #include <QKeySequenceEdit>
@@ -86,6 +87,10 @@
 #endif
 
 namespace {
+
+// Matches the spacing between command buttons, and separates the overflow
+// (more) control from the last visible button.
+constexpr int kCommandGapWidth = 4;
 
 // No Ctrl/Alt/Meta (Shift and keypad are ok): letters, digits, punctuation,
 // space, and field-edit keys. Used so typing "1"/"Q" cannot become a shortcut.
@@ -145,6 +150,19 @@ std::size_t command_overflow_hide_count(const std::vector<int>& item_widths, int
     ++hide;
   }
   return hide;
+}
+
+int toolbar_handle_extent(const QToolBar* bar) {
+  if (bar == nullptr || !bar->isMovable()) return 0;
+  return bar->style()->pixelMetric(QStyle::PM_ToolBarHandleExtent, nullptr, bar);
+}
+
+// Width available to a toolbar's contents, excluding a movable handle. This is
+// the same scale as the old window-minus-convert budget, so the two remain
+// interchangeable when the layout is not manually sized.
+int toolbar_content_budget(const QToolBar* bar) {
+  if (bar == nullptr) return 0;
+  return std::max(0, bar->width() - toolbar_handle_extent(bar));
 }
 
 class HoverOverflowAffordance final : public QLabel {
@@ -292,6 +310,16 @@ class ShrinkableCommandToolBar final : public QToolBar {
   }
 };
 
+// One spelling per project file. macOS hands the same file over as /tmp/...
+// from argv and /private/tmp/... from LaunchServices; canonicalising keeps the
+// recent list from listing a project twice and lets the "already open" check
+// recognise it.
+QString normalized_project_path(const QString& path) {
+  if (path.isEmpty()) return path;
+  const QString canonical = QFileInfo(path).canonicalFilePath();
+  return canonical.isEmpty() ? path : canonical;
+}
+
 int dock_title_bar_height(const QDockWidget* dock) {
   if (dock == nullptr) return 0;
   if (const QWidget* bar = dock->titleBarWidget()) {
@@ -372,7 +400,7 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
                                                          const QKeySequence& shortcut) {
     if (!first_command) {
       auto* gap = new QWidget(command_strip_);
-      gap->setFixedWidth(4);
+      gap->setFixedWidth(kCommandGapWidth);
       gap->setAttribute(Qt::WA_TransparentForMouseEvents);
       strip_layout->addWidget(gap);
       command_gaps_.push_back(gap);
@@ -414,6 +442,12 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
   }
   undo_action_ = addCommand(editMenu, tr("撤销"), QKeySequence::Undo);
   redo_action_ = addCommand(editMenu, tr("重做"), QKeySequence::Redo);
+  auto* overflow_gap = new QWidget(command_strip_);
+  overflow_gap->setFixedWidth(kCommandGapWidth);
+  overflow_gap->setAttribute(Qt::WA_TransparentForMouseEvents);
+  overflow_gap->hide();
+  strip_layout->addWidget(overflow_gap);
+  command_overflow_gap_ = overflow_gap;
   auto* overflow = new HoverOverflowAffordance(command_strip_);
   overflow->setObjectName(QStringLiteral("commandToolbarOverflow"));
   overflow->setToolTip(tr("更多"));
@@ -572,6 +606,14 @@ void EditorMainWindow::apply_default_dock_sizes() {
 
 void EditorMainWindow::reset_default_layout() {
   if (preview_dock_ == nullptr || editor_dock_ == nullptr) return;
+  command_toolbar_user_budget_ = -1;
+  command_toolbar_handle_pressed_ = false;
+  command_layout_state_ = -1;
+  {
+    QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+    prefs.remove(QStringLiteral("window/command-toolbar-budget-v1"));
+    prefs.sync();
+  }
   auto reset_toolbar = [this](QToolBar* bar) {
     if (bar == nullptr) return;
     removeToolBar(bar);
@@ -611,6 +653,11 @@ void EditorMainWindow::restore_or_reset_layout() {
     reset_default_layout();
     return;
   }
+  // QMainWindow state stores toolbar preferred widths without exposing them.
+  // Keep the command width beside it so the overflow can respect a manual size.
+  const int saved_command_budget =
+      prefs.value(QStringLiteral("window/command-toolbar-budget-v1"), -1).toInt();
+  command_toolbar_user_budget_ = saved_command_budget > 0 ? saved_command_budget : -1;
   // Recover the full editor chrome if a saved layout closed the edit / playback
   // docks. Floating docks are hidden on purpose during the startup splash.
   if (editor_dock_->isHidden() && playback_dock_->isHidden() &&
@@ -633,6 +680,13 @@ void EditorMainWindow::save_chrome_layout() {
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   prefs.setValue("window/geometry", saveGeometry());
   prefs.setValue("window/state-v16", saveState());
+  // See restore_or_reset_layout: the toolbar preference is otherwise opaque.
+  if (command_toolbar_user_budget_ > 0) {
+    prefs.setValue(QStringLiteral("window/command-toolbar-budget-v1"),
+                   command_toolbar_user_budget_);
+  } else {
+    prefs.remove(QStringLiteral("window/command-toolbar-budget-v1"));
+  }
   prefs.sync();
 }
 
@@ -911,6 +965,35 @@ bool EditorMainWindow::command_shares_row_with_convert() const {
   return !toolBarBreak(convert_toolbar_) && !toolBarBreak(command_toolbar_);
 }
 
+int EditorMainWindow::auto_command_toolbar_budget(bool share_row_with_convert) const {
+  if (command_toolbar_ == nullptr) return 0;
+
+  int convert_w = 0;
+  if (share_row_with_convert && convert_toolbar_ != nullptr) {
+    // Natural ribbon width only. The toolbar sizeHint can grow with the row
+    // and would hide command buttons while the window is still wide enough.
+    convert_w = convert_bar_ != nullptr ? convert_bar_->sizeHint().width()
+                                        : convert_toolbar_->minimumSizeHint().width();
+    convert_w += toolbar_handle_extent(convert_toolbar_);
+  }
+
+  int budget =
+      command_toolbar_->isFloating() ? command_toolbar_->width() : width() - convert_w;
+  if (!command_toolbar_->isFloating()) budget -= toolbar_handle_extent(command_toolbar_);
+  return std::max(0, budget);
+}
+
+void EditorMainWindow::capture_command_toolbar_user_budget() {
+  if (command_toolbar_ == nullptr || command_toolbar_->isFloating() ||
+      command_toolbar_->orientation() != Qt::Horizontal) {
+    return;
+  }
+  const int budget = toolbar_content_budget(command_toolbar_);
+  if (budget == command_toolbar_user_budget_) return;
+  command_toolbar_user_budget_ = budget;
+  schedule_command_toolbar_relayout();
+}
+
 void EditorMainWindow::relayout_command_toolbar() {
   if (command_toolbar_relayouting_ || command_toolbar_ == nullptr || command_strip_ == nullptr ||
       command_overflow_button_ == nullptr || command_overflow_menu_ == nullptr) {
@@ -925,6 +1008,7 @@ void EditorMainWindow::relayout_command_toolbar() {
     for (QToolButton* button : command_buttons_) {
       if (button != nullptr) button->show();
     }
+    if (command_overflow_gap_ != nullptr) command_overflow_gap_->hide();
     command_overflow_button_->hide();
     command_overflow_menu_->clear();
   };
@@ -936,6 +1020,9 @@ void EditorMainWindow::relayout_command_toolbar() {
     command_strip_->setMaximumWidth(QWIDGETSIZE_MAX);
     command_strip_->updateGeometry();
     command_toolbar_->updateGeometry();
+    // show_all() changed the strip without updating the horizontal state hash;
+    // force the next horizontal pass to apply it (including the overflow gap).
+    command_layout_state_ = -1;
     command_toolbar_relayouting_ = false;
     return;
   }
@@ -951,23 +1038,17 @@ void EditorMainWindow::relayout_command_toolbar() {
     widths.push_back(width);
   }
 
-  const int overflow_w = std::max(command_overflow_button_->sizeHint().width(), 22);
+  // The overflow control's leading gap is part of the space it needs.
+  const int overflow_w =
+      std::max(command_overflow_button_->sizeHint().width(), 22) + kCommandGapWidth;
 
-  int convert_w = 0;
   const bool share_row = command_shares_row_with_convert();
-  if (share_row) {
-    // Natural ribbon width only. The toolbar sizeHint can grow with the row
-    // and would hide command buttons while the window is still wide enough.
-    convert_w = convert_bar_ != nullptr ? convert_bar_->sizeHint().width()
-                                        : convert_toolbar_->minimumSizeHint().width();
-    if (convert_toolbar_->isMovable()) {
-      convert_w += convert_toolbar_->style()->pixelMetric(QStyle::PM_ToolBarHandleExtent);
-    }
-  }
-
-  int budget = command_toolbar_->isFloating() ? command_toolbar_->width() : width() - convert_w;
-  if (command_toolbar_->isMovable() && !command_toolbar_->isFloating()) {
-    budget -= command_toolbar_->style()->pixelMetric(QStyle::PM_ToolBarHandleExtent);
+  int budget = auto_command_toolbar_budget(share_row);
+  if (!command_toolbar_->isFloating() && command_toolbar_user_budget_ >= 0) {
+    // Dragging a toolbar handle sets Qt's preferred width for this toolbar.
+    // Window growth no longer widens it, so keep the auto budget as an upper
+    // bound instead of pretending the command bar can use window-minus-convert.
+    budget = std::min(command_toolbar_user_budget_, budget);
   }
   budget = std::max(0, budget);
 
@@ -984,12 +1065,15 @@ void EditorMainWindow::relayout_command_toolbar() {
   command_overflow_menu_->clear();
   int max_width_to_set = QWIDGETSIZE_MAX;
   if (hide_n == 0) {
+    if (command_overflow_gap_ != nullptr) command_overflow_gap_->hide();
     command_overflow_button_->hide();
     max_width_to_set = QWIDGETSIZE_MAX;
   } else {
     for (std::size_t i = keep; i < command_actions_.size(); ++i) {
       command_overflow_menu_->addAction(command_actions_[i]);
     }
+    // No leading gap when every command button is hidden.
+    if (command_overflow_gap_ != nullptr) command_overflow_gap_->setVisible(keep > 0);
     command_overflow_button_->show();
     max_width_to_set = std::max(1, budget);
   }
@@ -1348,6 +1432,7 @@ bool EditorMainWindow::show_startup_splash() {
   // avoids modality/activation quirks where accepting a child dialog leaves
   // the hidden parent as the active top-level window.
   QDialog splash(nullptr);
+  startup_splash_ = &splash;
   splash.setWindowTitle(tr("WDS Editor"));
   splash.setModal(true);
   splash.resize(720, 480);
@@ -1531,6 +1616,7 @@ bool EditorMainWindow::show_startup_splash() {
     AboutDialog(&splash).exec();
   });
   const int result = splash.exec();
+  startup_splash_ = nullptr;
   if (result != QDialog::Accepted) {
     ++open_generation_;
   }
@@ -1548,10 +1634,11 @@ void EditorMainWindow::maybe_auto_check_updates() {
 
 void EditorMainWindow::remember_recent_project(const QString& path) {
   if (path.isEmpty()) return;
+  const QString project_path = normalized_project_path(path);
   QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
   auto paths = prefs.value(QStringLiteral("recent/projects")).toStringList();
-  paths.removeAll(path);
-  paths.prepend(path);
+  paths.removeAll(project_path);
+  paths.prepend(project_path);
   while (paths.size() > 8) paths.removeLast();
   prefs.setValue(QStringLiteral("recent/projects"), paths);
 }
@@ -1559,8 +1646,44 @@ void EditorMainWindow::remember_recent_project(const QString& path) {
 bool EditorMainWindow::eventFilter(QObject* watched, QEvent* event) {
   const auto type = event->type();
   if ((watched == command_toolbar_ || watched == convert_toolbar_) &&
+      (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease)) {
+    auto* mouse_event = static_cast<QMouseEvent*>(event);
+    if (mouse_event->button() == Qt::LeftButton) {
+      if (type == QEvent::MouseButtonPress) {
+        // A toolbar handle drag is about to change the row's width split. Track
+        // it so the overflow can follow the command bar's new width live.
+        command_toolbar_handle_pressed_ = true;
+        command_toolbar_width_at_press_ =
+            command_toolbar_ != nullptr ? command_toolbar_->width() : 0;
+        command_toolbar_user_budget_at_press_ = command_toolbar_user_budget_;
+      } else if (command_toolbar_handle_pressed_) {
+        if (command_toolbar_ != nullptr &&
+            command_toolbar_->width() != command_toolbar_width_at_press_) {
+          capture_command_toolbar_user_budget();
+          schedule_chrome_layout_save();
+        } else {
+          // Pressed without resizing (or dragged back to the same width): keep
+          // the previous preference instead of pinning the natural width.
+          command_toolbar_user_budget_ = command_toolbar_user_budget_at_press_;
+        }
+        command_toolbar_handle_pressed_ = false;
+        schedule_command_toolbar_relayout();
+      }
+    }
+  }
+  if ((watched == command_toolbar_ || watched == convert_toolbar_) &&
       (type == QEvent::Resize || type == QEvent::Show || type == QEvent::Hide ||
        type == QEvent::ParentChange)) {
+    if (watched == command_toolbar_ && type == QEvent::Resize &&
+        command_toolbar_handle_pressed_ && command_toolbar_ != nullptr) {
+      // A platform toolbar drag may swallow the release event. Do not keep
+      // treating later layout changes as a live width drag without the button.
+      if ((QApplication::mouseButtons() & Qt::LeftButton) == 0) {
+        command_toolbar_handle_pressed_ = false;
+      } else if (command_toolbar_->width() != command_toolbar_width_at_press_) {
+        capture_command_toolbar_user_budget();
+      }
+    }
     if (watched == command_toolbar_) suppress_qt_toolbar_extension(command_toolbar_);
     if (!command_toolbar_relayouting_) schedule_command_toolbar_relayout();
   }
@@ -1804,44 +1927,98 @@ void EditorMainWindow::confirm_pending_changes(std::function<void()> on_proceed)
   if (box.clickedButton() == discard) on_proceed();
 }
 
+bool EditorMainWindow::open_project_at_startup(const QString& path) {
+  if (ui_manager_ == nullptr || path.isEmpty()) return false;
+  const QString project_path = normalized_project_path(path);
+  const QByteArray utf8 = project_path.toUtf8();
+  const std::string native_path(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+  if (!ui_manager_->session().open_wdsproject(native_path)) return false;
+  // A double-clicked project belongs at the top of the recent list even though
+  // it was never picked from the chooser.
+  remember_recent_project(project_path);
+  arm_backup_timer();
+  return true;
+}
+
+void EditorMainWindow::open_project_path(const QString& path) {
+  if (ui_manager_ == nullptr || path.isEmpty()) return;
+  const QString project_path = normalized_project_path(path);
+  if (startup_splash_ != nullptr) {
+    // Launched with the chooser up and the user double-clicked a project: close
+    // the chooser and let main() open the file once exec() returns.
+    pending_startup_open_ = project_path;
+    startup_splash_->accept();
+    return;
+  }
+  if (!QFileInfo::exists(project_path)) {
+    QMessageBox::warning(this, tr("打开失败"), tr("找不到工程文件：\n%1").arg(project_path));
+    return;
+  }
+  const QString current = normalized_project_path(
+      QString::fromStdString(ui_manager_->session().project_path()));
+  if (!current.isEmpty() && current == project_path) {
+    // Double-clicking the project that is already open just brings it forward.
+    show();
+    raise();
+    activateWindow();
+    remember_recent_project(project_path);
+    return;
+  }
+  confirm_pending_changes([this, project_path] { begin_open_project(project_path); });
+}
+
+QString EditorMainWindow::take_pending_startup_open() {
+  QString path = pending_startup_open_;
+  pending_startup_open_.clear();
+  return path;
+}
+
+void EditorMainWindow::begin_open_project(const QString& raw_path) {
+  if (ui_manager_ == nullptr || raw_path.isEmpty()) return;
+  const QString path = normalized_project_path(raw_path);
+  // Parse off the GUI thread; the overlay stays up and the preview keeps
+  // ticking while the worker runs. Apply happens on the GUI thread in
+  // `finished`, guarded by open_generation_ so an older load cannot
+  // overwrite a newer one.
+  auto overlay = std::make_shared<BusyScope>(this, tr("正在打开工程…"));
+  const std::uint64_t gen = ++open_generation_;
+  auto* watcher = new QFutureWatcher<PreparedWdsProject>(this);
+  track_open_watcher(watcher);
+  connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, this,
+          [this, path, watcher, gen, overlay]() mutable {
+            untrack_open_watcher(watcher);
+            watcher->deleteLater();
+            if (gen != open_generation_ || ui_manager_ == nullptr) {
+              overlay.reset();
+              return;
+            }
+            auto future = watcher->future();
+            const bool ok = ui_manager_->session().apply_prepared_wdsproject(future.takeResult());
+            overlay.reset();
+            if (!ok) {
+              QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
+            } else {
+              remember_recent_project(path);
+              clear_click_marks();
+              arm_backup_timer();
+              show();
+              raise();
+              activateWindow();
+            }
+          });
+  const std::string native_path = path.toStdString();
+  watcher->setFuture(QtConcurrent::run([native_path] {
+    wds::common::install_thread_crash_stack();
+    return EditorSession::prepare_wdsproject(native_path);
+  }));
+}
+
 void EditorMainWindow::open_project() {
   confirm_pending_changes([this] {
     const auto path = QFileDialog::getOpenFileName(this, tr("打开 WDS 工程"), {},
                                                     tr("WDS 工程 (*.wdsproject)"));
     if (path.isEmpty() || ui_manager_ == nullptr) return;
-    // Parse off the GUI thread; the overlay stays up and the preview keeps
-    // ticking while the worker runs. Apply happens on the GUI thread in
-    // `finished`, guarded by open_generation_ so an older load cannot
-    // overwrite a newer one.
-    auto overlay = std::make_shared<BusyScope>(this, tr("正在打开工程…"));
-    const std::uint64_t gen = ++open_generation_;
-    auto* watcher = new QFutureWatcher<PreparedWdsProject>(this);
-    track_open_watcher(watcher);
-    connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, this,
-            [this, path, watcher, gen, overlay]() mutable {
-              untrack_open_watcher(watcher);
-              watcher->deleteLater();
-              if (gen != open_generation_ || ui_manager_ == nullptr) {
-                overlay.reset();
-                return;
-              }
-              auto future = watcher->future();
-              const bool ok =
-                  ui_manager_->session().apply_prepared_wdsproject(future.takeResult());
-              overlay.reset();
-              if (!ok) {
-                QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
-              } else {
-                remember_recent_project(path);
-                clear_click_marks();
-                arm_backup_timer();
-              }
-            });
-    const std::string native_path = path.toStdString();
-    watcher->setFuture(QtConcurrent::run([native_path] {
-      wds::common::install_thread_crash_stack();
-      return EditorSession::prepare_wdsproject(native_path);
-    }));
+    begin_open_project(path);
   });
 }
 

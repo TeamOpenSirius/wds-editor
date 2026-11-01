@@ -1,4 +1,5 @@
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
+#include "wds/ui/preview_present_policy.hpp"
 #include "wds/ui/qt/qt_input_adapter.hpp"
 
 #include <wds/common/log.hpp>
@@ -198,6 +199,13 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       return true;
     }
     idle_wakeup_timer_.stop();
+    // A forced request (resize settle, expose, request_frame) must present even
+    // when the idle cap would rather wait: the surface was just resized, so the
+    // window shows a stretched/blank copy of the previous drawable until the
+    // new-size frame lands. Clearing force_frame_ before the cap check dropped
+    // exactly that frame, and the preview never repainted at the new aspect
+    // ratio (black once the window outgrew the stale drawable).
+    const bool forced_frame = force_frame_;
     force_frame_ = false;
     if (!resizing_ && !host_resize_suspended_) {
       note_frame_resume();
@@ -208,10 +216,9 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
     pending_elapsed_us_ = std::min<int64_t>(pending_elapsed_us_ + elapsed, 80000);
     const bool bypass_idle_cap =
         static_cast<bool>(idle_throttle_bypass_) && idle_throttle_bypass_();
-    // 2 ms slack: at exactly one vsync per interval the accumulator lands a
-    // hair under the cap and every other frame gets skipped (60→30 fps).
-    if (idle_frame_interval_us_ > 0 && !has_input && !bypass_idle_cap && !startup &&
-        pending_elapsed_us_ + 2000 < idle_frame_interval_us_) {
+    if (idle_cap_defers_frame(forced_frame, startup, has_input, bypass_idle_cap,
+                              idle_frame_interval_us_ > 0, pending_elapsed_us_,
+                              idle_frame_interval_us_)) {
       schedule_frame();
       return true;
     }

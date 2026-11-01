@@ -116,6 +116,22 @@ Paths are stored relative to the project file when possible, making projects eas
 
 `RESUME_CHART` / `RESUME_TICK` record the chart and tick the editor was on when it last exited normally; opening the project jumps straight back there. Older projects without these keys open at the start of their first chart.
 
+### Opening a project by double-click
+
+Installing the editor registers `.wdsproject` as a project file that WDS Editor
+opens, so double-clicking a project loads it directly — no startup chooser — and
+moves it to the front of the recent list.
+
+| Platform | Registration |
+| --- | --- |
+| Windows | The MSI writes the `.wdsproject` ProgId / shell open command (`"%1"`); uninstalling the MSI removes those values again. |
+| macOS | `WDS Editor.app` declares `CFBundleDocumentTypes` / the exported `com.wds.wdsproject` UTI. LaunchServices registers the app when it lands in `/Applications`; deleting the app unregisters it. |
+| Linux (development builds) | `scripts/install-linux-desktop.sh` installs a freedesktop desktop entry + MIME type and makes it the default handler; `--uninstall` removes them. |
+
+On macOS, opening a project while the editor runs (double-click or Open With)
+loads it in the running window and asks about unsaved changes first. Windows and
+Linux start a second instance instead; the first instance keeps its state.
+
 ### Native `.wdschart`
 
 `.wdschart` is the editor's lossless authoring format.

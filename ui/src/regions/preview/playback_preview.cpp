@@ -2,6 +2,7 @@
 #include "wds/renderer/log.hpp"
 #include "wds/ui/editor_ui_config.hpp"
 #include "wds/ui/frame_diag.hpp"
+#include "wds/ui/preview_present_policy.hpp"
 
 #include <wds/chart_render/openwds_hud_layout.hpp>
 #include <wds/chart_render/note_draw_order.hpp>
@@ -1877,12 +1878,22 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
 #if WDS_DIAG_ENABLED
     const auto draw_t0 = stage_now();
 #endif  // WDS_DIAG_ENABLED
-    vulkan_.draw_frame(batch_, geometry_.screen(),
-                       wds::chart_editor::kOfficialCameraBackgroundR,
-                       wds::chart_editor::kOfficialCameraBackgroundG,
-                       wds::chart_editor::kOfficialCameraBackgroundB, &additive_batch_, post,
-                       post2, add_scissor_ptr, mid, early, carve, &hud_batch_,
-                       split_emit_direct_ ? &extras : nullptr, want_dump ? &dump : nullptr);
+    const bool drew =
+        vulkan_.draw_frame(batch_, geometry_.screen(),
+                           wds::chart_editor::kOfficialCameraBackgroundR,
+                           wds::chart_editor::kOfficialCameraBackgroundG,
+                           wds::chart_editor::kOfficialCameraBackgroundB, &additive_batch_, post,
+                           post2, add_scissor_ptr, mid, early, carve, &hud_batch_,
+                           split_emit_direct_ ? &extras : nullptr, want_dump ? &dump : nullptr);
+    // A swapchain rebuilt since the previous present (host resize before this
+    // frame, or a WSI rebuild inside draw_frame) can swallow this present: the
+    // platform WSI drops the first frame into a fresh swapchain. Ask the host
+    // for one more present so the picture actually lands.
+    const std::uint64_t serial_after = vulkan_.swapchain_serial();
+    const bool rebuilt = serial_after != last_rendered_swapchain_serial_;
+    last_rendered_swapchain_serial_ = serial_after;
+    follow_up_present_ = wds::ui::needs_follow_up_present(drew, rebuilt, follow_up_streak_);
+    follow_up_streak_ = rebuilt ? follow_up_streak_ + 1 : 0;
 #if WDS_DIAG_ENABLED
     stage_draw_us = stage_us(draw_t0);
 #endif  // WDS_DIAG_ENABLED

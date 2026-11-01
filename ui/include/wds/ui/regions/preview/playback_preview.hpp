@@ -293,6 +293,11 @@ class PlaybackPreviewView {
   wds::renderer::StageGeometry& geometry() noexcept { return geometry_; }
   const wds::renderer::StageGeometry& geometry() const noexcept { return geometry_; }
   wds::renderer::VulkanRenderer& vulkan() noexcept { return vulkan_; }
+  // True when the last render rebuilt the swapchain. The platform WSI can drop
+  // the first present into a fresh swapchain (MoltenVK: SUBOPTIMAL + nothing on
+  // screen), so the host must present one more frame or the preview stays black
+  // until something else happens to trigger a draw.
+  bool wants_follow_up_present() const noexcept { return follow_up_present_; }
   wds::renderer::TextureCache& textures() noexcept { return textures_; }
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
@@ -403,6 +408,9 @@ class PlaybackPreviewView {
   std::vector<size_t> notes_draw_indices_;
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
   bool ready_ = false;
+  bool follow_up_present_ = false;
+  std::uint64_t last_rendered_swapchain_serial_ = 0;
+  int follow_up_streak_ = 0;
   bool mute_hold_body_sfx_ = false;
   bool show_judgment_text_ = false;
   int64_t chart_offset_ms_ = 0;
