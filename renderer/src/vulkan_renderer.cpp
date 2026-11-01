@@ -5209,6 +5209,36 @@ void vb_add_tex_key(std::vector<TexKeyFix>& order, TextureId texture, bool clip)
 
 // Pack CPU heads from `cursor`, then emit draws in append_from merge order
 // (same-texture concat). In-place extras keep their mapped addresses.
+namespace {
+
+// Draw submission guard: an external (mapped-VB) run must stay inside what the
+// batch actually wrote. Drivers differ in how they treat out-of-range vertex
+// fetches (robustness returns zeros on NVIDIA, others may still read the arena),
+// which would show up as missing ribbon segments on one GPU only.
+bool diag_ext_run_in_bounds(const DrawBatch& ex, const DrawBatch::ExtRun& run) {
+  if (static_cast<uint64_t>(run.first) + run.count > ex.ext_used) {
+    return false;
+  }
+  if (run.index_count > 0 &&
+      static_cast<uint64_t>(run.index_first) + run.index_count > ex.ext_idx_used) {
+    return false;
+  }
+  return true;
+}
+
+void diag_ext_run_report(const DrawBatch& ex, const DrawBatch::ExtRun& run) {
+  if (diag_ext_run_in_bounds(ex, run)) {
+    return;
+  }
+  wds::common::diag::emit_throttled(
+      "draw.extrun", 500,
+      "draw ext run OUT OF BOUNDS verts=%u+%u used=%u idx=%u+%u idx_used=%u tex=%u pipe=%u",
+      run.first, run.count, ex.ext_used, run.index_first, run.index_count, ex.ext_idx_used,
+      static_cast<unsigned>(run.texture), static_cast<unsigned>(run.overlay_pipe));
+}
+
+}  // namespace
+
 uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch* head,
                              bool head_keep_empty, bool head_first,
                              const DrawBatch* const* extras, size_t extra_n, uint32_t cursor,
@@ -5301,6 +5331,7 @@ uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch*
               run.count == 0) {
             continue;
           }
+          diag_ext_run_report(ex, run);
           GpuDrawBucket g;
           g.texture = run.texture;
           g.disable_alpha_clip = run.disable_alpha_clip;
@@ -5356,6 +5387,7 @@ uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch*
 
 // Keep DrawBatch / ext_run order (no same-texture regroup). Used for
 // split-effect particles so sortingOrder survives blend changes.
+
 uint32_t vb_plan_ordered_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch* head,
                                const DrawBatch* const* extras, size_t extra_n, uint32_t cursor,
                                DrawVertex* dst, bool extras_in_place, const DrawVertex* mapped,
@@ -5366,6 +5398,7 @@ uint32_t vb_plan_ordered_draws(std::vector<GpuDrawBucket>& draws, const DrawBatc
         if (run.count == 0 && run.index_count == 0) {
           continue;
         }
+        diag_ext_run_report(src, run);
         GpuDrawBucket g;
         g.texture = run.texture;
         g.disable_alpha_clip = run.disable_alpha_clip;

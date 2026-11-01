@@ -4715,7 +4715,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
           "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
           "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
-          "chain_tail_gap=%d max_off=%.1f "
+          "chain_tail_gap=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
           now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
@@ -4725,7 +4725,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           diag_frame.fallback_trail, diag_frame.real_trail, trail_span_max, trail_span_big,
           diag_frame.chains, diag_frame.chain_skipped, diag_frame.chain_max,
           diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
-          diag_frame.chain_tail_gap, diag_frame.max_off, diag_frame.worst_px,
+          diag_frame.chain_tail_gap, split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
+          split_late_batch_.ext_overflow ? 1 : 0, split_late_batch_.ext_used,
+          split_late_batch_.ext_cap, diag_frame.max_off, diag_frame.worst_px,
           diag_frame.worst_py,
           diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
           content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
