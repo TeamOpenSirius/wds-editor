@@ -4629,6 +4629,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       int trail_particles = 0;
       int max_trail_points = 0;
       int nonfinite = 0;
+      float trail_span_max = 0.0f;
+      int trail_span_big = 0;
       int effect_ids[4] = {0, 0, 0, 0};
       int effect_counts[4] = {0, 0, 0, 0};
       int distinct_effects = 0;
@@ -4643,6 +4645,17 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         if (trail) {
           ++trail_particles;
           max_trail_points = std::max<int>(max_trail_points, lp.trail_points);
+          // Station spacing: a trail sampled across a stalled frame keeps far
+          // apart stations and draws one long straight strip (a stray line).
+          const size_t last = static_cast<size_t>(lp.trail_points) - 1u;
+          const float dx = lp.trail_x[last] - lp.trail_x[0];
+          const float dy = lp.trail_y[last] - lp.trail_y[0];
+          const float dz = lp.trail_z[last] - lp.trail_z[0];
+          const float span = std::sqrt(dx * dx + dy * dy + dz * dz);
+          trail_span_max = std::max(trail_span_max, span);
+          if (span > 0.75f) {
+            ++trail_span_big;
+          }
           if (!std::isfinite(lp.trail_x[0]) || !std::isfinite(lp.trail_y[0]) ||
               !std::isfinite(lp.trail_z[0]) ||
               !std::isfinite(lp.trail_x[static_cast<size_t>(lp.trail_points) - 1u]) ||
@@ -4668,14 +4681,15 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       wds::common::diag::emit(
           "split frame t=%.3fs rev=%llu playing=%d alive=%d drawn=%d verts=%u(+%lld) "
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
-          "trail_fallback=%d trail_tex=%d max_off=%.1f "
+          "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
           now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
           collected.total, split_particles_drawn, split_verts1,
           static_cast<long long>(vert_delta), trail_particles, max_trail_points, nonfinite,
           diag_frame.anomalies, diag_frame.bodies, diag_frame.missing_sprite,
-          diag_frame.fallback_trail, diag_frame.real_trail, diag_frame.max_off, diag_frame.worst_px,
+          diag_frame.fallback_trail, diag_frame.real_trail, trail_span_max, trail_span_big,
+          diag_frame.max_off, diag_frame.worst_px,
           diag_frame.worst_py,
           diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
           content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
