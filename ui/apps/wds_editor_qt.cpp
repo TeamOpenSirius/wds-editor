@@ -1769,6 +1769,9 @@ int main(int argc, char** argv) {
     // Resolution context for the field report: a preview artifact that only
     // shows up on one machine is usually tied to the screen / DPR the realtime
     // preview window is laid out at.
+    wds::common::diag::emit("paths skins=%s effects=%s",
+                            wds::ui::resolve_skins_dir(argv[0]).c_str(),
+                            wds::ui::resolve_effects_dir(argv[0]).c_str());
     wds::common::diag::emit("app argv=%d theme=%s", argc,
                             theme_id.isEmpty() ? "default" : theme_id.toUtf8().constData());
     for (QScreen* screen : QGuiApplication::screens()) {

@@ -2780,6 +2780,15 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     return;
   }
   ensure_split_effect_textures();
+  // Atlas / trail texture health: without them every named sprite tile falls
+  // back (body skipped) and the trail strips sample the solid 1x1 texture,
+  // which is exactly what a fan of hard white lines looks like.
+  wds::common::diag::emit_throttled(
+      "split.textures", 5000,
+      "split textures atlas=%d(%dx%d) trail=%d(%dx%d)",
+      skin_.split_effect_uvs ? 1 : 0, skin_.split_effect_uvs.width,
+      skin_.split_effect_uvs.height, skin_.split_effect_trail ? 1 : 0,
+      skin_.split_effect_trail.width, skin_.split_effect_trail.height);
 
   const int quality = config_.split_effect_quality;
   wds::chart_render::SplitEffectFrameCollect& collected = split_effect_collect_;
@@ -2880,6 +2889,12 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     float worst_y = 0.0f;
     float worst_z = 0.0f;
     float worst_view_z = 0.0f;
+    // A missing atlas tile falls back to the 1x1 solid texture, which paints
+    // hard white strips instead of the authored soft trail sprite.
+    int missing_sprite = 0;
+    int fallback_trail = 0;
+    int real_trail = 0;
+    int bodies = 0;
   } diag_frame;
   const float diag_off_limit =
       std::max(std::max(content_bounds.w, content_bounds.h), 1.0f) * 16.0f;
@@ -3801,10 +3816,21 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       const TextureInfo* strip_tex = trail_bomb ? trail_tex : &unbound_main_tex;
       const bool can_trail = strip_tex != nullptr && *strip_tex && p.trail_count < 2 &&
                              p.trail_points >= 2;
+      if (!unnamed && !tex) {
+        ++diag_frame.missing_sprite;
+      }
+      if (can_trail) {
+        if (strip_tex == &unbound_main_tex) {
+          ++diag_frame.fallback_trail;
+        } else {
+          ++diag_frame.real_trail;
+        }
+      }
       if (skip_body && !can_trail) {
         return;
       }
       ++(*tg.drawn);
+      ++diag_frame.bodies;
       const bool butterfly = (p.flags & wds::chart_render::kSplitEffectFlagButterfly) != 0;
       // OpenWDS materials.bundle SplitEffectSyurikenTrail: color *= _AddtiveIntencity
       // on fixed4 (RGBA), then clip(a-0.01). Catalog Other is materials[0]=Trail.
@@ -4641,13 +4667,16 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       }
       wds::common::diag::emit(
           "split frame t=%.3fs rev=%llu playing=%d alive=%d drawn=%d verts=%u(+%lld) "
-          "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d max_off=%.1f "
+          "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
+          "trail_fallback=%d trail_tex=%d max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
           now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
           collected.total, split_particles_drawn, split_verts1,
           static_cast<long long>(vert_delta), trail_particles, max_trail_points, nonfinite,
-          diag_frame.anomalies, diag_frame.max_off, diag_frame.worst_px, diag_frame.worst_py,
+          diag_frame.anomalies, diag_frame.bodies, diag_frame.missing_sprite,
+          diag_frame.fallback_trail, diag_frame.real_trail, diag_frame.max_off, diag_frame.worst_px,
+          diag_frame.worst_py,
           diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
           content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
           effect_counts[0], effect_ids[1],
