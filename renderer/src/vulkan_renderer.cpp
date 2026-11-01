@@ -2692,6 +2692,12 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.
   const uint32_t image_count =
       preferred_swapchain_image_count(caps.minImageCount, caps.maxImageCount, kMaxFramesInFlight);
+  wds::common::diag::emit(
+      "swapchain present=%s format=%s/%u colorspace=%s/%u extent=%ux%u image_count=%u",
+      present_mode_name(present_mode), vk_format_name(chosen.format),
+      static_cast<unsigned>(chosen.format), vk_colorspace_name(chosen.colorSpace),
+      static_cast<unsigned>(chosen.colorSpace), new_extent.width, new_extent.height,
+      image_count);
 
   // Release FSE on the live swapchain before we retire it.
   release_fullscreen_exclusive_internal();
@@ -4015,6 +4021,9 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
             vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
             static_cast<unsigned>(msaa_samples));
 #endif
+    wds::common::diag::emit("pipeline create FAILED name=textured format=%u samples=%u",
+                            static_cast<unsigned>(swapchain_format),
+                            static_cast<unsigned>(msaa_samples));
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
     last_wsi_action = WsiRecoverAction::Fatal;
@@ -4043,6 +4052,9 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
             vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
             static_cast<unsigned>(msaa_samples));
 #endif
+    wds::common::diag::emit("pipeline create FAILED name=alpha_soft format=%u samples=%u",
+                            static_cast<unsigned>(swapchain_format),
+                            static_cast<unsigned>(msaa_samples));
     pipeline_alpha_soft = VK_NULL_HANDLE;
   }
 
@@ -4075,6 +4087,9 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
             vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
             static_cast<unsigned>(msaa_samples));
 #endif
+    wds::common::diag::emit("pipeline create FAILED name=additive format=%u samples=%u",
+                            static_cast<unsigned>(swapchain_format),
+                            static_cast<unsigned>(msaa_samples));
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
     last_wsi_action = WsiRecoverAction::Fatal;
@@ -4218,15 +4233,67 @@ void log_physical_devices(VkInstance instance, VkSurfaceKHR surface, VkPhysicalD
             VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
             VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion));
     // Field reports: the GPU/driver is the only variable left when one machine
-    // paints stray lines and another does not.
-    wds::common::diag::emit("gpu[%u] '%s' type=%s vendor=0x%x id=0x%x api=%u.%u.%u "
-                            "drv=%u.%u.%u",
-                            i, name, physical_device_type_name(props.deviceType), props.vendorID,
-                            props.deviceID, VK_VERSION_MAJOR(props.apiVersion),
-                            VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion),
-                            VK_VERSION_MAJOR(props.driverVersion),
-                            VK_VERSION_MINOR(props.driverVersion),
-                            VK_VERSION_PATCH(props.driverVersion));
+    // paints stray lines and another does not, so record the full identity.
+    {
+      char driver_name[64] = "?";
+      char driver_info[64] = "?";
+      uint32_t driver_id = props.vendorID;
+      unsigned char device_uuid[16] = {};
+      {
+        const auto get_props2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
+        const auto get_props2_khr = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(
+            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR"));
+        if (get_props2 != nullptr || get_props2_khr != nullptr) {
+          VkPhysicalDeviceDriverProperties drv{
+              VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+          VkPhysicalDeviceIDProperties ids{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+          drv.pNext = &ids;
+          VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+          p2.pNext = &drv;
+          if (get_props2 != nullptr) {
+            get_props2(devices[i], &p2);
+          } else {
+            get_props2_khr(devices[i], &p2);
+          }
+          std::snprintf(driver_name, sizeof(driver_name), "%s", drv.driverName);
+          std::snprintf(driver_info, sizeof(driver_info), "%s", drv.driverInfo);
+          driver_id = static_cast<uint32_t>(drv.driverID);
+          for (int b = 0; b < 16; ++b) {
+            device_uuid[b] = ids.deviceUUID[b];
+          }
+        }
+      }
+      static bool diag_gpu_logged = false;
+      if (!diag_gpu_logged) {
+        diag_gpu_logged = true;
+      wds::common::diag::emit(
+          "gpu[%u] '%s' type=%s vendor=0x%x id=0x%x api=%u.%u.%u drv=%u.%u.%u "
+          "driver_id=%u driver='%s' info='%s' uuid=%02x%02x%02x%02x",
+          i, name, physical_device_type_name(props.deviceType), props.vendorID, props.deviceID,
+          VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
+          VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
+          VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion), driver_id,
+          driver_name, driver_info, device_uuid[0], device_uuid[1], device_uuid[2],
+          device_uuid[3]);
+      }
+      // Limits that decide which submission paths this driver can take.
+      static bool diag_limits_logged = false;
+      if (!diag_limits_logged && i == 0) {
+        diag_limits_logged = true;
+        wds::common::diag::emit(
+          "gpu[%u] limits push_constants=%u max_vb_stride=%u max_vb_bindings=%u "
+          "max_attr_offset=%u max_attrs=%u min_storage_offset_align=%u max_draw_index=%u "
+          "framebuffer_samples=0x%x timestamp_period=%.3f non_coherent_atom=%u",
+          i, props.limits.maxPushConstantsSize, props.limits.maxVertexInputBindingStride,
+          props.limits.maxVertexInputBindings, props.limits.maxVertexInputAttributeOffset,
+          props.limits.maxVertexInputAttributes,
+          static_cast<unsigned>(props.limits.minStorageBufferOffsetAlignment),
+          static_cast<unsigned>(props.limits.maxDrawIndexedIndexValue),
+          static_cast<unsigned>(props.limits.framebufferColorSampleCounts),
+          props.limits.timestampPeriod, props.limits.nonCoherentAtomSize);
+      }
+    }
 
     VkPhysicalDeviceMemoryProperties mem{};
     vkGetPhysicalDeviceMemoryProperties(devices[i], &mem);
@@ -5734,6 +5801,19 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   impl_->preferred_msaa = preferred_msaa_;
 
   impl_->shader_dir = resolve_shader_dir();
+  {
+    namespace fs = std::filesystem;
+    const char* names[] = {"syuriken.vert.spv", "textured_quad.vert.spv",
+                           "textured_quad.frag.spv"};
+    char present[64] = {};
+    for (const char* n : names) {
+      const fs::path p = wds::common::path_from_utf8(impl_->shader_dir) / n;
+      std::error_code ec;
+      const bool ok = fs::is_regular_file(p, ec);
+      std::strncat(present, ok ? "1" : "0", sizeof(present) - std::strlen(present) - 1);
+    }
+    wds::common::diag::emit("shaders dir=%s present=%s", impl_->shader_dir.c_str(), present);
+  }
   WDS_LOG("VulkanRenderer::create shader_dir=%s\n", impl_->shader_dir.c_str());
 
   if (host.external_instance != VK_NULL_HANDLE) {

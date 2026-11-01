@@ -1,6 +1,7 @@
 #include "wds/common/diag_log.hpp"
 
 #include "wds/common/crash_handler.hpp"
+#include "wds/common/runtime_env.hpp"
 #include "wds/common/utf8_path.hpp"
 
 #include <algorithm>
@@ -11,7 +12,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+
+#if !defined(_WIN32)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
 #include <mutex>
+#include <thread>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -163,6 +170,41 @@ bool open(const char* tag) {
 
 void emit_build_banner() {
   banner("build version=%s git=%s type=%s", WDS_APP_VERSION, WDS_GIT_HASH, WDS_BUILD_TYPE);
+}
+
+void emit_system_banner() {
+  char os[128] = {};
+  format_os_version(os, sizeof(os));
+  unsigned long long ram_mb = 0;
+#if defined(_WIN32)
+  MEMORYSTATUSEX ms{};
+  ms.dwLength = sizeof(ms);
+  if (::GlobalMemoryStatusEx(&ms)) {
+    ram_mb = static_cast<unsigned long long>(ms.ullTotalPhys / (1024ull * 1024ull));
+  }
+#elif defined(__APPLE__)
+  uint64_t mem = 0;
+  size_t len = sizeof(mem);
+  if (sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0) {
+    ram_mb = mem / (1024ull * 1024ull);
+  }
+#else
+  const long pages = sysconf(_SC_PHYS_PAGES);
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (pages > 0 && page_size > 0) {
+    ram_mb = static_cast<unsigned long long>(pages) * static_cast<unsigned long long>(page_size) /
+             (1024ull * 1024ull);
+  }
+#endif
+  banner("system os=%s arch=%s cpus=%u ram_mb=%llu", os[0] != '\0' ? os : "unknown",
+#if defined(__aarch64__) || defined(_M_ARM64)
+         "arm64",
+#elif defined(__x86_64__) || defined(_M_X64)
+         "x86_64",
+#else
+         "other",
+#endif
+         std::thread::hardware_concurrency(), ram_mb);
 }
 
 void close() {

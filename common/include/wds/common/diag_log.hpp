@@ -28,6 +28,9 @@ const char* path();
 // Version / git hash / build type banner (macros live in wds_common).
 void emit_build_banner();
 
+// OS / architecture / CPU count / physical memory of the reporting machine.
+void emit_system_banner();
+
 // printf-style append with a monotonic "[diag +<ms>]" prefix. Thread-safe.
 void emit(const char* fmt, ...);
 // Same line, mirrored to stderr (startup banners only).

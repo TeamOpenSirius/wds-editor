@@ -1734,6 +1734,22 @@ int main(int argc, char** argv) {
   // here so a report from a machine we cannot reproduce on is still usable.
   wds::common::diag::open("preview");
   wds::common::diag::emit_build_banner();
+  wds::common::diag::emit_system_banner();
+  {
+    // Which optional render paths this run takes. These change what the GPU is
+    // asked to do, so a report must state them explicitly.
+    const auto flag = [](const char* name) {
+      const char* v = std::getenv(name);
+      return (v != nullptr && v[0] != '\0') ? v : "-";
+    };
+    wds::common::diag::emit(
+        "switches indexed=%s legacy_emit=%s legacy_lanes=%s parallel_emit=%s "
+        "no_split_particles=%s precommit_draw=%s no_bloom=%s dump_verts=%s",
+        flag("WDS_SPLIT_TRAIL_INDEXED"), flag("WDS_PREVIEW_LEGACY_EMIT"),
+        flag("WDS_PREVIEW_LEGACY_LANES"), flag("WDS_PREVIEW_PARALLEL_EMIT"),
+        flag("WDS_NO_SPLIT_PARTICLES"), flag("WDS_PRECOMMIT_DRAW"), flag("WDS_NO_BLOOM"),
+        flag("WDS_DUMP_VERTS"));
+  }
   wds::common::log_open_debug_session();
   g_prev_qt_handler = qInstallMessageHandler(&wds_qt_message_handler);
   prepare_bundled_qt_plugins(argv[0]);
@@ -1848,6 +1864,15 @@ int main(int argc, char** argv) {
   editor.enable_qt_chrome();
   editor.set_config_path(wds::ui::resolve_editor_config_path(argv[0]));
   editor.load_ui_config();
+  {
+    const auto& vis = editor.chart_preview().preview().config();
+    wds::common::diag::emit(
+        "render config quality=%d msaa=%d line_opacity=%.3f note_speed=%.3f "
+        "note_height=%d lane_count=%d view_zoom=%.4f stage_opacity=%.3f extended=%d",
+        vis.split_effect_quality, vis.msaa_samples, vis.split_line_opacity, vis.note_speed,
+        vis.note_height_level, vis.lane_count, vis.view_zoom, vis.stage_opacity,
+        editor.session().extended_features() ? 1 : 0);
+  }
   // Idle presents are capped at 30 Hz. The gate below decides whether the
   // picture actually changed; the 30 Hz wakeup keeps paused scrubbing and
   // wheel seeks on the same cadence as playback instead of a 4 Hz watchdog.

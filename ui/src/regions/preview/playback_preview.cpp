@@ -1744,6 +1744,35 @@ void scan_batch_slivers(const wds::renderer::DrawBatch& batch, BatchSliverStats&
   }
 }
 
+// Deterministic digest of one batch's vertex stream. Two machines running the
+// same build at the same timeline should print the same number; a difference
+// points at the data we submit, not at the driver.
+uint64_t hash_batch_vertices(const wds::renderer::DrawBatch& batch) {
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint32_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  for (const auto& bucket : batch.buckets) {
+    for (const auto& v : bucket.vertices) {
+      uint32_t bits = 0;
+      std::memcpy(&bits, &v.x, sizeof(bits));
+      mix(bits);
+      std::memcpy(&bits, &v.y, sizeof(bits));
+      mix(bits);
+      std::memcpy(&bits, &v.u, sizeof(bits));
+      mix(bits);
+      std::memcpy(&bits, &v.v, sizeof(bits));
+      mix(bits);
+      std::memcpy(&bits, &v.q, sizeof(bits));
+      mix(bits);
+      std::memcpy(&bits, &v.a, sizeof(bits));
+      mix(bits);
+    }
+  }
+  return h;
+}
+
 void batch_extent(const wds::renderer::DrawBatch& batch, float& max_x, float& max_y) {
   for (const auto& bucket : batch.buckets) {
     for (const auto& vert : bucket.vertices) {
@@ -3611,10 +3640,28 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     }
     wds::common::diag::emit_throttled(
         "split.scene", 1000,
-        "split scene rev=%llu t=%.3fs playing=%d quality=%d stage=%.1fx%.1f content_px=%d "
-        "panel_px=%dx%d aspect=%.4f zoom=%.4f focal=%.3f near=%.3f splits=%zu alive=%d",
+        "split scene rev=%llu t=%.3fs playing=%d quality=%d msaa=%d line_op=%.3f fps=%.1f "
+        "stage=%.1fx%.1f content_px=%d panel_px=%dx%d aspect=%.4f zoom=%.4f focal=%.3f "
+        "near=%.3f splits=%zu alive=%d",
         static_cast<unsigned long long>(snapshot.revision), now, playing ? 1 : 0, quality,
-        content_bounds.w, content_bounds.h, geometry_.content_height_px(), diag_panel_w,
+        config_.msaa_samples, config_.split_line_opacity, [&] {
+          static std::chrono::steady_clock::time_point last{};
+          static int frames = 0;
+          ++frames;
+          const auto now_tp = std::chrono::steady_clock::now();
+          if (last.time_since_epoch().count() == 0) {
+            last = now_tp;
+            return 0.0f;
+          }
+          const float sec = std::chrono::duration<float>(now_tp - last).count();
+          if (sec < 1.0f) {
+            return 0.0f;
+          }
+          const float fps = static_cast<float>(frames) / sec;
+          frames = 0;
+          last = now_tp;
+          return fps;
+        }(), content_bounds.w, content_bounds.h, geometry_.content_height_px(), diag_panel_w,
         diag_panel_h, view_aspect, view_zoom, focal, near_clip, snapshot.split_lanes.size(),
         collected.total);
     // Identity only: split_percent_* animates every frame, so hashing the whole
@@ -4663,6 +4710,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       int nonfinite = 0;
       float trail_span_max = 0.0f;
       int trail_span_big = 0;
+      int mode_counts[3] = {0, 0, 0};
+      int blend_counts[3] = {0, 0, 0};
       int effect_ids[4] = {0, 0, 0, 0};
       int effect_counts[4] = {0, 0, 0, 0};
       int distinct_effects = 0;
@@ -4673,6 +4722,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                            collected.pool.size());
       for (size_t pool_i = 0; pool_i < pool_n; ++pool_i) {
         const auto& lp = collected.pool[pool_i];
+        mode_counts[std::min<int>(lp.render_mode, 2)] += 1;
+        blend_counts[std::min<int>(lp.blend, 2)] += 1;
         const bool trail = lp.trail_points >= 2;
         if (trail) {
           ++trail_particles;
@@ -4715,7 +4766,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
           "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
           "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
-          "chain_tail_gap=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u max_off=%.1f "
+          "chain_tail_gap=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
+          "modes=[%d,%d,%d] blends=[%d,%d,%d] sig=%016llx max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
           now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
@@ -4727,7 +4779,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
           diag_frame.chain_tail_gap, split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
           split_late_batch_.ext_overflow ? 1 : 0, split_late_batch_.ext_used,
-          split_late_batch_.ext_cap, diag_frame.max_off, diag_frame.worst_px,
+          split_late_batch_.ext_cap, mode_counts[0], mode_counts[1], mode_counts[2],
+          blend_counts[0], blend_counts[1], blend_counts[2],
+          static_cast<unsigned long long>(hash_batch_vertices(split_emit_late_)),
+          diag_frame.max_off, diag_frame.worst_px,
           diag_frame.worst_py,
           diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
           content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
