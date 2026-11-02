@@ -148,7 +148,7 @@ EditorToolbar::EditorToolbar(EditorSession& session, ChartEditPanel& edit)
   chart_dropdown_ = chart.get();
   add_child(std::move(chart));
   chart_add_button_ = add_step_button(*this, "+", [this] {
-    if (session_.read_only()) return;
+    if (!session_.can_add_chart()) return;
     if (on_chart_add_) {
       on_chart_add_();
     } else {
@@ -436,8 +436,9 @@ void EditorToolbar::run(Action action) {
     case Action::Open:
       if (on_open_) {
         on_open_();
-      } else if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-        (void)session_.open_wdsproject(*path);
+      } else if (auto path =
+                     native_file_dialog::open_file("打开 WDS 文件", {"wdsproject", "wdschart"})) {
+        (void)session_.open_document(*path);
       } else {
         session_.report_status("打开已取消", StatusLevel::Info);
       }
@@ -445,6 +446,10 @@ void EditorToolbar::run(Action action) {
     case Action::Save:
       if (session_.read_only()) {
         session_.report_status("只读预览无法保存", StatusLevel::Error);
+        break;
+      }
+      if (session_.chart_only()) {
+        (void)session_.save();
         break;
       }
       if (session_.project_path().empty()) {
@@ -753,11 +758,12 @@ void EditorToolbar::paint(wds::interaction::UiPainter& painter) const {
   const bool editable = !session_.read_only();
   action_buttons_[1]->set_enabled(editable);
   action_buttons_[3]->set_enabled(editable);
-  action_buttons_[1]->set_tooltip("保存工程");
+  action_buttons_[1]->set_tooltip(session_.chart_only() ? "保存谱面" : "保存工程");
   delay_field_->set_enabled(session_.delay_editable());
-  // Read-only pack imports may still switch among multiple charts.
+  // Read-only pack imports may still switch among multiple charts. A direct
+  // .wdschart session has exactly one chart and cannot add more.
   chart_dropdown_->set_enabled(editable || session_.chart_count() > 1);
-  chart_add_button_->set_enabled(editable);
+  chart_add_button_->set_enabled(session_.can_add_chart());
   for (auto* button : convert_buttons_) button->set_enabled(editable);
 
   sync_numeric_fields();

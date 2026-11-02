@@ -14,6 +14,7 @@
 #include <wds/common/time.hpp>
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/editor_session.hpp"
+#include "wds/ui/project_open_args.hpp"
 #include "wds/ui/resource_paths.hpp"
 #include "wds/ui/layout/editor_layout.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
@@ -425,8 +426,8 @@ EditorMainWindow::EditorMainWindow(QWidget* parent) : QMainWindow(parent) {
     command_buttons_.push_back(button);
     return action;
   };
-  open_action_ = addCommand(fileMenu, tr("打开工程"), QKeySequence::Open);
-  save_action_ = addCommand(fileMenu, tr("保存工程"), QKeySequence::Save);
+  open_action_ = addCommand(fileMenu, tr("打开"), QKeySequence::Open);
+  save_action_ = addCommand(fileMenu, tr("保存"), QKeySequence::Save);
   music_action_ = addCommand(fileMenu, tr("导入音乐"), {});
   jacket_action_ = addCommand(fileMenu, tr("导入曲绘"), {});
   auto* stems_action = fileMenu->addAction(tr("本地分轨…"));
@@ -1324,7 +1325,7 @@ void EditorMainWindow::arm_backup_timer() {
   backup_timer_.stop();
   if (ui_manager_ == nullptr) return;
   const auto& session = ui_manager_->session();
-  if (session.project_path().empty() || session.read_only()) return;
+  if (session.project_path().empty() || session.chart_only() || session.read_only()) return;
   const int minutes = std::max(1, ui_manager_->backup_interval_min());
   backup_timer_.start(minutes * 60 * 1000);
 }
@@ -1332,7 +1333,7 @@ void EditorMainWindow::arm_backup_timer() {
 void EditorMainWindow::fire_auto_backup() {
   if (ui_manager_ == nullptr) return;
   auto& session = ui_manager_->session();
-  if (session.project_path().empty() || session.read_only()) return;
+  if (session.project_path().empty() || session.chart_only() || session.read_only()) return;
   std::vector<ChartBackupItem> items;
   if (!session.capture_auto_backup(items) || items.empty()) return;
   enqueue_backup_write(ChartBackupKind::Auto, std::move(items));
@@ -1365,6 +1366,12 @@ void EditorMainWindow::refresh_window_title() {
     if (!session.project_path().empty()) {
       title += QStringLiteral(" — ");
       title += QFileInfo(QString::fromStdString(session.project_path())).fileName();
+    } else if (session.chart_only()) {
+      const auto& chart_path = session.chart_path(session.active_chart_index());
+      if (!chart_path.empty()) {
+        title += QStringLiteral(" — ");
+        title += QFileInfo(QString::fromStdString(chart_path)).fileName();
+      }
     }
   }
   setWindowTitle(title);
@@ -1426,7 +1433,11 @@ void EditorMainWindow::wait_open_project_watchers() {
 }
 
 bool EditorMainWindow::show_startup_splash() {
-  if (ui_manager_ == nullptr || !ui_manager_->session().project_path().empty()) return true;
+  if (ui_manager_ == nullptr ||
+      !ui_manager_->session().project_path().empty() ||
+      ui_manager_->session().chart_only()) {
+    return true;
+  }
   conceal_unrevealed_floating_chrome();
   // Keep the chooser independent from the (still hidden) main window. This
   // avoids modality/activation quirks where accepting a child dialog leaves
@@ -1524,7 +1535,7 @@ bool EditorMainWindow::show_startup_splash() {
   root->addWidget(progress);
   auto* actions = new QHBoxLayout;
   actions->setSpacing(8);
-  auto* open = new QPushButton(tr("打开工程"), &splash);
+  auto* open = new QPushButton(tr("打开文件"), &splash);
   auto* create = new QPushButton(tr("新建工程"), &splash);
   auto* untitled = new QPushButton(tr("暂不需要工程"), &splash);
   auto* about = new QPushButton(tr("关于"), &splash);
@@ -1545,7 +1556,7 @@ bool EditorMainWindow::show_startup_splash() {
     splash.setEnabled(false);
     for (auto* button : {open, create, untitled, about}) button->setEnabled(false);
     recent->setEnabled(false);
-    loading->setText(tr("正在加载工程…"));
+    loading->setText(tr("正在加载文件…"));
     loading->setVisible(true);
     progress->setVisible(true);
     const std::uint64_t gen = ++open_generation_;
@@ -1571,17 +1582,21 @@ bool EditorMainWindow::show_startup_splash() {
               loading->setVisible(false);
               progress->setVisible(false);
               if (result) {
-                remember_recent_project(path);
+                // A directly opened chart is an in-memory session; it must not
+                // pollute the recent-projects list.
+                if (!wds::ui::is_wdschart_path(path.toStdString())) {
+                  remember_recent_project(path);
+                }
                 splash.accept();
               } else {
                 QMessageBox::warning(&splash, tr("打开失败"),
-                                     tr("无法加载所选工程。"));
+                                     tr("无法加载所选文件。"));
               }
             });
     const std::string native_path = path.toStdString();
     watcher->setFuture(QtConcurrent::run([native_path] {
       wds::common::install_thread_crash_stack();
-      return EditorSession::prepare_wdsproject(native_path);
+      return EditorSession::prepare_document(native_path);
     }));
   };
   connect(recent, &QListWidget::itemDoubleClicked, &splash,
@@ -1591,8 +1606,9 @@ bool EditorMainWindow::show_startup_splash() {
           });
   connect(open, &QPushButton::clicked, &splash, [this, &splash, start_load] {
     journal_menu_action("splash.open");
-    const auto path = QFileDialog::getOpenFileName(&splash, tr("打开 WDS 工程"), {},
-                                                   tr("WDS 工程 (*.wdsproject)"));
+    const auto path = QFileDialog::getOpenFileName(
+        &splash, tr("打开 WDS 文件"), {},
+        tr("WDS 工程或谱面 (*.wdsproject *.wdschart)"));
     start_load(path);
   });
   connect(create, &QPushButton::clicked, &splash, [this, &splash] {
@@ -1927,44 +1943,56 @@ void EditorMainWindow::confirm_pending_changes(std::function<void()> on_proceed)
   if (box.clickedButton() == discard) on_proceed();
 }
 
-bool EditorMainWindow::open_project_at_startup(const QString& path) {
+bool EditorMainWindow::open_document_at_startup(const QString& path) {
   if (ui_manager_ == nullptr || path.isEmpty()) return false;
-  const QString project_path = normalized_project_path(path);
-  const QByteArray utf8 = project_path.toUtf8();
-  const std::string native_path(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-  if (!ui_manager_->session().open_wdsproject(native_path)) return false;
+  const QString document_path = normalized_project_path(path);
+  const std::string native_path = document_path.toStdString();
+  if (!ui_manager_->session().open_document(native_path)) return false;
   // A double-clicked project belongs at the top of the recent list even though
-  // it was never picked from the chooser.
-  remember_recent_project(project_path);
+  // it was never picked from the chooser. A chart is an in-memory one-chart
+  // session and must leave the project list untouched.
+  if (!wds::ui::is_wdschart_path(native_path)) {
+    remember_recent_project(document_path);
+  }
   arm_backup_timer();
   return true;
 }
 
-void EditorMainWindow::open_project_path(const QString& path) {
+void EditorMainWindow::open_document_path(const QString& path) {
   if (ui_manager_ == nullptr || path.isEmpty()) return;
-  const QString project_path = normalized_project_path(path);
+  const QString document_path = normalized_project_path(path);
+  const bool chart = wds::ui::is_wdschart_path(document_path.toStdString());
   if (startup_splash_ != nullptr) {
-    // Launched with the chooser up and the user double-clicked a project: close
+    // Launched with the chooser up and the user double-clicked a document: close
     // the chooser and let main() open the file once exec() returns.
-    pending_startup_open_ = project_path;
+    pending_startup_open_ = document_path;
     startup_splash_->accept();
     return;
   }
-  if (!QFileInfo::exists(project_path)) {
-    QMessageBox::warning(this, tr("打开失败"), tr("找不到工程文件：\n%1").arg(project_path));
+  if (!QFileInfo::exists(document_path)) {
+    QMessageBox::warning(this, tr("打开失败"), tr("找不到文件：\n%1").arg(document_path));
     return;
   }
-  const QString current = normalized_project_path(
-      QString::fromStdString(ui_manager_->session().project_path()));
-  if (!current.isEmpty() && current == project_path) {
-    // Double-clicking the project that is already open just brings it forward.
+  QString current;
+  if (chart) {
+    const auto& session = ui_manager_->session();
+    if (session.chart_only()) {
+      current = normalized_project_path(
+          QString::fromStdString(session.chart_path(session.active_chart_index())));
+    }
+  } else {
+    current = normalized_project_path(
+        QString::fromStdString(ui_manager_->session().project_path()));
+  }
+  if (!current.isEmpty() && current == document_path) {
+    // Double-clicking the document that is already open just brings it forward.
     show();
     raise();
     activateWindow();
-    remember_recent_project(project_path);
+    if (!chart) remember_recent_project(document_path);
     return;
   }
-  confirm_pending_changes([this, project_path] { begin_open_project(project_path); });
+  confirm_pending_changes([this, document_path] { begin_open_document(document_path); });
 }
 
 QString EditorMainWindow::take_pending_startup_open() {
@@ -1973,19 +2001,21 @@ QString EditorMainWindow::take_pending_startup_open() {
   return path;
 }
 
-void EditorMainWindow::begin_open_project(const QString& raw_path) {
+void EditorMainWindow::begin_open_document(const QString& raw_path) {
   if (ui_manager_ == nullptr || raw_path.isEmpty()) return;
   const QString path = normalized_project_path(raw_path);
+  const bool chart = wds::ui::is_wdschart_path(path.toStdString());
   // Parse off the GUI thread; the overlay stays up and the preview keeps
   // ticking while the worker runs. Apply happens on the GUI thread in
   // `finished`, guarded by open_generation_ so an older load cannot
   // overwrite a newer one.
-  auto overlay = std::make_shared<BusyScope>(this, tr("正在打开工程…"));
+  auto overlay =
+      std::make_shared<BusyScope>(this, chart ? tr("正在打开谱面…") : tr("正在打开工程…"));
   const std::uint64_t gen = ++open_generation_;
   auto* watcher = new QFutureWatcher<PreparedWdsProject>(this);
   track_open_watcher(watcher);
   connect(watcher, &QFutureWatcher<PreparedWdsProject>::finished, this,
-          [this, path, watcher, gen, overlay]() mutable {
+          [this, path, chart, watcher, gen, overlay]() mutable {
             untrack_open_watcher(watcher);
             watcher->deleteLater();
             if (gen != open_generation_ || ui_manager_ == nullptr) {
@@ -1996,9 +2026,9 @@ void EditorMainWindow::begin_open_project(const QString& raw_path) {
             const bool ok = ui_manager_->session().apply_prepared_wdsproject(future.takeResult());
             overlay.reset();
             if (!ok) {
-              QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选工程。"));
+              QMessageBox::warning(this, tr("打开失败"), tr("无法打开所选文件。"));
             } else {
-              remember_recent_project(path);
+              if (!chart) remember_recent_project(path);
               clear_click_marks();
               arm_backup_timer();
               show();
@@ -2009,16 +2039,17 @@ void EditorMainWindow::begin_open_project(const QString& raw_path) {
   const std::string native_path = path.toStdString();
   watcher->setFuture(QtConcurrent::run([native_path] {
     wds::common::install_thread_crash_stack();
-    return EditorSession::prepare_wdsproject(native_path);
+    return EditorSession::prepare_document(native_path);
   }));
 }
 
 void EditorMainWindow::open_project() {
   confirm_pending_changes([this] {
-    const auto path = QFileDialog::getOpenFileName(this, tr("打开 WDS 工程"), {},
-                                                    tr("WDS 工程 (*.wdsproject)"));
+    const auto path = QFileDialog::getOpenFileName(
+        this, tr("打开 WDS 文件"), {},
+        tr("WDS 工程或谱面 (*.wdsproject *.wdschart)"));
     if (path.isEmpty() || ui_manager_ == nullptr) return;
-    begin_open_project(path);
+    begin_open_document(path);
   });
 }
 
@@ -2043,25 +2074,37 @@ void EditorMainWindow::save_project_then(std::function<void()> done) {
     QMessageBox::warning(this, tr("只读"), tr("只读预览无法保存。"));
     return;
   }
-  QString path = QString::fromStdString(session.project_path());
-  if (path.isEmpty()) {
-    path = pick_wdsproject_save_path(this);
+  // Direct .wdschart open: write the chart back to its own file. No project
+  // dialog, no .wdsproject, and no recent-project update.
+  const bool chart_only = session.chart_only();
+  QString path;
+  if (!chart_only) {
+    path = QString::fromStdString(session.project_path());
+    if (path.isEmpty()) {
+      path = pick_wdsproject_save_path(this);
+    }
+    if (path.isEmpty()) return;
   }
-  if (path.isEmpty()) return;
   auto ok = std::make_shared<bool>(false);
   run_with_busy(
-      tr("正在保存工程…"),
-      [this, path, ok] {
+      chart_only ? tr("正在保存谱面…") : tr("正在保存工程…"),
+      [this, path, ok, chart_only] {
         if (ui_manager_ == nullptr) return;
         auto& session = ui_manager_->session();
+        if (chart_only) {
+          *ok = session.save();
+          return;
+        }
         *ok = session.project_path().empty() ? session.save_as(path.toStdString())
                                              : session.save();
       },
-      [this, path, ok, done = std::move(done)] {
+      [this, path, ok, chart_only, done = std::move(done)] {
         if (!*ok) {
-          QMessageBox::warning(this, tr("保存失败"), tr("无法保存工程。"));
+          QMessageBox::warning(
+              this, tr("保存失败"),
+              chart_only ? tr("无法保存谱面。") : tr("无法保存工程。"));
         } else {
-          remember_recent_project(path);
+          if (!chart_only) remember_recent_project(path);
           arm_backup_timer();
         }
         if (*ok && done) done();
@@ -2121,6 +2164,10 @@ void EditorMainWindow::import_jacket() {
 
 void EditorMainWindow::add_chart() {
   if (ui_manager_ == nullptr || ui_manager_->session().read_only()) return;
+  if (!ui_manager_->session().can_add_chart()) {
+    statusBar()->showMessage(tr("当前为独立谱面，只能编辑这一张谱面"));
+    return;
+  }
   QMessageBox box(QMessageBox::Question, tr("添加谱面"), tr("新建空白谱面，还是添加已有谱面文件？"), QMessageBox::NoButton, this);
   auto* create = box.addButton(tr("新建"), QMessageBox::AcceptRole);
   auto* existing = box.addButton(tr("添加已有"), QMessageBox::ActionRole);

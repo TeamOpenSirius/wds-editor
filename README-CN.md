@@ -49,6 +49,7 @@ WDS Editor 拥有自己的可编辑工程与谱面格式，同时兼容已有 WD
 - 面向 WDS 表现规则实现的**实时 3D 谱面预览**。
 - 基于 BASS 的音乐播放、打击音和统一 Transport 时钟。
 - **多谱面工程**：同一首歌可以保存多个难度 / 谱面。
+- **直接打开谱面**：`.wdschart` 可像工程一样双击打开，进入只包含该谱面的内存工程。
 - **官方 CSV 导入与导出**。
 - **SUS 导入与导出**，兼容 Ched 12 键布局。
 - 可选的 **SUS → 原生可编辑谱面**自动转换。
@@ -117,17 +118,20 @@ END
 
 `RESUME_CHART` / `RESUME_TICK` 记录上次正常退出时正在编辑的谱面与 tick 位置；再次打开工程会直接跳转回去。旧工程没有这两个条目时会进入第一张谱面的开头。
 
-### 双击打开工程
+### 双击打开工程或谱面
 
-安装编辑器后，`.wdsproject` 会注册为由 WDS Editor 打开的工程文件：双击工程会直接载入，跳过开屏选择界面，并把该工程移到「最近编辑」列表最前面。
+安装编辑器后，`.wdsproject` 与 `.wdschart` 都会注册为由 WDS Editor 打开的文件：
+
+- 双击工程会直接载入，跳过开屏选择界面，并把该工程移到「最近编辑」列表最前面。
+- 双击谱面同样跳过开屏选择界面，但会创建一个**只在内存中存在**的单谱面工程，不会写入任何 `.wdsproject`，也不会影响「最近编辑」工程列表。此时自动保存与「添加谱面」不可用；保存只写回这张 `.wdschart`，关闭时的未保存提示也只统计谱面本身的修改。导入音乐、导入曲绘以及导出当前谱面/整个工程仍然可用，导入的工程设置只保留在本次内存会话中。
 
 | 平台 | 注册方式 |
 | --- | --- |
-| Windows | MSI 写入 `.wdsproject` 的 ProgId 与 shell open 命令（`"%1"`）；卸载 MSI 时这些注册表值会一并删除。 |
-| macOS | `WDS Editor.app` 在 Info.plist 里声明 `CFBundleDocumentTypes` 与导出的 `com.wds.wdsproject` UTI。应用放进 `/Applications` 后由 LaunchServices 注册；删除应用即取消注册。 |
-| Linux（开发构建） | `scripts/install-linux-desktop.sh` 写入 freedesktop desktop entry 与 MIME 类型，并设为默认打开方式；`--uninstall` 移除。 |
+| Windows | MSI 写入 `.wdsproject` / `.wdschart` 的 ProgId 与 shell open 命令（`"%1"`）；卸载 MSI 时这些注册表值会一并删除。 |
+| macOS | `WDS Editor.app` 在 Info.plist 里声明 `CFBundleDocumentTypes` 与导出的 `com.wds.wdsproject` / `com.wds.wdschart` UTI。应用放进 `/Applications` 后由 LaunchServices 注册；删除应用即取消注册。 |
+| Linux（开发构建） | `scripts/install-linux-desktop.sh` 写入 freedesktop desktop entry 与 MIME 类型，并把两种格式都设为默认打开方式；`--uninstall` 移除。 |
 
-macOS 上编辑器已打开时再次双击工程（或「打开方式」），会在当前窗口载入，并先询问未保存的修改；Windows 与 Linux 会启动第二个实例，原实例状态保持不变。
+macOS 上编辑器已打开时再次双击文件（或「打开方式」），会在当前窗口载入，并先询问未保存的修改；Windows 与 Linux 会启动第二个实例，原实例状态保持不变。
 
 ### `.wdschart`
 
@@ -402,7 +406,7 @@ Transport 统一管理：
 | 快捷键 | 功能 |
 | --- | --- |
 | `Space` | 播放 / 暂停 |
-| `Ctrl/Cmd + O` | 打开工程 |
+| `Ctrl/Cmd + O` | 打开工程或谱面 |
 | `Ctrl/Cmd + S` | 保存 |
 | `Ctrl/Cmd + Z` | 撤销 |
 | `Ctrl/Cmd + Y` | 重做 |

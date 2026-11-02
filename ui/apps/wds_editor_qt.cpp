@@ -1731,9 +1731,9 @@ int main(int argc, char** argv) {
   wds::ui::prepare_macos_vulkan_environment(argv[0]);
   wds::common::log_runtime_environment(argv[0]);
   wds::ui::WdsApplication app(argc, argv);
-  // Double-clicked .wdsproject files arrive as a QFileOpenEvent (macOS, via
-  // LaunchServices) or as a bare argv entry (Windows shell / Linux desktop
-  // entry). Capture the event form before anything can consume it.
+  // Double-clicked .wdsproject / .wdschart files arrive as a QFileOpenEvent
+  // (macOS, via LaunchServices) or as a bare argv entry (Windows shell / Linux
+  // desktop entry). Capture the event form before anything can consume it.
   wds::ui::FileOpenRouter file_open_router;
   app.installEventFilter(&file_open_router);
   QCoreApplication::setOrganizationName(QStringLiteral("WDS"));
@@ -2002,13 +2002,14 @@ int main(int argc, char** argv) {
     }
   }
 
-  // File-manager / shell association launch: open the project directly and skip
-  // the startup chooser. `--open` stays the automation switch (it must not touch
-  // the user's recent list, which every capture script would pollute).
+  // File-manager / shell association launch: open a .wdsproject or .wdschart
+  // directly and skip the startup chooser. `--open` stays the automation switch
+  // (it must not touch the user's recent list, which every capture script would
+  // pollute).
   QString external_open_path;
   for (const QString& positional : positional_args) {
     if (QFileInfo(positional).isFile() &&
-        wds::ui::is_wdsproject_path(positional.toStdString())) {
+        wds::ui::is_wds_document_path(positional.toStdString())) {
       external_open_path = positional;
       break;
     }
@@ -2018,7 +2019,7 @@ int main(int argc, char** argv) {
     if (capture_job.out_dir.isEmpty() || capture_job.times_path.isEmpty()) {
       std::fprintf(stderr,
                    "usage: wds_editor --capture-preview <out_dir> --capture-times <file> "
-                   "[--preview-size 1920x1080] [--open project.wdsproject] [--chart chart.wdschart]\n");
+                   "[--preview-size 1920x1080] [--open document.wdsproject] [--chart chart.wdschart]\n");
       return 2;
     }
     QString times_err;
@@ -2255,8 +2256,8 @@ int main(int argc, char** argv) {
   if (!open_path.isEmpty()) {
     const QByteArray utf8 = open_path.toUtf8();
     const std::string path(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-    if (!editor.session().open_wdsproject(path)) {
-      WDS_LOG("failed to open project: %s\n", path.c_str());
+    if (!editor.session().open_document(path)) {
+      WDS_LOG("failed to open document: %s\n", path.c_str());
     }
   }
 
@@ -2279,7 +2280,7 @@ int main(int argc, char** argv) {
 
   bool startup_project_opened = false;
   if (!external_open_path.isEmpty() && open_path.isEmpty()) {
-    startup_project_opened = window.open_project_at_startup(external_open_path);
+    startup_project_opened = window.open_document_at_startup(external_open_path);
     if (!startup_project_opened) {
       WDS_LOG("failed to open associated project: %s\n",
               external_open_path.toUtf8().constData());
@@ -2291,7 +2292,7 @@ int main(int argc, char** argv) {
   // this window instead of spawning another instance. While the startup chooser
   // is up the window closes it and parks the path; the drain below opens it.
   file_open_router.set_handler([&window](const QString& path) {
-    window.open_project_path(path);
+    window.open_document_path(path);
   });
   if (!args.contains("--smoke-test") && !cli_automation) {
     maybe_notify_previous_crash(nullptr);
@@ -2304,7 +2305,7 @@ int main(int argc, char** argv) {
     if (open_path.isEmpty()) {
       const QString parked = window.take_pending_startup_open();
       if (!parked.isEmpty()) {
-        startup_project_opened = window.open_project_at_startup(parked);
+        startup_project_opened = window.open_document_at_startup(parked);
       }
     }
   }

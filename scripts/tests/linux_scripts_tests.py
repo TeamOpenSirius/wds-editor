@@ -148,14 +148,20 @@ with open(os.environ['WDS_SCRIPT_TEST_CALLS'], 'a') as f:
         # Exec must launch the editor with the document as a bare argument, and
         # survive spaces in the install path.
         self.assertIn(f'Exec="{editor}" %f', desktop_text)
-        self.assertIn("MimeType=application/x-wdsproject;", desktop_text)
+        self.assertIn("MimeType=application/x-wdsproject;application/x-wdschart;", desktop_text)
         self.assertIn("TryExec=" + str(editor), desktop_text)
-        self.assertIn('glob pattern="*.wdsproject"', mime.read_text())
+        mime_text = mime.read_text()
+        self.assertIn('glob pattern="*.wdsproject"', mime_text)
+        self.assertIn('glob pattern="*.wdschart"', mime_text)
+        self.assertIn('<match value="WDSCHART " type="string" offset="0"/>', mime_text)
         recorded = [json.loads(line) for line in calls.read_text().splitlines()]
         self.assertEqual([r["tool"] for r in recorded],
-                         ["update-mime-database", "update-desktop-database", "xdg-mime"])
-        self.assertEqual(recorded[-1]["args"],
+                         ["update-mime-database", "update-desktop-database", "xdg-mime",
+                          "xdg-mime"])
+        self.assertEqual(recorded[-2]["args"],
                          ["default", "wds-editor.desktop", "application/x-wdsproject"])
+        self.assertEqual(recorded[-1]["args"],
+                         ["default", "wds-editor.desktop", "application/x-wdschart"])
 
         result = self.run_script("install-linux-desktop.sh", "--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -48,16 +48,18 @@ class EditorMainWindow final : public QMainWindow {
   // Shows the startup chooser. Returns true when the editor should continue,
   // false when the user closed the splash and the application should exit.
   bool show_startup_splash();
-  // File-association / deep-link launch: load `path` before the first frame and
-  // move it to the front of the recent list. False when it cannot load, so the
-  // caller can fall back to the startup chooser.
-  bool open_project_at_startup(const QString& path);
-  // A project requested while the editor already runs (another double-click).
-  // Confirms unsaved changes, loads it and moves it to the front of the list.
-  // While the startup chooser is up this closes it instead and parks the path,
-  // so the caller can open it right after the chooser returns.
-  void open_project_path(const QString& path);
-  // Path parked by open_project_path() while the startup chooser was open.
+  // File-association / deep-link launch: load a .wdsproject or .wdschart before
+  // the first frame. Projects move to the front of the recent list; charts do
+  // not (they are an in-memory, single-chart session). False when it cannot
+  // load, so the caller can fall back to the startup chooser.
+  bool open_document_at_startup(const QString& path);
+  // A document requested while the editor already runs (another double-click).
+  // Confirms unsaved changes, loads it and, for projects only, moves it to the
+  // front of the list. While the startup chooser is up this closes it instead
+  // and parks the path, so the caller can open it right after the chooser
+  // returns.
+  void open_document_path(const QString& path);
+  // Path parked by open_document_path() while the startup chooser was open.
   QString take_pending_startup_open();
   void maybe_auto_check_updates();
   void set_viewport_windows(QWindow* preview, QWindow* editor);
@@ -88,7 +90,7 @@ class EditorMainWindow final : public QMainWindow {
   void confirm_pending_changes(std::function<void()> on_proceed);
   void open_project();
   // Parse + apply on the GUI thread, load on a worker; callers own confirmation.
-  void begin_open_project(const QString& path);
+  void begin_open_document(const QString& path);
   void save_project();
   void import_chart();
   void import_music();

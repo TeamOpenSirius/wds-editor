@@ -795,6 +795,7 @@ void EditorToolbarWidget::build_ui() {
   });
   connect(chart_add_, &QPushButton::clicked, this, [this] {
     journal_menu_action("toolbar.chart_add");
+    if (!manager_->session().can_add_chart()) return;
     if (on_add_chart_) on_add_chart_();
   });
   connect(pause_at_current_, &QCheckBox::toggled, this, [this](bool checked) {
@@ -918,7 +919,7 @@ void EditorToolbarWidget::refresh_enabled_states() {
   if (chart_select_ != nullptr) {
     chart_select_->setEnabled(editable || session.chart_count() > 1);
   }
-  if (chart_add_ != nullptr) chart_add_->setEnabled(editable);
+  if (chart_add_ != nullptr) chart_add_->setEnabled(session.can_add_chart());
 }
 
 void EditorToolbarWidget::refresh_curve_controls() {

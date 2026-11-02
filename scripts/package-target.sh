@@ -2066,11 +2066,12 @@ EOF
   <string>wds</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
-  <!-- Double-click / Open With for .wdsproject. LaunchServices registers an app
-       in /Applications from this declaration, which also makes WDS Editor the
-       default handler for the type (only this app claims it). Removing the app
-       unregisters it again, so the drag-to-Applications install and the
-       delete-from-Applications uninstall both do the right thing. -->
+  <!-- Double-click / Open With for .wdsproject and .wdschart. LaunchServices
+       registers an app in /Applications from these declarations, which also
+       makes WDS Editor the default handler for both types (only this app claims
+       them). Removing the app unregisters them again, so the
+       drag-to-Applications install and the delete-from-Applications uninstall
+       both do the right thing. -->
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
@@ -2089,6 +2090,24 @@ EOF
       <key>LSItemContentTypes</key>
       <array>
         <string>com.wds.wdsproject</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>WDS 谱面</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>CFBundleTypeIconFile</key>
+      <string>wds</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>wdschart</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.wds.wdschart</string>
       </array>
     </dict>
   </array>
@@ -2111,6 +2130,26 @@ EOF
         <key>public.filename-extension</key>
         <array>
           <string>wdsproject</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.wds.wdschart</string>
+      <key>UTTypeDescription</key>
+      <string>WDS 谱面</string>
+      <key>UTTypeIconFile</key>
+      <string>wds</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+        <string>public.content</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>wdschart</string>
         </array>
       </dict>
     </dict>

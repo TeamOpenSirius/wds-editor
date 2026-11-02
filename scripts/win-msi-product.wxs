@@ -330,13 +330,13 @@
     </Directory>
 
     <DirectoryRef Id="INSTALLDIR">
-      <!-- Double-click / Open With for .wdsproject. Everything lives in one
-           component so uninstall removes every value Windows uses to resolve the
-           association (the extension's default value, the ProgId verb and the
-           Open With entry). wixl writes the ProgId under HKCR, which a
-           per-machine install maps to HKLM\Software\Classes. wixl has no
-           RemoveRegistryKey, so the now-empty keys stay behind; with no ProgId
-           value they associate nothing. -->
+      <!-- Double-click / Open With for .wdsproject and .wdschart. Everything
+           lives in one component so uninstall removes every value Windows uses
+           to resolve the associations (the extension's default value, the
+           ProgId verbs and the Open With entries). wixl writes the ProgIds under
+           HKCR, which a per-machine install maps to HKLM\Software\Classes. wixl
+           has no RemoveRegistryKey, so the now-empty keys stay behind; with no
+           ProgId value they associate nothing. -->
       <Component Id="FileAssociation" Guid="$(var.GuidFileAssociation)" Win64="yes">
         <RegistryValue Root="HKLM"
                        Key="Software\Classes\.wdsproject\OpenWithProgids"
@@ -344,13 +344,23 @@
                        Type="string"
                        Value=""
                        KeyPath="yes"/>
+        <RegistryValue Root="HKLM"
+                       Key="Software\Classes\.wdschart\OpenWithProgids"
+                       Name="WDSChart"
+                       Type="string"
+                       Value=""/>
         <!-- ASCII only: wixl crashes on non-ASCII strings when the package has
-             no explicit Codepage (MSI 1252). The shell shows this as the file
-             type name. -->
+             no explicit Codepage (MSI 1252). The shell shows these as the file
+             type names. -->
         <ProgId Id="WDSProject" Description="WDS Chart Project">
           <Extension Id="wdsproject" ContentType="application/x-wdsproject">
             <!-- TargetFile resolves to the installed editor, so the command
                  survives a custom install directory. -->
+            <Verb Id="open" Command="Open" TargetFile="WdsFile_wds_editor_exe" Argument="&quot;%1&quot;"/>
+          </Extension>
+        </ProgId>
+        <ProgId Id="WDSChart" Description="WDS Chart File">
+          <Extension Id="wdschart" ContentType="application/x-wdschart">
             <Verb Id="open" Command="Open" TargetFile="WdsFile_wds_editor_exe" Argument="&quot;%1&quot;"/>
           </Extension>
         </ProgId>

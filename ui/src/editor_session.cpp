@@ -1,6 +1,7 @@
 #include "wds/ui/editor_session.hpp"
 
 #include "wds/ui/native_file_dialog.hpp"
+#include "wds/ui/project_open_args.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/regions/status/status_bar.hpp"
 
@@ -591,6 +592,7 @@ bool EditorSession::new_project() {
   offset_ms_ = 0;
   metadata_dirty_ = false;
   read_only_ = false;
+  chart_only_ = false;
   allow_delay_when_read_only_ = false;
   reset_music_config_meta();
   apply_chart_delay();
@@ -663,6 +665,43 @@ PreparedWdsProject EditorSession::prepare_wdsproject(const std::string& path) {
   return prepared;
 }
 
+PreparedWdsProject EditorSession::prepare_wdschart(const std::string& path) {
+  PreparedWdsProject prepared;
+  prepared.kind = PreparedWdsProject::Kind::Chart;
+  // A directly opened chart is its own in-memory project. The project path must
+  // stay empty so no save path can ever write a .wdsproject.
+  prepared.project_path.clear();
+  prepared.chart_paths.reserve(1);
+  prepared.charts.reserve(1);
+  wds::chart_editor::NotationChart chart;
+  if (!ok(wds::chart_editor::ChartSerializer::load_from_file(path, chart))) {
+    prepared.error = "无法加载谱面 " + path;
+    return prepared;
+  }
+  chart.timing.offset_ms = 0;
+  prepared.chart_paths.push_back(path);
+  prepared.charts.push_back(std::move(chart));
+  prepared.active_chart_index = 0;
+  prepared.resume_tick = 0;
+  prepared.offset_ms = 0;
+  return prepared;
+}
+
+PreparedWdsProject EditorSession::prepare_document(const std::string& path) {
+  if (is_wdschart_path(path)) {
+    return prepare_wdschart(path);
+  }
+  return prepare_wdsproject(path);
+}
+
+bool EditorSession::open_wdschart(const std::string& path) {
+  return apply_prepared_wdsproject(prepare_wdschart(path));
+}
+
+bool EditorSession::open_document(const std::string& path) {
+  return is_wdschart_path(path) ? open_wdschart(path) : open_wdsproject(path);
+}
+
 bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
   if (!prepared.valid() || prepared.chart_paths.size() != prepared.charts.size()) {
     status("打开失败：" + (prepared.error.empty() ? std::string("工程数据无效")
@@ -670,6 +709,7 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
            StatusLevel::Error);
     return false;
   }
+  const bool chart_only = prepared.kind == PreparedWdsProject::Kind::Chart;
 
   // Build session slots only on the owner thread. Preparation above is pure
   // file I/O/parsing and never exposes a half-loaded project to rendering.
@@ -697,7 +737,7 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
     }
   }
 
-  project_path_ = std::move(prepared.project_path);
+  project_path_ = chart_only ? std::string() : std::move(prepared.project_path);
   music_path_ = loaded_music;
   jacket_path_ = loaded_jacket;
   apply_preview_jacket(&jacket_note);
@@ -706,19 +746,27 @@ bool EditorSession::apply_prepared_wdsproject(PreparedWdsProject prepared) {
   offset_ms_ = prepared.offset_ms;
   metadata_dirty_ = false;
   read_only_ = false;
+  chart_only_ = chart_only;
   allow_delay_when_read_only_ = false;
   reset_music_config_meta();
+  if (chart_only) sus_meta_ = {};
 
   if (!activate_chart(active_chart_index_)) {
     publish_crash_context();
     status("打开失败：无法激活谱面", StatusLevel::Error);
     return false;
   }
-  // Resume at the tick saved on exit. Legacy projects pass 0 → chart start.
-  const int64_t resume_ms = wds::chart_editor::tick_to_milliseconds(
-      prepared.resume_tick, engine().document().timing());
-  preview_.restore_playback_position(resume_ms);
-  status("已打开工程：" + project_path_ + music_note + jacket_note, StatusLevel::Info);
+  if (chart_only) {
+    preview_.reset_playback();
+    status("已打开谱面：" + charts_.front().path + "（独立谱面，工程设置不会保存）",
+           StatusLevel::Info);
+  } else {
+    // Resume at the tick saved on exit. Legacy projects pass 0 → chart start.
+    const int64_t resume_ms = wds::chart_editor::tick_to_milliseconds(
+        prepared.resume_tick, engine().document().timing());
+    preview_.restore_playback_position(resume_ms);
+    status("已打开工程：" + project_path_ + music_note + jacket_note, StatusLevel::Info);
+  }
   notify_project_reloaded();
   publish_crash_context();
   return true;
@@ -819,6 +867,11 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
            StatusLevel::Error);
     return false;
   }
+  if (chart_only_) {
+    // A direct .wdschart open must never create a project file.
+    status("独立谱面不保存工程，请使用「保存」写回谱面", StatusLevel::Error);
+    return false;
+  }
   if (project_path.empty() || charts_.empty()) {
     status("保存失败：没有可写入的工程或谱面", StatusLevel::Error);
     return false;
@@ -866,11 +919,48 @@ bool EditorSession::write_all_charts_and_project(const std::string& project_path
   return true;
 }
 
+bool EditorSession::save_chart_only() {
+  if (read_only_) {
+    status("只读预览无法保存", StatusLevel::Error);
+    return false;
+  }
+  if (!chart_only_ || charts_.empty() || active_chart_index_ >= charts_.size()) {
+    status("保存失败：没有可写入的谱面", StatusLevel::Error);
+    return false;
+  }
+  sync_active_chart();
+  auto& slot = charts_[active_chart_index_];
+  if (slot.path.empty()) {
+    status("保存失败：独立谱面未绑定文件路径", StatusLevel::Error);
+    return false;
+  }
+  const std::string path = slot.path;
+  const auto chart_save = wds::chart_editor::ChartSerializer::save_to_file(
+      chart_for_disk(slot.chart), path);
+  if (!ok(chart_save)) {
+    status("保存失败：无法写入谱面 " + path +
+               (chart_save.message.empty() ? "" : " — " + chart_save.message),
+           StatusLevel::Error);
+    return false;
+  }
+  slot.dirty = false;
+  // The in-memory project (music, delay, jacket, chart list) is deliberately not
+  // written for a direct .wdschart open; clear its dirty bit so the exit prompt
+  // only ever reflects chart edits.
+  metadata_dirty_ = false;
+  engine().mark_saved();
+  status("已保存谱面：" + path, StatusLevel::Info);
+  notify_ui_change(SessionUiChange::Document);
+  publish_crash_context();
+  return true;
+}
+
 bool EditorSession::save() {
   if (read_only_) {
     status("只读预览无法保存", StatusLevel::Error);
     return false;
   }
+  if (chart_only_) return save_chart_only();
   if (project_path_.empty()) return false;
   return write_all_charts_and_project(project_path_);
 }
@@ -878,6 +968,11 @@ bool EditorSession::save() {
 bool EditorSession::save_as(const std::string& path) {
   if (read_only_) {
     status("只读预览无法保存", StatusLevel::Error);
+    return false;
+  }
+  if (chart_only_) {
+    // Only an explicit chart export may write this session to a new destination.
+    status("独立谱面不支持另存工程，请使用导出", StatusLevel::Error);
     return false;
   }
   if (path.empty()) return false;
@@ -966,6 +1061,7 @@ bool EditorSession::import_official_pack(const std::string& music_config_path) {
   offset_ms_ = pack_offset_ms;
   metadata_dirty_ = false;
   read_only_ = true;
+  chart_only_ = false;
   allow_delay_when_read_only_ = false;
   cue_sheet_name_ = music.cue_sheet_name.empty() ? "Music" : music.cue_sheet_name;
   cue_name_ = music.cue_name.empty() ? "1" : music.cue_name;
@@ -1040,6 +1136,7 @@ bool EditorSession::import_official(const std::string& chart_path,
   engine().mark_saved();
   metadata_dirty_ = false;
   read_only_ = true;
+  chart_only_ = false;
   // No music_config → allow editing 谱面延迟 for preview alignment.
   allow_delay_when_read_only_ = !found_config;
   reset_music_config_meta();
@@ -1085,6 +1182,7 @@ bool EditorSession::import_sus(const std::string& path) {
   active_chart_index_ = 0;
   metadata_dirty_ = convert;
   read_only_ = !convert;
+  chart_only_ = false;
   allow_delay_when_read_only_ = false;
   reset_music_config_meta();
   sus_meta_ = meta;
@@ -1377,11 +1475,18 @@ bool EditorSession::set_offset_ms(int64_t offset_ms) {
   }
   if (blocked) return false;
 
+  const bool chart_dirty_before = engine().is_dirty();
   offset_ms_ = offset_ms;
   if (!read_only_) {
     metadata_dirty_ = true;
   }
   apply_chart_delay();
+  if (chart_only_ && !chart_dirty_before) {
+    // Changing the (unsaveable) project delay marks the document dirty in the
+    // engine. Preserve real chart edits, but do not let delay alone trigger the
+    // unsaved-changes prompt for a direct .wdschart session.
+    engine().mark_saved();
+  }
   notify_ui_change(SessionUiChange::Offset);
   notify_ui_change(SessionUiChange::Document);
   return true;
@@ -1399,6 +1504,10 @@ bool EditorSession::switch_chart(std::size_t index) {
 
 bool EditorSession::add_chart() {
   if (read_only_) return false;
+  if (chart_only_) {
+    status("当前为独立谱面，只能编辑这一张谱面", StatusLevel::Error);
+    return false;
+  }
   if (project_path_.empty()) {
     status("请先保存工程后再添加谱面", StatusLevel::Error);
     return false;
@@ -1443,6 +1552,10 @@ bool EditorSession::add_chart() {
 
 bool EditorSession::add_chart_from_file(const std::string& path) {
   if (read_only_ || path.empty()) return false;
+  if (chart_only_) {
+    status("当前为独立谱面，只能编辑这一张谱面", StatusLevel::Error);
+    return false;
+  }
   if (project_path_.empty()) {
     status("请先保存工程后再添加谱面", StatusLevel::Error);
     return false;
@@ -1471,7 +1584,10 @@ bool EditorSession::add_chart_from_file(const std::string& path) {
 }
 
 bool EditorSession::dirty() const noexcept {
-  if (metadata_dirty_) return true;
+  // A direct .wdschart open has no project file, so imported music / delay /
+  // jacket / chart-list metadata are intentionally not saveable and must not
+  // trigger the close prompt. Only chart edits count.
+  if (!chart_only_ && metadata_dirty_) return true;
   if (engine().is_dirty()) return true;
   for (const auto& slot : charts_) {
     if (slot.dirty) return true;

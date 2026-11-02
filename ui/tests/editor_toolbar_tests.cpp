@@ -874,6 +874,73 @@ void test_auto_backup_normalizes_ids_without_mutating_session() {
   fs::remove_all(dir);
 }
 
+void test_direct_chart_open_is_in_memory_single_chart_session() {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "wds_direct_chart" / std::to_string(std::rand());
+  fs::create_directories(dir);
+  const fs::path chart_path = dir / "standalone.wdschart";
+
+  wds::chart_editor::NotationChart source;
+  wds::chart_editor::NotationNote first;
+  first.start_tick = 0;
+  first.lane = 0;
+  first.width = 1;
+  source.notes = {first};
+  CHECK(wds::chart_editor::ChartSerializer::save_to_file(source, chart_path.string()).error ==
+        wds::chart_editor::SerializeError::Ok);
+
+  wds::ui::ChartPreviewPanel preview;
+  wds::ui::EditorSession session(preview);
+  CHECK(session.open_wdschart(chart_path.string()));
+  CHECK(session.chart_only());
+  CHECK(session.project_path().empty());
+  CHECK_EQ(session.chart_count(), 1u);
+  CHECK_EQ(session.chart_path(0), chart_path.string());
+  CHECK(!session.dirty());
+
+  // Music/delay/chart-list metadata is intentionally not saveable: changing it
+  // must not count as an unsaved change for a direct .wdschart open.
+  CHECK(session.set_offset_ms(120));
+  CHECK(!session.dirty());
+
+  // One chart only: adding charts is rejected and must not create files.
+  CHECK(!session.add_chart());
+  CHECK(!session.add_chart_from_file(chart_path.string()));
+  CHECK_EQ(session.chart_count(), 1u);
+  CHECK(!fs::exists(dir / "1.wdschart"));
+
+  // Auto-backup and resume writes are impossible without a bound project.
+  std::vector<wds::ui::ChartBackupItem> backup;
+  CHECK(!session.capture_auto_backup(backup));
+  CHECK(session.auto_backup_directory().empty());
+  CHECK(!session.save_resume_position());
+
+  // A project save must not be possible, even if a destination is supplied.
+  const fs::path project_path = dir / "must_not_exist.wdsproject";
+  CHECK(!session.save_as(project_path.string()));
+  CHECK(!fs::exists(project_path));
+
+  // Chart edits are dirty; Save writes only the chart and leaves no project.
+  const std::string before = read_all(chart_path);
+  wds::chart_editor::NotationNote second;
+  second.start_tick = 480;
+  second.lane = 1;
+  second.width = 2;
+  CHECK(session.engine().document().add_note(second) >= 0);
+  CHECK(session.dirty());
+  CHECK(session.save());
+  CHECK(!session.dirty());
+  CHECK(!fs::exists(project_path));
+  CHECK(read_all(chart_path) != before);
+
+  wds::chart_editor::NotationChart reloaded;
+  CHECK(wds::chart_editor::ChartSerializer::load_from_file(chart_path.string(), reloaded).error ==
+        wds::chart_editor::SerializeError::Ok);
+  CHECK_EQ(reloaded.notes.size(), 2u);
+  fs::remove_all(dir);
+}
+
 void test_project_resume_position_roundtrip_and_legacy_fallback() {
   namespace fs = std::filesystem;
   const fs::path dir =
@@ -967,6 +1034,7 @@ int main() {
   test_first_save_skips_manual_backup();
   test_second_save_manual_backup_keeps_previous_disk();
   test_auto_backup_normalizes_ids_without_mutating_session();
+  test_direct_chart_open_is_in_memory_single_chart_session();
   test_project_resume_position_roundtrip_and_legacy_fallback();
   test_settings_section_order_includes_format();
   if (g_failures != 0) {

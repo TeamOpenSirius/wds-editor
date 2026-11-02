@@ -8,15 +8,16 @@
 namespace wds::ui {
 namespace {
 
-// Only real project files are routed: LaunchServices can hand us any document
+// Only real WDS documents are routed: LaunchServices can hand us any document
 // (and a folder, when an app bundle is dropped on ours), and a stale recent
-// path must not make the editor open a nonexistent file.
-bool is_project_file(const QString& path) {
+// path must not make the editor open a nonexistent file. Charts use the same
+// direct-open path as projects.
+bool is_document_file(const QString& path) {
   if (path.isEmpty()) {
     return false;
   }
   const QFileInfo info(path);
-  return info.isFile() && is_wdsproject_path(info.filePath().toStdString());
+  return info.isFile() && is_wds_document_path(info.filePath().toStdString());
 }
 
 }  // namespace
@@ -64,10 +65,10 @@ bool FileOpenRouter::eventFilter(QObject* watched, QEvent* event) {
   if (event->type() == QEvent::FileOpen) {
     const auto* open = static_cast<QFileOpenEvent*>(event);
     const QString path = open->file();
-    if (is_project_file(path)) {
+    if (is_document_file(path)) {
       enqueue(path);
     }
-    // Not consumed: Qt's own handler does not act on project files, and other
+    // Not consumed: Qt's own handler does not act on WDS documents, and other
     // document types must keep whatever default behaviour they have.
     return false;
   }
