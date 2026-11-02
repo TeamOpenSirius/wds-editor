@@ -277,6 +277,10 @@ struct SplitEffectLiveParticle {
   // One id per evaluate() per split line; vertex 0 is oldest. 0 count =
   // Particle-mode path.
   uint32_t trail_chain = 0;
+  // System identity fingerprint (authored bind fields + catalog index), written
+  // when the ribbon chain is stitched. Two groups sharing a chain id but not a
+  // tag are different ParticleSystems, i.e. an identity collision.
+  uint16_t system_tag = 0;
   uint16_t trail_vertex = 0;
   uint16_t trail_count = 0;
   float trail_r = 1.0f;

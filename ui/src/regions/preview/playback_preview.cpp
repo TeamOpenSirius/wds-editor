@@ -2751,7 +2751,30 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   split_emit_direct_n_ = 0;
   split_emit_in_vb_ = false;
   split_emit_vb_low_ = 0;
-  const int64_t now_us = preview_now_us(snapshot, visual_lead_us_);
+  int64_t now_us = preview_now_us(snapshot, visual_lead_us_);
+  // Fixed-step simulation clock: particles, trail stations and sub-emitter
+  // grouping are sampled on a 1/60 s grid, so a 165 Hz display and a 60 Hz one
+  // evaluate the same data. Repeats inside one grid step reuse the previous
+  // collect (the state is analytic in now_t, so the pool is identical).
+  static const bool fixed_step_on = [] {
+    const char* v = std::getenv("WDS_FIXED_COLLECT");
+    return !(v != nullptr && v[0] == '0');
+  }();
+  constexpr int64_t kFixedStepUs = 16667;  // 1/60 s
+  static int64_t fixed_last_us = -1;
+  static uint64_t fixed_last_rev = 0;
+  static bool fixed_last_playing = false;
+  bool fixed_step_repeat = false;
+  if (fixed_step_on) {
+    const bool step_playing = snapshot.playback_state == PreviewPlaybackState::Playing;
+    const int64_t stepped = (now_us / kFixedStepUs) * kFixedStepUs;
+    fixed_step_repeat = step_playing && fixed_last_playing &&
+                        fixed_last_rev == snapshot.revision && stepped == fixed_last_us;
+    fixed_last_us = stepped;
+    fixed_last_rev = snapshot.revision;
+    fixed_last_playing = step_playing;
+    now_us = stepped;
+  }
   const double now = static_cast<double>(now_us) / 1'000'000.0;
   const bool playing = snapshot.playback_state == PreviewPlaybackState::Playing;
   int cache_cleared = 0;
@@ -2938,6 +2961,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     // or repeat a station index: the ribbon then zig-zags between unrelated
     // stations (dashed strips, stray straight spans).
     int chain_mixed = 0;
+    int chain_tag_mixed = 0;
     int chain_dup_chains = 0;
   } diag_frame;
   const float diag_off_limit =
@@ -3558,10 +3582,11 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const uint64_t view_hash = hash_preview_view(geometry_);
   const auto cache_stats = wds::chart_render::split_effect_eval_cache_stats();
   const bool collect_memo =
-      !playing && split_pause_collect_valid_ &&
-      split_pause_revision_ == snapshot.revision && split_pause_now_us_ == now_us &&
-      split_pause_quality_ == quality && split_pause_splits_hash_ == splits_hash &&
-      split_pause_seed_epoch_ == cache_stats.epoch;
+      fixed_step_repeat ||
+      (!playing && split_pause_collect_valid_ &&
+       split_pause_revision_ == snapshot.revision && split_pause_now_us_ == now_us &&
+       split_pause_quality_ == quality && split_pause_splits_hash_ == splits_hash &&
+       split_pause_seed_epoch_ == cache_stats.epoch);
   const bool verts_memo =
       collect_memo && split_pause_verts_valid_ && split_pause_view_hash_ == view_hash;
   if (verts_memo) {
@@ -4112,6 +4137,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       int n_eff = 0;
       uint16_t counts[4] = {0, 0, 0, 0};
       int n_cnt = 0;
+      uint16_t tags[4] = {0, 0, 0, 0};
+      int n_tag = 0;
       for (int k = 0; k < cn; ++k) {
         const auto& lp = pool[idxs[static_cast<size_t>(k)]];
         bool seen = false;
@@ -4126,6 +4153,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         seen = false;
         for (int e = 0; e < n_cnt; ++e) seen = seen || counts[e] == lp.trail_count;
         if (!seen && n_cnt < 4) counts[n_cnt++] = lp.trail_count;
+        seen = false;
+        for (int e = 0; e < n_tag; ++e) seen = seen || tags[e] == lp.system_tag;
+        if (!seen && n_tag < 4) tags[n_tag++] = lp.system_tag;
       }
       for (int k = 1; k < cn; ++k) {
         if (ts.verts[static_cast<size_t>(k)] <= ts.verts[static_cast<size_t>(k - 1)]) {
@@ -4136,7 +4166,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           ++dup_pairs;
         }
       }
-      const bool mixed = n_cat > 1 || n_line > 1 || n_eff > 1 || n_cnt > 1;
+      const bool mixed = n_cat > 1 || n_line > 1 || n_eff > 1 || n_cnt > 1 || n_tag > 1;
+      if (n_tag > 1) {
+        ++diag_frame.chain_tag_mixed;
+      }
       if (mixed) {
         ++diag_frame.chain_mixed;
       }
@@ -4152,11 +4185,12 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       if (mixed) {
         wds::common::diag::emit_throttled(
             "chain.mixed", 2000,
-            "chain MIXED chain=%08x parts=%d dup=%d catalogs=[%u,%u,%u,%u] "
+            "chain MIXED chain=%08x parts=%d dup=%d tags=[%u,%u,%u,%u] catalogs=[%u,%u,%u,%u] "
             "lines=[%d,%d,%d,%d] effects=[%d,%d,%d,%d] counts=[%u,%u,%u,%u]",
-            chain_hash, cn, dup_pairs, catalogs[0], catalogs[1], catalogs[2], catalogs[3],
-            lines[0], lines[1], lines[2], lines[3], effects[0], effects[1], effects[2],
-            effects[3], counts[0], counts[1], counts[2], counts[3]);
+            chain_hash, cn, dup_pairs, tags[0], tags[1], tags[2], tags[3], catalogs[0],
+            catalogs[1], catalogs[2], catalogs[3], lines[0], lines[1], lines[2], lines[3],
+            effects[0], effects[1], effects[2], effects[3], counts[0], counts[1], counts[2],
+            counts[3]);
       }
     }
     for (int k = 1; k < cn; ++k) {
@@ -4833,7 +4867,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
           "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
           "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
-          "chain_tail_gap=%d chain_mixed=%d chain_dup_chains=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
+          "chain_tail_gap=%d chain_mixed=%d chain_tag_mixed=%d chain_dup_chains=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
           "modes=[%d,%d,%d] blends=[%d,%d,%d] sig=%016llx max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
@@ -4844,7 +4878,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           diag_frame.fallback_trail, diag_frame.real_trail, trail_span_max, trail_span_big,
           diag_frame.chains, diag_frame.chain_skipped, diag_frame.chain_max,
           diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
-          diag_frame.chain_tail_gap, diag_frame.chain_mixed, diag_frame.chain_dup_chains,
+          diag_frame.chain_tail_gap, diag_frame.chain_mixed, diag_frame.chain_tag_mixed,
+          diag_frame.chain_dup_chains,
           split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
           split_late_batch_.ext_overflow ? 1 : 0, split_late_batch_.ext_used,
           split_late_batch_.ext_cap, mode_counts[0], mode_counts[1], mode_counts[2],
