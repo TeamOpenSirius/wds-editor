@@ -2006,7 +2006,7 @@ int finish_realize_outputs(const SplitEffectParticle& p, const EmitContext& ctx,
   if (ctx.want_trail && p.trail_mode == 1) {
     SplitWallScope wall_stitch(SplitWallSec::Stitch);
     SplitDiagScope diag_stitch(SplitDiagPhase::Stitch);
-    stitch_ribbons(p, out, written, ctx.line_index, cat, split_instance_salt(ctx));
+    stitch_ribbons(p, out, written, ctx.line_index, cat, split_instance_salt(ctx), 0u);
   }
   if (commit_carry && split_eval_carry_enabled() && !observers_installed()) {
     commit_primary_carry(make_system_key(ctx, p, 0), ctx, jobs);
@@ -4577,7 +4577,8 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
           }
           if (dest != nullptr && ctx.want_trail && child.trail_mode == 1 && plan.kept > ribbon0) {
             stitch_ribbons(child, dest + ribbon0, plan.kept - ribbon0, ctx.line_index,
-                           idx_of(child), split_instance_salt(ctx));
+                           idx_of(child), split_instance_salt(ctx),
+                           static_cast<uint32_t>(ribbon0));
           }
         }
       }
@@ -4668,7 +4669,7 @@ int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
     if (ribbon_child != nullptr && ctx.want_trail && ribbon_child->trail_mode == 1 &&
         written > ribbon0) {
       stitch_ribbons(*ribbon_child, out + ribbon0, written - ribbon0, ctx.line_index, ribbon_idx,
-                     split_instance_salt(ctx));
+                     split_instance_salt(ctx), static_cast<uint32_t>(ribbon0));
     }
   };
   const int n = std::min(plan.kept, static_cast<int>(plan.items.size()));

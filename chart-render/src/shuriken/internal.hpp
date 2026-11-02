@@ -682,8 +682,8 @@ void fill_trails(PoseIntegrator& integ, const ParticleState& st, float age,
 // Unity owns one ParticleSystem per split instance, so two overlapping splits
 // of the same effect on the same line are two ribbons, not one.
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id,
-                    uint32_t instance_id) noexcept;
+                    int32_t line_index, uint32_t system_id, uint32_t instance_id,
+                    uint32_t vertex_base) noexcept;
 
 void fill_live(const ParticleState& st, float age, bool want_trail, SplitEffectLiveParticle& out);
 
