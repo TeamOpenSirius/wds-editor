@@ -2285,6 +2285,17 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
     v.trail_g *= over_g;
     v.trail_b *= over_b;
     v.trail_a *= std::clamp(over_a, 0.0f, 1.0f);
+    // Unity 2022.3 TrailModule.inheritParticleColor: the trail is tinted by the
+    // particle colour (GetCurrentColor = start x colour modules). 19 of the 187
+    // official trail systems set it true, 6 of them in Ribbon mode - the
+    // particle-mode path (fill_trails) already did this, the ribbon did not.
+    // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-inheritParticleColor.html
+    if (p.trail_inherit_particle_color != 0) {
+      v.trail_r *= v.current_r;
+      v.trail_g *= v.current_g;
+      v.trail_b *= v.current_b;
+      v.trail_a *= v.current_a;
+    }
     v.trail_chain = chain;
     v.system_tag = mix3(authored, system_id + 1u, static_cast<uint32_t>(line_index) + 1u);
     // Unique inside the chain, not inside this group: one system can be stitched

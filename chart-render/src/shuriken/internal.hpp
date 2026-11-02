@@ -324,18 +324,19 @@ inline float trail_lifetime_mul_hi(const SplitEffectParticle& p) noexcept {
   return m;
 }
 
-// Unity 2022.3 TrailModule.dieWithParticles=false: each trail persists until
-// its points expire (t_rec + Lifetime×startLifetime). Ribbon has no per-trail
-// points independent of particles, so keep=life+L×life is Mode=Particle (0)
-// only. Ribbon dieWith=false drops the particle at death (leaves the chain).
+// Unity 2022.3 TrailModule.dieWithParticles=false: "the remaining Trail
+// expires naturally based on its own remaining lifetime", so the particle must
+// stay alive (body suppressed) for life + Lifetime×startLifetime. That applies
+// to Ribbon mode too: a ribbon station IS the particle, so keeping it alive is
+// what holds the tail until its points expire. 62 of the 187 official trail
+// systems are Ribbon + dieWithParticles=false.
 // dieWith=true stays `life`.
 // https://docs.unity3d.com/2022.3/Documentation/Manual/PartSysTrailsModule.html
 // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-dieWithParticles.html
 inline float particle_keep_sim(const SplitEffectParticle& p, float life,
                                float trail_mul) noexcept {
   life = std::max(life, 1e-4f);
-  if ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0 &&
-      p.trail_mode == 0) {
+  if ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0) {
     return life + std::max(trail_mul, 0.0f) * life;
   }
   return life;

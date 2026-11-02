@@ -3316,10 +3316,8 @@ struct ChildSysHoist {
 
 void fill_child_sys_hoist(const SplitEffectParticle& p, ChildSysHoist& h) noexcept {
   h.sim = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
-  h.keep_uses_trail = ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0 &&
-                       p.trail_mode == 0)
-                          ? 1
-                          : 0;
+  h.keep_uses_trail =
+      ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0) ? 1 : 0;
   h.trail_hi = h.keep_uses_trail != 0 ? trail_lifetime_mul_hi(p) : 0.0f;
   if (p.life_curve_count == 0 && p.life_random == 0) {
     h.const_life = std::max(p.lifetime, 1e-4f);
@@ -3399,9 +3397,9 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
       float max_age = 0.0f;
       {
         const bool uses_trail =
-            sys != nullptr ? sys->keep_uses_trail != 0
-                           : ((child.flags & kSplitEffectFlagTrails) != 0 &&
-                              child.trail_die_with == 0 && child.trail_mode == 0);
+            sys != nullptr
+                ? sys->keep_uses_trail != 0
+                : ((child.flags & kSplitEffectFlagTrails) != 0 && child.trail_die_with == 0);
         if (!uses_trail) {
           max_age = life;
         } else {

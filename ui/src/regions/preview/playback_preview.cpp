@@ -174,9 +174,9 @@ TrailDrawScratch& trail_draw_scratch() {
   return scratch;
 }
 
-// evaluate keeps remaining==0 only for PerParticle dieWith=false until
-// trail verts expire. Skip the body quad; trail verts still draw. Ribbon
-// dead particles are not kept (they leave the chain at death).
+// evaluate keeps remaining==0 for dieWithParticles=false until the trail
+// expires, in both modes. Skip the body quad; the trail still draws - for a
+// Ribbon that station is the particle itself, so it is what holds the tail.
 // https://docs.unity3d.com/2022.3/Documentation/Manual/PartSysTrailsModule.html
 // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-dieWithParticles.html
 bool split_live_skip_dead_trail_body(
@@ -187,7 +187,9 @@ bool split_live_skip_dead_trail_body(
   if ((p.flags & wds::chart_render::kSplitEffectFlagTrails) == 0) {
     return false;
   }
-  return p.trail_count < 2 && p.trail_points >= 2;
+  // Ribbon stations (trail_count >= 2) are kept too: the particle stays as a
+  // station while its ribbon tail expires.
+  return p.trail_points >= 2 || p.trail_count >= 2;
 }
 
 // Unity 2022.3 TrailTextureMode.Stretch: "Map the texture once along the
