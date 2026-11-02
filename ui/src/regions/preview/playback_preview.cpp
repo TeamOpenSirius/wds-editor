@@ -4153,8 +4153,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       int n_eff = 0;
       uint16_t counts[4] = {0, 0, 0, 0};
       int n_cnt = 0;
-      uint16_t tags[4] = {0, 0, 0, 0};
-      int n_tag = 0;
+      uint32_t tags[4] = {0, 0, 0, 0};  // system_tag is 32-bit; truncating here
+      int n_tag = 0;                     // made every tag look equal */
+
       for (int k = 0; k < cn; ++k) {
         const auto& lp = pool[idxs[static_cast<size_t>(k)]];
         bool seen = false;
@@ -4198,10 +4199,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         ++diag_frame.chain_dup_chains;
         wds::common::diag::emit_throttled(
             "chain.dup", 2000,
-            "chain DUP chain=%08x parts=%d dup=%d first=(%u,%u) catalogs=%d/%d lines=%d/%d "
-            "effects=%d/%d counts=%d/%d",
-            chain_hash, cn, dup_pairs, dup_a, dup_b, n_cat, catalogs[0], n_line, lines[0],
-            n_eff, effects[0], n_cnt, counts[0]);
+            "chain DUP chain=%08x tag=%08x parts=%d dup=%d first=(%u,%u) catalogs=%d/%d "
+            "lines=%d/%d effects=%d/%d counts=%d/%d",
+            chain_hash, marker.system_tag, cn, dup_pairs, dup_a, dup_b, n_cat, catalogs[0], n_line,
+            lines[0], n_eff, effects[0], n_cnt, counts[0]);
       }
       if (mixed) {
         wds::common::diag::emit_throttled(
@@ -4265,17 +4266,21 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   // lines alike. PerParticle trails already follow the body in emit_one.
   auto for_each_line_job = [&](const std::vector<int>& particle_idxs, auto&& on_particle,
                                auto&& on_ribbon) {
-    std::unordered_map<uint32_t, std::vector<int>> chains;
+    // A ribbon is one ParticleSystem (Unity 2022.3 Trails: one ribbon per
+    // system, ordered by age). Key by the chain hash *and* the 32-bit system
+    // fingerprint, so two systems can only ever share a strip if both 32-bit
+    // hashes collide - the old single-hash key could merge them.
+    std::unordered_map<uint64_t, std::vector<int>> chains;
     for (int idx : particle_idxs) {
       const auto& rp = pool[static_cast<size_t>(idx)];
       if (rp.trail_chain != 0 && rp.trail_count >= 2) {
-        chains[rp.trail_chain].push_back(idx);
+        chains[(static_cast<uint64_t>(rp.trail_chain) << 32) | rp.system_tag].push_back(idx);
       }
     }
     struct ChainRef {
       uint8_t sorting_order;
       uint32_t catalog_index;
-      uint32_t chain;
+      uint64_t chain;
       std::vector<int>* idxs;
     };
     std::vector<ChainRef> order;

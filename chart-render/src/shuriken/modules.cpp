@@ -2286,7 +2286,7 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
     v.trail_b *= over_b;
     v.trail_a *= std::clamp(over_a, 0.0f, 1.0f);
     v.trail_chain = chain;
-    v.system_tag = static_cast<uint16_t>((authored ^ (system_id * 2654435761u)) & 0xffffu);
+    v.system_tag = mix3(authored, system_id + 1u, static_cast<uint32_t>(line_index) + 1u);
     // Unique inside the chain, not inside this group: one system can be stitched
     // several times per frame (one call per sub-emitter burst), and restarting
     // at 0 made process_chain's sort interleave the groups, which drew the
