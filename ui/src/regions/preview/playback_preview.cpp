@@ -3311,26 +3311,15 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                        v_along_src[i + 1], sa, sr, sg, sb, &share, color_cont);
           }
         };
-        int run0 = 0;
-        for (int i = 0; i + 1 < n; ++i) {
-          // Break the strip only on a real discontinuity, never on the station
-          // index: one system can be stitched from several groups per frame, so
-          // its per-call indices restart and an index test would cut the ribbon
-          // into one quad per station (visibly dashed). Stations are ordered by
-          // age before this point, so a jump in space is what must not be
-          // bridged.
-          const size_t ia = static_cast<size_t>(i);
-          const size_t ib = ia + 1;
-          const float dx = xs[ib] - xs[ia];
-          const float dy = ys[ib] - ys[ia];
-          const float dz = zs[ib] - zs[ia];
-          const bool spatial_jump = dx * dx + dy * dy + dz * dz > 16.0f;
-          if (spatial_jump) {
-            run_strip(run0, i + 1);
-            run0 = i + 1;
-          }
-        }
-        run_strip(run0, n);
+        // Unity 2022.3 Trails module, Ribbon mode: "create a ribbon of trails
+        // connecting each particle based on its age"; Ribbon Count 1 is "a
+        // single ribbon connecting each particle" and "the ordering of the
+        // particles is decided based on their age". There is no distance rule
+        // that breaks the ribbon, so the chain - already ordered by age - is
+        // emitted as one strip. Splitting here used to cut the ribbon into one
+        // quad per station whenever a system needed several stitch calls in a
+        // frame, because each call restarted its own station index.
+        run_strip(0, n);
       };
 
   // OpenWDS Butterfly mesh + ButterflyEffect.shader, then Unity 2022.3
