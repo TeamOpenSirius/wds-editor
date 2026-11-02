@@ -26,6 +26,13 @@ class ChartPreviewPanel;
 // EditorSession remains a GUI-thread operation because it touches the live
 // editor engine, transport, and preview.
 struct PreparedWdsProject {
+  // A chart opened directly from a .wdschart creates an in-memory, single-chart
+  // project. `project_path` stays empty and nothing may write a .wdsproject.
+  enum class Kind {
+    Project,
+    Chart,
+  };
+  Kind kind = Kind::Project;
   std::string project_path;
   std::string music_path;
   std::string jacket_path;
@@ -99,10 +106,21 @@ class EditorSession {
   // new_project + save_as: writes .wdsproject and 1.wdschart together.
   bool create_project(const std::string& path);
   static PreparedWdsProject prepare_wdsproject(const std::string& path);
+  // Direct .wdschart open: one bound chart, no project file. Save writes only
+  // that chart; project settings (music/delay/jacket/chart list) never land on
+  // disk and are not part of the unsaved-changes state.
+  static PreparedWdsProject prepare_wdschart(const std::string& path);
+  // Dispatch by extension for file-association / Open dialog paths.
+  static PreparedWdsProject prepare_document(const std::string& path);
   bool apply_prepared_wdsproject(PreparedWdsProject prepared);
   bool open_wdsproject(const std::string& path);
+  bool open_wdschart(const std::string& path);
+  bool open_document(const std::string& path);
   bool save();
   bool save_as(const std::string& path);
+  // Chart-only session opened from a .wdschart: save the active chart to its
+  // original path and never write a .wdsproject.
+  bool save_chart_only();
   // Current playhead as a chart tick (clamped to >= 0).
   int32_t edit_tick() const;
   // Normal-exit hook: rewrite only RESUME_CHART / RESUME_TICK in the bound
@@ -150,6 +168,11 @@ class EditorSession {
   const std::string& jacket_path() const noexcept { return jacket_path_; }
   int64_t offset_ms() const noexcept { return offset_ms_; }
   bool dirty() const noexcept;
+  // True when this session was opened directly from one .wdschart. There is no
+  // project file: auto-save/resume are off, add-chart is unavailable, and only
+  // chart edits count as unsaved changes.
+  bool chart_only() const noexcept { return chart_only_; }
+  bool can_add_chart() const noexcept { return !read_only_ && !chart_only_; }
   bool read_only() const noexcept { return read_only_; }
   // Chart delay field: editable for normal projects, or official import without music_config.
   bool delay_editable() const noexcept { return !read_only_ || allow_delay_when_read_only_; }
@@ -220,6 +243,7 @@ class EditorSession {
   std::vector<int32_t> last_offset_violation_ids_;
   bool metadata_dirty_ = false;
   bool read_only_ = false;
+  bool chart_only_ = false;
   bool allow_delay_when_read_only_ = false;
   bool sus_auto_convert_ = false;
   bool extended_features_ = false;

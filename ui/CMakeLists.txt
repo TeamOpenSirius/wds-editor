@@ -29,6 +29,7 @@ add_executable(wds_editor WIN32
   src/qt/flow_layout.cpp
   src/qt/spread_layout.cpp
   src/qt/wds_theme.cpp
+  src/qt/file_open_router.cpp
   src/qt/caption_check.cpp
   src/qt/fluent_icons.cpp
   src/qt/about_dialog.cpp
@@ -290,6 +291,23 @@ if(NOT CMAKE_CROSSCOMPILING)
     target_compile_options(wds_export_video_dialog_tests PRIVATE /utf-8)
   endif()
   add_test(NAME wds_export_video_dialog_tests COMMAND wds_export_video_dialog_tests -platform offscreen)
+  add_executable(wds_settings_live_apply_tests
+    tests/settings_live_apply_tests.cpp
+    src/qt/settings_dialog.cpp
+    src/qt/caption_check.cpp
+    src/qt/wds_theme.cpp
+    src/qt/update_checker.cpp
+    src/qt/shortcut_settings_dialog.cpp
+    src/qt/fluent_icons.cpp
+    src/qt/flow_layout.cpp
+    src/qt/qt_input_adapter.cpp)
+  target_link_libraries(wds_settings_live_apply_tests PRIVATE wds::ui Qt6::Widgets Qt6::Network Qt6::Svg)
+  target_compile_definitions(wds_settings_live_apply_tests PRIVATE QT_NO_KEYWORDS
+    WDS_APP_VERSION="${WDS_APP_VERSION}")
+  if(MSVC)
+    target_compile_options(wds_settings_live_apply_tests PRIVATE /utf-8)
+  endif()
+  add_test(NAME wds_settings_live_apply_tests COMMAND wds_settings_live_apply_tests -platform offscreen)
   add_executable(wds_system_proxy_tests tests/system_proxy_tests.cpp src/qt/system_proxy.cpp)
   target_link_libraries(wds_system_proxy_tests PRIVATE Qt6::Core Qt6::Network)
   target_include_directories(wds_system_proxy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

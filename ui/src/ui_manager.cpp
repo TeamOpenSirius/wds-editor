@@ -204,8 +204,9 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   });
   toolbar->set_open_handler([this] {
     with_save_if_dirty([this] {
-      if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-        (void)session_->open_wdsproject(*path);
+      if (auto path =
+              native_file_dialog::open_file("打开 WDS 文件", {"wdsproject", "wdschart"})) {
+        (void)session_->open_document(*path);
       } else {
         set_status("打开已取消", StatusLevel::Info);
       }
@@ -223,6 +224,10 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     });
   });
   toolbar->set_chart_add_handler([this] {
+    if (!session_->can_add_chart()) {
+      set_status("当前为独立谱面，只能编辑这一张谱面", StatusLevel::Error);
+      return;
+    }
     if (chart_add_dialog_ != nullptr) chart_add_dialog_->open();
   });
   toolbar->bind_curve_state(&curve_template_state_);
@@ -232,6 +237,10 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     push_curve_fill_selection();
   });
   chart_add->on_create_new([this] {
+    if (session_->chart_only()) {
+      set_status("当前为独立谱面，只能编辑这一张谱面", StatusLevel::Error);
+      return;
+    }
     if (!session_->read_only()) {
       if (session_->add_chart()) set_status("已添加空白谱面", StatusLevel::Info);
     } else {
@@ -239,6 +248,10 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     }
   });
   chart_add->on_add_existing([this] {
+    if (session_->chart_only()) {
+      set_status("当前为独立谱面，只能编辑这一张谱面", StatusLevel::Error);
+      return;
+    }
     if (session_->read_only()) {
       set_status("只读预览无法添加谱面", StatusLevel::Error);
       return;
@@ -455,8 +468,9 @@ void UiManager::bind_editor_shortcuts() {
       return;
     }
     with_save_if_dirty([this] {
-      if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-        (void)session_->open_wdsproject(*path);
+      if (auto path =
+              native_file_dialog::open_file("打开 WDS 文件", {"wdsproject", "wdschart"})) {
+        (void)session_->open_document(*path);
       }
     });
   });
@@ -761,8 +775,9 @@ UnsavedChangesDialog* UiManager::unsaved_changes_dialog() noexcept {
 
 void UiManager::open_project_with_prompt() {
   with_save_if_dirty([this] {
-    if (auto path = native_file_dialog::open_file("打开 WDS 工程", {"wdsproject"})) {
-      (void)session_->open_wdsproject(*path);
+    if (auto path =
+            native_file_dialog::open_file("打开 WDS 文件", {"wdsproject", "wdschart"})) {
+      (void)session_->open_document(*path);
     } else {
       set_status("打开已取消", StatusLevel::Info);
     }
@@ -852,6 +867,7 @@ bool UiManager::save_current_project() {
     set_status("只读预览无法保存", StatusLevel::Error);
     return false;
   }
+  if (session_->chart_only()) return session_->save();
   if (session_->project_path().empty()) {
     if (auto path = native_file_dialog::save_file("保存 WDS 工程", "untitled.wdsproject",
                                                   {"wdsproject"})) {

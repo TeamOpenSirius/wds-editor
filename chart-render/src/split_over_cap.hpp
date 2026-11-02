@@ -16,6 +16,10 @@ namespace wds::chart_render {
 // changes only move the oldest cut.
 struct OverCapCandidate {
   int priority = 0;
+  // Split instance that owns this station (EmitContext.line_start_ms). The
+  // per-line budget share is really per split instance: two overlapping splits
+  // of one effect on the same line are two ParticleSystems in OpenWDS.
+  int64_t instance_start_ms = 0;
   int32_t line_index = 0;
   uint16_t layer = 0;
   uint32_t task_i = 0;
@@ -31,9 +35,16 @@ inline bool over_cap_legacy_env() noexcept {
   return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
 }
 
+inline bool over_cap_same_line(const OverCapCandidate& a, const OverCapCandidate& b) noexcept {
+  return a.line_index == b.line_index && a.instance_start_ms == b.instance_start_ms;
+}
+
 inline bool over_cap_identity_lt(const OverCapCandidate& a, const OverCapCandidate& b) noexcept {
   if (a.line_index != b.line_index) {
     return a.line_index < b.line_index;
+  }
+  if (a.instance_start_ms != b.instance_start_ms) {
+    return a.instance_start_ms < b.instance_start_ms;
   }
   if (a.layer != b.layer) {
     return a.layer < b.layer;
@@ -78,6 +89,9 @@ inline void apply_over_cap_select(std::vector<OverCapCandidate>& candidates, int
                 if (a.line_index != b.line_index) {
                   return a.line_index < b.line_index;
                 }
+                if (a.instance_start_ms != b.instance_start_ms) {
+                  return a.instance_start_ms < b.instance_start_ms;
+                }
                 if (a.layer != b.layer) {
                   return a.layer < b.layer;
                 }
@@ -85,7 +99,7 @@ inline void apply_over_cap_select(std::vector<OverCapCandidate>& candidates, int
               });
     int line_count = 1;
     for (size_t i = 1; i < candidates.size(); ++i) {
-      if (candidates[i].line_index != candidates[i - 1].line_index) {
+      if (!over_cap_same_line(candidates[i], candidates[i - 1])) {
         ++line_count;
       }
     }
@@ -96,9 +110,9 @@ inline void apply_over_cap_select(std::vector<OverCapCandidate>& candidates, int
     std::vector<size_t> lim;
     size_t i = 0;
     while (i < candidates.size() && static_cast<int>(kept.size()) < cap) {
-      const int32_t line = candidates[i].line_index;
+      const OverCapCandidate line_head = candidates[i];
       size_t line_end = i + 1;
-      while (line_end < candidates.size() && candidates[line_end].line_index == line) {
+      while (line_end < candidates.size() && over_cap_same_line(candidates[line_end], line_head)) {
         ++line_end;
       }
       head.clear();
@@ -139,7 +153,7 @@ inline void apply_over_cap_select(std::vector<OverCapCandidate>& candidates, int
 
   int line_count = 1;
   for (size_t i = 1; i < candidates.size(); ++i) {
-    if (candidates[i].line_index != candidates[i - 1].line_index) {
+    if (!over_cap_same_line(candidates[i], candidates[i - 1])) {
       ++line_count;
     }
   }
@@ -149,9 +163,9 @@ inline void apply_over_cap_select(std::vector<OverCapCandidate>& candidates, int
 
   size_t i = 0;
   while (i < candidates.size() && static_cast<int>(kept.size()) < cap) {
-    const int32_t line = candidates[i].line_index;
+    const OverCapCandidate line_head = candidates[i];
     size_t line_end = i + 1;
-    while (line_end < candidates.size() && candidates[line_end].line_index == line) {
+    while (line_end < candidates.size() && over_cap_same_line(candidates[line_end], line_head)) {
       ++line_end;
     }
 

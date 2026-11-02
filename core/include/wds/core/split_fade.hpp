@@ -35,8 +35,13 @@ namespace wds::chart_editor {
 // (note-time curve) or put the cubic on linear screen Y.
 inline constexpr float kOfficialSplitFadeInSec = 1.0f;
 inline constexpr float kOfficialSplitFadeOutSec = 0.3f;
-// SplitLaneRuntime.HideAnimationMilliseconds / Destroy(..., 0.5f).
-inline constexpr int64_t kOfficialSplitHideDelayMs = 500;
+// Measured on OpenWDS bc69eb89 (Assets/OpenWDS/Runtime/LiveParticleDump.cs probe,
+// effect 11151, Editor batch): OnFadeOut fires on the EndMs tick; the bundled
+// fadeOut clip has m_StopTime=1.0 and its OnExit animation event (t=1.0) returns
+// the pooled controller (SplitEffectController.OnAnimationExit -> OnCompleted).
+// Native observed msToClipEnd=1000, msToExited=1017 (one-frame quantisation).
+// The old 500 ms came from the pre-pool Destroy(gameObject, 0.5f).
+inline constexpr int64_t kOfficialSplitHideDelayMs = 1000;
 inline constexpr float kOfficialSplitEffectY = -5.0f;
 inline constexpr float kOfficialLineHeightScale = 27.0f;
 inline constexpr float kOfficialSplitLineSprite = 2.56f;
@@ -200,15 +205,20 @@ inline float official_split_fade_out_alpha(float t01) noexcept {
   return 1.0f - u * u * (3.0f - 2.0f * u);
 }
 
-// OpenWDS LaneGroup.InitializeSplitLaneVisual / OnSplitLane: BG_LaneBorder a
-// starts at 0. ShouldShow (start−1s) restarts DOFade(target, 1s).SetDelay(1s),
-// so the fade runs [start, start+1s]; !IsContinued at EndMs restarts
-// DOFade(0, 0.5s). DOTween default ease OutQuad: align2-n5 hide matches
-// a_E·(1−e/0.5)² within 1e-6 on 17 effects. Hide starts from the value at
-// EndMs; DOTween's captured from-value for splits shorter than 1s or
-// overlapping splits is 未证实 (callers take the max over live splits).
-inline constexpr float kOfficialLaneBorderShowSec = 1.0f;
+// OpenWDS LaneGroup (bc69eb89) InitializeSplitLaneVisual / OnSplitLane:
+// - initial BG_LaneBorder a = target (the assist-line setting only toggles
+//   SpriteRenderer.enabled; the alpha no longer starts at 0);
+// - ShouldShow (start−1s) restarts DOFade(0, 0.5s), so the border is hidden by
+//   start−0.5s;
+// - the last Hide (!IsContinued at EndMs) restarts DOFade(target, 1s).SetDelay(1s),
+//   so the border returns over [end+1s, end+2s].
+// DOTween default ease OutQuad. Overlapping splits restart the two sequences;
+// this pure function takes the minimum over live splits, which is exact while a
+// single split is inside the window and an approximation when they overlap
+// (DOTween's restarted from-value for overlaps is 未证实).
 inline constexpr float kOfficialLaneBorderHideSec = 0.5f;
+inline constexpr float kOfficialLaneBorderRestoreDelaySec = 1.0f;
+inline constexpr float kOfficialLaneBorderRestoreSec = 1.0f;
 
 inline float official_dotween_out_quad(float t01) noexcept {
   const float u = std::clamp(t01, 0.0f, 1.0f);
@@ -217,22 +227,27 @@ inline float official_dotween_out_quad(float t01) noexcept {
 
 inline float official_split_lane_border_alpha(double now_ms, int64_t start_ms, int64_t end_ms,
                                               float target) noexcept {
-  auto shown = [&](double t_ms) {
-    return target * official_dotween_out_quad(
-                        static_cast<float>((t_ms - static_cast<double>(start_ms)) /
-                                           (1000.0 * kOfficialLaneBorderShowSec)));
-  };
-  if (now_ms < static_cast<double>(start_ms)) {
-    return 0.0f;
+  const double start = static_cast<double>(start_ms);
+  const double end = static_cast<double>(std::max(end_ms, start_ms));
+  const double hide_begin = start - 1000.0 * kOfficialSplitFadeInSec;
+  const double hidden_at = hide_begin + 1000.0 * kOfficialLaneBorderHideSec;
+  const double restore_begin = end + 1000.0 * kOfficialLaneBorderRestoreDelaySec;
+  const double restored_at = restore_begin + 1000.0 * kOfficialLaneBorderRestoreSec;
+  if (now_ms < hide_begin) return target;
+  if (now_ms < hidden_at) {
+    const float u = static_cast<float>((now_ms - hide_begin) /
+                                       (1000.0 * kOfficialLaneBorderHideSec));
+    return target * (1.0f - official_dotween_out_quad(u));
   }
-  if (now_ms < static_cast<double>(end_ms)) {
-    return shown(now_ms);
+  if (now_ms < restore_begin) return 0.0f;
+  if (now_ms < restored_at) {
+    const float u = static_cast<float>((now_ms - restore_begin) /
+                                       (1000.0 * kOfficialLaneBorderRestoreSec));
+    return target * official_dotween_out_quad(u);
   }
-  const float from = end_ms > start_ms ? shown(static_cast<double>(end_ms)) : 0.0f;
-  const float e = static_cast<float>((now_ms - static_cast<double>(end_ms)) /
-                                     (1000.0 * kOfficialLaneBorderHideSec));
-  return from * (1.0f - official_dotween_out_quad(e));
+  return target;
 }
+
 
 inline int64_t split_fade_sec_to_ms(float seconds) noexcept {
   return std::max<int64_t>(
@@ -244,7 +259,10 @@ inline int64_t official_split_expire_ms(int64_t start_ms, int64_t end_ms) noexce
   return end_ms;
 }
 
-// Visible after EndMs until Destroy(0.5s). Clip length is not the hide tail.
+// Visible after EndMs until the pooled controller returns. The 1.0 s fadeOut
+// clip stop time is the instance tail; the 0.3 s line-alpha fade (fade_out_sec)
+// is only the m_Color.a key range inside the same clip. Emission itself stops at
+// EndMs (split.should_show); this window keeps instance/trailing particles alive.
 inline int64_t official_split_hide_tail_ms(float fade_out_sec = kOfficialSplitFadeOutSec) noexcept {
   (void)fade_out_sec;
   return kOfficialSplitHideDelayMs;

@@ -254,6 +254,39 @@ void PreviewSnapshotBuilder::rebuild_split_lanes(PreviewSnapshot& out,
             });
   out.rebuild_split_lane_index();
   out.active_lane_count = resolve_active_lane_count(out.split_lanes, config_.lane_count);
+  rebuild_split_borders(out, timing, index, preview_time_ms);
+}
+
+void PreviewSnapshotBuilder::rebuild_split_borders(PreviewSnapshot& out,
+                                                   const MusicTiming& timing,
+                                                   const ChartNoteIndex& index,
+                                                   int64_t preview_time_ms) const {
+  out.split_borders.clear();
+  const int64_t show_ms =
+      static_cast<int64_t>(std::llround(static_cast<double>(kOfficialSplitFadeInSec) * 1000.0));
+  const int64_t restore_total_ms = static_cast<int64_t>(std::llround(
+      static_cast<double>(kOfficialLaneBorderRestoreDelaySec +
+                          kOfficialLaneBorderRestoreSec) *
+      1000.0));
+  // Starts in [now - restore_total - max_span, now + show] can still have a
+  // BG_LaneBorder window covering `now`; the exact filter below decides.
+  const int64_t lower = sat_sub_nonneg(sat_sub_nonneg(preview_time_ms, restore_total_ms),
+                                       index.max_split_span_ms());
+  const int64_t upper = sat_add_nonneg(preview_time_ms, show_ms);
+  index.query_split_lanes_in_range(lower, upper, split_buffer_);
+  for (int32_t note_id : split_buffer_) {
+    const NotationNote* note = lookup_note(note_id);
+    if (note == nullptr) continue;
+    const int64_t start_ms = note->start_ms(timing);
+    const int64_t end_ms = std::max(start_ms, note->end_ms(timing));
+    if (preview_time_ms < start_ms - show_ms) continue;
+    if (preview_time_ms > end_ms + restore_total_ms) continue;
+    out.split_borders.push_back(PreviewSplitBorderInstance{start_ms, end_ms});
+  }
+  std::sort(out.split_borders.begin(), out.split_borders.end(),
+            [](const PreviewSplitBorderInstance& a, const PreviewSplitBorderInstance& b) {
+              return a.start_ms < b.start_ms;
+            });
 }
 
 void PreviewSnapshotBuilder::update_split_lanes_incremental(
@@ -302,6 +335,7 @@ void PreviewSnapshotBuilder::update_split_lanes_incremental(
             });
   inout.rebuild_split_lane_index();
   inout.active_lane_count = resolve_active_lane_count(inout.split_lanes, config_.lane_count);
+  rebuild_split_borders(inout, timing, index, preview_time_ms);
 }
 
 void PreviewSnapshotBuilder::rebuild_concurrent_lines(

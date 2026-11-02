@@ -341,14 +341,32 @@ uint32_t stable_emitter_identity(const EmitContext& ctx) noexcept {
          999u;
 }
 
+// Per split-instance identity on a line (line_start_ms + Play generation).
+// OpenWDS builds one SplitEffectController per split, so every per-instance
+// identity (ribbon chain, particle seed, birth sampling salt, RoD seed) needs
+// this dimension; line_index alone collides between overlapping splits.
+uint32_t split_instance_salt(const EmitContext& ctx, bool with_gen) noexcept {
+  const uint64_t ms = static_cast<uint64_t>(ctx.line_start_ms);
+  // with_gen = true: a re-Play() of the same split is a fresh random stream
+  // (Unity useAutoRandomSeed remints on Play). with_gen = false: the stable
+  // per-instance salt used for authored-sampling identity, so systems with a
+  // manual randomSeed stay repeatable across Plays.
+  return mix3(static_cast<uint32_t>(ms), static_cast<uint32_t>(ms >> 32),
+              with_gen ? ctx.line_play_gen + 1u : 1u);
+}
+
 namespace {
 
 uint32_t hash_auto_particle_seed(const EmitContext& ctx, const SplitEffectParticle& p,
                                  int birth_index, uint32_t extra, uint32_t gen) noexcept {
   const uint32_t ps_i = catalog_index(p);
-  return mix3(static_cast<uint32_t>(ctx.color_id),
-              static_cast<uint32_t>(ctx.line_index * 131 + birth_index * 17 + p.element_index),
-              mix3(extra, ps_i, gen));
+  // Unity mints one Random.Range(0, 1000) per split instance at Play, so two
+  // overlapping splits of the same effect never share a random stream. The
+  // instance salt is that missing dimension (line_index alone collides).
+  return mix3(mix3(static_cast<uint32_t>(ctx.color_id),
+                   static_cast<uint32_t>(ctx.line_index * 131 + birth_index * 17 + p.element_index),
+                   mix3(extra, ps_i, gen)),
+              split_instance_salt(ctx), 0x51ed270bu);
 }
 
 uint32_t hash_line_particle_seed(const EmitContext& ctx, const SplitEffectParticle& p,
@@ -1305,13 +1323,24 @@ void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float 
   out.butterfly_wing_x = p.butterfly_wing_x;
   const float rot_u = u01(mix3(st.seed, 14, 1u));
   out.roll = st.rot_z + eval_rotation_over_life(p, age, st.life, rot_u, 2);
-  if (p.rotation_3d != 0) {
-    out.tilt_x = st.rot_x + eval_rotation_over_life(p, age, st.life, rot_u, 0);
-    out.tilt_y = st.rot_y + eval_rotation_over_life(p, age, st.life, rot_u, 1);
-  } else {
-    out.tilt_x = 0.0f;
-    out.tilt_y = 0.0f;
-  }
+  // Rotation over Lifetime is its own 3-axis module. Unity 2022.3
+  // RotationOverLifetimeModule.separateAxes: "Set the rotation over lifetime
+  // on each axis separately" / "When disabled, only the z-axis rotation curve
+  // is used". It does not consult Main 3D Start Rotation.
+  // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.RotationOverLifetimeModule-separateAxes.html
+  // Main's "3D Start Rotation" only supplies the start-rotation X/Y curves:
+  // https://docs.unity3d.com/2022.3/Documentation/Manual/PartSysMainModule.html
+  // OpenWDS SplitEffects/1040 element SplitEffectElements1040 particle 1041:
+  // rotation3D=false, rotationOverLifetime.enabled=true, separateAxes=true,
+  // y.scalar=25.13274 rad/s (x scalar 1.0, z curve 0). Unity's notes visibly
+  // spin about their own vertical axis (align2 fi050 1040) while the old
+  // rotation_3d gate forced tilt_x/tilt_y to 0. The same prefab particle is
+  // reused by 10080 / 10692 / 11460 / 11618 — apply the module generally,
+  // never special-case 1040.
+  out.tilt_x = (p.rotation_3d != 0 ? st.rot_x : 0.0f) +
+               eval_rotation_over_life(p, age, st.life, rot_u, 0);
+  out.tilt_y = (p.rotation_3d != 0 ? st.rot_y : 0.0f) +
+               eval_rotation_over_life(p, age, st.life, rot_u, 1);
   if (p.rbs_enabled != 0) {
     // Unity 2022.3 Rotation by Speed (Manual/PartSysRotBySpeedModule.html):
     // Angular Velocity is degrees/s (catalog stores radians). Speed Range
@@ -1977,7 +2006,7 @@ int finish_realize_outputs(const SplitEffectParticle& p, const EmitContext& ctx,
   if (ctx.want_trail && p.trail_mode == 1) {
     SplitWallScope wall_stitch(SplitWallSec::Stitch);
     SplitDiagScope diag_stitch(SplitDiagPhase::Stitch);
-    stitch_ribbons(p, out, written, ctx.line_index, cat);
+    stitch_ribbons(p, out, written, ctx.line_index, cat, split_instance_salt(ctx));
   }
   if (commit_carry && split_eval_carry_enabled() && !observers_installed()) {
     commit_primary_carry(make_system_key(ctx, p, 0), ctx, jobs);
@@ -3002,7 +3031,8 @@ void collect_subemit_parent_event(SubEventWork& ev, const SplitEffectParticle* p
     dest.local_child = local_child;
     dest.type = slot_type;
     dest.properties = slot_properties;
-    collect_event_bursts(child, pose.event_t, ctx.color_id, 0, dest.births);
+    collect_event_bursts(child, pose.event_t, ctx.color_id, split_instance_salt(ctx), 0,
+                          dest.births);
     dest.burst_count = dest.births.size();
     dest.n_full_births = static_cast<int>(dest.births.size());
     SubemitWalkCursor walk{};
@@ -3286,10 +3316,8 @@ struct ChildSysHoist {
 
 void fill_child_sys_hoist(const SplitEffectParticle& p, ChildSysHoist& h) noexcept {
   h.sim = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
-  h.keep_uses_trail = ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0 &&
-                       p.trail_mode == 0)
-                          ? 1
-                          : 0;
+  h.keep_uses_trail =
+      ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0) ? 1 : 0;
   h.trail_hi = h.keep_uses_trail != 0 ? trail_lifetime_mul_hi(p) : 0.0f;
   if (p.life_curve_count == 0 && p.life_random == 0) {
     h.const_life = std::max(p.lifetime, 1e-4f);
@@ -3369,9 +3397,9 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
       float max_age = 0.0f;
       {
         const bool uses_trail =
-            sys != nullptr ? sys->keep_uses_trail != 0
-                           : ((child.flags & kSplitEffectFlagTrails) != 0 &&
-                              child.trail_die_with == 0 && child.trail_mode == 0);
+            sys != nullptr
+                ? sys->keep_uses_trail != 0
+                : ((child.flags & kSplitEffectFlagTrails) != 0 && child.trail_die_with == 0);
         if (!uses_trail) {
           max_age = life;
         } else {
@@ -4547,7 +4575,7 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
           }
           if (dest != nullptr && ctx.want_trail && child.trail_mode == 1 && plan.kept > ribbon0) {
             stitch_ribbons(child, dest + ribbon0, plan.kept - ribbon0, ctx.line_index,
-                           idx_of(child));
+                           idx_of(child), split_instance_salt(ctx));
           }
         }
       }
@@ -4637,7 +4665,8 @@ int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
   auto flush_stitch = [&]() {
     if (ribbon_child != nullptr && ctx.want_trail && ribbon_child->trail_mode == 1 &&
         written > ribbon0) {
-      stitch_ribbons(*ribbon_child, out + ribbon0, written - ribbon0, ctx.line_index, ribbon_idx);
+      stitch_ribbons(*ribbon_child, out + ribbon0, written - ribbon0, ctx.line_index, ribbon_idx,
+                     split_instance_salt(ctx));
     }
   };
   const int n = std::min(plan.kept, static_cast<int>(plan.items.size()));

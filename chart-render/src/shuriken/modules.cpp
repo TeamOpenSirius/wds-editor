@@ -2215,7 +2215,8 @@ uint32_t fbits_u32(float x) noexcept {
 }  // namespace
 
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id) noexcept {
+                    int32_t line_index, uint32_t system_id,
+                    uint32_t instance_id) noexcept {
   if (out == nullptr || n < 2 || p.trail_mode != 1) {
     return;
   }
@@ -2254,8 +2255,17 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
            mix3(fbits_u32(p.shape_pos_z), fbits_u32(p.local_pos_y), fbits_u32(p.trail_width)),
            mix3(static_cast<uint32_t>(p.element_index) + 1u,
                 static_cast<uint32_t>(p.uv_name_index) + 1u, fbits_u32(p.rate_over_distance)));
-  const uint32_t chain =
-      mix3(system_id + 1u, static_cast<uint32_t>(line_index) + 1u, authored);
+  // Two split instances of the same effect on the same line share
+  // (system_id, line_index, authored); without instance_id they land in one
+  // chain, and process_chain's trail_vertex sort then interleaves them, so the
+  // strip jumps tens of world units between stations. OpenWDS instantiates one
+  // SplitEffectController (one ParticleSystem, ribbonCount=1) per split, so the
+  // instance must be part of the identity. Per-particle trail_chain values are
+  // grouped by this id and ordered by trail_vertex; interleaved instances would
+  // otherwise draw long crossing strips (10630 with two overlapping splits:
+  // max station step 0.38 -> 49.7 world units without this).
+  const uint32_t chain = mix3(system_id + 1u, static_cast<uint32_t>(line_index) + 1u,
+                              mix3(authored, instance_id + 1u, 0x9e3779b9u));
   // Prefix acc is the same 3D arc used for trail_u0/u1. total==0: t=0 at
   // the oldest station and t=1 elsewhere (same as fill_ribbon_stretch_along).
   float acc = 0.0f;
@@ -2275,7 +2285,18 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
     v.trail_g *= over_g;
     v.trail_b *= over_b;
     v.trail_a *= std::clamp(over_a, 0.0f, 1.0f);
+    // Unity 2022.3 TrailModule.inheritParticleColor: the trail is tinted by the
+    // particle colour (GetCurrentColor = start x colour modules). 19 of the 187
+    // official trail systems set it true, 6 of them in Ribbon mode.
+    // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-inheritParticleColor.html
+    if (p.trail_inherit_particle_color != 0) {
+      v.trail_r *= v.current_r;
+      v.trail_g *= v.current_g;
+      v.trail_b *= v.current_b;
+      v.trail_a *= v.current_a;
+    }
     v.trail_chain = chain;
+    v.system_tag = mix3(authored, system_id + 1u, static_cast<uint32_t>(line_index) + 1u);
     v.trail_vertex = static_cast<uint16_t>(i);
     v.trail_count = static_cast<uint16_t>(n);
     if (i + 1 >= n) {

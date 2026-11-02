@@ -2,9 +2,11 @@
 #include "wds/ui/qt/realtime_vulkan_window.hpp"
 #include <wds/audio/transport.hpp>
 #include "wds/ui/qt/chart_edit_widget.hpp"
+#include "wds/ui/qt/file_open_router.hpp"
 #include "wds/ui/qt/wds_theme.hpp"
 #include "wds/ui/ui_manager.hpp"
 #include "wds/ui/frame_diag.hpp"
+#include "wds/ui/project_open_args.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/resource_paths.hpp"
 #include "wds/ui/startup_deps.hpp"
@@ -49,6 +51,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStyleFactory>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QMessageBox>
@@ -1728,6 +1731,11 @@ int main(int argc, char** argv) {
   wds::ui::prepare_macos_vulkan_environment(argv[0]);
   wds::common::log_runtime_environment(argv[0]);
   wds::ui::WdsApplication app(argc, argv);
+  // Double-clicked .wdsproject / .wdschart files arrive as a QFileOpenEvent
+  // (macOS, via LaunchServices) or as a bare argv entry (Windows shell / Linux
+  // desktop entry). Capture the event form before anything can consume it.
+  wds::ui::FileOpenRouter file_open_router;
+  app.installEventFilter(&file_open_router);
   QCoreApplication::setOrganizationName(QStringLiteral("WDS"));
   QCoreApplication::setApplicationName(QStringLiteral("WDS Editor"));
   QGuiApplication::setApplicationDisplayName(QStringLiteral("WDS Editor"));
@@ -1866,6 +1874,7 @@ int main(int argc, char** argv) {
   auto ui_alive = std::make_shared<std::atomic<bool>>(true);
 
   QString open_path;
+  QStringList positional_args;
   QString music_cli;
   // `--screenshot <path>[@<ms>]` may repeat; each entry schedules its own grab.
   QList<std::pair<QString, int>> screenshots;
@@ -1986,6 +1995,23 @@ int main(int argc, char** argv) {
       } else {
         screenshots.append({spec, 6000});
       }
+    } else if (!args.at(i).startsWith(QLatin1Char('-'))) {
+      // Bare argument. A shell file association passes the document this way
+      // (Windows: `wds_editor.exe "%1"`, Linux: desktop Exec=%f).
+      positional_args.append(args.at(i));
+    }
+  }
+
+  // File-manager / shell association launch: open a .wdsproject or .wdschart
+  // directly and skip the startup chooser. `--open` stays the automation switch
+  // (it must not touch the user's recent list, which every capture script would
+  // pollute).
+  QString external_open_path;
+  for (const QString& positional : positional_args) {
+    if (QFileInfo(positional).isFile() &&
+        wds::ui::is_wds_document_path(positional.toStdString())) {
+      external_open_path = positional;
+      break;
     }
   }
 
@@ -1993,7 +2019,7 @@ int main(int argc, char** argv) {
     if (capture_job.out_dir.isEmpty() || capture_job.times_path.isEmpty()) {
       std::fprintf(stderr,
                    "usage: wds_editor --capture-preview <out_dir> --capture-times <file> "
-                   "[--preview-size 1920x1080] [--open project.wdsproject] [--chart chart.wdschart]\n");
+                   "[--preview-size 1920x1080] [--open document.wdsproject] [--chart chart.wdschart]\n");
       return 2;
     }
     QString times_err;
@@ -2132,6 +2158,12 @@ int main(int argc, char** argv) {
     editor.chart_preview().render();
     editor.chart_preview().note_frame_presented();
     preview_window->mark_presented();
+    if (editor.chart_preview().preview().wants_follow_up_present()) {
+      // That frame rebuilt the swapchain (host resize or WSI suboptimal), and the
+      // platform WSI drops the first present into a fresh one. Present once more
+      // right away; otherwise a paused preview stays black at the new size.
+      preview_window->request_frame();
+    }
     static bool logged_present = false;
     if (!logged_present) {
       logged_present = true;
@@ -2217,23 +2249,64 @@ int main(int argc, char** argv) {
                    });
   edit_timer->start(kPausedSyncIntervalMs);
 
+  const bool cli_automation =
+      capture_preview || seek_sec >= 0.0 || sweep_start_sec >= 0.0 || quit_after_sec >= 0 ||
+      (std::getenv("WDS_DUMP_VERTS") != nullptr && std::getenv("WDS_DUMP_VERTS")[0] != '\0');
+
   if (!open_path.isEmpty()) {
     const QByteArray utf8 = open_path.toUtf8();
     const std::string path(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-    if (!editor.session().open_wdsproject(path)) {
-      WDS_LOG("failed to open project: %s\n", path.c_str());
+    if (!editor.session().open_document(path)) {
+      WDS_LOG("failed to open document: %s\n", path.c_str());
+    }
+  }
+
+  // macOS delivers a double-clicked document as an Apple Event once AppKit
+  // finishes launching — after main() reached this point. Pump the loop for a
+  // short, bounded window so a file-association launch can suppress the startup
+  // chooser; a real double-click pays only the Apple Event latency.
+  if (external_open_path.isEmpty() && !cli_automation) {
+#if defined(Q_OS_MACOS)
+    QElapsedTimer association_wait;
+    association_wait.start();
+    while (!file_open_router.has_pending() && association_wait.elapsed() < 400) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+      QThread::msleep(2);
+    }
+#endif
+    const QString routed = file_open_router.take_pending_path();
+    if (!routed.isEmpty()) external_open_path = routed;
+  }
+
+  bool startup_project_opened = false;
+  if (!external_open_path.isEmpty() && open_path.isEmpty()) {
+    startup_project_opened = window.open_document_at_startup(external_open_path);
+    if (!startup_project_opened) {
+      WDS_LOG("failed to open associated project: %s\n",
+              external_open_path.toUtf8().constData());
     }
   }
 
   window.setWindowIcon(QApplication::windowIcon());
-  const bool cli_automation =
-      capture_preview || seek_sec >= 0.0 || sweep_start_sec >= 0.0 || quit_after_sec >= 0 ||
-      (std::getenv("WDS_DUMP_VERTS") != nullptr && std::getenv("WDS_DUMP_VERTS")[0] != '\0');
+  // Documents opened from now on (double-click while the editor runs) open in
+  // this window instead of spawning another instance. While the startup chooser
+  // is up the window closes it and parks the path; the drain below opens it.
+  file_open_router.set_handler([&window](const QString& path) {
+    window.open_document_path(path);
+  });
   if (!args.contains("--smoke-test") && !cli_automation) {
     maybe_notify_previous_crash(nullptr);
-    if (open_path.isEmpty() && !window.show_startup_splash()) {
+    if (open_path.isEmpty() && !startup_project_opened && !window.show_startup_splash()) {
       wds::common::mark_clean_exit();
       return 0;
+    }
+    // A project double-clicked while the chooser was open: the chooser is gone
+    // now, so load it instead of leaving it for a later double-click.
+    if (open_path.isEmpty()) {
+      const QString parked = window.take_pending_startup_open();
+      if (!parked.isEmpty()) {
+        startup_project_opened = window.open_document_at_startup(parked);
+      }
     }
   }
   window.show();

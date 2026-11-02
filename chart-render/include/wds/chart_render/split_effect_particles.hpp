@@ -23,12 +23,14 @@ class Controller;
 // The crossing and update-order behavior is a candidate, not a Unity parity
 // claim; the temporary adapter records it explicitly in its introspection.
 struct SplitEffectParentMotion {
+  // Replay-only probe flag: exact parent-motion travel instead of the authored
+  // LineHight closed form. Nothing in production sets it; split_effect_bench
+  // and the live-dump replay fixtures drive it.
   bool rod_motion_candidate = false;
-  // Temporary replay-only candidate: derive the RoD random draw stream from
-  // the stable logical emitter identity (line + chart start + catalog system)
-  // instead of sharing one catalog-only sequence across all lines. This is
-  // disabled by default until the Unity per-system draw lifetime is verified.
-  bool rod_emitter_seed_candidate = false;
+  // The RoD random draw stream always comes from the split-instance identity
+  // (color + line + chart start + Play generation) now; the old catalog-only
+  // "seed candidate" flag is gone because it described a stream that ignored
+  // overlapping split instances.
   bool birth_pose_candidate = false;
   // live dump v1 hop: Σ|Δps.worldPosition| of the ParticleSystem Transform.
   // Not lossyY / chord / worldDistanceAccum / max(wda, 2·Σdt). Not 2022.3.
@@ -52,14 +54,29 @@ struct SplitEffectParentMotion {
   float emitter_vz = 0.0f;
 };
 
-// Preview draw-pool hop (not Unity Main.maxParticles). Unity 2022.3
-// maxParticles is "in the system at once"; emit/evaluate apply that as a
-// concurrent-alive cap (drop a birth that would exceed it, do not defer).
-// 16384 sits just above the official-chart peak ~15500.
-// apply_over_cap: first-come between splits, per-line share, then
-// birth-ordered selection (ribbon = one contiguous newest/head run).
-// Note hit VFX (BomSquare / BomFlare) are a separate uncapped list.
-inline constexpr int kSplitEffectParticlePool = 16384;
+// Unity 2022.3 MainModule.maxParticles is the only particle cap the official
+// client has: "the maximum number of particles in the system at once", applied
+// per ParticleSystem, so overlapping split instances each get their own budget.
+// That semantic cap is catalog `max_particles` and is enforced by
+// apply_max_particles_alive_cap (births beyond it are dropped, not deferred).
+//
+// kSplitEffectParticlePool is NOT that cap. It is a memory safety ceiling for
+// the preview draw list: a frame that exceeds it is trimmed by
+// apply_over_cap (first-come between splits, per-line share, then birth-ordered
+// selection, ribbon = one contiguous newest/head run). It used to be 16384,
+// sized from the official 318 single-split corpus (peak ~15500), and two
+// overlapping Full splits blew through it: 3-lane + 6-lane 10630 one beat apart
+// at 120 BPM holds ~16400 alive, the trim cut ribbon stations, and the stations
+// came back the moment the older split died - visibly a strip regrowing from
+// the far end (particle-layer energy 1.65 s -> 1.70 s rose 1895.8 -> 1908.5
+// under 16384 and decayed monotonically under 65536).
+// The ceiling now sits far above realistic overlap so it never binds in normal
+// play and only guards pathological input; the pool is no longer pre-reserved
+// to the ceiling, it grows to the written high-water mark (536 B/particle), so
+// raising it costs nothing until a frame really needs the particles.
+inline constexpr int kSplitEffectParticlePool = 131072;
+// Per-frame starting reservation. The pool grows on demand up to the ceiling.
+inline constexpr int kSplitEffectPoolReserve = 16384;
 // Preview seed window in now_t seconds (t=0 is fadeIn / OnFadeIn Play).
 // Engineering pad (hop, not 2022.3), same upper bound as
 // kSplitEffectFadeinCollectCapSec. Official catalog looping is 0; conservative
@@ -260,6 +277,10 @@ struct SplitEffectLiveParticle {
   // One id per evaluate() per split line; vertex 0 is oldest. 0 count =
   // Particle-mode path.
   uint32_t trail_chain = 0;
+  // 32-bit fingerprint of the ParticleSystem that owns this station (authored
+  // bind fields + catalog index + line). Ribbons are keyed by (trail_chain,
+  // system_tag), so two systems cannot share a strip unless both hashes collide.
+  uint32_t system_tag = 0;
   uint16_t trail_vertex = 0;
   uint16_t trail_count = 0;
   float trail_r = 1.0f;

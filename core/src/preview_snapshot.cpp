@@ -109,6 +109,7 @@ void PreviewSnapshot::clear_keep_capacity() noexcept {
   clear_notes_keep_capacity();
   clear_concurrent_lines_keep_capacity();
   clear_split_lanes_keep_capacity();
+  split_borders.clear();
   active_lane_count = 0;
 }
 

@@ -1,6 +1,8 @@
 #include "wds/common/log.hpp"
 #include "wds/ui/frame_diag.hpp"
 #include "wds/ui/layout/editor_layout.hpp"
+#include "wds/ui/preview_present_policy.hpp"
+#include "wds/ui/project_open_args.hpp"
 #include "wds/ui/regions/edit/edit_viewport.hpp"
 
 #include <wds/core/official_playfield.hpp>
@@ -463,5 +465,77 @@ int main() {
     }));
     assert(arms == 2);
     assert(played.count(key) == 1);
+  }
+
+  // File association: double-clicked project/chart paths arrive as a bare argv
+  // entry on Windows/Linux. Flags and their values must never be mistaken for
+  // one.
+  {
+    using wds::ui::first_document_argument;
+    using wds::ui::first_project_argument;
+    using wds::ui::is_wds_document_path;
+    using wds::ui::is_wdschart_path;
+    using wds::ui::is_wdsproject_path;
+    assert(is_wdsproject_path("a.wdsproject"));
+    assert(is_wdsproject_path("/tmp/My Test Chart/My Test Chart.wdsproject"));
+    assert(is_wdsproject_path("C:\\charts\\song.WDSPROJECT"));
+    assert(!is_wdsproject_path("a.wdsproject.tmp"));
+    assert(!is_wdsproject_path("wdsproject"));
+    assert(!is_wdsproject_path(".wdsproject"));
+    assert(!is_wdsproject_path("/tmp/a.wdschart"));
+    assert(is_wdschart_path("a.wdschart"));
+    assert(is_wdschart_path("/tmp/My Test Chart/notes.WDSCHART"));
+    assert(!is_wdschart_path("a.wdschart.tmp"));
+    assert(!is_wdschart_path(".wdschart"));
+    assert(is_wds_document_path("a.wdsproject"));
+    assert(is_wds_document_path("a.wdschart"));
+    assert(!is_wds_document_path("a.csv"));
+
+    const char* only_flag[] = {"--seek", "12.5"};
+    assert(first_project_argument(only_flag, 2) == -1);
+    assert(first_document_argument(only_flag, 2) == -1);
+    const char* one_project[] = {"--smoke-test", "/tmp/x.wdsproject"};
+    assert(first_project_argument(one_project, 2) == 1);
+    assert(first_document_argument(one_project, 2) == 1);
+    const char* one_chart[] = {"--smoke-test", "/tmp/x.wdschart"};
+    assert(first_project_argument(one_chart, 2) == -1);
+    assert(first_document_argument(one_chart, 2) == 1);
+    const char* flag_like[] = {"--chart", "b.wdsproject"};
+    // A value that merely looks like a document is still a flag value; the
+    // parser consumed it, so it never reaches this helper as a bare argument.
+    assert(first_project_argument(flag_like, 2) == 1);
+    assert(first_document_argument(flag_like, 2) == 1);
+    const char* empty_args[] = {nullptr, ""};
+    assert(first_document_argument(empty_args, 2) == -1);
+    assert(first_project_argument(empty_args, 2) == -1);
+    assert(first_document_argument(nullptr, 0) == -1);
+  }
+
+  // Paused preview present policy: resizing the preview dock must land a frame
+  // at the new aspect ratio instead of leaving the old drawable (stretched or
+  // black) on screen.
+  {
+    using wds::ui::idle_cap_defers_frame;
+    using wds::ui::needs_follow_up_present;
+    // Paused, nothing dirty, well under one idle interval: the cap may wait.
+    assert(idle_cap_defers_frame(false, false, false, false, true, 0, 33333));
+    assert(idle_cap_defers_frame(false, false, false, false, true, 30000, 33333));
+    // A forced frame (resize settle / expose / request_frame) never waits.
+    assert(!idle_cap_defers_frame(true, false, false, false, true, 0, 33333));
+    assert(!idle_cap_defers_frame(true, false, false, false, true, 30000, 33333));
+    // First frame, input, playback bypass and a disabled cap also present.
+    assert(!idle_cap_defers_frame(false, true, false, false, true, 0, 33333));
+    assert(!idle_cap_defers_frame(false, false, true, false, true, 0, 33333));
+    assert(!idle_cap_defers_frame(false, false, false, true, true, 0, 33333));
+    assert(!idle_cap_defers_frame(false, false, false, false, false, 0, 33333));
+    // Enough time accumulated: present.
+    assert(!idle_cap_defers_frame(false, false, false, false, true, 32000, 33333));
+
+    // A swapchain rebuilt during the frame asks for one more present, bounded.
+    assert(needs_follow_up_present(true, true, 0));
+    assert(needs_follow_up_present(true, true, 1));
+    assert(!needs_follow_up_present(true, true, 2));
+    assert(!needs_follow_up_present(true, false, 0));
+    assert(!needs_follow_up_present(false, true, 0));
   }
 }

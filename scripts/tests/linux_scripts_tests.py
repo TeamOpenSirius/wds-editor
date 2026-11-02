@@ -110,13 +110,72 @@ sys.exit(19)
         self.assertEqual(output["libs"], str(runtime) + ":/existing libraries")
 
     def test_help_and_missing_editor(self):
-        for script in ("build-linux.sh", "run-linux.sh"):
+        for script in ("build-linux.sh", "run-linux.sh", "install-linux-desktop.sh"):
             result = self.run_script(script, "--help")
             self.assertEqual(result.returncode, 0)
             self.assertIn("Usage:", result.stdout)
         result = self.run_script("run-linux.sh")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(str(self.build), result.stderr)
+
+    def desktop_env(self):
+        """Fake freedesktop tools on PATH plus an isolated XDG data home."""
+        tools = self.root / "desktop tools"
+        calls = self.root / "desktop-calls.jsonl"
+        for name in ("update-mime-database", "update-desktop-database", "xdg-mime"):
+            self.executable(tools / name, """import json, os, sys
+with open(os.environ['WDS_SCRIPT_TEST_CALLS'], 'a') as f:
+    f.write(json.dumps({'tool': os.path.basename(sys.argv[0]), 'args': sys.argv[1:]}) + '\\n')
+""")
+        self.env["PATH"] = str(tools) + os.pathsep + self.env["PATH"]
+        self.env["WDS_SCRIPT_TEST_CALLS"] = str(calls)
+        self.env["XDG_DATA_HOME"] = str(self.root / "xdg data")
+        return calls
+
+    def test_file_association_install_and_uninstall(self):
+        calls = self.desktop_env()
+        editor = self.root / "editor with spaces" / "wds_editor"
+        self.executable(editor, "sys.exit(0)\n")
+        data = Path(self.env["XDG_DATA_HOME"])
+
+        result = self.run_script("install-linux-desktop.sh", "--editor", str(editor))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        desktop = data / "applications/wds-editor.desktop"
+        mime = data / "mime/packages/wds-editor.xml"
+        self.assertTrue(desktop.is_file())
+        self.assertTrue(mime.is_file())
+        desktop_text = desktop.read_text()
+        # Exec must launch the editor with the document as a bare argument, and
+        # survive spaces in the install path.
+        self.assertIn(f'Exec="{editor}" %f', desktop_text)
+        self.assertIn("MimeType=application/x-wdsproject;application/x-wdschart;", desktop_text)
+        self.assertIn("TryExec=" + str(editor), desktop_text)
+        mime_text = mime.read_text()
+        self.assertIn('glob pattern="*.wdsproject"', mime_text)
+        self.assertIn('glob pattern="*.wdschart"', mime_text)
+        self.assertIn('<match value="WDSCHART " type="string" offset="0"/>', mime_text)
+        recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual([r["tool"] for r in recorded],
+                         ["update-mime-database", "update-desktop-database", "xdg-mime",
+                          "xdg-mime"])
+        self.assertEqual(recorded[-2]["args"],
+                         ["default", "wds-editor.desktop", "application/x-wdsproject"])
+        self.assertEqual(recorded[-1]["args"],
+                         ["default", "wds-editor.desktop", "application/x-wdschart"])
+
+        result = self.run_script("install-linux-desktop.sh", "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(desktop.exists())
+        self.assertFalse(mime.exists())
+        self.assertIn("Removed", result.stdout)
+
+    def test_file_association_rejects_missing_editor(self):
+        self.desktop_env()
+        result = self.run_script("install-linux-desktop.sh",
+                                 "--editor", str(self.root / "missing editor"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("editor not found", result.stderr)
+        self.assertFalse((Path(self.env["XDG_DATA_HOME"]) / "applications").exists())
 
     def test_bad_explicit_sdk_fails_before_configure(self):
         self.env["WDS_QT_LINUX_ROOT"] = str(self.root / "missing SDK")

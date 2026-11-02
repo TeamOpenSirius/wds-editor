@@ -1093,6 +1093,7 @@ void mark_primary_fills(FrameScratch& fs, size_t begin, size_t end, int cap) {
         Candidate c;
         c.priority = t.priority;
         c.line_index = t.line_index;
+        c.instance_start_ms = t.start_ms;
         c.layer = t.layer;
         c.task_i = static_cast<uint32_t>(ti);
         c.job_i = j;
@@ -1112,6 +1113,7 @@ void mark_primary_fills(FrameScratch& fs, size_t begin, size_t end, int cap) {
         Candidate c;
         c.priority = t.priority;
         c.line_index = t.line_index;
+        c.instance_start_ms = t.start_ms;
         c.layer = t.layer;
         c.task_i = static_cast<uint32_t>(ti);
         c.job_i = static_cast<uint32_t>(i);
@@ -1646,6 +1648,7 @@ int assemble_split(FrameScratch& fs, SplitPrep& prep, SplitEffectLiveParticle* o
         Candidate c;
         c.priority = t.priority;
         c.line_index = t.line_index;
+        c.instance_start_ms = t.start_ms;
         c.layer = t.layer;
         c.task_i = static_cast<uint32_t>(ti);
         c.job_i = static_cast<uint32_t>(i);
@@ -2835,8 +2838,10 @@ void collect_split_effect_frame(
 #endif  // WDS_DIAG_ENABLED
   }
   const int cap = kSplitEffectParticlePool;
-  if (io.pool.capacity() < static_cast<size_t>(cap)) {
-    io.pool.reserve(static_cast<size_t>(cap));
+  // Grow to the written high-water mark instead of reserving the ceiling:
+  // the ceiling is a pathological-input guard, not a per-frame budget.
+  if (io.pool.capacity() < static_cast<size_t>(kSplitEffectPoolReserve)) {
+    io.pool.reserve(static_cast<size_t>(kSplitEffectPoolReserve));
   }
 #if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.after_pool");

@@ -184,6 +184,14 @@ inline uint32_t mix3(uint32_t a, uint32_t b, uint32_t c) noexcept {
 // This is the same line seed already used by the !autoRandomSeed path.
 uint32_t stable_emitter_identity(const EmitContext& ctx) noexcept;
 
+// Split-instance identity on a line: EmitContext.line_start_ms plus the Play()
+// generation. OpenWDS instantiates one SplitEffectController (one
+// ParticleSystem per element) per split, so every per-instance identity —
+// ribbon chain, particle seed, birth sampling salt, RoD seed — must include
+// this. Without it two overlapping splits of the same effect share one chain
+// (crossing ribbon strips) and one random stream.
+uint32_t split_instance_salt(const EmitContext& ctx, bool with_gen = true) noexcept;
+
 inline float u01(uint32_t h) noexcept {
   // UnityEngine.Random.value: inclusive [0, 1].
   return static_cast<float>(h & 0x00FFFFFFu) * (1.0f / 16777215.0f);
@@ -316,18 +324,18 @@ inline float trail_lifetime_mul_hi(const SplitEffectParticle& p) noexcept {
   return m;
 }
 
-// Unity 2022.3 TrailModule.dieWithParticles=false: each trail persists until
-// its points expire (t_rec + Lifetime×startLifetime). Ribbon has no per-trail
-// points independent of particles, so keep=life+L×life is Mode=Particle (0)
-// only. Ribbon dieWith=false drops the particle at death (leaves the chain).
+// Unity 2022.3 TrailModule.dieWithParticles=false: "the remaining Trail
+// expires naturally based on its own remaining lifetime", so the particle stays
+// alive (body suppressed) for life + Lifetime×startLifetime. Applies to Ribbon
+// too: a ribbon station IS the particle, so keeping it is what holds the tail.
+// 62 of the 187 official trail systems are Ribbon + dieWithParticles=false.
 // dieWith=true stays `life`.
 // https://docs.unity3d.com/2022.3/Documentation/Manual/PartSysTrailsModule.html
 // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-dieWithParticles.html
 inline float particle_keep_sim(const SplitEffectParticle& p, float life,
                                float trail_mul) noexcept {
   life = std::max(life, 1e-4f);
-  if ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0 &&
-      p.trail_mode == 0) {
+  if ((p.flags & kSplitEffectFlagTrails) != 0 && p.trail_die_with == 0) {
     return life + std::max(trail_mul, 0.0f) * life;
   }
   return life;
@@ -341,6 +349,7 @@ inline float particle_keep_sim_conservative(const SplitEffectParticle& p,
 // Unity 2022.3 Sub Emitters: Death/Collision/Trigger/Manual (and Birth extra
 // Emit) use only the child's burst settings, at the parent event time.
 void collect_event_bursts(const SplitEffectParticle& p, float event_t, int32_t color_id,
+                          uint32_t instance_salt,
                           int start_index, std::vector<Birth>& out);
 
 void sample_shape(const SplitEffectParticle& p, uint32_t seed, uint32_t extra, float birth_t,
@@ -669,8 +678,12 @@ void set_rol_cache_key(const ParticleCacheKey* key) noexcept;
 void fill_trails(PoseIntegrator& integ, const ParticleState& st, float age,
                  SplitEffectLiveParticle& out) noexcept;
 
+// instance_id is the split instance on this line (EmitContext.line_start_ms).
+// Unity owns one ParticleSystem per split instance, so two overlapping splits
+// of the same effect on the same line are two ribbons, not one.
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id) noexcept;
+                    int32_t line_index, uint32_t system_id,
+                    uint32_t instance_id) noexcept;
 
 void fill_live(const ParticleState& st, float age, bool want_trail, SplitEffectLiveParticle& out);
 

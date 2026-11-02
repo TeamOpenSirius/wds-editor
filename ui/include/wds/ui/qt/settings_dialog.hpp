@@ -28,6 +28,8 @@ class SettingsPanel final : public QWidget {
   void refresh_extended_lock();
 
  private:
+  friend struct SettingsPanelTestAccess;  // tests drive apply_live without Qt input
+
   void build_pages();
   void load_from_config();
   bool capture_into_config();

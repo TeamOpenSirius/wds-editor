@@ -81,8 +81,12 @@ uint32_t rod_system_identity(const SplitEffectParticle& p) noexcept {
 uint32_t rod_random_seed(const EmitContext* ctx, const SplitEffectParticle& p,
                          int birth_index) noexcept {
   const uint32_t id = rod_system_identity(p);
-  if (ctx != nullptr && ctx->parent_motion.rod_emitter_seed_candidate) {
-    return mix3(stable_emitter_identity(*ctx), static_cast<uint32_t>(birth_index + 1), id);
+  if (ctx != nullptr) {
+    // stable_emitter_identity carries color / line / start_ms; the salt adds the
+    // Play() generation. Together they are the per-instance seed stream (Unity
+    // mints one seed per split instance).
+    return mix3(id, static_cast<uint32_t>(birth_index + 1),
+                mix3(stable_emitter_identity(*ctx), split_instance_salt(*ctx), 3u));
   }
   return mix3(id, static_cast<uint32_t>(birth_index + 1), 3u);
 }
@@ -121,8 +125,14 @@ uint32_t sampling_system_identity(const SplitEffectParticle& p) noexcept {
   return mix3(values, rod_system_identity(p), 5u);
 }
 
-uint32_t birth_sampling_extra(const SplitEffectParticle& p, uint32_t tag) noexcept {
-  return mix3(sampling_system_identity(p), tag != 0 ? tag : 1u, 7u);
+// instance_salt = split_instance_salt(ctx) of the emitting split instance (0
+// when no context). The authored identity keeps *different systems* on one
+// line apart; the salt keeps *different split instances of the same system*
+// apart, matching OpenWDS' one ParticleSystem (one seed) per split instance.
+uint32_t birth_sampling_extra(const SplitEffectParticle& p, uint32_t tag,
+                              uint32_t instance_salt = 0u) noexcept {
+  return mix3(mix3(sampling_system_identity(p), tag != 0 ? tag : 1u, 7u), instance_salt,
+              0x2f9a5c13u);
 }
 
 // Closed-form |Δps.worldPosition| when the ParticleSystem is a child of
@@ -188,7 +198,8 @@ void collect_curve_rod_births(const SplitEffectParticle& p, float now_t, int32_t
   float frac = 0.0f;
   int k = 0;
   const uint32_t id = rod_system_identity(p);
-  const uint32_t extra = birth_sampling_extra(p, 3u);
+  const uint32_t instance_salt = context != nullptr ? split_instance_salt(*context, false) : 0u;
+  const uint32_t extra = birth_sampling_extra(p, 3u, instance_salt);
   const bool pose = context != nullptr && context->parent_motion.rod_motion_candidate &&
                     context->parent_motion.birth_pose_candidate;
   const float end_play = delay + span / speed;
@@ -253,7 +264,7 @@ void collect_curve_rod_births(const SplitEffectParticle& p, float now_t, int32_t
 // constant, so frame-end curve_t is unproven for RoT. Constant RoT does not
 // use this path.
 void collect_curve_rot_births(const SplitEffectParticle& p, float now_t, std::vector<Birth>& out,
-                              int cap, int next) {
+                              int cap, int next, uint32_t instance_salt) {
   const float speed = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
   const float delay = playback_delay(p);
   const float length = p.length_in_sec > 1e-6f ? p.length_in_sec : 1.0f;
@@ -264,7 +275,7 @@ void collect_curve_rot_births(const SplitEffectParticle& p, float now_t, std::ve
     return;
   }
   const float end_play = delay + span / speed;
-  const uint32_t extra = birth_sampling_extra(p, 2u);
+  const uint32_t extra = birth_sampling_extra(p, 2u, instance_salt);
   float frac = 0.0f;
   int k = 0;
   for (float play_t = delay; play_t < end_play && static_cast<int>(out.size()) < cap && k < cap;) {
@@ -308,6 +319,7 @@ void collect_curve_rot_births(const SplitEffectParticle& p, float now_t, std::ve
 void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
                     std::vector<Birth>& out, const EmitContext* context,
                     bool include_expired) {
+  const uint32_t instance_salt = context != nullptr ? split_instance_salt(*context, false) : 0u;
   const float speed = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
   const float delay = playback_delay(p);
   const float now_sim = (now_t - delay) * speed;
@@ -330,7 +342,7 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
 
   const float rot = p.rate_over_time;
   if (p.rot_curve_count > 0) {
-    collect_curve_rot_births(p, now_t, out, cap, next);
+    collect_curve_rot_births(p, now_t, out, cap, next, instance_salt);
     next = static_cast<int>(out.size());
   } else if (rot > 1e-6f) {
     // live dump dump-pending-v1 hop (10600_8), not 2022.3: constant Rate over
@@ -341,7 +353,7 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
     const int n = std::min(cap, std::max(0, static_cast<int>(std::floor(span * rot))));
     for (int k = 0; k < n; ++k) {
       push_birth(out, delay + ((static_cast<float>(k) + 1.0f) / rot) / speed, next + k,
-                 birth_sampling_extra(p, 2u), cap);
+                 birth_sampling_extra(p, 2u, instance_salt), cap);
     }
     next = static_cast<int>(out.size());
   }
@@ -375,8 +387,9 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
           const float distance = (static_cast<float>(k) + 1.0f) / rod;
           if (distance > total + kDistanceEpsilon) break;
           const float parent_z = context->parent_motion.motion_origin_z + distance;
-          push_rod_birth(out, birth_time_for_distance(distance), next + k, birth_sampling_extra(p, 3u),
-                     cap, parent_z, context->parent_motion.birth_pose_candidate);
+          push_rod_birth(out, birth_time_for_distance(distance), next + k,
+                         birth_sampling_extra(p, 3u, instance_salt), cap, parent_z,
+                         context->parent_motion.birth_pose_candidate);
           ++k;
         }
       } else if (rod_two) {
@@ -389,8 +402,9 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
           distance += 1.0f / rate;
           if (distance > total + 1e-5f) break;
           const float parent_z = context->parent_motion.motion_origin_z + distance;
-          push_rod_birth(out, birth_time_for_distance(distance), next + k, birth_sampling_extra(p, 3u),
-                     cap, parent_z, context->parent_motion.birth_pose_candidate);
+          push_rod_birth(out, birth_time_for_distance(distance), next + k,
+                         birth_sampling_extra(p, 3u, instance_salt), cap, parent_z,
+                         context->parent_motion.birth_pose_candidate);
           ++k;
         }
       }
@@ -406,7 +420,7 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
       const float travel_delay = authored_rod_travel(p, color_id, fade_scale_at_play_t(delay_t));
       const float travel = std::max(0.0f, travel_now - travel_delay);
       const float full_travel = std::max(authored_rod_travel(p, color_id, 1.0f), 1e-4f);
-      const uint32_t extra = birth_sampling_extra(p, 3u);
+      const uint32_t extra = birth_sampling_extra(p, 3u, instance_salt);
       if (rod_two) {
         float acc = 0.0f;
         int k = 0;
@@ -478,7 +492,7 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
              p.emission > 0.0f) {
     const int n = std::min(cap, std::max(1, static_cast<int>(std::lround(p.emission))));
     for (int k = 0; k < n; ++k) {
-      push_birth(out, delay, next + k, birth_sampling_extra(p, 1u), cap);
+      push_birth(out, delay, next + k, birth_sampling_extra(p, 1u, instance_salt), cap);
     }
   }
 }
@@ -545,7 +559,7 @@ bool collect_births_can_extend(const SplitEffectParticle& p) noexcept {
 void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t color_id,
                            int first_index, std::vector<Birth>& out, const EmitContext* context) {
   (void)color_id;
-  (void)context;
+  const uint32_t instance_salt = context != nullptr ? split_instance_salt(*context, false) : 0u;
   if (!collect_births_can_extend(p)) {
     collect_births(p, now_t, color_id, out, context, false);
     return;
@@ -569,7 +583,7 @@ void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t co
     const int n = std::min(cap, std::max(0, static_cast<int>(std::floor(span * rot))));
     for (int k = start; k < n; ++k) {
       push_birth(out, delay + ((static_cast<float>(k) + 1.0f) / rot) / speed, k,
-                 birth_sampling_extra(p, 2u), cap);
+                 birth_sampling_extra(p, 2u, instance_salt), cap);
     }
     return;
   }
@@ -591,7 +605,7 @@ void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t co
   const float travel_delay = authored_rod_travel(p, color_id, fade_scale_at_play_t(delay_t));
   const float travel = std::max(0.0f, travel_now - travel_delay);
   const float full_travel = std::max(authored_rod_travel(p, color_id, 1.0f), 1e-4f);
-  const uint32_t extra = birth_sampling_extra(p, 3u);
+  const uint32_t extra = birth_sampling_extra(p, 3u, instance_salt);
   const int n = std::min(cap, std::max(0, static_cast<int>(std::floor(
       split_effect_rod_seeds_from_ps_world_path(rod, travel)))));
   for (int k = start; k < n; ++k) {
@@ -603,7 +617,7 @@ void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t co
 }
 
 void collect_event_bursts(const SplitEffectParticle& p, float event_t, int32_t color_id,
-                          int start_index, std::vector<Birth>& out) {
+                          uint32_t instance_salt, int start_index, std::vector<Birth>& out) {
   SplitWallScope wall_births(SplitWallSec::Births);
   const int cap = collect_list_cap();
   int next = start_index;
@@ -620,7 +634,8 @@ void collect_event_bursts(const SplitEffectParticle& p, float event_t, int32_t c
       }
       for (int k = 0; k < count; ++k) {
         push_birth(out, event_t, next,
-                   birth_sampling_extra(p, (4u + bi) * 17u + 700u + static_cast<uint32_t>(k)),
+                   birth_sampling_extra(p, (4u + bi) * 17u + 700u + static_cast<uint32_t>(k),
+                                       instance_salt),
                    cap);
         ++next;
       }
@@ -630,7 +645,7 @@ void collect_event_bursts(const SplitEffectParticle& p, float event_t, int32_t c
   if (p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::Burst) && p.emission > 0.0f) {
     const int n = std::min(cap, std::max(1, static_cast<int>(std::lround(p.emission))));
     for (int k = 0; k < n; ++k) {
-      push_birth(out, event_t, next + k, birth_sampling_extra(p, 701u), cap);
+      push_birth(out, event_t, next + k, birth_sampling_extra(p, 701u, instance_salt), cap);
     }
   }
 }

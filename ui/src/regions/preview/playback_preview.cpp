@@ -2,12 +2,14 @@
 #include "wds/renderer/log.hpp"
 #include "wds/ui/editor_ui_config.hpp"
 #include "wds/ui/frame_diag.hpp"
+#include "wds/ui/preview_present_policy.hpp"
 
 #include <wds/chart_render/openwds_hud_layout.hpp>
 #include <wds/chart_render/note_draw_order.hpp>
 #include <wds/chart_render/note_strips.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/chart_render/split_effect_catalog.hpp>
+#include <wds/chart_render/split_effect_particle_playback.hpp>
 #include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <split_collect_pool.hpp>
@@ -171,9 +173,9 @@ TrailDrawScratch& trail_draw_scratch() {
   return scratch;
 }
 
-// evaluate keeps remaining==0 only for PerParticle dieWith=false until
-// trail verts expire. Skip the body quad; trail verts still draw. Ribbon
-// dead particles are not kept (they leave the chain at death).
+// evaluate keeps remaining==0 for dieWithParticles=false until the trail
+// expires, in both modes. Skip the body quad; the trail still draws - for a
+// Ribbon that station is the particle itself, so it is what holds the tail.
 // https://docs.unity3d.com/2022.3/Documentation/Manual/PartSysTrailsModule.html
 // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-dieWithParticles.html
 bool split_live_skip_dead_trail_body(
@@ -184,7 +186,9 @@ bool split_live_skip_dead_trail_body(
   if ((p.flags & wds::chart_render::kSplitEffectFlagTrails) == 0) {
     return false;
   }
-  return p.trail_count < 2 && p.trail_points >= 2;
+  // Ribbon stations (trail_count >= 2) are kept too: the particle stays as a
+  // station while its ribbon tail expires.
+  return p.trail_points >= 2 || p.trail_count >= 2;
 }
 
 // Unity 2022.3 TrailTextureMode.Stretch: "Map the texture once along the
@@ -288,6 +292,7 @@ const TextureInfo* syuriken_plate_for(const SkinCatalog& skin,
   return &skin.syuriken_plate;
 }
 
+// OpenWDS SplitEffectSyuriken shades per fragment (renderer/shaders/syuriken.frag).
 // OpenWDS SplitEffectSyuriken shades per fragment (renderer/shaders/syuriken.frag).
 // One projective quad per Line: U spans the sprite textureRect, V is local_y /
 // sprite at each end, rgb is LineColor premultiplied by its alpha and vertex
@@ -1875,12 +1880,22 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
 #if WDS_DIAG_ENABLED
     const auto draw_t0 = stage_now();
 #endif  // WDS_DIAG_ENABLED
-    vulkan_.draw_frame(batch_, geometry_.screen(),
-                       wds::chart_editor::kOfficialCameraBackgroundR,
-                       wds::chart_editor::kOfficialCameraBackgroundG,
-                       wds::chart_editor::kOfficialCameraBackgroundB, &additive_batch_, post,
-                       post2, add_scissor_ptr, mid, early, carve, &hud_batch_,
-                       split_emit_direct_ ? &extras : nullptr, want_dump ? &dump : nullptr);
+    const bool drew =
+        vulkan_.draw_frame(batch_, geometry_.screen(),
+                           wds::chart_editor::kOfficialCameraBackgroundR,
+                           wds::chart_editor::kOfficialCameraBackgroundG,
+                           wds::chart_editor::kOfficialCameraBackgroundB, &additive_batch_, post,
+                           post2, add_scissor_ptr, mid, early, carve, &hud_batch_,
+                           split_emit_direct_ ? &extras : nullptr, want_dump ? &dump : nullptr);
+    // A swapchain rebuilt since the previous present (host resize before this
+    // frame, or a WSI rebuild inside draw_frame) can swallow this present: the
+    // platform WSI drops the first frame into a fresh swapchain. Ask the host
+    // for one more present so the picture actually lands.
+    const std::uint64_t serial_after = vulkan_.swapchain_serial();
+    const bool rebuilt = serial_after != last_rendered_swapchain_serial_;
+    last_rendered_swapchain_serial_ = serial_after;
+    follow_up_present_ = wds::ui::needs_follow_up_present(drew, rebuilt, follow_up_streak_);
+    follow_up_streak_ = rebuilt ? follow_up_streak_ + 1 : 0;
 #if WDS_DIAG_ENABLED
     stage_draw_us = stage_us(draw_t0);
 #endif  // WDS_DIAG_ENABLED
@@ -2270,14 +2285,18 @@ void PlaybackPreviewView::draw_stage(DrawBatch& batch, const PreviewSnapshot& sn
                                      TextureId solid_texture) {
   // BGShadow (−9) / BG_Lane (−8) / borders / judgeline. ingame_bg (−10) is
   // submitted earlier so its bucket is behind these (Vulkan later-bucket-wins).
-  // Editor: default lane borders stay visible; active splits fade them out via
-  // stage_cover_alpha (OpenWDS LaneGroup BG_LaneBorder starts at α=0 and fades
-  // in only during splits — intentionally not mirrored here; user 2026-10-15).
-  float border_cover = 1.0f;
-  for (const auto& split : snapshot.split_lanes) {
-    if (split.should_show && split.split_count > 0) {
-      border_cover = std::min(border_cover, split.stage_cover_alpha);
-    }
+  // BG_LaneBorder (OpenWDS bc69eb89 LaneGroup): visible by default; a split
+  // hides it from start−1s (0.5s DOTween out) and the last split restores it
+  // over [end+1s, end+2s]. The span outlives the pooled split instance (which
+  // returns at end+1s), so the stage layer uses snapshot.split_borders instead
+  // of the live split_lanes list. Overlap takes the min (approximation noted in
+  // official_split_lane_border_alpha).
+  float border_factor = 1.0f;
+  for (const auto& border : snapshot.split_borders) {
+    border_factor = std::min(
+        border_factor,
+        wds::chart_editor::official_split_lane_border_alpha(
+            static_cast<double>(snapshot.timeline_ms), border.start_ms, border.end_ms, 1.0f));
   }
 
   if (skin_.bg_shadow) {
@@ -2307,7 +2326,7 @@ void PlaybackPreviewView::draw_stage(DrawBatch& batch, const PreviewSnapshot& sn
   const int split_opacity_pct = static_cast<int>(
       std::lround(static_cast<double>(config_.split_line_opacity) * 100.0));
   const float border_a =
-      wds::chart_editor::official_lane_border_alpha(split_opacity_pct) * border_cover;
+      wds::chart_editor::official_lane_border_alpha(split_opacity_pct) * border_factor;
   if (border_a > 0.001f) {
     if (skin_.lane_border) {
       batch.add_sprite(skin_.lane_border, geometry_.stage_quad(), -0.88f, border_a);
@@ -2508,11 +2527,37 @@ void PlaybackPreviewView::persist_split_pause_vert_memo() {
 void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                                TextureId solid_texture) {
   WDS_PERF_SCOPE("preview.split_particles");
+  if (std::getenv("WDS_NO_SPLIT_PARTICLES") != nullptr) {
+    return;
+  }
   split_emit_direct_ = false;
   split_emit_direct_n_ = 0;
   split_emit_in_vb_ = false;
   split_emit_vb_low_ = 0;
-  const int64_t now_us = preview_now_us(snapshot, visual_lead_us_);
+  int64_t now_us = preview_now_us(snapshot, visual_lead_us_);
+  // Fixed-step simulation clock: particles, trail stations and sub-emitter
+  // grouping are sampled on a 1/60 s grid, so a 165 Hz display and a 60 Hz one
+  // evaluate the same data. Repeats inside one grid step reuse the previous
+  // collect (the state is analytic in now_t, so the pool is identical).
+  static const bool fixed_step_on = [] {
+    const char* v = std::getenv("WDS_FIXED_COLLECT");
+    return !(v != nullptr && v[0] == '0');
+  }();
+  constexpr int64_t kFixedStepUs = 16667;  // 1/60 s
+  static int64_t fixed_last_us = -1;
+  static uint64_t fixed_last_rev = 0;
+  static bool fixed_last_playing = false;
+  bool fixed_step_repeat = false;
+  if (fixed_step_on) {
+    const bool step_playing = snapshot.playback_state == PreviewPlaybackState::Playing;
+    const int64_t stepped = (now_us / kFixedStepUs) * kFixedStepUs;
+    fixed_step_repeat = step_playing && fixed_last_playing &&
+                        fixed_last_rev == snapshot.revision && stepped == fixed_last_us;
+    fixed_last_us = stepped;
+    fixed_last_rev = snapshot.revision;
+    fixed_last_playing = step_playing;
+    now_us = stepped;
+  }
   const double now = static_cast<double>(now_us) / 1'000'000.0;
   const bool playing = snapshot.playback_state == PreviewPlaybackState::Playing;
   int cache_cleared = 0;
@@ -2799,9 +2844,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       wds::ui::preview_legacy_lanes_from_env() || wds::ui::preview_legacy_emit_from_env();
   auto draw_clipped_trail_strip =
       [&](DrawBatch& dest, const TextureInfo& tex, const float* xs, const float* ys,
-          const float* zs, const float* world_w, const float* v_along_src, const uint16_t* verts,
-          int n, float a, float r, float g, float b, const float* va, const float* vr,
-          const float* vg, const float* vb) {
+          const float* zs, const float* world_w, const float* v_along_src, int n, float a, float r,
+          float g, float b, const float* va, const float* vr, const float* vg,
+          const float* vb) {
         if (n < 2 || !tex) {
           return;
         }
@@ -2952,15 +2997,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                        v_along_src[i + 1], sa, sr, sg, sb, &share, color_cont);
           }
         };
-        int run0 = 0;
-        for (int i = 0; i + 1 < n; ++i) {
-          if (verts != nullptr &&
-              verts[i + 1] != static_cast<uint16_t>(verts[static_cast<size_t>(i)] + 1u)) {
-            run_strip(run0, i + 1);
-            run0 = i + 1;
-          }
-        }
-        run_strip(run0, n);
+        // Unity 2022.3 Trails: a ribbon connects each particle by age and has no
+        // distance rule that breaks it, so the chain (already ordered by age) is
+        // emitted as one strip.
+        run_strip(0, n);
       };
 
   // OpenWDS Butterfly mesh + ButterflyEffect.shader, then Unity 2022.3
@@ -3224,10 +3264,11 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const uint64_t view_hash = hash_preview_view(geometry_);
   const auto cache_stats = wds::chart_render::split_effect_eval_cache_stats();
   const bool collect_memo =
-      !playing && split_pause_collect_valid_ &&
+      fixed_step_repeat ||
+      (!playing && split_pause_collect_valid_ &&
       split_pause_revision_ == snapshot.revision && split_pause_now_us_ == now_us &&
-      split_pause_quality_ == quality && split_pause_splits_hash_ == splits_hash &&
-      split_pause_seed_epoch_ == cache_stats.epoch;
+       split_pause_quality_ == quality && split_pause_splits_hash_ == splits_hash &&
+       split_pause_seed_epoch_ == cache_stats.epoch);
   const bool verts_memo =
       collect_memo && split_pause_verts_valid_ && split_pause_view_hash_ == view_hash;
   if (verts_memo) {
@@ -3477,6 +3518,17 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       tg.late->overlay_pipe = body_pipe;
       DrawBatch& dest = *tg.late;
       float size_unity = p.size;
+      // Recovered prefab references for these effects never play in Unity
+      // (see split_effect_particle_playback.hpp); do not draw a body the
+      // reference cannot show.
+      if (wds::chart_render::official_split_effect_particles_off(p.effect_id)) {
+        return;
+      }
+      if (std::getenv("WDS_SPLIT_PARTICLE_DEBUG") != nullptr && p.effect_id == 11151) {
+        std::fprintf(stderr, "PART size=%.4f cur=%.4f cur_y=%.4f sol_y=%.4f age=%.4f a=%.4f mode=%d\n",
+                     p.size, p.current_size, p.current_size_y, p.sol_y, p.age, p.a,
+                     static_cast<int>(p.render_mode));
+      }
       // live dump n7 (align2-n7-unity-v1 11520_1 Hamming-1). Not 2022.3.
       // Billboard: size' = min(GetCurrentSize, maxP * W(viewZ)),
       // W = 2 * viewZ * tan(fov/2) * aspect. viewZ<=0: no clamp.
@@ -3595,13 +3647,24 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       }
       WDS_PERF_COUNT("preview.verts.trail", 1);
       draw_clipped_trail_strip(trail_dest, *strip_tex, ts.xs.data(), ts.ys.data(), ts.zs.data(),
-                               ts.widths.data(), ts.v_along.data(), nullptr, pn, 0.0f, 0.0f, 0.0f,
-                               0.0f, ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
+                               ts.widths.data(), ts.v_along.data(), pn, 0.0f, 0.0f, 0.0f, 0.0f,
+                               ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
   };
 
   auto process_chain = [&](std::vector<int>& idxs, SplitEmitTargets tg) {
-    std::sort(idxs.begin(), idxs.end(),
-              [&](int a, int b) { return pool[a].trail_vertex < pool[b].trail_vertex; });
+    // Unity 2022.3 Trails, Ribbon mode: "connecting each particle based on its
+    // age", "the ordering of the particles is decided based on their age". Do
+    // not sort by the per-call station index: one system can be stitched in
+    // several groups per frame and each restarts its index, which interleaved
+    // the groups and drew the strip between unrelated particles.
+    // Ties (same birth step = one burst) use pool order, i.e. spawn order across
+    // every group of the frame.
+    std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
+      if (pool[a].birth_t != pool[b].birth_t) {
+        return pool[a].birth_t < pool[b].birth_t;
+      }
+      return a < b;
+    });
     if (idxs.size() < 2) {
       return;
     }
@@ -3642,8 +3705,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     }
     fill_ribbon_stretch_along(ts.v_along.data(), ts.xs.data(), ts.ys.data(), ts.zs.data(), cn);
     draw_clipped_trail_strip(dest, *strip_tex, ts.xs.data(), ts.ys.data(), ts.zs.data(),
-                             ts.widths.data(), ts.v_along.data(), ts.verts.data(), cn, 0.0f, 0.0f,
-                             0.0f, 0.0f, ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
+                             ts.widths.data(), ts.v_along.data(), cn, 0.0f, 0.0f, 0.0f, 0.0f,
+                             ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
   };
 
   std::vector<std::vector<int>> ribbon_job_idxs;
@@ -3674,17 +3737,20 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   // lines alike. PerParticle trails already follow the body in emit_one.
   auto for_each_line_job = [&](const std::vector<int>& particle_idxs, auto&& on_particle,
                                auto&& on_ribbon) {
-    std::unordered_map<uint32_t, std::vector<int>> chains;
+    // A ribbon is one ParticleSystem (Unity 2022.3 Trails: one ribbon per system,
+  // ordered by age). Key by the chain hash *and* the 32-bit system fingerprint,
+  // so two systems can only share a strip if both hashes collide.
+  std::unordered_map<uint64_t, std::vector<int>> chains;
     for (int idx : particle_idxs) {
       const auto& rp = pool[static_cast<size_t>(idx)];
       if (rp.trail_chain != 0 && rp.trail_count >= 2) {
-        chains[rp.trail_chain].push_back(idx);
+        chains[(static_cast<uint64_t>(rp.trail_chain) << 32) | rp.system_tag].push_back(idx);
       }
     }
     struct ChainRef {
       uint8_t sorting_order;
       uint32_t catalog_index;
-      uint32_t chain;
+      uint64_t chain;
       std::vector<int>* idxs;
     };
     std::vector<ChainRef> order;

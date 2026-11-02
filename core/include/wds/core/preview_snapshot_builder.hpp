@@ -101,6 +101,11 @@ class PreviewSnapshotBuilder {
                                       const MusicTiming& timing, const ChartNoteIndex& index,
                                       int64_t preview_time_ms) const;
 
+  // Lane-border spans use the official hide/restore window [start-1s, end+2s],
+  // wider than the pooled split instance lifetime. Rebuilt every update.
+  void rebuild_split_borders(PreviewSnapshot& out, const MusicTiming& timing,
+                             const ChartNoteIndex& index, int64_t preview_time_ms) const;
+
   void rebuild_concurrent_lines(PreviewSnapshot& out,
                                 const std::vector<ConcurrentLineNote>& concurrent_lines,
                                 int64_t preview_time_ms) const;

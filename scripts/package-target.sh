@@ -1138,12 +1138,13 @@ make_win_msi() {
 
   python3 "${ROOT}/scripts/win-msi-harvest.py" "$heat_wxs" "$build_ts" \
     || die "win-msi-harvest.py failed"
-  local guid_registry="" guid_stamp="" guid_desk="" guid_start=""
+  local guid_registry="" guid_stamp="" guid_desk="" guid_start="" guid_assoc=""
   local authored_guids="" authored_key="" authored_val=""
   authored_guids="$(python3 "${ROOT}/scripts/win-msi-harvest.py" --authored-guids "$build_ts")" \
     || die "win-msi-harvest.py --authored-guids failed"
   while IFS='=' read -r authored_key authored_val; do
     case "${authored_key}" in
+      GUID_FileAssociation) guid_assoc="${authored_val}" ;;
       GUID_RegistryInstallDir) guid_registry="${authored_val}" ;;
       GUID_InstallStamp) guid_stamp="${authored_val}" ;;
       GUID_DesktopShortcut) guid_desk="${authored_val}" ;;
@@ -1151,7 +1152,7 @@ make_win_msi() {
     esac
   done <<<"${authored_guids}"
   [[ -n "${guid_registry}" && -n "${guid_stamp}" \
-     && -n "${guid_desk}" && -n "${guid_start}" ]] || \
+     && -n "${guid_desk}" && -n "${guid_start}" && -n "${guid_assoc}" ]] || \
     die "per-build authored component GUIDs were not generated"
 
   mkdir -p "$(dirname "$msi_path")"
@@ -1182,6 +1183,7 @@ PY
       -D "BuildId=${build_id}" \
       -D "BuildTs=${build_ts}" \
       -D "GuidRegistryInstallDir=${guid_registry}" \
+      -D "GuidFileAssociation=${guid_assoc}" \
       -D "GuidInstallStamp=${guid_stamp}" \
       -D "GuidDesktopShortcut=${guid_desk}" \
       -D "GuidStartMenuShortcut=${guid_start}" \
@@ -2064,6 +2066,94 @@ EOF
   <string>wds</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <!-- Double-click / Open With for .wdsproject and .wdschart. LaunchServices
+       registers an app in /Applications from these declarations, which also
+       makes WDS Editor the default handler for both types (only this app claims
+       them). Removing the app unregisters them again, so the
+       drag-to-Applications install and the delete-from-Applications uninstall
+       both do the right thing. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>WDS 工程</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>CFBundleTypeIconFile</key>
+      <string>wds</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>wdsproject</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.wds.wdsproject</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>WDS 谱面</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>CFBundleTypeIconFile</key>
+      <string>wds</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>wdschart</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.wds.wdschart</string>
+      </array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.wds.wdsproject</string>
+      <key>UTTypeDescription</key>
+      <string>WDS 工程</string>
+      <key>UTTypeIconFile</key>
+      <string>wds</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+        <string>public.content</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>wdsproject</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.wds.wdschart</string>
+      <key>UTTypeDescription</key>
+      <string>WDS 谱面</string>
+      <key>UTTypeIconFile</key>
+      <string>wds</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+        <string>public.content</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>wdschart</string>
+        </array>
+      </dict>
+    </dict>
+  </array>
   <key>CFBundleShortVersionString</key>
   <string>${WDS_PRODUCT_VERSION}</string>
   <key>LSMinimumSystemVersion</key>
