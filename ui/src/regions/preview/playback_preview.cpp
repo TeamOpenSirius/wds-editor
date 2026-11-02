@@ -13,7 +13,6 @@
 #include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <split_collect_pool.hpp>
-#include <wds/common/diag_log.hpp>
 #include <wds/common/page_touch.hpp>
 #include <wds/common/perf_stages.hpp>
 #include <wds/common/minflt_stage.hpp>
@@ -1634,164 +1633,6 @@ void PlaybackPreviewView::sync_hit_sfx(const wds::chart_editor::PreviewSnapshot&
   update_hit_sfx(snapshot);
 }
 
-namespace {
-
-// A thin, long triangle is what a "stray line" looks like in the final draw
-// list: two vertices far apart, the third almost on that edge. Scanning every
-// batch catches geometry from any draw path (particles, lane plates, hits),
-// including the frames where the split list is already empty.
-struct BatchSliverStats {
-  int count = 0;
-  size_t tris = 0;
-  float len = 0.0f;
-  float width = 1.0f;
-  // Thinnest long triangle seen even when it was not classified as a sliver,
-  // so a clean log still proves the detector is looking at real geometry.
-  float min_width = 1.0f;
-  float ax = 0.0f;
-  float ay = 0.0f;
-  float bx = 0.0f;
-  float by = 0.0f;
-  wds::renderer::TextureId tex = wds::renderer::kInvalidTextureId;
-};
-
-void scan_batch_slivers(const wds::renderer::DrawBatch& batch, BatchSliverStats& out) {
-  using wds::renderer::DrawVertex;
-  const auto edge_len = [](const DrawVertex& p, const DrawVertex& q, float& dx, float& dy) {
-    dx = q.x - p.x;
-    dy = q.y - p.y;
-    return std::sqrt(dx * dx + dy * dy);
-  };
-  for (const auto& bucket : batch.buckets) {
-    const auto& verts = bucket.vertices;
-    const auto& indices = bucket.indices;
-    if (verts.empty()) {
-      continue;
-    }
-    const size_t tri_n = indices.empty() ? verts.size() / 3u : indices.size() / 3u;
-    for (size_t t = 0; t < tri_n; ++t) {
-      DrawVertex a;
-      DrawVertex b;
-      DrawVertex c;
-      if (indices.empty()) {
-        a = verts[t * 3u + 0u];
-        b = verts[t * 3u + 1u];
-        c = verts[t * 3u + 2u];
-      } else {
-        const size_t ia = indices[t * 3u + 0u];
-        const size_t ib = indices[t * 3u + 1u];
-        const size_t ic = indices[t * 3u + 2u];
-        if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size()) {
-          continue;
-        }
-        a = verts[ia];
-        b = verts[ib];
-        c = verts[ic];
-      }
-      ++out.tris;
-      float dx0 = 0.0f;
-      float dy0 = 0.0f;
-      float dx1 = 0.0f;
-      float dy1 = 0.0f;
-      float dx2 = 0.0f;
-      float dy2 = 0.0f;
-      float l0 = edge_len(a, b, dx0, dy0);
-      float l1 = edge_len(b, c, dx1, dy1);
-      float l2 = edge_len(c, a, dx2, dy2);
-      float longest = l0;
-      float ex = dx0;
-      float ey = dy0;
-      if (l1 > longest) {
-        longest = l1;
-        ex = dx1;
-        ey = dy1;
-      }
-      if (l2 > longest) {
-        longest = l2;
-        ex = dx2;
-        ey = dy2;
-      }
-      if (longest < 0.30f) {
-        continue;
-      }
-      const float cross = std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
-      const float width = cross / longest;  // parallelogram height, stage half-height = 1
-      out.min_width = std::min(out.min_width, width);
-      if (width >= 0.012f) {
-        continue;
-      }
-      ++out.count;
-      if (longest > out.len) {
-        out.len = longest;
-        out.width = width;
-        if (longest == l0) {
-          out.ax = a.x;
-          out.ay = a.y;
-          out.bx = b.x;
-          out.by = b.y;
-        } else if (longest == l1) {
-          out.ax = b.x;
-          out.ay = b.y;
-          out.bx = c.x;
-          out.by = c.y;
-        } else {
-          out.ax = c.x;
-          out.ay = c.y;
-          out.bx = a.x;
-          out.by = a.y;
-        }
-        out.tex = bucket.texture;
-      }
-    }
-  }
-}
-
-// Deterministic digest of one batch's vertex stream. Two machines running the
-// same build at the same timeline should print the same number; a difference
-// points at the data we submit, not at the driver.
-uint64_t hash_batch_vertices(const wds::renderer::DrawBatch& batch) {
-  uint64_t h = 1469598103934665603ull;
-  const auto mix = [&h](uint32_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
-  };
-  for (const auto& bucket : batch.buckets) {
-    for (const auto& v : bucket.vertices) {
-      uint32_t bits = 0;
-      std::memcpy(&bits, &v.x, sizeof(bits));
-      mix(bits);
-      std::memcpy(&bits, &v.y, sizeof(bits));
-      mix(bits);
-      std::memcpy(&bits, &v.u, sizeof(bits));
-      mix(bits);
-      std::memcpy(&bits, &v.v, sizeof(bits));
-      mix(bits);
-      std::memcpy(&bits, &v.q, sizeof(bits));
-      mix(bits);
-      std::memcpy(&bits, &v.a, sizeof(bits));
-      mix(bits);
-    }
-  }
-  return h;
-}
-
-void batch_extent(const wds::renderer::DrawBatch& batch, float& max_x, float& max_y) {
-  for (const auto& bucket : batch.buckets) {
-    for (const auto& vert : bucket.vertices) {
-      const float ax = std::abs(vert.x);
-      const float ay = std::abs(vert.y);
-      if (ax > max_x) {
-        max_x = ax;
-      }
-      if (ay > max_y) {
-        max_y = ay;
-      }
-    }
-  }
-}
-
-}  // namespace
-
 void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatch* ui_overlay,
                                  TextureId ui_solid_texture, const DrawBatch* modal_overlay,
                                  const DrawBatch* modal_chrome, int64_t visual_lead_us,
@@ -2068,66 +1909,6 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
                                            &textures_);
   }
   persist_split_pause_vert_memo();
-  {
-    // Every batch that reaches the GPU is scanned for thin, long triangles: the
-    // reported artifact is a fan of stray lines, and it can outlive the split
-    // list (empty split frames used to log nothing at all).
-    static std::chrono::steady_clock::time_point next_geom{};
-    const auto geom_now = std::chrono::steady_clock::now();
-    if (geom_now >= next_geom) {
-      next_geom = geom_now + std::chrono::milliseconds(500);
-      const bool geom_playing = snapshot.playback_state == PreviewPlaybackState::Playing;
-      const struct {
-        const char* name;
-        const wds::renderer::DrawBatch* batch;
-      } refs[] = {
-          {"bg", &batch_},         {"notes", &notes_batch_},      {"glow", &glow_batch_},
-          {"lanes", &split_lanes_glow_}, {"split", &split_late_batch_},
-          {"add", &additive_batch_}, {"hud", &hud_batch_},
-      };
-      float geom_min_width = 1.0f;
-      for (const auto& ref : refs) {
-        BatchSliverStats slivers;
-        scan_batch_slivers(*ref.batch, slivers);
-        geom_min_width = std::min(geom_min_width, slivers.min_width);
-        if (slivers.count <= 0) {
-          continue;
-        }
-        wds::common::diag::emit(
-            "geom sliver batch=%s tex=%u tris=%zu n=%d len=%.3f width=%.4f a=(%.3f,%.3f) "
-            "b=(%.3f,%.3f) splits=%zu playing=%d",
-            ref.name, static_cast<unsigned>(slivers.tex), slivers.tris, slivers.count,
-            slivers.len, slivers.width, slivers.ax, slivers.ay, slivers.bx, slivers.by,
-            snapshot.split_lanes.size(), geom_playing ? 1 : 0);
-      }
-      {
-        float lanes_x = 0.0f;
-        float lanes_y = 0.0f;
-        float split_x = 0.0f;
-        float split_y = 0.0f;
-        float notes_x = 0.0f;
-        float notes_y = 0.0f;
-        batch_extent(split_lanes_glow_, lanes_x, lanes_y);
-        batch_extent(split_late_batch_, split_x, split_y);
-        batch_extent(notes_batch_, notes_x, notes_y);
-        wds::common::diag::emit_throttled(
-            "geom.extent", 1000,
-            "geom extent splits=%zu playing=%d lanes=(%.2f,%.2f) split=(%.2f,%.2f) "
-            "notes=(%.2f,%.2f)",
-            snapshot.split_lanes.size(), geom_playing ? 1 : 0, lanes_x, lanes_y, split_x,
-            split_y, notes_x, notes_y);
-      }
-      wds::common::diag::emit_throttled(
-          "geom.counts", 1000,
-          "geom counts splits=%zu playing=%d min_w=%.4f bg=%zu notes=%zu glow=%zu lanes=%zu "
-          "split=%zu add=%zu hud=%zu",
-          snapshot.split_lanes.size(), geom_playing ? 1 : 0, geom_min_width,
-          batch_.vertex_count(),
-          notes_batch_.vertex_count(), glow_batch_.vertex_count(),
-          split_lanes_glow_.vertex_count(), split_late_batch_.vertex_count(),
-          additive_batch_.vertex_count(), hud_batch_.vertex_count());
-    }
-  }
   if (split_emit_in_vb_) {
     for (size_t i = 0; i < split_emit_direct_n_ && i < split_emit_parts_.size(); ++i) {
       split_emit_parts_[i].notes.unbind_external();
@@ -2814,14 +2595,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     }
   }
   if (snapshot.split_lanes.empty()) {
-    // The stray lines appear right after the last split dies, so keep a slow
-    // heartbeat for the frames where there is nothing split-related to log.
-    const auto& no_split_stage = geometry_.content();
-    wds::common::diag::emit_throttled(
-        "split.scene.empty", 2000,
-        "split scene (no splits) rev=%llu t=%.3fs playing=%d stage=%.1fx%.1f content_px=%d",
-        static_cast<unsigned long long>(snapshot.revision), now, playing ? 1 : 0,
-        no_split_stage.w, no_split_stage.h, geometry_.content_height_px());
     split_pause_collect_valid_ = false;
     split_pause_verts_valid_ = false;
     split_pause_verts_pending_ = false;
@@ -2834,15 +2607,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     return;
   }
   ensure_split_effect_textures();
-  // Atlas / trail texture health: without them every named sprite tile falls
-  // back (body skipped) and the trail strips sample the solid 1x1 texture,
-  // which is exactly what a fan of hard white lines looks like.
-  wds::common::diag::emit_throttled(
-      "split.textures", 5000,
-      "split textures atlas=%d(%dx%d) trail=%d(%dx%d)",
-      skin_.split_effect_uvs ? 1 : 0, skin_.split_effect_uvs.width,
-      skin_.split_effect_uvs.height, skin_.split_effect_trail ? 1 : 0,
-      skin_.split_effect_trail.width, skin_.split_effect_trail.height);
 
   const int quality = config_.split_effect_quality;
   wds::chart_render::SplitEffectFrameCollect& collected = split_effect_collect_;
@@ -2920,83 +2684,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const float cam_group_z = wds::chart_editor::kOfficialLaneGroupZ;
   const float near_clip = wds::chart_editor::kOfficialCameraNearClip;
   size_t dest_reserve_chunk = 0;
-  // --- field diagnostics (always on; <crash dir>/diag-preview-*.log) -------
-  // A stray-line report (3-lane + 6-lane 10630 overlap, far end of the lanes)
-  // only reproduces on some machines. Every projected vertex is checked here:
-  // degenerate / far-out projections are logged with the split-effect particle
-  // that produced them, and a throttled digest records the surface size, the
-  // aspect the particle camera is built from and the pool state. wds::common
-  // ::diag is a no-op when WDS_DIAG=0.
-  struct SplitDiagCtx {
-    int effect_id = 0;
-    int catalog = 0;
-    int particle = -1;
-    int trail = -1;
-  } diag_ctx;
-  struct SplitDiagFrame {
-    int anomalies = 0;
-    int logged = 0;
-    float max_off = 0.0f;
-    float worst_px = 0.0f;
-    float worst_py = 0.0f;
-    float worst_x = 0.0f;
-    float worst_y = 0.0f;
-    float worst_z = 0.0f;
-    float worst_view_z = 0.0f;
-    // A missing atlas tile falls back to the 1x1 solid texture, which paints
-    // hard white strips instead of the authored soft trail sprite.
-    int missing_sprite = 0;
-    int fallback_trail = 0;
-    int real_trail = 0;
-    int bodies = 0;
-    // Ribbon chains: the reported ribbons look like separate little segments,
-    // so record how many particles each chain joins and how far apart the
-    // joined stations are.
-    int chains = 0;
-    int chain_skipped = 0;
-    int chain_particles = 0;
-    int chain_max = 0;
-    int chain_gap_big = 0;
-    int chain_vertex_dup = 0;
-    int chain_tail_gap = 0;
-    // Chains that mix particles from different catalog systems / lines / effects
-    // or repeat a station index: the ribbon then zig-zags between unrelated
-    // stations (dashed strips, stray straight spans).
-    int chain_mixed = 0;
-    int chain_tag_mixed = 0;
-    int chain_dup_chains = 0;
-    int chain_station_dup = 0;
-  } diag_frame;
-  const float diag_off_limit =
-      std::max(std::max(content_bounds.w, content_bounds.h), 1.0f) * 16.0f;
-  auto diag_note_projection = [&](float x, float y, float z, float view_z, float px, float py) {
-    const float off = std::max(std::abs(px - proj_cx), std::abs(py - proj_cy));
-    if (off > diag_frame.max_off) {
-      diag_frame.max_off = off;
-      diag_frame.worst_px = px;
-      diag_frame.worst_py = py;
-      diag_frame.worst_x = x;
-      diag_frame.worst_y = y;
-      diag_frame.worst_z = z;
-      diag_frame.worst_view_z = view_z;
-    }
-    const bool bad = !std::isfinite(px) || !std::isfinite(py) || !std::isfinite(view_z) ||
-                     off > diag_off_limit;
-    if (!bad) {
-      return;
-    }
-    ++diag_frame.anomalies;
-    if (diag_frame.logged >= 6) {
-      return;
-    }
-    ++diag_frame.logged;
-    wds::common::diag::emit(
-        "split vertex out of stage: px=%.1f py=%.1f off=%.1f world=(%.3f,%.3f,%.3f) "
-        "view_z=%.3f near=%.3f stage=%.0fx%.0f aspect=%.4f effect=%d catalog=%d particle=%d "
-        "trail=%d",
-        px, py, off, x, y, z, view_z, near_clip, content_bounds.w, content_bounds.h, view_aspect,
-        diag_ctx.effect_id, diag_ctx.catalog, diag_ctx.particle, diag_ctx.trail);
-  };
   auto camera_z_fast = [&](float y, float z) { return cam_group_z + y * tilt_s + z * tilt_c; };
   auto project_main_fast = [&](float x, float y, float z) {
     const float wy = y * tilt_c - z * tilt_s;
@@ -3004,9 +2691,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     const float zz = std::max(wz, 1e-4f);
     const float ndc_x = (x / zz) * focal_over_aspect;
     const float ndc_y = (wy / zz) * focal;
-    const wds::renderer::Vec2 projected{proj_cx + ndc_x * proj_hx, proj_cy + ndc_y * proj_hy};
-    diag_note_projection(x, y, z, wz, projected.x, projected.y);
-    return projected;
+    return wds::renderer::Vec2{proj_cx + ndc_x * proj_hx, proj_cy + ndc_y * proj_hy};
   };
   auto poly_in_front_of_near = [&](const float* qy, const float* qz, int n) {
     for (int i = 0; i < n; ++i) {
@@ -3264,7 +2949,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
             }
           }
           for (int k = 0; k + 1 < m; ++k) {
-            diag_ctx.trail = k;
             const int i = i0 + k;
             if (world_w[i] < 1e-5f && world_w[i + 1] < 1e-5f) {
               continue;
@@ -3313,14 +2997,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                        v_along_src[i + 1], sa, sr, sg, sb, &share, color_cont);
           }
         };
-        // Unity 2022.3 Trails module, Ribbon mode: "create a ribbon of trails
-        // connecting each particle based on its age"; Ribbon Count 1 is "a
-        // single ribbon connecting each particle" and "the ordering of the
-        // particles is decided based on their age". There is no distance rule
-        // that breaks the ribbon, so the chain - already ordered by age - is
-        // emitted as one strip. Splitting here used to cut the ribbon into one
-        // quad per station whenever a system needed several stitch calls in a
-        // frame, because each call restarted its own station index.
+        // Unity 2022.3 Trails: a ribbon connects each particle by age and has no
+        // distance rule that breaks it, so the chain (already ordered by age) is
+        // emitted as one strip.
         run_strip(0, n);
       };
 
@@ -3587,7 +3266,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const bool collect_memo =
       fixed_step_repeat ||
       (!playing && split_pause_collect_valid_ &&
-       split_pause_revision_ == snapshot.revision && split_pause_now_us_ == now_us &&
+      split_pause_revision_ == snapshot.revision && split_pause_now_us_ == now_us &&
        split_pause_quality_ == quality && split_pause_splits_hash_ == splits_hash &&
        split_pause_seed_epoch_ == cache_stats.epoch);
   const bool verts_memo =
@@ -3656,99 +3335,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
 #endif  // WDS_DIAG_ENABLED
   }
   WDS_PERF_COUNT("preview.split_memo.collect", collect_memo ? 1 : 0);
-  {
-    // Scene context once a second plus one line per new split instance: this is
-    // the "3-lane + 6-lane 10630 overlap" that the stray-line report sits in,
-    // and the aspect comes from the preview surface, so a report from a
-    // different window/DPR is comparable line by line.
-    int diag_panel_w = 0;
-    int diag_panel_h = 0;
-    {
-      int px = 0;
-      int py = 0;
-      if (!geometry_.panel_framebuffer_rect(px, py, diag_panel_w, diag_panel_h)) {
-        diag_panel_w = 0;
-        diag_panel_h = 0;
-      }
-    }
-    wds::common::diag::emit_throttled(
-        "split.scene", 1000,
-        "split scene rev=%llu t=%.3fs playing=%d quality=%d msaa=%d line_op=%.3f fps=%.1f "
-        "stage=%.1fx%.1f content_px=%d panel_px=%dx%d aspect=%.4f zoom=%.4f focal=%.3f "
-        "near=%.3f splits=%zu alive=%d",
-        static_cast<unsigned long long>(snapshot.revision), now, playing ? 1 : 0, quality,
-        config_.msaa_samples, config_.split_line_opacity, [&] {
-          static std::chrono::steady_clock::time_point last{};
-          static int frames = 0;
-          ++frames;
-          const auto now_tp = std::chrono::steady_clock::now();
-          if (last.time_since_epoch().count() == 0) {
-            last = now_tp;
-            return 0.0f;
-          }
-          const float sec = std::chrono::duration<float>(now_tp - last).count();
-          if (sec < 1.0f) {
-            return 0.0f;
-          }
-          const float fps = static_cast<float>(frames) / sec;
-          frames = 0;
-          last = now_tp;
-          return fps;
-        }(), content_bounds.w, content_bounds.h, geometry_.content_height_px(), diag_panel_w,
-        diag_panel_h, view_aspect, view_zoom, focal, near_clip, snapshot.split_lanes.size(),
-        collected.total);
-    // Identity only: split_percent_* animates every frame, so hashing the whole
-    // instance would reprint the list on every frame.
-    uint64_t diag_splits_identity = 1469598103934665603ull;
-    const auto diag_mix = [](uint64_t h, uint64_t v) {
-      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-      return h;
-    };
-    for (const auto& inst : snapshot.split_lanes) {
-      diag_splits_identity = diag_mix(diag_splits_identity,
-                                      static_cast<uint64_t>(inst.source_note_id));
-      diag_splits_identity = diag_mix(diag_splits_identity,
-                                      static_cast<uint64_t>(inst.start_ms));
-      diag_splits_identity = diag_mix(diag_splits_identity,
-                                      static_cast<uint64_t>(inst.end_ms));
-      diag_splits_identity = diag_mix(diag_splits_identity,
-                                      static_cast<uint64_t>(inst.split_count));
-      diag_splits_identity = diag_mix(diag_splits_identity,
-                                      static_cast<uint64_t>(inst.effective_lane_count));
-    }
-    static uint64_t logged_splits_identity = 0;
-    if (diag_splits_identity != logged_splits_identity) {
-      logged_splits_identity = diag_splits_identity;
-      for (size_t di = 0; di < snapshot.split_lanes.size(); ++di) {
-        const auto& inst = snapshot.split_lanes[di];
-        const int begin = di < collected.split_begin.size() ? collected.split_begin[di] : 0;
-        const int count = di < collected.split_count.size() ? collected.split_count[di] : 0;
-        int effect_ids[3] = {0, 0, 0};
-        int distinct = 0;
-        int particles = 0;
-        if (begin >= 0) {
-          const int end = std::min<int>(begin + count, static_cast<int>(collected.pool.size()));
-          for (int pi = begin; pi < end; ++pi) {
-            const int eid = collected.pool[static_cast<size_t>(pi)].effect_id;
-            if (eid == 0) continue;
-            ++particles;
-            bool seen = false;
-            for (int e = 0; e < distinct; ++e) seen = seen || effect_ids[e] == eid;
-            if (!seen && distinct < 3) effect_ids[distinct++] = eid;
-          }
-        }
-        wds::common::diag::emit(
-            "split instance i=%zu note=%d split_count=%d lane_type=%d scratch=%d start_ms=%lld "
-            "end_ms=%lld lanes=%d alpha=%.3f appear=(%.3f..%.3f) phase=%d particles=%d "
-            "effects=[%d,%d,%d]",
-            di, inst.source_note_id, inst.split_count, static_cast<int>(inst.split_lane_type),
-            inst.scratch_length, static_cast<long long>(inst.start_ms),
-            static_cast<long long>(inst.end_ms), inst.effective_lane_count,
-            inst.split_line_alpha, inst.split_percent_start, inst.split_percent_end,
-            inst.split_anim_phase, particles, effect_ids[0], effect_ids[1], effect_ids[2]);
-      }
-    }
-  }
   if (collected.total <= 0) {
     // Lines still on screen, no live particles: skip emit job walk / mapped-VB
     // / full-pool trail estimate. Collect already ran (births / dead latch).
@@ -3861,9 +3447,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   SplitEmitTargets emit_targets{&emit_notes, &emit_glow, &emit_late, &split_particles_drawn};
 
   auto emit_one = [&](const wds::chart_render::SplitEffectLiveParticle& p, SplitEmitTargets tg) {
-      diag_ctx.effect_id = p.effect_id;
-      diag_ctx.catalog = static_cast<int>(p.catalog_index);
-      diag_ctx.trail = -1;
       const bool unnamed = p.uv_name_index == wds::chart_render::kSplitEffectNoUvName;
       const bool cube = (p.flags & wds::chart_render::kSplitEffectFlagCubeMesh) != 0;
       const bool ring = (p.flags & wds::chart_render::kSplitEffectFlagRingMesh) != 0;
@@ -3906,21 +3489,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       const TextureInfo* strip_tex = trail_bomb ? trail_tex : &unbound_main_tex;
       const bool can_trail = strip_tex != nullptr && *strip_tex && p.trail_count < 2 &&
                              p.trail_points >= 2;
-      if (!unnamed && !tex) {
-        ++diag_frame.missing_sprite;
-      }
-      if (can_trail) {
-        if (strip_tex == &unbound_main_tex) {
-          ++diag_frame.fallback_trail;
-        } else {
-          ++diag_frame.real_trail;
-        }
-      }
       if (skip_body && !can_trail) {
         return;
       }
       ++(*tg.drawn);
-      ++diag_frame.bodies;
       const bool butterfly = (p.flags & wds::chart_render::kSplitEffectFlagButterfly) != 0;
       // OpenWDS materials.bundle SplitEffectSyurikenTrail: color *= _AddtiveIntencity
       // on fixed4 (RGBA), then clip(a-0.01). Catalog Other is materials[0]=Trail.
@@ -4080,30 +3652,23 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   };
 
   auto process_chain = [&](std::vector<int>& idxs, SplitEmitTargets tg) {
-    // Unity 2022.3 Trails module, Ribbon mode: "connecting each particle based
-    // on its age", "the ordering of the particles is decided based on their
-    // age". Sort on age only; do NOT use the per-call station index, which
-    // restarts at 0 for every stitch group and used to interleave the groups
-    // (the strip then zig-zagged between unrelated particles).
-    // Ties (particles born in the same step, which is the common case for a
-    // burst) fall back to pool order: that is the order the collector appended
-    // them in, i.e. spawn order across every group of this frame, so a burst
-    // keeps a coherent order instead of a seed-shuffled one.
+    // Unity 2022.3 Trails, Ribbon mode: "connecting each particle based on its
+    // age", "the ordering of the particles is decided based on their age". Do
+    // not sort by the per-call station index: one system can be stitched in
+    // several groups per frame and each restarts its index, which interleaved
+    // the groups and drew the strip between unrelated particles.
+    // Ties (same birth step = one burst) use pool order, i.e. spawn order across
+    // every group of the frame.
     std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
-      const auto& pa = pool[static_cast<size_t>(a)];
-      const auto& pb = pool[static_cast<size_t>(b)];
-      if (pa.birth_t != pb.birth_t) {
-        return pa.birth_t < pb.birth_t;
+      if (pool[a].birth_t != pool[b].birth_t) {
+        return pool[a].birth_t < pool[b].birth_t;
       }
       return a < b;
     });
     if (idxs.size() < 2) {
-      ++diag_frame.chains;
-      ++diag_frame.chain_skipped;
       return;
     }
     const auto& marker = pool[idxs.back()];
-    const uint32_t chain_hash = marker.trail_chain;
     const auto trail_mat =
         wds::chart_render::official_split_effect_trail_material(marker.catalog_index);
     const bool trail_bomb = wds::chart_render::official_split_effect_trail_uses_bomb_tex(trail_mat);
@@ -4137,102 +3702,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       ts.vg[static_cast<size_t>(k)] = v.trail_g * trail_k;
       ts.vb[static_cast<size_t>(k)] = v.trail_b * trail_k;
       ts.verts[static_cast<size_t>(k)] = v.trail_vertex;
-    }
-    ++diag_frame.chains;
-    diag_frame.chain_particles += cn;
-    diag_frame.chain_max = std::max(diag_frame.chain_max, cn);
-    {
-      // Identify which systems this chain actually mixes, and where the
-      // station order breaks, so a single field log shows the collision.
-      int dup_pairs = 0;
-      unsigned dup_a = 0;
-      unsigned dup_b = 0;
-      uint32_t catalogs[4] = {0, 0, 0, 0};
-      int n_cat = 0;
-      int32_t lines[4] = {0, 0, 0, 0};
-      int n_line = 0;
-      int32_t effects[4] = {0, 0, 0, 0};
-      int n_eff = 0;
-      uint16_t counts[4] = {0, 0, 0, 0};
-      int n_cnt = 0;
-      uint32_t tags[4] = {0, 0, 0, 0};  // system_tag is 32-bit; truncating here
-      int n_tag = 0;                     // made every tag look equal */
-
-      for (int k = 0; k < cn; ++k) {
-        const auto& lp = pool[idxs[static_cast<size_t>(k)]];
-        bool seen = false;
-        for (int e = 0; e < n_cat; ++e) seen = seen || catalogs[e] == lp.catalog_index;
-        if (!seen && n_cat < 4) catalogs[n_cat++] = lp.catalog_index;
-        seen = false;
-        for (int e = 0; e < n_line; ++e) seen = seen || lines[e] == lp.line_index;
-        if (!seen && n_line < 4) lines[n_line++] = lp.line_index;
-        seen = false;
-        for (int e = 0; e < n_eff; ++e) seen = seen || effects[e] == lp.effect_id;
-        if (!seen && n_eff < 4) effects[n_eff++] = lp.effect_id;
-        seen = false;
-        for (int e = 0; e < n_cnt; ++e) seen = seen || counts[e] == lp.trail_count;
-        if (!seen && n_cnt < 4) counts[n_cnt++] = lp.trail_count;
-        seen = false;
-        for (int e = 0; e < n_tag; ++e) seen = seen || tags[e] == lp.system_tag;
-        if (!seen && n_tag < 4) tags[n_tag++] = lp.system_tag;
-      }
-      for (int k = 1; k < cn; ++k) {
-        const auto& prev = pool[idxs[static_cast<size_t>(k - 1)]];
-        const auto& cur = pool[idxs[static_cast<size_t>(k)]];
-        if (prev.birth_t == cur.birth_t && prev.seed == cur.seed) {
-          ++diag_frame.chain_station_dup;
-        }
-        if (ts.verts[static_cast<size_t>(k)] <= ts.verts[static_cast<size_t>(k - 1)]) {
-          if (dup_pairs == 0) {
-            dup_a = ts.verts[static_cast<size_t>(k - 1)];
-            dup_b = ts.verts[static_cast<size_t>(k)];
-          }
-          ++dup_pairs;
-        }
-      }
-      const bool mixed = n_cat > 1 || n_line > 1 || n_eff > 1 || n_cnt > 1 || n_tag > 1;
-      if (n_tag > 1) {
-        ++diag_frame.chain_tag_mixed;
-      }
-      if (mixed) {
-        ++diag_frame.chain_mixed;
-      }
-      if (dup_pairs > 0) {
-        ++diag_frame.chain_dup_chains;
-        wds::common::diag::emit_throttled(
-            "chain.dup", 2000,
-            "chain DUP chain=%08x tag=%08x parts=%d dup=%d first=(%u,%u) catalogs=%d/%d "
-            "lines=%d/%d effects=%d/%d counts=%d/%d",
-            chain_hash, marker.system_tag, cn, dup_pairs, dup_a, dup_b, n_cat, catalogs[0], n_line,
-            lines[0], n_eff, effects[0], n_cnt, counts[0]);
-      }
-      if (mixed) {
-        wds::common::diag::emit_throttled(
-            "chain.mixed", 2000,
-            "chain MIXED chain=%08x parts=%d dup=%d tags=[%u,%u,%u,%u] catalogs=[%u,%u,%u,%u] "
-            "lines=[%d,%d,%d,%d] effects=[%d,%d,%d,%d] counts=[%u,%u,%u,%u]",
-            chain_hash, cn, dup_pairs, tags[0], tags[1], tags[2], tags[3], catalogs[0],
-            catalogs[1], catalogs[2], catalogs[3], lines[0], lines[1], lines[2], lines[3],
-            effects[0], effects[1], effects[2], effects[3], counts[0], counts[1], counts[2],
-            counts[3]);
-      }
-    }
-    for (int k = 1; k < cn; ++k) {
-      const size_t a = static_cast<size_t>(k - 1);
-      const size_t b = static_cast<size_t>(k);
-      const float dx = ts.xs[b] - ts.xs[a];
-      const float dy = ts.ys[b] - ts.ys[a];
-      const float dz = ts.zs[b] - ts.zs[a];
-      const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
-      if (gap > 0.5f) {
-        ++diag_frame.chain_gap_big;
-      }
-      if (gap > 2.0f) {
-        ++diag_frame.chain_tail_gap;
-      }
-      if (ts.verts[b] <= ts.verts[a]) {
-        ++diag_frame.chain_vertex_dup;
-      }
     }
     fill_ribbon_stretch_along(ts.v_along.data(), ts.xs.data(), ts.ys.data(), ts.zs.data(), cn);
     draw_clipped_trail_strip(dest, *strip_tex, ts.xs.data(), ts.ys.data(), ts.zs.data(),
@@ -4268,11 +3737,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   // lines alike. PerParticle trails already follow the body in emit_one.
   auto for_each_line_job = [&](const std::vector<int>& particle_idxs, auto&& on_particle,
                                auto&& on_ribbon) {
-    // A ribbon is one ParticleSystem (Unity 2022.3 Trails: one ribbon per
-    // system, ordered by age). Key by the chain hash *and* the 32-bit system
-    // fingerprint, so two systems can only ever share a strip if both 32-bit
-    // hashes collide - the old single-hash key could merge them.
-    std::unordered_map<uint64_t, std::vector<int>> chains;
+    // A ribbon is one ParticleSystem (Unity 2022.3 Trails: one ribbon per system,
+  // ordered by age). Key by the chain hash *and* the 32-bit system fingerprint,
+  // so two systems can only share a strip if both hashes collide.
+  std::unordered_map<uint64_t, std::vector<int>> chains;
     for (int idx : particle_idxs) {
       const auto& rp = pool[static_cast<size_t>(idx)];
       if (rp.trail_chain != 0 && rp.trail_count >= 2) {
@@ -4419,7 +3887,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   auto run_emit_job = [&](const EmitJob& job, SplitEmitTargets tg) {
     if (job.kind == EmitJob::Particle) {
       if (job.index >= 0 && static_cast<size_t>(job.index) < pool.size()) {
-        diag_ctx.particle = job.index;
         emit_one(pool[static_cast<size_t>(job.index)], tg);
       }
       return;
@@ -4442,11 +3909,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
     WDS_PERF_COUNT("preview.verts.ribbon", 1);
     for_each_line_job(
-        particle_idxs,
-        [&](int idx) {
-          diag_ctx.particle = idx;
-          emit_one(pool[static_cast<size_t>(idx)], tg);
-        },
+        particle_idxs, [&](int idx) { emit_one(pool[static_cast<size_t>(idx)], tg); },
         [&](std::vector<int>& idxs) { process_chain(idxs, tg); });
   };
 
@@ -4826,102 +4289,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const int64_t vert_delta =
       static_cast<int64_t>(split_verts1) - static_cast<int64_t>(split_verts0);
   WDS_PERF_COUNT("preview.verts.count", vert_delta);
-  {
-    // Frame digest every 500 ms: pool composition, what was drawn and how far
-    // the furthest projected vertex landed. A clean picture stays within a
-    // few stage widths; the reported stray lines push max_off far beyond it.
-    static std::chrono::steady_clock::time_point diag_next_digest{};
-    const auto diag_now = std::chrono::steady_clock::now();
-    if (diag_now >= diag_next_digest) {
-      diag_next_digest = diag_now + std::chrono::milliseconds(500);
-      int trail_particles = 0;
-      int max_trail_points = 0;
-      int nonfinite = 0;
-      float trail_span_max = 0.0f;
-      int trail_span_big = 0;
-      int mode_counts[3] = {0, 0, 0};
-      int blend_counts[3] = {0, 0, 0};
-      int effect_ids[4] = {0, 0, 0, 0};
-      int effect_counts[4] = {0, 0, 0, 0};
-      int distinct_effects = 0;
-      // collected.pool is reused, so only [0, total) holds this frame's
-      // particles; the tail is last frame's high-water garbage.
-      const size_t pool_n =
-          std::min<size_t>(static_cast<size_t>(std::max(collected.total, 0)),
-                           collected.pool.size());
-      for (size_t pool_i = 0; pool_i < pool_n; ++pool_i) {
-        const auto& lp = collected.pool[pool_i];
-        mode_counts[std::min<int>(lp.render_mode, 2)] += 1;
-        blend_counts[std::min<int>(lp.blend, 2)] += 1;
-        const bool trail = lp.trail_points >= 2;
-        if (trail) {
-          ++trail_particles;
-          max_trail_points = std::max<int>(max_trail_points, lp.trail_points);
-          // Station spacing: a trail sampled across a stalled frame keeps far
-          // apart stations and draws one long straight strip (a stray line).
-          const size_t last = static_cast<size_t>(lp.trail_points) - 1u;
-          const float dx = lp.trail_x[last] - lp.trail_x[0];
-          const float dy = lp.trail_y[last] - lp.trail_y[0];
-          const float dz = lp.trail_z[last] - lp.trail_z[0];
-          const float span = std::sqrt(dx * dx + dy * dy + dz * dz);
-          trail_span_max = std::max(trail_span_max, span);
-          if (span > 0.75f) {
-            ++trail_span_big;
-          }
-          if (!std::isfinite(lp.trail_x[0]) || !std::isfinite(lp.trail_y[0]) ||
-              !std::isfinite(lp.trail_z[0]) ||
-              !std::isfinite(lp.trail_x[static_cast<size_t>(lp.trail_points) - 1u]) ||
-              !std::isfinite(lp.trail_y[static_cast<size_t>(lp.trail_points) - 1u]) ||
-              !std::isfinite(lp.trail_z[static_cast<size_t>(lp.trail_points) - 1u])) {
-            ++nonfinite;
-          }
-        }
-        if (!std::isfinite(lp.world_x) || !std::isfinite(lp.main_y) || !std::isfinite(lp.z) ||
-            !std::isfinite(lp.size)) {
-          ++nonfinite;
-        }
-        int slot = -1;
-        for (int e = 0; e < distinct_effects; ++e) {
-          if (effect_ids[e] == lp.effect_id) slot = e;
-        }
-        if (slot < 0 && distinct_effects < 4) {
-          slot = distinct_effects++;
-          effect_ids[slot] = lp.effect_id;
-        }
-        if (slot >= 0) ++effect_counts[slot];
-      }
-      wds::common::diag::emit(
-          "split frame t=%.3fs rev=%llu playing=%d alive=%d drawn=%d verts=%u(+%lld) "
-          "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
-          "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
-          "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
-          "chain_tail_gap=%d chain_mixed=%d chain_tag_mixed=%d chain_dup_chains=%d "
-          "chain_station_dup=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
-          "modes=[%d,%d,%d] blends=[%d,%d,%d] sig=%016llx max_off=%.1f "
-          "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
-          "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
-          now, static_cast<unsigned long long>(snapshot.revision), playing ? 1 : 0,
-          collected.total, split_particles_drawn, split_verts1,
-          static_cast<long long>(vert_delta), trail_particles, max_trail_points, nonfinite,
-          diag_frame.anomalies, diag_frame.bodies, diag_frame.missing_sprite,
-          diag_frame.fallback_trail, diag_frame.real_trail, trail_span_max, trail_span_big,
-          diag_frame.chains, diag_frame.chain_skipped, diag_frame.chain_max,
-          diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
-          diag_frame.chain_tail_gap, diag_frame.chain_mixed, diag_frame.chain_tag_mixed,
-          diag_frame.chain_dup_chains, diag_frame.chain_station_dup,
-          split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
-          split_late_batch_.ext_overflow ? 1 : 0, split_late_batch_.ext_used,
-          split_late_batch_.ext_cap, mode_counts[0], mode_counts[1], mode_counts[2],
-          blend_counts[0], blend_counts[1], blend_counts[2],
-          static_cast<unsigned long long>(hash_batch_vertices(split_emit_late_)),
-          diag_frame.max_off, diag_frame.worst_px,
-          diag_frame.worst_py,
-          diag_frame.worst_x, diag_frame.worst_y, diag_frame.worst_z, diag_frame.worst_view_z,
-          content_bounds.w, content_bounds.h, geometry_.content_height_px(), effect_ids[0],
-          effect_counts[0], effect_ids[1],
-          effect_counts[1], effect_ids[2], effect_counts[2], effect_ids[3], effect_counts[3]);
-    }
-  }
   const auto cache_after = wds::chart_render::split_effect_eval_cache_stats();
   if (!playing) {
     split_pause_collect_valid_ = true;

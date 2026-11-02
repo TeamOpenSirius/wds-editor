@@ -325,11 +325,10 @@ inline float trail_lifetime_mul_hi(const SplitEffectParticle& p) noexcept {
 }
 
 // Unity 2022.3 TrailModule.dieWithParticles=false: "the remaining Trail
-// expires naturally based on its own remaining lifetime", so the particle must
-// stay alive (body suppressed) for life + Lifetime×startLifetime. That applies
-// to Ribbon mode too: a ribbon station IS the particle, so keeping it alive is
-// what holds the tail until its points expire. 62 of the 187 official trail
-// systems are Ribbon + dieWithParticles=false.
+// expires naturally based on its own remaining lifetime", so the particle stays
+// alive (body suppressed) for life + Lifetime×startLifetime. Applies to Ribbon
+// too: a ribbon station IS the particle, so keeping it is what holds the tail.
+// 62 of the 187 official trail systems are Ribbon + dieWithParticles=false.
 // dieWith=true stays `life`.
 // https://docs.unity3d.com/2022.3/Documentation/Manual/PartSysTrailsModule.html
 // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-dieWithParticles.html
@@ -683,8 +682,8 @@ void fill_trails(PoseIntegrator& integ, const ParticleState& st, float age,
 // Unity owns one ParticleSystem per split instance, so two overlapping splits
 // of the same effect on the same line are two ribbons, not one.
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id, uint32_t instance_id,
-                    uint32_t vertex_base) noexcept;
+                    int32_t line_index, uint32_t system_id,
+                    uint32_t instance_id) noexcept;
 
 void fill_live(const ParticleState& st, float age, bool want_trail, SplitEffectLiveParticle& out);
 

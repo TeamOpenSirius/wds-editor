@@ -360,24 +360,6 @@ VulkanRenderer
 
 Web 项目 [SiriusChartViewer](https://github.com/TeamOpenSirius/SiriusChartViewer) 也直接复用了这里的预览核心，并将选定 C++ 模块通过 Emscripten 编译成 WebAssembly。
 
-### 预览诊断日志
-
-Release 版默认写一条与崩溃日志同目录的诊断日志
-（`<日志目录>/diag-preview-<时间>-<pid>.log`），用于排查“只在别人机器上复现”的
-预览问题（例如 Split Effect 在轨道远端出现异常直线）。记录内容：
-
-- 启动：版本 / git hash / 构建类型、屏幕逻辑尺寸、DPR；
-- 实时预览窗口尺寸或 DPI 变化：逻辑尺寸与 framebuffer 尺寸；
-- 每秒一次预览场景：舞台内容尺寸（世界坐标与像素）、据此推出的相机 aspect、
-  当前在场的 Split 实例（音符 id、轨道数、起止时间、粒子数、效果 id）；
-- 每 0.5 秒一次帧摘要：存活/绘制粒子数、顶点数、拖尾点数、非有限值数量、
-  最远的投影偏移；
-- 投影落到舞台外 16 倍以上或出现 NaN/Inf 时，逐条记录当时的粒子效果 id、
-  粒子序号、拖尾段序号与投影输入。
-
-关闭：启动前设 `WDS_DIAG=0`；目录可用 `WDS_CRASH_LOG_DIR` 重定向，
-文件可用 `WDS_DIAG_PATH` 直接指定；单文件上限 32 MiB。
-
 ## 音频
 
 音乐与打击音由 **BASS / BASSmix** 驱动。

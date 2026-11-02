@@ -19,7 +19,6 @@
 #include <wds/core/notation.hpp>
 #include <wds/core/types.hpp>
 #include "wds/common/crash_handler.hpp"
-#include "wds/common/diag_log.hpp"
 #include "wds/common/log.hpp"
 #include "wds/common/minflt_stage.hpp"
 #include "wds/common/perf_stages.hpp"
@@ -1506,11 +1505,6 @@ void log_qt_vulkan_instance(const QVulkanInstance& vk_instance) {
   WDS_LOG("QVulkanInstance api=%d.%d.%d supported=%d.%d.%d ok=1\n", api.majorVersion(),
           api.minorVersion(), api.microVersion(), supported.majorVersion(),
           supported.minorVersion(), supported.microVersion());
-  wds::common::diag::emit("vulkan api=%d.%d.%d supported=%d.%d.%d extensions=%d layers=%d",
-                          api.majorVersion(), api.minorVersion(), api.microVersion(),
-                          supported.majorVersion(), supported.minorVersion(),
-                          supported.microVersion(), static_cast<int>(vk_instance.extensions().size()),
-                          static_cast<int>(vk_instance.layers().size()));
   const auto exts = vk_instance.extensions();
   WDS_LOG("QVulkanInstance extensions=%d\n", static_cast<int>(exts.size()));
   for (const QByteArray& ext : exts) {
@@ -1729,27 +1723,6 @@ bool preview_atlases_ready(const wds::ui::ChartPreviewPanel& preview) {
 
 int main(int argc, char** argv) {
   wds::common::install_crash_handlers();
-  // Field diagnostics: always-on text log next to the crash reports. The
-  // split-effect preview writes resolution / particle geometry anomalies
-  // here so a report from a machine we cannot reproduce on is still usable.
-  wds::common::diag::open("preview");
-  wds::common::diag::emit_build_banner();
-  wds::common::diag::emit_system_banner();
-  {
-    // Which optional render paths this run takes. These change what the GPU is
-    // asked to do, so a report must state them explicitly.
-    const auto flag = [](const char* name) {
-      const char* v = std::getenv(name);
-      return (v != nullptr && v[0] != '\0') ? v : "-";
-    };
-    wds::common::diag::emit(
-        "switches indexed=%s legacy_emit=%s legacy_lanes=%s parallel_emit=%s "
-        "no_split_particles=%s precommit_draw=%s no_bloom=%s dump_verts=%s",
-        flag("WDS_SPLIT_TRAIL_INDEXED"), flag("WDS_PREVIEW_LEGACY_EMIT"),
-        flag("WDS_PREVIEW_LEGACY_LANES"), flag("WDS_PREVIEW_PARALLEL_EMIT"),
-        flag("WDS_NO_SPLIT_PARTICLES"), flag("WDS_PRECOMMIT_DRAW"), flag("WDS_NO_BLOOM"),
-        flag("WDS_DUMP_VERTS"));
-  }
   wds::common::log_open_debug_session();
   g_prev_qt_handler = qInstallMessageHandler(&wds_qt_message_handler);
   prepare_bundled_qt_plugins(argv[0]);
@@ -1786,26 +1759,6 @@ int main(int argc, char** argv) {
       QSettings("WDS", "WDS Editor").value("appearance/theme").toString();
   wds::ui::apply_wds_theme(app, theme_dir, theme_id);
   log_qt_environment(theme_id);
-  {
-    // Resolution context for the field report: a preview artifact that only
-    // shows up on one machine is usually tied to the screen / DPR the realtime
-    // preview window is laid out at.
-    wds::common::diag::emit("paths skins=%s effects=%s",
-                            wds::ui::resolve_skins_dir(argv[0]).c_str(),
-                            wds::ui::resolve_effects_dir(argv[0]).c_str());
-    wds::common::diag::emit("app argv=%d theme=%s", argc,
-                            theme_id.isEmpty() ? "default" : theme_id.toUtf8().constData());
-    for (QScreen* screen : QGuiApplication::screens()) {
-      if (screen == nullptr) continue;
-      const QRect geo = screen->geometry();
-      const QRect avail = screen->availableGeometry();
-      wds::common::diag::emit(
-          "screen name=%s logical=%dx%d available=%dx%d dpr=%.3f dpi=%.1fx%.1f",
-          screen->name().toUtf8().constData(), geo.width(), geo.height(), avail.width(),
-          avail.height(), screen->devicePixelRatio(), screen->physicalDotsPerInchX(),
-          screen->physicalDotsPerInchY());
-    }
-  }
 
   auto deps = wds::ui::check_startup_dependencies(argv[0]);
   if (!deps.ok()) {
@@ -1864,15 +1817,6 @@ int main(int argc, char** argv) {
   editor.enable_qt_chrome();
   editor.set_config_path(wds::ui::resolve_editor_config_path(argv[0]));
   editor.load_ui_config();
-  {
-    const auto& vis = editor.chart_preview().preview().config();
-    wds::common::diag::emit(
-        "render config quality=%d msaa=%d line_opacity=%.3f note_speed=%.3f "
-        "note_height=%d lane_count=%d view_zoom=%.4f stage_opacity=%.3f extended=%d",
-        vis.split_effect_quality, vis.msaa_samples, vis.split_line_opacity, vis.note_speed,
-        vis.note_height_level, vis.lane_count, vis.view_zoom, vis.stage_opacity,
-        editor.session().extended_features() ? 1 : 0);
-  }
   // Idle presents are capped at 30 Hz. The gate below decides whether the
   // picture actually changed; the 30 Hz wakeup keeps paused scrubbing and
   // wheel seeks on the same cadence as playback instead of a 4 Hz watchdog.
@@ -2886,7 +2830,6 @@ int main(int argc, char** argv) {
 #if WDS_DIAG_ENABLED
   frame_diag.close();
 #endif  // WDS_DIAG_ENABLED
-  wds::common::diag::emit("app exit rc=%d (clean)", rc);
   wds::common::mark_clean_exit();
   return rc;
 }

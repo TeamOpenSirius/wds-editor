@@ -1,7 +1,5 @@
 #include "wds/renderer/texture.hpp"
 
-#include <wds/common/diag_log.hpp>
-
 #include <wds/common/log.hpp>
 #include <wds/common/utf8_path.hpp>
 
@@ -586,17 +584,10 @@ TextureInfo TextureCache::load_standalone_png(const std::string& path) {
   CpuImage image;
   if (!load_png_rgba8(path, image.pixels, image.width, image.height) || image.width <= 0 ||
       image.height <= 0) {
-    // A missing or undecodable sprite silently changes what the preview can
-    // draw (the split-effect atlas / trail sprite in particular).
-    wds::common::diag::emit_throttled(path.c_str(), 5000, "texture load FAILED png=%s",
-                                      path.c_str());
     return {};
   }
   TextureInfo info = gpu_create(image.pixels.data(), image.width, image.height);
   if (!info) {
-    wds::common::diag::emit_throttled(path.c_str(), 5000,
-                                      "texture upload FAILED png=%s %dx%d", path.c_str(),
-                                      image.width, image.height);
     return {};
   }
   return commit_standalone_gpu(path, info);

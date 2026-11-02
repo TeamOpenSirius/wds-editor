@@ -362,27 +362,6 @@ It includes:
 
 The same preview core is reused by the web-based [SiriusChartViewer](https://github.com/TeamOpenSirius/SiriusChartViewer), where selected C++ components are compiled to WebAssembly.
 
-### Preview diagnostics log
-
-Release builds always write a diagnostics log next to the crash reports
-(`<log dir>/diag-preview-<stamp>-<pid>.log`) so preview problems that only
-reproduce on another machine (for example stray lines at the far end of the
-lanes during a Split Effect) can be compared line by line:
-
-- startup: version / git hash / build type, screen size, DPR;
-- realtime preview window size or DPI changes: logical and framebuffer size;
-- once a second: the preview scene — stage content size in world units and
-  pixels, the camera aspect derived from it, and the Split instances on screen
-  (note id, lane count, start/end time, particle count, effect id);
-- every 0.5 s a frame digest: alive/drawn particles, vertices, trail points,
-  non-finite counts and the furthest projected offset;
-- any projection that lands more than 16x outside the stage (or is NaN/Inf) is
-  logged with the effect id, particle index, trail segment index and inputs.
-
-Disable with `WDS_DIAG=0` before launch; redirect the directory with
-`WDS_CRASH_LOG_DIR`, or the file with `WDS_DIAG_PATH`. Each file is capped at
-32 MiB.
-
 ## Audio
 
 Audio playback is implemented through **BASS / BASSmix**.

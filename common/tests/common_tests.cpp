@@ -1,7 +1,6 @@
 #include "wds/common/app_version.hpp"
 #include "wds/common/common.hpp"
 #include "wds/common/crash_input_journal.hpp"
-#include "wds/common/diag_log.hpp"
 #include "wds/common/perf_stages.hpp"
 #include "wds/common/utf8_path.hpp"
 
@@ -28,31 +27,6 @@ int failures = 0;
       ++failures;                                                               \
     }                                                                           \
   } while (0)
-
-void test_diag_log_sink_and_throttle() {
-  // The field diagnostics sink is always compiled in: it must create the file,
-  // flush whole lines, and throttle per key without dropping the first line.
-  const auto path = std::filesystem::temp_directory_path() / "wds_diag_log_tests.log";
-  std::filesystem::remove(path);
-#if defined(_WIN32)
-  _putenv_s("WDS_DIAG_PATH", path.string().c_str());
-#else
-  setenv("WDS_DIAG_PATH", path.string().c_str(), 1);
-#endif
-  CHECK(wds::common::diag::open("test"));
-  CHECK(wds::common::diag::enabled());
-  wds::common::diag::emit("diag probe %d", 7);
-  wds::common::diag::emit_throttled("probe.key", 1000, "throttled-first");
-  wds::common::diag::emit_throttled("probe.key", 1000, "throttled-second");
-  std::ifstream in(path, std::ios::binary);
-  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  CHECK(text.find("diag probe 7") != std::string::npos);
-  CHECK(text.find("throttled-first") != std::string::npos);
-  CHECK(text.find("throttled-second") == std::string::npos);
-  CHECK(std::string(wds::common::diag::path()).find("wds_diag_log_tests.log") !=
-        std::string::npos);
-  std::filesystem::remove(path);
-}
 
 void test_timeline_play_pause_seek() {
   wds::common::Timeline tl;
@@ -421,7 +395,6 @@ int main() {
   test_timeline_advance_guards_and_apply();
   test_microsecond_helpers();
   test_utf8_install_path_io();
-  test_diag_log_sink_and_throttle();
   test_crash_input_journal();
   test_app_version_parse_and_compare();
 #if WDS_DIAG_ENABLED

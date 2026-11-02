@@ -4,7 +4,6 @@
 #include "wds/renderer/upload_result.hpp"
 
 #include <wds/common/crash_handler.hpp>
-#include <wds/common/diag_log.hpp>
 #include <wds/common/perf_stages.hpp>
 #include <wds/common/utf8_path.hpp>
 
@@ -2692,12 +2691,6 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   // to maxImageCount — Mac often stays at 3; Win NVIDIA here can go to 5.
   const uint32_t image_count =
       preferred_swapchain_image_count(caps.minImageCount, caps.maxImageCount, kMaxFramesInFlight);
-  wds::common::diag::emit(
-      "swapchain present=%s format=%s/%u colorspace=%s/%u extent=%ux%u image_count=%u",
-      present_mode_name(present_mode), vk_format_name(chosen.format),
-      static_cast<unsigned>(chosen.format), vk_colorspace_name(chosen.colorSpace),
-      static_cast<unsigned>(chosen.colorSpace), new_extent.width, new_extent.height,
-      image_count);
 
   // Release FSE on the live swapchain before we retire it.
   release_fullscreen_exclusive_internal();
@@ -4021,9 +4014,6 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
             vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
             static_cast<unsigned>(msaa_samples));
 #endif
-    wds::common::diag::emit("pipeline create FAILED name=textured format=%u samples=%u",
-                            static_cast<unsigned>(swapchain_format),
-                            static_cast<unsigned>(msaa_samples));
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
     last_wsi_action = WsiRecoverAction::Fatal;
@@ -4052,9 +4042,6 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
             vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
             static_cast<unsigned>(msaa_samples));
 #endif
-    wds::common::diag::emit("pipeline create FAILED name=alpha_soft format=%u samples=%u",
-                            static_cast<unsigned>(swapchain_format),
-                            static_cast<unsigned>(msaa_samples));
     pipeline_alpha_soft = VK_NULL_HANDLE;
   }
 
@@ -4087,9 +4074,6 @@ bool VulkanRenderer::Impl::create_render_pass_and_pipelines() {
             vk_format_name(swapchain_format), static_cast<unsigned>(swapchain_format),
             static_cast<unsigned>(msaa_samples));
 #endif
-    wds::common::diag::emit("pipeline create FAILED name=additive format=%u samples=%u",
-                            static_cast<unsigned>(swapchain_format),
-                            static_cast<unsigned>(msaa_samples));
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
     last_wsi_action = WsiRecoverAction::Fatal;
@@ -4232,68 +4216,6 @@ void log_physical_devices(VkInstance instance, VkSurfaceKHR surface, VkPhysicalD
             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
             VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
             VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion));
-    // Field reports: the GPU/driver is the only variable left when one machine
-    // paints stray lines and another does not, so record the full identity.
-    {
-      char driver_name[64] = "?";
-      char driver_info[64] = "?";
-      uint32_t driver_id = props.vendorID;
-      unsigned char device_uuid[16] = {};
-      {
-        const auto get_props2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
-            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
-        const auto get_props2_khr = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(
-            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR"));
-        if (get_props2 != nullptr || get_props2_khr != nullptr) {
-          VkPhysicalDeviceDriverProperties drv{
-              VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
-          VkPhysicalDeviceIDProperties ids{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-          drv.pNext = &ids;
-          VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-          p2.pNext = &drv;
-          if (get_props2 != nullptr) {
-            get_props2(devices[i], &p2);
-          } else {
-            get_props2_khr(devices[i], &p2);
-          }
-          std::snprintf(driver_name, sizeof(driver_name), "%s", drv.driverName);
-          std::snprintf(driver_info, sizeof(driver_info), "%s", drv.driverInfo);
-          driver_id = static_cast<uint32_t>(drv.driverID);
-          for (int b = 0; b < 16; ++b) {
-            device_uuid[b] = ids.deviceUUID[b];
-          }
-        }
-      }
-      static bool diag_gpu_logged = false;
-      if (!diag_gpu_logged) {
-        diag_gpu_logged = true;
-      wds::common::diag::emit(
-          "gpu[%u] '%s' type=%s vendor=0x%x id=0x%x api=%u.%u.%u drv=%u.%u.%u "
-          "driver_id=%u driver='%s' info='%s' uuid=%02x%02x%02x%02x",
-          i, name, physical_device_type_name(props.deviceType), props.vendorID, props.deviceID,
-          VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
-          VK_VERSION_PATCH(props.apiVersion), VK_VERSION_MAJOR(props.driverVersion),
-          VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion), driver_id,
-          driver_name, driver_info, device_uuid[0], device_uuid[1], device_uuid[2],
-          device_uuid[3]);
-      }
-      // Limits that decide which submission paths this driver can take.
-      static bool diag_limits_logged = false;
-      if (!diag_limits_logged && i == 0) {
-        diag_limits_logged = true;
-        wds::common::diag::emit(
-          "gpu[%u] limits push_constants=%u max_vb_stride=%u max_vb_bindings=%u "
-          "max_attr_offset=%u max_attrs=%u min_storage_offset_align=%u max_draw_index=%u "
-          "framebuffer_samples=0x%x timestamp_period=%.3f non_coherent_atom=%u",
-          i, props.limits.maxPushConstantsSize, props.limits.maxVertexInputBindingStride,
-          props.limits.maxVertexInputBindings, props.limits.maxVertexInputAttributeOffset,
-          props.limits.maxVertexInputAttributes,
-          static_cast<unsigned>(props.limits.minStorageBufferOffsetAlignment),
-          static_cast<unsigned>(props.limits.maxDrawIndexedIndexValue),
-          static_cast<unsigned>(props.limits.framebufferColorSampleCounts),
-          props.limits.timestampPeriod, props.limits.nonCoherentAtomSize);
-      }
-    }
 
     VkPhysicalDeviceMemoryProperties mem{};
     vkGetPhysicalDeviceMemoryProperties(devices[i], &mem);
@@ -5276,36 +5198,6 @@ void vb_add_tex_key(std::vector<TexKeyFix>& order, TextureId texture, bool clip)
 
 // Pack CPU heads from `cursor`, then emit draws in append_from merge order
 // (same-texture concat). In-place extras keep their mapped addresses.
-namespace {
-
-// Draw submission guard: an external (mapped-VB) run must stay inside what the
-// batch actually wrote. Drivers differ in how they treat out-of-range vertex
-// fetches (robustness returns zeros on NVIDIA, others may still read the arena),
-// which would show up as missing ribbon segments on one GPU only.
-bool diag_ext_run_in_bounds(const DrawBatch& ex, const DrawBatch::ExtRun& run) {
-  if (static_cast<uint64_t>(run.first) + run.count > ex.ext_used) {
-    return false;
-  }
-  if (run.index_count > 0 &&
-      static_cast<uint64_t>(run.index_first) + run.index_count > ex.ext_idx_used) {
-    return false;
-  }
-  return true;
-}
-
-void diag_ext_run_report(const DrawBatch& ex, const DrawBatch::ExtRun& run) {
-  if (diag_ext_run_in_bounds(ex, run)) {
-    return;
-  }
-  wds::common::diag::emit_throttled(
-      "draw.extrun", 500,
-      "draw ext run OUT OF BOUNDS verts=%u+%u used=%u idx=%u+%u idx_used=%u tex=%u pipe=%u",
-      run.first, run.count, ex.ext_used, run.index_first, run.index_count, ex.ext_idx_used,
-      static_cast<unsigned>(run.texture), static_cast<unsigned>(run.overlay_pipe));
-}
-
-}  // namespace
-
 uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch* head,
                              bool head_keep_empty, bool head_first,
                              const DrawBatch* const* extras, size_t extra_n, uint32_t cursor,
@@ -5398,7 +5290,6 @@ uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch*
               run.count == 0) {
             continue;
           }
-          diag_ext_run_report(ex, run);
           GpuDrawBucket g;
           g.texture = run.texture;
           g.disable_alpha_clip = run.disable_alpha_clip;
@@ -5454,7 +5345,6 @@ uint32_t vb_plan_layer_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch*
 
 // Keep DrawBatch / ext_run order (no same-texture regroup). Used for
 // split-effect particles so sortingOrder survives blend changes.
-
 uint32_t vb_plan_ordered_draws(std::vector<GpuDrawBucket>& draws, const DrawBatch* head,
                                const DrawBatch* const* extras, size_t extra_n, uint32_t cursor,
                                DrawVertex* dst, bool extras_in_place, const DrawVertex* mapped,
@@ -5465,7 +5355,6 @@ uint32_t vb_plan_ordered_draws(std::vector<GpuDrawBucket>& draws, const DrawBatc
         if (run.count == 0 && run.index_count == 0) {
           continue;
         }
-        diag_ext_run_report(src, run);
         GpuDrawBucket g;
         g.texture = run.texture;
         g.disable_alpha_clip = run.disable_alpha_clip;
@@ -5801,19 +5690,6 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   impl_->preferred_msaa = preferred_msaa_;
 
   impl_->shader_dir = resolve_shader_dir();
-  {
-    namespace fs = std::filesystem;
-    const char* names[] = {"syuriken.vert.spv", "textured_quad.vert.spv",
-                           "textured_quad.frag.spv"};
-    char present[64] = {};
-    for (const char* n : names) {
-      const fs::path p = wds::common::path_from_utf8(impl_->shader_dir) / n;
-      std::error_code ec;
-      const bool ok = fs::is_regular_file(p, ec);
-      std::strncat(present, ok ? "1" : "0", sizeof(present) - std::strlen(present) - 1);
-    }
-    wds::common::diag::emit("shaders dir=%s present=%s", impl_->shader_dir.c_str(), present);
-  }
   WDS_LOG("VulkanRenderer::create shader_dir=%s\n", impl_->shader_dir.c_str());
 
   if (host.external_instance != VK_NULL_HANDLE) {

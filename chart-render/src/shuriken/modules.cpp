@@ -2215,8 +2215,8 @@ uint32_t fbits_u32(float x) noexcept {
 }  // namespace
 
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id, uint32_t instance_id,
-                    uint32_t vertex_base) noexcept {
+                    int32_t line_index, uint32_t system_id,
+                    uint32_t instance_id) noexcept {
   if (out == nullptr || n < 2 || p.trail_mode != 1) {
     return;
   }
@@ -2287,8 +2287,7 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
     v.trail_a *= std::clamp(over_a, 0.0f, 1.0f);
     // Unity 2022.3 TrailModule.inheritParticleColor: the trail is tinted by the
     // particle colour (GetCurrentColor = start x colour modules). 19 of the 187
-    // official trail systems set it true, 6 of them in Ribbon mode - the
-    // particle-mode path (fill_trails) already did this, the ribbon did not.
+    // official trail systems set it true, 6 of them in Ribbon mode.
     // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/ParticleSystem.TrailModule-inheritParticleColor.html
     if (p.trail_inherit_particle_color != 0) {
       v.trail_r *= v.current_r;
@@ -2298,12 +2297,7 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
     }
     v.trail_chain = chain;
     v.system_tag = mix3(authored, system_id + 1u, static_cast<uint32_t>(line_index) + 1u);
-    // Unique inside the chain, not inside this group: one system can be stitched
-    // several times per frame (one call per sub-emitter burst), and restarting
-    // at 0 made process_chain's sort interleave the groups, which drew the
-    // ribbon between unrelated particles (dashed strips, stray spans).
-    v.trail_vertex = static_cast<uint16_t>(
-        std::min<uint32_t>(vertex_base + static_cast<uint32_t>(i), 0xffffu));
+    v.trail_vertex = static_cast<uint16_t>(i);
     v.trail_count = static_cast<uint16_t>(n);
     if (i + 1 >= n) {
       continue;
