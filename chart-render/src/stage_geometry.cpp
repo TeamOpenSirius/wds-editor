@@ -579,8 +579,22 @@ bool StageGeometry::split_particle_oriented_world_corners(
   const bool world_axes = render_alignment == 1 || render_alignment == 2;
   const float eff_tilt_x = world_axes ? -tilt_x : tilt_x;
   const float eff_tilt_y = world_axes ? -tilt_y : tilt_y;
-  const float cr = std::cos(roll);
-  const float sr = std::sin(roll);
+  // View (0) billboards: Unity's in-plane Z roll runs the opposite way to
+  // this helper's rotation. live dump align2-dump-unity-v1 effect 11431
+  // (fi015 / fi050 / fi085), Bake AABB of the 90deg-rolled HoldLongNotes
+  // sticks: Unity z in [-0.83, 0.15] and y_min -8.20 (stick body on the
+  // +camera-up side of the particle), while +roll here gave z in
+  // [-0.13, 0.82] (body below the anchor). With -roll the native Bake AABB
+  // is z [-0.82, 0.15], y_min -8.21, matching Unity to 0.02 units. The PSR
+  // pivot offset rotates with the roll, so an edge pivot (11431_2 x=-0.5,
+  // 11431_3 x=-0.2) turning into a 180deg-looking drop under the track is
+  // this roll sign, not a pivot error. World (1) / Local (2) keep +roll:
+  // 11822_1 (Local, roll -90deg, pivot.x=1) Bake z [-1.97, -0.03] already
+  // matches Unity without the flip.
+  // Not 2022.3 wording; the numbers above are dump output.
+  const float eff_roll = world_axes ? roll : -roll;
+  const float cr = std::cos(eff_roll);
+  const float sr = std::sin(eff_roll);
   const float cxr = std::cos(eff_tilt_x);
   const float sxr = std::sin(eff_tilt_x);
   const float cyr = std::cos(eff_tilt_y);
