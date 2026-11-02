@@ -3157,9 +3157,9 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       wds::ui::preview_legacy_lanes_from_env() || wds::ui::preview_legacy_emit_from_env();
   auto draw_clipped_trail_strip =
       [&](DrawBatch& dest, const TextureInfo& tex, const float* xs, const float* ys,
-          const float* zs, const float* world_w, const float* v_along_src, const uint16_t* verts,
-          int n, float a, float r, float g, float b, const float* va, const float* vr,
-          const float* vg, const float* vb) {
+          const float* zs, const float* world_w, const float* v_along_src, int n, float a, float r,
+          float g, float b, const float* va, const float* vr, const float* vg,
+          const float* vb) {
         if (n < 2 || !tex) {
           return;
         }
@@ -3313,8 +3313,19 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         };
         int run0 = 0;
         for (int i = 0; i + 1 < n; ++i) {
-          if (verts != nullptr &&
-              verts[i + 1] != static_cast<uint16_t>(verts[static_cast<size_t>(i)] + 1u)) {
+          // Break the strip only on a real discontinuity, never on the station
+          // index: one system can be stitched from several groups per frame, so
+          // its per-call indices restart and an index test would cut the ribbon
+          // into one quad per station (visibly dashed). Stations are ordered by
+          // age before this point, so a jump in space is what must not be
+          // bridged.
+          const size_t ia = static_cast<size_t>(i);
+          const size_t ib = ia + 1;
+          const float dx = xs[ib] - xs[ia];
+          const float dy = ys[ib] - ys[ia];
+          const float dz = zs[ib] - zs[ia];
+          const bool spatial_jump = dx * dx + dy * dy + dz * dz > 16.0f;
+          if (spatial_jump) {
             run_strip(run0, i + 1);
             run0 = i + 1;
           }
@@ -4073,8 +4084,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       }
       WDS_PERF_COUNT("preview.verts.trail", 1);
       draw_clipped_trail_strip(trail_dest, *strip_tex, ts.xs.data(), ts.ys.data(), ts.zs.data(),
-                               ts.widths.data(), ts.v_along.data(), nullptr, pn, 0.0f, 0.0f, 0.0f,
-                               0.0f, ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
+                               ts.widths.data(), ts.v_along.data(), pn, 0.0f, 0.0f, 0.0f, 0.0f,
+                               ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
   };
 
   auto process_chain = [&](std::vector<int>& idxs, SplitEmitTargets tg) {
@@ -4232,8 +4243,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     }
     fill_ribbon_stretch_along(ts.v_along.data(), ts.xs.data(), ts.ys.data(), ts.zs.data(), cn);
     draw_clipped_trail_strip(dest, *strip_tex, ts.xs.data(), ts.ys.data(), ts.zs.data(),
-                             ts.widths.data(), ts.v_along.data(), ts.verts.data(), cn, 0.0f, 0.0f,
-                             0.0f, 0.0f, ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
+                             ts.widths.data(), ts.v_along.data(), cn, 0.0f, 0.0f, 0.0f, 0.0f,
+                             ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
   };
 
   std::vector<std::vector<int>> ribbon_job_idxs;
