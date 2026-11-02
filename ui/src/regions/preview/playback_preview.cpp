@@ -4078,19 +4078,20 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   };
 
   auto process_chain = [&](std::vector<int>& idxs, SplitEmitTargets tg) {
-    // Order stations by AGE, like Unity's BakeTrails ("connecting each particle
-    // based on its age"), not by the per-call station index: one system can be
-    // stitched several times in a frame (one call per group), and every call
-    // restarts its own index, so an index sort interleaves the groups and the
-    // strip zig-zags between unrelated particles.
+    // Unity 2022.3 Trails module, Ribbon mode: "connecting each particle based
+    // on its age", "the ordering of the particles is decided based on their
+    // age". Sort on age only; do NOT use the per-call station index, which
+    // restarts at 0 for every stitch group and used to interleave the groups
+    // (the strip then zig-zagged between unrelated particles).
+    // Ties (particles born in the same step, which is the common case for a
+    // burst) fall back to pool order: that is the order the collector appended
+    // them in, i.e. spawn order across every group of this frame, so a burst
+    // keeps a coherent order instead of a seed-shuffled one.
     std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
       const auto& pa = pool[static_cast<size_t>(a)];
       const auto& pb = pool[static_cast<size_t>(b)];
       if (pa.birth_t != pb.birth_t) {
         return pa.birth_t < pb.birth_t;
-      }
-      if (pa.seed != pb.seed) {
-        return pa.seed < pb.seed;
       }
       return a < b;
     });
