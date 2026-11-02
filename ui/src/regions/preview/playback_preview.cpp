@@ -2934,6 +2934,11 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     int chain_gap_big = 0;
     int chain_vertex_dup = 0;
     int chain_tail_gap = 0;
+    // Chains that mix particles from different catalog systems / lines / effects
+    // or repeat a station index: the ribbon then zig-zags between unrelated
+    // stations (dashed strips, stray straight spans).
+    int chain_mixed = 0;
+    int chain_dup_chains = 0;
   } diag_frame;
   const float diag_off_limit =
       std::max(std::max(content_bounds.w, content_bounds.h), 1.0f) * 16.0f;
@@ -4055,6 +4060,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       return;
     }
     const auto& marker = pool[idxs.back()];
+    const uint32_t chain_hash = marker.trail_chain;
     const auto trail_mat =
         wds::chart_render::official_split_effect_trail_material(marker.catalog_index);
     const bool trail_bomb = wds::chart_render::official_split_effect_trail_uses_bomb_tex(trail_mat);
@@ -4092,6 +4098,67 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     ++diag_frame.chains;
     diag_frame.chain_particles += cn;
     diag_frame.chain_max = std::max(diag_frame.chain_max, cn);
+    {
+      // Identify which systems this chain actually mixes, and where the
+      // station order breaks, so a single field log shows the collision.
+      int dup_pairs = 0;
+      unsigned dup_a = 0;
+      unsigned dup_b = 0;
+      uint32_t catalogs[4] = {0, 0, 0, 0};
+      int n_cat = 0;
+      int32_t lines[4] = {0, 0, 0, 0};
+      int n_line = 0;
+      int32_t effects[4] = {0, 0, 0, 0};
+      int n_eff = 0;
+      uint16_t counts[4] = {0, 0, 0, 0};
+      int n_cnt = 0;
+      for (int k = 0; k < cn; ++k) {
+        const auto& lp = pool[idxs[static_cast<size_t>(k)]];
+        bool seen = false;
+        for (int e = 0; e < n_cat; ++e) seen = seen || catalogs[e] == lp.catalog_index;
+        if (!seen && n_cat < 4) catalogs[n_cat++] = lp.catalog_index;
+        seen = false;
+        for (int e = 0; e < n_line; ++e) seen = seen || lines[e] == lp.line_index;
+        if (!seen && n_line < 4) lines[n_line++] = lp.line_index;
+        seen = false;
+        for (int e = 0; e < n_eff; ++e) seen = seen || effects[e] == lp.effect_id;
+        if (!seen && n_eff < 4) effects[n_eff++] = lp.effect_id;
+        seen = false;
+        for (int e = 0; e < n_cnt; ++e) seen = seen || counts[e] == lp.trail_count;
+        if (!seen && n_cnt < 4) counts[n_cnt++] = lp.trail_count;
+      }
+      for (int k = 1; k < cn; ++k) {
+        if (ts.verts[static_cast<size_t>(k)] <= ts.verts[static_cast<size_t>(k - 1)]) {
+          if (dup_pairs == 0) {
+            dup_a = ts.verts[static_cast<size_t>(k - 1)];
+            dup_b = ts.verts[static_cast<size_t>(k)];
+          }
+          ++dup_pairs;
+        }
+      }
+      const bool mixed = n_cat > 1 || n_line > 1 || n_eff > 1 || n_cnt > 1;
+      if (mixed) {
+        ++diag_frame.chain_mixed;
+      }
+      if (dup_pairs > 0) {
+        ++diag_frame.chain_dup_chains;
+        wds::common::diag::emit_throttled(
+            "chain.dup", 2000,
+            "chain DUP chain=%08x parts=%d dup=%d first=(%u,%u) catalogs=%d/%d lines=%d/%d "
+            "effects=%d/%d counts=%d/%d",
+            chain_hash, cn, dup_pairs, dup_a, dup_b, n_cat, catalogs[0], n_line, lines[0],
+            n_eff, effects[0], n_cnt, counts[0]);
+      }
+      if (mixed) {
+        wds::common::diag::emit_throttled(
+            "chain.mixed", 2000,
+            "chain MIXED chain=%08x parts=%d dup=%d catalogs=[%u,%u,%u,%u] "
+            "lines=[%d,%d,%d,%d] effects=[%d,%d,%d,%d] counts=[%u,%u,%u,%u]",
+            chain_hash, cn, dup_pairs, catalogs[0], catalogs[1], catalogs[2], catalogs[3],
+            lines[0], lines[1], lines[2], lines[3], effects[0], effects[1], effects[2],
+            effects[3], counts[0], counts[1], counts[2], counts[3]);
+      }
+    }
     for (int k = 1; k < cn; ++k) {
       const size_t a = static_cast<size_t>(k - 1);
       const size_t b = static_cast<size_t>(k);
@@ -4766,7 +4833,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
           "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
           "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
-          "chain_tail_gap=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
+          "chain_tail_gap=%d chain_mixed=%d chain_dup_chains=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
           "modes=[%d,%d,%d] blends=[%d,%d,%d] sig=%016llx max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
@@ -4777,7 +4844,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           diag_frame.fallback_trail, diag_frame.real_trail, trail_span_max, trail_span_big,
           diag_frame.chains, diag_frame.chain_skipped, diag_frame.chain_max,
           diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
-          diag_frame.chain_tail_gap, split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
+          diag_frame.chain_tail_gap, diag_frame.chain_mixed, diag_frame.chain_dup_chains,
+          split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
           split_late_batch_.ext_overflow ? 1 : 0, split_late_batch_.ext_used,
           split_late_batch_.ext_cap, mode_counts[0], mode_counts[1], mode_counts[2],
           blend_counts[0], blend_counts[1], blend_counts[2],
