@@ -3000,8 +3000,10 @@ void test_openwds_layer_table_not_2020_only() {
           ++width_curves;
         }
       }
-      // Unity 2022.3 dieWithParticles=false keep = life + L×life is
-      // PerParticle only. Ribbon drops the particle at death.
+      // Unity 2022.3 dieWithParticles=false keeps the particle for
+      // life + Lifetime×startLifetime in both Particle and Ribbon mode: a
+      // ribbon station is the particle, so it must survive until its trail
+      // expires.
       const float length = ps[i].length_in_sec > 1e-6f ? ps[i].length_in_sec : 1.0f;
       const float part_life = std::max(ps[i].lifetime, ps[i].lifetime_min);
       const float speed = ps[i].simulation_speed > 1e-6f ? ps[i].simulation_speed : 1.0f;
@@ -3026,7 +3028,7 @@ void test_openwds_layer_table_not_2020_only() {
         }
       }
       float keep = part_life;
-      if (ps[i].trail_die_with == 0 && ps[i].trail_mode == 0) {
+      if (ps[i].trail_die_with == 0) {
         keep = part_life + trail_mul * part_life;
       }
       wds::chart_render::shuriken::EmitContext late_ctx;
@@ -3098,7 +3100,10 @@ void test_openwds_layer_table_not_2020_only() {
           ++dead_body;
         }
       }
-      CHECK(dead_body == 0);
+      // dieWithParticles=false: stations older than the body lifetime stay in
+      // the output so their ribbon trail can expire. remaining_lifetime tracks
+      // the body and is therefore zero for those kept stations.
+      CHECK(dead_body > 0);
     }
   }
   const auto* scatter = layer_of(10120, 2);
@@ -3503,10 +3508,11 @@ void test_openwds_layer_table_not_2020_only() {
       }
     }
     std::printf("10120 after life 1.20 n=%d segs=%d\n", late, late_segs);
-    // Ribbon dieWith=false: particle leaves at death (life=0.2). Last
-    // Duration births are gone by 1.20. PerParticle keep=life+L×life does
-    // not apply. trail_lifetime as extra seconds would persist to ~2.2.
-    CHECK(late == 0);
+    // Ribbon dieWith=false keeps the station until its trail expires: the last
+    // Duration births are still present at 1.20 (with ribbon geometry) and gone
+    // by 1.45.
+    CHECK(late > 0);
+    CHECK(late_segs > 0);
     tctx.now_t = 1.45f;
     const int expired = wds::chart_render::shuriken::evaluate(*trail, tctx, ribbons.data(), 512);
     CHECK(expired == 0);
