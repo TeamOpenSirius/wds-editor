@@ -2963,6 +2963,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     int chain_mixed = 0;
     int chain_tag_mixed = 0;
     int chain_dup_chains = 0;
+    int chain_station_dup = 0;
   } diag_frame;
   const float diag_off_limit =
       std::max(std::max(content_bounds.w, content_bounds.h), 1.0f) * 16.0f;
@@ -4077,8 +4078,22 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   };
 
   auto process_chain = [&](std::vector<int>& idxs, SplitEmitTargets tg) {
-    std::sort(idxs.begin(), idxs.end(),
-              [&](int a, int b) { return pool[a].trail_vertex < pool[b].trail_vertex; });
+    // Order stations by AGE, like Unity's BakeTrails ("connecting each particle
+    // based on its age"), not by the per-call station index: one system can be
+    // stitched several times in a frame (one call per group), and every call
+    // restarts its own index, so an index sort interleaves the groups and the
+    // strip zig-zags between unrelated particles.
+    std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
+      const auto& pa = pool[static_cast<size_t>(a)];
+      const auto& pb = pool[static_cast<size_t>(b)];
+      if (pa.birth_t != pb.birth_t) {
+        return pa.birth_t < pb.birth_t;
+      }
+      if (pa.seed != pb.seed) {
+        return pa.seed < pb.seed;
+      }
+      return a < b;
+    });
     if (idxs.size() < 2) {
       ++diag_frame.chains;
       ++diag_frame.chain_skipped;
@@ -4158,6 +4173,11 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         if (!seen && n_tag < 4) tags[n_tag++] = lp.system_tag;
       }
       for (int k = 1; k < cn; ++k) {
+        const auto& prev = pool[idxs[static_cast<size_t>(k - 1)]];
+        const auto& cur = pool[idxs[static_cast<size_t>(k)]];
+        if (prev.birth_t == cur.birth_t && prev.seed == cur.seed) {
+          ++diag_frame.chain_station_dup;
+        }
         if (ts.verts[static_cast<size_t>(k)] <= ts.verts[static_cast<size_t>(k - 1)]) {
           if (dup_pairs == 0) {
             dup_a = ts.verts[static_cast<size_t>(k - 1)];
@@ -4867,7 +4887,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           "trails=%d max_trail_pts=%d nonfinite=%d cap_anomalies=%d bodies=%d miss_sprite=%d "
           "trail_fallback=%d trail_tex=%d trail_span=%.2f trail_span_big=%d chains=%d "
           "chain_skip=%d chain_max=%d chain_parts=%d chain_gap_big=%d chain_dup=%d "
-          "chain_tail_gap=%d chain_mixed=%d chain_tag_mixed=%d chain_dup_chains=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
+          "chain_tail_gap=%d chain_mixed=%d chain_tag_mixed=%d chain_dup_chains=%d "
+          "chain_station_dup=%d vb=%d vb_low=%d vb_ofl=%d vb_used=%u vb_cap=%u "
           "modes=[%d,%d,%d] blends=[%d,%d,%d] sig=%016llx max_off=%.1f "
           "worst=(%.1f,%.1f) world=(%.2f,%.2f,%.2f) view_z=%.2f stage=%.0fx%.0f px_h=%d "
           "effects=[%d:%d,%d:%d,%d:%d,%d:%d]",
@@ -4879,7 +4900,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
           diag_frame.chains, diag_frame.chain_skipped, diag_frame.chain_max,
           diag_frame.chain_particles, diag_frame.chain_gap_big, diag_frame.chain_vertex_dup,
           diag_frame.chain_tail_gap, diag_frame.chain_mixed, diag_frame.chain_tag_mixed,
-          diag_frame.chain_dup_chains,
+          diag_frame.chain_dup_chains, diag_frame.chain_station_dup,
           split_emit_in_vb_ ? 1 : 0, split_emit_vb_low_,
           split_late_batch_.ext_overflow ? 1 : 0, split_late_batch_.ext_used,
           split_late_batch_.ext_cap, mode_counts[0], mode_counts[1], mode_counts[2],
