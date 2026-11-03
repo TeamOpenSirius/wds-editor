@@ -157,6 +157,39 @@ void test_multiple_split_events_have_independent_first_samples() {
   CHECK(playback_second_04 == raw_second_04);
 }
 
+wds::chart_editor::PreviewSplitLaneInstance make_split(int32_t effect_id) {
+  wds::chart_editor::PreviewSplitLaneInstance split;
+  split.apply_identity(effect_id, 6, wds::chart_editor::SplitLaneType::Ignore, effect_id, 1000,
+                       3000);
+  split.apply_state(true, false, 7);
+  split.apply_animation(1.0f, 0.0f, 1.0f, 0.0f, 1);
+  return split;
+}
+
+void test_particles_off_family_is_enforced_in_collect() {
+  // 11151-11157 instantiate the same recovered SplitEffectElements11151 prefab
+  // whose _lineEffects PPtrs are broken/duplicated, so the Unity reference
+  // never starts their ParticleSystems. The rule must live in the shared
+  // collector: the realtime preview, the MP4 export and --capture-preview all
+  // draw from this collect, so a renderer-local check would drift.
+  std::vector<wds::chart_render::SplitEffectLiveParticle> out(
+      static_cast<size_t>(wds::chart_render::kSplitEffectParticlePool));
+  for (int32_t id = 11151; id <= 11157; ++id) {
+    auto split = make_split(id);
+    wds::chart_render::reset_split_effect_auto_seed_session();
+    const int n = wds::chart_render::collect_split_effect_particles(
+        split, wds::chart_editor::kOfficialSpritEffectNormal, 0.30, out.data(),
+        static_cast<int>(out.size()));
+    CHECK(n == 0);
+  }
+  // 11150 is a different, resolved prefab and must keep its particles.
+  auto keep = make_split(11150);
+  wds::chart_render::reset_split_effect_auto_seed_session();
+  CHECK(wds::chart_render::collect_split_effect_particles(
+            keep, wds::chart_editor::kOfficialSpritEffectNormal, 0.30, out.data(),
+            static_cast<int>(out.size())) > 0);
+}
+
 void test_custom_runtime_capability_is_observation_only() {
   using namespace wds::chart_render;
   using namespace wds::chart_render::shuriken;
@@ -215,6 +248,7 @@ int main() {
   test_playback_keeps_first_sample_rod();
   test_reset_and_non_monotonic_lifecycle();
   test_multiple_split_events_have_independent_first_samples();
+  test_particles_off_family_is_enforced_in_collect();
   test_custom_runtime_capability_is_observation_only();
   if (failures == 0) {
     std::puts("split_effect_playback_tests passed");

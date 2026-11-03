@@ -17,6 +17,7 @@
 #include <wds/chart_render/openwds_shuriken_bind.hpp>
 #include <wds/chart_render/openwds_split_effects/controller.hpp>
 #include <wds/chart_render/shuriken/evaluate.hpp>
+#include <wds/chart_render/split_effect_particle_playback.hpp>
 #include <wds/core/gimmick.hpp>
 #include <wds/core/official_split_x.hpp>
 #include <wds/core/split_effect_gate.hpp>
@@ -1451,6 +1452,15 @@ void prepare_split_tasks(FrameScratch& fs, SplitPrep& prep,
   prep.start_ms = split.start_ms;
   prep.now_t = clock.now_t;
   mark_split_lines(quality, split, clock.color_id, now_sec, clock.seed_inside, playing);
+  // Recovered SplitEffectElement._lineEffects PPtrs are broken/duplicated for
+  // the 1115x family, so the Unity reference never starts their
+  // ParticleSystems (see split_effect_particle_playback.hpp). Enforced here, in
+  // the shared collector, rather than in one renderer: the realtime preview,
+  // the MP4 video export, the capture CLI and any future renderer all consume
+  // this and cannot drift. The split line itself still draws.
+  if (official_split_effect_particles_off(clock.color_id)) {
+    return;
+  }
   if (!clock.visible) {
     return;
   }

@@ -9,7 +9,6 @@
 #include <wds/chart_render/note_strips.hpp>
 #include <wds/chart_render/note_visual_policy.hpp>
 #include <wds/chart_render/split_effect_catalog.hpp>
-#include <wds/chart_render/split_effect_particle_playback.hpp>
 #include <wds/chart_render/split_effect_particles.hpp>
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <split_collect_pool.hpp>
@@ -3518,12 +3517,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       tg.late->overlay_pipe = body_pipe;
       DrawBatch& dest = *tg.late;
       float size_unity = p.size;
-      // Recovered prefab references for these effects never play in Unity
-      // (see split_effect_particle_playback.hpp); do not draw a body the
-      // reference cannot show.
-      if (wds::chart_render::official_split_effect_particles_off(p.effect_id)) {
-        return;
-      }
       if (std::getenv("WDS_SPLIT_PARTICLE_DEBUG") != nullptr && p.effect_id == 11151) {
         std::fprintf(stderr, "PART size=%.4f cur=%.4f cur_y=%.4f sol_y=%.4f age=%.4f a=%.4f mode=%d\n",
                      p.size, p.current_size, p.current_size_y, p.sol_y, p.age, p.a,
