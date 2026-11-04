@@ -9340,6 +9340,257 @@ void test_scroll_speed_zero_freezes_preview_distance() {
   CHECK_EQ(static_cast<int>(doc.scroll_speed_points().size()), 1);
 }
 
+void test_negative_scroll_speed_visibility_and_roundtrip() {
+  CHECK(is_valid_scroll_multiplier(-1.5));
+  CHECK(is_valid_scroll_multiplier(0.0));
+  CHECK(!is_valid_scroll_multiplier(std::numeric_limits<double>::infinity()));
+
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+
+  // Tick 0..1440 (0..1500 ms) scrolls at -1, then +1. At 1000 ms the note at
+  // 3000 ms is 2 s away (beyond the +SV spawn lead) but sits above the judge
+  // line because the reverse segment brought it back.
+  NotePositionCalculator positions;
+  positions.set_scroll_speed_points({{0, -1.0}, {1440, 1.0}}, timing);
+  CHECK(positions.has_negative_scroll_speed());
+  CHECK(std::fabs(positions.scroll_distance_ms(3000, 1000) - 1000.0) < 1e-6);
+  CHECK(positions.calculate_position_y(3000, 1000) > 0.0f);
+  CHECK(positions.calculate_position_y(3000, 1000) < 58.0f);
+
+  double visible_first = 0.0;
+  double visible_last = 0.0;
+  CHECK(positions.visible_target_time_bounds(1000.0, -3.0, 58.0, &visible_first,
+                                             &visible_last));
+  CHECK(visible_first <= 3000.0);
+  CHECK(visible_last >= 3000.0);
+  // A far-future target can still be visible after a long reverse segment.
+  CHECK(visible_last > 1000.0 + 1500.0);
+
+  std::vector<NotationNote> notes;
+  NotationNote below_judge = make_tap(2870, 2);  // 2990 ms; just under the line at t=0
+  below_judge.id = 0;
+  NotationNote far_visible = make_tap(2880, 0);  // 3000 ms
+  far_visible.id = 1;
+  NotationNote far_hidden = make_tap(5760, 1);  // 6000 ms, scrolled far off-screen
+  far_hidden.id = 2;
+  notes = {below_judge, far_visible, far_hidden};
+  ChartNoteIndex index;
+  index.rebuild(notes, timing);
+
+  PreviewSnapshotBuilder builder;
+  builder.set_scroll_speed_points({{0, -1.0}, {1440, 1.0}}, timing);
+  const PreviewSnapshot at_zero =
+      builder.build(notes, timing, {}, index, 0, PreviewPlaybackState::Paused, 1);
+  CHECK(at_zero.find_note(below_judge.id) != nullptr);
+  CHECK(at_zero.find_note(far_visible.id) != nullptr);
+  CHECK(at_zero.find_note(far_hidden.id) == nullptr);
+
+  const PreviewSnapshot snapshot =
+      builder.build(notes, timing, {}, index, 1000, PreviewPlaybackState::Paused, 1);
+  CHECK(snapshot.find_note(far_visible.id) != nullptr);
+  CHECK(snapshot.find_note(far_hidden.id) == nullptr);
+
+  // A hold that is currently being pressed is always visible, even when the
+  // scroll has pushed both its trimmed head and its tail below the screen.
+  NotationNote held;
+  held.note_type = NoteType::NontailHold;
+  held.start_tick = 960;   // 1000 ms
+  held.end_tick = 1680;    // 1750 ms
+  held.lane = 4;
+  held.width = 1;
+  held.id = 0;
+  const std::vector<NotationNote> hold_notes{held};
+  ChartNoteIndex hold_index;
+  hold_index.rebuild(hold_notes, timing);
+  NotePositionCalculator hold_positions;
+  hold_positions.set_scroll_speed_points({{0, 1.0}, {1440, -1.0}}, timing);
+  CHECK(hold_positions.calculate_position_y(held.start_ms(timing), 1500) < -3.0f);
+  CHECK(hold_positions.calculate_position_y(held.end_ms(timing), 1500) < -3.0f);
+  PreviewSnapshotBuilder hold_builder;
+  hold_builder.set_scroll_speed_points({{0, 1.0}, {1440, -1.0}}, timing);
+  const PreviewSnapshot holding =
+      hold_builder.build(hold_notes, timing, {}, hold_index, 1500, PreviewPlaybackState::Paused, 2);
+  CHECK(holding.find_note(held.id) != nullptr);
+  if (const PreviewNoteInstance* body = holding.find_note(held.id)) {
+    CHECK(body->visual_state == PreviewNoteVisualState::Holding);
+  }
+
+  ChartDocument doc;
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  CHECK(doc.set_scroll_speed_points({{0, -1.5}, {480, 2.0}}));
+  CHECK_EQ(static_cast<int>(doc.scroll_speed_points().size()), 2);
+  CHECK(std::fabs(doc.scroll_speed_points().front().multiplier + 1.5) < 1e-9);
+
+  // .wdschart persists the sign; SUS still rejects negative #TIL00 values.
+  const fs::path path = temp_chart_path("negative_sv_roundtrip.wdschart");
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(doc.to_notation_chart(), path.string()).error),
+           static_cast<int>(SerializeError::Ok));
+  NotationChart loaded;
+  CHECK_EQ(static_cast<int>(ChartSerializer::load_from_file(path.string(), loaded).error),
+           static_cast<int>(SerializeError::Ok));
+  CHECK_EQ(static_cast<int>(loaded.scroll_speed_points.size()), 2);
+  if (loaded.scroll_speed_points.size() == 2) {
+    CHECK(std::fabs(loaded.scroll_speed_points[0].multiplier + 1.5) < 1e-9);
+  }
+
+  std::string sus_text;
+  NotationChart sus_chart = doc.to_notation_chart();
+  sus_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  sus_chart.scroll_speed_points = {{0, -1.0}};
+  CHECK(SusChartFormat::serialize(sus_chart, SusChartSaveOptions{}, sus_text).error !=
+        SerializeError::Ok);
+}
+
+void test_negative_scroll_speed_range_queries() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+
+  NotePositionCalculator calc;
+  calc.set_scroll_speed_points({{0, 1.0}, {1440, -1.0}, {2880, 1.0}}, timing);
+  const double top = 58.0;
+  const double bottom = static_cast<double>(official_percent_to_judge_y(1.0f));
+  const double distance_lo = calc.scroll_distance_for_position_y(bottom);
+  const double distance_hi = calc.scroll_distance_for_position_y(top);
+
+  std::vector<ScrollTimeRange> ranges;
+  calc.scroll_time_ranges_for_distance(4000.0, distance_lo, distance_hi, ranges);
+  CHECK(!ranges.empty());
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    CHECK(ranges[i].first_ms <= ranges[i].last_ms);
+    if (i > 0) CHECK(ranges[i].first_ms > ranges[i - 1].last_ms + 1e-6);
+    const double mid = 0.5 * (ranges[i].first_ms + ranges[i].last_ms);
+    const int64_t mid_ms = static_cast<int64_t>(std::llround(mid));
+    const double y = calc.calculate_position_y(mid_ms, 4000);
+    CHECK(y >= bottom - 1e-3);
+    CHECK(y <= top + 1e-3);
+  }
+  double last = 0.0;
+  CHECK(calc.scroll_time_last_for_distance(4000.0, distance_lo, distance_hi, &last));
+  CHECK(std::fabs(last - ranges.back().last_ms) < 1e-6);
+
+  // No SV points: s(t) = t, so the preimage is just the distance band.
+  NotePositionCalculator plain;
+  double plain_last = 0.0;
+  CHECK(plain.scroll_time_last_for_distance(1000.0, -20.0, 30.0, &plain_last));
+  CHECK(std::fabs(plain_last - 1030.0) < 1e-6);
+  std::vector<ScrollTimeRange> plain_ranges;
+  plain.scroll_time_ranges_for_distance(1000.0, -20.0, 30.0, plain_ranges);
+  CHECK_EQ(static_cast<int>(plain_ranges.size()), 1);
+  if (plain_ranges.size() == 1) {
+    CHECK(std::fabs(plain_ranges[0].first_ms - 980.0) < 1e-6);
+    CHECK(std::fabs(plain_ranges[0].last_ms - 1030.0) < 1e-6);
+  }
+}
+
+void test_negative_scroll_speed_candidate_ranges_match_bruteforce() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+
+  constexpr int kNotes = 400;
+  std::vector<NotationNote> notes;
+  notes.reserve(kNotes);
+  for (int i = 0; i < kNotes; ++i) {
+    NotationNote note = make_tap(i * 240, i % 6);
+    note.id = i;
+    notes.push_back(note);
+  }
+  ChartNoteIndex index;
+  index.rebuild(notes, timing);
+
+  std::vector<ScrollSpeedPoint> points;
+  constexpr int kSegments = 16;
+  const int32_t segment_ticks = (kNotes * 240) / kSegments;
+  for (int i = 0; i < kSegments; ++i) {
+    points.push_back({i * segment_ticks, (i % 2 == 0) ? 1.0 : -1.0});
+  }
+
+  const int64_t now = 30000;
+  NotePositionCalculator calc;
+  calc.set_scroll_speed_points(points, timing);
+  const double top = 58.0;
+  const double bottom = static_cast<double>(official_percent_to_judge_y(1.0f));
+
+  std::vector<int32_t> expected;
+  for (const auto& note : notes) {
+    const int64_t start_ms = note.start_ms(timing);
+    if (start_ms <= now) continue;  // taps are consumed at their hit time
+    const double y = static_cast<double>(calc.calculate_position_y(start_ms, now));
+    if (y >= bottom && y <= top) expected.push_back(note.id);
+  }
+  std::sort(expected.begin(), expected.end());
+
+  PreviewSnapshotBuilder builder;
+  builder.set_scroll_speed_points(points, timing);
+  const PreviewSnapshot full =
+      builder.build(notes, timing, {}, index, now, PreviewPlaybackState::Paused, 7);
+  std::vector<int32_t> got;
+  got.reserve(full.notes.size());
+  for (const auto& note : full.notes) {
+    // AutoHit entries are VFX-only; draw_notes only renders Approaching/Holding.
+    if (note.visual_state == PreviewNoteVisualState::Approaching ||
+        note.visual_state == PreviewNoteVisualState::Holding) {
+      got.push_back(note.note_id);
+    }
+  }
+  std::sort(got.begin(), got.end());
+  CHECK(got == expected);
+
+  PreviewSnapshot incremental;
+  PreviewSnapshotBuilder incremental_builder;
+  incremental_builder.set_scroll_speed_points(points, timing);
+  incremental_builder.build_into(incremental, notes, timing, {}, index, now - 1000,
+                                 PreviewPlaybackState::Paused, 7);
+  const SnapshotDiffEstimate estimate =
+      incremental_builder.estimate_diff(incremental, index, {}, now, 7);
+  incremental_builder.update_incremental(incremental, notes, timing, {}, index, now,
+                                         PreviewPlaybackState::Paused, 7);
+  const PreviewSnapshot reference =
+      incremental_builder.build(notes, timing, {}, index, now, PreviewPlaybackState::Paused, 7);
+  CHECK(snapshot_contents_equal(incremental, reference));
+  CHECK(estimate.note_candidate_count >= reference.notes.size());
+}
+
+void test_negative_scroll_speed_range_keeps_hold_tail_visible() {
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  normalize_timing_points(timing);
+
+  NotationNote hold;
+  hold.id = 0;
+  hold.start_tick = 3408;  // 3550 ms
+  hold.end_tick = 4416;    // 4600 ms
+  hold.lane = 3;
+  hold.width = 1;
+  hold.note_type = NoteType::NontailHold;
+  const std::vector<NotationNote> notes{hold};
+  ChartNoteIndex index;
+  index.rebuild(notes, timing);
+
+  // +1 until 3000 ms, then -1: the head sits above the screen while the tail
+  // (4600 ms) is still visible. The head's start time is in a gap of the visible
+  // preimage, so range queries must widen by the hold span to find it.
+  NotePositionCalculator calc;
+  calc.set_scroll_speed_points({{0, 1.0}, {2880, -1.0}}, timing);
+  CHECK(calc.calculate_position_y(hold.start_ms(timing), 0) > 58.0f);
+  CHECK(calc.calculate_position_y(hold.end_ms(timing), 0) <= 58.0f);
+
+  PreviewSnapshotBuilder builder;
+  builder.set_scroll_speed_points({{0, 1.0}, {2880, -1.0}}, timing);
+  const PreviewSnapshot snapshot =
+      builder.build(notes, timing, {}, index, 0, PreviewPlaybackState::Paused, 3);
+  const PreviewNoteInstance* body = snapshot.find_note(hold.id);
+  CHECK(body != nullptr);
+  if (body != nullptr) CHECK(body->visual_state == PreviewNoteVisualState::Approaching);
+}
+
 void test_sus_skips_negative_scroll_speed_with_warning() {
   const std::string sus =
       "#REQUEST \"ticks_per_beat 480\"\n"
@@ -11134,6 +11385,10 @@ int main() {
   test_sirius_features_require_extended_profile();
   test_sirius_extended_csv_native_and_sus_scroll();
   test_scroll_speed_zero_freezes_preview_distance();
+  test_negative_scroll_speed_visibility_and_roundtrip();
+  test_negative_scroll_speed_range_queries();
+  test_negative_scroll_speed_candidate_ranges_match_bruteforce();
+  test_negative_scroll_speed_range_keeps_hold_tail_visible();
   test_sus_skips_negative_scroll_speed_with_warning();
   test_legacy_eighth_markers_are_dropped_and_recomputed();
   test_supplied_sus_repro_if_available();

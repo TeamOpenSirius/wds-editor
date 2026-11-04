@@ -110,10 +110,11 @@ struct ConcurrentLineNote {
 };
 
 // Visual scroll-speed event. The event starts at tick and remains in effect
-// until the next point. Multiplier 0 freezes notes; negative values are invalid.
-// A chart with no points has multiplier 1.0.
+// until the next point. Multiplier 0 freezes notes; a negative multiplier runs
+// the scroll backwards (notes approach the judgment line from below). Any finite
+// multiplier is valid. A chart with no points has multiplier 1.0.
 inline bool is_valid_scroll_multiplier(double multiplier) noexcept {
-  return std::isfinite(multiplier) && multiplier >= 0.0;
+  return std::isfinite(multiplier);
 }
 
 struct ScrollSpeedPoint {

@@ -21,8 +21,9 @@ namespace wds::chart_editor {
 //                   BPM, so the editor cannot rebuild the eighth grid; file times stay.
 //                   Export of an editable chart still generates type 900 (gimmick 0 /
 //                   scratch 0). Export rows are sorted by startTime then type;
-//                   -1 = HiSpeed (endTime holds non-negative multiplier; stored in
-//                   scroll_speed_points, never in NotationNote);
+//                   -1 = HiSpeed (endTime holds the multiplier, including
+//                   negative/reverse SV; stored in scroll_speed_points, never in
+//                   NotationNote);
 //                   31 = ScratchSound (purple mid-star); 40 = Scratch (kept as-is;
 //                   looks like Flick; the editor cannot author it);
 //                   split rows always export type 0, leftLane -1, laneLength 0
@@ -82,8 +83,8 @@ struct OfficialChartLoadOptions {
   // Official lanes are 1-based (1..12); editor NotationNote uses 0-based (0..11).
   bool convert_lane_to_zero_based = true;
 
-  // Skip HiSpeed (type == -1) rows for legacy callers. Leave false so
-  // non-negative SV events are retained in scroll_speed_points.
+  // Skip HiSpeed (type == -1) rows for legacy callers. Leave false so SV
+  // events (positive, zero or negative) are retained in scroll_speed_points.
   bool skip_hispeed = false;
   ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
 

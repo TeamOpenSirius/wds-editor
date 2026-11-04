@@ -10,6 +10,7 @@
 #include <wds/core/types.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -108,24 +109,45 @@ class PreviewSnapshotBuilder {
 
   void rebuild_concurrent_lines(PreviewSnapshot& out,
                                 const std::vector<ConcurrentLineNote>& concurrent_lines,
-                                int64_t preview_time_ms) const;
+                                int64_t preview_time_ms, uint64_t revision) const;
 
   void update_concurrent_lines_incremental(
       PreviewSnapshot& inout, const std::vector<ConcurrentLineNote>& concurrent_lines,
-      int64_t preview_time_ms) const;
+      int64_t preview_time_ms, uint64_t revision) const;
 
   void update_notes_incremental(PreviewSnapshot& inout, int64_t preview_time_ms,
                                 const MusicTiming& timing, const ChartNoteIndex& index,
-                                int32_t lane_count) const;
+                                int32_t lane_count, uint64_t revision) const;
 
   void rebuild_notes(PreviewSnapshot& out, int64_t preview_time_ms, const MusicTiming& timing,
                      const ChartNoteIndex& index, int32_t lane_count,
-                     size_t concurrent_capacity) const;
+                     size_t concurrent_capacity, uint64_t revision) const;
 
   static size_t size_delta(size_t a, size_t b) noexcept;
 
   int64_t spawn_lead_ms() const;
   int64_t tail_ms(const ChartNoteIndex& index) const;
+  // Lead derived from the last visible target time (hull fallback).
+  int64_t query_lead_ms(int64_t preview_time_ms) const;
+  int64_t lead_ms_from_last(int64_t preview_time_ms, double last_ms) const;
+  bool note_visible_spatially(const NotationNote& note, int64_t preview_time_ms,
+                              const MusicTiming& timing) const;
+  double visible_bottom_y() const;
+  double visible_top_y() const;
+  void visible_distance_bounds(double& out_lo, double& out_hi) const;
+
+  // Fills candidate_buffer_ for (now, index, revision). Reused by estimate_diff
+  // and the following rebuild/update, so the expensive query runs once.
+  void ensure_note_candidates(int64_t preview_time_ms, const ChartNoteIndex& index,
+                              uint64_t revision) const;
+  // Per-frame cache for concurrent-line visibility, shared by estimate and the
+  // following rebuild/update.
+  void ensure_concurrent_visibility(
+      const std::vector<ConcurrentLineNote>& concurrent_lines, int64_t preview_time_ms,
+      uint64_t revision) const;
+
+  static constexpr size_t kRangeScanSegmentsMax = 1024;
+  static constexpr size_t kMaxCandidateRanges = 512;
 
   PreviewConfig config_;
   NotePositionCalculator position_calculator_;
@@ -141,6 +163,25 @@ class PreviewSnapshotBuilder {
   mutable const std::vector<NotationNote>* cached_combo_notes_ = nullptr;
   mutable std::vector<int64_t> cached_combo_hits_;
   double minimum_scroll_multiplier_ = 1.0;
+  bool has_negative_scroll_ = false;
+  // Bumped on config / SV changes; invalidates derived distance and query caches.
+  uint64_t scroll_generation_ = 0;
+  mutable uint64_t cached_distance_generation_ = ~uint64_t{0};
+  mutable double cached_distance_lo_ = 0.0;
+  mutable double cached_distance_hi_ = 0.0;
+  mutable int64_t candidate_cache_now_ = std::numeric_limits<int64_t>::min();
+  mutable uint64_t candidate_cache_revision_ = ~uint64_t{0};
+  mutable const ChartNoteIndex* candidate_cache_index_ = nullptr;
+  mutable int64_t candidate_cache_tail_ = -1;
+  mutable uint64_t candidate_cache_scroll_generation_ = ~uint64_t{0};
+  mutable std::vector<ScrollTimeRange> visible_ranges_;
+  mutable std::vector<ScrollTimeRange> query_ranges_;
+  mutable int64_t concurrent_cache_now_ = std::numeric_limits<int64_t>::min();
+  mutable uint64_t concurrent_cache_revision_ = ~uint64_t{0};
+  mutable const void* concurrent_cache_data_ = nullptr;
+  mutable size_t concurrent_cache_size_ = 0;
+  mutable uint64_t concurrent_cache_scroll_generation_ = ~uint64_t{0};
+  mutable std::vector<uint8_t> concurrent_visibility_;
 };
 
 }  // namespace wds::chart_editor

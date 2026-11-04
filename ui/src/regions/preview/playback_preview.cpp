@@ -2362,6 +2362,11 @@ float PlaybackPreviewView::spawn_clip_percent() const noexcept {
   return geometry_.lane_mask_bottom_percent();
 }
 
+float PlaybackPreviewView::note_visible_bottom_percent() const noexcept {
+  // The lane plate is drawn from percent 0 (spawn) to percent 1 (near edge).
+  return 1.0f;
+}
+
 void PlaybackPreviewView::draw_split_lanes(DrawBatch& batch, const PreviewSnapshot& snapshot) {
   WDS_PERF_SCOPE("preview.split_lanes");
   // Split line X is Main / SetLineX, not Unity World. LiveParticle.world_x
@@ -4347,7 +4352,11 @@ void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewS
   for (const auto& line : snapshot.concurrent_lines) {
     const double beat = static_cast<double>(line.milliseconds) / 1000.0;
     const float p = geometry_.note_percent(beat, now);
-    if (p <= 0.0f || p > geometry_.judgeline_percent() + 0.02f) {
+    // Before its hit time a negative-SV line approaches from below and stays
+    // visible below the judgment line; after the hit it despawns.
+    const float max_p = beat >= now ? note_visible_bottom_percent()
+                                    : geometry_.judgeline_percent() + 0.02f;
+    if (p <= 0.0f || p > max_p) {
       continue;
     }
     if (p < spawn_clip_percent()) {
@@ -4484,11 +4493,19 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
   const double start = static_cast<double>(note.start_ms) / 1000.0;
   const double end = static_cast<double>(note.end_ms) / 1000.0;
   const float judge_p = geometry_.judgeline_percent();
-  float p_near = std::clamp(geometry_.note_percent(start, now_sec), 0.0f, judge_p);
-  float p_far = std::clamp(geometry_.note_percent(end, now_sec), 0.0f, judge_p);
-  if (p_near < p_far) {
-    std::swap(p_near, p_far);
+  const float bottom_p = note_visible_bottom_percent();
+  const float raw_start_p = geometry_.note_percent(start, now_sec);
+  const float raw_end_p = geometry_.note_percent(end, now_sec);
+  float p_start = raw_start_p;
+  if (now_sec >= start) {
+    // The already-held part is hidden at the judgment line; the future tail
+    // stays on its own side (above for +SV, below for −SV). Use the drawn
+    // clock rather than the snapshot state so visual lead cannot leak a +SV
+    // head below the line.
+    p_start = judge_p;
   }
+  float p_near = std::clamp(std::max(p_start, raw_end_p), 0.0f, bottom_p);
+  float p_far = std::clamp(std::min(p_start, raw_end_p), 0.0f, bottom_p);
   if (p_near <= p_far) {
     return;
   }
@@ -4515,6 +4532,12 @@ void PlaybackPreviewView::draw_hold_body(DrawBatch& batch, const PreviewNoteInst
   }
 
   auto alpha_at = [&](float p) {
+    // Anything below the judgment line is future body and stays fully visible;
+    // only the part crossing the line fades like a normal approaching tip. This
+    // must not depend on endpoint order: a +SV hold can become negative midway,
+    // leaving the start further below than the tail while the tail is below the
+    // line too.
+    if (p > judge_p) return base_alpha;
     if (p <= fade_lo) return base_alpha;
     return base_alpha * std::clamp(1.0f - (p - fade_lo) / band, 0.0f, 1.0f);
   };
@@ -4567,7 +4590,13 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
   }
 
   const float p = geometry_.note_percent(beat_sec, now_sec);
-  if (p < -0.05f || p >= geometry_.judgeline_percent()) {
+  const float bottom_p = note_visible_bottom_percent();
+  // Keep the old +SV rule for notes that already passed the judge line; only a
+  // still-approaching reverse note may be drawn below it.
+  if (p > geometry_.judgeline_percent() && beat_sec < now_sec) {
+    return;
+  }
+  if (p < -0.05f || p > bottom_p) {
     return;
   }
 
@@ -4581,7 +4610,7 @@ void PlaybackPreviewView::draw_flat_note_at(DrawBatch& batch, const PreviewNoteI
   // Bottom/Top share plane footprint; Unity local Z = height, pinhole-projected.
   const float unity_z = bottom_layer ? config_.note_unity_local_z_bottom
                                      : config_.note_unity_local_z_top;
-  const float pc = std::clamp(p, 0.0f, geometry_.judgeline_percent());
+  const float pc = std::clamp(p, 0.0f, bottom_p);
   const float half = geometry_.note_half_height_percent(lane, pc);
   const float p_tip = pc - half;
   const float p_near = pc + half;
@@ -4616,7 +4645,10 @@ void PlaybackPreviewView::draw_tick_note(DrawBatch& batch, const PreviewNoteInst
   }
   const double beat = static_cast<double>(note.start_ms) / 1000.0;
   const float p = geometry_.note_percent(beat, now_sec);
-  if (p < 0.0f || p >= geometry_.judgeline_percent()) {
+  if (p > geometry_.judgeline_percent() && beat < now_sec) {
+    return;
+  }
+  if (p < 0.0f || p > note_visible_bottom_percent()) {
     return;
   }
   if (p < spawn_clip_percent()) {
@@ -4639,7 +4671,10 @@ void PlaybackPreviewView::draw_arrows_at(DrawBatch& batch, const PreviewNoteInst
     return;
   }
   const float p = geometry_.note_percent(beat_sec, now_sec);
-  if (p <= 0.0f || p >= geometry_.judgeline_percent()) {
+  if (p > geometry_.judgeline_percent() && beat_sec < now_sec) {
+    return;
+  }
+  if (p <= 0.0f || p > note_visible_bottom_percent()) {
     return;
   }
   if (p < spawn_clip_percent()) {

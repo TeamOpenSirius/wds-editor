@@ -1905,7 +1905,8 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     ss << "#TIL00: \"";
     for (size_t i = 0; i < chart.scroll_speed_points.size(); ++i) {
       const auto& point = chart.scroll_speed_points[i];
-      if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+      if (point.tick < 0 || point.multiplier < 0.0 ||
+          !is_valid_scroll_multiplier(point.multiplier)) {
         return {SerializeError::ParseError, "SUS scroll speed must be non-negative"};
       }
       if (i) ss << ", ";
