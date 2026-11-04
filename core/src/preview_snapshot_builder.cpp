@@ -1,6 +1,7 @@
 #include <wds/core/preview_snapshot_builder.hpp>
 
 #include <wds/core/gimmick.hpp>
+#include <wds/core/official_playfield.hpp>
 #include <wds/core/split_fade.hpp>
 
 #include <algorithm>
@@ -56,17 +57,22 @@ void PreviewSnapshotBuilder::set_config(PreviewConfig config) {
   position_calculator_.set_config(config);
   auto_judge_.set_config(config);
   split_lane_simulator_.set_config(config);
+  ++scroll_generation_;
 }
 
 void PreviewSnapshotBuilder::set_scroll_speed_points(std::vector<ScrollSpeedPoint> points,
                                                      const MusicTiming& timing) {
   minimum_scroll_multiplier_ = 1.0;
+  has_negative_scroll_ = false;
   for (const auto& point : points) {
-    if (std::isfinite(point.multiplier) && point.multiplier > 0.0) {
+    if (!std::isfinite(point.multiplier)) continue;
+    if (point.multiplier < 0.0) has_negative_scroll_ = true;
+    if (point.multiplier > 0.0) {
       minimum_scroll_multiplier_ = std::min(minimum_scroll_multiplier_, point.multiplier);
     }
   }
   position_calculator_.set_scroll_speed_points(std::move(points), timing);
+  ++scroll_generation_;
 }
 
 void PreviewSnapshotBuilder::set_compatibility_profile(ChartCompatibilityProfile profile) {
@@ -75,6 +81,12 @@ void PreviewSnapshotBuilder::set_compatibility_profile(ChartCompatibilityProfile
 
 bool PreviewSnapshotBuilder::is_spawn_visible(const NotationNote& note, int64_t preview_time_ms,
                                               const MusicTiming& timing) const {
+  if (has_negative_scroll_) {
+    // Negative SV can show a note long before its hit time, below the judgment
+    // line, or several times as the scroll reverses. Position is the only stable
+    // test; the renderer culls the same band.
+    return note_visible_spatially(note, preview_time_ms, timing);
+  }
   const int64_t start_ms = note.start_ms(timing);
   return preview_time_ms >= start_ms - spawn_lead_ms();
 }
@@ -110,6 +122,13 @@ bool PreviewSnapshotBuilder::is_expired(const NotationNote& note, int64_t previe
 
 bool PreviewSnapshotBuilder::is_concurrent_line_visible(const ConcurrentLineNote& line,
                                                         int64_t preview_time_ms) const {
+  if (has_negative_scroll_) {
+    if (preview_time_ms > line.milliseconds + config_.post_miss_visible_ms) return false;
+    const double y =
+        static_cast<double>(position_calculator_.calculate_position_y(line.milliseconds,
+                                                                      preview_time_ms));
+    return y >= visible_bottom_y() && y <= visible_top_y();
+  }
   const int64_t lead = spawn_lead_ms();
   return preview_time_ms >= line.milliseconds - lead &&
          preview_time_ms <= line.milliseconds + config_.post_miss_visible_ms;
@@ -139,6 +158,194 @@ int64_t PreviewSnapshotBuilder::spawn_lead_ms() const {
   const double lead = static_cast<double>(position_calculator_.move_seconds()) * 1000.0 /
                       minimum_scroll_multiplier_;
   return static_cast<int64_t>(std::min(lead, static_cast<double>(INT64_MAX / 4)));
+}
+
+double PreviewSnapshotBuilder::visible_top_y() const {
+  return static_cast<double>(config_.offset_value) + static_cast<double>(config_.spawn_y);
+}
+
+double PreviewSnapshotBuilder::visible_bottom_y() const {
+  // The lane plate reaches percent 1 at the bottom of the stage; notes below the
+  // judgment line stay visible there until their hit time.
+  return static_cast<double>(config_.offset_value) +
+         static_cast<double>(official_percent_to_judge_y(1.0f));
+}
+
+bool PreviewSnapshotBuilder::note_visible_spatially(const NotationNote& note,
+                                                    int64_t preview_time_ms,
+                                                    const MusicTiming& timing) const {
+  const int64_t start_ms = note.start_ms(timing);
+  const int64_t end_ms = note.end_ms(timing);
+  const bool held = is_hold_body(note.note_type) && !is_hold_mid_star(note.note_type);
+  if (held && preview_time_ms >= start_ms && preview_time_ms <= end_ms) {
+    // While the hold is being pressed its body is pinned at the judgment line:
+    // the held part is trimmed away, so the tail may be far outside the screen
+    // in either direction. It is still a visible note and must stay in the
+    // snapshot; the renderer clips the body to the lane.
+    return true;
+  }
+  const double top = visible_top_y();
+  const double bottom = visible_bottom_y();
+  const double start_y = static_cast<double>(position_calculator_.calculate_position_y(
+      start_ms, preview_time_ms));
+  if (!held) {
+    return start_y >= bottom && start_y <= top;
+  }
+  const double end_y = static_cast<double>(position_calculator_.calculate_position_y(
+      end_ms, preview_time_ms));
+  return std::min(start_y, end_y) <= top && std::max(start_y, end_y) >= bottom;
+}
+
+int64_t PreviewSnapshotBuilder::query_lead_ms(int64_t preview_time_ms) const {
+  if (!has_negative_scroll_) {
+    return spawn_lead_ms();
+  }
+  double distance_lo = 0.0;
+  double distance_hi = 0.0;
+  visible_distance_bounds(distance_lo, distance_hi);
+  double last = 0.0;
+  if (!position_calculator_.scroll_time_last_for_distance(
+          static_cast<double>(preview_time_ms), distance_lo, distance_hi, &last)) {
+    return spawn_lead_ms();
+  }
+  return lead_ms_from_last(preview_time_ms, last);
+}
+
+int64_t PreviewSnapshotBuilder::lead_ms_from_last(int64_t preview_time_ms, double last) const {
+  const double now = static_cast<double>(preview_time_ms);
+  const double cap = static_cast<double>(std::numeric_limits<int64_t>::max() / 4);
+  if (!(last >= now)) {
+    return 0;
+  }
+  const double lead = std::ceil(std::min(last - now + 1.0, cap));
+  if (!std::isfinite(lead) || lead <= 0.0) {
+    return 0;
+  }
+  return static_cast<int64_t>(lead);
+}
+
+void PreviewSnapshotBuilder::visible_distance_bounds(double& out_lo, double& out_hi) const {
+  if (cached_distance_generation_ == scroll_generation_) {
+    out_lo = cached_distance_lo_;
+    out_hi = cached_distance_hi_;
+    return;
+  }
+  out_lo = position_calculator_.scroll_distance_for_position_y(visible_bottom_y());
+  out_hi = position_calculator_.scroll_distance_for_position_y(visible_top_y());
+  if (out_lo > out_hi) std::swap(out_lo, out_hi);
+  cached_distance_lo_ = out_lo;
+  cached_distance_hi_ = out_hi;
+  cached_distance_generation_ = scroll_generation_;
+}
+
+void PreviewSnapshotBuilder::ensure_note_candidates(int64_t preview_time_ms,
+                                                    const ChartNoteIndex& index,
+                                                    uint64_t revision) const {
+  const int64_t tail = tail_ms(index);
+  if (candidate_cache_now_ == preview_time_ms && candidate_cache_revision_ == revision &&
+      candidate_cache_index_ == &index && candidate_cache_tail_ == tail &&
+      candidate_cache_scroll_generation_ == scroll_generation_) {
+    return;
+  }
+
+  candidate_buffer_.clear();
+  if (!has_negative_scroll_) {
+    index.query_candidates(preview_time_ms, spawn_lead_ms(), tail, candidate_buffer_);
+  } else {
+    bool queried_ranges = false;
+    const size_t segment_count = position_calculator_.scroll_segment_count();
+    if (segment_count <= kRangeScanSegmentsMax) {
+      double distance_lo = 0.0;
+      double distance_hi = 0.0;
+      visible_distance_bounds(distance_lo, distance_hi);
+      visible_ranges_.clear();
+      position_calculator_.scroll_time_ranges_for_distance(
+          static_cast<double>(preview_time_ms), distance_lo, distance_hi, visible_ranges_);
+
+      // Candidate starts below now are only needed for still-held holds and
+      // expired-by-tail notes; the renderer/spatial filter trims the rest.
+      const double base_lo = static_cast<double>(preview_time_ms) - static_cast<double>(tail);
+      const double base_hi = static_cast<double>(preview_time_ms);
+      query_ranges_.clear();
+      query_ranges_.push_back({base_lo, base_hi});
+      // A hold whose tail is inside a visible range can have its head far above
+      // (or below) the band. Expand the start window by the longest hold span so
+      // range queries still include those bodies; the spatial filter decides.
+      const double hold_span = static_cast<double>(std::max<int64_t>(0, index.max_hold_span_ms()));
+      for (const auto& range : visible_ranges_) {
+        if (range.last_ms < base_lo) continue;
+        double lo = std::max(range.first_ms, base_lo);
+        if (hold_span > 0.0) lo = std::max(base_lo, lo - hold_span);
+        query_ranges_.push_back({lo, range.last_ms});
+      }
+      // Expanding by the hold span can invalidate the original ordering, so sort
+      // before merging. The 4 ms tolerance covers the 1 ms query endpoints below
+      // and keeps a note from being returned by two neighbouring ranges.
+      std::sort(query_ranges_.begin(), query_ranges_.end(),
+                [](const ScrollTimeRange& a, const ScrollTimeRange& b) {
+                  return a.first_ms < b.first_ms;
+                });
+      size_t merged = 0;
+      for (const auto& range : query_ranges_) {
+        if (merged > 0 && range.first_ms <= query_ranges_[merged - 1].last_ms + 4.0) {
+          query_ranges_[merged - 1].last_ms =
+              std::max(query_ranges_[merged - 1].last_ms, range.last_ms);
+        } else {
+          query_ranges_[merged++] = range;
+        }
+      }
+      query_ranges_.resize(merged);
+
+      if (query_ranges_.size() <= kMaxCandidateRanges) {
+        constexpr double kTimeLimit =
+            static_cast<double>(std::numeric_limits<int64_t>::max() / 4);
+        for (const auto& range : query_ranges_) {
+          const double lo = std::max(-kTimeLimit, range.first_ms);
+          const double hi = std::min(kTimeLimit, range.last_ms);
+          if (!(lo <= hi)) continue;
+          const int64_t lo_ms = static_cast<int64_t>(std::floor(lo)) - 1;
+          const int64_t hi_ms = static_cast<int64_t>(std::ceil(hi)) + 1;
+          if (lo_ms > hi_ms) continue;
+          index.for_each_start_in_range(lo_ms, hi_ms,
+                                        [&](int32_t note_id) {
+                                          candidate_buffer_.push_back(note_id);
+                                        });
+        }
+        queried_ranges = true;
+      }
+    }
+    if (!queried_ranges) {
+      const int64_t lead = query_lead_ms(preview_time_ms);
+      index.query_candidates(preview_time_ms, lead, tail, candidate_buffer_);
+    }
+  }
+
+  candidate_cache_now_ = preview_time_ms;
+  candidate_cache_revision_ = revision;
+  candidate_cache_index_ = &index;
+  candidate_cache_tail_ = tail;
+  candidate_cache_scroll_generation_ = scroll_generation_;
+}
+
+void PreviewSnapshotBuilder::ensure_concurrent_visibility(
+    const std::vector<ConcurrentLineNote>& concurrent_lines, int64_t preview_time_ms,
+    uint64_t revision) const {
+  const void* data = concurrent_lines.empty() ? nullptr : concurrent_lines.data();
+  if (concurrent_cache_now_ == preview_time_ms && concurrent_cache_revision_ == revision &&
+      concurrent_cache_data_ == data && concurrent_cache_size_ == concurrent_lines.size() &&
+      concurrent_cache_scroll_generation_ == scroll_generation_) {
+    return;
+  }
+  concurrent_visibility_.resize(concurrent_lines.size());
+  for (size_t i = 0; i < concurrent_lines.size(); ++i) {
+    concurrent_visibility_[i] =
+        is_concurrent_line_visible(concurrent_lines[i], preview_time_ms) ? 1 : 0;
+  }
+  concurrent_cache_now_ = preview_time_ms;
+  concurrent_cache_revision_ = revision;
+  concurrent_cache_data_ = data;
+  concurrent_cache_size_ = concurrent_lines.size();
+  concurrent_cache_scroll_generation_ = scroll_generation_;
 }
 
 int64_t PreviewSnapshotBuilder::tail_ms(const ChartNoteIndex& index) const {
@@ -340,14 +547,14 @@ void PreviewSnapshotBuilder::update_split_lanes_incremental(
 
 void PreviewSnapshotBuilder::rebuild_concurrent_lines(
     PreviewSnapshot& out, const std::vector<ConcurrentLineNote>& concurrent_lines,
-    int64_t preview_time_ms) const {
+    int64_t preview_time_ms, uint64_t revision) const {
   out.clear_concurrent_lines_keep_capacity();
   out.reserve(0, concurrent_lines.size(), 0);
+  ensure_concurrent_visibility(concurrent_lines, preview_time_ms, revision);
 
-  for (const auto& line : concurrent_lines) {
-    if (!is_concurrent_line_visible(line, preview_time_ms)) {
-      continue;
-    }
+  for (size_t i = 0; i < concurrent_lines.size(); ++i) {
+    if (!concurrent_visibility_[i]) continue;
+    const ConcurrentLineNote& line = concurrent_lines[i];
     PreviewConcurrentLineInstance instance;
     fill_concurrent_line_instance(instance, line, preview_time_ms);
     out.upsert_concurrent_line(instance);
@@ -356,13 +563,13 @@ void PreviewSnapshotBuilder::rebuild_concurrent_lines(
 
 void PreviewSnapshotBuilder::update_concurrent_lines_incremental(
     PreviewSnapshot& inout, const std::vector<ConcurrentLineNote>& concurrent_lines,
-    int64_t preview_time_ms) const {
+    int64_t preview_time_ms, uint64_t revision) const {
   visited_buffer_.assign(inout.concurrent_lines.size(), 0);
+  ensure_concurrent_visibility(concurrent_lines, preview_time_ms, revision);
 
-  for (const auto& line : concurrent_lines) {
-    if (!is_concurrent_line_visible(line, preview_time_ms)) {
-      continue;
-    }
+  for (size_t i = 0; i < concurrent_lines.size(); ++i) {
+    if (!concurrent_visibility_[i]) continue;
+    const ConcurrentLineNote& line = concurrent_lines[i];
 
     if (PreviewConcurrentLineInstance* existing =
             inout.find_concurrent_line(line.milliseconds, line.start_lane)) {
@@ -396,9 +603,10 @@ void PreviewSnapshotBuilder::update_concurrent_lines_incremental(
 void PreviewSnapshotBuilder::rebuild_notes(PreviewSnapshot& out, int64_t preview_time_ms,
                                            const MusicTiming& timing,
                                            const ChartNoteIndex& index, int32_t lane_count,
-                                           size_t concurrent_capacity) const {
+                                           size_t concurrent_capacity,
+                                           uint64_t revision) const {
   out.clear_notes_keep_capacity();
-  index.query_candidates(preview_time_ms, spawn_lead_ms(), tail_ms(index), candidate_buffer_);
+  ensure_note_candidates(preview_time_ms, index, revision);
   out.reserve(candidate_buffer_.size(), concurrent_capacity, out.split_lanes.capacity());
 
   for (int32_t note_id : candidate_buffer_) {
@@ -429,8 +637,9 @@ void PreviewSnapshotBuilder::update_notes_incremental(PreviewSnapshot& inout,
                                                       int64_t preview_time_ms,
                                                       const MusicTiming& timing,
                                                       const ChartNoteIndex& index,
-                                                      int32_t lane_count) const {
-  index.query_candidates(preview_time_ms, spawn_lead_ms(), tail_ms(index), candidate_buffer_);
+                                                      int32_t lane_count,
+                                                      uint64_t revision) const {
+  ensure_note_candidates(preview_time_ms, index, revision);
   visited_buffer_.assign(inout.notes.size(), 0);
 
   for (int32_t note_id : candidate_buffer_) {
@@ -511,17 +720,16 @@ SnapshotDiffEstimate PreviewSnapshotBuilder::estimate_diff(
                                     estimate.previous_concurrent_count;
   estimate.revision_changed = previous.revision != revision;
 
-  index.query_candidates(preview_time_ms, spawn_lead_ms(), tail_ms(index), candidate_buffer_);
+  ensure_note_candidates(preview_time_ms, index, revision);
   estimate.note_candidate_count = candidate_buffer_.size();
 
   query_preview_split_candidates(index, preview_time_ms, config_, split_buffer_);
   estimate.split_candidate_count = split_buffer_.size();
 
+  ensure_concurrent_visibility(concurrent_lines, preview_time_ms, revision);
   size_t concurrent_visible = 0;
-  for (const auto& line : concurrent_lines) {
-    if (is_concurrent_line_visible(line, preview_time_ms)) {
-      ++concurrent_visible;
-    }
+  for (const uint8_t visible : concurrent_visibility_) {
+    concurrent_visible += visible;
   }
   estimate.concurrent_candidate_count = concurrent_visible;
 
@@ -564,9 +772,9 @@ void PreviewSnapshotBuilder::build_into(
   out.last_update_strategy = SnapshotUpdateStrategy::FullRebuild;
 
   rebuild_split_lanes(out, notes, timing, index, preview_time_ms);
-  rebuild_concurrent_lines(out, concurrent_lines, preview_time_ms);
+  rebuild_concurrent_lines(out, concurrent_lines, preview_time_ms, revision);
   rebuild_notes(out, preview_time_ms, timing, index, out.active_lane_count,
-                concurrent_lines.size());
+                concurrent_lines.size(), revision);
 
   ensure_combo_hits(notes, timing, revision);
   const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);
@@ -591,8 +799,9 @@ void PreviewSnapshotBuilder::update_incremental(
 
   // Split lanes first: active_lane_count affects note layout.
   update_split_lanes_incremental(inout, notes, timing, index, preview_time_ms);
-  update_concurrent_lines_incremental(inout, concurrent_lines, preview_time_ms);
-  update_notes_incremental(inout, preview_time_ms, timing, index, inout.active_lane_count);
+  update_concurrent_lines_incremental(inout, concurrent_lines, preview_time_ms, revision);
+  update_notes_incremental(inout, preview_time_ms, timing, index, inout.active_lane_count,
+                           revision);
 
   ensure_combo_hits(notes, timing, revision);
   const PreviewComboState combo = combo_from_sorted_hits(cached_combo_hits_, preview_time_ms);

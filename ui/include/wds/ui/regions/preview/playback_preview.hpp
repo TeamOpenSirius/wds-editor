@@ -310,6 +310,9 @@ class PlaybackPreviewView {
   void draw_hidden_line(wds::renderer::DrawBatch& batch);
   // Official LaneMask bottom percent (GetNoteVisiblePositionY). z=0 objects cull here.
   float spawn_clip_percent() const noexcept;
+  // Bottom edge of the lane plate (percent 1). Negative SV notes approach the
+  // judgment line from below and stay visible until they are judged.
+  float note_visible_bottom_percent() const noexcept;
   void draw_split_lanes(wds::renderer::DrawBatch& batch,
                         const wds::chart_editor::PreviewSnapshot& snapshot);
   void draw_split_particles(const wds::chart_editor::PreviewSnapshot& snapshot,

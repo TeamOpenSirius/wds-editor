@@ -472,6 +472,11 @@ void ExportVideoJob::encode_next_frame() {
   constexpr int kSubmitAhead = 2;
   if (ffmpeg_->bytesToWrite() == 0 && submitted_frames_ < total_frames_ &&
       submitted_frames_ - written_frames_ < kSubmitAhead) {
+    // One picture pipeline: this is the same ChartPreviewPanel::render() the
+    // realtime preview presents, fed by the same preview snapshot and the same
+    // DrawBatch rules. Never fork a separate export renderer or gate a visual
+    // rule on export here; put it in PlaybackPreviewView or chart-render so the
+    // preview, this MP4 export and --capture-preview all inherit it.
     preview.render();
     ++submitted_frames_;
     if (submitted_frames_ < total_frames_) preview.tick(0);

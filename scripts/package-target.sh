@@ -160,6 +160,82 @@ download() {
   mv "${out}.partial" "$out"
 }
 
+# Vulkan runtime components (x64/vulkan-1.dll) for the Windows stage.
+# LunarG's "latest" alias points at the newest SDK, but a just-released SDK can
+# be missing its runtime-components zip (1.4.363.1 on 2026-11-02 returned 404
+# while 1.4.363.0 still exists), so try latest, the resolved version, that
+# version's x.y.z.0 build and a pinned release before giving up.
+VULKAN_RT_PINNED_VERSIONS=(1.4.363.0 1.4.304.0)
+
+vulkan_rt_extract_dll() {
+  local zip="$1" extract="$2"
+  rm -rf "$extract"
+  mkdir -p "$extract"
+  unzip -q -o "$zip" -x '*.pdb' -d "$extract" 2>/dev/null || return 1
+  find "$extract" -type f -path '*/x64/vulkan-1.dll' | head -1
+}
+
+fetch_vulkan_runtime_components() {
+  local zip="${CACHE_DIR}/vulkan-runtime-components.zip"
+  local extract="${CACHE_DIR}/vulkan-rt-components"
+  mkdir -p "${CACHE_DIR}"
+  local vk_dll
+  vk_dll="$(find "$extract" -type f -path '*/x64/vulkan-1.dll' 2>/dev/null | head -1 || true)"
+  if [[ -n "$vk_dll" ]]; then
+    printf '%s\n' "$vk_dll"
+    return 0
+  fi
+  if [[ -f "$zip" && -s "$zip" ]]; then
+    vk_dll="$(vulkan_rt_extract_dll "$zip" "$extract" || true)"
+    if [[ -n "$vk_dll" ]]; then
+      printf '%s\n' "$vk_dll"
+      return 0
+    fi
+    rm -f "$zip"
+  fi
+
+  local -a urls=()
+  if [[ -n "${WDS_VULKAN_COMPONENTS_URL:-}" ]]; then
+    urls+=("${WDS_VULKAN_COMPONENTS_URL}")
+  else
+    urls+=("https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime-components.zip")
+    local latest=""
+    latest="$(curl -fsSL --retry 2 --retry-delay 1 --max-time 20 \
+      "https://vulkan.lunarg.com/sdk/latest/windows.txt" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      urls+=("https://sdk.lunarg.com/sdk/download/${latest}/windows/vulkan-runtime-components.zip")
+      local patch_zero="${latest%.*}.0"
+      if [[ "$patch_zero" != "$latest" ]]; then
+        urls+=("https://sdk.lunarg.com/sdk/download/${patch_zero}/windows/vulkan-runtime-components.zip")
+      fi
+    fi
+    local pinned
+    for pinned in "${VULKAN_RT_PINNED_VERSIONS[@]}"; do
+      urls+=("https://sdk.lunarg.com/sdk/download/${pinned}/windows/vulkan-runtime-components.zip")
+    done
+  fi
+
+  local url
+  for url in "${urls[@]}"; do
+    echo "Downloading: ${url}" >&2
+    rm -f "${zip}.partial"
+    if ! curl -fL --retry 3 --retry-delay 2 -o "${zip}.partial" "$url"; then
+      echo "warning: Vulkan runtime components not available at ${url}" >&2
+      rm -f "${zip}.partial"
+      continue
+    fi
+    mv "${zip}.partial" "$zip"
+    vk_dll="$(vulkan_rt_extract_dll "$zip" "$extract" || true)"
+    if [[ -n "$vk_dll" ]]; then
+      printf '%s\n' "$vk_dll"
+      return 0
+    fi
+    echo "warning: ${url} has no x64/vulkan-1.dll" >&2
+    rm -f "$zip"
+  done
+  return 1
+}
+
 copy_theme() {
   local stage="$1"
   if [[ ! -f "${ROOT}/ui/assets/theme/Yami.obt" ]]; then
@@ -900,16 +976,10 @@ package_win() {
     esac
   done
 
-  local comp_url="${WDS_VULKAN_COMPONENTS_URL:-https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime-components.zip?Human=true}"
-  local comp_zip="${CACHE_DIR}/vulkan-runtime-components.zip"
-  download "$comp_url" "$comp_zip"
-  local extract="${CACHE_DIR}/vulkan-rt-components"
-  rm -rf "$extract"
-  mkdir -p "$extract"
-  unzip -q -o "$comp_zip" -d "$extract"
-  local vk_dll
-  vk_dll="$(find "$extract" -type f -path '*/x64/vulkan-1.dll' | head -1 || true)"
-  [[ -n "$vk_dll" ]] || die "vulkan-1.dll not found inside runtime components zip"
+  local vk_dll=""
+  if ! vk_dll="$(fetch_vulkan_runtime_components)"; then
+    die "vulkan-1.dll not found (no usable Vulkan runtime components download)"
+  fi
   cp -a "$vk_dll" "${stage}/vulkan-1.dll"
 
   copy_portable_resources "$stage" "$build_dir"
@@ -2536,24 +2606,13 @@ stage_win_debug() {
   fi
   copy_bass_runtime "$stage" win-x86_64
 
-  # Prefer already-extracted / staged vulkan-1.dll; otherwise download components zip.
+  # Prefer already-extracted / staged vulkan-1.dll; otherwise fetch components.
   local vk_dll=""
   if [[ -f "${DIST_DIR}/staging/wds-win-x86_64/vulkan-1.dll" ]]; then
     vk_dll="${DIST_DIR}/staging/wds-win-x86_64/vulkan-1.dll"
-  else
-    vk_dll="$(find "${CACHE_DIR}/vulkan-rt-components" -type f -path '*/x64/vulkan-1.dll' 2>/dev/null | head -1 || true)"
+  elif ! vk_dll="$(fetch_vulkan_runtime_components)"; then
+    die "vulkan-1.dll not found (run a Release package once, or check cache)"
   fi
-  if [[ -z "${vk_dll}" || ! -f "${vk_dll}" ]]; then
-    local comp_url="${WDS_VULKAN_COMPONENTS_URL:-https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime-components.zip?Human=true}"
-    local comp_zip="${CACHE_DIR}/vulkan-runtime-components.zip"
-    download "$comp_url" "$comp_zip"
-    local extract="${CACHE_DIR}/vulkan-rt-components"
-    rm -rf "$extract"
-    mkdir -p "$extract"
-    unzip -q -o "$comp_zip" -d "$extract"
-    vk_dll="$(find "$extract" -type f -path '*/x64/vulkan-1.dll' | head -1 || true)"
-  fi
-  [[ -n "${vk_dll}" && -f "${vk_dll}" ]] || die "vulkan-1.dll not found (run a Release package once, or check cache)"
   cp -a "${vk_dll}" "${stage}/vulkan-1.dll"
 
   echo "Win Debug runtime staged at: ${stage}"

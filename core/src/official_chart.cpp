@@ -390,7 +390,7 @@ SerializeResult OfficialChartFormat::parse_chart(const std::string& text, Notati
       }
       if (!is_valid_scroll_multiplier(end_sec)) {
         return {SerializeError::ParseError,
-                "official chart: HiSpeed multiplier must be non-negative (line " +
+                "official chart: HiSpeed multiplier must be finite (line " +
                     std::to_string(line_no) + ")"};
       }
       chart.scroll_speed_points.push_back(

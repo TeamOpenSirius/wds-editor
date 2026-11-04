@@ -757,7 +757,11 @@ Rect meter_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_
   return {label_x, y + split_band_gap(), label_w, timing_label_h()};
 }
 
-std::string format_speed_label(double multiplier) { return format_bpm_label(multiplier) + "x"; }
+std::string format_speed_label(double multiplier) {
+  // Negative SV is supported; keep -0 from printing as "-0x".
+  if (std::fabs(multiplier) < 1e-9) multiplier = 0.0;
+  return format_bpm_label(multiplier) + "x";
+}
 
 Rect speed_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {
   return bpm_label_bounds(viewport, gutter, tick);

@@ -3933,6 +3933,8 @@ void test_extended_speed_gutter_slider_and_nontail() {
     h.panel.set_extended_editing_active(true);
     CHECK(wds::ui::format_speed_label(1.5) == "1.5x");
     CHECK(wds::ui::format_speed_label(0.0) == "0x");
+    CHECK(wds::ui::format_speed_label(-1.5) == "-1.5x");
+    CHECK(wds::ui::format_speed_label(-0.0) == "0x");
     const auto sg = h.panel.speed_gutter();
     const float y = h.panel.viewport().y_at(480);
     h.panel.on_pointer_move(PointerMoveEvent{{sg.x + sg.w * 0.5f, y}, {}});
@@ -3947,6 +3949,8 @@ void test_extended_speed_gutter_slider_and_nontail() {
     CHECK_EQ(static_cast<int>(h.engine.document().scroll_speed_points().size()), 1);
     CHECK(h.engine.document().compatibility_profile() == ChartCompatibilityProfile::SiriusExtended);
     CHECK(std::fabs(h.engine.document().scroll_speed_points().front().multiplier - 1.5) < 1e-9);
+    CHECK(h.panel.apply_scroll_speed(speed.tick, -1.5));
+    CHECK(std::fabs(h.engine.document().scroll_speed_points().front().multiplier + 1.5) < 1e-9);
     const auto hits = wds::ui::build_speed_label_hits(h.panel.viewport(), h.panel.speed_gutter(),
                                                       h.engine.document().scroll_speed_points());
     CHECK(!hits.empty());

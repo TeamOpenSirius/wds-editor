@@ -24,7 +24,7 @@ SpeedEditDialog::SpeedEditDialog(double multiplier, QWidget* parent) : QDialog(p
 
   multiplier_ = new QDoubleSpinBox(this);
   multiplier_->setDecimals(6);
-  multiplier_->setRange(0.0, 1000.0);
+  multiplier_->setRange(-1000.0, 1000.0);
   multiplier_->setSingleStep(0.1);
   multiplier_->setValue(wds::chart_editor::is_valid_scroll_multiplier(multiplier) ? multiplier
                                                                                   : 1.0);
