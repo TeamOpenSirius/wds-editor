@@ -1,26 +1,36 @@
-// Value inputs must not take keyboard focus when the mouse only manipulates their
-// value: picking from a dropdown menu or stepping the up/down arrows of a spin
-// box has to leave focus on the canvas, or Space (the app-level playback
-// shortcut) is routed to the widget instead of toggling playback. Qt only does
-// that for non-editable QComboBox on macOS; Windows / Linux leave QComboBox and
-// QAbstractSpinBox on WheelFocus.
+// Qt value/input widgets and the app-level shortcuts that share their keys.
 //
-// deliver_with_value_input_click_focus() relaxes ClickFocus for exactly those
-// arrow / stepper presses around QApplication::notify — and only there, so the
-// text area still focuses its embedded QLineEdit for typing.
+// 1) The playback progress bar is a timeline scrubber, so 「反转时间轴滚轮方向」
+//    (invert_scroll_wheel) must flip its wheel direction the same way it flips
+//    the edit playfield. Keyboard stepping is not a wheel gesture and keeps its
+//    normal direction.
+// 2) Value inputs must not take keyboard focus when the mouse only manipulates
+//    their value: picking from a dropdown or stepping the spin-box arrows has
+//    to leave focus on the canvas, or Space (the app-level playback shortcut)
+//    is routed to the widget. Qt only does that for non-editable QComboBox on
+//    macOS; Windows / Linux leave QComboBox and QAbstractSpinBox on WheelFocus.
+//    deliver_with_value_input_click_focus() relaxes ClickFocus for exactly
+//    those arrow / stepper presses around QApplication::notify — and only
+//    there, so the text area still focuses its embedded QLineEdit for typing.
+#include "wds/ui/qt/timeline_seek_slider.hpp"
 #include "wds/ui/qt/value_input_focus.hpp"
+
+#include <wds/interaction/editor_input.hpp>
 
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QWidget>
 
 #include <cstdio>
@@ -37,6 +47,51 @@ void check(bool cond, const char* expr, int line) {
   }
 }
 #define CHECK(expr) check((expr), #expr, __LINE__)
+
+// --- seek slider ---------------------------------------------------------
+
+// Returns the value change caused by one wheel event on the slider.
+int send_wheel(QSlider& slider, int delta_y) {
+  const int before = slider.value();
+  QWheelEvent event(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, delta_y), Qt::NoButton,
+                    Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(&slider, &event);
+  return slider.value() - before;
+}
+
+int send_key(QSlider& slider, int key) {
+  const int before = slider.value();
+  QKeyEvent event(QEvent::KeyPress, key, Qt::NoModifier);
+  QApplication::sendEvent(&slider, &event);
+  return slider.value() - before;
+}
+
+void test_seek_slider_wheel_direction() {
+  wds::ui::TimelineSeekSlider slider(Qt::Horizontal);
+  slider.setRange(0, 100000);
+  slider.setSingleStep(1000);
+  slider.setValue(50000);
+
+  // Default: wheel up scrubs forward, wheel down rewinds.
+  wds::interaction::set_invert_scroll_wheel(false);
+  CHECK(send_wheel(slider, 120) > 0);
+  CHECK(send_wheel(slider, -120) < 0);
+
+  // 「反转时间轴滚轮方向」 flips the progress bar exactly like the edit area.
+  wds::interaction::set_invert_scroll_wheel(true);
+  CHECK(send_wheel(slider, 120) < 0);
+  CHECK(send_wheel(slider, -120) > 0);
+
+  // ... and only the wheel: arrow keys keep their direction while inverted.
+  CHECK(send_key(slider, Qt::Key_Right) > 0);
+  CHECK(send_key(slider, Qt::Key_Left) < 0);
+
+  // The setting is read per event, so turning it back off takes effect at once.
+  wds::interaction::set_invert_scroll_wheel(false);
+  CHECK(send_wheel(slider, 120) > 0);
+}
+
+// --- value inputs --------------------------------------------------------
 
 QPoint combo_sub_center(QComboBox* combo, QStyle::SubControl sub) {
   QStyleOptionComboBox option;
@@ -64,7 +119,8 @@ struct RelaxResult {
   bool delivered = false;
 };
 
-RelaxResult deliver(QWidget* receiver, const QPoint& pos, QEvent::Type type = QEvent::MouseButtonPress) {
+RelaxResult deliver(QWidget* receiver, const QPoint& pos,
+                    QEvent::Type type = QEvent::MouseButtonPress) {
   QMouseEvent event(type, QPointF(pos), receiver->mapToGlobal(pos), Qt::LeftButton, Qt::LeftButton,
                     Qt::NoModifier);
   RelaxResult out;
@@ -75,12 +131,7 @@ RelaxResult deliver(QWidget* receiver, const QPoint& pos, QEvent::Type type = QE
   return out;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-  qputenv("QT_QPA_PLATFORM", "offscreen");
-  QApplication app(argc, argv);
-
+void test_value_input_focus() {
   QWidget window;
   auto* column = new QVBoxLayout(&window);
   auto* combo = new QComboBox(&window);
@@ -102,7 +153,7 @@ int main(int argc, char** argv) {
   column->addWidget(no_buttons);
   column->addWidget(plain);
   window.show();
-  app.processEvents();
+  QApplication::processEvents();
 
   // Windows / Linux defaults: click focus on the value input.
   for (QWidget* input : {static_cast<QWidget*>(combo), static_cast<QWidget*>(editable),
@@ -173,11 +224,19 @@ int main(int argc, char** argv) {
   auto* spin_edit = spin->findChild<QLineEdit*>();
   CHECK(spin_edit != nullptr);
   CHECK((spin_edit->focusPolicy() & Qt::ClickFocus) != 0);
+}
 
+}  // namespace
+
+int main(int argc, char** argv) {
+  qputenv("QT_QPA_PLATFORM", "offscreen");
+  QApplication app(argc, argv);
+  test_seek_slider_wheel_direction();
+  test_value_input_focus();
   if (failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
   }
-  std::printf("value_input_focus tests passed.\n");
+  std::printf("input widget tests passed.\n");
   return 0;
 }
