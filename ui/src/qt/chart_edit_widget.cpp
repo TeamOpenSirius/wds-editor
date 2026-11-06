@@ -311,10 +311,13 @@ void build_split_frame(ChartEditSplitFrame& f, const EditViewport& v,
     it.end_ms = std::max(it.start_ms, note.end_ms(timing));
     it.appear_ms = appear;
     it.fade_start_ms = it.start_ms - appear;
-    it.fade_end_ms = wds::chart_editor::official_split_destroy_ms(it.start_ms, it.end_ms);
+    it.fade_end_ms = wds::chart_editor::official_split_line_end_ms(
+        it.start_ms, it.end_ms, preview.split_line_animation_end_sec);
     it.line_w = it.selected ? kSplitLineHighlightW : kSplitLineW;
 
-    // Lane-guide hide coverage (fade-in start .. destroy), clipped to the view.
+    // Lane-guide hide coverage (fade-in start .. line alpha 0). Matches the fade-out
+    // clip, not the 1.0 s pooled-instance tail: the guides must return exactly when
+    // the split line has finished fading.
     {
       const float lo = std::max(view_ms_lo, static_cast<float>(it.fade_start_ms));
       const float hi = std::min(view_ms_hi, static_cast<float>(it.fade_end_ms));
@@ -979,7 +982,10 @@ void ChartEditWidget::paintEvent(QPaintEvent*) {
     const int64_t appear_ms = std::max<int64_t>(
         1, static_cast<int64_t>(std::llround(
                static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
-    const int64_t disappear_ms = wds::chart_editor::official_split_hide_tail_ms();
+    // Same tail as build_split_frame's fade_end: the fadeOut clip, not the 1.0 s
+    // pooled-instance window. split_max_span_ticks_ still widens the lower bound.
+    const int64_t disappear_ms =
+        wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
     const float view_ms_lo = v.scroll_ms();
     const float view_ms_hi = view_ms_lo + static_cast<float>(v.visible_ms());
     const int32_t fade_lo = wds::chart_editor::milliseconds_to_tick(

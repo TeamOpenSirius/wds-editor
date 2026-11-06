@@ -25,7 +25,8 @@ namespace wds::chart_editor {
 // - Mid #5 on the exact body span → purple split (SoundPurple). JumpScratch
 //   only when the Air encodes a nonzero scratch span; sl=0 stays gimmick 0.
 // - #TIL01 export must be `#TIL01: "` (colon-space) so sus2txt can parse it.
-//   #TIL00 non-negative global HiSpeed is retained as scroll_speed_points.
+//   #TIL00 global HiSpeed (positive or negative) is retained as
+//   scroll_speed_points.
 //   Both use sus2txt's 1920ths-of-the-measure index (not raw ticks).
 // - Legacy #2 Hold channels from older WDS exports import as blue Hold.
 // - Ched pad is always +2 both ways (WDS L ↔ SUS L+2). Export clips each span

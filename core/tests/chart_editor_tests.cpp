@@ -2008,8 +2008,42 @@ void test_official_split_fade_out_is_0_3s_smoothstep_from_expire() {
   CHECK(std::fabs(quarter.split_percent_end - official_split_identity_origin_percent()) <
         1e-4f);
 
+  // Two different durations: the line body is gone at E+0.3 s (bundle
+  // m_StreamedClip key), while the instance lives to the clip stop (E+1.0 s)
+  // for trailing particles and the hidden lane border.
+  PreviewSplitLaneInstance at_line_end;
+  sim.fill_instance(at_line_end, note, timing, expire_ms + 300);
+  CHECK_EQ(at_line_end.split_anim_phase, 2);
+  CHECK(std::fabs(at_line_end.split_line_alpha) < 1e-6f);
+  CHECK(sim.is_split_active(note, timing, expire_ms + 300));
+
   CHECK(sim.is_split_active(note, timing, expire_ms + 999));
   CHECK(!sim.is_split_active(note, timing, expire_ms + 1000));
+}
+
+void test_split_line_window_ends_with_fade_out_not_instance_tail() {
+  // The editor punches its default lane guides out over the split-line window,
+  // which ends when the fadeOut clip has Line1..7 at a=0
+  // (expire + split_line_animation_end_sec). The 1.0 s
+  // official_split_destroy_ms() tail is the pooled controller / trailing
+  // particle lifetime for the preview; using it for the editor left 0.7 s of
+  // hidden guides with no split line.
+  const int64_t start_ms = 10000;
+  const int64_t end_ms = 11000;
+  PreviewConfig cfg;
+  CHECK_EQ(split_fade_sec_to_ms(cfg.split_line_animation_end_sec), 300);
+
+  const int64_t line_end =
+      official_split_line_end_ms(start_ms, end_ms, cfg.split_line_animation_end_sec);
+  CHECK_EQ(line_end, end_ms + 300);
+  CHECK_EQ(official_split_destroy_ms(start_ms, end_ms), end_ms + kOfficialSplitHideDelayMs);
+  CHECK_EQ(official_split_destroy_ms(start_ms, end_ms) - line_end, 700);
+
+  // Config-driven: a custom fade-out keeps the guide outage in step.
+  CHECK_EQ(official_split_line_end_ms(start_ms, end_ms, 0.2f), end_ms + 200);
+  CHECK_EQ(official_split_line_end_ms(start_ms, end_ms, 1.0f), end_ms + 1000);
+  // Degenerate spans still expire at end_ms.
+  CHECK_EQ(official_split_line_end_ms(end_ms, end_ms, 0.3f), end_ms + 300);
 }
 
 void test_official_split_lane_border_alpha_follows_bc69eb89_lane_group() {
@@ -9424,7 +9458,7 @@ void test_negative_scroll_speed_visibility_and_roundtrip() {
   CHECK_EQ(static_cast<int>(doc.scroll_speed_points().size()), 2);
   CHECK(std::fabs(doc.scroll_speed_points().front().multiplier + 1.5) < 1e-9);
 
-  // .wdschart persists the sign; SUS still rejects negative #TIL00 values.
+  // .wdschart persists the sign; SUS #TIL00 round-trips it too.
   const fs::path path = temp_chart_path("negative_sv_roundtrip.wdschart");
   CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(doc.to_notation_chart(), path.string()).error),
            static_cast<int>(SerializeError::Ok));
@@ -9440,8 +9474,15 @@ void test_negative_scroll_speed_visibility_and_roundtrip() {
   NotationChart sus_chart = doc.to_notation_chart();
   sus_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
   sus_chart.scroll_speed_points = {{0, -1.0}};
-  CHECK(SusChartFormat::serialize(sus_chart, SusChartSaveOptions{}, sus_text).error !=
+  CHECK(SusChartFormat::serialize(sus_chart, SusChartSaveOptions{}, sus_text).error ==
         SerializeError::Ok);
+  CHECK(sus_text.find("#TIL00:") != std::string::npos);
+  SusChartLoadResult sus_loaded;
+  CHECK(SusChartFormat::parse(sus_text, sus_loaded).error == SerializeError::Ok);
+  CHECK_EQ(static_cast<int>(sus_loaded.chart.scroll_speed_points.size()), 1);
+  if (!sus_loaded.chart.scroll_speed_points.empty()) {
+    CHECK(std::fabs(sus_loaded.chart.scroll_speed_points[0].multiplier + 1.0) < 1e-9);
+  }
 }
 
 void test_negative_scroll_speed_range_queries() {
@@ -9591,7 +9632,7 @@ void test_negative_scroll_speed_range_keeps_hold_tail_visible() {
   if (body != nullptr) CHECK(body->visual_state == PreviewNoteVisualState::Approaching);
 }
 
-void test_sus_skips_negative_scroll_speed_with_warning() {
+void test_sus_keeps_negative_scroll_speed() {
   const std::string sus =
       "#REQUEST \"ticks_per_beat 480\"\n"
       "#BASEBPM 120\n"
@@ -9602,20 +9643,18 @@ void test_sus_skips_negative_scroll_speed_with_warning() {
   CHECK(result.error == SerializeError::Ok);
   if (result.error != SerializeError::Ok) return;
   CHECK_EQ(static_cast<int>(loaded.chart.notes.size()), 1);
-  CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 3);
-  if (loaded.chart.scroll_speed_points.size() == 3) {
+  CHECK_EQ(static_cast<int>(loaded.chart.scroll_speed_points.size()), 4);
+  if (loaded.chart.scroll_speed_points.size() == 4) {
     CHECK_EQ(loaded.chart.scroll_speed_points[0].tick, 0);
-    CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 240);
-    CHECK_EQ(loaded.chart.scroll_speed_points[2].tick, 360);
+    CHECK_EQ(loaded.chart.scroll_speed_points[1].tick, 120);
+    CHECK_EQ(loaded.chart.scroll_speed_points[2].tick, 240);
+    CHECK_EQ(loaded.chart.scroll_speed_points[3].tick, 360);
     CHECK(std::fabs(loaded.chart.scroll_speed_points[0].multiplier - 1.5) < 1e-9);
-    CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier) < 1e-9);
-    CHECK(std::fabs(loaded.chart.scroll_speed_points[2].multiplier - 2.0) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[1].multiplier + 2.0) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[2].multiplier) < 1e-9);
+    CHECK(std::fabs(loaded.chart.scroll_speed_points[3].multiplier - 2.0) < 1e-9);
   }
-  CHECK_EQ(static_cast<int>(loaded.warnings.size()), 1);
-  if (!loaded.warnings.empty()) {
-    CHECK(loaded.warnings[0].find("1") != std::string::npos);
-    CHECK(loaded.warnings[0].find("SV") != std::string::npos);
-  }
+  CHECK(loaded.warnings.empty());
 }
 
 // Former suppression tombstones / authored markers (scratch_length sentinels INT32_MIN and
@@ -11389,7 +11428,7 @@ int main() {
   test_negative_scroll_speed_range_queries();
   test_negative_scroll_speed_candidate_ranges_match_bruteforce();
   test_negative_scroll_speed_range_keeps_hold_tail_visible();
-  test_sus_skips_negative_scroll_speed_with_warning();
+  test_sus_keeps_negative_scroll_speed();
   test_legacy_eighth_markers_are_dropped_and_recomputed();
   test_supplied_sus_repro_if_available();
   test_auto_note_id_starts_at_zero();
@@ -11499,6 +11538,7 @@ int main() {
   test_official_split_fade_in_visible_hits_screen_before_clip_end();
   test_official_split_fade_in_scale_is_playfield_coverage();
   test_official_split_fade_out_is_0_3s_smoothstep_from_expire();
+  test_split_line_window_ends_with_fade_out_not_instance_tail();
   test_official_split_lane_border_alpha_follows_bc69eb89_lane_group();
   test_split_border_spans_outlive_pooled_instance();
   test_split_color_slot_mirrors_linehight_z180();

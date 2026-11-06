@@ -13,14 +13,26 @@ namespace wds::chart_editor {
 //   fadeIn  — LineHight localScale.y 0→1 over 1.0s, a stays 1
 //             t=0 value.y=0 outSlope.y=2.3040817; t=1 value.y=1 inSlope.y=0
 //             cubic 0.30408168 t^3 − 1.60816336 t^2 + 2.30408168 t
-//   fadeOut — Line1..7 m_Color.a 1→0, keys t=0 / t=0.3 (cubic 74.074 t^3
-//             − 33.333 t^2 + 1), i.e. 1 − smoothstep(t/0.3). LineHight
-//             scale stays (1,1,1). The loose Assets/Resources fadeOut .anim
-//             keys t=1 but is not the clip the runtime controller plays.
+//   fadeOut — pathId −1662439982848538488: Line1..7 m_Color.a 1→0, keys
+//             t=0 / t=0.3 (cubic 74.074066 t^3 − 33.333332 t^2 + 1), i.e.
+//             1 − smoothstep(t/0.3). LineHight scale stays (1,1,1)
+//             (m_ConstantClip). m_DenseClip.m_CurveCount=0 and
+//             m_FloatCurves=[] → the 0.3 s streamed ramp is the only alpha
+//             curve. The loose Assets/Resources SplitEffect_fadeOut_anim.anim
+//             keys t=0→1 (linear) and its controller has 2 layers; the runtime
+//             controller has 1 and plays this bundle clip. N5 live dump:
+//             line a at E+0.25 s = 0.075, not 0.75.
+//   Two durations, never swap them:
+//     line body — a=0 at E + 0.3 s  → official_split_line_end_ms()
+//     instance  — clip m_StopTime=1.0; its OnExit event at t=1.0 returns the
+//                 pooled controller at E + 1.0 s, which keeps trailing
+//                 particles and the hidden BG_LaneBorder alive → see
+//                 official_split_destroy_ms()
 // Scheduler (OpenWDS SplitLaneRuntime.Tick + SplitLaneAssetRuntime):
-// fadeIn at start−1s. OnFadeOut at EndTickCount (expire = EndMs).
-// Destroy(gameObject, 0.5s); lines reach a=0 at +0.3s. No 1500ms
-// minimum-showing pad.
+// fadeIn at start−1s; OnFadeOut on the EndMs tick. The stored
+// E + max(0, 1500−duration) + 0.5 s deadline is an upper cutoff, not a wait
+// (native b.mi skips only when the deadline is already past); there is no
+// 1500 ms minimum-showing pad.
 //
 // That cubic is Unity local Y, not screen Y. The playfield is LaneGroup
 // Rx=60° at z=12 (LaneGroup.prefab), rendered by a perspective camera
@@ -41,6 +53,8 @@ inline constexpr float kOfficialSplitFadeOutSec = 0.3f;
 // the pooled controller (SplitEffectController.OnAnimationExit -> OnCompleted).
 // Native observed msToClipEnd=1000, msToExited=1017 (one-frame quantisation).
 // The old 500 ms came from the pre-pool Destroy(gameObject, 0.5f).
+// This is the instance tail only — the line body is gone at 0.3 s
+// (official_split_line_end_ms()). Never use this constant for the line.
 inline constexpr int64_t kOfficialSplitHideDelayMs = 1000;
 inline constexpr float kOfficialSplitEffectY = -5.0f;
 inline constexpr float kOfficialLineHeightScale = 27.0f;
@@ -263,6 +277,9 @@ inline int64_t official_split_expire_ms(int64_t start_ms, int64_t end_ms) noexce
 // clip stop time is the instance tail; the 0.3 s line-alpha fade (fade_out_sec)
 // is only the m_Color.a key range inside the same clip. Emission itself stops at
 // EndMs (split.should_show); this window keeps instance/trailing particles alive.
+// The fade_out_sec argument is kept for call-site symmetry only and is
+// deliberately ignored: the instance outlives the line. For the line's own
+// window use official_split_line_end_ms().
 inline int64_t official_split_hide_tail_ms(float fade_out_sec = kOfficialSplitFadeOutSec) noexcept {
   (void)fade_out_sec;
   return kOfficialSplitHideDelayMs;
@@ -270,6 +287,21 @@ inline int64_t official_split_hide_tail_ms(float fade_out_sec = kOfficialSplitFa
 
 inline int64_t official_split_destroy_ms(int64_t start_ms, int64_t end_ms) noexcept {
   return official_split_expire_ms(start_ms, end_ms) + kOfficialSplitHideDelayMs;
+}
+
+// Window in which the split line body itself is still drawn. The fadeOut clip
+// keys Line1..7 m_Color.a 1→0 over `fade_out_sec` (PreviewConfig
+// split_line_animation_end_sec; 0.3 s official), so the line reaches a=0 at
+// expire + fade_out_sec.
+//
+// Do not substitute official_split_destroy_ms() here: its 1.0 s tail is the
+// pooled controller / trailing-particle lifetime (and the lane-border restore
+// delay), not the line. The editor punches its default lane guides out over
+// this line window, so a 1.0 s tail would leave 0.7 s of hidden guides with no
+// split line drawn — the fade-out looked shorter than the guides' outage.
+inline int64_t official_split_line_end_ms(int64_t start_ms, int64_t end_ms,
+                                          float fade_out_sec) noexcept {
+  return official_split_expire_ms(start_ms, end_ms) + split_fade_sec_to_ms(fade_out_sec);
 }
 
 }  // namespace wds::chart_editor

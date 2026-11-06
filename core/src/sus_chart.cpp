@@ -404,7 +404,6 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     double multiplier = 1.0;
   };
   std::vector<TilSpeedPoint> til_speeds;
-  size_t skipped_nonpositive_speed_points = 0;
   ChartCompatibilityProfile compatibility_profile = ChartCompatibilityProfile::Official;
   bool saw_compatibility_profile = false;
 
@@ -547,7 +546,8 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
       }
       continue;
     }
-    // Sirius SUS #TIL00 global non-negative SV; #TIL01 split lines.
+    // Sirius SUS #TIL00 global SV (negative = reverse scroll); #TIL01 split
+    // lines.
     if (header_l.rfind("til", 0) == 0) {
       const std::string til_id = header_l.size() >= 5 ? header_l.substr(3, 2) : "";
       if (til_id == "00") {
@@ -575,10 +575,9 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
               !std::isfinite(multiplier)) {
             return {SerializeError::ParseError, "SUS #TIL00 invalid speed entry"};
           }
-          if (multiplier < 0.0) {
-            ++skipped_nonpositive_speed_points;
-            continue;
-          }
+          // Negative SV is legal: it scrolls the lane backwards (same sign
+          // convention as .wdschart scroll_speed_points and the preview's
+          // negative-scroll path). Only non-finite values are rejected above.
           til_speeds.push_back({measure + measure_base, subtick, multiplier});
         }
         continue;
@@ -1367,11 +1366,6 @@ SerializeResult SusChartFormat::parse(const std::string& text, SusChartLoadResul
     }
     chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
   }
-  if (skipped_nonpositive_speed_points > 0) {
-    push_unique_warning(warnings,
-                        "已跳过 " + std::to_string(skipped_nonpositive_speed_points) +
-                            " 个负速 SV 点");
-  }
   if (compatibility_profile == ChartCompatibilityProfile::SiriusExtended) {
     for (const auto& note : chart.notes) {
       if (note.note_type == NoteType::None || is_split_lane_gimmick(note.gimmick_type)) continue;
@@ -1900,14 +1894,14 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
     }
   }
 
-  // Sirius #TIL00 global non-negative SV events.
+  // Sirius #TIL00 global SV events. Negative multipliers are written as-is:
+  // they are the reverse-scroll convention shared with .wdschart.
   if (!chart.scroll_speed_points.empty()) {
     ss << "#TIL00: \"";
     for (size_t i = 0; i < chart.scroll_speed_points.size(); ++i) {
       const auto& point = chart.scroll_speed_points[i];
-      if (point.tick < 0 || point.multiplier < 0.0 ||
-          !is_valid_scroll_multiplier(point.multiplier)) {
-        return {SerializeError::ParseError, "SUS scroll speed must be non-negative"};
+      if (point.tick < 0 || !is_valid_scroll_multiplier(point.multiplier)) {
+        return {SerializeError::ParseError, "SUS scroll speed is not a finite multiplier"};
       }
       if (i) ss << ", ";
       const auto loc = locate_tick(point.tick);

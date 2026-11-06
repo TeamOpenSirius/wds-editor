@@ -57,6 +57,13 @@ bool near4(int32_t id, int32_t slot, float r, float g, float b, float a) {
 
 void test_4txt_official_element_slots() {
   // Official prefab Line index (before world X flip).
+  // 11611–11617 are a single-lit-line family: only one of the 7 element slots
+  // carries this ID's colored element (4 PS); the other six point at the blank
+  // SplitEffectElements11611_1 (_lineColor 0, no PS). The controller enables
+  // lines for index <= splitCount, so at 2 splits only slots 0..2 exist and
+  // 11612 (slot 5) / 11614 (3) / 11615 (4) / 11617 (6) show nothing — official,
+  // not an extraction bug. Official charts only pair the family with gimmick
+  // types 16/36/56 (all split count 6).
   CHECK(near4(11611, 0, 1.0f, 0.25f, 0.25f, 1.0f));
   CHECK(near4(11611, 1, 0.0f, 0.0f, 0.0f, 0.0f));
   CHECK(near4(11612, 5, 0.2123f, 0.3401f, 1.0f, 1.0f));

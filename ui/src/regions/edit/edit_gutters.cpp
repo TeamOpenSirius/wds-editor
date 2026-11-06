@@ -324,8 +324,8 @@ std::vector<SplitCoverageMs> collect_split_coverage_ms(
     range.steady_start_ms = note.start_ms(timing);
     range.steady_end_ms = std::max(range.steady_start_ms, note.end_ms(timing));
     range.fade_start_ms = range.steady_start_ms - appear_ms;
-    range.fade_end_ms =
-        wds::chart_editor::official_split_destroy_ms(range.steady_start_ms, range.steady_end_ms);
+    range.fade_end_ms = wds::chart_editor::official_split_line_end_ms(
+        range.steady_start_ms, range.steady_end_ms, preview.split_line_animation_end_sec);
     range.split_count = wds::chart_editor::get_split_count(note.gimmick_type);
     range.color_id = note.scratch_length;
     out.push_back(range);
@@ -340,13 +340,17 @@ std::vector<std::pair<float, float>> merged_split_hide_ranges_ms(
   std::vector<std::pair<float, float>> covered;
   const int64_t appear_ms =
       wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_start_sec);
+  // Line window tail (fadeOut clip), not the pooled-instance tail.
+  const int64_t fade_out_ms =
+      wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   // Same arithmetic as collect_split_coverage_ms, per note.
   auto add_note = [&](const NotationNote& note) {
     if (!wds::chart_editor::is_split_lane_gimmick(note.gimmick_type)) return;
     const int64_t steady_start = note.start_ms(timing);
     const int64_t steady_end = std::max(steady_start, note.end_ms(timing));
     const int64_t fade_start = steady_start - appear_ms;
-    const int64_t fade_end = wds::chart_editor::official_split_destroy_ms(steady_start, steady_end);
+    const int64_t fade_end = wds::chart_editor::official_split_line_end_ms(
+        steady_start, steady_end, preview.split_line_animation_end_sec);
     const float lo = std::max(view_ms_lo, static_cast<float>(fade_start));
     const float hi = std::min(view_ms_hi, static_cast<float>(fade_end));
     if (hi > lo) covered.emplace_back(lo, hi);
@@ -357,9 +361,8 @@ std::vector<std::pair<float, float>> merged_split_hide_ranges_ms(
   const int64_t win_hi = static_cast<int64_t>(std::ceil(view_ms_hi)) + 2;
   if (doc != nullptr && !doc->index().hold_span_stale()) {
     // A split is relevant iff fade_start < win_hi and fade_end > win_lo, where
-    // fade_end = max(start, end) + hide delay <= start + max span + hide delay.
-    const int64_t reach =
-        doc->index().max_split_span_ms() + wds::chart_editor::kOfficialSplitHideDelayMs;
+    // fade_end = max(start, end) + fadeOut <= start + max span + fadeOut.
+    const int64_t reach = doc->index().max_split_span_ms() + fade_out_ms;
     const int64_t key_lo = win_lo - reach;
     const int64_t key_hi = win_hi + appear_ms;
     thread_local std::vector<int32_t> ids;
@@ -399,7 +402,8 @@ float split_line_opacity_at_ms(const NotationNote& note,
       wds::chart_editor::split_fade_sec_to_ms(preview.split_line_animation_end_sec);
   const int64_t expire_ms = wds::chart_editor::official_split_expire_ms(start_ms, end_ms);
   const int64_t fade_start = start_ms - appear_ms;
-  const int64_t fade_end = wds::chart_editor::official_split_destroy_ms(start_ms, end_ms);
+  const int64_t fade_end = wds::chart_editor::official_split_line_end_ms(
+      start_ms, end_ms, preview.split_line_animation_end_sec);
   if (time_ms < fade_start || time_ms >= fade_end) return 0.0f;
   if (time_ms < start_ms) {
     const float t = std::clamp(
