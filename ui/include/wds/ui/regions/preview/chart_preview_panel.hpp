@@ -1,5 +1,6 @@
 #pragma once
 
+#include "wds/ui/preview_present_policy.hpp"
 #include "wds/ui/regions/preview/playback_preview.hpp"
 
 #include "wds/renderer/preview_visual_config.hpp"
@@ -68,6 +69,25 @@ class ChartPreviewPanel {
   void mark_present_dirty() noexcept { present_dirty_ = true; }
   bool needs_present() const noexcept;
   void note_frame_presented() noexcept;
+  // Paused swapchain fill (SwapchainFillState). While the present gate is
+  // closed and this is true, the host still renders frames, each announced with
+  // request_swapchain_fill_frame() before render(); render() consumes the
+  // request. A fill frame needs no tick(): render() must draw the picture of
+  // the last presented frame. If that picture changed anyway, the frame resets
+  // coverage but still counts toward the fill cap.
+  bool needs_swapchain_fill() const noexcept {
+    return ready_ && !video_export_clock_ && swapchain_fill_pending(swapchain_fill_);
+  }
+  void request_swapchain_fill_frame() noexcept { swapchain_fill_requested_ = true; }
+  struct SwapchainFillReport {
+    bool requested_fill = false;
+    SwapchainFillOutcome outcome = SwapchainFillOutcome::Idle;
+    std::uint32_t covered = 0;
+    std::uint32_t image_count = 0;
+    std::uint32_t fill_presents = 0;
+  };
+  // Facts of the last render() call (reset every call).
+  const SwapchainFillReport& last_swapchain_fill() const noexcept { return last_swapchain_fill_; }
   void render(const wds::renderer::DrawBatch* ui_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_overlay = nullptr,
               const wds::renderer::DrawBatch* modal_chrome = nullptr);
@@ -176,6 +196,8 @@ class ChartPreviewPanel {
   void maybe_inject_preview_stall(bool playing, double chart_sec);
   // Syuriken pulse clock: song/chart microseconds, no present-latency extra.
   int64_t pulse_now_us(bool playing, int64_t timeline_us) const noexcept;
+  void note_swapchain_fill(bool requested_fill, bool fill_frame,
+                           std::uint64_t presents_before) noexcept;
 
   std::string last_init_error_;
   PlaybackPreviewView preview_;
@@ -191,6 +213,9 @@ class ChartPreviewPanel {
   std::uint64_t last_presented_doc_gen_ = ~std::uint64_t{0};
   std::uint64_t last_presented_revision_ = ~std::uint64_t{0};
   int64_t last_presented_timeline_us_ = std::numeric_limits<int64_t>::min();
+  SwapchainFillState swapchain_fill_{};
+  bool swapchain_fill_requested_ = false;
+  SwapchainFillReport last_swapchain_fill_{};
   std::uint64_t music_generation_ = 0;
   wds::renderer::TextureInfo spectrogram_texture_{};
   wds::chart_editor::ChartEditorEngine engine_;
@@ -233,7 +258,8 @@ class ChartPreviewPanel {
   int panel_y_ = 0;
   int panel_h_ = 0;
   // Last framebuffer size passed to resize_framebuffer(). resize_preview_viewport
-  // runs every frame, so this is what makes the MEMSTEP row event-driven.
+  // runs every frame, so this is what makes the MEMSTEP row and the
+  // present-dirty mark event-driven.
   int last_resize_fb_w_ = 0;
   int last_resize_fb_h_ = 0;
   int content_x_ = 0;

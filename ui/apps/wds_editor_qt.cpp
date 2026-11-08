@@ -485,6 +485,27 @@ class FrameDiagLogger {
     path_diag_on_ = true;
   }
 
+  // Paused swapchain fill re-presents an unchanged picture; it stays out of
+  // every frame statistic. Only the fill outcome is written.
+  void note_swapchain_fill_frame(wds::ui::UiManager& editor) {
+    if (!active_) return;
+    wds::common::perf::discard_frame();
+    const auto& fill = editor.chart_preview().last_swapchain_fill();
+    if (fill.outcome != wds::ui::SwapchainFillOutcome::Covered &&
+        fill.outcome != wds::ui::SwapchainFillOutcome::CapReached) {
+      return;
+    }
+    const auto& split = editor.chart_preview().preview().last_split_frame_diag();
+    char buf[192];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "SWAPFILL outcome=%s covered=%u/%u presents=%u chart_sec=%.3f splits=%d verts_memo=%d\n",
+        fill.outcome == wds::ui::SwapchainFillOutcome::Covered ? "done" : "cap", fill.covered,
+        fill.image_count, fill.fill_presents, last_chart_sec_, split.splits, split.verts_memo);
+    if (n > 0) pending_.append(buf, static_cast<std::size_t>(n));
+    flush_file();
+  }
+
   void finish_frame(wds::ui::UiManager& editor, const wds::ui::ChartEditWidget& widget,
                     int64_t wall_us, int64_t delta_us, int64_t tick_us, int64_t render_us) {
     if (!active_) return;
@@ -1827,6 +1848,8 @@ int main(int argc, char** argv) {
   preview_window->set_idle_present_gate([&editor] {
     return !editor.chart_preview().ready() || editor.chart_preview().needs_present();
   });
+  preview_window->set_idle_fill_gate(
+      [&editor] { return editor.chart_preview().needs_swapchain_fill(); });
   preview_window->set_idle_wakeup_interval_us(kPausedSyncIntervalUs);
   window.set_skins_dir(wds::ui::resolve_skins_dir(argv[0]));
   window.set_icons_dir(wds::ui::resolve_icons_dir(argv[0]));
@@ -2077,6 +2100,23 @@ int main(int argc, char** argv) {
                                          float delta, int logical_w, int logical_h, int fb_w,
                                          int fb_h,
                                          const std::vector<wds::interaction::InputEvent>& events) mutable {
+    if (preview_window->fill_frame() && editor.chart_preview().needs_swapchain_fill()) {
+      // Re-present the last picture only. No resize / tick / editor update and
+      // no frame budget or frame-diag bookkeeping: those advance idle precommit,
+      // the split-effect frame budget and the diag inter-frame state.
+      editor.chart_preview().request_swapchain_fill_frame();
+      editor.chart_preview().render();
+      editor.chart_preview().note_frame_presented();
+      preview_window->mark_presented();
+      if (editor.chart_preview().preview().wants_follow_up_present()) {
+        preview_window->request_frame();
+      }
+      editor.chart_preview().flush_retired_font_textures();
+#if WDS_DIAG_ENABLED
+      if (frame_diag.active()) frame_diag.note_swapchain_fill_frame(editor);
+#endif  // WDS_DIAG_ENABLED
+      return;
+    }
 #if WDS_DIAG_ENABLED
     const bool diag = frame_diag.active();
     int64_t wall_us = -1;
@@ -2824,6 +2864,7 @@ int main(int argc, char** argv) {
   preview_window->set_frame_callback({});
   preview_window->set_idle_throttle_bypass({});
   preview_window->set_idle_present_gate({});
+  preview_window->set_idle_fill_gate({});
   preview_window->set_surface_teardown({});
   edit_timer->stop();
   window.detach_ui_manager();

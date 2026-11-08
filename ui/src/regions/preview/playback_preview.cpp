@@ -1937,7 +1937,7 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   split_frame_diag_.total_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::steady_clock::now() - render_t0)
                                   .count();
-  if (frame_time) {
+  if (frame_time && !diag_fill_frame_) {
     publish_prevframe_diag(playing_now, known_verts, stage_stage_us, stage_notes_us,
                            stage_merge_us, stage_hud_us, stage_draw_us, stage_after_us);
     // MEMSTEP milestones sampled after a completed frame so the retained

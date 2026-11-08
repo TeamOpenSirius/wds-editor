@@ -187,6 +187,10 @@ add_executable(wds_ui_logic_tests
 target_link_libraries(wds_ui_logic_tests PRIVATE wds::core wds::interaction)
 target_include_directories(wds_ui_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+add_executable(wds_swapchain_fill_tests tests/swapchain_fill_tests.cpp)
+target_include_directories(wds_swapchain_fill_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(wds_swapchain_fill_tests PRIVATE cxx_std_17)
+
 add_executable(wds_note_draw_order_tests tests/note_draw_order_tests.cpp)
 target_link_libraries(wds_note_draw_order_tests PRIVATE wds::chart_render wds::core)
 
@@ -335,6 +339,7 @@ if(NOT CMAKE_CROSSCOMPILING)
       -s "${CMAKE_SOURCE_DIR}/stem-worker" -p "test_*.py")
   endif()
   add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
+  add_test(NAME wds_swapchain_fill_tests COMMAND wds_swapchain_fill_tests)
   add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
   add_test(NAME wds_ui_config_tests COMMAND wds_ui_config_tests)
   add_test(NAME wds_curve_templates_dialog_tests COMMAND wds_curve_templates_dialog_tests)

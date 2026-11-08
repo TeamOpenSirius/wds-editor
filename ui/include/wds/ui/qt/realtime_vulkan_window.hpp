@@ -38,6 +38,14 @@ class RealtimeVulkanWindow final : public QWindow {
   void set_idle_present_gate(std::function<bool()> ready) {
     idle_present_gate_ = std::move(ready);
   }
+  // Consulted only when the present gate is closed: while this returns true the
+  // unchanged picture is presented again so every swapchain image holds it
+  // before the preview goes idle. Fill frames start one idle interval after the
+  // last content frame, then run back to back; they never move the content
+  // frame clock. fill_frame() tells the frame callback that the current frame
+  // is such a re-present.
+  void set_idle_fill_gate(std::function<bool()> pending) { idle_fill_gate_ = std::move(pending); }
+  bool fill_frame() const noexcept { return fill_frame_; }
   // How often the paused present gate is re-checked when it says "unchanged".
   // This is a poll interval only: a frame is rendered when the gate later
   // reports a change, not on every wakeup.
@@ -75,6 +83,8 @@ class RealtimeVulkanWindow final : public QWindow {
   // Start the paused-gate/settle poll (when the window is hidden the poll keeps
   // checking exposure instead of letting the frame loop die).
   void arm_idle_wakeup();
+  int64_t fill_wait_us() const;
+  void arm_fill_wakeup(int64_t wait_us);
   // Park the frame loop while the window is not exposed and remember that the
   // swapchain may need one forced frame when it comes back (Windows minimize).
   void hold_frame_unexposed();
@@ -87,6 +97,7 @@ class RealtimeVulkanWindow final : public QWindow {
   std::function<void()> surface_teardown_;
   std::function<bool()> idle_throttle_bypass_;
   std::function<bool()> idle_present_gate_;
+  std::function<bool()> idle_fill_gate_;
   std::chrono::steady_clock::time_point last_frame_{};
   int64_t idle_frame_interval_us_ = 0;
   int64_t idle_wakeup_interval_us_ = 33333;
@@ -103,6 +114,7 @@ class RealtimeVulkanWindow final : public QWindow {
   bool exposure_held_ = false;
   bool presented_ = false;
   bool force_frame_ = false;
+  bool fill_frame_ = false;
   bool frame_hold_logged_ = false;
   bool surface_dead_ = false;
 };

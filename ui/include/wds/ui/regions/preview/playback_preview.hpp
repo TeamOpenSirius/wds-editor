@@ -298,6 +298,9 @@ class PlaybackPreviewView {
   // screen), so the host must present one more frame or the preview stays black
   // until something else happens to trigger a draw.
   bool wants_follow_up_present() const noexcept { return follow_up_present_; }
+  // The next render() only re-presents an unchanged picture (swapchain fill);
+  // it is left out of the PREVFRAME rows.
+  void set_diag_fill_frame(bool fill) noexcept { diag_fill_frame_ = fill; }
   wds::renderer::TextureCache& textures() noexcept { return textures_; }
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
@@ -412,6 +415,7 @@ class PlaybackPreviewView {
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
   bool ready_ = false;
   bool follow_up_present_ = false;
+  bool diag_fill_frame_ = false;
   std::uint64_t last_rendered_swapchain_serial_ = 0;
   int follow_up_streak_ = 0;
   bool mute_hold_body_sfx_ = false;

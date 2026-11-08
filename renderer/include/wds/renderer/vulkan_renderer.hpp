@@ -954,6 +954,19 @@ class VulkanRenderer {
   // back VK_SUBOPTIMAL_KHR and shows nothing), so a caller that sees the serial
   // move during a frame must draw one more frame to put the picture on screen.
   std::uint64_t swapchain_serial() const noexcept;
+  // Which image the last successful vkQueuePresentKHR handed over, and the
+  // swapchain it belonged to. `present_count` only moves on a successful
+  // present (export frames and failed presents leave it alone), so a caller
+  // can compare it across one draw to learn whether that draw presented.
+  struct PresentRecord {
+    std::uint64_t present_count = 0;
+    std::uint64_t present_serial = 0;
+    uint32_t image_index = UINT32_MAX;
+    // Current swapchain (may be newer than present_serial after a rebuild).
+    std::uint64_t swapchain_serial = 0;
+    uint32_t image_count = 0;
+  };
+  PresentRecord last_present_record() const noexcept;
   uint32_t physical_vendor_id() const noexcept { return device_vendor_id_; }
 
   // Last presented swapchain image → tightly packed RGBA8 (top-left origin).

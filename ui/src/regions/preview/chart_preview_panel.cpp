@@ -359,16 +359,21 @@ void ChartPreviewPanel::resize_framebuffer(int width, int height) {
   // frame, so this is a hot entry, not a rare user resize. Only take a clock
   // and emit a MEMSTEP row when the size actually changed; otherwise the
   // diagnostics themselves would sample task_info + walk every batch per frame.
-#if WDS_DIAG_ENABLED
   const bool size_changed = width != last_resize_fb_w_ || height != last_resize_fb_h_;
   last_resize_fb_w_ = width;
   last_resize_fb_h_ = height;
+#if WDS_DIAG_ENABLED
   const bool step_diag = size_changed && wds::common::perf::enabled();
   const auto resize_t0 =
       step_diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 #endif  // WDS_DIAG_ENABLED
   preview_.resize(width, height);
-  mark_present_dirty();
+  // Called every frame: only a real size change may mark the picture dirty. A
+  // swapchain rebuilt at the same size is covered by the follow-up present and
+  // the swapchain fill.
+  if (size_changed) {
+    mark_present_dirty();
+  }
   // MEMSTEP: swapchain + stage-geometry rebuild also clears lane_geom_pool_
   // (invalidate_lane_geom_cache), so this row is the retained-buffer delta
   // for a viewport change. No clock read when diagnostics are off.
@@ -757,6 +762,14 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   if (!ready_) {
     return;
   }
+  // A requested fill whose picture changed after the gate said "unchanged"
+  // resets coverage instead of adding to it.
+  const bool requested_fill = swapchain_fill_requested_;
+  const bool fill_frame = requested_fill && !needs_present();
+  swapchain_fill_requested_ = false;
+  const bool track_fill = !transport_.playing() && !transport_.intends_playing();
+  const std::uint64_t presents_before =
+      track_fill ? preview_.vulkan().last_present_record().present_count : 0;
   const uint64_t chart_revision = engine_.document().content_generation();
   if (scroll_geometry_revision_ != chart_revision) {
     preview_.geometry().set_scroll_speed_points(engine_.document().scroll_speed_points(),
@@ -784,11 +797,18 @@ void ChartPreviewPanel::render(const wds::renderer::DrawBatch* ui_overlay,
   last_pulse_now_us_ = pulse_now_us(playing, transport_us);
   maybe_inject_preview_stall(playing, static_cast<double>(last_displayed_now_us_) / 1'000'000.0);
   const auto present_t0 = std::chrono::steady_clock::now();
+  preview_.set_diag_fill_frame(requested_fill);
   preview_.render(snap, ui_overlay, solid_texture_.id, modal_overlay, modal_chrome, lead_us,
                   last_pulse_now_us_);
   last_present_latency_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now() - present_t0)
                                  .count();
+  if (track_fill) {
+    note_swapchain_fill(requested_fill, fill_frame, presents_before);
+  } else {
+    swapchain_fill_invalidate(swapchain_fill_);
+    last_swapchain_fill_ = {};
+  }
   if (transport_.audio().has_music()) {
     last_bass_after_present_us_ = transport_.audio().position().count();
   } else {
@@ -830,6 +850,31 @@ bool ChartPreviewPanel::needs_present() const noexcept {
       snap.timeline_us != 0 ? snap.timeline_us
                             : wds::common::ms_to_us(snap.timeline_ms).count();
   return us != last_presented_timeline_us_;
+}
+
+void ChartPreviewPanel::note_swapchain_fill(bool requested_fill, bool fill_frame,
+                                            std::uint64_t presents_before) noexcept {
+  const auto rec = preview_.vulkan().last_present_record();
+  SwapchainFrameFacts facts;
+  facts.requested_fill = requested_fill;
+  facts.fill_frame = fill_frame;
+  facts.presented = rec.present_count != presents_before;
+  facts.present_serial = rec.present_serial;
+  facts.image_index = rec.image_index;
+  facts.swapchain_serial = rec.swapchain_serial;
+  facts.image_count = rec.image_count;
+  const SwapchainFillOutcome outcome = note_swapchain_frame(swapchain_fill_, facts);
+  last_swapchain_fill_.requested_fill = requested_fill;
+  last_swapchain_fill_.outcome = outcome;
+  last_swapchain_fill_.covered = swapchain_fill_covered_count(swapchain_fill_);
+  last_swapchain_fill_.image_count = swapchain_fill_.image_count;
+  last_swapchain_fill_.fill_presents = swapchain_fill_.fill_presents;
+  if (outcome == SwapchainFillOutcome::Covered || outcome == SwapchainFillOutcome::CapReached) {
+    WDS_LOG("preview swapchain fill %s covered=%u/%u presents=%u\n",
+            outcome == SwapchainFillOutcome::Covered ? "done" : "cap",
+            last_swapchain_fill_.covered, last_swapchain_fill_.image_count,
+            last_swapchain_fill_.fill_presents);
+  }
 }
 
 void ChartPreviewPanel::note_frame_presented() noexcept {

@@ -41,6 +41,9 @@ class Scope {
 };
 
 void end_frame() noexcept;
+// Drop everything accumulated since the last end_frame() without recording a
+// frame (a frame that must not count in the window statistics).
+void discard_frame() noexcept;
 std::string window_report();
 int window_frames() noexcept;
 

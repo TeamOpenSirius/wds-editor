@@ -755,6 +755,10 @@ struct VulkanRenderer::Impl {
   uint64_t swapchain_serial = 0;
   uint32_t last_presented_image = UINT32_MAX;
   bool last_present_ok = false;
+  // See VulkanRenderer::last_present_record().
+  uint64_t successful_presents = 0;
+  uint64_t last_present_serial = 0;
+  uint32_t last_present_record_image = UINT32_MAX;
 
   bool export_active = false;
   VkExtent2D export_extent{};
@@ -7839,6 +7843,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     impl_->draw_stop_reason = nullptr;
     impl_->last_presented_image = image_index;
     impl_->last_present_ok = true;
+    ++impl_->successful_presents;
+    impl_->last_present_serial = impl_->swapchain_serial;
+    impl_->last_present_record_image = image_index;
   } else {
     impl_->note_draw_stopped("present");
     impl_->last_present_ok = false;
@@ -8022,6 +8029,19 @@ bool VulkanRenderer::readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& ou
 
 std::uint64_t VulkanRenderer::swapchain_serial() const noexcept {
   return impl_ != nullptr ? impl_->swapchain_serial : 0;
+}
+
+VulkanRenderer::PresentRecord VulkanRenderer::last_present_record() const noexcept {
+  PresentRecord out{};
+  if (impl_ == nullptr) return out;
+  out.present_count = impl_->successful_presents;
+  out.present_serial = impl_->last_present_serial;
+  out.image_index = impl_->last_present_record_image;
+  out.swapchain_serial = impl_->swapchain_serial;
+  out.image_count = impl_->swapchain != VK_NULL_HANDLE
+                        ? static_cast<uint32_t>(impl_->swapchain_images.size())
+                        : 0u;
+  return out;
 }
 
 void VulkanRenderer::sync_reported_size() noexcept {
