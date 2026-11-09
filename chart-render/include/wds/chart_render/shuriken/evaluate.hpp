@@ -129,4 +129,10 @@ void set_split_noise_neon_for_tests(int on) noexcept;
 // Drop carry + pose-cache epoch so an A/B collect cannot resume the other mode.
 void reset_split_eval_persistence_for_tests() noexcept;
 
+// Print WDS_INTEGRATE_BATCH_VERIFY (when VERIFY=1) / PACK+HITS (when
+// compiled with WDS_INTEGRATE_BATCH_COUNTERS=1). Golden fork children
+// _exit and skip atexit; call this before _exit. Default Release is a
+// no-op: no atexit, no WDS_INTEGRATE_* lines.
+void flush_integrate_batch_stats() noexcept;
+
 }  // namespace wds::chart_render::shuriken

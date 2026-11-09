@@ -595,6 +595,19 @@ void split_eval_cache_precommit(std::size_t slots_per_shard,
   }
 }
 
+bool split_eval_cache_has_checkpoints() noexcept {
+  const Cache& c = cache();
+  if (!c.enabled) {
+    return false;
+  }
+  for (int i = 0; i < kShards; ++i) {
+    if (c.shards[i].checkpoints.load(std::memory_order_relaxed) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 SplitEvalCacheStats split_eval_cache_stats() noexcept {
   const Cache& c = cache();
   SplitEvalCacheStats s;

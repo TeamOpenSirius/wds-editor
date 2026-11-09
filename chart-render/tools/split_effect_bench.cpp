@@ -1232,6 +1232,7 @@ void collect_single_group_samples(const GoldenGroupSpec& spec, int32_t scenario_
   }
   std::fclose(wf);
   close(write_fd);
+  wds::chart_render::shuriken::flush_integrate_batch_stats();
   _exit(0);
 }
 
@@ -1487,6 +1488,7 @@ struct GoldenRunConfig {
                wds::chart_render::split_effect_max_eval_slices(),
                wds::chart_render::split_effect_last_eval_sliced_tasks());
   std::fclose(out);
+  wds::chart_render::shuriken::flush_integrate_batch_stats();
   _exit(0);
 }
 

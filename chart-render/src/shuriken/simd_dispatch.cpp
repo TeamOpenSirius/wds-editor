@@ -7,6 +7,7 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(_MSC_VER)
+#include <immintrin.h>
 #include <intrin.h>
 #else
 #include <cpuid.h>
@@ -23,6 +24,7 @@ enum class Forced : int {
   Neon = 2,
   Sse42 = 3,
   Avx2 = 4,
+  Avx2Unchecked = 5,
 };
 
 std::atomic<Forced> g_force{Forced::Unset};
@@ -51,6 +53,12 @@ Forced parse_name(const char* raw) noexcept {
   }
   if (env_eq(raw, "avx2")) {
     return Forced::Avx2;
+  }
+  // Diagnostic only: skip CPUID / xgetbv and take the Avx2 kernel.
+  // SIGILL on CPUs that cannot execute AVX2+FMA. Rosetta reports no
+  // AVX2/FMA in CPUID but still executes the kernel (parent measured).
+  if (env_eq(raw, "avx2-unchecked")) {
+    return Forced::Avx2Unchecked;
   }
   return Forced::Auto;
 }
@@ -95,12 +103,25 @@ bool x86_has_fma3() noexcept {
   return (c & (1u << 12)) != 0;
 }
 
+bool x86_os_saves_ymm() noexcept {
+  // xgetbv(0): XCR0 bit1 XMM | bit2 YMM. CPUID AVX is not enough if the OS
+  // does not restore YMM (Intel SDM / 2022.3 SIMD dispatch analogue).
+  // Byte encoding so MinGW gas without an xgetbv mnemonic still assembles.
+#if defined(_MSC_VER)
+  return (_xgetbv(0) & 6ull) == 6ull;
+#else
+  unsigned eax = 0, edx = 0;
+  __asm__ volatile(".byte 0x0f, 0x01, 0xd0" : "=a"(eax), "=d"(edx) : "c"(0));
+  return (eax & 6u) == 6u;
+#endif
+}
+
 bool x86_has_avx2() noexcept {
   unsigned a = 0, b = 0, c = 0, d = 0;
   x86_cpuid(1, 0, &a, &b, &c, &d);
   const bool osxsave = (c & (1u << 27)) != 0;
   const bool avx = (c & (1u << 28)) != 0;
-  if (!osxsave || !avx) {
+  if (!osxsave || !avx || !x86_os_saves_ymm()) {
     return false;
   }
   x86_cpuid(7, 0, &a, &b, &c, &d);
@@ -151,6 +172,13 @@ SplitSimdPath apply_force(Forced f) noexcept {
       return SplitSimdPath::Avx2;
     }
     return x86_has_sse42() ? SplitSimdPath::Sse42 : SplitSimdPath::Scalar;
+#else
+    return pick_auto();
+#endif
+  }
+  if (f == Forced::Avx2Unchecked) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return SplitSimdPath::Avx2;
 #else
     return pick_auto();
 #endif

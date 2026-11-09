@@ -35,6 +35,9 @@ bool split_eval_cache_precommit_one_shard(int shard, std::size_t slots_per_shard
 int split_eval_cache_shard_count() noexcept;
 void split_eval_precommit_tls() noexcept;
 SplitEvalCacheStats split_eval_cache_stats() noexcept;
+// True if any shard holds a pose checkpoint. Snapshotted once per collect
+// so 4-wide can skip next==0 packing when maybe_restore would unalign lanes.
+bool split_eval_cache_has_checkpoints() noexcept;
 
 // Nearest checkpoint with next_step <= k_target. Returns false if none.
 bool split_eval_cache_lookup(const ParticleCacheKey& key, int k_target,

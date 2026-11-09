@@ -1,6 +1,7 @@
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <wds/chart_render/shuriken/minmax.hpp>
 
+#include "integrate_batch.hpp"
 #include "internal.hpp"
 #include "mix3_lazy.hpp"
 #include "split_collect_pool.hpp"
@@ -1103,6 +1104,7 @@ struct SystemEvalHashEntry {
 thread_local SystemEvalHashEntry g_tls_sys_hash_cache[kSysHashCacheSlots];
 std::atomic<uint32_t> g_sys_hash_frame_token{0};
 std::atomic<uint32_t> g_sys_hash_config_gen{0};
+std::atomic<bool> g_pose_cache_live{false};
 
 inline std::size_t sys_hash_slot(const SplitEffectParticle* p, int32_t color_id) noexcept {
   const std::uintptr_t u = reinterpret_cast<std::uintptr_t>(p);
@@ -1238,6 +1240,49 @@ void split_eval_precommit_tls() noexcept {
   precommit_alive_cap_tls();
 }
 
+namespace {
+
+int integrate_prefix_steps(float pose_age, int next_step) noexcept {
+  const float hz = integration_candidate_hz();
+  const float t_end = std::max(integration_candidate_age(pose_age), 0.0f);
+  const int k = t_end <= 0.0f ? 0 : static_cast<int>(std::floor(t_end * hz + 1e-4f));
+  int next = next_step < 0 ? 0 : next_step;
+  if (k < next) {
+    next = 0;
+  }
+  return k > next ? k - next : 0;
+}
+
+int job_next_step(const PrimaryEvalJob& job, PersistClaimSession& persist) noexcept {
+  // bind_hot wins over the job.grid copy; aligning on grid then switching to
+  // persist SoA made play 4-wide look aligned and then fail NEON (neon=0).
+  if (job.persist_i >= 0) {
+    if (const IntegratorHot* hot = persist_claimed_hot(persist, job.persist_i)) {
+      return hot->next_step;
+    }
+  }
+  if (job.has_grid != 0) {
+    return job.grid.next_step;
+  }
+  return 0;
+}
+
+int job_prefix_steps(const PrimaryEvalJob& job, PersistClaimSession& persist) noexcept {
+  return integrate_prefix_steps(job.pose_age, job_next_step(job, persist));
+}
+
+bool job_next_steps_aligned(const PrimaryEvalJob* jobs, int j, PersistClaimSession& persist) noexcept {
+  const int n0 = job_next_step(jobs[static_cast<size_t>(j)], persist);
+  for (int b = 1; b < 4; ++b) {
+    if (job_next_step(jobs[static_cast<size_t>(j + b)], persist) != n0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 void fill_live(const ParticleState& st, float age, bool want_trail, SplitEffectLiveParticle& out) {
   PoseIntegrator integ(st);
   fill_live(integ, st, age, want_trail, out, true, -1.0f);
@@ -1259,9 +1304,79 @@ void fill_live(PoseIntegrator& integ, const ParticleState& st, float age, bool w
   fill_live_after_pose(integ, st, age, want_trail, out, want_fd, trail_clock);
 }
 
+void fill_live_n(PoseIntegrator** xs, const ParticleState** sts, const float* ages, bool want_trail,
+                 SplitEffectLiveParticle** outs, const bool* want_fds, const float* trail_clocks,
+                 int n) {
+  if (xs == nullptr || sts == nullptr || ages == nullptr || outs == nullptr || n <= 0) {
+    return;
+  }
+  if (n == 4 && integrate_batch_enabled() && sts[0]->p != nullptr && sts[1]->p != nullptr &&
+      sts[2]->p != nullptr && sts[3]->p != nullptr && xs[0]->can_batch_mask0() &&
+      xs[1]->can_batch_mask0() && xs[2]->can_batch_mask0() && xs[3]->can_batch_mask0()) {
+    bool any_log = false;
+    int prefix = integrate_prefix_steps(ages[0], xs[0]->grid_next_step());
+    for (int i = 0; i < 4; ++i) {
+      const int pi = integrate_prefix_steps(ages[i], xs[i]->grid_next_step());
+      if (pi < prefix) {
+        prefix = pi;
+      }
+      set_rol_cache_key(nullptr);
+      if (want_trail && sts[i]->p != nullptr && (sts[i]->p->flags & kSplitEffectFlagTrails) != 0 &&
+          sts[i]->p->trail_mode != 1 && !split_particle_trail_path_straight(*sts[i])) {
+        any_log = true;
+        break;
+      }
+    }
+    bool aligned = true;
+    const int n0 = xs[0]->grid_next_step();
+    for (int i = 1; i < 4; ++i) {
+      if (xs[i]->grid_next_step() != n0) {
+        aligned = false;
+        break;
+      }
+    }
+    if (any_log || !aligned || prefix < kIntegrateBatchMinPrefix) {
+      integrate_batch_note_fallback();
+    } else {
+      float wx[4], wy[4], wz[4];
+      IntegrationVelocityTrace traces[4];
+      {
+        SplitWallScope wall_int(SplitWallSec::Integrate);
+        WDS_PERF_SCOPE("shuriken.integrate");
+        SplitDiagScope diag_int(SplitDiagPhase::Integrate);
+        PoseIntegrator::sample_batch(xs, ages, wx, wy, wz, traces, 4);
+        integrate_batch_note_hit(sts[0]->color_id);
+      }
+      for (int i = 0; i < 4; ++i) {
+        outs[i]->world_x = wx[i];
+        outs[i]->main_y = wy[i];
+        outs[i]->z = wz[i];
+        fill_live_after_pose(*xs[i], *sts[i], ages[i], want_trail, *outs[i],
+                             want_fds != nullptr ? want_fds[i] : true,
+                             trail_clocks != nullptr ? trail_clocks[i] : -1.0f, traces[i]);
+      }
+      return;
+    }
+  } else if (n == 4 && integrate_batch_enabled()) {
+    integrate_batch_note_fallback();
+  }
+  for (int i = 0; i < n; ++i) {
+    fill_live(*xs[i], *sts[i], ages[i], want_trail, *outs[i],
+              want_fds != nullptr ? want_fds[i] : true,
+              trail_clocks != nullptr ? trail_clocks[i] : -1.0f);
+  }
+}
+
 void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float age,
                           bool want_trail, SplitEffectLiveParticle& out, bool want_fd,
                           float trail_clock) {
+  fill_live_after_pose(integ, st, age, want_trail, out, want_fd, trail_clock,
+                       last_integration_velocity());
+}
+
+void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float age,
+                          bool want_trail, SplitEffectLiveParticle& out, bool want_fd,
+                          float trail_clock, const IntegrationVelocityTrace& vel) {
   const SplitEffectParticle& p = *st.p;
   float billboard_sprite_w_scale = 1.0f;
   set_rol_cache_key(nullptr);
@@ -1273,7 +1388,8 @@ void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float 
   // live dump v1 (write-intents/physics.md): copy the last integrate_pose
   // observer terms onto live. Dump reads these; do not pair by pointer
   // catalog_index. Not a 2022.3 equation. Does not change the pose.
-  const IntegrationVelocityTrace& vel = last_integration_velocity();
+  // Scalar reads TLS last_integration_velocity(). 4-wide sample_batch
+  // writes per-lane traces so fill_live_n does not see lane 3 on all four.
   out.stored_vx = vel.stored_x;
   out.stored_vy = vel.stored_y;
   out.stored_vz = vel.stored_z;
@@ -2064,6 +2180,11 @@ bool try_primary_carry(const EmitContext& ctx, const SplitEffectParticle& p,
 
 void begin_eval_system_hash_frame() noexcept {
   g_sys_hash_frame_token.fetch_add(1, std::memory_order_relaxed);
+  if (integrate_batch_enabled()) {
+    g_pose_cache_live.store(split_eval_cache_has_checkpoints(), std::memory_order_relaxed);
+  } else {
+    g_pose_cache_live.store(false, std::memory_order_relaxed);
+  }
 }
 
 void bump_eval_system_hash_config_generation() noexcept {
@@ -2324,7 +2445,99 @@ void evaluate_realize_jobs_range(const SplitEffectParticle& p, const EmitContext
   const int lo = job_lo < 0 ? 0 : job_lo;
   const int hi = job_hi < n ? job_hi : n;
   WDS_PERF_SCOPE("shuriken.evaluate.realize");
+  const bool batch_possible =
+      integrate_batch_enabled() && PoseIntegrator::particle_can_batch_mask0(p) &&
+      ((!g_pose_cache_live.load(std::memory_order_relaxed) && !sess.resume_persist) ||
+       integrate_batch_verify());
   for (int j = lo; j < hi; ++j) {
+    if (batch_possible && j + 4 <= hi) {
+      bool ok4 = true;
+      int slots[4];
+      for (int b = 0; b < 4; ++b) {
+        PrimaryEvalJob& job = jobs[static_cast<size_t>(j + b)];
+        if (job.write_slot == 0xffffffffu || job.do_fill == 0) {
+          ok4 = false;
+          break;
+        }
+        slots[b] = static_cast<int>(job.write_slot);
+        if (slots[b] < 0 || slots[b] >= sess.written) {
+          ok4 = false;
+          break;
+        }
+      }
+      if (ok4) {
+        int prefix = job_prefix_steps(jobs[static_cast<size_t>(j)], sess.persist);
+        for (int b = 1; b < 4; ++b) {
+          const int pb = job_prefix_steps(jobs[static_cast<size_t>(j + b)], sess.persist);
+          if (pb < prefix) {
+            prefix = pb;
+          }
+        }
+        // Pose cache live (play): maybe_restore / persist SoA leave 4-wide
+        // unaligned so NEON never fires (10990 play taken~1e6 neon=0). Only
+        // batch when the collect started with an empty cache (cold / seek).
+        const bool take = prefix >= kIntegrateBatchMinPrefix &&
+                          job_next_steps_aligned(jobs.data(), j, sess.persist) &&
+                          (!g_pose_cache_live.load(std::memory_order_relaxed) ||
+                           integrate_batch_verify());
+        integrate_batch_note_pack(prefix, take);
+        if (!take) {
+          ok4 = false;
+        }
+      }
+      if (ok4) {
+        const uint32_t stamp_cat = catalog_index(p);
+        const uint32_t cat = system_id_of(ctx, p);
+        ParticleCacheKey keys[4]{};
+        for (int b = 0; b < 4; ++b) {
+          PrimaryEvalJob& job = jobs[static_cast<size_t>(j + b)];
+          if (job.has_state == 0) {
+            make_state_job(job, ctx, p);
+          }
+          if (job.st.p == nullptr) {
+            refresh_carried_state(job.st, ctx, p);
+          }
+          if (job.has_grid == 0) {
+            keys[b] = make_cache_key(ctx, p, job.b, job.seed, job.st, cat, &g_tls_sys_hash);
+          }
+        }
+        PoseIntegrator i0(jobs[static_cast<size_t>(j)].st);
+        PoseIntegrator i1(jobs[static_cast<size_t>(j + 1)].st);
+        PoseIntegrator i2(jobs[static_cast<size_t>(j + 2)].st);
+        PoseIntegrator i3(jobs[static_cast<size_t>(j + 3)].st);
+        PoseIntegrator* xs[4] = {&i0, &i1, &i2, &i3};
+        const ParticleState* sts[4];
+        SplitEffectLiveParticle* outs[4];
+        float ages[4];
+        float clocks[4];
+        for (int b = 0; b < 4; ++b) {
+          PrimaryEvalJob& job = jobs[static_cast<size_t>(j + b)];
+          if (job.has_grid != 0) {
+            xs[b]->import_carry_grid(job.grid);
+          }
+          if (job.persist_i >= 0) {
+            if (IntegratorHot* hot = persist_claimed_hot(sess.persist, job.persist_i)) {
+              xs[b]->bind_hot(hot);
+            }
+          }
+          xs[b]->set_cache_key(keys[b].valid != 0 ? &keys[b] : nullptr);
+          sts[b] = &job.st;
+          outs[b] = &out[slots[b]];
+          ages[b] = job.pose_age;
+          clocks[b] = job.age;
+          WDS_PERF_COUNT("shuriken.integrate.realize", 1);
+        }
+        fill_live_n(xs, sts, ages, ctx.want_trail, outs, nullptr, clocks, 4);
+        for (int b = 0; b < 4; ++b) {
+          PrimaryEvalJob& job = jobs[static_cast<size_t>(j + b)];
+          xs[b]->export_grid(job.grid);
+          job.has_grid = 1;
+          stamp_evaluated_live(out[slots[b]], ctx, p, job.st, job.age, stamp_cat);
+        }
+        j += 3;
+        continue;
+      }
+    }
     PrimaryEvalJob& job = jobs[static_cast<size_t>(j)];
     if (job.write_slot == 0xffffffffu) {
       continue;
@@ -3589,7 +3802,7 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
                         const Birth& parent_b, uint16_t slot_i, bool do_fill_live,
                         SubemitFillItem* dest_item, const SplitEffectParticle* parent = nullptr,
                         uint32_t parent_idx = 0, uint8_t pose_hydrated = 0,
-                        const ChildSysHoist* sys = nullptr) {
+                        const ChildSysHoist* sys = nullptr, bool skip_integrate = false) {
   keep = 0;
   WDS_PERF_COUNT("shuriken.fill_subemit_child", 1);
   // PLAN (do_fill_live=false) only needs identity + keep. Cache key / sys
@@ -3751,7 +3964,7 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
     }
   }
   const float pose_age = age < st.life ? age : std::max(st.life - 1e-4f, 0.0f);
-  if (do_fill_live) {
+  if (do_fill_live && !skip_integrate) {
     const ParticleCacheKey key = make_cache_key(ctx, child, cb, cseed, st, child_idx, &g_tls_sys_hash);
     PoseIntegrator integ(st);
     if (has_grid != 0) {
@@ -5116,6 +5329,9 @@ void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan&
       rs.carry_parts.push_back(cap);
     }
   };
+  const bool batch_possible =
+      integrate_batch_enabled() &&
+      (!g_pose_cache_live.load(std::memory_order_relaxed) || integrate_batch_verify());
   for (int i = lo; i < hi; ++i) {
     SubemitFillItem& item = plan.items[static_cast<size_t>(i)];
     if (i == lo || item.stitch_group != prev_group) {
@@ -5167,6 +5383,137 @@ void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan&
         }
       }
       if (keep == 0 && item.child != nullptr) {
+        bool batched = false;
+        if (batch_possible && i + 4 <= hi &&
+            PoseIntegrator::particle_can_batch_mask0(*item.child)) {
+          bool ok4 = true;
+          for (int b = 1; b < 4; ++b) {
+            const SubemitFillItem& it = plan.items[static_cast<size_t>(i + b)];
+            if (rs.will_fill[static_cast<size_t>(i + b)] == 0 || it.child == nullptr ||
+                it.stitch_group != item.stitch_group ||
+                !PoseIntegrator::particle_can_batch_mask0(*it.child)) {
+              ok4 = false;
+              break;
+            }
+            const int si_b = rs.session_of[static_cast<size_t>(i + b)];
+            const int persist_b = rs.slot_of[static_cast<size_t>(i + b)];
+            if (persist_b >= 0 && si_b >= 0 && si_b < static_cast<int>(rs.sessions.size())) {
+              ChildPersistSession& sess_b = rs.sessions[static_cast<size_t>(si_b)];
+              const PersistSlotView view_b = persist_slot_at(sess_b.persist, persist_b);
+              if (view_b.ok) {
+                ok4 = false;
+                break;
+              }
+            }
+          }
+          if (ok4) {
+            int prefix = integrate_prefix_steps(item.pose_age, 0);
+            for (int b = 1; b < 4; ++b) {
+              const int pb =
+                  integrate_prefix_steps(plan.items[static_cast<size_t>(i + b)].pose_age, 0);
+              if (pb < prefix) {
+                prefix = pb;
+              }
+            }
+            const bool take = prefix >= kIntegrateBatchMinPrefix &&
+                              (!g_pose_cache_live.load(std::memory_order_relaxed) ||
+                               integrate_batch_verify());
+            integrate_batch_note_pack(prefix, take);
+            if (!take) {
+              ok4 = false;
+            }
+          }
+          if (ok4) {
+            CarryParticle caps[4];
+            uint8_t keeps[4] = {0, 0, 0, 0};
+            int sis[4];
+            for (int b = 0; b < 4; ++b) {
+              SubemitFillItem& it = plan.items[static_cast<size_t>(i + b)];
+              sis[b] = rs.session_of[static_cast<size_t>(i + b)];
+              fill_subemit_child(*it.child, it.b, it.born, it.properties, ctx, it.child_idx,
+                                 out[i + b], keeps[b], rs.have_carry_snap ? &rs.carry_snap : nullptr,
+                                 &caps[b], it.parent_b, it.slot_i, true, &it, nullptr, 0, 0, nullptr,
+                                 true);
+              if (keeps[b] != 0) {
+                refresh_carried_state(caps[b].st, ctx, *it.child);
+              }
+            }
+            auto commit_cap = [&](int b) {
+              caps[b].st.p = nullptr;
+              push_carry(caps[b]);
+              if (sis[b] >= 0 && sis[b] < static_cast<int>(rs.sessions.size()) &&
+                  rs.sessions[static_cast<size_t>(sis[b])].persist_ok != 0) {
+                PrimaryEvalJob job{};
+                job_from_child_carry(job, caps[b]);
+                push_job(i + b, sis[b], job);
+              }
+            };
+            auto finish_one = [&](int b) {
+              SubemitFillItem& it = plan.items[static_cast<size_t>(i + b)];
+              if (keeps[b] == 0) {
+                out[i + b] = SplitEffectLiveParticle{};
+                it.filled = 0;
+                return;
+              }
+              const ParticleCacheKey key =
+                  make_cache_key(ctx, *it.child, it.b, caps[b].seed, caps[b].st, it.child_idx,
+                                 &g_tls_sys_hash);
+              PoseIntegrator integ(caps[b].st);
+              if (caps[b].has_grid != 0) {
+                integ.import_carry_grid(caps[b].grid);
+              }
+              integ.set_cache_key(key.valid != 0 ? &key : nullptr);
+              WDS_PERF_COUNT("shuriken.integrate.child", 1);
+              fill_live(integ, caps[b].st, it.pose_age, ctx.want_trail, out[i + b], true, it.age);
+              integ.export_grid(caps[b].grid);
+              caps[b].has_grid = 1;
+              stamp_evaluated_live(out[i + b], ctx, *it.child, caps[b].st, it.age, it.child_idx);
+              it.filled = 1;
+              commit_cap(b);
+            };
+            if (keeps[0] != 0 && keeps[1] != 0 && keeps[2] != 0 && keeps[3] != 0) {
+              ParticleCacheKey keys[4]{};
+              PoseIntegrator i0(caps[0].st);
+              PoseIntegrator i1(caps[1].st);
+              PoseIntegrator i2(caps[2].st);
+              PoseIntegrator i3(caps[3].st);
+              PoseIntegrator* xs[4] = {&i0, &i1, &i2, &i3};
+              const ParticleState* sts[4] = {&caps[0].st, &caps[1].st, &caps[2].st, &caps[3].st};
+              SplitEffectLiveParticle* outs[4] = {&out[i], &out[i + 1], &out[i + 2], &out[i + 3]};
+              float ages[4];
+              float clocks[4];
+              for (int b = 0; b < 4; ++b) {
+                SubemitFillItem& it = plan.items[static_cast<size_t>(i + b)];
+                if (caps[b].has_grid != 0) {
+                  xs[b]->import_carry_grid(caps[b].grid);
+                }
+                keys[b] = make_cache_key(ctx, *it.child, it.b, caps[b].seed, caps[b].st, it.child_idx,
+                                         &g_tls_sys_hash);
+                xs[b]->set_cache_key(keys[b].valid != 0 ? &keys[b] : nullptr);
+                ages[b] = it.pose_age;
+                clocks[b] = it.age;
+                WDS_PERF_COUNT("shuriken.integrate.child", 1);
+              }
+              fill_live_n(xs, sts, ages, ctx.want_trail, outs, nullptr, clocks, 4);
+              for (int b = 0; b < 4; ++b) {
+                SubemitFillItem& it = plan.items[static_cast<size_t>(i + b)];
+                xs[b]->export_grid(caps[b].grid);
+                caps[b].has_grid = 1;
+                stamp_evaluated_live(out[i + b], ctx, *it.child, caps[b].st, it.age, it.child_idx);
+                it.filled = 1;
+                commit_cap(b);
+              }
+            } else {
+              for (int b = 0; b < 4; ++b) {
+                finish_one(b);
+              }
+            }
+            batched = true;
+            i += 3;
+            keep = 1;
+          }
+        }
+        if (!batched) {
         CarryParticle cap{};
         fill_subemit_child(*item.child, item.b, item.born, item.properties, ctx, item.child_idx,
                            out[i], keep, rs.have_carry_snap ? &rs.carry_snap : nullptr, &cap,
@@ -5179,6 +5526,7 @@ void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan&
             job_from_child_carry(job, cap);
             push_job(i, si, job);
           }
+        }
         }
       }
       if (keep == 0) {

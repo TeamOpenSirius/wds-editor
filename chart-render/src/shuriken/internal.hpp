@@ -430,8 +430,19 @@ class PoseIntegrator {
   PoseIntegrator(const PoseIntegrator&) = delete;
   PoseIntegrator& operator=(const PoseIntegrator&) = delete;
   void advance_to(int k) noexcept;
+  uint8_t step_mask() const noexcept { return step_mask_; }
+  bool can_batch_mask0() const noexcept;
+  // Catalog flags of can_batch_mask0(), no PoseIntegrator. Skip the 4-wide
+  // pack attempt when false so mask 4/7 play does not pay 4 ctors + fallback.
+  static bool particle_can_batch_mask0(const SplitEffectParticle& p) noexcept;
   void sample(float age, float& world_x, float& main_y, float& world_z,
               IntegrationVelocityTrace* trace = nullptr) noexcept;
+  // Wave 4a: n in [1,4]. Each integrator must can_batch_mask0(). Advances
+  // each to k[i] with the same 1/60 grid. Byte-identical to n scalar
+  // advance_to calls when WDS_INTEGRATE_BATCH_VERIFY=1 agrees.
+  static void advance_mask0_batch(PoseIntegrator** xs, const int* ks, int n) noexcept;
+  static void sample_batch(PoseIntegrator** xs, const float* ages, float* wx, float* wy, float* wz,
+                           IntegrationVelocityTrace* traces, int n) noexcept;
   void finite_difference(float age, float dt, float x0, float y0, float z0, float& vx, float& vy,
                          float& vz) noexcept;
   void set_cache_key(const ParticleCacheKey* key) noexcept { cache_key_ = key; }
@@ -695,6 +706,9 @@ void fill_live(PoseIntegrator& integ, const ParticleState& st, float age, bool w
 void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float age,
                           bool want_trail, SplitEffectLiveParticle& out, bool want_fd,
                           float trail_clock = -1.0f);
+void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float age,
+                          bool want_trail, SplitEffectLiveParticle& out, bool want_fd,
+                          float trail_clock, const IntegrationVelocityTrace& vel);
 
 struct PrimaryEvalJob {
   Birth b{};
