@@ -63,6 +63,7 @@ using wds::renderer::draw_frame_reaps_completed_uploads_before_zero_extent_retur
 using wds::renderer::draw_frame_waits_pending_uploads_before_sample;
 using wds::renderer::draw_frame_zero_extent_reap_applies_health;
 using wds::renderer::frames_in_flight_for_swapchain;
+using wds::renderer::persistent_vertex_prealloc_count;
 using wds::renderer::preferred_swapchain_image_count;
 using wds::renderer::recover_surface_has_reacquire;
 using wds::renderer::create_texture_rgba_waits_upload_fence;
@@ -1191,6 +1192,14 @@ void test_frames_in_flight_leaves_one_image_for_present() {
   CHECK(frames_in_flight_for_swapchain(4, 2) == 2);
 }
 
+void test_persistent_vertex_slots_match_frames_in_flight() {
+  CHECK(persistent_vertex_prealloc_count(2, 3) == 2);
+  CHECK(persistent_vertex_prealloc_count(3, 3) == 3);
+  CHECK(persistent_vertex_prealloc_count(1, 3) == 1);
+  CHECK(persistent_vertex_prealloc_count(0, 3) == 1);
+  CHECK(persistent_vertex_prealloc_count(4, 3) == 3);
+}
+
 void test_draw_batch_external_arena_matches_cpu() {
   wds::renderer::DrawBatch cpu;
   wds::renderer::DrawBatch ext;
@@ -1338,6 +1347,7 @@ void run_wsi_health_tests() {
   test_draw_frame_reaps_before_zero_extent_or_occluded_return();
   test_preferred_swapchain_image_count_requests_fif_plus_two();
   test_frames_in_flight_leaves_one_image_for_present();
+  test_persistent_vertex_slots_match_frames_in_flight();
   test_draw_batch_external_arena_matches_cpu();
   test_butterfly_bucket_disables_only_alpha_clip();
   test_pin_bucket_front_moves_late_texture_to_index_zero();

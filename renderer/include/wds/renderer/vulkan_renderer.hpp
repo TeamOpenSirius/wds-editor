@@ -667,6 +667,15 @@ inline constexpr int frames_in_flight_for_swapchain(uint32_t image_count,
   return spare < max_frames_in_flight ? spare : max_frames_in_flight;
 }
 
+// Persistent VB ring slots to preallocate. Per-slot size is still budgeted
+// with kMaxFramesInFlight.
+inline constexpr int persistent_vertex_prealloc_count(int frames_in_flight,
+                                                      int max_frames_in_flight) noexcept {
+  const int max_n = max_frames_in_flight < 1 ? 1 : max_frames_in_flight;
+  const int fif = frames_in_flight < 1 ? 1 : frames_in_flight;
+  return fif < max_n ? fif : max_n;
+}
+
 // Window-system binding supplied by the ui layer. Renderer never touches a
 // native window object — only the Vulkan instance/surface and size callbacks.
 struct VulkanHostSurface {
