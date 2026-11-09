@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QEvent>
 #include <QImage>
 #include <QPen>
 #include <QPixmap>
@@ -105,6 +106,7 @@ class ChartEditWidget final : public QWidget {
   void paintEvent(QPaintEvent*) override;
   void resizeEvent(QResizeEvent*) override;
   void showEvent(QShowEvent*) override;
+  void changeEvent(QEvent*) override;
   void enterEvent(QEnterEvent*) override;
   void leaveEvent(QEvent*) override;
   void focusInEvent(QFocusEvent*) override;

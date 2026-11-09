@@ -448,3 +448,27 @@ SourceSelectButton QPushButton:checked:focus,
 SourceSelectButton QPushButton:focus {
     border-color: var(--black3);
 }
+
+/* Extra-lane slider sits on the light edit canvas (~rgb 245). Yami Light's
+   white handle and grey4 groove match that fill, so the idle overlay is
+   invisible. Mid-gray groove / darker gray thumb stay readable at rest.
+   Filled span uses Light --primary (浅蓝), not the unused-track gray. */
+QSlider#extraLaneSlider::groove {
+    background-color: var(--grey1);
+}
+
+QSlider#extraLaneSlider::sub-page:horizontal {
+    background-color: var(--primary);
+}
+
+QSlider#extraLaneSlider::handle {
+    background-color: var(--black4);
+}
+
+QSlider#extraLaneSlider::handle:hover {
+    background-color: var(--black3);
+}
+
+QSlider#extraLaneSlider::handle:pressed {
+    background-color: var(--black2);
+}

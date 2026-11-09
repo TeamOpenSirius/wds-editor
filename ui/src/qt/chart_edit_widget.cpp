@@ -666,6 +666,17 @@ class ExtraLaneSlider final : public QSlider {
   bool groove_drag_ = false;
 };
 
+constexpr qreal kLaneSliderIdleOpacityDark = 0.3;
+// Light canvas is ~rgb(245); Yami Light's white handle at 0.3 composites to
+// nearly the same value. 0.5 with a gray handle keeps rest-state contrast
+// close to the dark theme's white-on-dark 0.3.
+constexpr qreal kLaneSliderIdleOpacityLight = 0.5;
+
+qreal lane_slider_idle_opacity() {
+  return wds::interaction::theme::color_scheme_is_light() ? kLaneSliderIdleOpacityLight
+                                                          : kLaneSliderIdleOpacityDark;
+}
+
 }  // namespace
 
 ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
@@ -679,13 +690,14 @@ ChartEditWidget::ChartEditWidget(ChartEditPanel* panel, QWidget* parent)
   hold_blue_ = pixmap_from_hold_bake(false);
   hold_purple_ = pixmap_from_hold_bake(true);
   extra_lane_slider_ = new ExtraLaneSlider(Qt::Horizontal, this);
+  extra_lane_slider_->setObjectName(QStringLiteral("extraLaneSlider"));
   extra_lane_slider_->setRange(0, 20);
   extra_lane_slider_->setValue(0);
   extra_lane_slider_->setVisible(false);
   extra_lane_slider_->setFocusPolicy(Qt::NoFocus);
   extra_lane_slider_->setMinimumHeight(22);
   extra_lane_slider_opacity_ = new QGraphicsOpacityEffect(extra_lane_slider_);
-  extra_lane_slider_opacity_->setOpacity(0.3);
+  extra_lane_slider_opacity_->setOpacity(lane_slider_idle_opacity());
   extra_lane_slider_->setGraphicsEffect(extra_lane_slider_opacity_);
   extra_lane_slider_fade_ = new QPropertyAnimation(extra_lane_slider_opacity_, "opacity", this);
   extra_lane_slider_fade_->setDuration(100);
@@ -870,7 +882,7 @@ void ChartEditWidget::fade_lane_slider(bool highlighted) {
   if (extra_lane_slider_opacity_ == nullptr || extra_lane_slider_fade_ == nullptr) return;
   extra_lane_slider_fade_->stop();
   extra_lane_slider_fade_->setStartValue(extra_lane_slider_opacity_->opacity());
-  extra_lane_slider_fade_->setEndValue(highlighted ? 1.0 : 0.3);
+  extra_lane_slider_fade_->setEndValue(highlighted ? 1.0 : lane_slider_idle_opacity());
   extra_lane_slider_fade_->start();
 }
 
@@ -898,6 +910,13 @@ void ChartEditWidget::resizeEvent(QResizeEvent*) {
 void ChartEditWidget::showEvent(QShowEvent* e) {
   mark_dirty();
   QWidget::showEvent(e);
+}
+void ChartEditWidget::changeEvent(QEvent* event) {
+  QWidget::changeEvent(event);
+  if (event == nullptr || event->type() != QEvent::StyleChange) return;
+  if (extra_lane_slider_ == nullptr || extra_lane_slider_opacity_ == nullptr) return;
+  if (extra_lane_slider_->underMouse() || extra_lane_slider_->isSliderDown()) return;
+  extra_lane_slider_opacity_->setOpacity(lane_slider_idle_opacity());
 }
 void ChartEditWidget::enterEvent(QEnterEvent* e) {
   mark_dirty();
