@@ -292,7 +292,23 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
 
     const bool in_preroll = committed_position_.count() < 0;
     if (!want_pause && audio_.has_music() && !in_preroll) {
-      const auto raw = clamp_time(audio_.position());
+      const auto health = audio_.stream_health();
+      const auto dur = audio_.duration();
+      const bool near_end =
+          dur.count() > 0 && committed_position_.count() + kEndSlopUs >= dur.count();
+      const auto kind = classify_stream_recovery(health, near_end);
+      if (kind == StreamRecoveryKind::NaturalEnd) {
+        // Hold the last committed T. Keep playing_ so Space / pause-here still
+        // apply the user's pause target instead of becoming a new Play.
+        skip_stalled_recovery_once_ = false;
+        audio_.stop_all_sfx();
+        recovery_.reset();
+        music_start_pending_ = false;
+        music_seek_pending_ = false;
+        audio_filter_valid_ = true;
+        filtered_audio_us_ = committed_position_.count();
+      } else {
+        const auto raw = clamp_time(audio_.position());
       const int64_t max_err = max_clock_error_us_;
 #if defined(_WIN32)
       constexpr double kFilterTauUs = 30000.0;
@@ -343,22 +359,7 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
         // Cursor frozen until a seek lands; start_pending may re-seek after sync.
       } else if (music_start_pending_) {
         recovery_.add_elapsed(wall_delta_us);
-      } else {
-        const auto health = audio_.stream_health();
-        const auto dur = audio_.duration();
-        const bool near_end =
-            dur.count() > 0 && committed_position_.count() + kEndSlopUs >= dur.count();
-        const auto kind = classify_stream_recovery(health, near_end);
-        if (kind == StreamRecoveryKind::NaturalEnd) {
-          skip_stalled_recovery_once_ = false;
-          committed_position_ = dur;
-          audio_.stop_all_sfx();
-          playing_ = false;
-          audio_.pause_music();
-          recovery_.reset();
-          music_start_pending_ = false;
-          music_seek_pending_ = false;
-        } else if (kind == StreamRecoveryKind::Recover) {
+      } else if (kind == StreamRecoveryKind::Recover) {
           if (skip_stalled_recovery_once_ && health == StreamHealth::Stalled) {
             skip_stalled_recovery_once_ = false;
           } else {
@@ -375,10 +376,10 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
               }
             }
           }
-        } else if (health == StreamHealth::Playing) {
+      } else if (health == StreamHealth::Playing) {
           skip_stalled_recovery_once_ = false;
           recovery_.reset();
-        }
+      }
       }
     } else if (!want_pause && wall_delta_us > 0) {
       const bool was_preroll = committed_position_.count() < 0;
@@ -399,7 +400,14 @@ wds::common::TimelineSnapshot Transport::poll(int64_t wall_delta_us) {
           committed_position_ = clamp_time(seek_time);
         }
       } else if (audio_.has_music() && !sought_this_poll_ && committed_position_.count() >= 0) {
-        committed_position_ = clamp_time(audio_.position());
+        const auto dur = audio_.duration();
+        const bool near_end =
+            dur.count() > 0 && committed_position_.count() + kEndSlopUs >= dur.count();
+        // Frozen at natural end: keep the held cursor. BASS Stopped may report
+        // duration or 0, which would overwrite T before the user pause lands.
+        if (!(audio_.stream_health() == StreamHealth::Stopped && near_end)) {
+          committed_position_ = clamp_time(audio_.position());
+        }
       }
       audio_.pause_music();
       audio_.begin_timeline_control();

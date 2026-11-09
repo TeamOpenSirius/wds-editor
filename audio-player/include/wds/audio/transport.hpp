@@ -57,6 +57,9 @@ class Transport {
   // is clamped to one display frame (see set_max_clock_error_us) so a hitch cannot
   // leave a permanent offset. Forward play never runs the committed cursor backwards
   // except a seek. Seek/pause resets the filter.
+  // Natural end (BASS Stopped near duration): freeze the last committed T and
+  // keep playing intent. Do not pause and do not snap to duration; a user pause
+  // then stays here or seeks back to the play-start anchor.
   // Without music: wall clock advances the timeline directly (rate-scaled).
   // Pass real frame time in microseconds — millisecond truncation stalls wall-clock
   // playback under MAILBOX / high refresh (common on Windows).

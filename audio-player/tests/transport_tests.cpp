@@ -542,14 +542,50 @@ void test_near_end_does_not_retry(Transport& transport, TestDouble& fake) {
   play_and_start(transport);
   fake.duration = Microseconds{10000000};
   fake.position = Microseconds{9950000};
+  fake.health = StreamHealth::Playing;
+  transport.poll(16000);
+  const auto held = transport.committed_position();
   fake.health = StreamHealth::Stopped;
   const int seeks0 = fake.set_position_calls;
   const int plays0 = fake.play_music_calls;
   const auto snap = transport.poll(16000);
-  expect(snap.state == PlaybackState::Paused, "near-end Stopped ends playback");
+  expect(snap.state == PlaybackState::Playing, "near-end Stopped keeps play intent");
+  expect(transport.playing(), "near-end is not a pause");
+  expect(transport.intends_playing(), "near-end still intends playing");
+  expect(snap.position == held, "near-end does not overwrite the cursor");
   expect(fake.set_position_calls == seeks0, "near-end does not set_position");
   expect(fake.play_music_calls == plays0, "near-end does not play_music");
   expect(!transport.recovery_pending(), "near-end does not leave recovery pending");
+
+  const auto still = transport.poll(16000);
+  expect(still.state == PlaybackState::Playing, "held end stays playing");
+  expect(still.position == held, "held end keeps the frozen cursor");
+  expect(fake.set_position_calls == seeks0, "held end does not recover");
+  expect(fake.play_music_calls == plays0, "held end does not replay");
+
+  fake.position = Microseconds{10000000};
+  transport.request_pause();
+  const auto paused_here = transport.poll(0);
+  expect(paused_here.state == PlaybackState::Paused, "user pause at held end pauses");
+  expect(paused_here.position == held, "pause in place keeps the frozen cursor");
+}
+
+void test_near_end_user_pause_can_seek_to_anchor(Transport& transport, TestDouble& fake) {
+  play_and_start(transport);
+  fake.duration = Microseconds{10000000};
+  fake.position = Microseconds{9950000};
+  fake.health = StreamHealth::Playing;
+  transport.poll(16000);
+  fake.health = StreamHealth::Stopped;
+  transport.poll(16000);
+  expect(transport.playing(), "held at end before user pause");
+
+  transport.request_seek_ms(2000);
+  transport.request_pause();
+  const auto paused = transport.poll(16000);
+  expect(paused.state == PlaybackState::Paused, "seek+pause at held end pauses");
+  expect(paused.position_ms() == 2000, "seek+pause returns to the pause target");
+  expect(!transport.intends_playing(), "user pause clears play intent");
 }
 
 void test_play_true_health_unchanged_rate_limited(Transport& transport, TestDouble& fake) {
@@ -1421,6 +1457,13 @@ int main() {
     bind_fake_music(end_t, end_fake);
     test_near_end_does_not_retry(end_t, end_fake);
     end_t.shutdown();
+  }
+  {
+    Transport end_seek_t;
+    TestDouble end_seek_fake;
+    bind_fake_music(end_seek_t, end_seek_fake);
+    test_near_end_user_pause_can_seek_to_anchor(end_seek_t, end_seek_fake);
+    end_seek_t.shutdown();
   }
   {
     Transport health_t;
