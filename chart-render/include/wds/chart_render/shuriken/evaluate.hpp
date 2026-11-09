@@ -56,7 +56,19 @@ struct EmitContext {
   // local so Ribbon chains stay one ParticleSystem (Unity ribbonCount=1).
   uint32_t catalog_index_override = 0;
   uint8_t has_catalog_index_override = 0;
+  // Wave 3.5c: line-constant mix3 results. Filled by emit_context_prepare_salts
+  // at construction. Identity fields (color/line/start_ms/play_gen) must be
+  // set first; copies keep the cache. hop / perf, not 2022.3.
+  uint32_t cached_salt_with_gen = 0;
+  uint32_t cached_salt_no_gen = 0;
+  uint32_t cached_emitter_identity = 0;
+  uint32_t cached_identity_salt_mix = 0;
+  uint8_t cached_salts_valid = 0;
 };
+
+// Precompute split_instance_salt / stable_emitter_identity for ctx. Call after
+// filling identity fields. Safe to call more than once.
+void emit_context_prepare_salts(EmitContext& ctx) noexcept;
 
 // Observation-only capability state.  Unity 2022.3 Custom simulation space
 // requires MainModule.customSimulationSpace, which is not present in the

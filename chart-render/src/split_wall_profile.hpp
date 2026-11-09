@@ -65,6 +65,10 @@ enum class SplitWallSec : int {
   WaveB3Setup,
   WaveB3,
   WaveB3b,
+  BirthsPlan,
+  CapSortPlan,
+  BirthsQueue,
+  CapSortQueue,
   Count
 };
 
@@ -85,6 +89,16 @@ struct SplitWallFrameSnap {
   int longest_wave = -1;
   int longest_kind = -1;
   int longest_fill = 0;
+  int birth_plan_n = 0;
+  int birth_plan_ext = 0;
+  int birth_plan_len_sum = 0;
+  int birth_plan_len_max = 0;
+  int birth_queue_n = 0;
+  int birth_queue_ext = 0;
+  int birth_queue_len_sum = 0;
+  int birth_queue_len_max = 0;
+  int birth_extend_hit = 0;
+  int birth_extend_miss = 0;
 };
 
 bool split_wall_enabled() noexcept;
@@ -104,6 +118,16 @@ void split_wall_note_candidates(int evaluated, int kept) noexcept;
 void split_wall_note_realized(int n) noexcept;
 void split_wall_note_splits(int n) noexcept;
 void split_wall_note_eval_slices(int n) noexcept;
+#if !WDS_DIAG_ENABLED
+inline void split_wall_note_birth_table(int, bool, bool) noexcept {}
+inline void split_wall_note_birth_extend(bool) noexcept {}
+#else
+// WALL-only: one collect_births call. is_queue distinguishes evaluate_plan vs
+// the parent queue at the start of evaluate_subemitters_plan. Sibling of Births
+// (not nested) so exclusive unscoped accounting stays honest.
+void split_wall_note_birth_table(int n, bool can_extend, bool is_queue) noexcept;
+void split_wall_note_birth_extend(bool hit) noexcept;
+#endif
 std::string split_wall_report();
 const char* split_wall_sec_name(SplitWallSec sec) noexcept;
 bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept;

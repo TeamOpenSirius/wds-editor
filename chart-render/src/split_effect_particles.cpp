@@ -988,6 +988,9 @@ shuriken::EmitContext task_emit_ctx(const EvalTask& task) {
     ectx.catalog_index_override = task.catalog_i;
     ectx.has_catalog_index_override = 1;
   }
+  if (ectx.cached_salts_valid == 0) {
+    shuriken::emit_context_prepare_salts(ectx);
+  }
   return ectx;
 }
 
@@ -2454,6 +2457,7 @@ void prepare_split_tasks(FrameScratch& fs, SplitPrep& prep,
         }
         ctx.line_play_gen = touch_line_play(clock.color_id, index, split.start_ms, now_sec,
                                            clock.seed_inside, playing);
+        shuriken::emit_context_prepare_salts(ctx);
         oracle_for_slot(particles, pcount, slot, fs.oracle);
         systems_for_slot(ctrl, slot, fs.oracle.size(), fs.systems);
         fs.bind_bound.clear();

@@ -2,6 +2,7 @@
 #include <wds/chart_render/shuriken/minmax.hpp>
 
 #include "internal.hpp"
+#include "mix3_lazy.hpp"
 #include "split_collect_pool.hpp"
 #include "split_eval_cache.hpp"
 #include "split_eval_carry.hpp"
@@ -71,7 +72,11 @@ void eval_particle_sol_at_age(const SplitEffectParticle& p, const ParticleState&
   // Non-separateAxes keeps one u (salt 21). separateAxes TwoCurves: live dump
   // dump-pending-v2 11350 hop (not 2022.3) — independent stream like VOL.
   // Catalog has 0 SOL TwoConstants; ROL stays shared (DUMP-v1 C4-01).
-  const float sol_u = u01(mix3(st.seed, 21, 1u));
+  float sol_u = 0.0f;
+  if (!mix3_lazy_e() || particle_reads_sol_u21(p)) {
+    sol_u = u01(mix3(st.seed, 21, 1u));
+    WDS_MIX3_COUNT("mix3.appear.21", 1);
+  }
   float sol_ux = sol_u;
   float sol_uy = sol_u;
   float sol_uz = sol_u;
@@ -81,6 +86,15 @@ void eval_particle_sol_at_age(const SplitEffectParticle& p, const ParticleState&
       p.sol_min_count > 0 || p.sol_y_min_count > 0 || p.sol_z_min_count > 0;
   if (sol_separate && sol_two_curves) {
     rng_fill_u01_3(st.seed, 1u, kSaltSolAxes, sol_ux, sol_uy, sol_uz);
+  }
+  if (mix3_lazy_verify() && mix3_lazy_e() && !particle_reads_sol_u21(p) &&
+      !(sol_separate && sol_two_curves)) {
+    const float eu = u01(mix3(st.seed, 21, 1u));
+    float sx0 = 1.0f, sy0 = 1.0f, sz0 = 1.0f;
+    float sx1 = 1.0f, sy1 = 1.0f, sz1 = 1.0f;
+    eval_sol_axes(p, t01, 0.0f, 0.0f, 0.0f, sx0, sy0, sz0);
+    eval_sol_axes(p, t01, eu, eu, eu, sx1, sy1, sz1);
+    mix3_verify_note(bits_eq(sx0, sx1) && bits_eq(sy0, sy1) && bits_eq(sz0, sz1), "appear.21");
   }
   eval_sol_axes(p, t01, sol_ux, sol_uy, sol_uz, sol_x, sol_y, sol_z);
 }
@@ -138,8 +152,12 @@ void eval_particle_color_at_age(const SplitEffectParticle& p, const ParticleStat
   if (p.start_color_state == 1 || p.start_color_state == 3) {
     start_color_time = st.emit_u;
   }
-  official_split_effect_eval_start_color_keys(p, start_color_time, u01(mix3(st.seed, 16, 1u)), sr,
-                                              sg, sb, sa);
+  float start_lerp = 0.0f;
+  if (!mix3_lazy_e() || particle_reads_start_color_lerp16(p)) {
+    start_lerp = u01(mix3(st.seed, 16, 1u));
+    WDS_MIX3_COUNT("mix3.appear.16", 1);
+  }
+  official_split_effect_eval_start_color_keys(p, start_color_time, start_lerp, sr, sg, sb, sa);
   if ((st.inherit_props & kSplitEffectSubInheritColor) != 0) {
     sr *= st.inherit_r;
     sg *= st.inherit_g;
@@ -168,8 +186,12 @@ float live_draw_alpha(const ParticleState& st, float age) {
   if (p.start_color_state == 1 || p.start_color_state == 3) {
     start_color_time = st.emit_u;
   }
-  official_split_effect_eval_start_color_keys(p, start_color_time, u01(mix3(st.seed, 16, 1u)), sr,
-                                              sg, sb, sa);
+  float start_lerp = 0.0f;
+  if (!mix3_lazy_e() || particle_reads_start_color_lerp16(p)) {
+    start_lerp = u01(mix3(st.seed, 16, 1u));
+    WDS_MIX3_COUNT("mix3.appear.16", 1);
+  }
+  official_split_effect_eval_start_color_keys(p, start_color_time, start_lerp, sr, sg, sb, sa);
   if ((st.inherit_props & kSplitEffectSubInheritColor) != 0) {
     sa *= st.inherit_a;
   }
@@ -336,6 +358,9 @@ float emitter_travel(int32_t color_id, float fade_scale) noexcept {
 // OpenWDS Initialize: Random.Range(0, 1000) once per line. Mix start_ms so
 // the same color / line index at another chart time is a different draw.
 uint32_t stable_emitter_identity(const EmitContext& ctx) noexcept {
+  if (mix3_lazy_c() && ctx.cached_salts_valid != 0) {
+    return ctx.cached_emitter_identity;
+  }
   const uint32_t start_tok = static_cast<uint32_t>(ctx.line_start_ms) + 1u;
   return mix3(static_cast<uint32_t>(ctx.color_id), static_cast<uint32_t>(ctx.line_index + 1),
               start_tok) %
@@ -347,6 +372,9 @@ uint32_t stable_emitter_identity(const EmitContext& ctx) noexcept {
 // identity (ribbon chain, particle seed, birth sampling salt, RoD seed) needs
 // this dimension; line_index alone collides between overlapping splits.
 uint32_t split_instance_salt(const EmitContext& ctx, bool with_gen) noexcept {
+  if (mix3_lazy_c() && ctx.cached_salts_valid != 0) {
+    return with_gen ? ctx.cached_salt_with_gen : ctx.cached_salt_no_gen;
+  }
   const uint64_t ms = static_cast<uint64_t>(ctx.line_start_ms);
   // with_gen = true: a re-Play() of the same split is a fresh random stream
   // (Unity useAutoRandomSeed remints on Play). with_gen = false: the stable
@@ -354,6 +382,26 @@ uint32_t split_instance_salt(const EmitContext& ctx, bool with_gen) noexcept {
   // manual randomSeed stay repeatable across Plays.
   return mix3(static_cast<uint32_t>(ms), static_cast<uint32_t>(ms >> 32),
               with_gen ? ctx.line_play_gen + 1u : 1u);
+}
+
+void emit_context_prepare_salts(EmitContext& ctx) noexcept {
+  if (!mix3_lazy_c()) {
+    ctx.cached_salts_valid = 0;
+    return;
+  }
+  const uint64_t ms = static_cast<uint64_t>(ctx.line_start_ms);
+  const uint32_t ms_lo = static_cast<uint32_t>(ms);
+  const uint32_t ms_hi = static_cast<uint32_t>(ms >> 32);
+  ctx.cached_salt_with_gen = mix3(ms_lo, ms_hi, ctx.line_play_gen + 1u);
+  ctx.cached_salt_no_gen = mix3(ms_lo, ms_hi, 1u);
+  const uint32_t start_tok = static_cast<uint32_t>(ctx.line_start_ms) + 1u;
+  ctx.cached_emitter_identity =
+      mix3(static_cast<uint32_t>(ctx.color_id), static_cast<uint32_t>(ctx.line_index + 1),
+           start_tok) %
+      999u;
+  ctx.cached_identity_salt_mix =
+      mix3(ctx.cached_emitter_identity, ctx.cached_salt_with_gen, 3u);
+  ctx.cached_salts_valid = 1;
 }
 
 namespace {
@@ -366,7 +414,7 @@ uint32_t hash_auto_particle_seed(const EmitContext& ctx, const SplitEffectPartic
   // instance salt is that missing dimension (line_index alone collides).
   return mix3(mix3(static_cast<uint32_t>(ctx.color_id),
                    static_cast<uint32_t>(ctx.line_index * 131 + birth_index * 17 + p.element_index),
-                   mix3(extra, ps_i, gen)),
+                   mix3_cached_auto_inner(extra, ps_i, gen)),
               split_instance_salt(ctx), 0x51ed270bu);
 }
 
@@ -377,8 +425,9 @@ uint32_t hash_line_particle_seed(const EmitContext& ctx, const SplitEffectPartic
               mix3(extra, ps_i, 1u));
 }
 
-ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, int birth_index,
-                         uint32_t extra, float emit_u, float birth_t, uint32_t seed) {
+ParticleState make_state_body(const EmitContext& ctx, const SplitEffectParticle& p, int birth_index,
+                              uint32_t extra, float emit_u, float birth_t, uint32_t seed,
+                              bool lazy) {
   ParticleState st;
   st.color_id = ctx.color_id;
   st.line_index = ctx.line_index;
@@ -410,12 +459,12 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
     if (p.size_min_curve_count > 0) {
       const float vmin = official_split_effect_eval_curve_keys(
           p.size_min_curve_begin, p.size_min_curve_count, eu, p.size_min);
-      st.size = pick(vmax, vmin, true, mix3(st.seed, 2, extra));
+      st.size = pick_maybe_hash(vmax, vmin, true, st.seed, 2, extra, lazy);
     } else {
       st.size = vmax;
     }
   } else {
-    st.size = pick(p.size, p.size_min, p.size_random != 0, mix3(st.seed, 2, extra));
+    st.size = pick_maybe_hash(p.size, p.size_min, p.size_random != 0, st.seed, 2, extra, lazy);
   }
   if (p.size_3d != 0) {
     if (p.size_y_curve_count > 0) {
@@ -424,13 +473,13 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
       if (p.size_y_min_curve_count > 0) {
         const float vmin = official_split_effect_eval_curve_keys(
             p.size_y_min_curve_begin, p.size_y_min_curve_count, eu, p.start_size_y_min);
-        st.size_y = pick(vmax, vmin, true, mix3(st.seed, 22, extra));
+        st.size_y = pick_maybe_hash(vmax, vmin, true, st.seed, 22, extra, lazy);
       } else {
         st.size_y = vmax;
       }
     } else {
-      st.size_y = pick(p.start_size_y, p.start_size_y_min, p.size_random != 0,
-                       mix3(st.seed, 22, extra));
+      st.size_y = pick_maybe_hash(p.start_size_y, p.start_size_y_min, p.size_random != 0, st.seed,
+                                  22, extra, lazy);
     }
   } else {
     st.size_y = st.size;
@@ -444,13 +493,13 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
       if (p.size_z_min_curve_count > 0) {
         const float vmin = official_split_effect_eval_curve_keys(
             p.size_z_min_curve_begin, p.size_z_min_curve_count, eu, p.start_size_z_min);
-        st.size_z = pick(vmax, vmin, true, mix3(st.seed, 23, extra));
+        st.size_z = pick_maybe_hash(vmax, vmin, true, st.seed, 23, extra, lazy);
       } else {
         st.size_z = vmax;
       }
     } else {
-      st.size_z = pick(p.start_size_z, p.start_size_z_min, p.size_random != 0,
-                       mix3(st.seed, 23, extra));
+      st.size_z = pick_maybe_hash(p.start_size_z, p.start_size_z_min, p.size_random != 0, st.seed,
+                                  23, extra, lazy);
     }
   } else {
     st.size_z = st.size;
@@ -461,12 +510,13 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
     if (p.speed_min_curve_count > 0) {
       const float vmin = official_split_effect_eval_curve_keys(
           p.speed_min_curve_begin, p.speed_min_curve_count, eu, p.start_speed);
-      st.speed = pick(vmax, vmin, true, mix3(st.seed, kSaltStartSpeedTwoCurves, extra));
+      st.speed = pick_maybe_hash(vmax, vmin, true, st.seed, kSaltStartSpeedTwoCurves, extra, lazy);
     } else {
       st.speed = vmax;
     }
   } else {
-    st.speed = pick(p.start_speed, p.start_speed_min, p.speed_random != 0, mix3(st.seed, 3, extra));
+    st.speed = pick_maybe_hash(p.start_speed, p.start_speed_min, p.speed_random != 0, st.seed, 3,
+                               extra, lazy);
   }
   // startSpeed * shape dir is the only baked velocity. VOL is evaluated each
   // step (Two Curves start at 0 — baking the scalar made butterflies fly +X).
@@ -474,13 +524,31 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
   st.vy = 0.0f;
   st.vz = 0.0f;
   // Same nearby-salt collapse as Shape cube-reject (salts 4/5/6 and 40/41/42).
-  rng_fill_u01_3(st.seed, extra, 4u, st.vol_ux, st.vol_uy, st.vol_uz);
-  rng_fill_u01_3(st.seed, extra, 40u, st.force_ux, st.force_uy, st.force_uz);
-  rng_fill_u01_3(st.seed, extra, kSaltNoiseStrength, st.noise_ux, st.noise_uy, st.noise_uz);
+  // Unread groups stay 0. They still sit in hash_particle_state_fields, which
+  // only affects in-memory cache identity (key also has seed / birth_index /
+  // extra). hop / perf, not 2022.3.
+  if (!lazy || particle_reads_vol_u(p)) {
+    rng_fill_u01_3(st.seed, extra, 4u, st.vol_ux, st.vol_uy, st.vol_uz);
+    WDS_MIX3_COUNT("mix3.ms.vol", 4);
+  } else {
+    st.vol_ux = st.vol_uy = st.vol_uz = 0.0f;
+  }
+  if (!lazy || particle_reads_force_u(p)) {
+    rng_fill_u01_3(st.seed, extra, 40u, st.force_ux, st.force_uy, st.force_uz);
+    WDS_MIX3_COUNT("mix3.ms.force", 4);
+  } else {
+    st.force_ux = st.force_uy = st.force_uz = 0.0f;
+  }
+  if (!lazy || particle_reads_noise_u(p)) {
+    rng_fill_u01_3(st.seed, extra, kSaltNoiseStrength, st.noise_ux, st.noise_uy, st.noise_uz);
+    WDS_MIX3_COUNT("mix3.ms.noise", 4);
+  } else {
+    st.noise_ux = st.noise_uy = st.noise_uz = 0.0f;
+  }
   st.inherit_k = 0.0f;
   if (p.inherit_enabled != 0) {
-    st.inherit_k = pick(p.inherit_mult, p.inherit_mult_min, p.inherit_random != 0,
-                        mix3(st.seed, 43, extra));
+    st.inherit_k = pick_maybe_hash(p.inherit_mult, p.inherit_mult_min, p.inherit_random != 0,
+                                   st.seed, 43, extra, lazy);
   }
   if (ctx.parent_motion.emitter_vel_candidate) {
     st.emitter_vel_set = 1;
@@ -494,7 +562,10 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
     st.emitter_vz = 0.0f;
   }
   float orb_ux = 0.0f, orb_uy = 0.0f, orb_uz = 0.0f;
-  rng_fill_u01_3(st.seed, extra, kSaltOrbital, orb_ux, orb_uy, orb_uz);
+  if (!lazy || particle_reads_orbital_u(p)) {
+    rng_fill_u01_3(st.seed, extra, kSaltOrbital, orb_ux, orb_uy, orb_uz);
+    WDS_MIX3_COUNT("mix3.ms.orb", 4);
+  }
   st.orb_x = eval_minmax_axis(p.orbital_x, p.orbital_x_min, p.orbital_x_random, 0, 0, 0, 0, 0.0f,
                              orb_ux);
   st.orb_y = eval_minmax_axis(p.orbital_y, p.orbital_y_min, p.orbital_y_random, 0, 0, 0, 0, 0.0f,
@@ -507,21 +578,59 @@ ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, i
   st.radial = p.radial;
   sample_shape(p, st.seed, extra, birth_t, birth_index, st.spawn_x, st.spawn_y, st.spawn_z, st.dir_x,
                st.dir_y, st.dir_z);
-  st.start_u = pick(p.start_frame, p.start_frame_min, p.start_frame_random != 0, mix3(st.seed, 7, extra));
-  if (p.fot_min_count > 0) {
-    st.fot_u = u01(mix3(st.seed, kSaltFotTwoCurves, extra));
+  if (!lazy || particle_reads_start_u_hash(p) || p.uv_frame_count > 0) {
+    st.start_u = pick_maybe_hash(p.start_frame, p.start_frame_min, p.start_frame_random != 0,
+                                 st.seed, 7, extra, lazy);
   } else {
-    st.fot_u = pick(p.fot, p.fot_min, p.fot_random != 0, mix3(st.seed, 8, extra));
+    st.start_u = p.start_frame;
   }
-  st.trail_life_mul =
-      pick(p.trail_lifetime, p.trail_lifetime_min, p.trail_lifetime_random != 0,
-           mix3(st.seed, kSaltTrailLifetime, extra));
-  st.col_u = u01(mix3(st.seed, 13, extra));
-  st.start_color_u = u01(mix3(st.seed, 15, extra));
-  st.rot_z = pick(p.rot_z, p.rot_z_min, p.rot_z_random != 0, mix3(st.seed, 9, extra));
+  if (p.fot_min_count > 0) {
+    if (!lazy || particle_reads_fot_u_hash(p)) {
+      st.fot_u = u01(mix3(st.seed, kSaltFotTwoCurves, extra));
+      WDS_MIX3_COUNT("mix3.ms.pick", 1);
+    } else {
+      st.fot_u = 0.0f;
+    }
+  } else if (!lazy || particle_reads_fot_u_hash(p) || (p.uv_frame_count > 0 && p.fot_count == 0)) {
+    st.fot_u = pick_maybe_hash(p.fot, p.fot_min, p.fot_random != 0, st.seed, 8, extra, lazy);
+  } else {
+    st.fot_u = p.fot;
+  }
+  if (!lazy || particle_reads_trail_life_hash(p) || (p.flags & kSplitEffectFlagTrails) != 0) {
+    st.trail_life_mul = pick_maybe_hash(p.trail_lifetime, p.trail_lifetime_min,
+                                        p.trail_lifetime_random != 0, st.seed, kSaltTrailLifetime,
+                                        extra, lazy);
+  } else {
+    st.trail_life_mul = -1.0f;
+  }
+  if (!lazy || particle_reads_col_u(p)) {
+    st.col_u = u01(mix3(st.seed, 13, extra));
+    WDS_MIX3_COUNT("mix3.ms.pick", 1);
+  } else {
+    st.col_u = 0.0f;
+  }
+  if (!lazy || particle_reads_start_color_u(p)) {
+    st.start_color_u = u01(mix3(st.seed, 15, extra));
+    WDS_MIX3_COUNT("mix3.ms.pick", 1);
+  } else {
+    st.start_color_u = 0.0f;
+  }
+  st.rot_z = pick_maybe_hash(p.rot_z, p.rot_z_min, p.rot_z_random != 0, st.seed, 9, extra, lazy);
   if (p.rotation_3d != 0) {
-    st.rot_x = pick(p.rot_x, p.rot_x_min, true, mix3(st.seed, 10, extra));
-    st.rot_y = pick(p.rot_y, p.rot_y_min, true, mix3(st.seed, 11, extra));
+    st.rot_x = pick_maybe_hash(p.rot_x, p.rot_x_min, true, st.seed, 10, extra, lazy);
+    st.rot_y = pick_maybe_hash(p.rot_y, p.rot_y_min, true, st.seed, 11, extra, lazy);
+  }
+  return st;
+}
+
+ParticleState make_state(const EmitContext& ctx, const SplitEffectParticle& p, int birth_index,
+                         uint32_t extra, float emit_u, float birth_t, uint32_t seed) {
+  const bool lazy = mix3_lazy_a();
+  ParticleState st = make_state_body(ctx, p, birth_index, extra, emit_u, birth_t, seed, lazy);
+  if (mix3_lazy_verify()) {
+    const ParticleState eager =
+        make_state_body(ctx, p, birth_index, extra, emit_u, birth_t, seed, false);
+    mix3_verify_state(st, eager, p);
   }
   return st;
 }
@@ -546,6 +655,7 @@ float system_emit_u(const SplitEffectParticle& p, float birth_t) noexcept {
 
 uint32_t particle_seed(const EmitContext& ctx, const SplitEffectParticle& p,
                        const Birth& b) noexcept {
+  WDS_MIX3_COUNT("mix3.particle_seed", 1);
   if (p.auto_random_seed == 0) {
     return hash_line_particle_seed(ctx, p, b.index, b.extra);
   }
@@ -1233,8 +1343,21 @@ void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float 
   if (p.start_color_state == 1 || p.start_color_state == 3) {
     start_color_time = st.emit_u;
   }
-  official_split_effect_eval_start_color_keys(p, start_color_time, u01(mix3(st.seed, 16, 1u)), sr,
-                                              sg, sb, sa);
+  float start_lerp = 0.0f;
+  if (!mix3_lazy_e() || particle_reads_start_color_lerp16(p)) {
+    start_lerp = u01(mix3(st.seed, 16, 1u));
+    WDS_MIX3_COUNT("mix3.appear.16", 1);
+  }
+  if (mix3_lazy_verify() && mix3_lazy_e() && !particle_reads_start_color_lerp16(p)) {
+    float er = sr, eg = sg, eb = sb, ea = sa;
+    float lr = sr, lg = sg, lb = sb, la = sa;
+    official_split_effect_eval_start_color_keys(p, start_color_time, 0.0f, lr, lg, lb, la);
+    official_split_effect_eval_start_color_keys(p, start_color_time, u01(mix3(st.seed, 16, 1u)), er,
+                                                eg, eb, ea);
+    mix3_verify_note(bits_eq(lr, er) && bits_eq(lg, eg) && bits_eq(lb, eb) && bits_eq(la, ea),
+                     "appear.16");
+  }
+  official_split_effect_eval_start_color_keys(p, start_color_time, start_lerp, sr, sg, sb, sa);
   if ((st.inherit_props & kSplitEffectSubInheritColor) != 0) {
     sr *= st.inherit_r;
     sg *= st.inherit_g;
@@ -1332,7 +1455,21 @@ void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float 
   out.custom1_x = p.custom1_x;
   out.custom1_y = p.custom1_y;
   out.butterfly_wing_x = p.butterfly_wing_x;
-  const float rot_u = u01(mix3(st.seed, 14, 1u));
+  float rot_u = 0.0f;
+  if (!mix3_lazy_e() || particle_reads_rol_u(p)) {
+    rot_u = u01(mix3(st.seed, 14, 1u));
+    WDS_MIX3_COUNT("mix3.appear.14", 1);
+  }
+  if (mix3_lazy_verify() && mix3_lazy_e() && !particle_reads_rol_u(p)) {
+    const float eu = u01(mix3(st.seed, 14, 1u));
+    mix3_verify_note(bits_eq(eval_rotation_over_life(p, age, st.life, 0.0f, 2),
+                             eval_rotation_over_life(p, age, st.life, eu, 2)) &&
+                         bits_eq(eval_rotation_over_life(p, age, st.life, 0.0f, 0),
+                                 eval_rotation_over_life(p, age, st.life, eu, 0)) &&
+                         bits_eq(eval_rotation_over_life(p, age, st.life, 0.0f, 1),
+                                 eval_rotation_over_life(p, age, st.life, eu, 1)),
+                     "appear.14");
+  }
   out.roll = st.rot_z + eval_rotation_over_life(p, age, st.life, rot_u, 2);
   // Rotation over Lifetime is its own 3-axis module. Unity 2022.3
   // RotationOverLifetimeModule.separateAxes: "Set the rotation over lifetime
@@ -1933,6 +2070,76 @@ void bump_eval_system_hash_config_generation() noexcept {
   g_sys_hash_config_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
+namespace {
+
+bool birth_table_row_eq(const Birth& a, const Birth& b) noexcept {
+  uint32_t ta = 0;
+  uint32_t tb = 0;
+  uint32_t ca = 0;
+  uint32_t cb = 0;
+  uint32_t za = 0;
+  uint32_t zb = 0;
+  std::memcpy(&ta, &a.time, sizeof(ta));
+  std::memcpy(&tb, &b.time, sizeof(tb));
+  std::memcpy(&ca, &a.curve_t, sizeof(ca));
+  std::memcpy(&cb, &b.curve_t, sizeof(cb));
+  std::memcpy(&za, &a.parent_z, sizeof(za));
+  std::memcpy(&zb, &b.parent_z, sizeof(zb));
+  return a.index == b.index && a.extra == b.extra && ta == tb && ca == cb && za == zb &&
+         a.parent_pose == b.parent_pose;
+}
+
+bool birth_table_list_eq(const std::vector<Birth>& a, const std::vector<Birth>& b) noexcept {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!birth_table_row_eq(a[i], b[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void fill_births_maybe_extend(const SplitEffectParticle& p, const EmitContext& ctx,
+                              std::vector<Birth>& births, bool include_expired, uint8_t kind) {
+  births.clear();
+  const bool can = collect_births_can_extend(p) && !ctx.parent_motion.rod_motion_candidate &&
+                   split_eval_births_extend_enabled();
+  bool used_extend = false;
+  SystemCarryKey key{};
+  if (can) {
+    key = make_system_key(ctx, p, kind);
+    BirthTableSnapshot snap;
+    if (split_eval_birth_table_lookup(key, snap) &&
+        split_eval_carry_can_resume(snap.now_t, ctx.now_t)) {
+      births.swap(snap.births);
+      collect_births_extend(p, ctx.now_t, ctx.color_id, static_cast<int>(births.size()), births,
+                            &ctx, include_expired);
+      used_extend = true;
+    }
+  }
+  if (!used_extend) {
+    collect_births(p, ctx.now_t, ctx.color_id, births, &ctx, include_expired);
+  }
+  if (can && split_eval_births_extend_verify()) {
+    std::vector<Birth> remade;
+    remade.reserve(births.size());
+    collect_births(p, ctx.now_t, ctx.color_id, remade, &ctx, include_expired);
+    if (!birth_table_list_eq(births, remade)) {
+      split_eval_birth_table_note_mismatch();
+      births.swap(remade);
+      used_extend = false;
+    }
+  }
+  if (can) {
+    split_eval_birth_table_store(key, ctx.now_t, births);
+    split_wall_note_birth_extend(used_extend);
+  }
+}
+
+}  // namespace
+
 void evaluate_plan(const SplitEffectParticle& p, const EmitContext& ctx,
                    std::vector<PrimaryEvalJob>& jobs) {
   jobs.clear();
@@ -1952,17 +2159,18 @@ void evaluate_plan(const SplitEffectParticle& p, const EmitContext& ctx,
   if (births.capacity() < 64) {
     births.reserve(64);
   }
-  // Always remake the birth list. Carry now stores only cap-kept particles
-  // (has_state after realize), so extend-from-snap.parts() would drop
-  // discarded-but-alive seeds. collect_births is the remake path and is
-  // byte-identical. hop schedule, not 2022.3.
+  // Birth table: continuous play may extend the live identity set stored
+  // beside carry (kind 8). Seek clears content, not capacity. hop schedule,
+  // not 2022.3.
   {
     WDS_PERF_SCOPE("shuriken.births");
-    SplitWallScope wall_births(SplitWallSec::Births);
-    collect_births(p, ctx.now_t, ctx.color_id, births, &ctx);
+    SplitWallScope wall_plan(SplitWallSec::BirthsPlan);
+    fill_births_maybe_extend(p, ctx, births, false, kBirthTableKindPlan);
+    split_wall_note_birth_table(static_cast<int>(births.size()), collect_births_can_extend(p),
+                                false);
   }
   {
-    SplitWallScope wall_cap(SplitWallSec::CapSort);
+    SplitWallScope wall_plan(SplitWallSec::CapSortPlan);
     apply_max_particles_alive_cap(p, ctx, births);
   }
   WDS_PERF_COUNT("shuriken.births", static_cast<int64_t>(births.size()));
@@ -2776,6 +2984,7 @@ void collect_subemit_parent_event(SubEventWork& ev, const SplitEffectParticle* p
     SplitWallScope wall_carry(SplitWallSec::CarryLookup);
     carried_i = carry_find_particle(*snap, b, seed);
   }
+  WDS_PERF_COUNT("shuriken.carry_find_parent_hit", carried_i >= 0 ? 1 : 0);
   float parent_life = parent_life_closed;
   if (persist_parent_hit) {
     parent_life = persist_parent.st.life;
@@ -2860,6 +3069,7 @@ void collect_subemit_parent_event(SubEventWork& ev, const SplitEffectParticle* p
   // so it still needs the live parent pose here. hop, not 2022.3.
   const bool defer_rot = split_defer_rot_parent_pose();
   const bool need_parent_state = any_rod || fill_now || !defer_rot;
+  WDS_PERF_COUNT("shuriken.need_parent_state", need_parent_state ? 1 : 0);
   if (need_parent_state) {
     note_eval_system_hash(parent, ctx.color_id);
   }
@@ -3381,6 +3591,7 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
                         uint32_t parent_idx = 0, uint8_t pose_hydrated = 0,
                         const ChildSysHoist* sys = nullptr) {
   keep = 0;
+  WDS_PERF_COUNT("shuriken.fill_subemit_child", 1);
   // PLAN (do_fill_live=false) only needs identity + keep. Cache key / sys
   // hash is for realize make_cache_key. hop, not 2022.3.
   if (do_fill_live) {
@@ -3390,7 +3601,22 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
                                    : (child.simulation_speed > 1e-6f ? child.simulation_speed : 1.0f);
   const float age = ctx.now_t * sim - cb.time * sim;
   const float eu = official_split_effect_sub_emit_u(born.age, born.life);
-  const uint32_t cseed = child_emit_seed(ctx, child, cb, parent_b, slot_i);
+  uint32_t cseed = 0;
+  if (mix3_lazy_verify()) {
+    const uint32_t eager = child_emit_seed(ctx, child, cb, parent_b, slot_i);
+    if (mix3_lazy_b() && dest_item != nullptr && dest_item->seed_ready != 0) {
+      mix3_verify_note(dest_item->seed == eager, "child_emit_seed");
+      cseed = dest_item->seed;
+    } else {
+      WDS_MIX3_COUNT("mix3.child_seed.fill", 1);
+      cseed = eager;
+    }
+  } else if (mix3_lazy_b() && dest_item != nullptr && dest_item->seed_ready != 0) {
+    cseed = dest_item->seed;
+  } else {
+    WDS_MIX3_COUNT("mix3.child_seed.fill", 1);
+    cseed = child_emit_seed(ctx, child, cb, parent_b, slot_i);
+  }
   auto write_dest_identity = [&](SubemitFillItem* dest, uint8_t filled_now, float pose_age_now) {
     if (dest == nullptr) {
       return;
@@ -3403,6 +3629,7 @@ void fill_subemit_child(const SplitEffectParticle& child, const Birth& cb, const
     dest->parent_b = parent_b;
     dest->born = born;
     dest->seed = cseed;
+    dest->seed_ready = 1;
     dest->age = age;
     dest->pose_age = pose_age_now;
     dest->emit_u = eu;
@@ -3693,6 +3920,7 @@ void hydrate_deferred_parent_poses(const EmitContext& ctx, SubemitFillPlan& plan
         !persist_hit &&
         split_eval_carry_lookup_for_time(parent_key, ctx.now_t, snap);
     const int carried_i = have_snap ? carry_find_particle(snap, head.parent_b, seed) : -1;
+    WDS_PERF_COUNT("shuriken.carry_find_parent_hit", carried_i >= 0 ? 1 : 0);
     ParticleState pst;
     if (persist_hit) {
       pst = persist_parent.st;
@@ -4175,11 +4403,19 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
     // does not keep the unused minScalar. Same window for every
     // Birth/Death slot, not an ID.
     {
-      SplitWallScope wall_births(SplitWallSec::Births);
-      collect_births(parent, ctx.now_t, ctx.color_id, layer.births, &ctx, true);
+      SplitWallScope wall_queue(SplitWallSec::BirthsQueue);
+      // Bind copies have catalog_index()==0. Queue ctx has no per-parent
+      // override (write_subemit_plan passes task.ctx), so two RoD parents on
+      // one line would share a kind-9 key. Use the same bound id as idx_of.
+      EmitContext qctx = ctx;
+      qctx.catalog_index_override = idx_of(parent);
+      qctx.has_catalog_index_override = 1;
+      fill_births_maybe_extend(parent, qctx, layer.births, true, kBirthTableKindQueue);
+      split_wall_note_birth_table(static_cast<int>(layer.births.size()),
+                                  collect_births_can_extend(parent), true);
     }
     {
-      SplitWallScope wall_cap(SplitWallSec::CapSort);
+      SplitWallScope wall_queue(SplitWallSec::CapSortQueue);
       apply_max_particles_alive_cap(parent, ctx, layer.births);
     }
     if (!layer.births.empty()) {
@@ -4473,6 +4709,7 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
     }
     }
     if (!refs.empty()) {
+      WDS_PERF_COUNT("shuriken.subemit_births", static_cast<int64_t>(refs.size()));
       SplitWallScope wall_ccap(SplitWallSec::ChildCap);
       auto& ref_keep = g_alive_cap_tls.ref_keep;
       ref_keep.assign(refs.size(), 1);
@@ -4524,14 +4761,19 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
         const float sim = ch.sim;
         for (size_t k = 0; k < mine.size(); ++k) {
           const ChildRef& r = refs[mine[k]];
-          const SubSlotOut& slot = events[r.ev].slots[r.sl];
+          SubSlotOut& slot = events[r.ev].slots[r.sl];
           cand[k] = slot_birth_at(slot, r.di);
           const float eu =
               r.di < slot.poses.size()
                   ? official_split_effect_sub_emit_u(slot.poses[r.di].age, slot.poses[r.di].life)
                   : 1.0f;
+          WDS_MIX3_COUNT("mix3.child_seed.cap", 1);
           const uint32_t cseed =
               child_emit_seed(ctx, child, cand[k], events[r.ev].b, slot.slot_i);
+          if (mix3_lazy_b() && r.di < slot.items.size()) {
+            slot.items[r.di].seed = cseed;
+            slot.items[r.di].seed_ready = 1;
+          }
           float life =
               ch.const_life >= 0.0f ? ch.const_life : birth_start_life(child, ctx, cand[k], eu, cseed);
           if ((slot.properties & kSplitEffectSubInheritLifetime) != 0 &&

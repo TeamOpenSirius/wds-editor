@@ -105,6 +105,26 @@ void split_eval_carry_store(const SystemCarryKey& key, float now_t,
 void split_eval_carry_drop(const SystemCarryKey& key) noexcept;
 void split_eval_carry_note_fallback() noexcept;
 
+// Live birth-table identity set (Birth rows, not particle state). Keyed by
+// SystemCarryKey; kind 8 = evaluate_plan, kind 9 = subemit parent queue.
+// Seek clears content and keeps vector capacity. hop schedule, not 2022.3.
+inline constexpr uint8_t kBirthTableKindPlan = 8;
+inline constexpr uint8_t kBirthTableKindQueue = 9;
+
+struct BirthTableSnapshot {
+  float now_t = -1.0e30f;
+  std::vector<Birth> births;
+};
+
+bool split_eval_births_extend_enabled() noexcept;
+bool split_eval_births_extend_verify() noexcept;
+bool split_eval_birth_table_lookup(const SystemCarryKey& key, BirthTableSnapshot& out) noexcept;
+void split_eval_birth_table_store(const SystemCarryKey& key, float now_t,
+                                  const std::vector<Birth>& births) noexcept;
+void split_eval_birth_table_clear_content() noexcept;
+void split_eval_birth_table_note_mismatch() noexcept;
+std::uint64_t split_eval_birth_table_verify_mismatches() noexcept;
+
 bool carry_birth_eq(const Birth& a, const Birth& b) noexcept;
 int carry_find_particle(const SystemCarrySnapshot& snap, const Birth& b, uint32_t seed) noexcept;
 int carry_find_child(const SystemCarrySnapshot& snap, const Birth& child, uint32_t seed,

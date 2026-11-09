@@ -98,6 +98,20 @@ constexpr float kRewindMaxAgeSec = 2.5f;
 constexpr std::size_t kRewindMaxSnapshots = 4;
 constexpr std::size_t kRewindMaxBytes = 64ull * 1024ull * 1024ull;
 
+bool parse_births_extend() noexcept {
+  const char* raw = std::getenv("WDS_BIRTHS_EXTEND");
+  if (raw == nullptr || raw[0] == '\0') {
+    return true;
+  }
+  const std::string_view v(raw);
+  return v != "0" && v != "off" && v != "false" && v != "OFF";
+}
+
+bool parse_births_extend_verify() noexcept {
+  const char* raw = std::getenv("WDS_BIRTHS_EXTEND_VERIFY");
+  return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+}
+
 bool parse_enabled() noexcept {
   const char* raw = std::getenv("WDS_SPLIT_CARRY");
   if (raw == nullptr || raw[0] == '\0') {
@@ -169,6 +183,22 @@ struct WalkKeyHash {
     return h;
   }
 };
+
+struct BirthTableEntry {
+  float now_t = -1.0e30f;
+  std::vector<Birth> births;
+  std::uint64_t tick = 0;
+};
+
+struct BirthTableShard {
+  std::mutex mu;
+  std::uint64_t tick = 1;
+  std::unordered_map<SystemCarryKey, std::unique_ptr<BirthTableEntry>, KeyHash> map;
+  std::vector<std::unique_ptr<BirthTableEntry>> free;
+};
+
+constexpr std::size_t kBirthTableMaxEntries = 4096;
+constexpr std::size_t kBirthTableMaxBirths = 1u << 20;
 
 struct WalkEntry {
   float now_t = -1.0e30f;
@@ -254,6 +284,7 @@ std::size_t entry_particles(const Entry& e) noexcept {
 struct Store {
   Shard shards[kShards];
   WalkShard walks[kWalkShards];
+  BirthTableShard birth_tables[kShards];
   std::atomic<std::size_t> bytes{0};
   std::atomic<std::size_t> systems{0};
   std::atomic<std::size_t> particles{0};
@@ -272,8 +303,11 @@ struct Store {
   std::atomic<float> gap_override{-1.0f};
   const bool enabled = parse_enabled();
   const bool rewind_enabled = parse_rewind_enabled();
+  const bool births_extend = parse_births_extend();
+  const bool births_extend_verify = parse_births_extend_verify();
   const std::size_t budget = parse_budget();
   const float max_gap = parse_gap();
+  std::atomic<std::uint64_t> birth_verify_mismatches{0};
 };
 
 std::atomic<Store*> g_store{nullptr};
@@ -431,6 +465,18 @@ void split_eval_carry_clear() noexcept {
     }
     sh.map.clear();
   }
+  for (int i = 0; i < kShards; ++i) {
+    BirthTableShard& sh = s.birth_tables[i];
+    std::lock_guard<std::mutex> lock(sh.mu);
+    for (auto& kv : sh.map) {
+      if (kv.second && sh.free.size() < 4096) {
+        kv.second->births.clear();
+        kv.second->now_t = -1.0e30f;
+        sh.free.push_back(std::move(kv.second));
+      }
+    }
+    sh.map.clear();
+  }
   s.bytes.store(0, std::memory_order_relaxed);
   s.systems.store(0, std::memory_order_relaxed);
   s.particles.store(0, std::memory_order_relaxed);
@@ -471,6 +517,7 @@ void split_eval_carry_clear_current_keep_rewind() noexcept {
     }
     sh.map.clear();
   }
+  split_eval_birth_table_clear_content();
 }
 
 void split_eval_carry_bump_epoch() noexcept {
@@ -1141,6 +1188,101 @@ void split_eval_walk_write_poses(const SubemitWalkKey& key, const float* event_t
     }
   }
   e.tick = ++sh.tick;
+}
+
+bool split_eval_births_extend_enabled() noexcept {
+  return store().births_extend;
+}
+
+bool split_eval_births_extend_verify() noexcept {
+  return store().births_extend_verify;
+}
+
+std::uint64_t split_eval_birth_table_verify_mismatches() noexcept {
+  return store().birth_verify_mismatches.load(std::memory_order_relaxed);
+}
+
+void split_eval_birth_table_note_mismatch() noexcept {
+  store().birth_verify_mismatches.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool split_eval_birth_table_lookup(const SystemCarryKey& key, BirthTableSnapshot& out) noexcept {
+  out.now_t = -1.0e30f;
+  out.births.clear();
+  if (!split_eval_births_extend_enabled()) {
+    return false;
+  }
+  Store& s = store();
+  BirthTableShard& sh = s.birth_tables[shard_of(key)];
+  std::lock_guard<std::mutex> lock(sh.mu);
+  const auto it = sh.map.find(key);
+  if (it == sh.map.end() || it->second->now_t < -1.0e20f) {
+    return false;
+  }
+  BirthTableEntry& e = *it->second;
+  out.now_t = e.now_t;
+  out.births = e.births;
+  e.tick = ++sh.tick;
+  return true;
+}
+
+void split_eval_birth_table_store(const SystemCarryKey& key, float now_t,
+                                  const std::vector<Birth>& births) noexcept {
+  if (!split_eval_births_extend_enabled()) {
+    return;
+  }
+  Store& s = store();
+  BirthTableShard& sh = s.birth_tables[shard_of(key)];
+  std::lock_guard<std::mutex> lock(sh.mu);
+  auto it = sh.map.find(key);
+  if (it == sh.map.end()) {
+    while (sh.map.size() >= (kBirthTableMaxEntries / static_cast<std::size_t>(kShards) + 1) &&
+           !sh.map.empty()) {
+      auto victim = sh.map.begin();
+      for (auto j = sh.map.begin(); j != sh.map.end(); ++j) {
+        if (j->second->tick < victim->second->tick) {
+          victim = j;
+        }
+      }
+      if (victim->second && sh.free.size() < 4096) {
+        victim->second->births.clear();
+        victim->second->now_t = -1.0e30f;
+        sh.free.push_back(std::move(victim->second));
+      }
+      sh.map.erase(victim);
+    }
+    std::unique_ptr<BirthTableEntry> e;
+    if (!sh.free.empty()) {
+      e = std::move(sh.free.back());
+      sh.free.pop_back();
+    } else {
+      e = std::make_unique<BirthTableEntry>();
+    }
+    it = sh.map.emplace(key, std::move(e)).first;
+  }
+  BirthTableEntry& e = *it->second;
+  if (births.size() > kBirthTableMaxBirths) {
+    e.births.clear();
+    e.now_t = -1.0e30f;
+    return;
+  }
+  e.now_t = now_t;
+  e.births = births;
+  e.tick = ++sh.tick;
+}
+
+void split_eval_birth_table_clear_content() noexcept {
+  Store& s = store();
+  for (int i = 0; i < kShards; ++i) {
+    BirthTableShard& sh = s.birth_tables[i];
+    std::lock_guard<std::mutex> lock(sh.mu);
+    for (auto& kv : sh.map) {
+      if (kv.second) {
+        kv.second->births.clear();
+        kv.second->now_t = -1.0e30f;
+      }
+    }
+  }
 }
 
 }  // namespace wds::chart_render::shuriken

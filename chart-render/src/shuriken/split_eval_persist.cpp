@@ -2,6 +2,7 @@
 #include "split_wall_profile.hpp"
 
 #include <wds/common/page_touch.hpp>
+#include <wds/common/perf_stages.hpp>
 
 
 #include <algorithm>
@@ -763,9 +764,16 @@ int persist_slot_count(const PersistClaimSession& s) noexcept {
 int persist_find_slot(const PersistClaimSession& s, const Birth& b, uint32_t seed) noexcept {
   PersistStore* st = store_from_session(s);
   if (st == nullptr) {
+    WDS_PERF_COUNT("shuriken.persist_slot_miss", 1);
     return -1;
   }
-  return find_slot(st->colds, b, seed);
+  const int idx = find_slot(st->colds, b, seed);
+  if (idx >= 0) {
+    WDS_PERF_COUNT("shuriken.persist_slot_hit", 1);
+  } else {
+    WDS_PERF_COUNT("shuriken.persist_slot_miss", 1);
+  }
+  return idx;
 }
 
 int persist_find_child_slot(const PersistClaimSession& s, const Birth& b, uint32_t seed,
@@ -1117,17 +1125,21 @@ bool split_eval_persist_lookup_particle(const SystemCarryKey& key, float now, co
   std::lock_guard<std::mutex> lock(sh.mu);
   const auto it = sh.map.find(key);
   if (it == sh.map.end()) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   PersistStore* st = table_store(r, it->second);
   if (st == nullptr || st->live == 0) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   if (st->now_t > now + kNowEps) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   const int idx = find_slot(st->colds, b, seed);
   if (idx < 0) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   PersistSlot s;
@@ -1135,6 +1147,7 @@ bool split_eval_persist_lookup_particle(const SystemCarryKey& key, float now, co
   out.st = s.st;
   out.grid = s.grid;
   out.has_grid = s.has_grid;
+  WDS_PERF_COUNT("shuriken.persist_lookup_hit", 1);
   return true;
 }
 

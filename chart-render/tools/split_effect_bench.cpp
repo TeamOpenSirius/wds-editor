@@ -173,6 +173,8 @@ void usage() {
                "      hop, not 2022.3.\n"
                "  noise-catalog\n"
                "      List official effects with active Noise / noise-driven sub-emitters.\n"
+               "  births-extend-scan [--effect ID]\n"
+               "      Catalog count of systems where collect_births_can_extend is true.\n"
                "  noise-hold-plan\n"
                "      Per-system hold-4 travel, live estimate, chosen N (hop, not 2022.3).\n"
                "\n"
@@ -2045,6 +2047,15 @@ struct ScanRow {
   int frames = 0;
   bool timed_out = false;
   double timeout_at_now_t = 0.0;
+  int max_birth_sum = 0;
+  int max_birth_plan_len = 0;
+  int max_birth_queue_len = 0;
+  int max_birth_plan_n = 0;
+  int max_birth_queue_n = 0;
+  int max_birth_plan_ext = 0;
+  int max_birth_queue_ext = 0;
+  double max_births_ms = 0.0;
+  double mean_births_ms = 0.0;
 };
 
 enum : uint32_t {
@@ -2062,6 +2073,15 @@ struct ScanPipeMsg {
   double max_ms = 0.0;
   double mean_ms = 0.0;
   int32_t frames = 0;
+  int32_t max_birth_sum = 0;
+  int32_t max_birth_plan_len = 0;
+  int32_t max_birth_queue_len = 0;
+  int32_t max_birth_plan_n = 0;
+  int32_t max_birth_queue_n = 0;
+  int32_t max_birth_plan_ext = 0;
+  int32_t max_birth_queue_ext = 0;
+  double max_births_ms = 0.0;
+  double mean_births_ms = 0.0;
 };
 
 static_assert(sizeof(ScanPipeMsg) <= 512, "ScanPipeMsg must fit in PIPE_BUF for atomic writes");
@@ -2116,6 +2136,15 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
   double max_ms = 0.0;
   double sum_ms = 0.0;
   int frames = 0;
+  int max_birth_sum = 0;
+  int max_birth_plan_len = 0;
+  int max_birth_queue_len = 0;
+  int max_birth_plan_n = 0;
+  int max_birth_queue_n = 0;
+  int max_birth_plan_ext = 0;
+  int max_birth_queue_ext = 0;
+  double max_births_ms = 0.0;
+  double sum_births_ms = 0.0;
   for (double now_t = 0.0; now_t <= tmax + 1e-12; now_t += dt) {
     ScanPipeMsg progress;
     progress.kind = kScanPipeProgress;
@@ -2130,6 +2159,24 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
     max_ms = std::max(max_ms, ms);
     sum_ms += ms;
     ++frames;
+    wds::chart_render::SplitWallFrameSnap wall{};
+    if (wds::chart_render::split_wall_copy_last_frame(wall)) {
+      const int birth_sum = wall.birth_plan_len_sum + wall.birth_queue_len_sum;
+      max_birth_sum = std::max(max_birth_sum, birth_sum);
+      max_birth_plan_len = std::max(max_birth_plan_len, wall.birth_plan_len_sum);
+      max_birth_queue_len = std::max(max_birth_queue_len, wall.birth_queue_len_sum);
+      max_birth_plan_n = std::max(max_birth_plan_n, wall.birth_plan_n);
+      max_birth_queue_n = std::max(max_birth_queue_n, wall.birth_queue_n);
+      max_birth_plan_ext = std::max(max_birth_plan_ext, wall.birth_plan_ext);
+      max_birth_queue_ext = std::max(max_birth_queue_ext, wall.birth_queue_ext);
+      const double births_ms =
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::BirthsPlan)] +
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::CapSortPlan)] +
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::BirthsQueue)] +
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::CapSortQueue)];
+      max_births_ms = std::max(max_births_ms, births_ms);
+      sum_births_ms += births_ms;
+    }
   }
   ScanPipeMsg done;
   done.kind = kScanPipeComplete;
@@ -2138,6 +2185,15 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
   done.max_ms = max_ms;
   done.mean_ms = frames > 0 ? sum_ms / static_cast<double>(frames) : 0.0;
   done.frames = frames;
+  done.max_birth_sum = max_birth_sum;
+  done.max_birth_plan_len = max_birth_plan_len;
+  done.max_birth_queue_len = max_birth_queue_len;
+  done.max_birth_plan_n = max_birth_plan_n;
+  done.max_birth_queue_n = max_birth_queue_n;
+  done.max_birth_plan_ext = max_birth_plan_ext;
+  done.max_birth_queue_ext = max_birth_queue_ext;
+  done.max_births_ms = max_births_ms;
+  done.mean_births_ms = frames > 0 ? sum_births_ms / static_cast<double>(frames) : 0.0;
   write_scan_pipe_msg(write_fd, done);
   close(write_fd);
   _exit(0);
@@ -2271,6 +2327,15 @@ bool scan_one_effect_with_timeout(int32_t effect_id, int quality, int32_t split_
     row_out.max_ms = complete_msg.max_ms;
     row_out.mean_ms = complete_msg.mean_ms;
     row_out.frames = complete_msg.frames;
+    row_out.max_birth_sum = complete_msg.max_birth_sum;
+    row_out.max_birth_plan_len = complete_msg.max_birth_plan_len;
+    row_out.max_birth_queue_len = complete_msg.max_birth_queue_len;
+    row_out.max_birth_plan_n = complete_msg.max_birth_plan_n;
+    row_out.max_birth_queue_n = complete_msg.max_birth_queue_n;
+    row_out.max_birth_plan_ext = complete_msg.max_birth_plan_ext;
+    row_out.max_birth_queue_ext = complete_msg.max_birth_queue_ext;
+    row_out.max_births_ms = complete_msg.max_births_ms;
+    row_out.mean_births_ms = complete_msg.mean_births_ms;
   }
   close(pipefd[0]);
   return true;
@@ -2344,8 +2409,10 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     }
     return a.max_ms > b.max_ms;
   });
-  std::fprintf(stdout, "\n%-8s %8s %10s %10s %8s %9s %16s\n", "id", "max_n", "max_ms", "mean_ms",
-               "frames", "timed_out", "timeout_at_now_t");
+  std::fprintf(stdout,
+               "\n%-8s %8s %10s %10s %8s %9s %16s %10s %10s %8s %8s %8s %8s\n", "id", "max_n",
+               "max_ms", "mean_ms", "frames", "timed_out", "timeout_at_now_t", "births_ms",
+               "mean_b_ms", "birth_n", "plan_len", "queue_len", "ext_max");
   for (const ScanRow& r : by_time) {
     std::fprintf(stdout, "%-8d %8d", r.id, r.max_n);
     print_ms_cell(r.max_ms);
@@ -2356,6 +2423,10 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     } else {
       std::fprintf(stdout, " %16s", "-");
     }
+    print_ms_cell(r.max_births_ms);
+    print_ms_cell(r.mean_births_ms);
+    std::fprintf(stdout, " %8d %8d %8d %8d", r.max_birth_sum, r.max_birth_plan_len,
+                 r.max_birth_queue_len, r.max_birth_plan_ext + r.max_birth_queue_ext);
     std::fputc('\n', stdout);
   }
   std::fprintf(stdout, "\n");
@@ -2380,6 +2451,36 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     std::fprintf(stdout, "HEAVIEST %d\n", r.id);
     ++heaviest_n;
   }
+  std::vector<ScanRow> by_births_ms = rows;
+  std::sort(by_births_ms.begin(), by_births_ms.end(),
+            [](const ScanRow& a, const ScanRow& b) { return a.max_births_ms > b.max_births_ms; });
+  size_t heaviest_births = 0;
+  for (const ScanRow& r : by_births_ms) {
+    if (heaviest_births >= 8) {
+      break;
+    }
+    if (r.timed_out) {
+      continue;
+    }
+    std::fprintf(stdout, "HEAVIEST_BIRTHS_MS %d max_births_ms=%.3f max_birth_n=%d\n", r.id,
+                 r.max_births_ms, r.max_birth_sum);
+    ++heaviest_births;
+  }
+  std::vector<ScanRow> by_birth_n = rows;
+  std::sort(by_birth_n.begin(), by_birth_n.end(),
+            [](const ScanRow& a, const ScanRow& b) { return a.max_birth_sum > b.max_birth_sum; });
+  size_t heaviest_birth_n = 0;
+  for (const ScanRow& r : by_birth_n) {
+    if (heaviest_birth_n >= 8) {
+      break;
+    }
+    if (r.timed_out) {
+      continue;
+    }
+    std::fprintf(stdout, "HEAVIEST_BIRTH_N %d max_birth_n=%d plan=%d queue=%d\n", r.id,
+                 r.max_birth_sum, r.max_birth_plan_len, r.max_birth_queue_len);
+    ++heaviest_birth_n;
+  }
 
   if (!csv_path.empty()) {
     FILE* csv = std::fopen(csv_path.c_str(), "w");
@@ -2387,7 +2488,10 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
       std::fprintf(stderr, "failed to write csv: %s\n", csv_path.c_str());
       return 1;
     }
-    std::fprintf(csv, "effect_id,max_particles,max_ms,mean_ms,frames,timed_out,timeout_at_now_t\n");
+    std::fprintf(csv,
+                 "effect_id,max_particles,max_ms,mean_ms,frames,timed_out,timeout_at_now_t,"
+                 "max_births_ms,mean_births_ms,max_birth_n,max_birth_plan_len,max_birth_queue_len,"
+                 "max_birth_plan_n,max_birth_queue_n,max_birth_plan_ext,max_birth_queue_ext\n");
     for (const ScanRow& r : by_time) {
       std::fprintf(csv, "%d,%d,", r.id, r.max_n);
       print_ms_csv(csv, r.max_ms);
@@ -2399,7 +2503,13 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
       } else {
         std::fputs(",", csv);
       }
-      std::fputc('\n', csv);
+      std::fputc(',', csv);
+      print_ms_csv(csv, r.max_births_ms);
+      std::fputc(',', csv);
+      print_ms_csv(csv, r.mean_births_ms);
+      std::fprintf(csv, ",%d,%d,%d,%d,%d,%d,%d\n", r.max_birth_sum, r.max_birth_plan_len,
+                   r.max_birth_queue_len, r.max_birth_plan_n, r.max_birth_queue_n,
+                   r.max_birth_plan_ext, r.max_birth_queue_ext);
     }
     std::fclose(csv);
     std::fprintf(stdout, "wrote %s\n", csv_path.c_str());
@@ -2551,6 +2661,15 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                                                  static_cast<wds::chart_render::SplitWallSec>(s)),
                          wall.sec_ms[s]);
           }
+          std::fprintf(stdout,
+                       " birth_plan n/ext/sum/max=%d/%d/%d/%d birth_queue n/ext/sum/max=%d/%d/%d/%d"
+                       " birth_extend hit/miss=%d/%d birth_verify_mm=%llu",
+                       wall.birth_plan_n, wall.birth_plan_ext, wall.birth_plan_len_sum,
+                       wall.birth_plan_len_max, wall.birth_queue_n, wall.birth_queue_ext,
+                       wall.birth_queue_len_sum, wall.birth_queue_len_max, wall.birth_extend_hit,
+                       wall.birth_extend_miss,
+                       static_cast<unsigned long long>(
+                           wds::chart_render::shuriken::split_eval_birth_table_verify_mismatches()));
         }
         std::fprintf(stdout, "\n");
       }
@@ -3334,6 +3453,126 @@ int cmd_noise_catalog() {
     std::fprintf(stdout, " %d=%.4g", heavy[i].second, static_cast<double>(heavy[i].first));
   }
   std::fputc('\n', stdout);
+  return 0;
+}
+
+int cmd_births_extend_scan(int32_t only_id) {
+  const auto ids = official_split_effect_ids();
+  int effects_n = 0;
+  int effects_any = 0;
+  int sys_n = 0;
+  int sys_active = 0;
+  int sys_ext = 0;
+  int sys_rot = 0;
+  int sys_rod = 0;
+  int sys_curve = 0;
+  int sys_burst = 0;
+  int sys_mixed = 0;
+  int sys_cap = 0;
+  int sys_rod_two = 0;
+  struct EffectExt {
+    int32_t id = 0;
+    int active = 0;
+    int ext = 0;
+    int rot = 0;
+    int rod = 0;
+    int curve = 0;
+    int burst = 0;
+  };
+  std::vector<EffectExt> per;
+  std::fprintf(stdout, "births-extend-scan effects=%zu only=%d\n", ids.size(), only_id);
+  for (int32_t id : ids) {
+    if (only_id > 0 && id != only_id) {
+      continue;
+    }
+    ++effects_n;
+    uint16_t n = 0;
+    const SplitEffectParticle* ps = effect_catalog_particles(id, &n);
+    EffectExt row;
+    row.id = id;
+    for (uint16_t i = 0; i < n; ++i) {
+      const SplitEffectParticle& p = ps[i];
+      ++sys_n;
+      if (p.go_active == 0) {
+        continue;
+      }
+      ++sys_active;
+      ++row.active;
+      const bool can = wds::chart_render::shuriken::collect_births_can_extend(p);
+      if (can) {
+        ++sys_ext;
+        ++row.ext;
+      }
+      if (p.rot_curve_count > 0 || p.rod_curve_count > 0) {
+        ++sys_curve;
+        ++row.curve;
+      }
+      uint8_t burst_n = 0;
+      (void)official_split_effect_bursts(p, &burst_n);
+      const bool burst = burst_n > 0 ||
+                         (p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::Burst) &&
+                          p.emission > 0.0f);
+      if (burst) {
+        ++sys_burst;
+        ++row.burst;
+      }
+      if (p.max_particles > 0 && p.max_particles < 1000) {
+        ++sys_cap;
+      }
+      const bool has_rot = p.rate_over_time > 1e-6f;
+      float rod = p.rate_over_distance;
+      if (rod <= 1e-6f &&
+          p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::RateOverDistance)) {
+        rod = p.emission;
+      }
+      const bool rod_two = p.rod_random != 0 && p.rate_over_distance_min > 1e-6f;
+      const bool has_rod = rod > 1e-6f || rod_two;
+      if (has_rot) {
+        ++sys_rot;
+        ++row.rot;
+      }
+      if (has_rod) {
+        ++sys_rod;
+        ++row.rod;
+      }
+      if (has_rot && has_rod) {
+        ++sys_mixed;
+      }
+      if (rod_two) {
+        ++sys_rod_two;
+      }
+    }
+    if (row.ext > 0) {
+      ++effects_any;
+    }
+    per.push_back(row);
+    if (only_id > 0) {
+      std::fprintf(stdout, "  effect %d systems=%u active=%d ext=%d\n", id, n, row.active, row.ext);
+    }
+  }
+  std::sort(per.begin(), per.end(), [](const EffectExt& a, const EffectExt& b) {
+    if (a.ext != b.ext) {
+      return a.ext > b.ext;
+    }
+    return a.id < b.id;
+  });
+  std::fprintf(stdout, "births-extend-scan top_extend:\n");
+  for (size_t i = 0; i < per.size() && i < 20; ++i) {
+    const EffectExt& r = per[i];
+    if (r.ext <= 0) {
+      break;
+    }
+    std::fprintf(stdout, "  %d active=%d ext=%d rot=%d rod=%d curve=%d burst=%d\n", r.id, r.active,
+                 r.ext, r.rot, r.rod, r.curve, r.burst);
+  }
+  std::fprintf(stdout,
+               "births-extend-scan effects=%d with_extend=%d systems=%d active=%d extend=%d "
+               "(%.1f%% of active) rot=%d rod=%d curve=%d burst=%d mixed=%d cap<1000=%d "
+               "rod_two=%d\n",
+               effects_n, effects_any, sys_n, sys_active, sys_ext,
+               sys_active > 0 ? 100.0 * static_cast<double>(sys_ext) / static_cast<double>(sys_active)
+                              : 0.0,
+               sys_rot, sys_rod, sys_curve, sys_burst, sys_mixed, sys_cap, sys_rod_two);
   return 0;
 }
 
@@ -5948,6 +6187,19 @@ int main(int argc, char** argv) {
 
   if (cmd == "noise-catalog") {
     return cmd_noise_catalog();
+  }
+
+  if (cmd == "births-extend-scan") {
+    int32_t only_id = 0;
+    for (int i = 2; i < argc; ++i) {
+      if (eq_i(argv[i], "--effect") && require(i + 1, "--effect")) {
+        only_id = std::atoi(argv[++i]);
+      } else {
+        std::fprintf(stderr, "unknown births-extend-scan arg: %s\n", argv[i]);
+        return 2;
+      }
+    }
+    return cmd_births_extend_scan(only_id);
   }
 
   if (cmd == "noise-hold-plan") {

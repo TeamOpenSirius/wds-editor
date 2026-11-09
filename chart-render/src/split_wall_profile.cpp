@@ -34,6 +34,7 @@ constexpr const char* kSecName[kSecN] = {
     "subemit_plan", "subemit_realize",
     "wave_b1", "wave_b2setup", "wave_b2", "wave_b2b",
     "wave_b3setup", "wave_b3", "wave_b3b",
+    "births_plan", "capsort_plan", "births_queue", "capsort_queue",
 };
 #endif  // WDS_DIAG_ENABLED
 
@@ -67,6 +68,16 @@ struct FrameAcc {
   std::atomic<int> longest_fill{0};
   std::atomic<int64_t> worker_busy[kMaxWorkers]{};
   std::atomic<int64_t> phase_b_wall{0};
+  std::atomic<int> birth_plan_n{0};
+  std::atomic<int> birth_plan_ext{0};
+  std::atomic<int> birth_plan_len_sum{0};
+  std::atomic<int> birth_plan_len_max{0};
+  std::atomic<int> birth_queue_n{0};
+  std::atomic<int> birth_queue_ext{0};
+  std::atomic<int> birth_queue_len_sum{0};
+  std::atomic<int> birth_queue_len_max{0};
+  std::atomic<int> birth_extend_hit{0};
+  std::atomic<int> birth_extend_miss{0};
 
   void reset() noexcept {
     for (int i = 0; i < kSecN; ++i) {
@@ -91,6 +102,16 @@ struct FrameAcc {
       worker_busy[w].store(0, std::memory_order_relaxed);
     }
     phase_b_wall.store(0, std::memory_order_relaxed);
+    birth_plan_n.store(0, std::memory_order_relaxed);
+    birth_plan_ext.store(0, std::memory_order_relaxed);
+    birth_plan_len_sum.store(0, std::memory_order_relaxed);
+    birth_plan_len_max.store(0, std::memory_order_relaxed);
+    birth_queue_n.store(0, std::memory_order_relaxed);
+    birth_queue_ext.store(0, std::memory_order_relaxed);
+    birth_queue_len_sum.store(0, std::memory_order_relaxed);
+    birth_queue_len_max.store(0, std::memory_order_relaxed);
+    birth_extend_hit.store(0, std::memory_order_relaxed);
+    birth_extend_miss.store(0, std::memory_order_relaxed);
   }
 };
 
@@ -113,7 +134,63 @@ struct WindowRow {
   int longest_fill = 0;
   int64_t worker_busy[kMaxWorkers]{};
   int64_t phase_b_wall = 0;
+  int birth_plan_n = 0;
+  int birth_plan_ext = 0;
+  int birth_plan_len_sum = 0;
+  int birth_plan_len_max = 0;
+  int birth_queue_n = 0;
+  int birth_queue_ext = 0;
+  int birth_queue_len_sum = 0;
+  int birth_queue_len_max = 0;
+  int birth_extend_hit = 0;
+  int birth_extend_miss = 0;
 };
+
+constexpr int kBirthHistN = 8;
+std::atomic<int64_t> g_hist_plan[kBirthHistN]{};
+std::atomic<int64_t> g_hist_queue[kBirthHistN]{};
+std::atomic<int64_t> g_hist_plan_calls{0};
+std::atomic<int64_t> g_hist_plan_ext{0};
+std::atomic<int64_t> g_hist_queue_calls{0};
+std::atomic<int64_t> g_hist_queue_ext{0};
+
+#if WDS_DIAG_ENABLED
+int birth_hist_bucket(int n) noexcept {
+  if (n <= 0) {
+    return 0;
+  }
+  if (n <= 16) {
+    return 1;
+  }
+  if (n <= 64) {
+    return 2;
+  }
+  if (n <= 256) {
+    return 3;
+  }
+  if (n <= 1024) {
+    return 4;
+  }
+  if (n <= 4096) {
+    return 5;
+  }
+  if (n <= 16384) {
+    return 6;
+  }
+  return 7;
+}
+#endif  // WDS_DIAG_ENABLED
+
+void reset_birth_hist() noexcept {
+  for (int i = 0; i < kBirthHistN; ++i) {
+    g_hist_plan[i].store(0, std::memory_order_relaxed);
+    g_hist_queue[i].store(0, std::memory_order_relaxed);
+  }
+  g_hist_plan_calls.store(0, std::memory_order_relaxed);
+  g_hist_plan_ext.store(0, std::memory_order_relaxed);
+  g_hist_queue_calls.store(0, std::memory_order_relaxed);
+  g_hist_queue_ext.store(0, std::memory_order_relaxed);
+}
 
 std::atomic<bool> g_on{env_on()};
 FrameAcc g_frame;
@@ -146,6 +223,16 @@ void fill_snap(const WindowRow& r, SplitWallFrameSnap& out) noexcept {
   out.longest_wave = r.longest_wave;
   out.longest_kind = r.longest_kind;
   out.longest_fill = r.longest_fill;
+  out.birth_plan_n = r.birth_plan_n;
+  out.birth_plan_ext = r.birth_plan_ext;
+  out.birth_plan_len_sum = r.birth_plan_len_sum;
+  out.birth_plan_len_max = r.birth_plan_len_max;
+  out.birth_queue_n = r.birth_queue_n;
+  out.birth_queue_ext = r.birth_queue_ext;
+  out.birth_queue_len_sum = r.birth_queue_len_sum;
+  out.birth_queue_len_max = r.birth_queue_len_max;
+  out.birth_extend_hit = r.birth_extend_hit;
+  out.birth_extend_miss = r.birth_extend_miss;
 }
 
 }  // namespace
@@ -160,6 +247,7 @@ void split_wall_reset() noexcept {
   g_frame.reset();
   g_last = {};
   g_have_last = false;
+  reset_birth_hist();
 }
 
 void split_wall_begin_frame() noexcept {
@@ -196,6 +284,16 @@ void split_wall_end_frame() noexcept {
     row.worker_busy[w] = g_frame.worker_busy[w].load(std::memory_order_relaxed);
   }
   row.phase_b_wall = g_frame.phase_b_wall.load(std::memory_order_relaxed);
+  row.birth_plan_n = g_frame.birth_plan_n.load(std::memory_order_relaxed);
+  row.birth_plan_ext = g_frame.birth_plan_ext.load(std::memory_order_relaxed);
+  row.birth_plan_len_sum = g_frame.birth_plan_len_sum.load(std::memory_order_relaxed);
+  row.birth_plan_len_max = g_frame.birth_plan_len_max.load(std::memory_order_relaxed);
+  row.birth_queue_n = g_frame.birth_queue_n.load(std::memory_order_relaxed);
+  row.birth_queue_ext = g_frame.birth_queue_ext.load(std::memory_order_relaxed);
+  row.birth_queue_len_sum = g_frame.birth_queue_len_sum.load(std::memory_order_relaxed);
+  row.birth_queue_len_max = g_frame.birth_queue_len_max.load(std::memory_order_relaxed);
+  row.birth_extend_hit = g_frame.birth_extend_hit.load(std::memory_order_relaxed);
+  row.birth_extend_miss = g_frame.birth_extend_miss.load(std::memory_order_relaxed);
   std::lock_guard<std::mutex> lock(g_mu);
   g_last = row;
   g_have_last = true;
@@ -408,6 +506,53 @@ void split_wall_note_eval_slices(int n) noexcept {
   }
   g_frame.eval_slices.store(n, std::memory_order_relaxed);
 }
+
+#if WDS_DIAG_ENABLED
+void split_wall_note_birth_table(int n, bool can_extend, bool is_queue) noexcept {
+  if (!split_wall_enabled()) {
+    return;
+  }
+  const int bucket = birth_hist_bucket(n);
+  if (is_queue) {
+    g_frame.birth_queue_n.fetch_add(1, std::memory_order_relaxed);
+    g_frame.birth_queue_len_sum.fetch_add(n, std::memory_order_relaxed);
+    int prev = g_frame.birth_queue_len_max.load(std::memory_order_relaxed);
+    while (n > prev && !g_frame.birth_queue_len_max.compare_exchange_weak(
+                           prev, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+    if (can_extend) {
+      g_frame.birth_queue_ext.fetch_add(1, std::memory_order_relaxed);
+      g_hist_queue_ext.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_hist_queue[bucket].fetch_add(1, std::memory_order_relaxed);
+    g_hist_queue_calls.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_frame.birth_plan_n.fetch_add(1, std::memory_order_relaxed);
+  g_frame.birth_plan_len_sum.fetch_add(n, std::memory_order_relaxed);
+  int prev = g_frame.birth_plan_len_max.load(std::memory_order_relaxed);
+  while (n > prev && !g_frame.birth_plan_len_max.compare_exchange_weak(
+                         prev, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+  }
+  if (can_extend) {
+    g_frame.birth_plan_ext.fetch_add(1, std::memory_order_relaxed);
+    g_hist_plan_ext.fetch_add(1, std::memory_order_relaxed);
+  }
+  g_hist_plan[bucket].fetch_add(1, std::memory_order_relaxed);
+  g_hist_plan_calls.fetch_add(1, std::memory_order_relaxed);
+}
+
+void split_wall_note_birth_extend(bool hit) noexcept {
+  if (!split_wall_enabled()) {
+    return;
+  }
+  if (hit) {
+    g_frame.birth_extend_hit.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    g_frame.birth_extend_miss.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+#endif  // WDS_DIAG_ENABLED
 
 const char* split_wall_sec_name(SplitWallSec sec) noexcept {
 #if WDS_DIAG_ENABLED
@@ -662,6 +807,57 @@ std::string split_wall_report() {
                 sec_avg[static_cast<int>(SplitWallSec::SubemitPlan)],
                 sec_avg[static_cast<int>(SplitWallSec::SubemitRealize)]);
   out += buf;
+  {
+    const int64_t plan_n = g_hist_plan_calls.load(std::memory_order_relaxed);
+    const int64_t plan_ext = g_hist_plan_ext.load(std::memory_order_relaxed);
+    const int64_t queue_n = g_hist_queue_calls.load(std::memory_order_relaxed);
+    const int64_t queue_ext = g_hist_queue_ext.load(std::memory_order_relaxed);
+    std::snprintf(buf, sizeof(buf),
+                  "  births_plan=%.3f capsort_plan=%.3f births_queue=%.3f capsort_queue=%.3f  "
+                  "plan_calls=%lld extend=%lld (%.0f%%) queue_calls=%lld extend=%lld (%.0f%%)\n",
+                  sec_avg[static_cast<int>(SplitWallSec::BirthsPlan)],
+                  sec_avg[static_cast<int>(SplitWallSec::CapSortPlan)],
+                  sec_avg[static_cast<int>(SplitWallSec::BirthsQueue)],
+                  sec_avg[static_cast<int>(SplitWallSec::CapSortQueue)],
+                  static_cast<long long>(plan_n), static_cast<long long>(plan_ext),
+                  plan_n > 0 ? 100.0 * static_cast<double>(plan_ext) / static_cast<double>(plan_n)
+                             : 0.0,
+                  static_cast<long long>(queue_n), static_cast<long long>(queue_ext),
+                  queue_n > 0 ? 100.0 * static_cast<double>(queue_ext) / static_cast<double>(queue_n)
+                              : 0.0);
+    out += buf;
+    double hit = 0.0;
+    double miss = 0.0;
+    for (const WindowRow& r : g_window) {
+      hit += static_cast<double>(r.birth_extend_hit);
+      miss += static_cast<double>(r.birth_extend_miss);
+    }
+    hit /= static_cast<double>(n);
+    miss /= static_cast<double>(n);
+    std::snprintf(buf, sizeof(buf), "  birth_extend hit=%.1f miss=%.1f\n", hit, miss);
+    out += buf;
+    static constexpr const char* kHistLabel[kBirthHistN] = {
+        "0", "1-16", "17-64", "65-256", "257-1024", "1025-4096", "4097-16384", "16385+"};
+    out += "  birth_len_plan";
+    for (int i = 0; i < kBirthHistN; ++i) {
+      const int64_t c = g_hist_plan[i].load(std::memory_order_relaxed);
+      if (c <= 0) {
+        continue;
+      }
+      std::snprintf(buf, sizeof(buf), " %s=%lld", kHistLabel[i], static_cast<long long>(c));
+      out += buf;
+    }
+    out += "\n  birth_len_queue";
+    for (int i = 0; i < kBirthHistN; ++i) {
+      const int64_t c = g_hist_queue[i].load(std::memory_order_relaxed);
+      if (c <= 0) {
+        continue;
+      }
+      std::snprintf(buf, sizeof(buf), " %s=%lld", kHistLabel[i], static_cast<long long>(c));
+      out += buf;
+    }
+    out += "\n";
+  }
   std::snprintf(buf, sizeof(buf),
                 "  serial extra capselect=%.3f assemble=%.3f lockwait=%.3f pool_wake=%.3f "
                 "pool_join=%.3f task_setup=%.3f\n",

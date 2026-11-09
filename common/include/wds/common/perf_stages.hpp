@@ -89,3 +89,13 @@ int pool_thread_ids(uint64_t* out, int cap) noexcept;
 #define WDS_PERF_COUNT(literal, n) ((void)0)
 
 #endif  // WDS_DIAG_ENABLED
+
+// Per-call mix3 counters slow the diagnostic hot path; off by default.
+#ifndef WDS_MIX3_COUNTERS
+#define WDS_MIX3_COUNTERS 0
+#endif
+#if WDS_MIX3_COUNTERS
+#define WDS_MIX3_COUNT(literal, n) WDS_PERF_COUNT(literal, n)
+#else
+#define WDS_MIX3_COUNT(literal, n) ((void)0)
+#endif

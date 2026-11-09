@@ -5,6 +5,8 @@
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <wds/chart_render/split_effect_particles.hpp>
 
+#include <wds/common/perf_stages.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -177,6 +179,7 @@ bool integration_observers_installed() noexcept;
 // Same 32-step xorshift as evaluate.cpp. Inlined so shape / emit / make_state
 // do not pay a cross-TU call per mix (sample: mix3 11–17% of collect).
 inline uint32_t mix3(uint32_t a, uint32_t b, uint32_t c) noexcept {
+  WDS_MIX3_COUNT("mix3.total", 1);
   return xorshift128_r32_mix3(a, b, c);
 }
 
@@ -297,7 +300,7 @@ bool collect_births_can_extend(const SplitEffectParticle& p) noexcept;
 bool collect_births_window_open(const SplitEffectParticle& p, float now_t) noexcept;
 void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t color_id,
                            int first_index, std::vector<Birth>& out,
-                           const EmitContext* context = nullptr);
+                           const EmitContext* context = nullptr, bool include_expired = false);
 
 // Unity 2022.3 Trails.lifetime is a multiplier of startLifetime (Manual
 // PartSysTrailsModule + TrailModule.lifetime). Conservative hi for windows
@@ -789,6 +792,9 @@ struct SubemitFillItem {
   uint8_t properties = 0;
   uint8_t ready = 0;
   uint8_t filled = 0;
+  // Wave 3.5c: cap stage writes child_emit_seed once; fill_subemit_child
+  // reuses it. 0 = not yet computed (seed itself may be 0).
+  uint8_t seed_ready = 0;
   // 1 = PLAN already ran pose_at (RoD walk). 0 = identity stub; realize
   // hydrates after the preview-pool cap. hop, not 2022.3.
   uint8_t pose_hydrated = 0;
