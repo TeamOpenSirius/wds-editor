@@ -58,6 +58,13 @@ enum class SplitWallSec : int {
   PePoseAt,
   SubemitPlan,
   SubemitRealize,
+  WaveB1,
+  WaveB2Setup,
+  WaveB2,
+  WaveB2b,
+  WaveB3Setup,
+  WaveB3,
+  WaveB3b,
   Count
 };
 
@@ -74,6 +81,10 @@ struct SplitWallFrameSnap {
   int evaluated = 0;
   int kept = 0;
   int realized = 0;
+  int eval_slices = 0;
+  int longest_wave = -1;
+  int longest_kind = -1;
+  int longest_fill = 0;
 };
 
 bool split_wall_enabled() noexcept;
@@ -85,12 +96,14 @@ void split_wall_scope_enter(SplitWallSec sec, int64_t now_ns) noexcept;
 void split_wall_scope_leave(SplitWallSec sec, int64_t start_ns, int64_t now_ns) noexcept;
 void split_wall_max_ns(SplitWallSec sec, int64_t ns) noexcept;
 void split_wall_begin_task() noexcept;
+void split_wall_set_task_tag(int wave, int kind, int fill) noexcept;
 void split_wall_note_task(int64_t ns) noexcept;
 void split_wall_note_phase_b(int ntasks, int nthreads, int64_t wall_ns) noexcept;
 void split_wall_note_worker_busy(int worker, int64_t busy_ns) noexcept;
 void split_wall_note_candidates(int evaluated, int kept) noexcept;
 void split_wall_note_realized(int n) noexcept;
 void split_wall_note_splits(int n) noexcept;
+void split_wall_note_eval_slices(int n) noexcept;
 std::string split_wall_report();
 const char* split_wall_sec_name(SplitWallSec sec) noexcept;
 bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept;

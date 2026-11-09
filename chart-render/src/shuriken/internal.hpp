@@ -535,26 +535,26 @@ class PoseIntegrator {
 // (birth_index, birth_extra). Overlapping instances differ by start_ms (or
 // are bit-identical at stagger 0). input_hash covers integration inputs so a
 // bind/chart change misses instead of reusing a stale pose.
+// Packed 56 B, explicit pad so memcmp is well-defined. Field order is
+// density first (input_hash / start_ms), then identity. Not a 2022.3 formula.
 struct ParticleCacheKey {
+  uint64_t input_hash = 0;
+  int64_t line_start_ms = 0;
   uint32_t epoch = 0;
   int32_t color_id = 0;
   int32_t line_index = 0;
-  int64_t line_start_ms = 0;
   uint32_t catalog_index = 0;
   int32_t birth_index = 0;
   uint32_t birth_extra = 0;
   uint32_t line_play_gen = 0;
   uint32_t seed = 0;
-  uint64_t input_hash = 0;
   uint8_t valid = 0;
+  uint8_t pad_[7]{};
 };
+static_assert(sizeof(ParticleCacheKey) == 56, "ParticleCacheKey packed");
 
 inline bool operator==(const ParticleCacheKey& a, const ParticleCacheKey& b) noexcept {
-  return a.epoch == b.epoch && a.color_id == b.color_id && a.line_index == b.line_index &&
-         a.line_start_ms == b.line_start_ms && a.catalog_index == b.catalog_index &&
-         a.birth_index == b.birth_index && a.birth_extra == b.birth_extra &&
-         a.line_play_gen == b.line_play_gen && a.seed == b.seed && a.input_hash == b.input_hash &&
-         a.valid == b.valid;
+  return std::memcmp(&a, &b, sizeof(ParticleCacheKey)) == 0;
 }
 
 void integrate_pose(const ParticleState& st, float age, float& world_x, float& main_y,
@@ -727,6 +727,21 @@ void evaluate_realize_job(const SplitEffectParticle& p, const EmitContext& ctx, 
 int evaluate_realize(const SplitEffectParticle& p, const EmitContext& ctx,
                      std::vector<PrimaryEvalJob>& jobs, SplitEffectLiveParticle* out, int max_out,
                      bool write_unfilled_stamps = true);
+
+struct PrimaryRealizeSession;
+struct ChildRealizeSession;
+struct RealizeSliceDelta;
+
+int evaluate_realize_prepare(const SplitEffectParticle& p, const EmitContext& ctx,
+                             std::vector<PrimaryEvalJob>& jobs, int max_out,
+                             bool write_unfilled_stamps, PrimaryRealizeSession& sess);
+void evaluate_realize_jobs_range(const SplitEffectParticle& p, const EmitContext& ctx,
+                                 std::vector<PrimaryEvalJob>& jobs, SplitEffectLiveParticle* out,
+                                 int job_lo, int job_hi, PrimaryRealizeSession& sess);
+int evaluate_realize_finish(const SplitEffectParticle& p, const EmitContext& ctx,
+                            std::vector<PrimaryEvalJob>& jobs, SplitEffectLiveParticle* out,
+                            PrimaryRealizeSession& sess);
+
 void evaluate_drop_primary_carry(const EmitContext& ctx, const SplitEffectParticle& p) noexcept;
 
 // Parent event pose at a child birth. Same fields as evaluate.cpp's former
@@ -802,6 +817,15 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
                               std::vector<SplitEffectLiveParticle>* out_vec = nullptr);
 int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
                                  const uint8_t* do_fill, SplitEffectLiveParticle* out, int max_out);
+int evaluate_subemitters_realize_prepare(const EmitContext& ctx, SubemitFillPlan& plan,
+                                         const uint8_t* do_fill, SplitEffectLiveParticle* out,
+                                         int max_out, ChildRealizeSession& rs);
+void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan& plan,
+                                        SplitEffectLiveParticle* out, int lo, int hi,
+                                        ChildRealizeSession& rs, RealizeSliceDelta* delta);
+int evaluate_subemitters_realize_finish(const EmitContext& ctx, SubemitFillPlan& plan,
+                                        ChildRealizeSession& rs, RealizeSliceDelta** deltas,
+                                        int n_deltas, int written);
 
 bool primary_eval_can_emit(const SplitEffectParticle& p, float now_t) noexcept;
 bool subemit_eval_can_emit(const SplitEffectParticle* particles, uint16_t count, int element_slot,

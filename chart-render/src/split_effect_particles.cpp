@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -501,6 +502,82 @@ openwds_split_effects::Controller* g_collect_controller_override = nullptr;
 using ControllerCache =
     std::map<int32_t, std::unique_ptr<openwds_split_effects::Controller>>;
 
+// bind_from_unity is a function of (ParticleSystem*, catalog oracle) only.
+// Prepare runs on the owner thread; seek does not clear this. Cap 2048 covers
+// the official catalog (~1100 systems); overflow drops the oldest last_use.
+struct BindCacheKey {
+  const unity::ParticleSystem* src = nullptr;
+  const SplitEffectParticle* oracle = nullptr;
+  bool operator==(const BindCacheKey& o) const noexcept {
+    return src == o.src && oracle == o.oracle;
+  }
+};
+
+struct BindCacheKeyHash {
+  size_t operator()(const BindCacheKey& k) const noexcept {
+    const size_t a = std::hash<uintptr_t>{}(reinterpret_cast<uintptr_t>(k.src));
+    const size_t b = std::hash<uintptr_t>{}(reinterpret_cast<uintptr_t>(k.oracle));
+    return a ^ (b + 0x9e3779b97f4a7c15ull + (a << 6) + (a >> 2));
+  }
+};
+
+struct BindCacheEnt {
+  SplitEffectParticle dst{};
+  uint32_t used = 0;
+};
+
+struct BindCache {
+  std::unordered_map<BindCacheKey, BindCacheEnt, BindCacheKeyHash> map;
+  uint32_t tick = 0;
+  static constexpr size_t kCap = 2048;
+};
+
+BindCache& bind_cache() {
+  static BindCache cache;
+  return cache;
+}
+
+void bind_cache_clear() noexcept {
+  BindCache& c = bind_cache();
+  c.map.clear();
+  c.tick = 0;
+}
+
+void bind_cache_evict(BindCache& c) {
+  const size_t want = BindCache::kCap * 3 / 4;
+  while (c.map.size() > want) {
+    uint32_t oldest = 0xffffffffu;
+    BindCacheKey oldest_k{};
+    for (const auto& kv : c.map) {
+      if (kv.second.used <= oldest) {
+        oldest = kv.second.used;
+        oldest_k = kv.first;
+      }
+    }
+    c.map.erase(oldest_k);
+  }
+}
+
+void bind_from_unity_cached(const unity::ParticleSystem& src, SplitEffectParticle& dst,
+                            const SplitEffectParticle* oracle) {
+  BindCache& c = bind_cache();
+  const BindCacheKey key{&src, oracle};
+  const auto it = c.map.find(key);
+  if (it != c.map.end()) {
+    dst = it->second.dst;
+    it->second.used = ++c.tick;
+    return;
+  }
+  bind_from_unity(src, dst, oracle);
+  if (c.map.size() >= BindCache::kCap) {
+    bind_cache_evict(c);
+  }
+  BindCacheEnt ent;
+  ent.dst = dst;
+  ent.used = ++c.tick;
+  c.map.emplace(key, std::move(ent));
+}
+
 ControllerCache& controller_cache() {
   static ControllerCache cache;
   return cache;
@@ -615,6 +692,7 @@ void set_split_effect_collect_controller_override(
   const OwnerThreadGuard owner_guard;
   g_collect_controller_override = controller;
   shuriken::split_eval_cache_bump_epoch();
+  bind_cache_clear();
 }
 
 namespace {
@@ -716,7 +794,7 @@ void bind_effect_particles(const SplitEffectParticle* particles, uint16_t pcount
     }
     const SplitEffectParticle* ora = j < oracle.size() ? oracle[j] : nullptr;
     SplitEffectParticle row;
-    bind_from_unity(*systems[j], row, ora);
+    bind_from_unity_cached(*systems[j], row, ora);
     if (ora != nullptr) {
       const ptrdiff_t local = ora - particles;
       if (local >= 0 && local < static_cast<ptrdiff_t>(pcount)) {
@@ -750,6 +828,20 @@ struct EvalTask {
   uint8_t write_stamps = 1;
   int written = 0;
   uint32_t last_cost_us = 1;
+  int fill_n = 0;
+  int slice_k = 1;
+  int slice_begin = -1;
+  int slice_count = 0;
+  shuriken::PrimaryRealizeSession pri_sess;
+  shuriken::ChildRealizeSession child_sess;
+};
+
+struct EvalSlice {
+  uint32_t task_i = 0;
+  int lo = 0;
+  int hi = 0;
+  uint32_t hint = 1;
+  int delta_i = -1;
 };
 
 struct SplitPrep {
@@ -783,6 +875,15 @@ struct FrameScratch {
   std::unordered_map<uint64_t, uint32_t> costs;
   std::vector<float> leak_u0;
   std::vector<float> leak_u1;
+  std::vector<EvalSlice> pri_slices;
+  std::vector<EvalSlice> sub_slices;
+  std::vector<uint32_t> pri_setup;
+  std::vector<uint32_t> pri_commit;
+  std::vector<uint32_t> sub_setup;
+  std::vector<uint32_t> sub_commit;
+  std::vector<size_t> slice_order;
+  std::vector<shuriken::RealizeSliceDelta> sub_deltas;
+  int sub_delta_used = 0;
 
   EvalTask& acquire_task() {
     if (task_used == tasks.size()) {
@@ -805,6 +906,29 @@ struct FrameScratch {
     t.sub_do_fill.clear();
     t.sub_fill_marked = 0;
     t.write_stamps = 1;
+    t.fill_n = 0;
+    t.slice_k = 1;
+    t.slice_begin = -1;
+    t.slice_count = 0;
+    shuriken::persist_release(t.pri_sess.persist);
+    t.pri_sess.resume_persist = false;
+    t.pri_sess.resume_carry = false;
+    t.pri_sess.persist_ok = false;
+    t.pri_sess.persist_cursor = 0;
+    t.pri_sess.written = 0;
+    for (int i = 0; i < t.child_sess.n_sessions && i < static_cast<int>(t.child_sess.sessions.size());
+         ++i) {
+      shuriken::persist_release(t.child_sess.sessions[static_cast<size_t>(i)].persist);
+    }
+    t.child_sess.n_sessions = 0;
+    t.child_sess.will_fill.clear();
+    t.child_sess.session_of.clear();
+    t.child_sess.slot_of.clear();
+    t.child_sess.carry_parts.clear();
+    t.child_sess.need.clear();
+    t.child_sess.newly.clear();
+    t.child_sess.have_carry_key = false;
+    t.child_sess.have_carry_snap = false;
     return t;
   }
 };
@@ -815,6 +939,39 @@ FrameScratch& frame_scratch() {
     scratch.tasks.reserve(128);
   }
   return scratch;
+}
+
+void reset_scratch_realize_sessions() {
+  FrameScratch& fs = frame_scratch();
+  for (EvalTask& t : fs.tasks) {
+    shuriken::persist_release(t.pri_sess.persist);
+    t.pri_sess.persist_ok = false;
+    t.pri_sess.resume_persist = false;
+    t.pri_sess.resume_carry = false;
+    t.pri_sess.persist_cursor = 0;
+    t.pri_sess.written = 0;
+    for (int i = 0; i < t.child_sess.n_sessions && i < static_cast<int>(t.child_sess.sessions.size());
+         ++i) {
+      shuriken::persist_release(t.child_sess.sessions[static_cast<size_t>(i)].persist);
+    }
+    t.child_sess.n_sessions = 0;
+    t.child_sess.have_carry_key = false;
+    t.child_sess.have_carry_snap = false;
+    t.child_sess.will_fill.clear();
+    t.child_sess.session_of.clear();
+    t.child_sess.slot_of.clear();
+    t.child_sess.carry_parts.clear();
+    t.child_sess.need.clear();
+    t.child_sess.newly.clear();
+    t.slice_k = 1;
+    t.slice_begin = -1;
+    t.slice_count = 0;
+  }
+  for (shuriken::RealizeSliceDelta& d : fs.sub_deltas) {
+    d.jobs.clear();
+    d.job_items.clear();
+    d.carry.clear();
+  }
 }
 
 uint64_t task_cost_key(const EvalTask& t) noexcept {
@@ -838,6 +995,258 @@ struct ParallelEvalCtx {
   EvalTask* tasks = nullptr;
   const size_t* order = nullptr;
 };
+
+struct ParallelSliceCtx {
+  EvalTask* tasks = nullptr;
+  EvalSlice* slices = nullptr;
+  const size_t* order = nullptr;
+  shuriken::RealizeSliceDelta* deltas = nullptr;
+  int ndeltas = 0;
+};
+
+struct ParallelTaskIdxCtx {
+  EvalTask* tasks = nullptr;
+  const uint32_t* ids = nullptr;
+};
+
+std::atomic<int> g_last_eval_slices{0};
+std::atomic<int> g_max_eval_slices{0};
+std::atomic<uint64_t> g_sum_eval_slices{0};
+std::atomic<int> g_last_eval_sliced_tasks{0};
+
+bool slice_force_env() noexcept {
+  static const int v = []() {
+    const char* e = std::getenv("WDS_SPLIT_SLICE_FORCE");
+    return (e != nullptr && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+  }();
+  return v != 0;
+}
+
+void note_eval_slices(int slices, int sliced_tasks) noexcept {
+  g_last_eval_slices.store(slices, std::memory_order_relaxed);
+  g_last_eval_sliced_tasks.store(sliced_tasks, std::memory_order_relaxed);
+  g_sum_eval_slices.fetch_add(slices > 0 ? static_cast<uint64_t>(slices) : 0,
+                              std::memory_order_relaxed);
+  int cur = g_max_eval_slices.load(std::memory_order_relaxed);
+  while (slices > cur &&
+         !g_max_eval_slices.compare_exchange_weak(cur, slices, std::memory_order_relaxed)) {
+  }
+  split_wall_note_eval_slices(slices);
+}
+
+int task_fill_n(const EvalTask& t) noexcept {
+  if (t.kind == EvalKind::Primary) {
+    int n = 0;
+    for (const shuriken::PrimaryEvalJob& job : t.plan) {
+      if (job.do_fill != 0) {
+        ++n;
+      }
+    }
+    return n;
+  }
+  const int n = std::min(t.sub_plan.kept, static_cast<int>(t.sub_plan.items.size()));
+  if (t.sub_fill_marked != 0 && t.sub_do_fill.size() >= static_cast<size_t>(n)) {
+    int f = 0;
+    for (int i = 0; i < n; ++i) {
+      f += t.sub_do_fill[static_cast<size_t>(i)] != 0 ? 1 : 0;
+    }
+    return f;
+  }
+  return n;
+}
+
+int subemit_max_group(const EvalTask& t) noexcept {
+  const int n = std::min(t.sub_plan.kept, static_cast<int>(t.sub_plan.items.size()));
+  int max_g = 1;
+  int g0 = 0;
+  uint16_t g = 0xffffu;
+  for (int i = 0; i <= n; ++i) {
+    const uint16_t ng =
+        i < n ? t.sub_plan.items[static_cast<size_t>(i)].stitch_group : 0xfffeu;
+    if (i == n || (i > 0 && ng != g)) {
+      max_g = std::max(max_g, i - g0);
+      g0 = i;
+    }
+    if (i < n) {
+      g = ng;
+    }
+  }
+  return max_g;
+}
+
+// Scan G1: extra setup/commit on tiny tasks cost 0.1–0.7 ms/frame.
+// 10660 peak 1806 particles / 1.06 ms ≈ 0.6 µs/particle → 0.1 ms ≈ 170
+// particles. 256/slice sits above that; K=2 needs fill>=512. Dual 10990
+// fill≈2000 still slices. FORCE bypasses the floor.
+constexpr int kMinFillPerSlice = 256;
+
+int choose_slice_k(int fill, int max_group, int n_units, int nthreads, bool force) noexcept {
+  if (n_units <= 1 || fill <= 0) {
+    return 1;
+  }
+  const int denom = std::max(32, std::max(1, max_group));
+  int kcap = fill / denom;
+  if (kcap < 2) {
+    kcap = 2;
+  }
+  int tmax = std::max(1, nthreads);
+  if (force) {
+    tmax = std::max(tmax, 2);
+  }
+  int K = std::min(tmax, kcap);
+  K = std::min(K, n_units);
+  return K < 2 ? 1 : K;
+}
+
+bool should_slice_task(int fill, int mean_fill, int K, bool force) noexcept {
+  if (K < 2) {
+    return false;
+  }
+  if (force) {
+    return true;
+  }
+  if (fill < K * kMinFillPerSlice) {
+    return false;
+  }
+  if (mean_fill <= 0) {
+    return true;
+  }
+  return fill > 2 * mean_fill;
+}
+
+void pack_primary_slices(uint32_t task_i, const EvalTask& t, int K, std::vector<EvalSlice>& out) {
+  const int n = static_cast<int>(t.plan.size());
+  std::vector<int> prefix(static_cast<size_t>(n) + 1, 0);
+  for (int i = 0; i < n; ++i) {
+    prefix[static_cast<size_t>(i) + 1] =
+        prefix[static_cast<size_t>(i)] + (t.plan[static_cast<size_t>(i)].do_fill != 0 ? 1 : 0);
+  }
+  const int fill = prefix[static_cast<size_t>(n)];
+  int start = 0;
+  for (int k = 0; k < K; ++k) {
+    const int goal = fill * (k + 1) / K;
+    int hi = start;
+    while (hi < n && prefix[static_cast<size_t>(hi)] < goal) {
+      ++hi;
+    }
+    if (k == K - 1) {
+      hi = n;
+    }
+    if (hi <= start) {
+      if (k == K - 1) {
+        hi = n;
+      } else {
+        continue;
+      }
+    }
+    EvalSlice sl;
+    sl.task_i = task_i;
+    sl.lo = start;
+    sl.hi = hi;
+    const int w = prefix[static_cast<size_t>(hi)] - prefix[static_cast<size_t>(start)];
+    sl.hint = w > 0 ? static_cast<uint32_t>(w) : 1u;
+    out.push_back(std::move(sl));
+    start = hi;
+  }
+}
+
+void pack_subemit_slices(uint32_t task_i, const EvalTask& t, int K, std::vector<EvalSlice>& out) {
+  const int n = std::min(t.sub_plan.kept, static_cast<int>(t.sub_plan.items.size()));
+  struct Group {
+    int lo = 0;
+    int hi = 0;
+    int w = 0;
+  };
+  std::vector<Group> groups;
+  int g0 = 0;
+  uint16_t g = 0xffffu;
+  for (int i = 0; i <= n; ++i) {
+    const uint16_t ng =
+        i < n ? t.sub_plan.items[static_cast<size_t>(i)].stitch_group : 0xfffeu;
+    if (i == n || (i > 0 && ng != g)) {
+      int w = 0;
+      if (t.sub_fill_marked != 0 && t.sub_do_fill.size() >= static_cast<size_t>(i)) {
+        for (int j = g0; j < i; ++j) {
+          w += t.sub_do_fill[static_cast<size_t>(j)] != 0 ? 1 : 0;
+        }
+      } else {
+        w = i - g0;
+      }
+      Group grp;
+      grp.lo = g0;
+      grp.hi = i;
+      grp.w = std::max(1, w);
+      groups.push_back(grp);
+      g0 = i;
+    }
+    if (i < n) {
+      g = ng;
+    }
+  }
+  const int ng = static_cast<int>(groups.size());
+  if (ng <= 0) {
+    return;
+  }
+  int total = 0;
+  for (const Group& grp : groups) {
+    total += grp.w;
+  }
+  int gi = 0;
+  for (int k = 0; k < K && gi < ng; ++k) {
+    const int left = K - k;
+    int acc = 0;
+    const int gstart = gi;
+    while (gi < ng) {
+      acc += groups[static_cast<size_t>(gi)].w;
+      ++gi;
+      const int remain_g = ng - gi;
+      const int remain_s = left - 1;
+      if (remain_g <= remain_s) {
+        break;
+      }
+      if (acc >= (total * (k + 1) / K) && remain_g >= remain_s) {
+        break;
+      }
+    }
+    EvalSlice sl;
+    sl.task_i = task_i;
+    sl.lo = groups[static_cast<size_t>(gstart)].lo;
+    sl.hi = groups[static_cast<size_t>(gi - 1)].hi;
+    sl.hint = acc > 0 ? static_cast<uint32_t>(acc) : 1u;
+    out.push_back(std::move(sl));
+  }
+}
+
+void sort_slice_order(std::vector<EvalSlice>& slices, std::vector<size_t>& order) {
+  order.resize(slices.size());
+  for (size_t i = 0; i < slices.size(); ++i) {
+    order[i] = i;
+  }
+  std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    return slices[a].hint > slices[b].hint;
+  });
+}
+
+int alloc_sub_delta(FrameScratch& fs) {
+  const int i = fs.sub_delta_used;
+  if (static_cast<size_t>(i) >= fs.sub_deltas.size()) {
+    fs.sub_deltas.emplace_back();
+  } else {
+    fs.sub_deltas[static_cast<size_t>(i)].jobs.clear();
+    fs.sub_deltas[static_cast<size_t>(i)].job_items.clear();
+    fs.sub_deltas[static_cast<size_t>(i)].carry.clear();
+  }
+  ++fs.sub_delta_used;
+  return i;
+}
+
+shuriken::RealizeSliceDelta* slice_delta_ptr(shuriken::RealizeSliceDelta* deltas, int ndeltas,
+                                             const EvalSlice& sl) noexcept {
+  if (deltas == nullptr || sl.delta_i < 0 || sl.delta_i >= ndeltas) {
+    return nullptr;
+  }
+  return &deltas[sl.delta_i];
+}
 
 void apply_over_cap(FrameScratch& fs, int cap);
 
@@ -923,6 +1332,13 @@ void write_subemit_plan(EvalTask& task) {
 #endif  // WDS_DIAG_ENABLED
 }
 
+const uint8_t* subemit_do_fill(const EvalTask& task, int keep) noexcept {
+  if (task.sub_fill_marked != 0 && task.sub_do_fill.size() >= static_cast<size_t>(keep)) {
+    return task.sub_do_fill.data();
+  }
+  return nullptr;
+}
+
 void write_subemit_realize(EvalTask& task) {
   if (task.sub_plan.kept <= 0) {
     task.written = 0;
@@ -933,12 +1349,9 @@ void write_subemit_realize(EvalTask& task) {
     SplitWallScope wall_grow(SplitWallSec::VecGrow);
     task.out.resize(static_cast<size_t>(keep));
   }
-  const uint8_t* do_fill = nullptr;
-  if (task.sub_fill_marked != 0 && task.sub_do_fill.size() >= static_cast<size_t>(keep)) {
-    do_fill = task.sub_do_fill.data();
-  }
-  const int n = shuriken::evaluate_subemitters_realize(task.ctx, task.sub_plan, do_fill,
-                                                       task.out.data(), keep);
+  const int n = shuriken::evaluate_subemitters_realize(task.ctx, task.sub_plan,
+                                                       subemit_do_fill(task, keep), task.out.data(),
+                                                       keep);
   task.written = n;
 }
 
@@ -975,6 +1388,7 @@ void run_one_eval_plan(EvalTask& task) {
 #if WDS_DIAG_ENABLED
   const bool time = eval_task_timing();
   const auto t0 = time ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  split_wall_set_task_tag(0, 0, task.fill_n);
   split_wall_begin_task();
 #endif  // WDS_DIAG_ENABLED
   {
@@ -1032,6 +1446,7 @@ void run_one_eval_realize(EvalTask& task) {
   }
   const auto t0 = std::chrono::steady_clock::now();
 #if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(2, 7, task.fill_n);
   split_wall_begin_task();
 #endif  // WDS_DIAG_ENABLED
   {
@@ -1173,6 +1588,7 @@ void run_one_eval_subemit_realize(EvalTask& task) {
 #if WDS_DIAG_ENABLED
   const bool time = eval_task_timing();
   const auto t0 = time ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  split_wall_set_task_tag(5, 8, task.fill_n);
   split_wall_begin_task();
 #endif  // WDS_DIAG_ENABLED
   {
@@ -1188,6 +1604,200 @@ void run_one_eval_subemit_realize(EvalTask& task) {
   if (time) {
     finish_eval_task_cost(task, t0, true);
   }
+#endif  // WDS_DIAG_ENABLED
+}
+
+void stamp_primary_catalog(EvalTask& task) {
+  if (task.has_catalog == 0) {
+    return;
+  }
+  const int n = task.written;
+  for (int i = 0; i < n; ++i) {
+    task.out[static_cast<size_t>(i)].catalog_index = task.catalog_i;
+  }
+}
+
+void run_one_eval_realize_setup(EvalTask& task) {
+  if (task.kind != EvalKind::Primary || task.plan.empty()) {
+    task.written = 0;
+    return;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(1, 1, task.fill_n);
+  split_wall_begin_task();
+  const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
+  SplitWallScope wall_task(SplitWallSec::TaskSetup);
+  WDS_PERF_SCOPE("split.collect.evaluate");
+  SplitDiagScope diag_real(SplitDiagPhase::Realize);
+  int keep = 0;
+  for (const shuriken::PrimaryEvalJob& job : task.plan) {
+    if (job.alive == 0 || job.alpha_keep == 0) {
+      continue;
+    }
+    if (task.write_stamps == 0 && job.do_fill == 0) {
+      continue;
+    }
+    ++keep;
+  }
+  if (keep > kSplitEffectParticlePool) {
+    keep = kSplitEffectParticlePool;
+  }
+  if (keep <= 0) {
+    task.written = 0;
+    shuriken::evaluate_drop_primary_carry(task_emit_ctx(task), task.primary);
+  } else {
+    if (task.out.size() < static_cast<size_t>(keep)) {
+      SplitWallScope wall_grow(SplitWallSec::VecGrow);
+      task.out.resize(static_cast<size_t>(keep));
+    }
+    shuriken::evaluate_realize_prepare(task.primary, task_emit_ctx(task), task.plan, keep,
+                                       task.write_stamps != 0, task.pri_sess);
+    task.written = task.pri_sess.written;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_note_task(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count());
+#endif  // WDS_DIAG_ENABLED
+}
+
+void run_one_eval_realize_slice(EvalTask& task, EvalSlice& sl) {
+  if (task.kind != EvalKind::Primary || task.written <= 0) {
+    return;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(2, 2, static_cast<int>(sl.hint));
+  split_wall_begin_task();
+  const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
+  WDS_PERF_SCOPE("split.collect.evaluate");
+  SplitDiagScope diag_real(SplitDiagPhase::Realize);
+  shuriken::evaluate_realize_jobs_range(task.primary, task_emit_ctx(task), task.plan,
+                                        task.out.data(), sl.lo, sl.hi, task.pri_sess);
+#if WDS_DIAG_ENABLED
+  split_wall_note_task(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count());
+#endif  // WDS_DIAG_ENABLED
+}
+
+void run_one_eval_realize_commit(EvalTask& task) {
+  if (task.kind != EvalKind::Primary) {
+    return;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(3, 3, task.fill_n);
+  split_wall_begin_task();
+  const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
+  SplitDiagScope diag_real(SplitDiagPhase::Realize);
+  if (task.written > 0) {
+    shuriken::evaluate_realize_finish(task.primary, task_emit_ctx(task), task.plan, task.out.data(),
+                                      task.pri_sess);
+    stamp_primary_catalog(task);
+#if WDS_DIAG_ENABLED
+    split_diag_add_count(SplitDiagCount::Particles, task.written);
+#endif  // WDS_DIAG_ENABLED
+  }
+  const int fill = task.fill_n > 0 ? task.fill_n : task_fill_n(task);
+  task.last_cost_us = fill > 0 ? static_cast<uint32_t>(fill) : 1u;
+#if WDS_DIAG_ENABLED
+  split_wall_note_task(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count());
+#endif  // WDS_DIAG_ENABLED
+}
+
+void run_one_eval_subemit_setup(EvalTask& task) {
+  if (task.kind != EvalKind::Subemit) {
+    return;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(4, 4, task.fill_n);
+  split_wall_begin_task();
+  const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
+  SplitWallScope wall_task(SplitWallSec::TaskSetup);
+  WDS_PERF_SCOPE("split.collect.subemit");
+  SplitDiagScope diag_sub(SplitDiagPhase::Subemit);
+  if (task.sub_plan.kept <= 0) {
+    task.written = 0;
+  } else {
+    const int keep = task.sub_plan.kept;
+    if (task.out.size() < static_cast<size_t>(keep)) {
+      SplitWallScope wall_grow(SplitWallSec::VecGrow);
+      task.out.resize(static_cast<size_t>(keep));
+    }
+    task.written = shuriken::evaluate_subemitters_realize_prepare(
+        task.ctx, task.sub_plan, subemit_do_fill(task, keep), task.out.data(), keep,
+        task.child_sess);
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_note_task(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count());
+#endif  // WDS_DIAG_ENABLED
+}
+
+void run_one_eval_subemit_slice(EvalTask& task, EvalSlice& sl, shuriken::RealizeSliceDelta* delta) {
+  if (task.kind != EvalKind::Subemit || task.written <= 0) {
+    return;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(5, 5, static_cast<int>(sl.hint));
+  split_wall_begin_task();
+  const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
+  WDS_PERF_SCOPE("split.collect.subemit");
+  SplitDiagScope diag_sub(SplitDiagPhase::Subemit);
+  shuriken::evaluate_subemitters_realize_range(task.ctx, task.sub_plan, task.out.data(), sl.lo,
+                                               sl.hi, task.child_sess, delta);
+#if WDS_DIAG_ENABLED
+  split_wall_note_task(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count());
+#endif  // WDS_DIAG_ENABLED
+}
+
+void run_one_eval_subemit_commit(EvalTask& task, EvalSlice* slices,
+                                 shuriken::RealizeSliceDelta* deltas, int ndeltas) {
+  if (task.kind != EvalKind::Subemit) {
+    return;
+  }
+#if WDS_DIAG_ENABLED
+  split_wall_set_task_tag(6, 6, task.fill_n);
+  split_wall_begin_task();
+  const auto t0 = std::chrono::steady_clock::now();
+#endif  // WDS_DIAG_ENABLED
+  SplitDiagScope diag_sub(SplitDiagPhase::Subemit);
+  if (task.written > 0 && slices != nullptr && deltas != nullptr && task.slice_begin >= 0 &&
+      task.slice_count > 0) {
+    shuriken::RealizeSliceDelta* buf[64];
+    const int nd = std::min(task.slice_count, 64);
+    int nbuf = 0;
+    for (int i = 0; i < nd; ++i) {
+      shuriken::RealizeSliceDelta* d =
+          slice_delta_ptr(deltas, ndeltas, slices[static_cast<size_t>(task.slice_begin + i)]);
+      if (d != nullptr) {
+        buf[nbuf++] = d;
+      }
+    }
+    shuriken::evaluate_subemitters_realize_finish(task.ctx, task.sub_plan, task.child_sess, buf, nbuf,
+                                                  task.written);
+  } else if (task.written > 0) {
+    shuriken::evaluate_subemitters_realize_finish(task.ctx, task.sub_plan, task.child_sess, nullptr,
+                                                  0, task.written);
+  }
+#if WDS_DIAG_ENABLED
+  split_diag_add_count(SplitDiagCount::Particles, task.written);
+#endif  // WDS_DIAG_ENABLED
+  const int fill = task.fill_n > 0 ? task.fill_n : task_fill_n(task);
+  task.last_cost_us = fill > 0 ? static_cast<uint32_t>(fill) : 1u;
+#if WDS_DIAG_ENABLED
+  split_wall_note_task(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count());
 #endif  // WDS_DIAG_ENABLED
 }
 
@@ -1288,6 +1898,340 @@ void sort_eval_order(FrameScratch& fs) {
   });
 }
 
+void build_realize_slices(FrameScratch& fs, size_t n) {
+  fs.pri_slices.clear();
+  fs.sub_slices.clear();
+  fs.pri_setup.clear();
+  fs.pri_commit.clear();
+  fs.sub_setup.clear();
+  fs.sub_commit.clear();
+  fs.sub_delta_used = 0;
+  const bool force = slice_force_env();
+  const int nthreads = split_collect_thread_count();
+  int sum_fill = 0;
+  int n_fill = 0;
+  for (size_t i = 0; i < n; ++i) {
+    EvalTask& t = fs.tasks[fs.order[i]];
+    t.fill_n = task_fill_n(t);
+    t.slice_k = 1;
+    t.slice_begin = -1;
+    t.slice_count = 0;
+    if (t.fill_n > 0) {
+      sum_fill += t.fill_n;
+      ++n_fill;
+    }
+  }
+  const int mean_fill = n_fill > 0 ? sum_fill / n_fill : 0;
+  for (size_t i = 0; i < n; ++i) {
+    const uint32_t ti = static_cast<uint32_t>(fs.order[i]);
+    EvalTask& t = fs.tasks[ti];
+    if (t.kind == EvalKind::Primary) {
+      const int units = static_cast<int>(t.plan.size());
+      const int K = choose_slice_k(t.fill_n, 1, units, nthreads, force);
+      if (should_slice_task(t.fill_n, mean_fill, K, force) && K >= 2) {
+        t.slice_begin = static_cast<int>(fs.pri_slices.size());
+        pack_primary_slices(ti, t, K, fs.pri_slices);
+        t.slice_count = static_cast<int>(fs.pri_slices.size()) - t.slice_begin;
+        if (t.slice_count > 1) {
+          t.slice_k = t.slice_count;
+          fs.pri_setup.push_back(ti);
+          fs.pri_commit.push_back(ti);
+        } else {
+          t.slice_k = 1;
+          fs.pri_slices.resize(static_cast<size_t>(std::max(0, t.slice_begin)));
+          t.slice_begin = -1;
+          t.slice_count = 0;
+          EvalSlice sl;
+          sl.task_i = ti;
+          sl.lo = 0;
+          sl.hi = units;
+          sl.hint = t.fill_n > 0 ? static_cast<uint32_t>(t.fill_n) : 1u;
+          fs.pri_slices.push_back(std::move(sl));
+        }
+      } else {
+        EvalSlice sl;
+        sl.task_i = ti;
+        sl.lo = 0;
+        sl.hi = units;
+        sl.hint = t.fill_n > 0 ? static_cast<uint32_t>(t.fill_n) : 1u;
+        fs.pri_slices.push_back(std::move(sl));
+      }
+    } else {
+      const int nitems = std::min(t.sub_plan.kept, static_cast<int>(t.sub_plan.items.size()));
+      const int max_g = subemit_max_group(t);
+      int n_groups = 0;
+      uint16_t g = 0xffffu;
+      for (int j = 0; j < nitems; ++j) {
+        const uint16_t ng = t.sub_plan.items[static_cast<size_t>(j)].stitch_group;
+        if (j == 0 || ng != g) {
+          ++n_groups;
+          g = ng;
+        }
+      }
+      const int K = choose_slice_k(t.fill_n, max_g, std::max(1, n_groups), nthreads, force);
+      if (should_slice_task(t.fill_n, mean_fill, K, force) && K >= 2) {
+        t.slice_begin = static_cast<int>(fs.sub_slices.size());
+        pack_subemit_slices(ti, t, K, fs.sub_slices);
+        t.slice_count = static_cast<int>(fs.sub_slices.size()) - t.slice_begin;
+        if (t.slice_count > 1) {
+          t.slice_k = t.slice_count;
+          for (int s = 0; s < t.slice_count; ++s) {
+            fs.sub_slices[static_cast<size_t>(t.slice_begin + s)].delta_i = alloc_sub_delta(fs);
+          }
+          fs.sub_setup.push_back(ti);
+          fs.sub_commit.push_back(ti);
+        } else {
+          t.slice_k = 1;
+          fs.sub_slices.resize(static_cast<size_t>(std::max(0, t.slice_begin)));
+          t.slice_begin = -1;
+          t.slice_count = 0;
+          EvalSlice sl;
+          sl.task_i = ti;
+          sl.lo = 0;
+          sl.hi = nitems;
+          sl.hint = t.fill_n > 0 ? static_cast<uint32_t>(t.fill_n) : 1u;
+          fs.sub_slices.push_back(std::move(sl));
+        }
+      } else {
+        EvalSlice sl;
+        sl.task_i = ti;
+        sl.lo = 0;
+        sl.hi = nitems;
+        sl.hint = t.fill_n > 0 ? static_cast<uint32_t>(t.fill_n) : 1u;
+        fs.sub_slices.push_back(std::move(sl));
+      }
+    }
+  }
+  const int slices = static_cast<int>(fs.pri_slices.size() + fs.sub_slices.size());
+  const int sliced_tasks = static_cast<int>(fs.pri_setup.size() + fs.sub_setup.size());
+  note_eval_slices(slices, sliced_tasks);
+  if (sliced_tasks > 0) {
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+      std::fprintf(stderr, "EVALSLICES n=%d sliced_tasks=%d force=%d mean_fill=%d nthreads=%d\n",
+                   slices, sliced_tasks, force ? 1 : 0, mean_fill, nthreads);
+    }
+  }
+}
+
+int task_unit_count(const EvalTask& t) noexcept {
+  if (t.kind == EvalKind::Primary) {
+    return static_cast<int>(t.plan.size());
+  }
+  return std::min(t.sub_plan.kept, static_cast<int>(t.sub_plan.items.size()));
+}
+
+bool any_task_would_slice(FrameScratch& fs, size_t n, int nthreads, bool force) noexcept {
+  if (force) {
+    return true;
+  }
+  // fill ≤ units, K≥2 needs fill≥512. Skip the do_fill walk (G1 leftover
+  // ~0.02 ms on 10740) when no task can possibly pass the floor.
+  bool maybe = false;
+  for (size_t i = 0; i < n; ++i) {
+    if (task_unit_count(fs.tasks[fs.order[i]]) >= 2 * kMinFillPerSlice) {
+      maybe = true;
+      break;
+    }
+  }
+  if (!maybe) {
+    return false;
+  }
+  int sum_fill = 0;
+  int n_fill = 0;
+  for (size_t i = 0; i < n; ++i) {
+    EvalTask& t = fs.tasks[fs.order[i]];
+    t.fill_n = task_fill_n(t);
+    if (t.fill_n > 0) {
+      sum_fill += t.fill_n;
+      ++n_fill;
+    }
+  }
+  const int mean_fill = n_fill > 0 ? sum_fill / n_fill : 0;
+  for (size_t i = 0; i < n; ++i) {
+    const EvalTask& t = fs.tasks[fs.order[i]];
+    int units = 0;
+    int max_g = 1;
+    if (t.kind == EvalKind::Primary) {
+      units = static_cast<int>(t.plan.size());
+    } else {
+      units = std::min(t.sub_plan.kept, static_cast<int>(t.sub_plan.items.size()));
+      // Upper bound on K (max_group=1). If even this would not slice, the
+      // real group walk cannot slice either.
+    }
+    const int K = choose_slice_k(t.fill_n, max_g, std::max(1, units), nthreads, false);
+    if (should_slice_task(t.fill_n, mean_fill, K, false) && K >= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void run_eval_realize_unsliced(FrameScratch& fs, uint64_t realize_hint) {
+  // Same two waves as 1.5b: both iterate every task (wrong kind no-ops) so
+  // choose_participants sees nitems=n, not primary-only / subemit-only
+  // counts. Scan 10660 with ~7 primary tasks otherwise clamps to 2 workers.
+  const size_t n = fs.order.size();
+  ParallelEvalCtx ctx;
+  ctx.tasks = fs.tasks.data();
+  ctx.order = fs.order.data();
+  {
+    SplitWallScope wall(SplitWallSec::WaveB2);
+    split_collect_note_work(n, realize_hint);
+    split_collect_parallel_for(
+        0, n, 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelEvalCtx*>(raw);
+          run_one_eval_realize(c->tasks[c->order[i]]);
+        },
+        &ctx, realize_hint);
+  }
+  {
+    SplitWallScope wall(SplitWallSec::WaveB3);
+    split_collect_note_work(n, realize_hint);
+    split_collect_parallel_for(
+        0, n, 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelEvalCtx*>(raw);
+          run_one_eval_subemit_realize(c->tasks[c->order[i]]);
+        },
+        &ctx, realize_hint);
+  }
+}
+
+void run_eval_realize_waves(FrameScratch& fs) {
+  const size_t n = fs.order.size();
+  if (n == 0) {
+    return;
+  }
+  note_eval_work(fs, n);
+  const uint64_t realize_hint = eval_work_hint(fs, n);
+  const bool force = slice_force_env();
+  const int nthreads = split_collect_thread_count();
+  if (!any_task_would_slice(fs, n, nthreads, force)) {
+    run_eval_realize_unsliced(fs, realize_hint);
+    return;
+  }
+  build_realize_slices(fs, n);
+  if (!fs.pri_setup.empty()) {
+    ParallelTaskIdxCtx tctx;
+    tctx.tasks = fs.tasks.data();
+    tctx.ids = fs.pri_setup.data();
+    const uint64_t hint = realize_hint;
+    SplitWallScope wall(SplitWallSec::WaveB2Setup);
+    split_collect_note_work(fs.pri_setup.size(), hint);
+    split_collect_parallel_for(
+        0, fs.pri_setup.size(), 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelTaskIdxCtx*>(raw);
+          run_one_eval_realize_setup(c->tasks[c->ids[i]]);
+        },
+        &tctx, hint);
+  }
+  if (!fs.pri_slices.empty()) {
+    sort_slice_order(fs.pri_slices, fs.slice_order);
+    ParallelSliceCtx sctx;
+    sctx.tasks = fs.tasks.data();
+    sctx.slices = fs.pri_slices.data();
+    sctx.order = fs.slice_order.data();
+    const uint64_t hint = realize_hint;
+    SplitWallScope wall(SplitWallSec::WaveB2);
+    split_collect_note_work(fs.pri_slices.size(), hint);
+    split_collect_parallel_for(
+        0, fs.pri_slices.size(), 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelSliceCtx*>(raw);
+          EvalSlice& sl = c->slices[c->order[i]];
+          EvalTask& t = c->tasks[sl.task_i];
+          if (t.slice_k <= 1) {
+            run_one_eval_realize(t);
+          } else {
+            run_one_eval_realize_slice(t, sl);
+          }
+        },
+        &sctx, hint);
+  }
+  if (!fs.pri_commit.empty()) {
+    ParallelTaskIdxCtx tctx;
+    tctx.tasks = fs.tasks.data();
+    tctx.ids = fs.pri_commit.data();
+    const uint64_t hint = realize_hint;
+    SplitWallScope wall(SplitWallSec::WaveB2b);
+    split_collect_note_work(fs.pri_commit.size(), hint);
+    split_collect_parallel_for(
+        0, fs.pri_commit.size(), 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelTaskIdxCtx*>(raw);
+          run_one_eval_realize_commit(c->tasks[c->ids[i]]);
+        },
+        &tctx, hint);
+  }
+  if (!fs.sub_setup.empty()) {
+    ParallelTaskIdxCtx tctx;
+    tctx.tasks = fs.tasks.data();
+    tctx.ids = fs.sub_setup.data();
+    const uint64_t hint = realize_hint;
+    SplitWallScope wall(SplitWallSec::WaveB3Setup);
+    split_collect_note_work(fs.sub_setup.size(), hint);
+    split_collect_parallel_for(
+        0, fs.sub_setup.size(), 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelTaskIdxCtx*>(raw);
+          run_one_eval_subemit_setup(c->tasks[c->ids[i]]);
+        },
+        &tctx, hint);
+  }
+  if (!fs.sub_slices.empty()) {
+    sort_slice_order(fs.sub_slices, fs.slice_order);
+    ParallelSliceCtx sctx;
+    sctx.tasks = fs.tasks.data();
+    sctx.slices = fs.sub_slices.data();
+    sctx.order = fs.slice_order.data();
+    sctx.deltas = fs.sub_deltas.data();
+    sctx.ndeltas = fs.sub_delta_used;
+    const uint64_t hint = realize_hint;
+    SplitWallScope wall(SplitWallSec::WaveB3);
+    split_collect_note_work(fs.sub_slices.size(), hint);
+    split_collect_parallel_for(
+        0, fs.sub_slices.size(), 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<ParallelSliceCtx*>(raw);
+          EvalSlice& sl = c->slices[c->order[i]];
+          EvalTask& t = c->tasks[sl.task_i];
+          if (t.slice_k <= 1) {
+            run_one_eval_subemit_realize(t);
+          } else {
+            run_one_eval_subemit_slice(t, sl, slice_delta_ptr(c->deltas, c->ndeltas, sl));
+          }
+        },
+        &sctx, hint);
+  }
+  if (!fs.sub_commit.empty()) {
+    struct SubCommitCtx {
+      EvalTask* tasks = nullptr;
+      const uint32_t* ids = nullptr;
+      EvalSlice* slices = nullptr;
+      shuriken::RealizeSliceDelta* deltas = nullptr;
+      int ndeltas = 0;
+    } cctx;
+    cctx.tasks = fs.tasks.data();
+    cctx.ids = fs.sub_commit.data();
+    cctx.slices = fs.sub_slices.data();
+    cctx.deltas = fs.sub_deltas.data();
+    cctx.ndeltas = fs.sub_delta_used;
+    const uint64_t hint = realize_hint;
+    SplitWallScope wall(SplitWallSec::WaveB3b);
+    split_collect_note_work(fs.sub_commit.size(), hint);
+    split_collect_parallel_for(
+        0, fs.sub_commit.size(), 1,
+        [](size_t i, void* raw) {
+          auto* c = static_cast<SubCommitCtx*>(raw);
+          run_one_eval_subemit_commit(c->tasks[c->ids[i]], c->slices, c->deltas, c->ndeltas);
+        },
+        &cctx, hint);
+  }
+}
+
 void run_eval_tasks(FrameScratch& fs, SplitPrep& prep, int cap) {
   const size_t begin = prep.task_begin;
   const size_t end = prep.task_end;
@@ -1315,22 +2259,16 @@ void run_eval_tasks(FrameScratch& fs, SplitPrep& prep, int cap) {
   const bool time_b = split_wall_enabled();
   const auto b0 = time_b ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 #endif  // WDS_DIAG_ENABLED
-  split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
-    auto* c = static_cast<ParallelEvalCtx*>(raw);
-    run_one_eval_plan(c->tasks[c->order[i]]);
-  }, &ctx, work_hint);
+  {
+    SplitWallScope wall(SplitWallSec::WaveB1);
+    split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
+      auto* c = static_cast<ParallelEvalCtx*>(raw);
+      run_one_eval_plan(c->tasks[c->order[i]]);
+    }, &ctx, work_hint);
+  }
   store_cap_selection(fs, prep, cap);
   sort_eval_order(fs);
-  note_eval_work(fs, n);
-  const uint64_t realize_hint = eval_work_hint(fs, n);
-  split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
-    auto* c = static_cast<ParallelEvalCtx*>(raw);
-    run_one_eval_realize(c->tasks[c->order[i]]);
-  }, &ctx, realize_hint);
-  split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
-    auto* c = static_cast<ParallelEvalCtx*>(raw);
-    run_one_eval_subemit_realize(c->tasks[c->order[i]]);
-  }, &ctx, realize_hint);
+  run_eval_realize_waves(fs);
 #if WDS_DIAG_ENABLED
   if (time_b) {
     const auto b1 = std::chrono::steady_clock::now();
@@ -1375,10 +2313,13 @@ void run_eval_tasks_all(FrameScratch& fs, std::vector<SplitPrep>& preps, int cap
   const bool time_b = split_wall_enabled();
   const auto b0 = time_b ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 #endif  // WDS_DIAG_ENABLED
-  split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
-    auto* c = static_cast<ParallelEvalCtx*>(raw);
-    run_one_eval_plan(c->tasks[c->order[i]]);
-  }, &ctx, work_hint);
+  {
+    SplitWallScope wall(SplitWallSec::WaveB1);
+    split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
+      auto* c = static_cast<ParallelEvalCtx*>(raw);
+      run_one_eval_plan(c->tasks[c->order[i]]);
+    }, &ctx, work_hint);
+  }
   int remaining = cap;
   for (SplitPrep& prep : preps) {
     if (!prep.has_work) {
@@ -1390,16 +2331,7 @@ void run_eval_tasks_all(FrameScratch& fs, std::vector<SplitPrep>& preps, int cap
     }
   }
   sort_eval_order(fs);
-  note_eval_work(fs, n);
-  const uint64_t realize_hint = eval_work_hint(fs, n);
-  split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
-    auto* c = static_cast<ParallelEvalCtx*>(raw);
-    run_one_eval_realize(c->tasks[c->order[i]]);
-  }, &ctx, realize_hint);
-  split_collect_parallel_for(0, n, 1, [](size_t i, void* raw) {
-    auto* c = static_cast<ParallelEvalCtx*>(raw);
-    run_one_eval_subemit_realize(c->tasks[c->order[i]]);
-  }, &ctx, realize_hint);
+  run_eval_realize_waves(fs);
 #if WDS_DIAG_ENABLED
   if (time_b) {
     const auto b1 = std::chrono::steady_clock::now();
@@ -1535,7 +2467,7 @@ void prepare_split_tasks(FrameScratch& fs, SplitPrep& prep,
             fs.bound_oracle.resize(fs.systems.size());
             for (size_t j = 0; j < fs.systems.size(); ++j) {
               fs.bound_oracle[j] = j < fs.oracle.size() ? fs.oracle[j] : nullptr;
-              bind_from_unity(*fs.systems[j], fs.bound_stack[j], fs.bound_oracle[j]);
+              bind_from_unity_cached(*fs.systems[j], fs.bound_stack[j], fs.bound_oracle[j]);
             }
           }
         }
@@ -1826,10 +2758,12 @@ void reset_split_effect_auto_seed_session(bool invalidate_eval_cache) noexcept {
 }
 
 void split_effect_clear_caches() noexcept {
+  reset_scratch_realize_sessions();
   shuriken::split_eval_cache_bump_epoch();
   shuriken::split_eval_carry_clear();
   shuriken::split_eval_persist_clear();
   clear_dead_latches();
+  bind_cache_clear();
   // Diagnostics only: remember *why* the next collect is cold so SPLITCOLD
   // can name it. Does not change when invalidation happens.
 #if WDS_DIAG_ENABLED
@@ -1843,6 +2777,7 @@ void split_effect_clear_seek_state() noexcept {
   // B1: keep the bounded rewind history across a seek; only the current
   // forward snapshot is invalid. Doc/quality/epoch invalidation still calls
   // split_eval_carry_clear() (full).
+  reset_scratch_realize_sessions();
   shuriken::split_eval_carry_clear_current_keep_rewind();
   shuriken::split_eval_persist_clear();
   clear_dead_latches();
@@ -1974,6 +2909,8 @@ SplitEffectPhaseDiag split_effect_last_phase_diag() noexcept {
   d.cache_evict_reap = cd.evict_reap;
   d.cache_evict_clear = cd.evict_clear;
   d.cache_epoch_bumps = cd.epoch_bumps;
+  d.eval_slices = g_last_eval_slices.load(std::memory_order_relaxed);
+  d.eval_sliced_tasks = g_last_eval_sliced_tasks.load(std::memory_order_relaxed);
   const SplitCollectPoolDiag pd = split_collect_pool_diag_frame();
   d.pool_tasks = pd.tasks;
   d.pool_wait_us = pd.wait_us;
@@ -1984,26 +2921,37 @@ SplitEffectPhaseDiag split_effect_last_phase_diag() noexcept {
   d.pool_join_us = pd.join_us;
   d.pool_inline_calls = pd.inline_calls;
   d.pool_serial_calls = pd.serial_calls;
+  d.pool_run_inline = pd.run_inline_calls;
   d.pool_sum_item_us = pd.sum_item_us;
   d.pool_wall_us = pd.wall_us;
+  d.pool_wall_top_us = pd.wall_top_us;
+  d.pool_nested_wait_us = pd.nested_wait_us;
   d.pool_participants = split_collect_last_call_participants();
   const double wall = static_cast<double>(pd.wall_us);
+  const double wall_top = static_cast<double>(pd.wall_top_us);
   const double sum_item = static_cast<double>(pd.sum_item_us);
-  // Parallel efficiency = how much of the summed per-claim work ran
-  // concurrently: sum_item / (wall * participants), clamped to [0,1]. Both
-  // sides are µs on the same core class, so the ratio is usable, not exact.
+  const double nested_wait = static_cast<double>(pd.nested_wait_us);
+  const double sum_busy = sum_item > nested_wait ? sum_item - nested_wait : 0.0;
   const int participants =
       split_collect_frame_max_participants() > 0 ? split_collect_frame_max_participants() : 1;
-  const double cap = wall * static_cast<double>(participants);
-  if (wall > 0.0 && cap > 0.0) {
-    double eff = sum_item / cap;
+  auto clamp01 = [](double eff) {
     if (!(eff >= 0.0)) {
-      eff = 0.0;
+      return 0.0;
     }
     if (eff > 1.0) {
-      eff = 1.0;
+      return 1.0;
     }
-    d.pool_par_eff = eff;
+    return eff;
+  };
+  // v1 kept for Wave 0–1.5 reports: nested Job walls sit in the denominator
+  // even though they overlap the outer wave.
+  const double cap_v1 = wall * static_cast<double>(participants);
+  if (wall > 0.0 && cap_v1 > 0.0) {
+    d.pool_par_eff_v1 = clamp01(sum_item / cap_v1);
+  }
+  const double cap = wall_top * static_cast<double>(participants);
+  if (wall_top > 0.0 && cap > 0.0) {
+    d.pool_par_eff = clamp01(sum_busy / cap);
   }
   return d;
 #else
@@ -2025,15 +2973,16 @@ std::size_t format_split_effect_phase_line(char* buf, std::size_t cap) noexcept 
       "SPLITPHASE frame=%llu playing=%d splits=%d systems=%d particles=%d "
       "collect_ms=%.3f evaluate_ms=%.3f integrate_ms=%.3f subemit_ms=%.3f realize_ms=%.3f "
       "copyout_ms=%.3f cache_hit=%llu cache_miss=%llu cache_bytes=%llu pool_tasks=%llu "
-      "pool_wait_us=%llu pool_par_eff=%.3f "
+      "pool_wait_us=%llu pool_par_eff=%.3f pool_par_eff_v1=%.3f "
       "prepare_ms=%.3f assemble_ms=%.3f compact_ms=%.3f traverse_ms=%.3f stitch_ms=%.3f "
       "cache_lu_ms=%.3f "
       "cache_ops=%llu cache_stale=%llu cache_evict_budget=%llu cache_evict_reap=%llu "
       "cache_evict_clear=%llu cache_epoch_bumps=%llu "
       "pool_claims_caller=%llu pool_claims_worker=%llu pool_items_caller=%llu "
       "pool_items_worker=%llu pool_join_us=%llu pool_sum_item_us=%llu pool_wall_us=%llu "
-      "pool_inline=%llu pool_serial=%llu pool_participants=%d "
-      "subemit_plan_ms=%.3f subemit_realize_ms=%.3f",
+      "pool_wall_top_us=%llu pool_nested_wait_us=%llu "
+      "pool_inline=%llu pool_serial=%llu pool_run_inline=%llu pool_participants=%d "
+      "subemit_plan_ms=%.3f subemit_realize_ms=%.3f eval_slices=%d eval_sliced_tasks=%d",
       static_cast<unsigned long long>(d.frame), d.playing, d.splits, d.systems, d.particles,
       static_cast<double>(d.collect_us) / 1000.0, static_cast<double>(d.evaluate_us) / 1000.0,
       static_cast<double>(d.integrate_us) / 1000.0, static_cast<double>(d.subemit_us) / 1000.0,
@@ -2042,7 +2991,7 @@ std::size_t format_split_effect_phase_line(char* buf, std::size_t cap) noexcept 
       static_cast<unsigned long long>(d.cache_lookup_misses),
       static_cast<unsigned long long>(d.cache_bytes),
       static_cast<unsigned long long>(d.pool_tasks),
-      static_cast<unsigned long long>(d.pool_wait_us), d.pool_par_eff,
+      static_cast<unsigned long long>(d.pool_wait_us), d.pool_par_eff, d.pool_par_eff_v1,
       static_cast<double>(d.prepare_us) / 1000.0, static_cast<double>(d.assemble_us) / 1000.0,
       static_cast<double>(d.compact_us) / 1000.0, static_cast<double>(d.traverse_us) / 1000.0,
       static_cast<double>(d.stitch_us) / 1000.0,
@@ -2060,10 +3009,13 @@ std::size_t format_split_effect_phase_line(char* buf, std::size_t cap) noexcept 
       static_cast<unsigned long long>(d.pool_join_us),
       static_cast<unsigned long long>(d.pool_sum_item_us),
       static_cast<unsigned long long>(d.pool_wall_us),
+      static_cast<unsigned long long>(d.pool_wall_top_us),
+      static_cast<unsigned long long>(d.pool_nested_wait_us),
       static_cast<unsigned long long>(d.pool_inline_calls),
-      static_cast<unsigned long long>(d.pool_serial_calls), d.pool_participants,
+      static_cast<unsigned long long>(d.pool_serial_calls),
+      static_cast<unsigned long long>(d.pool_run_inline), d.pool_participants,
       static_cast<double>(d.subemit_plan_us) / 1000.0,
-      static_cast<double>(d.subemit_realize_us) / 1000.0);
+      static_cast<double>(d.subemit_realize_us) / 1000.0, d.eval_slices, d.eval_sliced_tasks);
   if (n < 0) {
     return 0;
   }
@@ -2164,7 +3116,22 @@ SplitEffectEvalCacheStats split_effect_eval_cache_stats() noexcept {
   out.pool_p_cores = split_collect_p_cores();
   out.pool_e_cores = split_collect_e_cores();
   out.simd_path = split_simd_name();
+  out.eval_slices = g_last_eval_slices.load(std::memory_order_relaxed);
+  out.eval_slices_max = g_max_eval_slices.load(std::memory_order_relaxed);
+  out.eval_sliced_tasks = g_last_eval_sliced_tasks.load(std::memory_order_relaxed);
   return out;
+}
+
+int split_effect_last_eval_slices() noexcept {
+  return g_last_eval_slices.load(std::memory_order_relaxed);
+}
+
+int split_effect_max_eval_slices() noexcept {
+  return g_max_eval_slices.load(std::memory_order_relaxed);
+}
+
+int split_effect_last_eval_sliced_tasks() noexcept {
+  return g_last_eval_sliced_tasks.load(std::memory_order_relaxed);
 }
 
 const char* split_effect_simd_name() noexcept {
@@ -2719,7 +3686,7 @@ void diag_finish_frame(bool frame_scope) noexcept {
   // this build has WDS_ENABLE_LOGGING=0, so WDS_LOG only reaches the crash
   // ring and the harness would never see the line.
   {
-    char buf[1536];
+    char buf[1792];
     const std::size_t n = format_split_effect_phase_line(buf, sizeof(buf));
     if (n > 0) {
       std::fprintf(stderr, "%s\n", buf);

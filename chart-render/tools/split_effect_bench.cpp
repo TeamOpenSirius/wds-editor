@@ -1480,6 +1480,10 @@ struct GoldenRunConfig {
       }
     }
   }
+  std::fprintf(stderr, "EVALSLICES worker=%d last=%d max=%d sliced_tasks=%d\n", worker_id,
+               wds::chart_render::split_effect_last_eval_slices(),
+               wds::chart_render::split_effect_max_eval_slices(),
+               wds::chart_render::split_effect_last_eval_sliced_tasks());
   std::fclose(out);
   _exit(0);
 }
@@ -2471,6 +2475,13 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
     const bool wall_on = wds::chart_render::split_wall_enabled();
     auto prev_cache = wds::chart_render::split_effect_eval_cache_stats();
     const double origin = play_origin_sec(kDefaultStartMs);
+#if WDS_DIAG_ENABLED
+    MsStats par_eff;
+    MsStats par_eff_v1;
+    MsStats wall_top_us;
+    MsStats nested_wait_us;
+    MsStats sum_item_us;
+#endif  // WDS_DIAG_ENABLED
     for (int i = 0; i < frames; ++i) {
       rusage ru0{};
       rusage ru1{};
@@ -2486,6 +2497,14 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       if (frame_log) {
         std::fprintf(stdout, "FRAME i=%d collect_ms=%.3f n=%d\n", i, t, io.total);
       }
+#if WDS_DIAG_ENABLED
+      const auto phase = wds::chart_render::split_effect_last_phase_diag();
+      par_eff.add(phase.pool_par_eff);
+      par_eff_v1.add(phase.pool_par_eff_v1);
+      wall_top_us.add(static_cast<double>(phase.pool_wall_top_us));
+      nested_wait_us.add(static_cast<double>(phase.pool_nested_wait_us));
+      sum_item_us.add(static_cast<double>(phase.pool_sum_item_us));
+#endif  // WDS_DIAG_ENABLED
       if (wall_on) {
         wds::chart_render::SplitWallFrameSnap wall{};
         const bool have_wall = wds::chart_render::split_wall_copy_last_frame(wall);
@@ -2495,7 +2514,7 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                      "A=%.3f B=%.3f C=%.3f Bwall=%.3f task_sum=%.3f unscoped=%.3f "
                      "ntasks=%d eval=%d kept=%d realized=%d minflt=%ld majflt=%ld "
                      "cache hit/op/store=%llu/%llu/%llu carry hit/miss=%llu/%llu "
-                     "walk hit/miss=%llu/%llu",
+                     "walk hit/miss=%llu/%llu eval_slices=%d longest_wave=%d kind=%d fill=%d",
                      i, now_sec - origin, now_sec, t, io.total,
                      have_wall ? wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::PhaseA)]
                                : 0.0,
@@ -2511,7 +2530,17 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                      cur.lookup_ops - prev_cache.lookup_ops, cur.store_ops - prev_cache.store_ops,
                      cur.carry_hits - prev_cache.carry_hits, cur.carry_misses - prev_cache.carry_misses,
                      cur.carry_walk_hits - prev_cache.carry_walk_hits,
-                     cur.carry_walk_misses - prev_cache.carry_walk_misses);
+                     cur.carry_walk_misses - prev_cache.carry_walk_misses, cur.eval_slices,
+                     have_wall ? wall.longest_wave : -1, have_wall ? wall.longest_kind : -1,
+                     have_wall ? wall.longest_fill : 0);
+#if WDS_DIAG_ENABLED
+        std::fprintf(stdout,
+                     " pool_par_eff=%.3f pool_par_eff_v1=%.3f pool_wall_top_us=%llu "
+                     "pool_nested_wait_us=%llu",
+                     phase.pool_par_eff, phase.pool_par_eff_v1,
+                     static_cast<unsigned long long>(phase.pool_wall_top_us),
+                     static_cast<unsigned long long>(phase.pool_nested_wait_us));
+#endif  // WDS_DIAG_ENABLED
         prev_cache = cur;
         if (have_wall) {
           for (int s = 0; s < static_cast<int>(wds::chart_render::SplitWallSec::Count); ++s) {
@@ -2528,6 +2557,16 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       wds::common::perf::end_frame();
       now_sec = std::min(range_hi, now_sec + (play_dt > 1e-9 ? play_dt : 1.0 / 60.0));
     }
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled() && !par_eff.samples.empty()) {
+      std::fprintf(stdout,
+                   "  pool_par_eff p50=%.3f pool_par_eff_v1 p50=%.3f "
+                   "pool_wall_top_us p50=%.0f pool_nested_wait_us p50=%.0f "
+                   "pool_sum_item_us p50=%.0f\n",
+                   par_eff.pct(0.50), par_eff_v1.pct(0.50), wall_top_us.pct(0.50),
+                   nested_wait_us.pct(0.50), sum_item_us.pct(0.50));
+    }
+#endif  // WDS_DIAG_ENABLED
   } else if (kind == "dead") {
     state.reset();
     double warm_sec = now_sec_from_now_t(kDefaultStartMs, 0.0);
@@ -3018,8 +3057,13 @@ int cmd_golden_compare_hash(const GoldenRunConfig& cfg, const std::string& basel
     }
   }
   const double sec = std::chrono::duration<double>(Clock::now() - t0).count();
-  std::fprintf(stdout, "golden-compare hash tier=%s jobs=%d samples=%d mismatching=%d wall=%.2fs\n",
-               golden_tier_name(cfg.tier), cfg.jobs, samples, mismatching, sec);
+  std::fprintf(stdout,
+               "golden-compare hash tier=%s jobs=%d samples=%d mismatching=%d wall=%.2fs "
+               "eval_slices_last=%d eval_slices_max=%d eval_sliced_tasks=%d\n",
+               golden_tier_name(cfg.tier), cfg.jobs, samples, mismatching, sec,
+               wds::chart_render::split_effect_last_eval_slices(),
+               wds::chart_render::split_effect_max_eval_slices(),
+               wds::chart_render::split_effect_last_eval_sliced_tasks());
   return mismatching == 0 ? 0 : 1;
 }
 

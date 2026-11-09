@@ -32,6 +32,8 @@ constexpr const char* kSecName[kSecN] = {
     "assemble",   "lockwait",   "pool_wake",   "pool_join",   "task_setup",
     "cf_hash",    "cf_keep",    "cf_ident",    "pe_pose_at",
     "subemit_plan", "subemit_realize",
+    "wave_b1", "wave_b2setup", "wave_b2", "wave_b2b",
+    "wave_b3setup", "wave_b3", "wave_b3b",
 };
 #endif  // WDS_DIAG_ENABLED
 
@@ -59,6 +61,10 @@ struct FrameAcc {
   std::atomic<int> evaluated{0};
   std::atomic<int> kept{0};
   std::atomic<int> realized{0};
+  std::atomic<int> eval_slices{0};
+  std::atomic<int> longest_wave{-1};
+  std::atomic<int> longest_kind{-1};
+  std::atomic<int> longest_fill{0};
   std::atomic<int64_t> worker_busy[kMaxWorkers]{};
   std::atomic<int64_t> phase_b_wall{0};
 
@@ -77,6 +83,10 @@ struct FrameAcc {
     evaluated.store(0, std::memory_order_relaxed);
     kept.store(0, std::memory_order_relaxed);
     realized.store(0, std::memory_order_relaxed);
+    eval_slices.store(0, std::memory_order_relaxed);
+    longest_wave.store(-1, std::memory_order_relaxed);
+    longest_kind.store(-1, std::memory_order_relaxed);
+    longest_fill.store(0, std::memory_order_relaxed);
     for (int w = 0; w < kMaxWorkers; ++w) {
       worker_busy[w].store(0, std::memory_order_relaxed);
     }
@@ -97,6 +107,10 @@ struct WindowRow {
   int evaluated = 0;
   int kept = 0;
   int realized = 0;
+  int eval_slices = 0;
+  int longest_wave = -1;
+  int longest_kind = -1;
+  int longest_fill = 0;
   int64_t worker_busy[kMaxWorkers]{};
   int64_t phase_b_wall = 0;
 };
@@ -128,6 +142,10 @@ void fill_snap(const WindowRow& r, SplitWallFrameSnap& out) noexcept {
   out.evaluated = r.evaluated;
   out.kept = r.kept;
   out.realized = r.realized;
+  out.eval_slices = r.eval_slices;
+  out.longest_wave = r.longest_wave;
+  out.longest_kind = r.longest_kind;
+  out.longest_fill = r.longest_fill;
 }
 
 }  // namespace
@@ -170,6 +188,10 @@ void split_wall_end_frame() noexcept {
   row.evaluated = g_frame.evaluated.load(std::memory_order_relaxed);
   row.kept = g_frame.kept.load(std::memory_order_relaxed);
   row.realized = g_frame.realized.load(std::memory_order_relaxed);
+  row.eval_slices = g_frame.eval_slices.load(std::memory_order_relaxed);
+  row.longest_wave = g_frame.longest_wave.load(std::memory_order_relaxed);
+  row.longest_kind = g_frame.longest_kind.load(std::memory_order_relaxed);
+  row.longest_fill = g_frame.longest_fill.load(std::memory_order_relaxed);
   for (int w = 0; w < kMaxWorkers; ++w) {
     row.worker_busy[w] = g_frame.worker_busy[w].load(std::memory_order_relaxed);
   }
@@ -210,6 +232,9 @@ thread_local int g_nest_overflow = 0;
 constexpr int kTaskNest = 8;
 thread_local int64_t g_task_ex[kTaskNest];
 thread_local int g_task_n = 0;
+thread_local int g_task_tag_wave = -1;
+thread_local int g_task_tag_kind = -1;
+thread_local int g_task_tag_fill = 0;
 
 void add_exclusive_to(int task_i, int64_t dt) noexcept {
   if (dt <= 0) {
@@ -297,6 +322,12 @@ void split_wall_max_ns(SplitWallSec sec, int64_t ns) noexcept {
   atomic_max(g_frame.mx[i], ns);
 }
 
+void split_wall_set_task_tag(int wave, int kind, int fill) noexcept {
+  g_task_tag_wave = wave;
+  g_task_tag_kind = kind;
+  g_task_tag_fill = fill;
+}
+
 void split_wall_note_task(int64_t ns) noexcept {
   if (!split_wall_enabled() || ns <= 0) {
     return;
@@ -304,6 +335,11 @@ void split_wall_note_task(int64_t ns) noexcept {
   g_frame.task_sum.fetch_add(ns, std::memory_order_relaxed);
   g_frame.ntasks.fetch_add(1, std::memory_order_relaxed);
   atomic_max(g_frame.task_max, ns);
+  if (ns >= g_frame.task_max.load(std::memory_order_relaxed)) {
+    g_frame.longest_wave.store(g_task_tag_wave, std::memory_order_relaxed);
+    g_frame.longest_kind.store(g_task_tag_kind, std::memory_order_relaxed);
+    g_frame.longest_fill.store(g_task_tag_fill, std::memory_order_relaxed);
+  }
   int64_t have = 0;
   if (g_task_n > 0) {
     --g_task_n;
@@ -366,6 +402,13 @@ void split_wall_note_splits(int n) noexcept {
   g_frame.nsplits.fetch_add(n, std::memory_order_relaxed);
 }
 
+void split_wall_note_eval_slices(int n) noexcept {
+  if (!split_wall_enabled()) {
+    return;
+  }
+  g_frame.eval_slices.store(n, std::memory_order_relaxed);
+}
+
 const char* split_wall_sec_name(SplitWallSec sec) noexcept {
 #if WDS_DIAG_ENABLED
   const int i = static_cast<int>(sec);
@@ -425,6 +468,7 @@ std::string split_wall_report() {
   double evaluated = 0.0;
   double kept = 0.0;
   double realized = 0.0;
+  double eval_slices = 0.0;
   double staged = 0.0;
   int wmax = 0;
   double worker_busy_avg[kMaxWorkers]{};
@@ -435,6 +479,7 @@ std::string split_wall_report() {
     evaluated += static_cast<double>(r.evaluated);
     kept += static_cast<double>(r.kept);
     realized += static_cast<double>(r.realized);
+    eval_slices += static_cast<double>(r.eval_slices);
     staged += static_cast<double>(staged_ns(r));
     for (int w = 0; w < kMaxWorkers; ++w) {
       worker_busy_avg[w] += static_cast<double>(r.worker_busy[w]);
@@ -443,9 +488,22 @@ std::string split_wall_report() {
       }
     }
   }
+  int peak_wave = -1;
+  int peak_kind = -1;
+  int peak_fill = 0;
+  int64_t peak_ns = 0;
+  for (const WindowRow& r : g_window) {
+    if (r.task_max > peak_ns) {
+      peak_ns = r.task_max;
+      peak_wave = r.longest_wave;
+      peak_kind = r.longest_kind;
+      peak_fill = r.longest_fill;
+    }
+  }
   ntasks /= static_cast<double>(n);
   nthreads /= static_cast<double>(n);
   nsplits /= static_cast<double>(n);
+  eval_slices /= static_cast<double>(n);
   evaluated /= static_cast<double>(n);
   kept /= static_cast<double>(n);
   realized /= static_cast<double>(n);
@@ -473,12 +531,85 @@ std::string split_wall_report() {
   out += buf;
   std::snprintf(buf, sizeof(buf),
                 "  B ntasks=%.1f nthreads=%.1f longest_task=%.3f task_sum=%.3f  "
-                "C cap=%.3f copyout=%.3f leak=%.3f  eval %d kept %d realized %d (discard %.0f%%)\n",
+                "C cap=%.3f copyout=%.3f leak=%.3f  eval %d kept %d realized %d (discard %.0f%%)  "
+                "eval_slices=%.1f\n",
                 ntasks, nthreads, task_max, task_sum, cap, copy, leak,
                 static_cast<int>(evaluated + 0.5), static_cast<int>(kept + 0.5),
                 static_cast<int>(realized + 0.5),
-                evaluated > 1e-6 ? (1.0 - kept / evaluated) * 100.0 : 0.0);
+                evaluated > 1e-6 ? (1.0 - kept / evaluated) * 100.0 : 0.0, eval_slices);
   out += buf;
+  {
+    const char* wave_name = "?";
+    switch (peak_wave) {
+      case 0:
+        wave_name = "B1";
+        break;
+      case 1:
+        wave_name = "B2setup";
+        break;
+      case 2:
+        wave_name = "B2";
+        break;
+      case 3:
+        wave_name = "B2b";
+        break;
+      case 4:
+        wave_name = "B3setup";
+        break;
+      case 5:
+        wave_name = "B3";
+        break;
+      case 6:
+        wave_name = "B3b";
+        break;
+      default:
+        break;
+    }
+    const char* kind_name = "?";
+    switch (peak_kind) {
+      case 0:
+        kind_name = "plan";
+        break;
+      case 1:
+        kind_name = "pri_setup";
+        break;
+      case 2:
+        kind_name = "pri_slice";
+        break;
+      case 3:
+        kind_name = "pri_commit";
+        break;
+      case 4:
+        kind_name = "sub_setup";
+        break;
+      case 5:
+        kind_name = "sub_slice";
+        break;
+      case 6:
+        kind_name = "sub_commit";
+        break;
+      case 7:
+        kind_name = "pri_full";
+        break;
+      case 8:
+        kind_name = "sub_full";
+        break;
+      default:
+        break;
+    }
+    std::snprintf(buf, sizeof(buf),
+                  "  longest_owner wave=%s kind=%s fill=%d peak_ms=%.3f  "
+                  "waves b1=%.3f b2setup=%.3f b2=%.3f b2b=%.3f b3setup=%.3f b3=%.3f b3b=%.3f\n",
+                  wave_name, kind_name, peak_fill, static_cast<double>(peak_ns) / 1e6,
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB1)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB2Setup)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB2)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB2b)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB3Setup)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB3)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB3b)]);
+    out += buf;
+  }
   std::snprintf(buf, sizeof(buf),
                 "  eval thread-sum births=%.3f filter=%.3f make_state=%.3f alpha=%.3f "
                 "integrate=%.3f appear=%.3f trails=%.3f compact=%.3f stitch=%.3f "

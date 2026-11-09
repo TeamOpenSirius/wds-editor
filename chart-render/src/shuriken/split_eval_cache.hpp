@@ -19,6 +19,7 @@ struct SplitEvalCacheStats {
   std::uint64_t lookup_contend = 0;
   std::uint64_t store_ops = 0;
   std::uint64_t store_contend = 0;
+  std::uint64_t inplace_stores = 0;
 };
 
 bool split_eval_cache_enabled() noexcept;

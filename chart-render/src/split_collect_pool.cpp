@@ -358,7 +358,13 @@ std::atomic<uint64_t> g_diag_serial{0};       // cap<=1 or a single item: no poo
 std::atomic<uint64_t> g_diag_run_inline{0};   // kMaxJobs exhausted: ran inline
 std::atomic<uint64_t> g_diag_par_tasks{0};    // calls that published a Job
 std::atomic<uint64_t> g_diag_sum_item_us{0};  // Σ top-level claim µs this frame
-std::atomic<uint64_t> g_diag_wall_us{0};      // Σ wall µs of those pool waves
+std::atomic<uint64_t> g_diag_wall_us{0};      // Σ wall µs of every published Job
+#if WDS_DIAG_ENABLED
+// Nested Job walls overlap the outer wave, so they must not enter the
+// par_eff denominator. nested_wait is the join-idle part of an outer claim.
+std::atomic<uint64_t> g_diag_wall_top_us{0};     // Σ wall µs, tls_claim_depth==0
+std::atomic<uint64_t> g_diag_nested_wait_us{0};  // Σ cv_done_ wait µs, depth>0
+#endif  // WDS_DIAG_ENABLED
 // Claim attribution: a task executed on the caller vs on a pool worker. This
 // is the "is the pool helping or is the GUI thread doing everything" split.
 std::atomic<uint64_t> g_diag_claims_caller{0};
@@ -541,21 +547,32 @@ class SplitCollectPool {
       std::lock_guard<std::mutex> lock(mu_);
       if (free_count_ > 0) {
         job = free_[--free_count_];
-        job->next.store(begin, std::memory_order_relaxed);
-        job->finished.store(0, std::memory_order_relaxed);
-        job->begin = begin;
-        job->end = end;
-        job->grain = grain;
-        job->fn = fn;
-        job->ctx = ctx;
-        job->error = nullptr;
-        job->id = ++next_id_;
-        job->max_workers = participants;
-        active_[job_count_++] = job;
       }
+    }
+    if (job != nullptr) {
+      // Stale claim() may fetch_add refs after the previous retire wait saw 0.
+      // Do not store(0): that drops the increment and the matching fetch_sub wraps.
+      while (job->refs.load(std::memory_order_seq_cst) != 0) {
+        std::this_thread::yield();
+      }
+      std::lock_guard<std::mutex> lock(mu_);
+      job->begin = begin;
+      job->end = end;
+      job->grain = grain;
+      job->fn = fn;
+      job->ctx = ctx;
+      job->error = nullptr;
+      job->id = ++next_id_;
+      job->max_workers = participants;
+      job->next.store(begin, std::memory_order_relaxed);
+      job->finished.store(0, std::memory_order_relaxed);
+      job->generation.fetch_add(1, std::memory_order_seq_cst);
+      active_[job_count_++] = job;
     }
     if (job == nullptr) {
       // All kMaxJobs slots busy (nested publish overflow): run inline.
+      // No Job → this call does not add wall / wall_top / nested_wait.
+      // Nested inline work stays inside the outer claim timer as busy time.
 #if WDS_DIAG_ENABLED
       if (diag) {
         g_diag_run_inline.fetch_add(1, std::memory_order_relaxed);
@@ -630,6 +647,11 @@ class SplitCollectPool {
       // of sum_item but not part of the "wait"; spin is the remainder.
       const uint64_t spin_us = wall_us > wait_us ? wall_us - wait_us : 0ull;
       g_diag_wall_us.fetch_add(wall_us, std::memory_order_relaxed);
+      if (tls_claim_depth == 0) {
+        g_diag_wall_top_us.fetch_add(wall_us, std::memory_order_relaxed);
+      } else {
+        g_diag_nested_wait_us.fetch_add(wait_us, std::memory_order_relaxed);
+      }
       g_diag_wait_us.fetch_add(wait_us, std::memory_order_relaxed);
       g_diag_join_us.fetch_add(wait_us, std::memory_order_relaxed);
       g_diag_spin_us.fetch_add(spin_us, std::memory_order_relaxed);
@@ -643,7 +665,18 @@ class SplitCollectPool {
       std::lock_guard<std::mutex> lock(mu_);
       error = std::move(job->error);
       job->error = nullptr;
-      pop_job_locked(id);
+      retire_job_locked(id);
+    }
+    // Stale claim() snapshots may still hold refs. Do not recycle the slot
+    // (or clear fn) until those abort. generation is already even.
+    while (job->refs.load(std::memory_order_seq_cst) != 0) {
+      std::this_thread::yield();
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      job->fn = nullptr;
+      job->ctx = nullptr;
+      free_[free_count_++] = job;
     }
     if (error) {
       std::rethrow_exception(error);
@@ -654,8 +687,10 @@ class SplitCollectPool {
   static constexpr int kMaxJobs = 32;
 
   struct Job {
-    std::atomic<size_t> next{0};
-    std::atomic<size_t> finished{0};
+    alignas(64) std::atomic<size_t> next{0};
+    alignas(64) std::atomic<size_t> finished{0};
+    std::atomic<uint32_t> generation{0};  // even = free / retired, odd = published
+    std::atomic<uint32_t> refs{0};
     size_t begin = 0;
     size_t end = 0;
     size_t grain = 1;
@@ -686,7 +721,13 @@ class SplitCollectPool {
   bool has_claimable() const {
     for (int i = 0; i < job_count_; ++i) {
       const Job* j = active_[i];
-      if (j != nullptr && j->fn != nullptr && j->next.load(std::memory_order_relaxed) < j->end) {
+      if (j == nullptr || j->fn == nullptr) {
+        continue;
+      }
+      if ((j->generation.load(std::memory_order_relaxed) & 1u) == 0u) {
+        continue;
+      }
+      if (j->next.load(std::memory_order_relaxed) < j->end) {
         return true;
       }
     }
@@ -694,30 +735,56 @@ class SplitCollectPool {
   }
 
   bool claim(Claim& c) {
-    // Take the range under mu_ so a worker cannot fetch_add / read fn after
-    // parallel_for recycles the Job into a later publish (TSAN: write
-    // begin/fn vs stale claim).
-    std::lock_guard<std::mutex> lock(mu_);
-    for (int ji = job_count_ - 1; ji >= 0; --ji) {
-      Job* cand = active_[ji];
-      if (cand == nullptr || cand->fn == nullptr) {
+    Job* local[kMaxJobs];
+    int n = 0;
+    {
+      // Snapshot only. fetch_add is outside mu_ so workers do not serialize
+      // on every item. ABA: refs + odd generation; slot is not reused until
+      // refs==0 after retire makes generation even.
+      std::lock_guard<std::mutex> lock(mu_);
+      n = job_count_;
+      for (int i = 0; i < n; ++i) {
+        local[i] = active_[i];
+      }
+    }
+    for (int ji = n - 1; ji >= 0; --ji) {
+      Job* cand = local[ji];
+      if (cand == nullptr) {
         continue;
       }
+      const uint32_t gen = cand->generation.load(std::memory_order_acquire);
+      if ((gen & 1u) == 0u) {
+        continue;
+      }
+      cand->refs.fetch_add(1, std::memory_order_seq_cst);
+      if (cand->generation.load(std::memory_order_seq_cst) != gen) {
+        cand->refs.fetch_sub(1, std::memory_order_release);
+        continue;
+      }
+      auto* fn = cand->fn;
+      void* ctx = cand->ctx;
+      const size_t end = cand->end;
       const size_t grain = cand->grain < 1 ? 1 : cand->grain;
+      const int max_workers = cand->max_workers;
+      if (fn == nullptr) {
+        cand->refs.fetch_sub(1, std::memory_order_release);
+        continue;
+      }
       const size_t i0 = cand->next.fetch_add(grain, std::memory_order_relaxed);
-      if (i0 >= cand->end) {
+      if (cand->generation.load(std::memory_order_acquire) != gen || i0 >= end) {
+        cand->refs.fetch_sub(1, std::memory_order_release);
         continue;
       }
       size_t i1 = i0 + grain;
-      if (i1 > cand->end) {
-        i1 = cand->end;
+      if (i1 > end) {
+        i1 = end;
       }
       c.job = cand;
       c.i0 = i0;
       c.i1 = i1;
-      c.fn = cand->fn;
-      c.ctx = cand->ctx;
-      c.max_workers = cand->max_workers;
+      c.fn = fn;
+      c.ctx = ctx;
+      c.max_workers = max_workers;
       return true;
     }
     return false;
@@ -726,8 +793,20 @@ class SplitCollectPool {
   bool run_one_claim() {
     Claim c;
     if (!claim(c) || c.fn == nullptr || c.job == nullptr) {
+      if (c.job != nullptr && c.fn == nullptr) {
+        c.job->refs.fetch_sub(1, std::memory_order_release);
+      }
       return false;
     }
+    struct RefGuard {
+      Job* job = nullptr;
+      ~RefGuard() {
+        if (job != nullptr) {
+          job->refs.fetch_sub(1, std::memory_order_release);
+        }
+      }
+    } ref_guard;
+    ref_guard.job = c.job;
     const bool heavy = c.max_workers >= 3;
     if (tls_worker_id != 0) {
       // Workers past the steady P-cap stay UTILITY so the kernel can park
@@ -806,20 +885,17 @@ class SplitCollectPool {
     return true;
   }
 
-  void pop_job_locked(uint64_t id) {
+  void retire_job_locked(uint64_t id) {
     for (int i = 0; i < job_count_; ++i) {
       Job* j = active_[i];
       if (j == nullptr || j->id != id) {
         continue;
       }
-      j->fn = nullptr;
-      j->ctx = nullptr;
+      // Even generation: in-flight claim() snapshots abort before fetch_add.
+      j->generation.fetch_add(1, std::memory_order_seq_cst);
       active_[i] = active_[job_count_ - 1];
       active_[job_count_ - 1] = nullptr;
       --job_count_;
-      free_[free_count_++] = j;
-      // No notify: removing a job never makes a worker's wait predicate (stop_ / claimable work /
-      // heavy hold) true, so waking parked workers here would only make them re-sleep.
       return;
     }
   }
@@ -1109,6 +1185,8 @@ void split_collect_begin_frame() noexcept {
   g_diag_par_tasks.store(0, std::memory_order_relaxed);
   g_diag_sum_item_us.store(0, std::memory_order_relaxed);
   g_diag_wall_us.store(0, std::memory_order_relaxed);
+  g_diag_wall_top_us.store(0, std::memory_order_relaxed);
+  g_diag_nested_wait_us.store(0, std::memory_order_relaxed);
   g_diag_claims_caller.store(0, std::memory_order_relaxed);
   g_diag_claims_worker.store(0, std::memory_order_relaxed);
   g_diag_items_caller.store(0, std::memory_order_relaxed);
@@ -1161,6 +1239,8 @@ SplitCollectPoolDiag split_collect_pool_diag_frame() noexcept {
   d.par_calls = diag_load(g_diag_par_tasks);
   d.sum_item_us = diag_load(g_diag_sum_item_us);
   d.wall_us = diag_load(g_diag_wall_us);
+  d.wall_top_us = diag_load(g_diag_wall_top_us);
+  d.nested_wait_us = diag_load(g_diag_nested_wait_us);
   d.claims_caller = diag_load(g_diag_claims_caller);
   d.claims_worker = diag_load(g_diag_claims_worker);
   d.items_caller = diag_load(g_diag_items_caller);
@@ -1203,6 +1283,8 @@ void split_collect_parallel_for(size_t begin, size_t end, size_t grain, void (*f
   if (cap <= 1 || parts <= 1 || n == 1) {
     // Fallback: fn runs on the calling thread, no Job, no wake-up.
     // choose_participants already counted the cap<=1 / single-item cases.
+    // Serial path is not a pool wave: no wall_top / nested_wait. Nested
+    // serial work is already in the outer claim timer as busy time.
     for (size_t i = begin; i < end; ++i) {
       fn(i, ctx);
     }
