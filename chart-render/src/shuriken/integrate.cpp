@@ -1,4 +1,5 @@
 #include "integrate_batch.hpp"
+#include "integrate_mask0_x86.hpp"
 #include "internal.hpp"
 #include "modules_an.inl.hpp"
 #include "simd_dispatch.hpp"
@@ -730,29 +731,11 @@ void PoseIntegrator::run_step(int i, float t_mid, float dt, float t_end_for_nois
 
 namespace {
 
-#if WDS_INTEGRATE_SSE
-// Clang cannot emit vfmadd from a TU compiled without -mfma unless this
-// helper has target("fma"). noinline is that ISA constraint (same as
-// modules_an.inl.hpp), not a layout/i-cache tweak.
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((target("fma"), noinline))
-#endif
-float mask0_fmadd_ss(float v, float a, float dt) noexcept {
-  return _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(dt), _mm_set_ss(v)));
-}
-#endif
-
-// Same ops ARM scalar contracts to fmadd (vy += g*dt). When Avx2 is selected,
-// remainder steps and unbatched scalar mask-0 use this so they match 4-wide
-// vfmadd. SSE42/Scalar keep mul+add. hop.
+// Same ops ARM scalar contracts to fmadd (vy += g*dt). Avx2 simple mask-0
+// (batch + scalar remainder) fuses gravity in mask0_*_loop_*_avx2 instead of
+// calling a per-step target("fma") helper. SSE42 / Scalar / ARM keep mul+add
+// here so their codegen is unchanged. hop.
 inline float mask0_add_grav(float v, float g, float dt) noexcept {
-#if WDS_INTEGRATE_SSE
-  if (split_simd_path() == SplitSimdPath::Avx2) {
-    return mask0_fmadd_ss(v, g, dt);
-  }
-#endif
   return v + g * dt;
 }
 
@@ -1394,39 +1377,6 @@ inline void mask0_simple_step_x4(float32x4_t& lx, float32x4_t& ly, float32x4_t& 
 }
 #endif
 
-#if WDS_INTEGRATE_SSE
-// SSE4.2: mul+add, byte-identical to x86 scalar (no FMA). hop / perf, not 2022.3.
-inline void mask0_simple_step_x4_sse(__m128& lx, __m128& ly, __m128& lz, __m128& vx, __m128& vy,
-                                     __m128& vz, float dt, float grav_y, float grav_z,
-                                     float sm) noexcept {
-  const __m128 vdt = _mm_set1_ps(dt);
-  vy = _mm_add_ps(vy, _mm_mul_ps(_mm_set1_ps(grav_y), vdt));
-  vz = _mm_add_ps(vz, _mm_mul_ps(_mm_set1_ps(grav_z), vdt));
-  const __m128 vsm = _mm_set1_ps(sm);
-  lx = _mm_add_ps(lx, _mm_mul_ps(_mm_mul_ps(vx, vdt), vsm));
-  ly = _mm_add_ps(ly, _mm_mul_ps(_mm_mul_ps(vy, vdt), vsm));
-  lz = _mm_add_ps(lz, _mm_mul_ps(_mm_mul_ps(vz, vdt), vsm));
-}
-
-// AVX2: still __m128 + _mm_fmadd_ps for gravity (same ops ARM vfmaq). Function
-// target, not TU -mavx2. Per-step error ≤ u·|a·b|, u=2^-24. hop, not 2022.3.
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((target("avx2,fma"), noinline))
-#endif
-void mask0_simple_step_x4_avx2(__m128& lx, __m128& ly, __m128& lz, __m128& vx, __m128& vy,
-                               __m128& vz, float dt, float grav_y, float grav_z, float sm) noexcept {
-  const __m128 vdt = _mm_set1_ps(dt);
-  vy = _mm_fmadd_ps(_mm_set1_ps(grav_y), vdt, vy);
-  vz = _mm_fmadd_ps(_mm_set1_ps(grav_z), vdt, vz);
-  const __m128 vsm = _mm_set1_ps(sm);
-  lx = _mm_add_ps(lx, _mm_mul_ps(_mm_mul_ps(vx, vdt), vsm));
-  ly = _mm_add_ps(ly, _mm_mul_ps(_mm_mul_ps(vy, vdt), vsm));
-  lz = _mm_add_ps(lz, _mm_mul_ps(_mm_mul_ps(vz, vdt), vsm));
-}
-#endif
-
 }  // namespace
 
 void PoseIntegrator::advance_to(int k) noexcept {
@@ -1449,6 +1399,21 @@ void PoseIntegrator::advance_to(int k) noexcept {
     IntegratorGridState cur;
     export_grid(cur);
     grid_log_->push_back(cur);
+  }
+#if WDS_INTEGRATE_SSE
+  // Avx2 simple mask-0: one dispatch into a target("avx2,fma") loop so gravity
+  // is vfmaddss in-loop (same fused ops as 4-wide). SSE42 / Scalar / ARM keep
+  // the run_step_masked<0> loop below. ISA compile boundary, not layout.
+  if (step_mask_ == 0 && grid_log_ == nullptr && can_batch_mask0() &&
+      split_simd_path() == SplitSimdPath::Avx2) {
+    const int nsteps = k - hot_->next_step;
+    integrate_batch_note_mask0_scalar(nsteps);
+    mask0_scalar_loop_avx2(hot_, &trace_, nsteps, h_, grav_y_, grav_z_, st_->p->vol_speed_mod);
+    return;
+  }
+#endif
+  if (step_mask_ == 0) {
+    integrate_batch_note_mask0_scalar(k - hot_->next_step);
   }
   const int step_count = k;
   for (int i = hot_->next_step; i < k; ++i) {
@@ -1536,6 +1501,7 @@ void PoseIntegrator::advance_mask0_batch(PoseIntegrator** xs, const int* ks, int
       }
       if (kmin > i0) {
         integrate_batch_note_neon(true);
+        integrate_batch_note_mask0_simd4(kmin - i0);
         float32x4_t lx = {xs[0]->hot_->lx, xs[1]->hot_->lx, xs[2]->hot_->lx, xs[3]->hot_->lx};
         float32x4_t ly = {xs[0]->hot_->ly, xs[1]->hot_->ly, xs[2]->hot_->ly, xs[3]->hot_->ly};
         float32x4_t lz = {xs[0]->hot_->lz, xs[1]->hot_->lz, xs[2]->hot_->lz, xs[3]->hot_->lz};
@@ -1617,46 +1583,16 @@ void PoseIntegrator::advance_mask0_batch(PoseIntegrator** xs, const int* ks, int
         }
         if (kmin > i0) {
           integrate_batch_note_neon(true);
-          __m128 lx = _mm_setr_ps(xs[0]->hot_->lx, xs[1]->hot_->lx, xs[2]->hot_->lx, xs[3]->hot_->lx);
-          __m128 ly = _mm_setr_ps(xs[0]->hot_->ly, xs[1]->hot_->ly, xs[2]->hot_->ly, xs[3]->hot_->ly);
-          __m128 lz = _mm_setr_ps(xs[0]->hot_->lz, xs[1]->hot_->lz, xs[2]->hot_->lz, xs[3]->hot_->lz);
-          __m128 vx = _mm_setr_ps(xs[0]->hot_->vx, xs[1]->hot_->vx, xs[2]->hot_->vx, xs[3]->hot_->vx);
-          __m128 vy = _mm_setr_ps(xs[0]->hot_->vy, xs[1]->hot_->vy, xs[2]->hot_->vy, xs[3]->hot_->vy);
-          __m128 vz = _mm_setr_ps(xs[0]->hot_->vz, xs[1]->hot_->vz, xs[2]->hot_->vz, xs[3]->hot_->vz);
+          integrate_batch_note_mask0_simd4(kmin - i0);
+          // Dispatch once; the named kernel holds load / n-step / store.
           if (use_avx2) {
-            for (int i = i0; i < kmin; ++i) {
-              mask0_simple_step_x4_avx2(lx, ly, lz, vx, vy, vz, h, gy, gz, sm);
-            }
+            mask0_batch_loop_x4_avx2(xs[0]->hot_, xs[1]->hot_, xs[2]->hot_, xs[3]->hot_,
+                                     &xs[0]->trace_, &xs[1]->trace_, &xs[2]->trace_,
+                                     &xs[3]->trace_, kmin, h, gy, gz, sm);
           } else {
-            for (int i = i0; i < kmin; ++i) {
-              mask0_simple_step_x4_sse(lx, ly, lz, vx, vy, vz, h, gy, gz, sm);
-            }
-          }
-          alignas(16) float lxa[4], lya[4], lza[4], vxa[4], vya[4], vza[4];
-          _mm_store_ps(lxa, lx);
-          _mm_store_ps(lya, ly);
-          _mm_store_ps(lza, lz);
-          _mm_store_ps(vxa, vx);
-          _mm_store_ps(vya, vy);
-          _mm_store_ps(vza, vz);
-          for (int p = 0; p < 4; ++p) {
-            xs[p]->hot_->lx = lxa[p];
-            xs[p]->hot_->ly = lya[p];
-            xs[p]->hot_->lz = lza[p];
-            xs[p]->hot_->vx = vxa[p];
-            xs[p]->hot_->vy = vya[p];
-            xs[p]->hot_->vz = vza[p];
-            xs[p]->hot_->next_step = kmin;
-            auto& tr = xs[p]->trace_;
-            tr.stored_x = vxa[p];
-            tr.stored_y = vya[p];
-            tr.stored_z = vza[p];
-            tr.vol_x = tr.vol_y = tr.vol_z = 0.0f;
-            tr.noise_x = tr.noise_y = tr.noise_z = 0.0f;
-            tr.inherited_x = tr.inherited_y = tr.inherited_z = 0.0f;
-            tr.total_x = vxa[p];
-            tr.total_y = vya[p];
-            tr.total_z = vza[p];
+            mask0_batch_loop_x4_sse(xs[0]->hot_, xs[1]->hot_, xs[2]->hot_, xs[3]->hot_,
+                                    &xs[0]->trace_, &xs[1]->trace_, &xs[2]->trace_,
+                                    &xs[3]->trace_, kmin, h, gy, gz, sm);
           }
         }
         for (int p = 0; p < 4; ++p) {

@@ -25,6 +25,8 @@ add_library(wds_chart_render STATIC
   src/shuriken/emit.cpp
   src/shuriken/shape.cpp
   src/shuriken/integrate.cpp
+  src/shuriken/integrate_mask0_x86.cpp
+  src/shuriken/integrate_mask0_avx2.cpp
   src/shuriken/simd_dispatch.cpp
   src/shuriken/modules.cpp
   src/shuriken/modules_an.cpp
@@ -91,12 +93,24 @@ if(MSVC)
     src/shuriken/simd_dispatch.cpp
     src/shuriken/modules_an.cpp
     PROPERTIES COMPILE_OPTIONS "/fp:precise")
+  # MSVC has no function-level target("avx2,fma"). Compile only the Avx2
+  # whole-loop TU with /arch:AVX2; the rest of integrate.cpp stays default ISA.
+  set_source_files_properties(
+    src/shuriken/integrate_mask0_avx2.cpp
+    PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
   target_compile_options(wds_chart_render PRIVATE -Wall -Wextra -Wpedantic)
   set_source_files_properties(
     src/shuriken/simd_dispatch.cpp
     src/shuriken/modules_an.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
+
+# Optional: -DWDS_INTEGRATE_BATCH_COUNTERS=1 (cmake or compile def). Default
+# off so Release has no pack/width atomics. Same rule as WDS_MIX3_COUNTERS.
+option(WDS_INTEGRATE_BATCH_COUNTERS "Compile integrate-batch pack/width counters" OFF)
+if(WDS_INTEGRATE_BATCH_COUNTERS)
+  target_compile_definitions(wds_chart_render PRIVATE WDS_INTEGRATE_BATCH_COUNTERS=1)
 endif()
 
 # Unit tests live in this module; system tests live in ${CMAKE_SOURCE_DIR}/tests/system.

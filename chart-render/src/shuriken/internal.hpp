@@ -13,6 +13,8 @@
 #include <cstring>
 #include <vector>
 
+#include "integrate_hot.hpp"
+
 namespace wds::chart_render::shuriken {
 
 struct EmitContext;
@@ -111,36 +113,6 @@ struct ParticleState {
   float noise_uz = 0.0f;
   // Trails.lifetime TwoConstants pick. < 0 → use catalog trail_lifetime max.
   float trail_life_mul = -1.0f;
-};
-
-// Observation-only snapshot of the velocity terms already computed by
-// integrate_pose. All vectors are in the native PS-local/LaneGroup basis.
-// stored is Particle.velocity after Force/Gravity/Limit/Drag; vol and noise
-// are the current-frame animated terms; inherited is Current-mode inherit
-// (Initial is already in stored); total is the sum consumed by the position
-// step. Orbital/radial post-step transforms are deliberately outside this
-// snapshot.
-struct IntegrationVelocityTrace {
-  float stored_x = 0.0f;
-  float stored_y = 0.0f;
-  float stored_z = 0.0f;
-  float vol_x = 0.0f;
-  float vol_y = 0.0f;
-  float vol_z = 0.0f;
-  float noise_x = 0.0f;
-  float noise_y = 0.0f;
-  float noise_z = 0.0f;
-  // Curl × positionAmount, before Strength. Hold keeps this; Strength is a
-  // lifetime curve and is re-applied each step (2022.3 Noise Manual).
-  float noise_unit_x = 0.0f;
-  float noise_unit_y = 0.0f;
-  float noise_unit_z = 0.0f;
-  float inherited_x = 0.0f;
-  float inherited_y = 0.0f;
-  float inherited_z = 0.0f;
-  float total_x = 0.0f;
-  float total_y = 0.0f;
-  float total_z = 0.0f;
 };
 
 // Observation-only per-substep record.  This exposes the substeps that the
@@ -365,25 +337,6 @@ bool split_integrator_is_legacy() noexcept;
 
 struct ParticleCacheKey;
 
-// Pose / velocity at a full grid step k (never a tail). sample() advances
-// to k then integrates the exact remaining tail to now_t.
-//
-// IntegratorHot is the only R+W state of run_step / advance_to. It lives in
-// a contiguous array (persist SoA or a 128 B-aligned frame-arena batch).
-// 32 B divides 64 so a record never straddles a 64 B line. trace is cold.
-// alignas(32) is SIMD/hot-pose packing, not a false-sharing pad.
-struct alignas(32) IntegratorHot {
-  float lx = 0.0f;
-  float ly = 0.0f;
-  float lz = 0.0f;
-  float vx = 0.0f;
-  float vy = 0.0f;
-  float vz = 0.0f;
-  int next_step = 0;
-  std::uint32_t pad = 0;
-};
-static_assert(sizeof(IntegratorHot) == 32, "hot pose is 32 B");
-static_assert(64 % sizeof(IntegratorHot) == 0, "hot size divides 64");
 inline constexpr int kIntegratorHotPerLine = 128 / static_cast<int>(sizeof(IntegratorHot));
 
 inline int align_hot_index(int i) noexcept {

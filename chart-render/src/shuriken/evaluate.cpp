@@ -2445,10 +2445,10 @@ void evaluate_realize_jobs_range(const SplitEffectParticle& p, const EmitContext
   const int lo = job_lo < 0 ? 0 : job_lo;
   const int hi = job_hi < n ? job_hi : n;
   WDS_PERF_SCOPE("shuriken.evaluate.realize");
+  const bool catalog_ok = PoseIntegrator::particle_can_batch_mask0(p);
+  const bool cache_ok = !g_pose_cache_live.load(std::memory_order_relaxed) && !sess.resume_persist;
   const bool batch_possible =
-      integrate_batch_enabled() && PoseIntegrator::particle_can_batch_mask0(p) &&
-      ((!g_pose_cache_live.load(std::memory_order_relaxed) && !sess.resume_persist) ||
-       integrate_batch_verify());
+      integrate_batch_enabled() && catalog_ok && (cache_ok || integrate_batch_verify());
   for (int j = lo; j < hi; ++j) {
     if (batch_possible && j + 4 <= hi) {
       bool ok4 = true;
@@ -2466,18 +2466,20 @@ void evaluate_realize_jobs_range(const SplitEffectParticle& p, const EmitContext
         }
       }
       if (ok4) {
-        int prefix = job_prefix_steps(jobs[static_cast<size_t>(j)], sess.persist);
+        int prefs[4];
+        prefs[0] = job_prefix_steps(jobs[static_cast<size_t>(j)], sess.persist);
+        int prefix = prefs[0];
         for (int b = 1; b < 4; ++b) {
-          const int pb = job_prefix_steps(jobs[static_cast<size_t>(j + b)], sess.persist);
-          if (pb < prefix) {
-            prefix = pb;
+          prefs[b] = job_prefix_steps(jobs[static_cast<size_t>(j + b)], sess.persist);
+          if (prefs[b] < prefix) {
+            prefix = prefs[b];
           }
         }
         // Pose cache live (play): maybe_restore / persist SoA leave 4-wide
         // unaligned so NEON never fires (10990 play taken~1e6 neon=0). Only
         // batch when the collect started with an empty cache (cold / seek).
-        const bool take = prefix >= kIntegrateBatchMinPrefix &&
-                          job_next_steps_aligned(jobs.data(), j, sess.persist) &&
+        const bool aligned = job_next_steps_aligned(jobs.data(), j, sess.persist);
+        const bool take = prefix >= kIntegrateBatchMinPrefix && aligned &&
                           (!g_pose_cache_live.load(std::memory_order_relaxed) ||
                            integrate_batch_verify());
         integrate_batch_note_pack(prefix, take);
@@ -5407,12 +5409,14 @@ void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan&
             }
           }
           if (ok4) {
-            int prefix = integrate_prefix_steps(item.pose_age, 0);
+            int prefs[4];
+            prefs[0] = integrate_prefix_steps(item.pose_age, 0);
+            int prefix = prefs[0];
             for (int b = 1; b < 4; ++b) {
-              const int pb =
+              prefs[b] =
                   integrate_prefix_steps(plan.items[static_cast<size_t>(i + b)].pose_age, 0);
-              if (pb < prefix) {
-                prefix = pb;
+              if (prefs[b] < prefix) {
+                prefix = prefs[b];
               }
             }
             const bool take = prefix >= kIntegrateBatchMinPrefix &&

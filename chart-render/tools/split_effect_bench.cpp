@@ -2201,6 +2201,7 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
   done.mean_births_ms = frames > 0 ? sum_births_ms / static_cast<double>(frames) : 0.0;
   write_scan_pipe_msg(write_fd, done);
   close(write_fd);
+  wds::chart_render::shuriken::flush_integrate_batch_stats();
   _exit(0);
 }
 
