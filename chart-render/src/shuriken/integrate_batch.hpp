@@ -48,15 +48,18 @@ inline bool integrate_batch_enabled() noexcept {
   return on;
 }
 
-// Play persist advances ~1 grid step/frame; 4-wide packing+copy loses there.
-// N=2: all 4 lanes share ≥2 full steps from the same next_step. Skip the
-// entire 4-wide attempt when the pose cache already holds checkpoints
+// Structural: batch iff the 4 lanes share at least one grid step. Batch and
+// scalar do the same non-step work for those 4 particles (ctor / restore /
+// epilogue / fill_live_after_pose); there is no extra fixed pack cost.
+// Play skip is pose-cache live + grid alignment, not this threshold.
+inline constexpr int kIntegrateBatchMinPrefix = 1;
+
+// Skip the entire 4-wide attempt when the pose cache already holds checkpoints
 // (snapshotted once per collect onto an atomic workers can read): play
 // maybe_restore unaligns lanes so NEON never fires, and the ok4/prefix
 // scan itself was a play regression. Cold/seek clear the cache first.
 // Also skip when catalog flags are not mask-0 (packing then scalar fallback).
-// VERIFY still takes 4-wide. Time-independent, ID-independent.
-inline constexpr int kIntegrateBatchMinPrefix = 2;
+// VERIFY still takes 4-wide. ID-independent.
 
 inline void integrate_batch_register_atexit() noexcept;
 

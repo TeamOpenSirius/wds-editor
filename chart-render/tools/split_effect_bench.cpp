@@ -1483,10 +1483,13 @@ struct GoldenRunConfig {
       }
     }
   }
-  std::fprintf(stderr, "EVALSLICES worker=%d last=%d max=%d sliced_tasks=%d\n", worker_id,
-               wds::chart_render::split_effect_last_eval_slices(),
-               wds::chart_render::split_effect_max_eval_slices(),
-               wds::chart_render::split_effect_last_eval_sliced_tasks());
+  if (const char* e = std::getenv("WDS_SPLIT_ADAPT_LOG");
+      e != nullptr && e[0] == '1' && e[1] == '\0') {
+    std::fprintf(stderr, "EVALSLICES worker=%d last=%d max=%d sliced_tasks=%d\n", worker_id,
+                 wds::chart_render::split_effect_last_eval_slices(),
+                 wds::chart_render::split_effect_max_eval_slices(),
+                 wds::chart_render::split_effect_last_eval_sliced_tasks());
+  }
   std::fclose(out);
   wds::chart_render::shuriken::flush_integrate_batch_stats();
   _exit(0);

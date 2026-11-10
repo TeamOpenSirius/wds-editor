@@ -18,6 +18,7 @@ add_library(wds_chart_render STATIC
   src/split_line_skins.cpp
   src/split_line_official_colors.cpp
   src/split_effect_particles.cpp
+  src/split_adapt.cpp
   src/split_wall_profile.cpp
   src/split_collect_pool.cpp
   src/openwds_shuriken_bind.cpp

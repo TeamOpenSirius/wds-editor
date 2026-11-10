@@ -6,6 +6,8 @@
 // of per-byte contributions of the input words x, y, z, w (16 tables).
 namespace wds::chart_render::detail {
 
+// Read-only SIMD lookup (64 B loads). Not a false-sharing pad; writers never
+// share this table across cores.
 alignas(64) inline constexpr uint32_t kXorshift128R32Table[16][256] = {
     {
         0x00000000u, 0xB284D82Du, 0x6449B81Bu, 0xD6CD6036u, 0xCA13B865u, 0x78976048u,

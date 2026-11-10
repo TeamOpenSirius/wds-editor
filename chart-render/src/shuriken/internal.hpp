@@ -371,6 +371,7 @@ struct ParticleCacheKey;
 // IntegratorHot is the only R+W state of run_step / advance_to. It lives in
 // a contiguous array (persist SoA or a 128 B-aligned frame-arena batch).
 // 32 B divides 64 so a record never straddles a 64 B line. trace is cold.
+// alignas(32) is SIMD/hot-pose packing, not a false-sharing pad.
 struct alignas(32) IntegratorHot {
   float lx = 0.0f;
   float ly = 0.0f;

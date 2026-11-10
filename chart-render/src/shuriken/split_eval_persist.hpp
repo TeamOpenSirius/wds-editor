@@ -148,6 +148,8 @@ inline bool persist_child_can_hit(const EmitContext& ctx, const SplitEffectParti
   return true;
 }
 
+// Slot size/alignment is persist SoA packing (view stays 64-aligned), not a
+// false-sharing pad between cores. Do not switch to kFalseSharingAlign.
 struct alignas(64) PersistSlot {
   IntegratorGridState grid{};
   Birth b{};

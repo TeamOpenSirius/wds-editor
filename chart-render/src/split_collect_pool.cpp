@@ -16,6 +16,7 @@
 
 #include <wds/chart_render/split_effect_particles.hpp>
 
+#include <wds/common/cache_line.hpp>
 #include <wds/common/crash_handler.hpp>
 #include <wds/common/perf_stages.hpp>
 
@@ -687,8 +688,10 @@ class SplitCollectPool {
   static constexpr int kMaxJobs = 32;
 
   struct Job {
-    alignas(64) std::atomic<size_t> next{0};
-    alignas(64) std::atomic<size_t> finished{0};
+    // next vs finished: different cores RMW these on claim/join. 128 B is
+    // kFalseSharingAlign (Apple L1D 128 B + x86 adjacent-line prefetch).
+    alignas(wds::common::kFalseSharingAlign) std::atomic<size_t> next{0};
+    alignas(wds::common::kFalseSharingAlign) std::atomic<size_t> finished{0};
     std::atomic<uint32_t> generation{0};  // even = free / retired, odd = published
     std::atomic<uint32_t> refs{0};
     size_t begin = 0;
