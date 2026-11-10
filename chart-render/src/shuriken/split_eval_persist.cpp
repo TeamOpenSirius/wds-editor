@@ -2,6 +2,7 @@
 #include "split_wall_profile.hpp"
 
 #include <wds/common/page_touch.hpp>
+#include <wds/common/perf_stages.hpp>
 
 
 #include <algorithm>
@@ -33,6 +34,8 @@ struct KeyHash {
     h = h * 1315423911u + static_cast<std::size_t>(k.catalog_index);
     h = h * 1315423911u + static_cast<std::size_t>(k.line_play_gen);
     h = h * 1315423911u + static_cast<std::size_t>(k.kind);
+    h = h * 1315423911u + static_cast<std::size_t>(k.split_count);
+    h = h * 1315423911u + static_cast<std::size_t>(k.line_x_bits);
     h ^= static_cast<std::size_t>(k.input_hash) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     return h;
   }
@@ -85,6 +88,8 @@ float parse_rebuild_gap() noexcept {
   return v;
 }
 
+}  // namespace
+
 struct PersistStore {
   SystemCarryKey key{};
   ChildPersistFp fp{};
@@ -97,6 +102,8 @@ struct PersistStore {
   std::vector<PersistCold> colds;
   std::vector<PersistCand> cands;
 };
+
+namespace {
 
 std::size_t store_bytes(const PersistStore& st) noexcept {
   return kEntryOverhead + st.hots.capacity() * sizeof(IntegratorHot) +
@@ -430,43 +437,42 @@ bool should_rebuild(float prev, float now, float gap) noexcept {
   return false;
 }
 
-// HAZARD (latent): the claim is per-thread, but the pool's wait loop steals
-// work. If a thread holding a persist claim ran a nested parallel_for, it
-// could pick up another claim-taking task and clobber these thread_locals
-// (the outer claim would then fall back to the registry lookup or be lost).
-// No such nested path exists today; keep it that way or make this a stack.
-thread_local PersistStore* tls_claim_st = nullptr;
-thread_local uint32_t tls_claim_id = 0xffffffffu;
-thread_local uint32_t tls_claim_gen = 0;
-
-void tls_bind_claim(PersistStore* st, uint32_t id, uint32_t gen) noexcept {
-  tls_claim_st = st;
-  tls_claim_id = id;
-  tls_claim_gen = gen;
+void bind_session(PersistClaimSession& s, PersistStore* st, uint32_t id, uint32_t gen) noexcept {
+  s.store = st;
+  s.store_id = id;
+  s.gen = gen;
 }
 
-void tls_clear_claim() noexcept {
-  tls_claim_st = nullptr;
-  tls_claim_id = 0xffffffffu;
-  tls_claim_gen = 0;
+void clear_session(PersistClaimSession& s) noexcept {
+  s.store = nullptr;
+  s.store_id = 0xffffffffu;
+  s.gen = 0;
 }
 
-PersistStore* claimed_store(const PersistClaim& c) noexcept {
-  if (c.kind != PersistClaimKind::Forward || c.store_id == 0xffffffffu) {
+PersistStore* store_from_session(const PersistClaimSession& s) noexcept {
+  if (s.claim.kind != PersistClaimKind::Forward || s.claim.store_id == 0xffffffffu) {
     return nullptr;
   }
-  if (tls_claim_st != nullptr && tls_claim_id == c.store_id && tls_claim_gen == c.gen) {
-    if (tls_claim_st->gen == c.gen && tls_claim_st->busy != 0 && tls_claim_st->live != 0) {
-      return tls_claim_st;
+  if (s.store != nullptr && s.store_id == s.claim.store_id && s.gen == s.claim.gen) {
+    if (s.store->gen == s.claim.gen && s.store->busy != 0 && s.store->live != 0) {
+      return s.store;
     }
-    tls_clear_claim();
   }
   Registry& r = registry();
-  PersistStore* st = table_store(r, c.store_id);
-  if (st == nullptr || st->gen != c.gen || st->busy == 0 || st->live == 0) {
+  PersistStore* st = table_store(r, s.claim.store_id);
+  if (st == nullptr || st->gen != s.claim.gen || st->busy == 0 || st->live == 0) {
     return nullptr;
   }
-  tls_bind_claim(st, c.store_id, c.gen);
+  return st;
+}
+
+PersistStore* claimed_store(PersistClaimSession& s) noexcept {
+  PersistStore* st = store_from_session(s);
+  if (st == nullptr) {
+    clear_session(s);
+    return nullptr;
+  }
+  bind_session(s, st, s.claim.store_id, s.claim.gen);
   return st;
 }
 
@@ -668,16 +674,17 @@ bool persist_child_eligible(const SplitEffectParticle& p) noexcept {
   return persist_primary_eligible(p);
 }
 
-void split_eval_persist_claim(const SystemCarryKey& key, float now, PersistClaim& out) noexcept {
+void split_eval_persist_claim(const SystemCarryKey& key, float now, PersistClaimSession& out) noexcept {
   ChildPersistFp none{};
   split_eval_persist_claim(key, now, none, out);
 }
 
 void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildPersistFp& fp,
-                              PersistClaim& out) noexcept {
-  out = PersistClaim{};
+                              PersistClaimSession& out) noexcept {
+  out = PersistClaimSession{};
+  PersistClaim& c = out.claim;
   if (!split_eval_persist_enabled()) {
-    out.kind = PersistClaimKind::Miss;
+    c.kind = PersistClaimKind::Miss;
     return;
   }
   Registry& r = registry();
@@ -686,7 +693,7 @@ void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildP
   const auto it = sh.map.find(key);
   if (it == sh.map.end()) {
     r.misses.fetch_add(1, std::memory_order_relaxed);
-    out.kind = PersistClaimKind::Miss;
+    c.kind = PersistClaimKind::Miss;
     return;
   }
   const uint32_t id = it->second;
@@ -696,7 +703,7 @@ void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildP
       sh.map.erase(it);
     }
     r.misses.fetch_add(1, std::memory_order_relaxed);
-    out.kind = PersistClaimKind::Miss;
+    c.kind = PersistClaimKind::Miss;
     return;
   }
   if (should_rebuild(st->now_t, now, r.rebuild_gap) ||
@@ -704,80 +711,101 @@ void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildP
     sh.map.erase(it);
     free_store_id(r, id, *st);
     r.rebuilds.fetch_add(1, std::memory_order_relaxed);
-    out.kind = PersistClaimKind::Rebuild;
+    c.kind = PersistClaimKind::Rebuild;
     return;
   }
   st->busy = 1;
   st->tick = ++sh.tick;
-  out.store_id = id;
-  out.gen = st->gen;
-  out.prev_now = st->now_t;
-  out.kind = PersistClaimKind::Forward;
-  tls_bind_claim(st, id, st->gen);
+  c.store_id = id;
+  c.gen = st->gen;
+  c.prev_now = st->now_t;
+  c.kind = PersistClaimKind::Forward;
+  bind_session(out, st, id, st->gen);
   r.hits.fetch_add(1, std::memory_order_relaxed);
 }
 
-const PersistSlot* persist_slot_at(const PersistClaim& c, int idx) noexcept {
-  PersistStore* st = claimed_store(c);
-  if (st == nullptr || idx < 0 || idx >= static_cast<int>(st->colds.size())) {
-    return nullptr;
-  }
-  thread_local PersistSlot ring[4];
-  thread_local int ring_i = 0;
-  PersistSlot& v = ring[ring_i++ & 3];
-  assemble_slot(v, st->hots[static_cast<std::size_t>(idx)], st->colds[static_cast<std::size_t>(idx)]);
-  return &v;
+void split_eval_persist_claim(const SystemCarryKey& key, float now, PersistClaim& out) noexcept {
+  PersistClaimSession sess;
+  split_eval_persist_claim(key, now, sess);
+  out = sess.claim;
 }
 
-IntegratorHot* persist_claimed_hot(int idx) noexcept {
-  PersistStore* st = tls_claim_st;
+void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildPersistFp& fp,
+                              PersistClaim& out) noexcept {
+  PersistClaimSession sess;
+  split_eval_persist_claim(key, now, fp, sess);
+  out = sess.claim;
+}
+
+PersistSlotView persist_slot_at(const PersistClaimSession& s, int idx) noexcept {
+  PersistSlotView v;
+  PersistStore* st = store_from_session(s);
+  if (st == nullptr || idx < 0 || idx >= static_cast<int>(st->colds.size())) {
+    return v;
+  }
+  assemble_slot(v.slot, st->hots[static_cast<std::size_t>(idx)], st->colds[static_cast<std::size_t>(idx)]);
+  v.ok = true;
+  return v;
+}
+
+IntegratorHot* persist_claimed_hot(PersistClaimSession& s, int idx) noexcept {
+  // Read-only bind: concurrent slices of one claimed store must not write
+  // s.store (claimed_store can). Claim already published the pointer.
+  PersistStore* st = store_from_session(s);
   if (st == nullptr || idx < 0 || idx >= static_cast<int>(st->hots.size())) {
     return nullptr;
   }
   return &st->hots[static_cast<std::size_t>(idx)];
 }
 
-int persist_slot_count(const PersistClaim& c) noexcept {
-  PersistStore* st = claimed_store(c);
+int persist_slot_count(const PersistClaimSession& s) noexcept {
+  PersistStore* st = store_from_session(s);
   return st != nullptr ? static_cast<int>(st->colds.size()) : 0;
 }
 
-int persist_find_slot(const PersistClaim& c, const Birth& b, uint32_t seed) noexcept {
-  PersistStore* st = claimed_store(c);
+int persist_find_slot(const PersistClaimSession& s, const Birth& b, uint32_t seed) noexcept {
+  PersistStore* st = store_from_session(s);
   if (st == nullptr) {
+    WDS_PERF_COUNT("shuriken.persist_slot_miss", 1);
     return -1;
   }
-  return find_slot(st->colds, b, seed);
+  const int idx = find_slot(st->colds, b, seed);
+  if (idx >= 0) {
+    WDS_PERF_COUNT("shuriken.persist_slot_hit", 1);
+  } else {
+    WDS_PERF_COUNT("shuriken.persist_slot_miss", 1);
+  }
+  return idx;
 }
 
-int persist_find_child_slot(const PersistClaim& c, const Birth& b, uint32_t seed,
+int persist_find_child_slot(const PersistClaimSession& s, const Birth& b, uint32_t seed,
                             const Birth& parent_b, uint16_t slot_i) noexcept {
-  PersistStore* st = claimed_store(c);
+  PersistStore* st = store_from_session(s);
   if (st == nullptr) {
     return -1;
   }
   return find_child_slot(st->colds, b, seed, parent_b, slot_i);
 }
 
-void persist_cull_dead(PersistClaim& c, const SplitEffectParticle& p, float now) noexcept {
+void persist_cull_dead(PersistClaimSession& s, const SplitEffectParticle& p, float now) noexcept {
   SplitWallScope wall(SplitWallSec::PersistCull);
-  PersistStore* st = claimed_store(c);
+  PersistStore* st = claimed_store(s);
   if (st == nullptr) {
     return;
   }
   const float sim = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
   std::size_t w = 0;
   for (std::size_t i = 0; i < st->colds.size(); ++i) {
-    PersistCold& s = st->colds[i];
-    const float age = now * sim - s.b.time * sim;
+    PersistCold& cold = st->colds[i];
+    const float age = now * sim - cold.b.time * sim;
     const float trail = p.trail_lifetime_count > 0
                             ? trail_lifetime_mul_hi(p)
-                            : (s.st.trail_life_mul >= 0.0f ? s.st.trail_life_mul : p.trail_lifetime);
-    if (age >= particle_keep_sim(p, s.st.life, trail)) {
+                            : (cold.st.trail_life_mul >= 0.0f ? cold.st.trail_life_mul : p.trail_lifetime);
+    if (age >= particle_keep_sim(p, cold.st.life, trail)) {
       continue;
     }
     if (w != i) {
-      st->colds[w] = s;
+      st->colds[w] = cold;
       st->hots[w] = st->hots[i];
     }
     ++w;
@@ -786,13 +814,13 @@ void persist_cull_dead(PersistClaim& c, const SplitEffectParticle& p, float now)
   st->hots.resize(w);
 }
 
-void persist_release(PersistClaim& c) noexcept {
-  if (c.kind != PersistClaimKind::Forward) {
-    tls_clear_claim();
-    c = PersistClaim{};
+void persist_release(PersistClaimSession& s) noexcept {
+  if (s.claim.kind != PersistClaimKind::Forward) {
+    clear_session(s);
+    s.claim = PersistClaim{};
     return;
   }
-  PersistStore* st = claimed_store(c);
+  PersistStore* st = claimed_store(s);
   if (st != nullptr) {
     // Clear busy under the shard lock so eviction (which holds it) never sees
     // a half-released store.
@@ -801,8 +829,15 @@ void persist_release(PersistClaim& c) noexcept {
     std::lock_guard<std::mutex> lock(sh.mu);
     st->busy = 0;
   }
-  tls_clear_claim();
-  c = PersistClaim{};
+  clear_session(s);
+  s.claim = PersistClaim{};
+}
+
+void persist_release(PersistClaim& c) noexcept {
+  PersistClaimSession sess;
+  sess.claim = c;
+  persist_release(sess);
+  c = sess.claim;
 }
 
 void write_cands(PersistStore& st, const std::vector<PersistCand>* cands) noexcept {
@@ -817,19 +852,19 @@ void write_cands(PersistStore& st, const std::vector<PersistCand>* cands) noexce
   st.cands.assign(cands->begin(), cands->end());
 }
 
-void persist_commit(PersistClaim& c, float now, const std::vector<PrimaryEvalJob>& jobs,
+void persist_commit(PersistClaimSession& s, float now, const std::vector<PrimaryEvalJob>& jobs,
                     const ChildPersistFp* fp, const std::vector<PersistCand>* cands) noexcept {
   Registry& r = registry();
   PersistStore* st = nullptr;
   SystemCarryKey key{};
-  if (c.kind == PersistClaimKind::Forward) {
-    st = claimed_store(c);
+  if (s.claim.kind == PersistClaimKind::Forward) {
+    st = claimed_store(s);
     if (st != nullptr) {
       key = st->key;
     }
   }
   if (st == nullptr) {
-    persist_release(c);
+    persist_release(s);
     return;
   }
   SplitWallScope wall(SplitWallSec::PersistCommit);
@@ -842,10 +877,10 @@ void persist_commit(PersistClaim& c, float now, const std::vector<PrimaryEvalJob
     }
     int idx = -1;
     if (job.persist_i >= 0 && job.persist_i < static_cast<int>(st->colds.size())) {
-      const PersistCold& s = st->colds[static_cast<std::size_t>(job.persist_i)];
+      const PersistCold& cold = st->colds[static_cast<std::size_t>(job.persist_i)];
       const bool match = child_store != 0
-                             ? child_identity_eq(s, job.b, job.seed, job.parent_b, job.slot_i)
-                             : (carry_birth_eq(s.b, job.b) && s.seed == job.seed);
+                             ? child_identity_eq(cold, job.b, job.seed, job.parent_b, job.slot_i)
+                             : (carry_birth_eq(cold.b, job.b) && cold.seed == job.seed);
       if (match) {
         idx = job.persist_i;
       }
@@ -889,12 +924,12 @@ void persist_commit(PersistClaim& c, float now, const std::vector<PrimaryEvalJob
     apply_delta(r.particles, old_n, new_n);
     trim_budget(r, sh, key);
   }
-  tls_clear_claim();
-  c = PersistClaim{};
+  clear_session(s);
+  s.claim = PersistClaim{};
 }
 
-void persist_commit(PersistClaim& c, float now, const std::vector<PrimaryEvalJob>& jobs) noexcept {
-  persist_commit(c, now, jobs, nullptr, nullptr);
+void persist_commit(PersistClaimSession& s, float now, const std::vector<PrimaryEvalJob>& jobs) noexcept {
+  persist_commit(s, now, jobs, nullptr, nullptr);
 }
 
 void persist_commit_new(const SystemCarryKey& key, float now,
@@ -969,17 +1004,36 @@ void persist_commit_new(const SystemCarryKey& key, float now,
   trim_budget(r, sh, key);
 }
 
-void persist_finish(PersistClaim& c, const SystemCarryKey& key, float now, const ChildPersistFp& fp,
-                    const std::vector<PrimaryEvalJob>& jobs,
+void persist_finish(PersistClaimSession& s, const SystemCarryKey& key, float now,
+                    const ChildPersistFp& fp, const std::vector<PrimaryEvalJob>& jobs,
                     const std::vector<PersistCand>& cands) noexcept {
   const ChildPersistFp* fp_ptr = fp.want != 0 ? &fp : nullptr;
   const std::vector<PersistCand>* cand_ptr = cands.empty() ? nullptr : &cands;
-  if (c.kind == PersistClaimKind::Forward) {
-    persist_commit(c, now, jobs, fp_ptr, cand_ptr);
+  if (s.claim.kind == PersistClaimKind::Forward) {
+    persist_commit(s, now, jobs, fp_ptr, cand_ptr);
     return;
   }
-  persist_release(c);
+  persist_release(s);
   persist_commit_new(key, now, jobs, fp_ptr, cand_ptr);
+}
+
+void persist_finish(PersistClaimSession& s, const SystemCarryKey& key, float now,
+                    const ChildPersistFp& fp, const std::vector<PrimaryEvalJob>& jobs) noexcept {
+  persist_finish(s, key, now, fp, jobs, std::vector<PersistCand>{});
+}
+
+void persist_finish(PersistClaimSession& s, const SystemCarryKey& key, float now,
+                    const std::vector<PrimaryEvalJob>& jobs) noexcept {
+  persist_finish(s, key, now, ChildPersistFp{}, jobs);
+}
+
+void persist_finish(PersistClaim& c, const SystemCarryKey& key, float now, const ChildPersistFp& fp,
+                    const std::vector<PrimaryEvalJob>& jobs,
+                    const std::vector<PersistCand>& cands) noexcept {
+  PersistClaimSession sess;
+  sess.claim = c;
+  persist_finish(sess, key, now, fp, jobs, cands);
+  c = sess.claim;
 }
 
 void persist_finish(PersistClaim& c, const SystemCarryKey& key, float now, const ChildPersistFp& fp,
@@ -1073,17 +1127,21 @@ bool split_eval_persist_lookup_particle(const SystemCarryKey& key, float now, co
   std::lock_guard<std::mutex> lock(sh.mu);
   const auto it = sh.map.find(key);
   if (it == sh.map.end()) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   PersistStore* st = table_store(r, it->second);
   if (st == nullptr || st->live == 0) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   if (st->now_t > now + kNowEps) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   const int idx = find_slot(st->colds, b, seed);
   if (idx < 0) {
+    WDS_PERF_COUNT("shuriken.persist_lookup_miss", 1);
     return false;
   }
   PersistSlot s;
@@ -1091,6 +1149,7 @@ bool split_eval_persist_lookup_particle(const SystemCarryKey& key, float now, co
   out.st = s.st;
   out.grid = s.grid;
   out.has_grid = s.has_grid;
+  WDS_PERF_COUNT("shuriken.persist_lookup_hit", 1);
   return true;
 }
 

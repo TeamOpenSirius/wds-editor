@@ -2215,8 +2215,8 @@ uint32_t fbits_u32(float x) noexcept {
 }  // namespace
 
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id,
-                    uint32_t instance_id) noexcept {
+                    int32_t line_index, uint32_t system_id, uint32_t instance_id,
+                    uint8_t split_count, uint32_t line_x_bits) noexcept {
   if (out == nullptr || n < 2 || p.trail_mode != 1) {
     return;
   }
@@ -2264,6 +2264,10 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
   // grouped by this id and ordered by trail_vertex; interleaved instances would
   // otherwise draw long crossing strips (10630 with two overlapping splits:
   // max station step 0.38 -> 49.7 world units without this).
+  // instance_id is split_instance_salt (RNG stream). Do not fold split_count /
+  // line_x into it — that would remint seeds and rewrite golden trail_chain.
+  // Draw grouping uses (trail_chain << 32) | system_tag; mix lane identity
+  // into system_tag only so Full3/Full6 at the same start_ms stay two strips.
   const uint32_t chain = mix3(system_id + 1u, static_cast<uint32_t>(line_index) + 1u,
                               mix3(authored, instance_id + 1u, 0x9e3779b9u));
   // Prefix acc is the same 3D arc used for trail_u0/u1. total==0: t=0 at
@@ -2296,7 +2300,9 @@ void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, 
       v.trail_a *= v.current_a;
     }
     v.trail_chain = chain;
-    v.system_tag = mix3(authored, system_id + 1u, static_cast<uint32_t>(line_index) + 1u);
+    v.system_tag =
+        mix3(mix3(authored, system_id + 1u, static_cast<uint32_t>(line_index) + 1u),
+             static_cast<uint32_t>(split_count) + 1u, line_x_bits | 1u);
     v.trail_vertex = static_cast<uint16_t>(i);
     v.trail_count = static_cast<uint16_t>(n);
     if (i + 1 >= n) {

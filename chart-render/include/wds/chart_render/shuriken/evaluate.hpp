@@ -40,6 +40,9 @@ struct EmitContext {
   int64_t line_start_ms = 0;
   // Main X from official_split_line_world_x (OpenWDS SetLineX).
   float line_x = 0.0f;
+  // Official lane count of this split instance (1–6). Cache / carry / persist
+  // / ribbon draw identity; not mixed into mix3 salts (RNG unchanged).
+  uint8_t split_count = 0;
   // Live fade for Local origin (element 2.5×27×fade). World uses birth_fade.
   // scalingMode=Local: parent 27×fade applies to Transform localPosition
   // (TransformPoint) only, not to Shape / motion offsets.
@@ -56,7 +59,19 @@ struct EmitContext {
   // local so Ribbon chains stay one ParticleSystem (Unity ribbonCount=1).
   uint32_t catalog_index_override = 0;
   uint8_t has_catalog_index_override = 0;
+  // Wave 3.5c: line-constant mix3 results. Filled by emit_context_prepare_salts
+  // at construction. Identity fields (color/line/start_ms/play_gen) must be
+  // set first; copies keep the cache. hop / perf, not 2022.3.
+  uint32_t cached_salt_with_gen = 0;
+  uint32_t cached_salt_no_gen = 0;
+  uint32_t cached_emitter_identity = 0;
+  uint32_t cached_identity_salt_mix = 0;
+  uint8_t cached_salts_valid = 0;
 };
+
+// Precompute split_instance_salt / stable_emitter_identity for ctx. Call after
+// filling identity fields. Safe to call more than once.
+void emit_context_prepare_salts(EmitContext& ctx) noexcept;
 
 // Observation-only capability state.  Unity 2022.3 Custom simulation space
 // requires MainModule.customSimulationSpace, which is not present in the
@@ -116,5 +131,12 @@ void set_split_noise_neon_for_tests(int on) noexcept;
 
 // Drop carry + pose-cache epoch so an A/B collect cannot resume the other mode.
 void reset_split_eval_persistence_for_tests() noexcept;
+
+// Print WDS_INTEGRATE_BATCH_VERIFY (when VERIFY=1) / PACK+HITS (when
+// compiled with WDS_INTEGRATE_BATCH_COUNTERS=1). Golden fork children
+// _exit and skip atexit; call this before _exit. Default Release is a
+// no-op: no atexit, no WDS_INTEGRATE_* lines.
+void flush_integrate_batch_stats() noexcept;
+void reset_integrate_batch_stats() noexcept;
 
 }  // namespace wds::chart_render::shuriken

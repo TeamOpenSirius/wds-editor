@@ -122,6 +122,7 @@ endif()
 
 add_library(wds_ui STATIC
   src/ui_manager.cpp
+  src/constant_expr.cpp
   src/resource_paths.cpp
   src/startup_deps.cpp
   src/editor_session.cpp
@@ -186,6 +187,10 @@ add_executable(wds_ui_logic_tests
 )
 target_link_libraries(wds_ui_logic_tests PRIVATE wds::core wds::interaction)
 target_include_directories(wds_ui_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(wds_swapchain_fill_tests tests/swapchain_fill_tests.cpp)
+target_include_directories(wds_swapchain_fill_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(wds_swapchain_fill_tests PRIVATE cxx_std_17)
 
 add_executable(wds_note_draw_order_tests tests/note_draw_order_tests.cpp)
 target_link_libraries(wds_note_draw_order_tests PRIVATE wds::chart_render wds::core)
@@ -308,6 +313,14 @@ if(NOT CMAKE_CROSSCOMPILING)
     target_compile_options(wds_settings_live_apply_tests PRIVATE /utf-8)
   endif()
   add_test(NAME wds_settings_live_apply_tests COMMAND wds_settings_live_apply_tests -platform offscreen)
+  add_executable(wds_ui_input_tests tests/input_widget_tests.cpp)
+  target_link_libraries(wds_ui_input_tests PRIVATE wds::interaction Qt6::Widgets)
+  target_include_directories(wds_ui_input_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_definitions(wds_ui_input_tests PRIVATE QT_NO_KEYWORDS)
+  if(MSVC)
+    target_compile_options(wds_ui_input_tests PRIVATE /utf-8)
+  endif()
+  add_test(NAME wds_ui_input_tests COMMAND wds_ui_input_tests -platform offscreen)
   add_executable(wds_system_proxy_tests tests/system_proxy_tests.cpp src/qt/system_proxy.cpp)
   target_link_libraries(wds_system_proxy_tests PRIVATE Qt6::Core Qt6::Network)
   target_include_directories(wds_system_proxy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -327,6 +340,7 @@ if(NOT CMAKE_CROSSCOMPILING)
       -s "${CMAKE_SOURCE_DIR}/stem-worker" -p "test_*.py")
   endif()
   add_test(NAME wds_ui_logic_tests COMMAND wds_ui_logic_tests)
+  add_test(NAME wds_swapchain_fill_tests COMMAND wds_swapchain_fill_tests)
   add_test(NAME wds_note_draw_order_tests COMMAND wds_note_draw_order_tests)
   add_test(NAME wds_ui_config_tests COMMAND wds_ui_config_tests)
   add_test(NAME wds_curve_templates_dialog_tests COMMAND wds_curve_templates_dialog_tests)

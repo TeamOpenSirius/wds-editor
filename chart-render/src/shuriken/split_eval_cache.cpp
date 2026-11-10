@@ -8,6 +8,10 @@
 #include <wds/common/page_touch.hpp>
 #include <wds/common/perf_stages.hpp>
 
+#if WDS_DIAG_ENABLED
+#include <algorithm>
+#include <cstdio>
+#endif
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -32,25 +36,19 @@ constexpr int kMaxAligned = 20;
 constexpr std::size_t kEntryOverhead = 256;
 constexpr std::size_t kMinCap = 8;
 
-struct KeyHash {
-  std::size_t operator()(const ParticleCacheKey& k) const noexcept {
-    std::size_t h = k.epoch;
-    h = h * 1315423911u + static_cast<std::size_t>(k.color_id);
-    h = h * 1315423911u + static_cast<std::size_t>(k.line_index);
-    h = h * 1315423911u + static_cast<std::size_t>(k.line_start_ms);
-    h = h * 1315423911u + static_cast<std::size_t>(k.line_start_ms >> 32);
-    h = h * 1315423911u + static_cast<std::size_t>(k.catalog_index);
-    h = h * 1315423911u + static_cast<std::size_t>(k.birth_index);
-    h = h * 1315423911u + static_cast<std::size_t>(k.birth_extra);
-    h = h * 1315423911u + static_cast<std::size_t>(k.line_play_gen);
-    h = h * 1315423911u + static_cast<std::size_t>(k.seed);
-    h ^= static_cast<std::size_t>(k.input_hash) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-    return h;
-  }
-};
-
 std::uint64_t key_hash64(const ParticleCacheKey& k) noexcept {
-  const std::uint64_t h = static_cast<std::uint64_t>(KeyHash{}(k));
+  std::uint64_t h = k.input_hash;
+  h ^= static_cast<std::uint64_t>(k.epoch) * 0x9e3779b97f4a7c15ull;
+  h ^= (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.birth_index)) << 32) |
+       static_cast<std::uint64_t>(k.seed);
+  h ^= static_cast<std::uint64_t>(k.catalog_index) * 0xbf58476d1ce4e5b9ull;
+  h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.line_index));
+  h ^= static_cast<std::uint64_t>(k.line_start_ms);
+  h ^= (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.color_id)) << 32) | k.birth_extra;
+  h ^= k.line_play_gen;
+  h ^= static_cast<std::uint64_t>(k.line_x_bits);
+  h ^= static_cast<std::uint64_t>(k.split_count);
+  h *= 0x94d049bb133111ebull;
   return h == 0 ? 1 : h;
 }
 
@@ -239,7 +237,7 @@ void reset_entry(Entry& e) noexcept {
 
 struct Shard {
   std::shared_mutex mu;
-  std::uint64_t tick = 1;
+  std::atomic<std::uint64_t> tick{1};
   std::vector<Entry*> entry_free;
   FlatMap map;
   std::atomic<std::size_t> bytes{0};
@@ -250,6 +248,7 @@ struct Shard {
   std::atomic<std::uint64_t> lookup_contend{0};
   std::atomic<std::uint64_t> store_ops{0};
   std::atomic<std::uint64_t> store_contend{0};
+  std::atomic<std::uint64_t> inplace_stores{0};
   // Diagnostics only (WDS_FRAME_DIAG): extends the counters above, same
   // storage. Never read by a lookup or eviction decision.
   std::atomic<std::uint64_t> lookup_misses{0};   // no slot for this key
@@ -332,7 +331,11 @@ int shard_of(std::uint64_t h) noexcept {
 std::unique_lock<std::shared_mutex> lock_shard(Shard& sh) {
   std::unique_lock<std::shared_mutex> lk(sh.mu, std::try_to_lock);
   if (!lk.owns_lock()) {
+#if WDS_DIAG_ENABLED
+    SplitLockWaitScope wall_lock;
+#else
     SplitWallScope wall_lock(SplitWallSec::LockWait);
+#endif
     lk = std::unique_lock<std::shared_mutex>(sh.mu);
     sh.store_contend.fetch_add(1, std::memory_order_relaxed);
   }
@@ -343,7 +346,11 @@ std::unique_lock<std::shared_mutex> lock_shard(Shard& sh) {
 std::shared_lock<std::shared_mutex> lock_shard_shared(Shard& sh) {
   std::shared_lock<std::shared_mutex> lk(sh.mu, std::try_to_lock);
   if (!lk.owns_lock()) {
+#if WDS_DIAG_ENABLED
+    SplitLockWaitScope wall_lock;
+#else
     SplitWallScope wall_lock(SplitWallSec::LockWait);
+#endif
     lk = std::shared_lock<std::shared_mutex>(sh.mu);
     sh.lookup_contend.fetch_add(1, std::memory_order_relaxed);
   }
@@ -602,6 +609,19 @@ void split_eval_cache_precommit(std::size_t slots_per_shard,
   }
 }
 
+bool split_eval_cache_has_checkpoints() noexcept {
+  const Cache& c = cache();
+  if (!c.enabled) {
+    return false;
+  }
+  for (int i = 0; i < kShards; ++i) {
+    if (c.shards[i].checkpoints.load(std::memory_order_relaxed) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 SplitEvalCacheStats split_eval_cache_stats() noexcept {
   const Cache& c = cache();
   SplitEvalCacheStats s;
@@ -618,6 +638,7 @@ SplitEvalCacheStats split_eval_cache_stats() noexcept {
     s.lookup_contend += sh.lookup_contend.load(std::memory_order_relaxed);
     s.store_ops += sh.store_ops.load(std::memory_order_relaxed);
     s.store_contend += sh.store_contend.load(std::memory_order_relaxed);
+    s.inplace_stores += sh.inplace_stores.load(std::memory_order_relaxed);
   }
   return s;
 }
@@ -685,8 +706,6 @@ bool split_eval_cache_lookup(const ParticleCacheKey& key, int k_target,
                               std::memory_order_relaxed);
   const IntegratorGridState* st = pick_leq(*slot->entry, k_target);
   if (st == nullptr) {
-    // Slot present but no checkpoint at/below k_target: still a miss for the
-    // caller. Counted separately so hits+misses == lookup_ops.
 #if WDS_DIAG_ENABLED
     if (wds::common::perf::enabled()) {
       sh.lookup_misses.fetch_add(1, std::memory_order_relaxed);
@@ -699,36 +718,39 @@ bool split_eval_cache_lookup(const ParticleCacheKey& key, int k_target,
   return true;
 }
 
-void apply_store_locked(Cache& c, Shard& sh, std::uint64_t h, const ParticleCacheKey& key,
-                        const IntegratorGridState& st) {
-  FlatSlot* slot = sh.map.find(h, key);
-  const bool inserted = slot == nullptr;
-  if (inserted) {
-    evict_until_fit(c, sh, kEntryOverhead + sizeof(IntegratorGridState));
-    slot = sh.map.insert(h, key, take_entry(sh));
-    sh.particles.fetch_add(1, std::memory_order_relaxed);
-    // Recycled entries keep aligned.capacity(); drop_entry_account subtracts it.
-    sh.bytes.fetch_add(entry_bytes(*slot->entry), std::memory_order_relaxed);
+void apply_update_entry(Cache& c, Shard& sh, Entry& e, const IntegratorGridState& st) {
+  if (e.has_recent && e.recent.next_step == st.next_step) {
+    e.used_gen.store(c.play_gen.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    return;
   }
-  Entry& e = *slot->entry;
   const std::size_t old_b = entry_bytes(e);
   const int old_cps = count_cps(e);
   if (!e.has_high || st.next_step >= e.high.next_step) {
     e.high = st;
     e.has_high = true;
   } else if (!e.has_event || st.next_step >= e.event.next_step) {
-    // pose_at / hydrate stores sit behind the now_t high. Keep the
-    // newest of those so the next event can pick_leq instead of
-    // walking from birth. hop, not 2022.3.
     e.event = st;
     e.has_event = true;
   }
   e.recent = st;
   e.has_recent = true;
   upsert_aligned(e, st, c.stride);
-  e.tick = ++sh.tick;
+  e.tick = sh.tick.fetch_add(1, std::memory_order_relaxed) + 1;
   e.used_gen.store(c.play_gen.load(std::memory_order_relaxed), std::memory_order_relaxed);
   account_replace(sh, old_b, entry_bytes(e), old_cps, count_cps(e));
+}
+
+FlatSlot* store_ensure_slot(Cache& c, Shard& sh, std::uint64_t h, const ParticleCacheKey& key) {
+  FlatSlot* slot = sh.map.find(h, key);
+  if (slot != nullptr) {
+    sh.inplace_stores.fetch_add(1, std::memory_order_relaxed);
+    return slot;
+  }
+  evict_until_fit(c, sh, kEntryOverhead + sizeof(IntegratorGridState));
+  slot = sh.map.insert(h, key, take_entry(sh));
+  sh.particles.fetch_add(1, std::memory_order_relaxed);
+  sh.bytes.fetch_add(entry_bytes(*slot->entry), std::memory_order_relaxed);
+  return slot;
 }
 
 void split_eval_cache_store(const ParticleCacheKey& key, const IntegratorGridState& st) noexcept {
@@ -743,7 +765,8 @@ void split_eval_cache_store(const ParticleCacheKey& key, const IntegratorGridSta
   const std::uint64_t h = key_hash64(key);
   Shard& sh = c.shards[shard_of(h)];
   const std::unique_lock<std::shared_mutex> lock = lock_shard(sh);
-  apply_store_locked(c, sh, h, key, st);
+  FlatSlot* slot = store_ensure_slot(c, sh, h, key);
+  apply_update_entry(c, sh, *slot->entry, st);
 }
 
 void split_eval_cache_store_many(const ParticleCacheKey& key, const IntegratorGridState* sts,
@@ -759,10 +782,15 @@ void split_eval_cache_store_many(const ParticleCacheKey& key, const IntegratorGr
   const std::uint64_t h = key_hash64(key);
   Shard& sh = c.shards[shard_of(h)];
   const std::unique_lock<std::shared_mutex> lock = lock_shard(sh);
+  FlatSlot* slot = nullptr;
   for (int i = 0; i < n; ++i) {
-    if (sts[i].next_step >= 0) {
-      apply_store_locked(c, sh, h, key, sts[i]);
+    if (sts[i].next_step < 0) {
+      continue;
     }
+    if (slot == nullptr) {
+      slot = store_ensure_slot(c, sh, h, key);
+    }
+    apply_update_entry(c, sh, *slot->entry, sts[i]);
   }
 }
 
@@ -821,19 +849,13 @@ void split_eval_cache_store_rol(const ParticleCacheKey& key, std::uint8_t axis, 
   const std::uint64_t h = key_hash64(key);
   Shard& sh = c.shards[shard_of(h)];
   const std::unique_lock<std::shared_mutex> lock = lock_shard(sh);
-  FlatSlot* slot = sh.map.find(h, key);
-  if (slot == nullptr) {
-    evict_until_fit(c, sh, kEntryOverhead);
-    slot = sh.map.insert(h, key, take_entry(sh));
-    sh.particles.fetch_add(1, std::memory_order_relaxed);
-    sh.bytes.fetch_add(entry_bytes(*slot->entry), std::memory_order_relaxed);
-  }
+  FlatSlot* slot = store_ensure_slot(c, sh, h, key);
   Entry& e = *slot->entry;
   if (k >= e.rol_k[axis]) {
     e.rol_k[axis] = k;
     e.rol_acc[axis] = acc;
   }
-  e.tick = ++sh.tick;
+  e.tick = sh.tick.fetch_add(1, std::memory_order_relaxed) + 1;
   e.used_gen.store(c.play_gen.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
@@ -937,4 +959,91 @@ void split_eval_cache_reap_unused() noexcept {
   }
 }
 
+#if WDS_DIAG_ENABLED
+void split_eval_cache_dump_shard_stats() noexcept {
+  static const bool on = [] {
+    const char* raw = std::getenv("WDS_SPLIT_SHARD_STATS");
+    return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+  }();
+  if (!on) {
+    return;
+  }
+  static std::atomic<bool> dumped{false};
+  if (dumped.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  const Cache& c = cache();
+  struct Row {
+    std::uint64_t lookup_ops = 0;
+    std::uint64_t store_ops = 0;
+    std::uint64_t lookup_contend = 0;
+    std::uint64_t store_contend = 0;
+  };
+  Row rows[kShards];
+  std::uint64_t total_ops = 0;
+  std::uint64_t total_contend = 0;
+  std::uint64_t ops_arr[kShards];
+  std::uint64_t contend_arr[kShards];
+  for (int i = 0; i < kShards; ++i) {
+    const Shard& sh = c.shards[i];
+    rows[i].lookup_ops = sh.lookup_ops.load(std::memory_order_relaxed);
+    rows[i].store_ops = sh.store_ops.load(std::memory_order_relaxed);
+    rows[i].lookup_contend = sh.lookup_contend.load(std::memory_order_relaxed);
+    rows[i].store_contend = sh.store_contend.load(std::memory_order_relaxed);
+    ops_arr[i] = rows[i].lookup_ops + rows[i].store_ops;
+    contend_arr[i] = rows[i].lookup_contend + rows[i].store_contend;
+    total_ops += ops_arr[i];
+    total_contend += contend_arr[i];
+    std::fprintf(stderr,
+                 "SHARD i=%d lookup_ops=%llu store_ops=%llu lookup_contend=%llu store_contend=%llu\n",
+                 i, static_cast<unsigned long long>(rows[i].lookup_ops),
+                 static_cast<unsigned long long>(rows[i].store_ops),
+                 static_cast<unsigned long long>(rows[i].lookup_contend),
+                 static_cast<unsigned long long>(rows[i].store_contend));
+  }
+  auto top_frac = [](std::uint64_t* arr, int n, int k, std::uint64_t total) -> double {
+    if (total == 0 || k <= 0) {
+      return 0.0;
+    }
+    const int take = k < n ? k : n;
+    std::nth_element(arr, arr + (n - take), arr + n);
+    std::uint64_t sum = 0;
+    for (int i = n - take; i < n; ++i) {
+      sum += arr[i];
+    }
+    return static_cast<double>(sum) / static_cast<double>(total);
+  };
+  std::uint64_t ops_copy[kShards];
+  std::uint64_t contend_copy[kShards];
+  std::memcpy(ops_copy, ops_arr, sizeof(ops_copy));
+  std::memcpy(contend_copy, contend_arr, sizeof(contend_copy));
+  const double c1 = top_frac(contend_copy, kShards, 1, total_contend);
+  std::memcpy(contend_copy, contend_arr, sizeof(contend_copy));
+  const double c8 = top_frac(contend_copy, kShards, 8, total_contend);
+  std::memcpy(contend_copy, contend_arr, sizeof(contend_copy));
+  const double c32 = top_frac(contend_copy, kShards, 32, total_contend);
+  const double o1 = top_frac(ops_copy, kShards, 1, total_ops);
+  std::memcpy(ops_copy, ops_arr, sizeof(ops_copy));
+  const double o8 = top_frac(ops_copy, kShards, 8, total_ops);
+  std::memcpy(ops_copy, ops_arr, sizeof(ops_copy));
+  const double o32 = top_frac(ops_copy, kShards, 32, total_ops);
+  std::fprintf(stderr,
+               "SHARDSTATS shards=%d total_ops=%llu total_contend=%llu "
+               "contend_top1=%.4f contend_top8=%.4f contend_top32=%.4f "
+               "ops_top1=%.4f ops_top8=%.4f ops_top32=%.4f\n",
+               kShards, static_cast<unsigned long long>(total_ops),
+               static_cast<unsigned long long>(total_contend), c1, c8, c32, o1, o8, o32);
+  std::fflush(stderr);
+}
+
+namespace {
+[[maybe_unused]] const int g_register_shard_stats_atexit = [] {
+  const char* raw = std::getenv("WDS_SPLIT_SHARD_STATS");
+  if (raw != nullptr && raw[0] == '1' && raw[1] == '\0') {
+    std::atexit([] { split_eval_cache_dump_shard_stats(); });
+  }
+  return 0;
+}();
+}  // namespace
+#endif  // WDS_DIAG_ENABLED
 }  // namespace wds::chart_render::shuriken

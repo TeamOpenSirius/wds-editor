@@ -148,6 +148,8 @@ inline bool persist_child_can_hit(const EmitContext& ctx, const SplitEffectParti
   return true;
 }
 
+// Slot size/alignment is persist SoA packing (view stays 64-aligned), not a
+// false-sharing pad between cores. Do not switch to kFalseSharingAlign.
 struct alignas(64) PersistSlot {
   IntegratorGridState grid{};
   Birth b{};
@@ -184,6 +186,22 @@ struct PersistClaim {
   PersistClaimKind kind = PersistClaimKind::Miss;
 };
 
+struct PersistStore;
+
+// Exclusive claim plus the live store pointer. Nested steal cannot clobber
+// another invocation's pointer because the pointer lives on this object.
+struct PersistClaimSession {
+  PersistClaim claim{};
+  PersistStore* store = nullptr;
+  uint32_t store_id = 0xffffffffu;
+  uint32_t gen = 0;
+};
+
+struct PersistSlotView {
+  PersistSlot slot{};
+  bool ok = false;
+};
+
 struct PersistParticleView {
   ParticleState st{};
   IntegratorGridState grid{};
@@ -203,20 +221,31 @@ bool persist_child_eligible(const SplitEffectParticle& p) noexcept;
 // Claim exclusive ownership of the store for this task/frame. Backward time
 // or instance change drops the store immediately (Rebuild) and does not cull
 // or merge. fp != null (child): mismatch vs recorded inputs also Rebuild.
+void split_eval_persist_claim(const SystemCarryKey& key, float now, PersistClaimSession& out) noexcept;
+void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildPersistFp& fp,
+                              PersistClaimSession& out) noexcept;
 void split_eval_persist_claim(const SystemCarryKey& key, float now, PersistClaim& out) noexcept;
 void split_eval_persist_claim(const SystemCarryKey& key, float now, const ChildPersistFp& fp,
                               PersistClaim& out) noexcept;
 
-const PersistSlot* persist_slot_at(const PersistClaim& c, int idx) noexcept;
-IntegratorHot* persist_claimed_hot(int idx) noexcept;
-int persist_slot_count(const PersistClaim& c) noexcept;
-int persist_find_slot(const PersistClaim& c, const Birth& b, uint32_t seed) noexcept;
-int persist_find_child_slot(const PersistClaim& c, const Birth& b, uint32_t seed,
+PersistSlotView persist_slot_at(const PersistClaimSession& s, int idx) noexcept;
+IntegratorHot* persist_claimed_hot(PersistClaimSession& s, int idx) noexcept;
+int persist_slot_count(const PersistClaimSession& s) noexcept;
+int persist_find_slot(const PersistClaimSession& s, const Birth& b, uint32_t seed) noexcept;
+int persist_find_child_slot(const PersistClaimSession& s, const Birth& b, uint32_t seed,
                             const Birth& parent_b, uint16_t slot_i) noexcept;
 
-void persist_cull_dead(PersistClaim& c, const SplitEffectParticle& p, float now) noexcept;
+void persist_cull_dead(PersistClaimSession& s, const SplitEffectParticle& p, float now) noexcept;
 
-void persist_commit(PersistClaim& c, float now, const std::vector<PrimaryEvalJob>& jobs) noexcept;
+void persist_commit(PersistClaimSession& s, float now, const std::vector<PrimaryEvalJob>& jobs) noexcept;
+void persist_finish(PersistClaimSession& s, const SystemCarryKey& key, float now,
+                    const std::vector<PrimaryEvalJob>& jobs) noexcept;
+void persist_finish(PersistClaimSession& s, const SystemCarryKey& key, float now, const ChildPersistFp& fp,
+                    const std::vector<PrimaryEvalJob>& jobs) noexcept;
+void persist_finish(PersistClaimSession& s, const SystemCarryKey& key, float now, const ChildPersistFp& fp,
+                    const std::vector<PrimaryEvalJob>& jobs,
+                    const std::vector<PersistCand>& cands) noexcept;
+void persist_release(PersistClaimSession& s) noexcept;
 void persist_finish(PersistClaim& c, const SystemCarryKey& key, float now,
                     const std::vector<PrimaryEvalJob>& jobs) noexcept;
 void persist_finish(PersistClaim& c, const SystemCarryKey& key, float now, const ChildPersistFp& fp,
@@ -235,5 +264,54 @@ bool persist_peek_cands(const SystemCarryKey& key, const ChildPersistFp& fp, flo
 
 bool split_eval_persist_lookup_particle(const SystemCarryKey& key, float now, const Birth& b,
                                         uint32_t seed, PersistParticleView& out) noexcept;
+
+// Explicit realize sessions (1.5b). Capacity lives on EvalTask across frames;
+// seek clears persist/carry contents, not these vectors.
+struct PrimaryRealizeSession {
+  PersistClaimSession persist;
+  SystemCarrySnapshot carry_snap;
+  SystemCarryKey persist_key{};
+  bool persist_ok = false;
+  bool resume_persist = false;
+  bool resume_carry = false;
+  int persist_cursor = 0;
+  int written = 0;
+};
+
+struct ChildPersistSession {
+  SystemCarryKey key{};
+  const SplitEffectParticle* child = nullptr;
+  uint32_t child_idx = 0;
+  PersistClaimSession persist{};
+  ChildPersistFp fp{};
+  uint8_t persist_ok = 0;
+  uint8_t resume = 0;
+  std::vector<int> item_is;
+  std::vector<PrimaryEvalJob> jobs;
+};
+
+struct ChildRealizeSession {
+  std::vector<ChildPersistSession> sessions;
+  std::vector<int> session_of;
+  std::vector<int> slot_of;
+  int n_sessions = 0;
+  std::vector<uint8_t> will_fill;
+  std::vector<CarryParticle> carry_parts;
+  SystemCarryKey carry_key{};
+  SystemCarrySnapshot carry_snap;
+  bool have_carry_key = false;
+  bool have_carry_snap = false;
+  std::vector<uint8_t> need;
+  std::vector<int> newly;
+  std::vector<float> event_ts;
+  std::vector<SubemitWalkPose> stored;
+};
+
+// Per-slice jobs/carry. B3b merges by item index, not completion order.
+struct RealizeSliceDelta {
+  std::vector<PrimaryEvalJob> jobs;
+  std::vector<int> job_items;
+  std::vector<CarryParticle> carry;
+};
 
 }  // namespace wds::chart_render::shuriken

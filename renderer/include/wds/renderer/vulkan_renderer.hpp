@@ -667,6 +667,15 @@ inline constexpr int frames_in_flight_for_swapchain(uint32_t image_count,
   return spare < max_frames_in_flight ? spare : max_frames_in_flight;
 }
 
+// Persistent VB ring slots to preallocate. Per-slot size is still budgeted
+// with kMaxFramesInFlight.
+inline constexpr int persistent_vertex_prealloc_count(int frames_in_flight,
+                                                      int max_frames_in_flight) noexcept {
+  const int max_n = max_frames_in_flight < 1 ? 1 : max_frames_in_flight;
+  const int fif = frames_in_flight < 1 ? 1 : frames_in_flight;
+  return fif < max_n ? fif : max_n;
+}
+
 // Window-system binding supplied by the ui layer. Renderer never touches a
 // native window object — only the Vulkan instance/surface and size callbacks.
 struct VulkanHostSurface {
@@ -954,6 +963,19 @@ class VulkanRenderer {
   // back VK_SUBOPTIMAL_KHR and shows nothing), so a caller that sees the serial
   // move during a frame must draw one more frame to put the picture on screen.
   std::uint64_t swapchain_serial() const noexcept;
+  // Which image the last successful vkQueuePresentKHR handed over, and the
+  // swapchain it belonged to. `present_count` only moves on a successful
+  // present (export frames and failed presents leave it alone), so a caller
+  // can compare it across one draw to learn whether that draw presented.
+  struct PresentRecord {
+    std::uint64_t present_count = 0;
+    std::uint64_t present_serial = 0;
+    uint32_t image_index = UINT32_MAX;
+    // Current swapchain (may be newer than present_serial after a rebuild).
+    std::uint64_t swapchain_serial = 0;
+    uint32_t image_count = 0;
+  };
+  PresentRecord last_present_record() const noexcept;
   uint32_t physical_vendor_id() const noexcept { return device_vendor_id_; }
 
   // Last presented swapchain image → tightly packed RGBA8 (top-left origin).

@@ -2,7 +2,8 @@
 
 #include <QDialog>
 
-class QDoubleSpinBox;
+class QLineEdit;
+class QShowEvent;
 
 namespace wds::ui {
 
@@ -11,8 +12,16 @@ class SpeedEditDialog final : public QDialog {
   explicit SpeedEditDialog(double multiplier, QWidget* parent = nullptr);
   double multiplier() const;
 
+ protected:
+  void showEvent(QShowEvent* event) override;
+
  private:
-  QDoubleSpinBox* multiplier_ = nullptr;
+  void commit_field();
+  void select_all_text();
+
+  QLineEdit* field_ = nullptr;
+  double value_ = 1.0;
+  bool committing_ = false;
 };
 
 }  // namespace wds::ui

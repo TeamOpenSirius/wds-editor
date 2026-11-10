@@ -40,7 +40,6 @@ bool commit_hit_sfx_schedule(std::unordered_set<uint64_t>& played, uint64_t key,
 
 #include <wds/audio/hit_sfx.hpp>
 
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -166,12 +165,15 @@ class PlaybackPreviewView {
     int64_t leftover_us = 0;
     // Post-draw bookkeeping inside render() (pause memo persist + VB unbind).
     int64_t after_draw_us = 0;
-    // draw_split_particles internals: (a) collect_emit_jobs + estimate +
-    // stable_sort of EmitJobs, (b) per-job vertex emit (parallel/serial),
-    // (c) append_from merge into split_late_batch_ / emit parts.
+    // draw_split_particles internals: (a) collect_emit_jobs (per-line parallel
+    // + counting-sort merge) + estimate, (b) per-job vertex emit
+    // (vert-balanced parts), (c) append_from merge into split_late_batch_ /
+    // emit parts.
     int64_t emit_build_us = 0;
+    int64_t emit_plan_us = 0;
     int64_t emit_vertex_us = 0;
     int64_t emit_merge_us = 0;
+    int emit_merge_fb = 0;
     int64_t frame_no = 0;
     int64_t seeks_pending = 0;
     int64_t verts = 0;
@@ -298,6 +300,9 @@ class PlaybackPreviewView {
   // screen), so the host must present one more frame or the preview stays black
   // until something else happens to trigger a draw.
   bool wants_follow_up_present() const noexcept { return follow_up_present_; }
+  // The next render() only re-presents an unchanged picture (swapchain fill);
+  // it is left out of the PREVFRAME rows.
+  void set_diag_fill_frame(bool fill) noexcept { diag_fill_frame_ = fill; }
   wds::renderer::TextureCache& textures() noexcept { return textures_; }
   const wds::renderer::SkinCatalog& skin() const noexcept { return skin_; }
 
@@ -412,6 +417,7 @@ class PlaybackPreviewView {
   std::vector<const wds::chart_editor::PreviewNoteInstance*> note_draw_order_;
   bool ready_ = false;
   bool follow_up_present_ = false;
+  bool diag_fill_frame_ = false;
   std::uint64_t last_rendered_swapchain_serial_ = 0;
   int follow_up_streak_ = 0;
   bool mute_hold_body_sfx_ = false;
@@ -480,16 +486,90 @@ class PlaybackPreviewView {
     uint32_t n_notes = 0;
     uint32_t n_glow = 0;
     uint32_t n_late = 0;
+    // First/last overlay run of this job (tex/pipe proxy). 0 = empty.
+    // Used to snap vertex-part cuts to run boundaries so mapped-VB parts
+    // do not split a coalescable GPU draw.
+    uint32_t run_head = 0;
+    uint32_t run_tail = 0;
   };
   std::vector<SplitEmitPart> split_emit_parts_;
-  // Per-sorting_order buckets. Jobs are appended in collect order, so
-  // flattening buckets 0..255 is the same stable order as the old counting
-  // sort, but the cost is accumulated during the collect walk instead of a
-  // second estimate pass.
-  std::array<std::vector<EmitJob>, 256> emit_job_buckets_;
+  // Per-line emit-job scratch (one slot per split). Capacity is kept across
+  // frames; workers write only their split_i slot.
+  struct EmitLineScratch {
+    std::vector<int> particle_idxs;
+    std::vector<EmitJob> jobs;
+    std::vector<std::vector<int>> ribbons;
+    size_t ribbon_n = 0;
+    struct RibbonHit {
+      uint64_t chain = 0;
+      int idx = 0;
+    };
+    std::vector<RibbonHit> ribbon_hits;
+    struct ChainGroup {
+      uint8_t sorting_order = 0;
+      uint32_t catalog_index = 0;
+      uint64_t chain = 0;
+      size_t begin = 0;
+      size_t count = 0;
+    };
+    std::vector<ChainGroup> chain_groups;
+    std::vector<int> chain_idxs;
+    bool key_mono = true;
+    struct KeySeg {
+      uint8_t key = 0;
+      uint32_t job_lo = 0;
+      uint32_t job_n = 0;
+      uint32_t n_verts = 0;
+      uint32_t dest_lo = 0;
+      uint32_t dest_vert_lo = 0;
+    };
+    std::vector<KeySeg> segs;
+    // Compact live_emit_lt keys packed from a sequential pool scan so
+    // std::sort does not chase two ~536 B particles per compare.
+    // hi = sorting_order:8 | catalog_index:32 | birth_ord[31:8]
+    // lo = birth_ord[7:0]:8 | seed:32 | (unused 24)
+    struct EmitSortKey {
+      uint64_t hi = 0;
+      uint64_t lo = 0;
+      int32_t idx = 0;
+      bool operator<(const EmitSortKey& o) const noexcept {
+        if (hi != o.hi) {
+          return hi < o.hi;
+        }
+        if (lo != o.lo) {
+          return lo < o.lo;
+        }
+        return idx < o.idx;
+      }
+    };
+    struct EmitPackedAttr {
+      uint32_t catalog_index = 0;
+      uint32_t n_notes = 0;
+      uint32_t n_glow = 0;
+      uint32_t n_late = 0;
+      uint32_t run_head = 0;
+      uint32_t run_tail = 0;
+      uint64_t ribbon_chain = 0;
+      uint8_t sorting_order = 0;
+    };
+    std::vector<EmitSortKey> sort_keys;
+    std::vector<EmitPackedAttr> packed_attrs;
+    std::vector<int> sort_check_idxs;
+  };
+  std::vector<EmitLineScratch> emit_line_scratch_;
+  // Flattened ribbon chains (job.index after remapping). Size only grows.
+  std::vector<std::vector<int>> emit_ribbon_idxs_;
+  size_t emit_ribbon_n_ = 0;
+  std::vector<size_t> emit_ribbon_base_;
   // Stable destination for split emit jobs (reused across frames so the
-  // steady state does not allocate). Sorted by EmitJob::key.
+  // steady state does not allocate). Order is bucket key 0..255, then line
+  // order, then within-line live_emit_lt / ribbon-slot order.
   std::vector<EmitJob> emit_jobs_sorted_;
+  // Prefix of n_notes+n_glow+n_late per sorted job; part ranges by verts.
+  std::vector<uint32_t> emit_job_vert_prefix_;
+  std::vector<size_t> emit_part_lo_;
+  std::vector<size_t> emit_part_hi_;
+  std::vector<size_t> emit_line_seg_i_;
   size_t split_emit_reserve_hint_ = 0;
   // Split line plate geometry (Syuriken CPU tess) kept separate from particle glow.
   wds::renderer::DrawBatch split_lanes_glow_;

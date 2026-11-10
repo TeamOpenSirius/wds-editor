@@ -19,6 +19,7 @@ struct SplitEvalCacheStats {
   std::uint64_t lookup_contend = 0;
   std::uint64_t store_ops = 0;
   std::uint64_t store_contend = 0;
+  std::uint64_t inplace_stores = 0;
 };
 
 bool split_eval_cache_enabled() noexcept;
@@ -34,6 +35,9 @@ bool split_eval_cache_precommit_one_shard(int shard, std::size_t slots_per_shard
 int split_eval_cache_shard_count() noexcept;
 void split_eval_precommit_tls() noexcept;
 SplitEvalCacheStats split_eval_cache_stats() noexcept;
+// True if any shard holds a pose checkpoint. Snapshotted once per collect
+// so 4-wide can skip next==0 packing when maybe_restore would unalign lanes.
+bool split_eval_cache_has_checkpoints() noexcept;
 
 // Nearest checkpoint with next_step <= k_target. Returns false if none.
 bool split_eval_cache_lookup(const ParticleCacheKey& key, int k_target,
@@ -58,4 +62,7 @@ void split_eval_cache_note_frame_ms(double frame_ms) noexcept;
 double split_eval_cache_prev_frame_ms() noexcept;
 void split_eval_cache_reap_unused() noexcept;
 
+#if WDS_DIAG_ENABLED
+void split_eval_cache_dump_shard_stats() noexcept;
+#endif
 }  // namespace wds::chart_render::shuriken

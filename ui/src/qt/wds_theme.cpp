@@ -1,5 +1,7 @@
 #include "wds/ui/qt/wds_theme.hpp"
 
+#include "wds/ui/qt/value_input_focus.hpp"
+
 #include <wds/interaction/theme.hpp>
 
 #include <QAbstractScrollArea>
@@ -835,8 +837,15 @@ void install_no_wheel_value_inputs(QApplication& app) {
 }
 
 bool WdsApplication::notify(QObject* receiver, QEvent* event) {
-  if (intercept_no_wheel_value(receiver, event)) return true;
-  return QApplication::notify(receiver, event);
+  // A press on a value input's arrow / stepper region only changes its value; it
+  // must not take keyboard focus, or Space (the app-level playback shortcut)
+  // would be routed to the widget. Qt applies click focus inside
+  // QApplication::notify *before* any event filter runs, so the click policy is
+  // relaxed around that call. Text-area presses still focus the embedded editor.
+  return deliver_with_value_input_click_focus(receiver, event, [&] {
+    if (intercept_no_wheel_value(receiver, event)) return true;
+    return QApplication::notify(receiver, event);
+  });
 }
 
 QString normalize_theme_preference(const QString& stored) {

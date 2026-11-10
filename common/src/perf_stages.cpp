@@ -273,6 +273,21 @@ void end_frame() noexcept {
   }
 }
 
+void discard_frame() noexcept {
+  if (!enabled()) {
+    return;
+  }
+  std::lock_guard lock(g_mu);
+  const int nstages = static_cast<int>(g_stage_names.size());
+  for (const std::shared_ptr<ThreadSlot>& slot : g_threads) {
+    for (int i = 0; i < nstages; ++i) {
+      slot->ns[i].store(0, std::memory_order_relaxed);
+      slot->counter[i].store(0, std::memory_order_relaxed);
+      slot->scope_calls[i].store(0, std::memory_order_relaxed);
+    }
+  }
+}
+
 int window_frames() noexcept {
   std::lock_guard lock(g_mu);
   return static_cast<int>(g_ring_size);

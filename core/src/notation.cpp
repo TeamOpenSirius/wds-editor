@@ -254,6 +254,21 @@ int32_t first_legal_note_tick(const MusicTiming& timing) {
   return milliseconds_to_tick(0, timing);
 }
 
+namespace {
+
+// Keep the first point at each tick. Parsers still reject duplicates; this is
+// the in-memory dump path (load_from_chart) so a constructed chart cannot keep
+// two speed tags on one instant.
+void canonicalize_scroll_speed_points(std::vector<ScrollSpeedPoint>& points) {
+  std::stable_sort(points.begin(), points.end(),
+                   [](const auto& a, const auto& b) { return a.tick < b.tick; });
+  points.erase(std::unique(points.begin(), points.end(),
+                           [](const auto& a, const auto& b) { return a.tick == b.tick; }),
+               points.end());
+}
+
+}  // namespace
+
 bool note_intersects_negative_music_time(const NotationNote& note, const MusicTiming& timing) {
   if (note.note_type == NoteType::HiSpeed) {
     return false;
@@ -1199,6 +1214,7 @@ void ChartDocument::load_from_chart(const NotationChart& chart, ChartEditMode mo
   notes_ = chart.notes;
   concurrent_lines_ = chart.concurrent_lines;
   scroll_speed_points_ = chart.scroll_speed_points;
+  canonicalize_scroll_speed_points(scroll_speed_points_);
   compatibility_profile_ = chart.compatibility_profile;
   keep_file_eighths_ = chart.keep_file_eighths;
   edit_mode_ = mode;

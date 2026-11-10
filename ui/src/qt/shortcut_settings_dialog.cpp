@@ -103,6 +103,7 @@ constexpr EditorShortcut kEditShortcuts[] = {
     EditorShortcut::Mirror,     EditorShortcut::MirrorAboutCenter,
     EditorShortcut::NudgeUp,    EditorShortcut::NudgeDown,
     EditorShortcut::NudgeLeft,  EditorShortcut::NudgeRight,
+    EditorShortcut::NudgeTickUp, EditorShortcut::NudgeTickDown,
     EditorShortcut::SendSelectionToBackLayer,
     EditorShortcut::RestoreBackLayerNotes,
 };

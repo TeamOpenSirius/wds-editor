@@ -37,7 +37,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 #include <future>
 #include <limits>
 #include <string>
@@ -98,6 +97,8 @@ void ui_split_parallel_for(size_t n, void (*fn)(size_t, void*), void* ctx, uint6
   if (n == 0 || fn == nullptr) {
     return;
   }
+  // hint < kUiPoolMinWork stays inline (lane recolor). Emit-job collect passes
+  // particle-count work, or kUiPoolMinWork when WDS_EMIT_BUILD_PAR_FORCE=1.
   if (n == 1 || work_hint < kUiPoolMinWork) {
     for (size_t i = 0; i < n; ++i) {
       fn(i, ctx);
@@ -1937,7 +1938,7 @@ void PlaybackPreviewView::render(const PreviewSnapshot& snapshot, const DrawBatc
   split_frame_diag_.total_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::steady_clock::now() - render_t0)
                                   .count();
-  if (frame_time) {
+  if (frame_time && !diag_fill_frame_) {
     publish_prevframe_diag(playing_now, known_verts, stage_stage_us, stage_notes_us,
                            stage_merge_us, stage_hud_us, stage_draw_us, stage_after_us);
     // MEMSTEP milestones sampled after a completed frame so the retained
@@ -1984,7 +1985,8 @@ void PlaybackPreviewView::publish_prevframe_diag(bool playing, size_t known_vert
                "PREVFRAME frame=%lld playing=%d seeks_pending=%lld total_ms=%.3f notes_ms=%.3f "
                "splits_ms=%.3f particles_ms=%.3f lanes_ms=%.3f hud_ms=%.3f stage_ms=%.3f "
                "merge_ms=%.3f ensure_tex_ms=%.3f draw_frame_ms=%.3f leftover_ms=%.3f verts=%lld "
-               "draws=%lld emit_build_ms=%.3f emit_vertex_ms=%.3f emit_merge_ms=%.3f\n",
+               "draws=%lld emit_build_ms=%.3f emit_plan_ms=%.3f emit_vertex_ms=%.3f "
+               "emit_merge_ms=%.3f emit_merge_fb=%d\n",
                static_cast<long long>(d.frame_no), d.playing,
                static_cast<long long>(d.seeks_pending), static_cast<double>(d.total_us) / 1000.0,
                static_cast<double>(d.notes_us) / 1000.0,
@@ -1998,8 +2000,9 @@ void PlaybackPreviewView::publish_prevframe_diag(bool playing, size_t known_vert
                static_cast<double>(d.leftover_us) / 1000.0, static_cast<long long>(d.verts),
                static_cast<long long>(d.draws),
                static_cast<double>(d.emit_build_us) / 1000.0,
+               static_cast<double>(d.emit_plan_us) / 1000.0,
                static_cast<double>(d.emit_vertex_us) / 1000.0,
-               static_cast<double>(d.emit_merge_us) / 1000.0);
+               static_cast<double>(d.emit_merge_us) / 1000.0, d.emit_merge_fb);
 }
 
 #endif  // WDS_DIAG_ENABLED
@@ -2531,7 +2534,8 @@ void PlaybackPreviewView::persist_split_pause_vert_memo() {
 void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                                TextureId solid_texture) {
   WDS_PERF_SCOPE("preview.split_particles");
-  if (std::getenv("WDS_NO_SPLIT_PARTICLES") != nullptr) {
+  static const bool kNoSplitParticles = std::getenv("WDS_NO_SPLIT_PARTICLES") != nullptr;
+  if (kNoSplitParticles) {
     return;
   }
   split_emit_direct_ = false;
@@ -3309,8 +3313,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     split_frame_diag_.collect_us = 0;
     split_frame_diag_.verts_us = 0;
     split_frame_diag_.emit_build_us = 0;
+    split_frame_diag_.emit_plan_us = 0;
     split_frame_diag_.emit_vertex_us = 0;
     split_frame_diag_.emit_merge_us = 0;
+    split_frame_diag_.emit_merge_fb = 0;
 #endif  // WDS_DIAG_ENABLED
     split_pause_verts_pending_ = false;
     return;
@@ -3390,19 +3396,24 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     split_frame_diag_.collect_us = collect_us;
     split_frame_diag_.verts_us = 0;
     split_frame_diag_.emit_build_us = 0;
+    split_frame_diag_.emit_plan_us = 0;
     split_frame_diag_.emit_vertex_us = 0;
     split_frame_diag_.emit_merge_us = 0;
+    split_frame_diag_.emit_merge_fb = 0;
 #endif  // WDS_DIAG_ENABLED
     return;
   }
 #if WDS_DIAG_ENABLED
   const auto verts_t0 = std::chrono::steady_clock::now();
-  // PREVFRAME sub-splits of verts_us: emit-job build (collect + estimate +
-  // stable_sort), per-job vertex emit, and the append_from merge.
+  // PREVFRAME sub-splits of verts_us: emit-job build (per-line collect +
+  // estimate + counting-sort merge), per-job vertex emit, and the
+  // append_from merge. emit_build_us is a single interval (not doubled).
   const bool emit_time = perf::enabled();
   int64_t emit_build_us = 0;
+  int64_t emit_plan_us = 0;
   int64_t emit_vertex_us = 0;
   int64_t emit_merge_us = 0;
+  int emit_merge_fb = 0;
   const auto emit_now = [&]() {
     return emit_time ? std::chrono::steady_clock::now() : verts_t0;
   };
@@ -3418,6 +3429,20 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   const auto& pool = collected.pool;
   const bool legacy_emit = wds::ui::preview_legacy_emit_from_env();
   const size_t split_n = snapshot.split_lanes.size();
+  static const bool kSplitParticleDebug = std::getenv("WDS_SPLIT_PARTICLE_DEBUG") != nullptr;
+  static const bool kEmitBuildParForce =
+      wds::ui::frame_diag_env_enabled(std::getenv("WDS_EMIT_BUILD_PAR_FORCE"));
+  static const bool kEmitMergeFallbackForce =
+      wds::ui::frame_diag_env_enabled(std::getenv("WDS_EMIT_MERGE_FALLBACK_FORCE"));
+  static const bool kEmitSortLegacy =
+      wds::ui::frame_diag_env_enabled(std::getenv("WDS_EMIT_SORT_LEGACY"));
+#if WDS_DIAG_ENABLED
+  static const bool kEmitSortCheck =
+      wds::ui::frame_diag_env_enabled(std::getenv("WDS_EMIT_SORT_CHECK"));
+#endif  // WDS_DIAG_ENABLED
+  static const bool kVertsSelftest =
+      wds::ui::frame_diag_env_enabled(std::getenv("WDS_PREVIEW_VERTS_SELFTEST"));
+  const bool indexed_geom = wds::renderer::split_geometry_indexed_from_env();
   // Particle-only dests. glow_batch_ already holds split-lane plates (appended
   // before this function). Saving glow_batch_ as pause memo would replay those
   // plates on the next paused frame (+80640 glow on these charts).
@@ -3428,11 +3453,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
   split_late_batch_.overlay_ordered = true;
   size_t trail_vert_est = split_emit_reserve_hint_;
   if (trail_vert_est == 0) {
-    const bool indexed_est = wds::renderer::split_geometry_indexed_from_env();
     for (const auto& p : pool) {
       if (p.trail_points >= 2) {
         trail_vert_est +=
-            static_cast<size_t>(p.trail_points - 1) * (indexed_est ? 4u : 6u);
+            static_cast<size_t>(p.trail_points - 1) * (indexed_geom ? 4u : 6u);
       }
     }
   }
@@ -3522,7 +3546,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       tg.late->overlay_pipe = body_pipe;
       DrawBatch& dest = *tg.late;
       float size_unity = p.size;
-      if (std::getenv("WDS_SPLIT_PARTICLE_DEBUG") != nullptr && p.effect_id == 11151) {
+      if (kSplitParticleDebug && p.effect_id == 11151) {
         std::fprintf(stderr, "PART size=%.4f cur=%.4f cur_y=%.4f sol_y=%.4f age=%.4f a=%.4f mode=%d\n",
                      p.size, p.current_size, p.current_size_y, p.sol_y, p.age, p.a,
                      static_cast<int>(p.render_mode));
@@ -3707,7 +3731,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                              ts.va.data(), ts.vr.data(), ts.vg.data(), ts.vb.data());
   };
 
-  std::vector<std::vector<int>> ribbon_job_idxs;
   // live dump align2-u1-unity-v2 hop (not 2022.3): within a line, draw
   // catalog (prefab) index — primaries and subemitters together. Do not
   // use Subemit task.layer=pcount (that only stays on pool / over_cap so
@@ -3782,14 +3805,6 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       on_ribbon(*order[ci].idxs);
     }
   };
-  // Ribbon key: chain-last particle sorting_order, else 1 (unresolved).
-  auto ribbon_job_key = [&](const std::vector<int>& idxs) -> uint8_t {
-    if (!idxs.empty() && idxs.back() >= 0 &&
-        static_cast<size_t>(idxs.back()) < pool.size()) {
-      return pool[static_cast<size_t>(idxs.back())].sorting_order;
-    }
-    return 1;
-  };
 
   auto body_layer = [&](const wds::chart_render::SplitEffectLiveParticle&) -> int {
     return 2;
@@ -3820,14 +3835,13 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     const bool butterfly = (p.flags & wds::chart_render::kSplitEffectFlagButterfly) != 0;
     if (!skip_body && (!butterfly || in_front)) {
       // Near-plane clip of a quad adds at most one vertex (fan 3 tris).
-      const bool indexed = wds::renderer::split_geometry_indexed_from_env();
-      uint32_t body = indexed ? 5u : 9u;
+      uint32_t body = indexed_geom ? 5u : 9u;
       if (butterfly) {
-        body = indexed ? 8u : 12u;
+        body = indexed_geom ? 8u : 12u;
       } else if (ring) {
         body = static_cast<uint32_t>(wds::chart_render::kSplitEffectRingMeshTriCount) * 3u;
       } else if (cube) {
-        body = indexed ? 24u : 36u;
+        body = indexed_geom ? 24u : 36u;
       }
       add_layer(body_layer(p), body, notes, glow, late);
     }
@@ -3835,51 +3849,447 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       return;
     }
     const int pn = std::max(static_cast<int>(p.trail_points), 2);
-    add_layer(2,
-              static_cast<uint32_t>(pn - 1) *
-                  (wds::renderer::split_geometry_indexed_from_env() ? 4u : 6u),
-              notes, glow, late);
+    add_layer(2, static_cast<uint32_t>(pn - 1) * (indexed_geom ? 4u : 6u), notes, glow, late);
+  };
+  constexpr uint32_t kEmitRunTrail = 0x80000001u;
+  auto overlay_pipe_of = [](const wds::chart_render::SplitEffectLiveParticle& p) -> uint8_t {
+    const bool body_trail_mat =
+        p.blend == static_cast<uint8_t>(wds::chart_render::SplitEffectBlend::Other);
+    if (p.blend == static_cast<uint8_t>(wds::chart_render::SplitEffectBlend::Alpha)) {
+      return static_cast<uint8_t>(wds::renderer::DrawOverlayPipe::Alpha);
+    }
+    if (body_trail_mat) {
+      return static_cast<uint8_t>(wds::renderer::DrawOverlayPipe::AdditiveClip01);
+    }
+    return static_cast<uint8_t>(wds::renderer::DrawOverlayPipe::Additive);
+  };
+  auto fill_particle_run_tags = [&](const wds::chart_render::SplitEffectLiveParticle& p,
+                                    EmitJob& job) {
+    const bool unnamed = p.uv_name_index == wds::chart_render::kSplitEffectNoUvName;
+    const bool cube = (p.flags & wds::chart_render::kSplitEffectFlagCubeMesh) != 0;
+    const bool ring = (p.flags & wds::chart_render::kSplitEffectFlagRingMesh) != 0;
+    const bool unnamed_add_alpha_trails =
+        unnamed && !cube && !ring &&
+        (p.flags & wds::chart_render::kSplitEffectFlagTrails) != 0 &&
+        p.blend != static_cast<uint8_t>(wds::chart_render::SplitEffectBlend::Other);
+    bool skip_body = split_live_skip_dead_trail_body(p) || unnamed_add_alpha_trails;
+    if (p.a < 0.001f) {
+      skip_body = true;
+    }
+    const bool in_front = wds::chart_editor::official_main_in_front_of_camera(p.main_y, p.z);
+    const bool butterfly = (p.flags & wds::chart_render::kSplitEffectFlagButterfly) != 0;
+    const bool has_body = !skip_body && (!butterfly || in_front);
+    const bool has_trail = p.trail_count < 2 && p.trail_points >= 2;
+    const uint32_t body_tag =
+        (static_cast<uint32_t>(overlay_pipe_of(p)) << 24) |
+        (static_cast<uint32_t>(p.uv_name_index) & 0x00ffffffu);
+    if (has_body && has_trail) {
+      job.run_head = body_tag;
+      job.run_tail = kEmitRunTrail;
+    } else if (has_body) {
+      job.run_head = body_tag;
+      job.run_tail = body_tag;
+    } else if (has_trail) {
+      job.run_head = kEmitRunTrail;
+      job.run_tail = kEmitRunTrail;
+    }
+  };
+
+  // IEEE total order except NaN, with ±0 collapsed so it matches
+  // `a.birth_t != b.birth_t` then `a.birth_t < b.birth_t` (IEEE -0 == +0).
+  // NaN makes that comparator not a strict weak order; those lines use
+  // live_emit_lt instead of this encoding.
+  auto emit_birth_ord = [](float f) -> uint32_t {
+    uint32_t u = 0;
+    std::memcpy(&u, &f, sizeof(u));
+    if ((u & 0x7fffffffu) == 0u) {
+      u = 0u;
+    }
+    if ((u & 0x80000000u) != 0u) {
+      u = ~u;
+    } else {
+      u ^= 0x80000000u;
+    }
+    return u;
+  };
+  auto pack_emit_sort_key = [&](const wds::chart_render::SplitEffectLiveParticle& p,
+                                int idx) -> EmitLineScratch::EmitSortKey {
+    const uint32_t b = emit_birth_ord(p.birth_t);
+    EmitLineScratch::EmitSortKey k;
+    k.hi = (static_cast<uint64_t>(p.sorting_order) << 56) |
+           (static_cast<uint64_t>(p.catalog_index) << 24) | (static_cast<uint64_t>(b) >> 8);
+    k.lo = (static_cast<uint64_t>(b & 0xffu) << 56) | (static_cast<uint64_t>(p.seed) << 24);
+    k.idx = idx;
+    return k;
+  };
+
+  auto collect_one_line = [&](size_t split_i) {
+    EmitLineScratch& sc = emit_line_scratch_[split_i];
+    const int begin =
+        split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
+    const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
+    sc.particle_idxs.clear();
+    sc.jobs.clear();
+    sc.ribbon_hits.clear();
+    sc.chain_groups.clear();
+    sc.chain_idxs.clear();
+    sc.sort_keys.clear();
+    sc.packed_attrs.clear();
+    sc.ribbon_n = 0;
+    const size_t nn = static_cast<size_t>(std::max(n, 0));
+    sc.particle_idxs.reserve(nn);
+    sc.jobs.reserve(nn + 8);
+    sc.sort_keys.reserve(nn);
+    sc.packed_attrs.reserve(nn);
+    bool nan_birth = false;
+    for (int i = 0; i < n; ++i) {
+      const int idx = begin + i;
+      EmitLineScratch::EmitPackedAttr attr;
+      if (idx >= 0 && static_cast<size_t>(idx) < pool.size()) {
+        const auto& p = pool[static_cast<size_t>(idx)];
+        if (std::isnan(p.birth_t)) {
+          nan_birth = true;
+        }
+        sc.sort_keys.push_back(pack_emit_sort_key(p, idx));
+        attr.catalog_index = p.catalog_index;
+        attr.sorting_order = p.sorting_order;
+        estimate_particle(p, attr.n_notes, attr.n_glow, attr.n_late);
+        EmitJob tags;
+        fill_particle_run_tags(p, tags);
+        attr.run_head = tags.run_head;
+        attr.run_tail = tags.run_tail;
+        if (p.trail_chain != 0 && p.trail_count >= 2) {
+          attr.ribbon_chain =
+              (static_cast<uint64_t>(p.trail_chain) << 32) | p.system_tag;
+        }
+      } else {
+        EmitLineScratch::EmitSortKey k;
+        k.idx = idx;
+        sc.sort_keys.push_back(k);
+      }
+      sc.packed_attrs.push_back(attr);
+    }
+    const bool use_packed = !kEmitSortLegacy && !nan_birth;
+    if (!nan_birth) {
+      std::sort(sc.sort_keys.begin(), sc.sort_keys.end());
+    }
+    if (use_packed) {
+      sc.particle_idxs.resize(sc.sort_keys.size());
+      for (size_t j = 0; j < sc.sort_keys.size(); ++j) {
+        sc.particle_idxs[j] = sc.sort_keys[j].idx;
+      }
+    } else {
+      for (int i = 0; i < n; ++i) {
+        sc.particle_idxs.push_back(begin + i);
+      }
+      std::sort(sc.particle_idxs.begin(), sc.particle_idxs.end(), live_emit_lt);
+    }
+#if WDS_DIAG_ENABLED
+    if (kEmitSortCheck && !nan_birth && n > 0) {
+      sc.sort_check_idxs.clear();
+      sc.sort_check_idxs.reserve(nn);
+      if (use_packed) {
+        for (int i = 0; i < n; ++i) {
+          sc.sort_check_idxs.push_back(begin + i);
+        }
+        std::sort(sc.sort_check_idxs.begin(), sc.sort_check_idxs.end(), live_emit_lt);
+      } else {
+        for (const auto& k : sc.sort_keys) {
+          sc.sort_check_idxs.push_back(k.idx);
+        }
+      }
+      if (sc.sort_check_idxs != sc.particle_idxs) {
+        std::fprintf(stderr,
+                     "WDS_EMIT_SORT_CHECK mismatch split=%zu n=%d packed=%d legacy_env=%d\n",
+                     split_i, n, use_packed ? 1 : 0, kEmitSortLegacy ? 1 : 0);
+      }
+    }
+#endif  // WDS_DIAG_ENABLED
+    WDS_PERF_COUNT("preview.verts.ribbon", 1);
+    sc.ribbon_hits.reserve(nn);
+    for (int idx : sc.particle_idxs) {
+      const int slot = idx - begin;
+      if (slot < 0 || static_cast<size_t>(slot) >= sc.packed_attrs.size()) {
+        continue;
+      }
+      const uint64_t chain = sc.packed_attrs[static_cast<size_t>(slot)].ribbon_chain;
+      if (chain != 0) {
+        sc.ribbon_hits.push_back({chain, idx});
+      }
+    }
+    if (!sc.ribbon_hits.empty()) {
+      std::stable_sort(sc.ribbon_hits.begin(), sc.ribbon_hits.end(),
+                       [](const EmitLineScratch::RibbonHit& a, const EmitLineScratch::RibbonHit& b) {
+                         return a.chain < b.chain;
+                       });
+      sc.chain_idxs.reserve(sc.ribbon_hits.size());
+      size_t g0 = 0;
+      while (g0 < sc.ribbon_hits.size()) {
+        const uint64_t chain = sc.ribbon_hits[g0].chain;
+        size_t g1 = g0 + 1;
+        while (g1 < sc.ribbon_hits.size() && sc.ribbon_hits[g1].chain == chain) {
+          ++g1;
+        }
+        const size_t begin_c = sc.chain_idxs.size();
+        for (size_t k = g0; k < g1; ++k) {
+          sc.chain_idxs.push_back(sc.ribbon_hits[k].idx);
+        }
+        uint8_t so = 0;
+        uint32_t cat = 0;
+        const int head_idx = sc.chain_idxs[begin_c];
+        const int head_slot = head_idx - begin;
+        if (head_slot >= 0 && static_cast<size_t>(head_slot) < sc.packed_attrs.size()) {
+          const auto& head = sc.packed_attrs[static_cast<size_t>(head_slot)];
+          so = head.sorting_order;
+          cat = head.catalog_index;
+        }
+        sc.chain_groups.push_back({so, cat, chain, begin_c, g1 - g0});
+        g0 = g1;
+      }
+      std::sort(sc.chain_groups.begin(), sc.chain_groups.end(),
+                [](const EmitLineScratch::ChainGroup& a, const EmitLineScratch::ChainGroup& b) {
+                  if (a.sorting_order != b.sorting_order) {
+                    return a.sorting_order < b.sorting_order;
+                  }
+                  if (a.catalog_index != b.catalog_index) {
+                    return a.catalog_index < b.catalog_index;
+                  }
+                  return a.chain < b.chain;
+                });
+    }
+    auto take_ribbon = [&](const EmitLineScratch::ChainGroup& g) {
+      if (sc.ribbon_n == sc.ribbons.size()) {
+        sc.ribbons.emplace_back();
+      }
+      auto& dst = sc.ribbons[sc.ribbon_n];
+      dst.clear();
+      dst.insert(dst.end(), sc.chain_idxs.begin() + g.begin,
+                 sc.chain_idxs.begin() + g.begin + g.count);
+      EmitJob job{EmitJob::Ribbon, static_cast<int32_t>(sc.ribbon_n), 0};
+      if (!dst.empty()) {
+        const int tail_slot = dst.back() - begin;
+        if (tail_slot >= 0 && static_cast<size_t>(tail_slot) < sc.packed_attrs.size()) {
+          job.key = sc.packed_attrs[static_cast<size_t>(tail_slot)].sorting_order;
+        } else {
+          job.key = 1;
+        }
+      } else {
+        job.key = 1;
+      }
+      if (dst.size() >= 2) {
+        job.n_late = static_cast<uint32_t>(dst.size() - 1) * (indexed_geom ? 4u : 6u);
+      }
+      job.run_head = kEmitRunTrail;
+      job.run_tail = kEmitRunTrail;
+      sc.jobs.push_back(job);
+      ++sc.ribbon_n;
+    };
+    size_t ci = 0;
+    for (int idx : sc.particle_idxs) {
+      const int slot = idx - begin;
+      const EmitLineScratch::EmitPackedAttr* attr = nullptr;
+      if (slot >= 0 && static_cast<size_t>(slot) < sc.packed_attrs.size()) {
+        attr = &sc.packed_attrs[static_cast<size_t>(slot)];
+      }
+      const uint8_t so = attr != nullptr ? attr->sorting_order : uint8_t{0};
+      const uint32_t cat = attr != nullptr ? attr->catalog_index : 0u;
+      while (ci < sc.chain_groups.size() &&
+             (sc.chain_groups[ci].sorting_order < so ||
+              (sc.chain_groups[ci].sorting_order == so &&
+               sc.chain_groups[ci].catalog_index < cat))) {
+        take_ribbon(sc.chain_groups[ci]);
+        ++ci;
+      }
+      EmitJob job{EmitJob::Particle, idx, 0};
+      if (attr != nullptr) {
+        job.key = attr->sorting_order;
+        job.n_notes = attr->n_notes;
+        job.n_glow = attr->n_glow;
+        job.n_late = attr->n_late;
+        job.run_head = attr->run_head;
+        job.run_tail = attr->run_tail;
+      }
+      sc.jobs.push_back(job);
+    }
+    for (; ci < sc.chain_groups.size(); ++ci) {
+      take_ribbon(sc.chain_groups[ci]);
+    }
+    sc.key_mono = true;
+    sc.segs.clear();
+    sc.segs.reserve(8);
+    for (size_t ji = 0; ji < sc.jobs.size(); ++ji) {
+      const EmitJob& job = sc.jobs[ji];
+      const uint32_t v = job.n_notes + job.n_glow + job.n_late;
+      if (ji > 0 && job.key < sc.jobs[ji - 1].key) {
+        sc.key_mono = false;
+      }
+      if (sc.segs.empty() || job.key != sc.segs.back().key) {
+        sc.segs.push_back({job.key, static_cast<uint32_t>(ji), 1u, v, 0u, 0u});
+      } else {
+        sc.segs.back().job_n += 1u;
+        sc.segs.back().n_verts += v;
+      }
+    }
   };
 
   auto collect_emit_jobs = [&]() {
-    for (auto& bucket : emit_job_buckets_) {
-      bucket.clear();
+    if (emit_line_scratch_.size() < split_n) {
+      emit_line_scratch_.resize(split_n);
     }
-    ribbon_job_idxs.clear();
-    auto append_job = [&](EmitJob job) { emit_job_buckets_[job.key].push_back(job); };
-    for (size_t split_i = 0; split_i < split_n; ++split_i) {
-      const int begin =
-          split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
-      const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
-      std::vector<int> particle_idxs;
-      particle_idxs.reserve(static_cast<size_t>(n));
-      for (int i = 0; i < n; ++i) {
-        particle_idxs.push_back(begin + i);
+    if (emit_ribbon_base_.size() < split_n) {
+      emit_ribbon_base_.resize(split_n);
+    }
+    struct CollectParCtx {
+      decltype(collect_one_line)* fn = nullptr;
+    } cctx;
+    cctx.fn = &collect_one_line;
+    uint64_t hint = static_cast<uint64_t>(collected.total) * 16ull + split_n * 64ull;
+    if (kEmitBuildParForce) {
+      hint = std::max(hint, kUiPoolMinWork);
+    }
+    ui_split_parallel_for(
+        split_n,
+        [](size_t split_i, void* raw) {
+          auto* ctx = static_cast<CollectParCtx*>(raw);
+          if (ctx == nullptr || ctx->fn == nullptr) {
+            return;
+          }
+          (*ctx->fn)(split_i);
+        },
+        &cctx, hint);
+
+#if WDS_DIAG_ENABLED
+    const auto plan_t0 = emit_now();
+#endif  // WDS_DIAG_ENABLED
+    bool all_mono = !kEmitMergeFallbackForce;
+    size_t total_jobs = 0;
+    size_t ribbon_total = 0;
+    for (size_t i = 0; i < split_n; ++i) {
+      if (!emit_line_scratch_[i].key_mono) {
+        all_mono = false;
       }
-      std::sort(particle_idxs.begin(), particle_idxs.end(), live_emit_lt);
-      WDS_PERF_COUNT("preview.verts.ribbon", 1);
-      for_each_line_job(
-          particle_idxs,
-          [&](int idx) {
-            EmitJob job{EmitJob::Particle, idx, 0};
-            if (idx >= 0 && static_cast<size_t>(idx) < pool.size()) {
-              job.key = pool[static_cast<size_t>(idx)].sorting_order;
-              estimate_particle(pool[static_cast<size_t>(idx)], job.n_notes, job.n_glow,
-                                job.n_late);
+      total_jobs += emit_line_scratch_[i].jobs.size();
+      emit_ribbon_base_[i] = ribbon_total;
+      ribbon_total += emit_line_scratch_[i].ribbon_n;
+    }
+#if WDS_DIAG_ENABLED
+    emit_merge_fb = all_mono ? 0 : 1;
+#endif  // WDS_DIAG_ENABLED
+    if (emit_ribbon_idxs_.size() < ribbon_total) {
+      emit_ribbon_idxs_.resize(ribbon_total);
+    }
+    emit_ribbon_n_ = ribbon_total;
+    emit_jobs_sorted_.resize(total_jobs);
+    if (emit_job_vert_prefix_.size() < total_jobs + 1) {
+      emit_job_vert_prefix_.resize(total_jobs + 1);
+    }
+    if (total_jobs > 0) {
+      emit_job_vert_prefix_[0] = 0;
+    }
+
+    auto flatten_ribbons_line = [&](size_t split_i) {
+      EmitLineScratch& sc = emit_line_scratch_[split_i];
+      size_t ri = emit_ribbon_base_[split_i];
+      for (size_t k = 0; k < sc.ribbon_n; ++k) {
+        emit_ribbon_idxs_[ri].swap(sc.ribbons[k]);
+        ++ri;
+      }
+    };
+
+    if (!all_mono) {
+      for (size_t i = 0; i < split_n; ++i) {
+        flatten_ribbons_line(i);
+      }
+      uint32_t counts[256];
+      for (uint32_t& c : counts) {
+        c = 0;
+      }
+      for (size_t i = 0; i < split_n; ++i) {
+        for (const EmitJob& job : emit_line_scratch_[i].jobs) {
+          counts[job.key] += 1u;
+        }
+      }
+      uint32_t start[256];
+      uint32_t acc = 0;
+      for (int k = 0; k < 256; ++k) {
+        start[k] = acc;
+        acc += counts[k];
+      }
+      for (size_t i = 0; i < split_n; ++i) {
+        const size_t base = emit_ribbon_base_[i];
+        for (EmitJob job : emit_line_scratch_[i].jobs) {
+          if (job.kind == EmitJob::Ribbon) {
+            job.index = static_cast<int32_t>(base + static_cast<size_t>(job.index));
+          }
+          emit_jobs_sorted_[start[job.key]++] = job;
+        }
+      }
+      uint32_t vacc = 0;
+      for (size_t j = 0; j < total_jobs; ++j) {
+        const EmitJob& job = emit_jobs_sorted_[j];
+        vacc += job.n_notes + job.n_glow + job.n_late;
+        emit_job_vert_prefix_[j + 1] = vacc;
+      }
+#if WDS_DIAG_ENABLED
+      emit_plan_us = emit_elapsed(plan_t0);
+#endif  // WDS_DIAG_ENABLED
+    } else {
+      if (emit_line_seg_i_.size() < split_n) {
+        emit_line_seg_i_.resize(split_n);
+      }
+      for (size_t i = 0; i < split_n; ++i) {
+        emit_line_seg_i_[i] = 0;
+      }
+      uint32_t dest = 0;
+      uint32_t vert = 0;
+      for (int key = 0; key < 256; ++key) {
+        for (size_t i = 0; i < split_n; ++i) {
+          EmitLineScratch& sc = emit_line_scratch_[i];
+          size_t& ci = emit_line_seg_i_[i];
+          if (ci < sc.segs.size() && sc.segs[ci].key == static_cast<uint8_t>(key)) {
+            sc.segs[ci].dest_lo = dest;
+            sc.segs[ci].dest_vert_lo = vert;
+            dest += sc.segs[ci].job_n;
+            vert += sc.segs[ci].n_verts;
+            ++ci;
+          }
+        }
+      }
+#if WDS_DIAG_ENABLED
+      emit_plan_us = emit_elapsed(plan_t0);
+#endif  // WDS_DIAG_ENABLED
+      auto write_one_line = [&](size_t split_i) {
+        flatten_ribbons_line(split_i);
+        EmitLineScratch& sc = emit_line_scratch_[split_i];
+        const size_t rbase = emit_ribbon_base_[split_i];
+        for (const EmitLineScratch::KeySeg& seg : sc.segs) {
+          uint32_t acc = seg.dest_vert_lo;
+          for (uint32_t j = 0; j < seg.job_n; ++j) {
+            EmitJob job = sc.jobs[static_cast<size_t>(seg.job_lo) + j];
+            if (job.kind == EmitJob::Ribbon) {
+              job.index = static_cast<int32_t>(rbase + static_cast<size_t>(job.index));
             }
-            append_job(job);
+            const size_t di = static_cast<size_t>(seg.dest_lo) + j;
+            emit_jobs_sorted_[di] = job;
+            acc += job.n_notes + job.n_glow + job.n_late;
+            emit_job_vert_prefix_[di + 1] = acc;
+          }
+        }
+      };
+      struct WriteParCtx {
+        decltype(write_one_line)* fn = nullptr;
+      } wctx;
+      wctx.fn = &write_one_line;
+      ui_split_parallel_for(
+          split_n,
+          [](size_t split_i, void* raw) {
+            auto* ctx = static_cast<WriteParCtx*>(raw);
+            if (ctx == nullptr || ctx->fn == nullptr) {
+              return;
+            }
+            (*ctx->fn)(split_i);
           },
-          [&](std::vector<int>& idxs) {
-            ribbon_job_idxs.push_back(std::move(idxs));
-            EmitJob job{EmitJob::Ribbon,
-                        static_cast<int32_t>(ribbon_job_idxs.size() - 1), 0};
-            job.key = ribbon_job_key(ribbon_job_idxs.back());
-            if (ribbon_job_idxs.back().size() >= 2) {
-              job.n_late = static_cast<uint32_t>(ribbon_job_idxs.back().size() - 1) *
-                           (wds::renderer::split_geometry_indexed_from_env() ? 4u : 6u);
-            }
-            append_job(job);
-          });
+          &wctx, hint);
     }
   };
   auto run_emit_job = [&](const EmitJob& job, SplitEmitTargets tg) {
@@ -3889,13 +4299,12 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       }
       return;
     }
-    if (job.index >= 0 && static_cast<size_t>(job.index) < ribbon_job_idxs.size()) {
-      process_chain(ribbon_job_idxs[static_cast<size_t>(job.index)], tg);
+    if (job.index >= 0 && static_cast<size_t>(job.index) < emit_ribbon_n_) {
+      process_chain(emit_ribbon_idxs_[static_cast<size_t>(job.index)], tg);
     }
   };
 
-  std::function<void(size_t, SplitEmitTargets)> build_one_split;
-  build_one_split = [&](size_t split_i, SplitEmitTargets tg) {
+  auto build_one_split = [&](size_t split_i, SplitEmitTargets tg) {
     const int begin =
         split_i < collected.split_begin.size() ? collected.split_begin[split_i] : 0;
     const int n = split_i < collected.split_count.size() ? collected.split_count[split_i] : 0;
@@ -3917,43 +4326,98 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     const auto build_t0 = emit_now();
 #endif  // WDS_DIAG_ENABLED
     collect_emit_jobs();
-    // Jobs are already stored in per-key buckets in collect order. Flattening
-    // 0..255 is the same stable sort result as the old counting sort, while
-    // vertex estimates come from the job itself instead of another walk.
-    size_t total_jobs = 0;
-    for (const auto& bucket : emit_job_buckets_) {
-      total_jobs += bucket.size();
-    }
-    emit_jobs_sorted_.clear();
-    emit_jobs_sorted_.reserve(total_jobs);
-    uint32_t est_notes = 0;
-    uint32_t est_glow = 0;
-    uint32_t est_late = 0;
-    for (const auto& bucket : emit_job_buckets_) {
-      for (const EmitJob& job : bucket) {
-        emit_jobs_sorted_.push_back(job);
-        est_notes += job.n_notes;
-        est_glow += job.n_glow;
-        est_late += job.n_late;
-      }
-    }
     const size_t njobs = emit_jobs_sorted_.size();
-#if WDS_DIAG_ENABLED
-    emit_build_us = emit_elapsed(build_t0);
-#endif  // WDS_DIAG_ENABLED
     if (njobs == 0) {
+#if WDS_DIAG_ENABLED
+      emit_build_us = emit_elapsed(build_t0);
+#endif  // WDS_DIAG_ENABLED
       return;
     }
     const int threads = std::max(wds::chart_render::split_collect_thread_count(), 1);
-    const uint32_t est_verts = est_notes + est_glow + est_late;
+    const uint32_t est_verts = emit_job_vert_prefix_[njobs];
     // Small tessellation stays on this thread; the shared collect pool
     // scales with topology (not a hardcoded 4).
     const bool use_pool = threads > 1 && njobs >= 2 && est_verts >= 2048u;
     const size_t nparts =
         use_pool ? std::max<size_t>(1, std::min(static_cast<size_t>(threads), njobs))
                  : size_t{1};
+    if (emit_part_lo_.size() < nparts) {
+      emit_part_lo_.resize(nparts);
+    }
+    if (emit_part_hi_.size() < nparts) {
+      emit_part_hi_.resize(nparts);
+    }
+    const uint32_t total_v = emit_job_vert_prefix_[njobs];
+    emit_part_lo_[0] = 0;
+    if (total_v == 0) {
+      for (size_t i = 0; i < nparts; ++i) {
+        emit_part_lo_[i] = njobs * i / nparts;
+        emit_part_hi_[i] = njobs * (i + 1) / nparts;
+      }
+    } else {
+      const uint32_t* pre = emit_job_vert_prefix_.data();
+      auto find_at = [&](uint32_t target) -> size_t {
+        const uint32_t* it = std::lower_bound(pre, pre + njobs + 1, target);
+        size_t j = static_cast<size_t>(it - pre);
+        if (j > njobs) {
+          j = njobs;
+        }
+        return j;
+      };
+      for (size_t i = 0; i + 1 < nparts; ++i) {
+        const uint32_t t_hi =
+            static_cast<uint32_t>((static_cast<uint64_t>(total_v) * (i + 1)) / nparts);
+        size_t cut = find_at(t_hi);
+        if (cut < emit_part_lo_[i]) {
+          cut = emit_part_lo_[i];
+        }
+        emit_part_hi_[i] = cut;
+        emit_part_lo_[i + 1] = cut;
+      }
+      emit_part_hi_[nparts - 1] = njobs;
+    }
+    if (nparts > 1) {
+      auto run_break = [&](size_t j) -> bool {
+        if (j == 0 || j >= njobs) {
+          return true;
+        }
+        const uint32_t a = emit_jobs_sorted_[j - 1].run_tail;
+        const uint32_t b = emit_jobs_sorted_[j].run_head;
+        return a == 0 || b == 0 || a != b;
+      };
+      const uint32_t* pre = emit_job_vert_prefix_.data();
+      for (size_t i = 0; i + 1 < nparts; ++i) {
+        const size_t left_lim = emit_part_lo_[i];
+        const size_t right_lim = emit_part_hi_[i + 1];
+        size_t target = emit_part_hi_[i];
+        if (target < left_lim) {
+          target = left_lim;
+        }
+        if (target > right_lim) {
+          target = right_lim;
+        }
+        size_t chosen = target;
+        if (!run_break(target)) {
+          size_t L = target;
+          while (L > left_lim && !run_break(L)) {
+            --L;
+          }
+          size_t R = target;
+          while (R < right_lim && !run_break(R)) {
+            ++R;
+          }
+          const uint32_t tv = pre[target];
+          const uint32_t dL = tv >= pre[L] ? tv - pre[L] : pre[L] - tv;
+          const uint32_t dR = tv >= pre[R] ? tv - pre[R] : pre[R] - tv;
+          chosen = dL <= dR ? L : R;
+        }
+        emit_part_hi_[i] = chosen;
+        emit_part_lo_[i + 1] = chosen;
+      }
+      emit_part_hi_[nparts - 1] = njobs;
+    }
 #if WDS_DIAG_ENABLED
-    emit_build_us += emit_elapsed(build_t0);
+    emit_build_us = emit_elapsed(build_t0);
     const auto vertex_t0 = emit_now();
 #endif  // WDS_DIAG_ENABLED
     if (nparts <= 1 && !(&notes == &emit_notes && &glow == &emit_glow && &late == &emit_late)) {
@@ -4003,8 +4467,8 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       std::vector<uint32_t>& glow_cap = emit_glow_cap_;
       std::vector<uint32_t>& late_cap = emit_late_cap_;
       for (size_t part_i = 0; part_i < nparts; ++part_i) {
-        const size_t lo = njobs * part_i / nparts;
-        const size_t hi = njobs * (part_i + 1) / nparts;
+        const size_t lo = emit_part_lo_[part_i];
+        const size_t hi = emit_part_hi_[part_i];
         for (size_t j = lo; j < hi; ++j) {
           const EmitJob& job = emit_jobs_sorted_[j];
           notes_cap[part_i] += job.n_notes;
@@ -4034,7 +4498,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       const size_t extra_idx_bytes = static_cast<size_t>(extra_verts) * sizeof(uint32_t) * 2u;
       const size_t head_idx_bytes = static_cast<size_t>(kHeadReserveIdx) * sizeof(uint32_t);
       const size_t lock_need_ib = extra_idx_bytes + head_idx_bytes;
-      const bool need_ib = wds::renderer::split_geometry_indexed_from_env();
+      const bool need_ib = indexed_geom;
       if (extra_bytes > 0 &&
           vulkan_.lock_persistent_vb(std::max(lock_need, size_t{4096}), &lock, lock_need_ib) &&
           lock.mapped != nullptr && lock.capacity_bytes >= lock_need &&
@@ -4091,32 +4555,33 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     struct JobEmitParCtx {
       std::vector<EmitJob>* jobs = nullptr;
       std::vector<SplitEmitPart>* parts = nullptr;
+      const size_t* part_lo = nullptr;
+      const size_t* part_hi = nullptr;
       size_t nparts = 0;
-      size_t njobs = 0;
       decltype(run_emit_job)* run = nullptr;
     } par_ctx;
     par_ctx.jobs = &emit_jobs_sorted_;
     par_ctx.parts = &split_emit_parts_;
+    par_ctx.part_lo = emit_part_lo_.data();
+    par_ctx.part_hi = emit_part_hi_.data();
     par_ctx.nparts = nparts;
-    par_ctx.njobs = njobs;
     par_ctx.run = &run_emit_job;
-    ui_split_parallel_for(
-        nparts,
-        [](size_t part_i, void* raw) {
-          auto* ctx = static_cast<JobEmitParCtx*>(raw);
-          if (ctx == nullptr || ctx->jobs == nullptr || ctx->parts == nullptr ||
-              ctx->run == nullptr || part_i >= ctx->nparts || part_i >= ctx->parts->size()) {
-            return;
-          }
-          const size_t lo = ctx->njobs * part_i / ctx->nparts;
-          const size_t hi = ctx->njobs * (part_i + 1) / ctx->nparts;
-          SplitEmitPart& part = (*ctx->parts)[part_i];
-          SplitEmitTargets tg{&part.notes, &part.glow, &part.late, &part.drawn};
-          for (size_t j = lo; j < hi; ++j) {
-            (*ctx->run)((*ctx->jobs)[j], tg);
-          }
-        },
-        &par_ctx, static_cast<uint64_t>(est_verts));
+    auto emit_part_fn = [](size_t part_i, void* raw) {
+      auto* ctx = static_cast<JobEmitParCtx*>(raw);
+      if (ctx == nullptr || ctx->jobs == nullptr || ctx->parts == nullptr ||
+          ctx->part_lo == nullptr || ctx->part_hi == nullptr || ctx->run == nullptr ||
+          part_i >= ctx->nparts || part_i >= ctx->parts->size()) {
+        return;
+      }
+      const size_t lo = ctx->part_lo[part_i];
+      const size_t hi = ctx->part_hi[part_i];
+      SplitEmitPart& part = (*ctx->parts)[part_i];
+      SplitEmitTargets tg{&part.notes, &part.glow, &part.late, &part.drawn};
+      for (size_t j = lo; j < hi; ++j) {
+        (*ctx->run)((*ctx->jobs)[j], tg);
+      }
+    };
+    ui_split_parallel_for(nparts, emit_part_fn, &par_ctx, static_cast<uint64_t>(est_verts));
     dest_reserve_chunk = saved_chunk;
     if (split_emit_in_vb_) {
       bool overflow = false;
@@ -4139,23 +4604,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
         }
         split_emit_in_vb_ = false;
         split_emit_vb_low_ = 0;
-        ui_split_parallel_for(
-            nparts,
-            [](size_t part_i, void* raw) {
-              auto* ctx = static_cast<JobEmitParCtx*>(raw);
-              if (ctx == nullptr || ctx->jobs == nullptr || ctx->parts == nullptr ||
-                  ctx->run == nullptr || part_i >= ctx->nparts || part_i >= ctx->parts->size()) {
-                return;
-              }
-              const size_t lo = ctx->njobs * part_i / ctx->nparts;
-              const size_t hi = ctx->njobs * (part_i + 1) / ctx->nparts;
-              SplitEmitPart& part = (*ctx->parts)[part_i];
-              SplitEmitTargets tg{&part.notes, &part.glow, &part.late, &part.drawn};
-              for (size_t j = lo; j < hi; ++j) {
-                (*ctx->run)((*ctx->jobs)[j], tg);
-              }
-            },
-            &par_ctx, static_cast<uint64_t>(est_verts));
+        ui_split_parallel_for(nparts, emit_part_fn, &par_ctx, static_cast<uint64_t>(est_verts));
       }
     }
 #if WDS_DIAG_ENABLED
@@ -4185,8 +4634,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
     }
   };
 
-  const bool verts_selftest =
-      wds::ui::frame_diag_env_enabled(std::getenv("WDS_PREVIEW_VERTS_SELFTEST"));
+  const bool verts_selftest = kVertsSelftest;
   static bool verts_selftest_done = false;
   if (verts_selftest && !verts_selftest_done && !collect_memo && !verts_memo &&
       collected.total > 0) {
@@ -4239,6 +4687,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
       DrawBatch rec_notes;
       DrawBatch rec_glow;
       DrawBatch rec_late;
+      rec_late.overlay_ordered = true;
       for (size_t i = 0; i < split_emit_direct_n_; ++i) {
         rec_notes.append_from(split_emit_parts_[i].notes);
         rec_glow.append_from(split_emit_parts_[i].glow);
@@ -4339,8 +4788,10 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
                                   std::chrono::steady_clock::now() - verts_t0)
                                   .count();
   split_frame_diag_.emit_build_us = emit_build_us;
+  split_frame_diag_.emit_plan_us = emit_plan_us;
   split_frame_diag_.emit_vertex_us = emit_vertex_us;
   split_frame_diag_.emit_merge_us = emit_merge_us;
+  split_frame_diag_.emit_merge_fb = emit_merge_fb;
 #endif  // WDS_DIAG_ENABLED
 }
 

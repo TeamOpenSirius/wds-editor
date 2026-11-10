@@ -4,6 +4,10 @@
 #include <wds/chart_render/stage_geometry.hpp>
 #include "split_wall_profile.hpp"
 #include "shuriken/internal.hpp"
+#if WDS_DIAG_ENABLED
+#include "shuriken/split_eval_cache.hpp"
+#include "split_over_cap.hpp"
+#endif
 #include "shuriken/split_eval_carry.hpp"
 #include <wds/core/gimmick.hpp>
 #include <wds/core/official_chart.hpp>
@@ -34,6 +38,7 @@ inline std::string window_report() { return {}; }
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -173,6 +178,8 @@ void usage() {
                "      hop, not 2022.3.\n"
                "  noise-catalog\n"
                "      List official effects with active Noise / noise-driven sub-emitters.\n"
+               "  births-extend-scan [--effect ID]\n"
+               "      Catalog count of systems where collect_births_can_extend is true.\n"
                "  noise-hold-plan\n"
                "      Per-system hold-4 travel, live estimate, chosen N (hop, not 2022.3).\n"
                "\n"
@@ -200,6 +207,11 @@ void usage() {
                "      11621/10380/10660/11711 ×4 stagger 0.2. Exact vs remake + cost.\n"
                "  kf-memory --chart PATH [--gap 0.25,0.5,1,2] [--quality 1]\n"
                "      Hypothetical whole-chart snapshot bytes in note windows (alive slots).\n"
+               "\n"
+               "  key-collision-check\n"
+               "      Full6×2 stagger=0 and Full6+Full3 same start_ms: 5-run hash stability\n"
+               "      and default cache/carry vs CACHE=CARRY=PERSIST=0 particle identity.\n"
+               "      Cold (clear each frame) and play. Exit 1 if 6+3 still share keys.\n"
                "\n"
                "  dead-skip-check [--tmax 8] [--dt 0.05] [--instances 1] [--split-count 2]\n"
                "                  [--only ID[,ID...]]\n"
@@ -345,6 +357,66 @@ double collect_ms(const std::vector<PreviewSplitLaneInstance>& splits, int quali
   return ms;
 }
 
+#if WDS_DIAG_ENABLED
+void print_lockwait_frame(int i, double collect_ms, bool warm,
+                          const wds::chart_render::SplitEffectEvalCacheStats& prev,
+                          const wds::chart_render::SplitEffectEvalCacheStats& cur) {
+  if (!wds::chart_render::split_lockwait_enabled()) {
+    return;
+  }
+  wds::chart_render::SplitWallFrameSnap wall{};
+  const bool have = wds::chart_render::split_wall_copy_last_frame(wall);
+  const double lockwait_ms = have ? static_cast<double>(wall.lockwait_ns) / 1e6 : 0.0;
+  const double max_wait_ms = have ? static_cast<double>(wall.lockwait_max_ns) / 1e6 : 0.0;
+  const double thread_max_ms = have ? static_cast<double>(wall.lockwait_thread_max_ns) / 1e6 : 0.0;
+  std::fprintf(stdout,
+               "LOCKWAITFRAME i=%d collect_ms=%.3f lockwait_ms=%.6f blocks=%d max_wait_ms=%.6f "
+               "thread_max_ms=%.6f lookup_contend=%llu store_contend=%llu lookup_ops=%llu "
+               "store_ops=%llu%s\n",
+               i, collect_ms, lockwait_ms, have ? wall.lockwait_blocks : 0, max_wait_ms,
+               thread_max_ms,
+               static_cast<unsigned long long>(cur.lookup_contend - prev.lookup_contend),
+               static_cast<unsigned long long>(cur.store_contend - prev.store_contend),
+               static_cast<unsigned long long>(cur.lookup_ops - prev.lookup_ops),
+               static_cast<unsigned long long>(cur.store_ops - prev.store_ops),
+               warm ? " warm=1" : "");
+}
+
+void print_wave_frame(int i, double collect_ms, bool warm) {
+  if (!wds::chart_render::split_waves_enabled()) {
+    return;
+  }
+  wds::chart_render::SplitWallFrameSnap wall{};
+  const bool have = wds::chart_render::split_wall_copy_last_frame(wall);
+  auto sec = [&](wds::chart_render::SplitWallSec s) {
+    return have ? wall.sec_ms[static_cast<int>(s)] : 0.0;
+  };
+  using S = wds::chart_render::SplitWallSec;
+  std::fprintf(stdout,
+               "WAVEFRAME i=%d collect_ms=%.3f a=%.3f b1=%.3f cap_push=%.3f cap_select=%.3f "
+               "cap_n=%d slices=%.3f b2setup=%.3f b2=%.3f b2b=%.3f b3setup=%.3f b3=%.3f "
+               "b3b=%.3f c=%.3f reap=%.3f%s\n",
+               i, collect_ms, sec(S::PhaseA), sec(S::WaveB1), sec(S::CapPush), sec(S::CapApply),
+               have ? wall.cap_n : 0, sec(S::RealizeSlices), sec(S::WaveB2Setup), sec(S::WaveB2),
+               sec(S::WaveB2b), sec(S::WaveB3Setup), sec(S::WaveB3), sec(S::WaveB3b),
+               sec(S::Assemble), sec(S::Reap), warm ? " warm=1" : "");
+}
+
+void print_diag_frames(int i, double collect_ms, bool warm,
+                       wds::chart_render::SplitEffectEvalCacheStats& prev) {
+  const auto cur = wds::chart_render::split_effect_eval_cache_stats();
+  print_lockwait_frame(i, collect_ms, warm, prev, cur);
+  print_wave_frame(i, collect_ms, warm);
+  if (wds::chart_render::split_lockwait_enabled()) {
+    prev = cur;
+  }
+}
+
+void bench_diag_dump_end() {
+  wds::chart_render::shuriken::split_eval_cache_dump_shard_stats();
+  wds::chart_render::over_cap_bucket_verify_dump();
+}
+#endif  // WDS_DIAG_ENABLED
 struct MsStats {
   std::vector<double> samples;
 
@@ -1230,6 +1302,10 @@ void collect_single_group_samples(const GoldenGroupSpec& spec, int32_t scenario_
   }
   std::fclose(wf);
   close(write_fd);
+  wds::chart_render::shuriken::flush_integrate_batch_stats();
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   _exit(0);
 }
 
@@ -1480,7 +1556,15 @@ struct GoldenRunConfig {
       }
     }
   }
+  if (const char* e = std::getenv("WDS_SPLIT_ADAPT_LOG");
+      e != nullptr && e[0] == '1' && e[1] == '\0') {
+    std::fprintf(stderr, "EVALSLICES worker=%d last=%d max=%d sliced_tasks=%d\n", worker_id,
+                 wds::chart_render::split_effect_last_eval_slices(),
+                 wds::chart_render::split_effect_max_eval_slices(),
+                 wds::chart_render::split_effect_last_eval_sliced_tasks());
+  }
   std::fclose(out);
+  wds::chart_render::shuriken::flush_integrate_batch_stats();
   _exit(0);
 }
 
@@ -2041,6 +2125,15 @@ struct ScanRow {
   int frames = 0;
   bool timed_out = false;
   double timeout_at_now_t = 0.0;
+  int max_birth_sum = 0;
+  int max_birth_plan_len = 0;
+  int max_birth_queue_len = 0;
+  int max_birth_plan_n = 0;
+  int max_birth_queue_n = 0;
+  int max_birth_plan_ext = 0;
+  int max_birth_queue_ext = 0;
+  double max_births_ms = 0.0;
+  double mean_births_ms = 0.0;
 };
 
 enum : uint32_t {
@@ -2058,6 +2151,15 @@ struct ScanPipeMsg {
   double max_ms = 0.0;
   double mean_ms = 0.0;
   int32_t frames = 0;
+  int32_t max_birth_sum = 0;
+  int32_t max_birth_plan_len = 0;
+  int32_t max_birth_queue_len = 0;
+  int32_t max_birth_plan_n = 0;
+  int32_t max_birth_queue_n = 0;
+  int32_t max_birth_plan_ext = 0;
+  int32_t max_birth_queue_ext = 0;
+  double max_births_ms = 0.0;
+  double mean_births_ms = 0.0;
 };
 
 static_assert(sizeof(ScanPipeMsg) <= 512, "ScanPipeMsg must fit in PIPE_BUF for atomic writes");
@@ -2112,6 +2214,15 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
   double max_ms = 0.0;
   double sum_ms = 0.0;
   int frames = 0;
+  int max_birth_sum = 0;
+  int max_birth_plan_len = 0;
+  int max_birth_queue_len = 0;
+  int max_birth_plan_n = 0;
+  int max_birth_queue_n = 0;
+  int max_birth_plan_ext = 0;
+  int max_birth_queue_ext = 0;
+  double max_births_ms = 0.0;
+  double sum_births_ms = 0.0;
   for (double now_t = 0.0; now_t <= tmax + 1e-12; now_t += dt) {
     ScanPipeMsg progress;
     progress.kind = kScanPipeProgress;
@@ -2126,6 +2237,24 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
     max_ms = std::max(max_ms, ms);
     sum_ms += ms;
     ++frames;
+    wds::chart_render::SplitWallFrameSnap wall{};
+    if (wds::chart_render::split_wall_copy_last_frame(wall)) {
+      const int birth_sum = wall.birth_plan_len_sum + wall.birth_queue_len_sum;
+      max_birth_sum = std::max(max_birth_sum, birth_sum);
+      max_birth_plan_len = std::max(max_birth_plan_len, wall.birth_plan_len_sum);
+      max_birth_queue_len = std::max(max_birth_queue_len, wall.birth_queue_len_sum);
+      max_birth_plan_n = std::max(max_birth_plan_n, wall.birth_plan_n);
+      max_birth_queue_n = std::max(max_birth_queue_n, wall.birth_queue_n);
+      max_birth_plan_ext = std::max(max_birth_plan_ext, wall.birth_plan_ext);
+      max_birth_queue_ext = std::max(max_birth_queue_ext, wall.birth_queue_ext);
+      const double births_ms =
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::BirthsPlan)] +
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::CapSortPlan)] +
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::BirthsQueue)] +
+          wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::CapSortQueue)];
+      max_births_ms = std::max(max_births_ms, births_ms);
+      sum_births_ms += births_ms;
+    }
   }
   ScanPipeMsg done;
   done.kind = kScanPipeComplete;
@@ -2134,8 +2263,21 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
   done.max_ms = max_ms;
   done.mean_ms = frames > 0 ? sum_ms / static_cast<double>(frames) : 0.0;
   done.frames = frames;
+  done.max_birth_sum = max_birth_sum;
+  done.max_birth_plan_len = max_birth_plan_len;
+  done.max_birth_queue_len = max_birth_queue_len;
+  done.max_birth_plan_n = max_birth_plan_n;
+  done.max_birth_queue_n = max_birth_queue_n;
+  done.max_birth_plan_ext = max_birth_plan_ext;
+  done.max_birth_queue_ext = max_birth_queue_ext;
+  done.max_births_ms = max_births_ms;
+  done.mean_births_ms = frames > 0 ? sum_births_ms / static_cast<double>(frames) : 0.0;
   write_scan_pipe_msg(write_fd, done);
   close(write_fd);
+  wds::chart_render::shuriken::flush_integrate_batch_stats();
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   _exit(0);
 }
 
@@ -2267,6 +2409,15 @@ bool scan_one_effect_with_timeout(int32_t effect_id, int quality, int32_t split_
     row_out.max_ms = complete_msg.max_ms;
     row_out.mean_ms = complete_msg.mean_ms;
     row_out.frames = complete_msg.frames;
+    row_out.max_birth_sum = complete_msg.max_birth_sum;
+    row_out.max_birth_plan_len = complete_msg.max_birth_plan_len;
+    row_out.max_birth_queue_len = complete_msg.max_birth_queue_len;
+    row_out.max_birth_plan_n = complete_msg.max_birth_plan_n;
+    row_out.max_birth_queue_n = complete_msg.max_birth_queue_n;
+    row_out.max_birth_plan_ext = complete_msg.max_birth_plan_ext;
+    row_out.max_birth_queue_ext = complete_msg.max_birth_queue_ext;
+    row_out.max_births_ms = complete_msg.max_births_ms;
+    row_out.mean_births_ms = complete_msg.mean_births_ms;
   }
   close(pipefd[0]);
   return true;
@@ -2340,8 +2491,10 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     }
     return a.max_ms > b.max_ms;
   });
-  std::fprintf(stdout, "\n%-8s %8s %10s %10s %8s %9s %16s\n", "id", "max_n", "max_ms", "mean_ms",
-               "frames", "timed_out", "timeout_at_now_t");
+  std::fprintf(stdout,
+               "\n%-8s %8s %10s %10s %8s %9s %16s %10s %10s %8s %8s %8s %8s\n", "id", "max_n",
+               "max_ms", "mean_ms", "frames", "timed_out", "timeout_at_now_t", "births_ms",
+               "mean_b_ms", "birth_n", "plan_len", "queue_len", "ext_max");
   for (const ScanRow& r : by_time) {
     std::fprintf(stdout, "%-8d %8d", r.id, r.max_n);
     print_ms_cell(r.max_ms);
@@ -2352,6 +2505,10 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     } else {
       std::fprintf(stdout, " %16s", "-");
     }
+    print_ms_cell(r.max_births_ms);
+    print_ms_cell(r.mean_births_ms);
+    std::fprintf(stdout, " %8d %8d %8d %8d", r.max_birth_sum, r.max_birth_plan_len,
+                 r.max_birth_queue_len, r.max_birth_plan_ext + r.max_birth_queue_ext);
     std::fputc('\n', stdout);
   }
   std::fprintf(stdout, "\n");
@@ -2376,6 +2533,36 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     std::fprintf(stdout, "HEAVIEST %d\n", r.id);
     ++heaviest_n;
   }
+  std::vector<ScanRow> by_births_ms = rows;
+  std::sort(by_births_ms.begin(), by_births_ms.end(),
+            [](const ScanRow& a, const ScanRow& b) { return a.max_births_ms > b.max_births_ms; });
+  size_t heaviest_births = 0;
+  for (const ScanRow& r : by_births_ms) {
+    if (heaviest_births >= 8) {
+      break;
+    }
+    if (r.timed_out) {
+      continue;
+    }
+    std::fprintf(stdout, "HEAVIEST_BIRTHS_MS %d max_births_ms=%.3f max_birth_n=%d\n", r.id,
+                 r.max_births_ms, r.max_birth_sum);
+    ++heaviest_births;
+  }
+  std::vector<ScanRow> by_birth_n = rows;
+  std::sort(by_birth_n.begin(), by_birth_n.end(),
+            [](const ScanRow& a, const ScanRow& b) { return a.max_birth_sum > b.max_birth_sum; });
+  size_t heaviest_birth_n = 0;
+  for (const ScanRow& r : by_birth_n) {
+    if (heaviest_birth_n >= 8) {
+      break;
+    }
+    if (r.timed_out) {
+      continue;
+    }
+    std::fprintf(stdout, "HEAVIEST_BIRTH_N %d max_birth_n=%d plan=%d queue=%d\n", r.id,
+                 r.max_birth_sum, r.max_birth_plan_len, r.max_birth_queue_len);
+    ++heaviest_birth_n;
+  }
 
   if (!csv_path.empty()) {
     FILE* csv = std::fopen(csv_path.c_str(), "w");
@@ -2383,7 +2570,10 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
       std::fprintf(stderr, "failed to write csv: %s\n", csv_path.c_str());
       return 1;
     }
-    std::fprintf(csv, "effect_id,max_particles,max_ms,mean_ms,frames,timed_out,timeout_at_now_t\n");
+    std::fprintf(csv,
+                 "effect_id,max_particles,max_ms,mean_ms,frames,timed_out,timeout_at_now_t,"
+                 "max_births_ms,mean_births_ms,max_birth_n,max_birth_plan_len,max_birth_queue_len,"
+                 "max_birth_plan_n,max_birth_queue_n,max_birth_plan_ext,max_birth_queue_ext\n");
     for (const ScanRow& r : by_time) {
       std::fprintf(csv, "%d,%d,", r.id, r.max_n);
       print_ms_csv(csv, r.max_ms);
@@ -2395,11 +2585,20 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
       } else {
         std::fputs(",", csv);
       }
-      std::fputc('\n', csv);
+      std::fputc(',', csv);
+      print_ms_csv(csv, r.max_births_ms);
+      std::fputc(',', csv);
+      print_ms_csv(csv, r.mean_births_ms);
+      std::fprintf(csv, ",%d,%d,%d,%d,%d,%d,%d\n", r.max_birth_sum, r.max_birth_plan_len,
+                   r.max_birth_queue_len, r.max_birth_plan_n, r.max_birth_queue_n,
+                   r.max_birth_plan_ext, r.max_birth_queue_ext);
     }
     std::fclose(csv);
     std::fprintf(stdout, "wrote %s\n", csv_path.c_str());
   }
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return 0;
 }
 
@@ -2443,11 +2642,19 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
   std::mt19937 rng(seed);
   if (kind == "play") {
     state.reset();
+#if WDS_DIAG_ENABLED
+    auto prev_cache = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     if (warm_from_t >= 0.0) {
       double warm_sec = now_sec_from_now_t(kDefaultStartMs, warm_from_t);
       int from_t_frames = 0;
       while (warm_sec + 1e-12 < range_lo) {
+#if WDS_DIAG_ENABLED
+        const double wt = collect_ms(splits, quality, warm_sec, true, state, io);
+        print_diag_frames(from_t_frames, wt, true, prev_cache);
+#else
         (void)collect_ms(splits, quality, warm_sec, true, state, io);
+#endif
         warm_sec = std::min(range_lo, warm_sec + 1.0 / 60.0);
         ++from_t_frames;
       }
@@ -2458,7 +2665,12 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
     if (warm_frames > 0) {
       int wf = 0;
       for (; wf < warm_frames; ++wf) {
+#if WDS_DIAG_ENABLED
+        const double wt = collect_ms(splits, quality, now_sec, true, state, io);
+        print_diag_frames(wf, wt, true, prev_cache);
+#else
         (void)collect_ms(splits, quality, now_sec, true, state, io);
+#endif
         now_sec = std::min(range_hi, now_sec + (play_dt > 1e-9 ? play_dt : 1.0 / 60.0));
       }
       std::fprintf(stdout, "  warm-frames=%d now_sec=%.4f n=%d\n", wf, now_sec, io.total);
@@ -2469,8 +2681,17 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
     }();
     mark_collect_faults();
     const bool wall_on = wds::chart_render::split_wall_enabled();
+#if !WDS_DIAG_ENABLED
     auto prev_cache = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     const double origin = play_origin_sec(kDefaultStartMs);
+#if WDS_DIAG_ENABLED
+    MsStats par_eff;
+    MsStats par_eff_v1;
+    MsStats wall_top_us;
+    MsStats nested_wait_us;
+    MsStats sum_item_us;
+#endif  // WDS_DIAG_ENABLED
     for (int i = 0; i < frames; ++i) {
       rusage ru0{};
       rusage ru1{};
@@ -2483,9 +2704,20 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       }
       ms.add(t);
       ps.add(io.total);
+#if WDS_DIAG_ENABLED
+      print_diag_frames(i, t, false, prev_cache);
+#endif
       if (frame_log) {
         std::fprintf(stdout, "FRAME i=%d collect_ms=%.3f n=%d\n", i, t, io.total);
       }
+#if WDS_DIAG_ENABLED
+      const auto phase = wds::chart_render::split_effect_last_phase_diag();
+      par_eff.add(phase.pool_par_eff);
+      par_eff_v1.add(phase.pool_par_eff_v1);
+      wall_top_us.add(static_cast<double>(phase.pool_wall_top_us));
+      nested_wait_us.add(static_cast<double>(phase.pool_nested_wait_us));
+      sum_item_us.add(static_cast<double>(phase.pool_sum_item_us));
+#endif  // WDS_DIAG_ENABLED
       if (wall_on) {
         wds::chart_render::SplitWallFrameSnap wall{};
         const bool have_wall = wds::chart_render::split_wall_copy_last_frame(wall);
@@ -2495,7 +2727,7 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                      "A=%.3f B=%.3f C=%.3f Bwall=%.3f task_sum=%.3f unscoped=%.3f "
                      "ntasks=%d eval=%d kept=%d realized=%d minflt=%ld majflt=%ld "
                      "cache hit/op/store=%llu/%llu/%llu carry hit/miss=%llu/%llu "
-                     "walk hit/miss=%llu/%llu",
+                     "walk hit/miss=%llu/%llu eval_slices=%d longest_wave=%d kind=%d fill=%d",
                      i, now_sec - origin, now_sec, t, io.total,
                      have_wall ? wall.sec_ms[static_cast<int>(wds::chart_render::SplitWallSec::PhaseA)]
                                : 0.0,
@@ -2511,7 +2743,17 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                      cur.lookup_ops - prev_cache.lookup_ops, cur.store_ops - prev_cache.store_ops,
                      cur.carry_hits - prev_cache.carry_hits, cur.carry_misses - prev_cache.carry_misses,
                      cur.carry_walk_hits - prev_cache.carry_walk_hits,
-                     cur.carry_walk_misses - prev_cache.carry_walk_misses);
+                     cur.carry_walk_misses - prev_cache.carry_walk_misses, cur.eval_slices,
+                     have_wall ? wall.longest_wave : -1, have_wall ? wall.longest_kind : -1,
+                     have_wall ? wall.longest_fill : 0);
+#if WDS_DIAG_ENABLED
+        std::fprintf(stdout,
+                     " pool_par_eff=%.3f pool_par_eff_v1=%.3f pool_wall_top_us=%llu "
+                     "pool_nested_wait_us=%llu",
+                     phase.pool_par_eff, phase.pool_par_eff_v1,
+                     static_cast<unsigned long long>(phase.pool_wall_top_us),
+                     static_cast<unsigned long long>(phase.pool_nested_wait_us));
+#endif  // WDS_DIAG_ENABLED
         prev_cache = cur;
         if (have_wall) {
           for (int s = 0; s < static_cast<int>(wds::chart_render::SplitWallSec::Count); ++s) {
@@ -2522,12 +2764,31 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                                                  static_cast<wds::chart_render::SplitWallSec>(s)),
                          wall.sec_ms[s]);
           }
+          std::fprintf(stdout,
+                       " birth_plan n/ext/sum/max=%d/%d/%d/%d birth_queue n/ext/sum/max=%d/%d/%d/%d"
+                       " birth_extend hit/miss=%d/%d birth_verify_mm=%llu",
+                       wall.birth_plan_n, wall.birth_plan_ext, wall.birth_plan_len_sum,
+                       wall.birth_plan_len_max, wall.birth_queue_n, wall.birth_queue_ext,
+                       wall.birth_queue_len_sum, wall.birth_queue_len_max, wall.birth_extend_hit,
+                       wall.birth_extend_miss,
+                       static_cast<unsigned long long>(
+                           wds::chart_render::shuriken::split_eval_birth_table_verify_mismatches()));
         }
         std::fprintf(stdout, "\n");
       }
       wds::common::perf::end_frame();
       now_sec = std::min(range_hi, now_sec + (play_dt > 1e-9 ? play_dt : 1.0 / 60.0));
     }
+#if WDS_DIAG_ENABLED
+    if (wds::common::perf::enabled() && !par_eff.samples.empty()) {
+      std::fprintf(stdout,
+                   "  pool_par_eff p50=%.3f pool_par_eff_v1 p50=%.3f "
+                   "pool_wall_top_us p50=%.0f pool_nested_wait_us p50=%.0f "
+                   "pool_sum_item_us p50=%.0f\n",
+                   par_eff.pct(0.50), par_eff_v1.pct(0.50), wall_top_us.pct(0.50),
+                   nested_wait_us.pct(0.50), sum_item_us.pct(0.50));
+    }
+#endif  // WDS_DIAG_ENABLED
   } else if (kind == "dead") {
     state.reset();
     double warm_sec = now_sec_from_now_t(kDefaultStartMs, 0.0);
@@ -2631,11 +2892,19 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       wds::common::perf::end_frame();
     }
   } else if (kind == "seek-play") {
+#if WDS_DIAG_ENABLED
+    auto prev_seek_warm = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     if (warm_frames > 0) {
       double warm_sec = range_lo;
       int wf = 0;
       for (; wf < warm_frames; ++wf) {
+#if WDS_DIAG_ENABLED
+        const double wt = collect_ms(splits, quality, warm_sec, true, state, io);
+        print_diag_frames(wf, wt, true, prev_seek_warm);
+#else
         (void)collect_ms(splits, quality, warm_sec, true, state, io);
+#endif
         warm_sec = std::min(range_hi, warm_sec + (play_dt > 1e-9 ? play_dt : 1.0 / 60.0));
       }
       std::fprintf(stdout, "  seek-play warm-frames=%d now_sec=%.4f n=%d\n", wf, warm_sec, io.total);
@@ -2667,6 +2936,10 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       const unsigned long long d_c_miss = cur.carry_misses - prev.carry_misses;
       const unsigned long long d_w_hit = cur.carry_walk_hits - prev.carry_walk_hits;
       const unsigned long long d_w_miss = cur.carry_walk_misses - prev.carry_walk_misses;
+#if WDS_DIAG_ENABLED
+      print_lockwait_frame(i, t, false, prev, cur);
+      print_wave_frame(i, t, false);
+#endif
       prev = cur;
       std::fprintf(stdout,
                    "SEEKFRAME i=%d now_t=%.4f now_sec=%.4f collect=%.3f n=%d "
@@ -2705,12 +2978,18 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
   } else {
     std::uniform_real_distribution<double> uni(range_lo, range_hi);
     mark_collect_faults();
+#if WDS_DIAG_ENABLED
+    auto prev_cold = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     for (int i = 0; i < frames; ++i) {
       wds::chart_render::split_effect_clear_caches();
       const double now_sec = uni(rng);
       const double t = collect_ms(splits, quality, now_sec, false, state, io);
       ms.add(t);
       ps.add(io.total);
+#if WDS_DIAG_ENABLED
+      print_diag_frames(i, t, false, prev_cold);
+#endif
       wds::common::perf::end_frame();
     }
   }
@@ -2740,6 +3019,9 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                static_cast<unsigned long long>(cache.carry_walk_hits),
                static_cast<unsigned long long>(cache.carry_walk_misses),
                static_cast<unsigned long long>(cache.carry_walk_commits));
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return 0;
 }
 
@@ -3018,8 +3300,16 @@ int cmd_golden_compare_hash(const GoldenRunConfig& cfg, const std::string& basel
     }
   }
   const double sec = std::chrono::duration<double>(Clock::now() - t0).count();
-  std::fprintf(stdout, "golden-compare hash tier=%s jobs=%d samples=%d mismatching=%d wall=%.2fs\n",
-               golden_tier_name(cfg.tier), cfg.jobs, samples, mismatching, sec);
+  std::fprintf(stdout,
+               "golden-compare hash tier=%s jobs=%d samples=%d mismatching=%d wall=%.2fs "
+               "eval_slices_last=%d eval_slices_max=%d eval_sliced_tasks=%d\n",
+               golden_tier_name(cfg.tier), cfg.jobs, samples, mismatching, sec,
+               wds::chart_render::split_effect_last_eval_slices(),
+               wds::chart_render::split_effect_max_eval_slices(),
+               wds::chart_render::split_effect_last_eval_sliced_tasks());
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return mismatching == 0 ? 0 : 1;
 }
 
@@ -3193,6 +3483,9 @@ int cmd_golden_compare_v1(const GoldenRunConfig& cfg, const std::string& path, b
     std::fprintf(stdout, "  worst %s abs=%.6g cand=%.6g base=%.6g  %s\n", w.field.c_str(),
                  w.abs_diff, w.cand, w.base, format_key(w.key, kbuf, sizeof(kbuf)));
   }
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return acc.mismatching == 0 ? 0 : 1;
 }
 
@@ -3290,6 +3583,126 @@ int cmd_noise_catalog() {
     std::fprintf(stdout, " %d=%.4g", heavy[i].second, static_cast<double>(heavy[i].first));
   }
   std::fputc('\n', stdout);
+  return 0;
+}
+
+int cmd_births_extend_scan(int32_t only_id) {
+  const auto ids = official_split_effect_ids();
+  int effects_n = 0;
+  int effects_any = 0;
+  int sys_n = 0;
+  int sys_active = 0;
+  int sys_ext = 0;
+  int sys_rot = 0;
+  int sys_rod = 0;
+  int sys_curve = 0;
+  int sys_burst = 0;
+  int sys_mixed = 0;
+  int sys_cap = 0;
+  int sys_rod_two = 0;
+  struct EffectExt {
+    int32_t id = 0;
+    int active = 0;
+    int ext = 0;
+    int rot = 0;
+    int rod = 0;
+    int curve = 0;
+    int burst = 0;
+  };
+  std::vector<EffectExt> per;
+  std::fprintf(stdout, "births-extend-scan effects=%zu only=%d\n", ids.size(), only_id);
+  for (int32_t id : ids) {
+    if (only_id > 0 && id != only_id) {
+      continue;
+    }
+    ++effects_n;
+    uint16_t n = 0;
+    const SplitEffectParticle* ps = effect_catalog_particles(id, &n);
+    EffectExt row;
+    row.id = id;
+    for (uint16_t i = 0; i < n; ++i) {
+      const SplitEffectParticle& p = ps[i];
+      ++sys_n;
+      if (p.go_active == 0) {
+        continue;
+      }
+      ++sys_active;
+      ++row.active;
+      const bool can = wds::chart_render::shuriken::collect_births_can_extend(p);
+      if (can) {
+        ++sys_ext;
+        ++row.ext;
+      }
+      if (p.rot_curve_count > 0 || p.rod_curve_count > 0) {
+        ++sys_curve;
+        ++row.curve;
+      }
+      uint8_t burst_n = 0;
+      (void)official_split_effect_bursts(p, &burst_n);
+      const bool burst = burst_n > 0 ||
+                         (p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::Burst) &&
+                          p.emission > 0.0f);
+      if (burst) {
+        ++sys_burst;
+        ++row.burst;
+      }
+      if (p.max_particles > 0 && p.max_particles < 1000) {
+        ++sys_cap;
+      }
+      const bool has_rot = p.rate_over_time > 1e-6f;
+      float rod = p.rate_over_distance;
+      if (rod <= 1e-6f &&
+          p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::RateOverDistance)) {
+        rod = p.emission;
+      }
+      const bool rod_two = p.rod_random != 0 && p.rate_over_distance_min > 1e-6f;
+      const bool has_rod = rod > 1e-6f || rod_two;
+      if (has_rot) {
+        ++sys_rot;
+        ++row.rot;
+      }
+      if (has_rod) {
+        ++sys_rod;
+        ++row.rod;
+      }
+      if (has_rot && has_rod) {
+        ++sys_mixed;
+      }
+      if (rod_two) {
+        ++sys_rod_two;
+      }
+    }
+    if (row.ext > 0) {
+      ++effects_any;
+    }
+    per.push_back(row);
+    if (only_id > 0) {
+      std::fprintf(stdout, "  effect %d systems=%u active=%d ext=%d\n", id, n, row.active, row.ext);
+    }
+  }
+  std::sort(per.begin(), per.end(), [](const EffectExt& a, const EffectExt& b) {
+    if (a.ext != b.ext) {
+      return a.ext > b.ext;
+    }
+    return a.id < b.id;
+  });
+  std::fprintf(stdout, "births-extend-scan top_extend:\n");
+  for (size_t i = 0; i < per.size() && i < 20; ++i) {
+    const EffectExt& r = per[i];
+    if (r.ext <= 0) {
+      break;
+    }
+    std::fprintf(stdout, "  %d active=%d ext=%d rot=%d rod=%d curve=%d burst=%d\n", r.id, r.active,
+                 r.ext, r.rot, r.rod, r.curve, r.burst);
+  }
+  std::fprintf(stdout,
+               "births-extend-scan effects=%d with_extend=%d systems=%d active=%d extend=%d "
+               "(%.1f%% of active) rot=%d rod=%d curve=%d burst=%d mixed=%d cap<1000=%d "
+               "rod_two=%d\n",
+               effects_n, effects_any, sys_n, sys_active, sys_ext,
+               sys_active > 0 ? 100.0 * static_cast<double>(sys_ext) / static_cast<double>(sys_active)
+                              : 0.0,
+               sys_rot, sys_rod, sys_curve, sys_burst, sys_mixed, sys_cap, sys_rod_two);
   return 0;
 }
 
@@ -5635,6 +6048,373 @@ int cmd_kf_memory(const std::string& chart_path, const std::vector<double>& gaps
   return 0;
 }
 
+// Full6×2 stagger=0 and Full6+Full3 same start_ms. Default cache/carry vs
+// CACHE=CARRY=PERSIST=0 must be particle-identical; 5 repeats must hash-stable.
+// Catches the pre-keyfix hole where 6+3 shared ParticleCacheKey / SystemCarryKey.
+constexpr int32_t kKeyfixEffect = 10990;
+constexpr int kKeyfixRepeats = 5;
+constexpr int kKeyfixFrames = 4;
+
+uint64_t keyfix_fnv(uint64_t h, const void* p, size_t n) {
+  const auto* b = static_cast<const uint8_t*>(p);
+  for (size_t i = 0; i < n; ++i) {
+    h ^= b[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+void keyfix_mix_f32(uint64_t& h, float f) { h = keyfix_fnv(h, &f, sizeof(f)); }
+void keyfix_mix_u32(uint64_t& h, uint32_t u) { h = keyfix_fnv(h, &u, sizeof(u)); }
+void keyfix_mix_i32(uint64_t& h, int32_t u) { h = keyfix_fnv(h, &u, sizeof(u)); }
+void keyfix_mix_u64(uint64_t& h, uint64_t u) { h = keyfix_fnv(h, &u, sizeof(u)); }
+
+uint64_t keyfix_hash_pool(const SplitEffectLiveParticle* ps, int n, bool pose_only) {
+  struct Key {
+    int32_t line = 0;
+    uint32_t cat = 0;
+    uint32_t seed = 0;
+    float birth_t = 0.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    uint32_t idx = 0;
+  };
+  std::vector<Key> keys(static_cast<size_t>(std::max(n, 0)));
+  for (int i = 0; i < n; ++i) {
+    const SplitEffectLiveParticle& p = ps[i];
+    keys[static_cast<size_t>(i)] = Key{p.line_index, p.catalog_index, p.seed, p.birth_t, p.world_x,
+                                       p.main_y, p.z, static_cast<uint32_t>(i)};
+  }
+  std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+    if (a.line != b.line) {
+      return a.line < b.line;
+    }
+    if (a.cat != b.cat) {
+      return a.cat < b.cat;
+    }
+    if (a.seed != b.seed) {
+      return a.seed < b.seed;
+    }
+    if (a.birth_t != b.birth_t) {
+      return a.birth_t < b.birth_t;
+    }
+    if (a.x != b.x) {
+      return a.x < b.x;
+    }
+    if (a.y != b.y) {
+      return a.y < b.y;
+    }
+    if (a.z != b.z) {
+      return a.z < b.z;
+    }
+    return a.idx < b.idx;
+  });
+  uint64_t h = 1469598103934665603ull;
+  for (const Key& k : keys) {
+    const SplitEffectLiveParticle& p = ps[k.idx];
+    keyfix_mix_i32(h, p.line_index);
+    keyfix_mix_u32(h, p.catalog_index);
+    keyfix_mix_u32(h, p.seed);
+    keyfix_mix_f32(h, p.birth_t);
+    keyfix_mix_f32(h, p.world_x);
+    keyfix_mix_f32(h, p.main_y);
+    keyfix_mix_f32(h, p.z);
+    if (!pose_only) {
+      keyfix_mix_f32(h, p.age);
+      keyfix_mix_f32(h, p.size);
+      keyfix_mix_f32(h, p.r);
+      keyfix_mix_f32(h, p.g);
+      keyfix_mix_f32(h, p.b);
+      keyfix_mix_f32(h, p.a);
+      keyfix_mix_u32(h, p.trail_chain);
+      keyfix_mix_u32(h, p.trail_vertex);
+      keyfix_mix_u32(h, p.trail_count);
+    }
+  }
+  return h;
+}
+
+struct KeyfixSweep {
+  uint64_t pose = 0;
+  uint64_t full = 0;
+  int n = 0;
+  int unique_pose = 0;
+  int unique_full = 0;
+  int nan = 0;
+};
+
+void keyfix_reset() {
+  wds::chart_render::reset_split_effect_auto_seed_session(true);
+  wds::chart_render::split_effect_clear_caches();
+}
+
+KeyfixSweep keyfix_sweep(const std::vector<PreviewSplitLaneInstance>& splits,
+                         const std::vector<double>& times, bool play, bool clear_each, int repeats) {
+  KeyfixSweep out;
+  std::vector<uint64_t> poses;
+  std::vector<uint64_t> fulls;
+  poses.reserve(static_cast<size_t>(repeats));
+  fulls.reserve(static_cast<size_t>(repeats));
+  SplitEffectFrameCollect io;
+  SplitEffectPlaybackState state;
+  for (int r = 0; r < repeats; ++r) {
+    keyfix_reset();
+    state.reset();
+    uint64_t pose = 1469598103934665603ull;
+    uint64_t full = 1469598103934665603ull;
+    int n0 = 0;
+    int nan0 = 0;
+    for (size_t fi = 0; fi < times.size(); ++fi) {
+      if (clear_each) {
+        keyfix_reset();
+        state.reset();
+      }
+      (void)collect_ms(splits, 0, times[fi], play, state, io);
+      if (fi == 0) {
+        n0 = io.total;
+        for (int i = 0; i < io.total; ++i) {
+          const auto& p = io.pool[static_cast<size_t>(i)];
+          if (!std::isfinite(p.world_x) || !std::isfinite(p.main_y) || !std::isfinite(p.z)) {
+            ++nan0;
+          }
+        }
+      }
+      keyfix_mix_u64(pose, keyfix_hash_pool(io.pool.data(), io.total, true));
+      keyfix_mix_u64(full, keyfix_hash_pool(io.pool.data(), io.total, false));
+    }
+    poses.push_back(pose);
+    fulls.push_back(full);
+    if (r == 0) {
+      out.pose = pose;
+      out.full = full;
+      out.n = n0;
+      out.nan = nan0;
+    }
+  }
+  auto uniq = [](std::vector<uint64_t> v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return static_cast<int>(v.size());
+  };
+  out.unique_pose = uniq(poses);
+  out.unique_full = uniq(fulls);
+  return out;
+}
+
+struct KeyfixChildResult {
+  KeyfixSweep cold{};
+  KeyfixSweep play{};
+};
+
+int keyfix_run_one_env(const char* env_label) {
+  if (wds::chart_render::official_split_effect(kKeyfixEffect) == nullptr) {
+    std::fprintf(stderr, "key-collision-check: official_split_effect(%d) missing\n", kKeyfixEffect);
+    return 2;
+  }
+  std::vector<PreviewSplitLaneInstance> six =
+      make_instances(kKeyfixEffect, 2, 0.0, 6, SplitLaneType::Full);
+  std::vector<PreviewSplitLaneInstance> mixed;
+  mixed.push_back(make_split(kKeyfixEffect, 6, SplitLaneType::Full, kDefaultStartMs,
+                             kKeyfixEffect * 10 + 1));
+  mixed.push_back(make_split(kKeyfixEffect, 3, SplitLaneType::Full, kDefaultStartMs,
+                             kKeyfixEffect * 10 + 2));
+  std::vector<double> times;
+  times.reserve(static_cast<size_t>(kKeyfixFrames));
+  for (int i = 0; i < kKeyfixFrames; ++i) {
+    const double u = static_cast<double>(i) / static_cast<double>(kKeyfixFrames - 1);
+    times.push_back(now_sec_from_now_t(kDefaultStartMs, 0.65 + 0.5 * u));
+  }
+  struct Named {
+    const char* name;
+    const std::vector<PreviewSplitLaneInstance>* splits;
+  };
+  const Named fixtures[] = {{"full6x2-stagger0", &six}, {"full6+full3-same-start", &mixed}};
+  int fail = 0;
+  for (const Named& fx : fixtures) {
+    const KeyfixSweep cold = keyfix_sweep(*fx.splits, times, false, true, kKeyfixRepeats);
+    const KeyfixSweep play = keyfix_sweep(*fx.splits, times, true, false, kKeyfixRepeats);
+    std::fprintf(stdout,
+                 "KEYFIX_ROW env=%s fixture=%s mode=cold n=%d nan=%d pose=%016llx full=%016llx "
+                 "pose_u=%d full_u=%d\n",
+                 env_label, fx.name, cold.n, cold.nan,
+                 static_cast<unsigned long long>(cold.pose),
+                 static_cast<unsigned long long>(cold.full), cold.unique_pose, cold.unique_full);
+    std::fprintf(stdout,
+                 "KEYFIX_ROW env=%s fixture=%s mode=play n=%d nan=%d pose=%016llx full=%016llx "
+                 "pose_u=%d full_u=%d\n",
+                 env_label, fx.name, play.n, play.nan,
+                 static_cast<unsigned long long>(play.pose),
+                 static_cast<unsigned long long>(play.full), play.unique_pose, play.unique_full);
+    if (cold.unique_pose != 1 || cold.unique_full != 1 || play.unique_pose != 1 ||
+        play.unique_full != 1 || cold.nan != 0 || play.nan != 0 || cold.n <= 0 || play.n <= 0) {
+      ++fail;
+    }
+  }
+  std::fflush(stdout);
+  return fail == 0 ? 0 : 1;
+}
+
+struct KeyfixRow {
+  std::string env;
+  std::string fixture;
+  std::string mode;
+  int n = 0;
+  uint64_t pose = 0;
+  uint64_t full = 0;
+  int pose_u = 0;
+  int full_u = 0;
+};
+
+bool parse_keyfix_row(const char* line, KeyfixRow& row) {
+  char env[32]{};
+  char fixture[64]{};
+  char mode[16]{};
+  unsigned long long pose = 0;
+  unsigned long long full = 0;
+  int n = 0;
+  int nan = 0;
+  int pose_u = 0;
+  int full_u = 0;
+  if (std::sscanf(line,
+                  "KEYFIX_ROW env=%31s fixture=%63s mode=%15s n=%d nan=%d pose=%llx full=%llx "
+                  "pose_u=%d full_u=%d",
+                  env, fixture, mode, &n, &nan, &pose, &full, &pose_u, &full_u) != 9) {
+    return false;
+  }
+  row.env = env;
+  row.fixture = fixture;
+  row.mode = mode;
+  row.n = n;
+  row.pose = static_cast<uint64_t>(pose);
+  row.full = static_cast<uint64_t>(full);
+  row.pose_u = pose_u;
+  row.full_u = full_u;
+  return true;
+}
+
+int keyfix_spawn_env(char* self, const char* label, int cache, int carry, int persist,
+                     std::string& out_text) {
+  int fds[2];
+  if (pipe(fds) != 0) {
+    std::perror("pipe");
+    return 127;
+  }
+  const pid_t pid = fork();
+  if (pid < 0) {
+    std::perror("fork");
+    return 127;
+  }
+  if (pid == 0) {
+    close(fds[0]);
+    if (dup2(fds[1], STDOUT_FILENO) < 0) {
+      _exit(127);
+    }
+    close(fds[1]);
+    setenv("WDS_SPLIT_KEYFIX_CHILD", label, 1);
+    setenv("WDS_SPLIT_CACHE", cache ? "1" : "0", 1);
+    setenv("WDS_SPLIT_CARRY", carry ? "1" : "0", 1);
+    setenv("WDS_SPLIT_PERSIST", persist ? "1" : "0", 1);
+    char* args[] = {self, const_cast<char*>("key-collision-check"), nullptr};
+    execv(self, args);
+    _exit(127);
+  }
+  close(fds[1]);
+  out_text.clear();
+  char buf[4096];
+  for (;;) {
+    const ssize_t n = read(fds[0], buf, sizeof(buf));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    if (n == 0) {
+      break;
+    }
+    out_text.append(buf, static_cast<size_t>(n));
+  }
+  close(fds[0]);
+  int st = 0;
+  if (waitpid(pid, &st, 0) < 0) {
+    return 127;
+  }
+  if (WIFEXITED(st)) {
+    return WEXITSTATUS(st);
+  }
+  return 127;
+}
+
+int cmd_key_collision_check(char* self) {
+  const char* child = std::getenv("WDS_SPLIT_KEYFIX_CHILD");
+  if (child != nullptr && child[0] != '\0') {
+    return keyfix_run_one_env(child);
+  }
+  if (wds::chart_render::official_split_effect(kKeyfixEffect) == nullptr) {
+    std::fprintf(stderr, "key-collision-check: official_split_effect(%d) missing\n", kKeyfixEffect);
+    return 2;
+  }
+  std::string def_txt;
+  std::string off_txt;
+  // Default: cache on, carry on, persist off (product defaults).
+  const int def_rc = keyfix_spawn_env(self, "default", 1, 1, 0, def_txt);
+  const int off_rc = keyfix_spawn_env(self, "alloff", 0, 0, 0, off_txt);
+  std::fputs(def_txt.c_str(), stdout);
+  std::fputs(off_txt.c_str(), stdout);
+  std::map<std::tuple<std::string, std::string>, KeyfixRow> def_rows;
+  std::map<std::tuple<std::string, std::string>, KeyfixRow> off_rows;
+  auto ingest = [](const std::string& txt,
+                   std::map<std::tuple<std::string, std::string>, KeyfixRow>& dest) {
+    std::string line;
+    for (char c : txt) {
+      if (c == '\n') {
+        KeyfixRow row;
+        if (parse_keyfix_row(line.c_str(), row)) {
+          dest[{row.fixture, row.mode}] = row;
+        }
+        line.clear();
+      } else {
+        line.push_back(c);
+      }
+    }
+  };
+  ingest(def_txt, def_rows);
+  ingest(off_txt, off_rows);
+  int mismatches = 0;
+  const char* fixtures[] = {"full6x2-stagger0", "full6+full3-same-start"};
+  const char* modes[] = {"cold", "play"};
+  for (const char* fx : fixtures) {
+    for (const char* mode : modes) {
+      const auto key = std::make_tuple(std::string(fx), std::string(mode));
+      const auto d = def_rows.find(key);
+      const auto o = off_rows.find(key);
+      if (d == def_rows.end() || o == off_rows.end()) {
+        std::fprintf(stdout, "key-collision-check MISSING fixture=%s mode=%s\n", fx, mode);
+        ++mismatches;
+        continue;
+      }
+      const bool stable = d->second.pose_u == 1 && d->second.full_u == 1 && o->second.pose_u == 1 &&
+                          o->second.full_u == 1;
+      const bool match = d->second.pose == o->second.pose && d->second.full == o->second.full &&
+                         d->second.n == o->second.n;
+      std::fprintf(stdout,
+                   "key-collision-check fixture=%s mode=%s stable=%d match=%d n=%d/%d "
+                   "def_pose=%016llx off_pose=%016llx\n",
+                   fx, mode, stable ? 1 : 0, match ? 1 : 0, d->second.n, o->second.n,
+                   static_cast<unsigned long long>(d->second.pose),
+                   static_cast<unsigned long long>(o->second.pose));
+      if (!stable || !match) {
+        ++mismatches;
+      }
+    }
+  }
+  std::fprintf(stdout, "key-collision-check mismatches=%d default_rc=%d alloff_rc=%d\n", mismatches,
+               def_rc, off_rc);
+  std::fflush(stdout);
+  return mismatches == 0 && def_rc == 0 && off_rc == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -5906,6 +6686,19 @@ int main(int argc, char** argv) {
     return cmd_noise_catalog();
   }
 
+  if (cmd == "births-extend-scan") {
+    int32_t only_id = 0;
+    for (int i = 2; i < argc; ++i) {
+      if (eq_i(argv[i], "--effect") && require(i + 1, "--effect")) {
+        only_id = std::atoi(argv[++i]);
+      } else {
+        std::fprintf(stderr, "unknown births-extend-scan arg: %s\n", argv[i]);
+        return 2;
+      }
+    }
+    return cmd_births_extend_scan(only_id);
+  }
+
   if (cmd == "noise-hold-plan") {
     return cmd_noise_hold_plan();
   }
@@ -6175,6 +6968,10 @@ int main(int argc, char** argv) {
     return cmd_kf_memory(chart, gaps, quality);
   }
 
+
+  if (cmd == "key-collision-check") {
+    return cmd_key_collision_check(argv[0]);
+  }
 
   if (cmd == "dead-skip-check") {
     double tmax = 8.0;

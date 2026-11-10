@@ -5,11 +5,15 @@
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include <wds/chart_render/split_effect_particles.hpp>
 
+#include <wds/common/perf_stages.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <vector>
+
+#include "integrate_hot.hpp"
 
 namespace wds::chart_render::shuriken {
 
@@ -111,36 +115,6 @@ struct ParticleState {
   float trail_life_mul = -1.0f;
 };
 
-// Observation-only snapshot of the velocity terms already computed by
-// integrate_pose. All vectors are in the native PS-local/LaneGroup basis.
-// stored is Particle.velocity after Force/Gravity/Limit/Drag; vol and noise
-// are the current-frame animated terms; inherited is Current-mode inherit
-// (Initial is already in stored); total is the sum consumed by the position
-// step. Orbital/radial post-step transforms are deliberately outside this
-// snapshot.
-struct IntegrationVelocityTrace {
-  float stored_x = 0.0f;
-  float stored_y = 0.0f;
-  float stored_z = 0.0f;
-  float vol_x = 0.0f;
-  float vol_y = 0.0f;
-  float vol_z = 0.0f;
-  float noise_x = 0.0f;
-  float noise_y = 0.0f;
-  float noise_z = 0.0f;
-  // Curl × positionAmount, before Strength. Hold keeps this; Strength is a
-  // lifetime curve and is re-applied each step (2022.3 Noise Manual).
-  float noise_unit_x = 0.0f;
-  float noise_unit_y = 0.0f;
-  float noise_unit_z = 0.0f;
-  float inherited_x = 0.0f;
-  float inherited_y = 0.0f;
-  float inherited_z = 0.0f;
-  float total_x = 0.0f;
-  float total_y = 0.0f;
-  float total_z = 0.0f;
-};
-
 // Observation-only per-substep record.  This exposes the substeps that the
 // native evaluator actually executes without changing the integration
 // equations or their ordering.  Production callers leave the observer null.
@@ -177,6 +151,7 @@ bool integration_observers_installed() noexcept;
 // Same 32-step xorshift as evaluate.cpp. Inlined so shape / emit / make_state
 // do not pay a cross-TU call per mix (sample: mix3 11–17% of collect).
 inline uint32_t mix3(uint32_t a, uint32_t b, uint32_t c) noexcept {
+  WDS_MIX3_COUNT("mix3.total", 1);
   return xorshift128_r32_mix3(a, b, c);
 }
 
@@ -297,7 +272,7 @@ bool collect_births_can_extend(const SplitEffectParticle& p) noexcept;
 bool collect_births_window_open(const SplitEffectParticle& p, float now_t) noexcept;
 void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t color_id,
                            int first_index, std::vector<Birth>& out,
-                           const EmitContext* context = nullptr);
+                           const EmitContext* context = nullptr, bool include_expired = false);
 
 // Unity 2022.3 Trails.lifetime is a multiplier of startLifetime (Manual
 // PartSysTrailsModule + TrailModule.lifetime). Conservative hi for windows
@@ -362,24 +337,6 @@ bool split_integrator_is_legacy() noexcept;
 
 struct ParticleCacheKey;
 
-// Pose / velocity at a full grid step k (never a tail). sample() advances
-// to k then integrates the exact remaining tail to now_t.
-//
-// IntegratorHot is the only R+W state of run_step / advance_to. It lives in
-// a contiguous array (persist SoA or a 128 B-aligned frame-arena batch).
-// 32 B divides 64 so a record never straddles a 64 B line. trace is cold.
-struct alignas(32) IntegratorHot {
-  float lx = 0.0f;
-  float ly = 0.0f;
-  float lz = 0.0f;
-  float vx = 0.0f;
-  float vy = 0.0f;
-  float vz = 0.0f;
-  int next_step = 0;
-  std::uint32_t pad = 0;
-};
-static_assert(sizeof(IntegratorHot) == 32, "hot pose is 32 B");
-static_assert(64 % sizeof(IntegratorHot) == 0, "hot size divides 64");
 inline constexpr int kIntegratorHotPerLine = 128 / static_cast<int>(sizeof(IntegratorHot));
 
 inline int align_hot_index(int i) noexcept {
@@ -427,8 +384,19 @@ class PoseIntegrator {
   PoseIntegrator(const PoseIntegrator&) = delete;
   PoseIntegrator& operator=(const PoseIntegrator&) = delete;
   void advance_to(int k) noexcept;
+  uint8_t step_mask() const noexcept { return step_mask_; }
+  bool can_batch_mask0() const noexcept;
+  // Catalog flags of can_batch_mask0(), no PoseIntegrator. Skip the 4-wide
+  // pack attempt when false so mask 4/7 play does not pay 4 ctors + fallback.
+  static bool particle_can_batch_mask0(const SplitEffectParticle& p) noexcept;
   void sample(float age, float& world_x, float& main_y, float& world_z,
               IntegrationVelocityTrace* trace = nullptr) noexcept;
+  // Wave 4a: n in [1,4]. Each integrator must can_batch_mask0(). Advances
+  // each to k[i] with the same 1/60 grid. Byte-identical to n scalar
+  // advance_to calls when WDS_INTEGRATE_BATCH_VERIFY=1 agrees.
+  static void advance_mask0_batch(PoseIntegrator** xs, const int* ks, int n) noexcept;
+  static void sample_batch(PoseIntegrator** xs, const float* ages, float* wx, float* wy, float* wz,
+                           IntegrationVelocityTrace* traces, int n) noexcept;
   void finite_difference(float age, float dt, float x0, float y0, float z0, float& vx, float& vy,
                          float& vz) noexcept;
   void set_cache_key(const ParticleCacheKey* key) noexcept { cache_key_ = key; }
@@ -531,30 +499,42 @@ class PoseIntegrator {
 
 // Stable per-particle identity for the incremental integrator cache.
 // Uniqueness: within one (color_id, line_index, line_start_ms, catalog_index,
-// line_play_gen, epoch), collect_births / subemit remapping assign unique
-// (birth_index, birth_extra). Overlapping instances differ by start_ms (or
-// are bit-identical at stagger 0). input_hash covers integration inputs so a
+// line_play_gen, epoch, split_count, line_x_bits), collect_births / subemit
+// remapping assign unique (birth_index, birth_extra). Same-start Full6×2
+// share (bit-identical inputs). Full3 vs Full6 at the same start_ms differ
+// by split_count / line_x. input_hash covers integration inputs so a
 // bind/chart change misses instead of reusing a stale pose.
+// Packed 56 B, explicit pad so memcmp is well-defined. Field order is
+// density first (input_hash / start_ms), then identity. Not a 2022.3 formula.
+// split_count + line_x_bits: overlapping Full3/Full6 at the same start_ms
+// share (color, line_index, start_ms) but read different official lane X
+// (and line 0 has the same X for 3 and 6). Same write as ChildPersistFp.
+inline uint32_t split_lane_x_bits(float x) noexcept {
+  uint32_t u = 0;
+  std::memcpy(&u, &x, sizeof(u));
+  return u;
+}
+
 struct ParticleCacheKey {
+  uint64_t input_hash = 0;
+  int64_t line_start_ms = 0;
   uint32_t epoch = 0;
   int32_t color_id = 0;
   int32_t line_index = 0;
-  int64_t line_start_ms = 0;
   uint32_t catalog_index = 0;
   int32_t birth_index = 0;
   uint32_t birth_extra = 0;
   uint32_t line_play_gen = 0;
   uint32_t seed = 0;
-  uint64_t input_hash = 0;
+  uint32_t line_x_bits = 0;
+  uint8_t split_count = 0;
   uint8_t valid = 0;
+  uint8_t pad_[2]{};
 };
+static_assert(sizeof(ParticleCacheKey) == 56, "ParticleCacheKey packed");
 
 inline bool operator==(const ParticleCacheKey& a, const ParticleCacheKey& b) noexcept {
-  return a.epoch == b.epoch && a.color_id == b.color_id && a.line_index == b.line_index &&
-         a.line_start_ms == b.line_start_ms && a.catalog_index == b.catalog_index &&
-         a.birth_index == b.birth_index && a.birth_extra == b.birth_extra &&
-         a.line_play_gen == b.line_play_gen && a.seed == b.seed && a.input_hash == b.input_hash &&
-         a.valid == b.valid;
+  return std::memcmp(&a, &b, sizeof(ParticleCacheKey)) == 0;
 }
 
 void integrate_pose(const ParticleState& st, float age, float& world_x, float& main_y,
@@ -682,8 +662,8 @@ void fill_trails(PoseIntegrator& integ, const ParticleState& st, float age,
 // Unity owns one ParticleSystem per split instance, so two overlapping splits
 // of the same effect on the same line are two ribbons, not one.
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id,
-                    uint32_t instance_id) noexcept;
+                    int32_t line_index, uint32_t system_id, uint32_t instance_id,
+                    uint8_t split_count, uint32_t line_x_bits) noexcept;
 
 void fill_live(const ParticleState& st, float age, bool want_trail, SplitEffectLiveParticle& out);
 
@@ -692,6 +672,9 @@ void fill_live(PoseIntegrator& integ, const ParticleState& st, float age, bool w
 void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float age,
                           bool want_trail, SplitEffectLiveParticle& out, bool want_fd,
                           float trail_clock = -1.0f);
+void fill_live_after_pose(PoseIntegrator& integ, const ParticleState& st, float age,
+                          bool want_trail, SplitEffectLiveParticle& out, bool want_fd,
+                          float trail_clock, const IntegrationVelocityTrace& vel);
 
 struct PrimaryEvalJob {
   Birth b{};
@@ -727,6 +710,21 @@ void evaluate_realize_job(const SplitEffectParticle& p, const EmitContext& ctx, 
 int evaluate_realize(const SplitEffectParticle& p, const EmitContext& ctx,
                      std::vector<PrimaryEvalJob>& jobs, SplitEffectLiveParticle* out, int max_out,
                      bool write_unfilled_stamps = true);
+
+struct PrimaryRealizeSession;
+struct ChildRealizeSession;
+struct RealizeSliceDelta;
+
+int evaluate_realize_prepare(const SplitEffectParticle& p, const EmitContext& ctx,
+                             std::vector<PrimaryEvalJob>& jobs, int max_out,
+                             bool write_unfilled_stamps, PrimaryRealizeSession& sess);
+void evaluate_realize_jobs_range(const SplitEffectParticle& p, const EmitContext& ctx,
+                                 std::vector<PrimaryEvalJob>& jobs, SplitEffectLiveParticle* out,
+                                 int job_lo, int job_hi, PrimaryRealizeSession& sess);
+int evaluate_realize_finish(const SplitEffectParticle& p, const EmitContext& ctx,
+                            std::vector<PrimaryEvalJob>& jobs, SplitEffectLiveParticle* out,
+                            PrimaryRealizeSession& sess);
+
 void evaluate_drop_primary_carry(const EmitContext& ctx, const SplitEffectParticle& p) noexcept;
 
 // Parent event pose at a child birth. Same fields as evaluate.cpp's former
@@ -774,6 +772,9 @@ struct SubemitFillItem {
   uint8_t properties = 0;
   uint8_t ready = 0;
   uint8_t filled = 0;
+  // Wave 3.5c: cap stage writes child_emit_seed once; fill_subemit_child
+  // reuses it. 0 = not yet computed (seed itself may be 0).
+  uint8_t seed_ready = 0;
   // 1 = PLAN already ran pose_at (RoD walk). 0 = identity stub; realize
   // hydrates after the preview-pool cap. hop, not 2022.3.
   uint8_t pose_hydrated = 0;
@@ -802,6 +803,15 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
                               std::vector<SplitEffectLiveParticle>* out_vec = nullptr);
 int evaluate_subemitters_realize(const EmitContext& ctx, SubemitFillPlan& plan,
                                  const uint8_t* do_fill, SplitEffectLiveParticle* out, int max_out);
+int evaluate_subemitters_realize_prepare(const EmitContext& ctx, SubemitFillPlan& plan,
+                                         const uint8_t* do_fill, SplitEffectLiveParticle* out,
+                                         int max_out, ChildRealizeSession& rs);
+void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan& plan,
+                                        SplitEffectLiveParticle* out, int lo, int hi,
+                                        ChildRealizeSession& rs, RealizeSliceDelta* delta);
+int evaluate_subemitters_realize_finish(const EmitContext& ctx, SubemitFillPlan& plan,
+                                        ChildRealizeSession& rs, RealizeSliceDelta** deltas,
+                                        int n_deltas, int written);
 
 bool primary_eval_can_emit(const SplitEffectParticle& p, float now_t) noexcept;
 bool subemit_eval_can_emit(const SplitEffectParticle* particles, uint16_t count, int element_slot,

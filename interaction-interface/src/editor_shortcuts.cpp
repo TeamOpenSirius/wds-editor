@@ -229,6 +229,10 @@ const char* editor_shortcut_id(EditorShortcut id) noexcept {
       return "send_selection_to_back_layer";
     case EditorShortcut::RestoreBackLayerNotes:
       return "restore_back_layer_notes";
+    case EditorShortcut::NudgeTickUp:
+      return "nudge_tick_up";
+    case EditorShortcut::NudgeTickDown:
+      return "nudge_tick_down";
     case EditorShortcut::Count:
       break;
   }
@@ -328,6 +332,10 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
       return "移到背图层";
     case EditorShortcut::RestoreBackLayerNotes:
       return "恢复所有背图层";
+    case EditorShortcut::NudgeTickUp:
+      return "微调时间上移";
+    case EditorShortcut::NudgeTickDown:
+      return "微调时间下移";
     case EditorShortcut::Count:
       break;
   }
@@ -429,6 +437,10 @@ ShortcutChord default_editor_shortcut(EditorShortcut id) noexcept {
       return chord_primary(static_cast<KeyCode>('B'));
     case EditorShortcut::RestoreBackLayerNotes:
       return chord_primary(static_cast<KeyCode>('N'));
+    case EditorShortcut::NudgeTickUp:
+      return chord_primary(KeyCode::Up);
+    case EditorShortcut::NudgeTickDown:
+      return chord_primary(KeyCode::Down);
     case EditorShortcut::Count:
       break;
   }

@@ -1,5 +1,7 @@
 #include "wds/ui/qt/playback_dock.hpp"
 
+#include "wds/ui/qt/timeline_seek_slider.hpp"
+
 #include "wds/ui/qt/spread_layout.hpp"
 #include "wds/ui/qt/caption_check.hpp"
 #include "wds/ui/qt/fluent_icons.hpp"
@@ -24,14 +26,12 @@
 #include <QLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMouseEvent>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
-#include <QStyleOption>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -237,63 +237,8 @@ QWidget* make_pair_row(QWidget* parent, QWidget* left, QWidget* right, int col_w
   return row;
 }
 
-// Groove is 4px and the handle is 20×10, so QSlider only starts a drag on the
-// handle. Any press on this control jumps to that x and keeps tracking.
-class ClickSeekSlider final : public QSlider {
- public:
-  using QSlider::QSlider;
-
- protected:
-  void mousePressEvent(QMouseEvent* event) override {
-    if (event->button() != Qt::LeftButton) {
-      QSlider::mousePressEvent(event);
-      return;
-    }
-    seek_drag_ = true;
-    setSliderDown(true);
-    setValue(value_from_pos(event->position().toPoint()));
-    event->accept();
-  }
-
-  void mouseMoveEvent(QMouseEvent* event) override {
-    if (!seek_drag_) {
-      QSlider::mouseMoveEvent(event);
-      return;
-    }
-    setValue(value_from_pos(event->position().toPoint()));
-    event->accept();
-  }
-
-  void mouseReleaseEvent(QMouseEvent* event) override {
-    if (!seek_drag_) {
-      QSlider::mouseReleaseEvent(event);
-      return;
-    }
-    setValue(value_from_pos(event->position().toPoint()));
-    seek_drag_ = false;
-    setSliderDown(false);
-    event->accept();
-  }
-
- private:
-  int value_from_pos(const QPoint& pos) const {
-    QStyleOptionSlider opt;
-    initStyleOption(&opt);
-    const QRect groove =
-        style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
-    const QRect handle =
-        style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
-    const int slider_length = std::max(1, handle.width());
-    const int slider_min = groove.isValid() ? groove.x() : 0;
-    const int slider_max = groove.isValid() ? groove.right() - slider_length + 1
-                                            : std::max(0, width() - slider_length);
-    const int span = std::max(1, slider_max - slider_min);
-    return QStyle::sliderValueFromPosition(minimum(), maximum(), pos.x() - slider_min, span,
-                                           opt.upsideDown);
-  }
-
-  bool seek_drag_ = false;
-};
+// Seek slider: thin groove, click-to-seek drag and the 「反转时间轴滚轮方向」
+// wheel setting live in TimelineSeekSlider (timeline_seek_slider.hpp).
 
 QComboBox* make_volume_combo(QWidget* parent) {
   auto* combo = new QComboBox(parent);
@@ -351,7 +296,7 @@ void PlaybackBar::build_ui() {
   box->setContentsMargins(0, 0, 0, 0);
   box->setSpacing(0);
 
-  seek_ = new ClickSeekSlider(Qt::Horizontal, block);
+  seek_ = new TimelineSeekSlider(Qt::Horizontal, block);
   seek_->setRange(0, 1);
   seek_->setMinimumWidth(120);
   seek_->setFixedHeight(32);

@@ -60,6 +60,10 @@ enum class EditorShortcut : int {
   // (stored by name) and existing enum values stay stable.
   SendSelectionToBackLayer,
   RestoreBackLayerNotes,
+  // 1-tick time nudge (default Ctrl/Cmd+Up/Down). Appended so persisted
+  // config ids (stored by name) and existing enum values stay stable.
+  NudgeTickUp,
+  NudgeTickDown,
   Count
 };
 

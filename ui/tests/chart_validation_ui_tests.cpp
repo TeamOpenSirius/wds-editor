@@ -1,6 +1,7 @@
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
+#include "wds/ui/regions/edit/edit_gutters.hpp"
 #include "wds/ui/regions/preview/chart_preview_panel.hpp"
 #include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/ui_manager.hpp"
@@ -466,6 +467,52 @@ void test_spectrum_mode_selects_backdrop() {
   CHECK_EQ(static_cast<int>(spec.behind_sprites().size()), 1);
 }
 
+void test_split_guide_hide_matches_line_fade_out() {
+  // The editor's default lane guides must return when the split line has
+  // finished fading (fadeOut clip: expire + split_line_animation_end_sec), not
+  // when the preview's pooled instance returns 1.0 s after EndMs. Sharing the
+  // instance tail left 0.7 s of hidden guides with no split line drawn.
+  PreviewConfig cfg;
+  MusicTiming timing;
+  timing.bpm = 120.0;
+  timing.ticks_per_quarter = 480;
+  NotationNote split = make_tap(240, 0);
+  split.end_tick = 1440;
+  split.scratch_length = 10392;
+  split.gimmick_type = wds::chart_editor::GimmickType::Split3;
+  const std::vector<NotationNote> notes{split};
+
+  const int64_t start_ms = split.start_ms(timing);
+  const int64_t end_ms = split.end_ms(timing);
+  const int64_t appear_ms =
+      wds::chart_editor::split_fade_sec_to_ms(cfg.split_line_animation_start_sec);
+  const int64_t fade_out_ms =
+      wds::chart_editor::split_fade_sec_to_ms(cfg.split_line_animation_end_sec);
+  const int64_t line_end_ms = wds::chart_editor::official_split_line_end_ms(
+      start_ms, end_ms, cfg.split_line_animation_end_sec);
+  CHECK_EQ(line_end_ms, end_ms + fade_out_ms);
+  // The preview keeps the 1.0 s pooled-instance tail; the editor must not.
+  CHECK_EQ(wds::chart_editor::official_split_destroy_ms(start_ms, end_ms),
+           end_ms + wds::chart_editor::kOfficialSplitHideDelayMs);
+  CHECK(wds::chart_editor::official_split_destroy_ms(start_ms, end_ms) > line_end_ms);
+
+  const auto ranges = wds::ui::merged_split_hide_ranges_ms(
+      notes, timing, cfg, static_cast<float>(start_ms - 5000.0),
+      static_cast<float>(end_ms + 5000.0));
+  CHECK_EQ(static_cast<int>(ranges.size()), 1);
+  if (!ranges.empty()) {
+    CHECK_EQ(static_cast<int64_t>(std::llround(ranges.front().first)), start_ms - appear_ms);
+    CHECK_EQ(static_cast<int64_t>(std::llround(ranges.front().second)), line_end_ms);
+  }
+
+  // Opacity follows the same window: 1 at EndMs, still visible just before the
+  // fade ends, exactly 0 at the guide-hide edge and after it.
+  CHECK(std::fabs(wds::ui::split_line_opacity_at_ms(split, timing, cfg, end_ms) - 1.0f) < 1e-4f);
+  CHECK(wds::ui::split_line_opacity_at_ms(split, timing, cfg, line_end_ms - 30) > 0.0f);
+  CHECK(wds::ui::split_line_opacity_at_ms(split, timing, cfg, line_end_ms) == 0.0f);
+  CHECK(wds::ui::split_line_opacity_at_ms(split, timing, cfg, line_end_ms + fade_out_ms) == 0.0f);
+}
+
 }  // namespace
 
 int main() {
@@ -480,6 +527,7 @@ int main() {
   test_spectrogram_uv_follows_viewport_ms();
   test_playing_skips_full_spectrogram_atlas();
   test_spectrum_mode_selects_backdrop();
+  test_split_guide_hide_matches_line_fade_out();
 
   if (g_failures == 0) {
     std::printf("All chart_validation UI tests passed.\n");

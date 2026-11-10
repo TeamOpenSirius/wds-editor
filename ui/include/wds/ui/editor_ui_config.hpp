@@ -95,7 +95,8 @@ struct EditorUiConfig {
   int extra_visible_lanes = 0;
   // Minutes between Auto backups of an on-disk project. One of 5/10/15/20/30/45/60.
   int backup_interval_min = 15;
-  // When true, negate timeline-scrub wheel deltas (not Option+wheel visible range).
+  // When true, negate timeline-scrub wheel deltas (edit playfield and the
+  // playback dock seek bar; not Option+wheel visible range).
   bool invert_scroll_wheel = false;
   // When true, invert Option+wheel visible-range adjust direction.
   // Independent of invert_scroll_wheel (timeline scrub).

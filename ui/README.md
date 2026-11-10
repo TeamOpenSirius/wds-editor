@@ -85,7 +85,7 @@ ui/
 
 设置（「输入」页，写入 OS 配置目录的 `config.yml`）：
 
-- **反转时间轴滚轮方向**：只翻 scrub；适配器先按此项取反 delta
+- **反转时间轴滚轮方向**：只翻 scrub（编辑区时间轴 + 播放 Dock 的进度条）；适配器先按此项取反 delta，进度条在 `TimelineSeekSlider` 里按同一开关翻方向
 - **反转滚轮调节可见范围大小方向**：只翻 Option+滚轮。两项各自生效、互不抵消
 - **时间轴滚轮速度**：0.25–3；非有限值回 1。只影响 scrub，不影响可见范围
 
@@ -164,6 +164,8 @@ ui.session();
 | Q/W/E/A/S/D | 默认宽度 1/2/3/4/6/12 |
 
 Primary = Ctrl（Windows）/ Cmd（macOS）。
+
+**焦点与 Space**：Space 是应用级播放/暂停，只有聚焦文本类控件时才让给控件。点下拉菜单、按上下箭头调数值都只改值、不抢键盘焦点：macOS 的非可编辑 QComboBox 本来就是 `TabFocus`，Windows 默认 `WheelFocus/StrongFocus`，选完值后仍持有焦点并吞掉 Space。`value_input_focus.hpp` 的 `deliver_with_value_input_click_focus()` 在 `WdsApplication::notify()` 里**只对箭头 / 上下按钮这类按下事件**临时去掉 ClickFocus——Qt 的点击取焦发生在 `QApplication::notify()` 内、任何 event filter 之前，所以必须包在这一层；文本区仍由内嵌 QLineEdit 自己取焦，键入不受影响。因此可编辑下拉框选完值、数值框调完数值后，也能直接空格播放。
 
 ## 运行
 

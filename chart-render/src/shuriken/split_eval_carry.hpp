@@ -38,13 +38,17 @@ struct SystemCarryKey {
   uint32_t catalog_index = 0;
   uint32_t line_play_gen = 0;
   uint64_t input_hash = 0;
+  uint32_t line_x_bits = 0;
   uint8_t kind = 0;
+  uint8_t split_count = 0;
 };
+static_assert(sizeof(SystemCarryKey) == 48, "SystemCarryKey packed");
 
 inline bool operator==(const SystemCarryKey& a, const SystemCarryKey& b) noexcept {
   return a.epoch == b.epoch && a.color_id == b.color_id && a.line_index == b.line_index &&
          a.line_start_ms == b.line_start_ms && a.catalog_index == b.catalog_index &&
-         a.line_play_gen == b.line_play_gen && a.input_hash == b.input_hash && a.kind == b.kind;
+         a.line_play_gen == b.line_play_gen && a.input_hash == b.input_hash &&
+         a.line_x_bits == b.line_x_bits && a.kind == b.kind && a.split_count == b.split_count;
 }
 
 struct CarryParticle {
@@ -104,6 +108,26 @@ void split_eval_carry_store(const SystemCarryKey& key, float now_t,
                             std::vector<CarryParticle>&& parts, int next_birth = 0) noexcept;
 void split_eval_carry_drop(const SystemCarryKey& key) noexcept;
 void split_eval_carry_note_fallback() noexcept;
+
+// Live birth-table identity set (Birth rows, not particle state). Keyed by
+// SystemCarryKey; kind 8 = evaluate_plan, kind 9 = subemit parent queue.
+// Seek clears content and keeps vector capacity. hop schedule, not 2022.3.
+inline constexpr uint8_t kBirthTableKindPlan = 8;
+inline constexpr uint8_t kBirthTableKindQueue = 9;
+
+struct BirthTableSnapshot {
+  float now_t = -1.0e30f;
+  std::vector<Birth> births;
+};
+
+bool split_eval_births_extend_enabled() noexcept;
+bool split_eval_births_extend_verify() noexcept;
+bool split_eval_birth_table_lookup(const SystemCarryKey& key, BirthTableSnapshot& out) noexcept;
+void split_eval_birth_table_store(const SystemCarryKey& key, float now_t,
+                                  const std::vector<Birth>& births) noexcept;
+void split_eval_birth_table_clear_content() noexcept;
+void split_eval_birth_table_note_mismatch() noexcept;
+std::uint64_t split_eval_birth_table_verify_mismatches() noexcept;
 
 bool carry_birth_eq(const Birth& a, const Birth& b) noexcept;
 int carry_find_particle(const SystemCarrySnapshot& snap, const Birth& b, uint32_t seed) noexcept;

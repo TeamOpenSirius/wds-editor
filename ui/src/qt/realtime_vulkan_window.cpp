@@ -192,13 +192,37 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       return true;
     }
     const bool has_input = !input_queue_.events().empty();
+    bool fill_frame = false;
     if (!startup && !force_frame_ && !has_input && idle_present_gate_ &&
         !idle_present_gate_()) {
-      arm_idle_wakeup();
-      pending_elapsed_us_ = 0;
-      return true;
+      if (!idle_fill_gate_ || !idle_fill_gate_()) {
+        arm_idle_wakeup();
+        pending_elapsed_us_ = 0;
+        return true;
+      }
+      const int64_t wait_us = fill_wait_us();
+      if (wait_us > 0) {
+        arm_fill_wakeup(wait_us);
+        pending_elapsed_us_ = 0;
+        return true;
+      }
+      fill_frame = true;
     }
     idle_wakeup_timer_.stop();
+    const qreal scale = devicePixelRatio();
+    const int fb_w = std::max(1, qRound(width() * scale));
+    const int fb_h = std::max(1, qRound(height() * scale));
+    if (fill_frame) {
+      // Leaves last_frame_ / pending_elapsed_us_ alone: the paused cap and the
+      // delta of the next content frame still count from the last content frame.
+      if (frame_callback_) {
+        fill_frame_ = true;
+        frame_callback_(0.0f, width(), height(), fb_w, fb_h, input_queue_.events());
+        fill_frame_ = false;
+      }
+      schedule_frame();
+      return true;
+    }
     // A forced request (resize settle, expose, request_frame) must present even
     // when the idle cap would rather wait: the surface was just resized, so the
     // window shows a stretched/blank copy of the previous drawable until the
@@ -222,9 +246,6 @@ bool RealtimeVulkanWindow::event(QEvent* event) {
       schedule_frame();
       return true;
     }
-    const qreal scale = devicePixelRatio();
-    const int fb_w = std::max(1, qRound(width() * scale));
-    const int fb_h = std::max(1, qRound(height() * scale));
     if (startup) {
       WDS_LOG("preview first frame resize=%d suspend=%d exposed=%d logical=%dx%d fb=%dx%d\n",
               resizing_ ? 1 : 0, host_resize_suspended_ ? 1 : 0, isExposed() ? 1 : 0, width(),
@@ -315,8 +336,15 @@ void RealtimeVulkanWindow::schedule_frame() {
     return;
   }
   if (idle_present_gate_ && presented_ && !force_frame_ && !idle_present_gate_()) {
-    arm_idle_wakeup();
-    return;
+    if (!idle_fill_gate_ || !idle_fill_gate_()) {
+      arm_idle_wakeup();
+      return;
+    }
+    const int64_t wait_us = fill_wait_us();
+    if (wait_us > 0) {
+      arm_fill_wakeup(wait_us);
+      return;
+    }
   }
   idle_wakeup_timer_.stop();
   requestUpdate();
@@ -325,6 +353,17 @@ void RealtimeVulkanWindow::schedule_frame() {
 void RealtimeVulkanWindow::arm_idle_wakeup() {
   if (idle_wakeup_interval_us_ <= 0) return;
   idle_wakeup_timer_.start(std::max(1, static_cast<int>(idle_wakeup_interval_us_ / 1000)));
+}
+
+int64_t RealtimeVulkanWindow::fill_wait_us() const {
+  const auto since = std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - last_frame_)
+                         .count();
+  return swapchain_fill_wait_us(since, idle_frame_interval_us_);
+}
+
+void RealtimeVulkanWindow::arm_fill_wakeup(int64_t wait_us) {
+  idle_wakeup_timer_.start(std::max(1, static_cast<int>((wait_us + 999) / 1000)));
 }
 
 void RealtimeVulkanWindow::hold_frame_unexposed() {

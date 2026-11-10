@@ -347,7 +347,8 @@ void ChartEditRenderer::paint(wds::interaction::UiPainter& painter, const EditVi
         1, static_cast<int64_t>(
                std::llround(static_cast<double>(preview.split_line_animation_start_sec) * 1000.0)));
     const int64_t fade_start_ms = start_ms - appear_ms;
-    const int64_t fade_end_ms = wds::chart_editor::official_split_destroy_ms(start_ms, end_ms);
+    const int64_t fade_end_ms = wds::chart_editor::official_split_line_end_ms(
+        start_ms, end_ms, preview.split_line_animation_end_sec);
 
     const float view_ms_lo = viewport.scroll_ms();
     const float view_ms_hi = view_ms_lo + static_cast<float>(viewport.visible_ms());

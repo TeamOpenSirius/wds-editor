@@ -755,6 +755,10 @@ struct VulkanRenderer::Impl {
   uint64_t swapchain_serial = 0;
   uint32_t last_presented_image = UINT32_MAX;
   bool last_present_ok = false;
+  // See VulkanRenderer::last_present_record().
+  uint64_t successful_presents = 0;
+  uint64_t last_present_serial = 0;
+  uint32_t last_present_record_image = UINT32_MAX;
 
   bool export_active = false;
   VkExtent2D export_extent{};
@@ -1018,6 +1022,7 @@ struct VulkanRenderer::Impl {
                         VkBufferUsageFlags usage);
   bool ensure_frame_vertex_capacity(uint32_t frame, size_t bytes);
   bool ensure_frame_index_capacity(uint32_t frame, size_t bytes);
+  bool ensure_persistent_vertex_slots();
   size_t next_ring_target(size_t min_bytes) const noexcept;
   size_t next_ib_ring_target(size_t min_bytes) const noexcept;
   bool commit_ring_grow(size_t min_bytes);
@@ -2695,6 +2700,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   // Release FSE on the live swapchain before we retire it.
   release_fullscreen_exclusive_internal();
 
+  const int prev_frames_in_flight = frames_in_flight;
   const VkSwapchainKHR old_swapchain = swapchain;
   VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
   info.surface = surface;
@@ -2846,6 +2852,7 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
     swapchain_format = prev_format;
     swapchain_extent = prev_extent;
     swapchain_can_blit = prev_can_blit;
+    frames_in_flight = prev_frames_in_flight;
   };
 
   swapchain = new_swapchain;
@@ -2898,6 +2905,10 @@ bool VulkanRenderer::Impl::create_swapchain(int width, int height) {
   }
   WDS_LOG("swapchain images=%u (requested=%u) frames_in_flight=%d min=%u max=%u\n", actual,
           image_count, frames_in_flight, caps.minImageCount, caps.maxImageCount);
+  // FIF can grow on recreate; back new slots here, not on the first frame after resize.
+  if (!ensure_persistent_vertex_slots()) {
+    WDS_LOG("create_swapchain: persistent vertex slot alloc failed (fif=%d)\n", frames_in_flight);
+  }
 
   swapchain_views.resize(swapchain_images.size());
   bool ok = true;
@@ -3110,6 +3121,9 @@ bool VulkanRenderer::Impl::ensure_ring_slot(FrameVertexBuffer& slot, size_t byte
 }
 
 bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t bytes) {
+  if (frame >= static_cast<uint32_t>(kMaxFramesInFlight) || device == VK_NULL_HANDLE) {
+    return false;
+  }
   const size_t ring =
       persistent_ring_bytes > 0 ? persistent_ring_bytes : kRingVertexCapacityBytes;
   return ensure_ring_slot(frame_vertices[frame], bytes, ring, persistent_ring_max_bytes,
@@ -3117,11 +3131,28 @@ bool VulkanRenderer::Impl::ensure_frame_vertex_capacity(uint32_t frame, size_t b
 }
 
 bool VulkanRenderer::Impl::ensure_frame_index_capacity(uint32_t frame, size_t bytes) {
+  if (frame >= static_cast<uint32_t>(kMaxFramesInFlight) || device == VK_NULL_HANDLE) {
+    return false;
+  }
   const size_t ring = persistent_index_ring_bytes > 0
                           ? persistent_index_ring_bytes
                           : VulkanRenderer::kPersistentIndexRingBytes;
   return ensure_ring_slot(frame_indices[frame], bytes, ring, persistent_index_ring_max_bytes,
                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+}
+
+bool VulkanRenderer::Impl::ensure_persistent_vertex_slots() {
+  const int n = persistent_vertex_prealloc_count(frames_in_flight, kMaxFramesInFlight);
+  for (int i = 0; i < n; ++i) {
+    auto& slot = frame_vertices[static_cast<size_t>(i)];
+    if (slot.buffer != VK_NULL_HANDLE) {
+      continue;
+    }
+    if (!ensure_frame_vertex_capacity(static_cast<uint32_t>(i), persistent_ring_bytes)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 size_t VulkanRenderer::Impl::next_ring_target(size_t min_bytes) const noexcept {
@@ -6053,10 +6084,8 @@ bool VulkanRenderer::create(const VulkanHostSurface& host) {
   }
 
   impl_->textures.resize(1);  // slot 0 unused
-  for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
-    if (!impl_->ensure_frame_vertex_capacity(i, impl_->persistent_ring_bytes)) {
-      return false;
-    }
+  if (!impl_->ensure_persistent_vertex_slots()) {
+    return false;
   }
 
   emit_health(RendererHealthEvent::Created);
@@ -7839,6 +7868,9 @@ bool VulkanRenderer::draw_frame(const DrawBatch& batch, const ScreenBounds& scre
     impl_->draw_stop_reason = nullptr;
     impl_->last_presented_image = image_index;
     impl_->last_present_ok = true;
+    ++impl_->successful_presents;
+    impl_->last_present_serial = impl_->swapchain_serial;
+    impl_->last_present_record_image = image_index;
   } else {
     impl_->note_draw_stopped("present");
     impl_->last_present_ok = false;
@@ -8022,6 +8054,19 @@ bool VulkanRenderer::readback_rgba8(std::vector<std::uint8_t>& out_rgba, int& ou
 
 std::uint64_t VulkanRenderer::swapchain_serial() const noexcept {
   return impl_ != nullptr ? impl_->swapchain_serial : 0;
+}
+
+VulkanRenderer::PresentRecord VulkanRenderer::last_present_record() const noexcept {
+  PresentRecord out{};
+  if (impl_ == nullptr) return out;
+  out.present_count = impl_->successful_presents;
+  out.present_serial = impl_->last_present_serial;
+  out.image_index = impl_->last_present_record_image;
+  out.swapchain_serial = impl_->swapchain_serial;
+  out.image_count = impl_->swapchain != VK_NULL_HANDLE
+                        ? static_cast<uint32_t>(impl_->swapchain_images.size())
+                        : 0u;
+  return out;
 }
 
 void VulkanRenderer::sync_reported_size() noexcept {

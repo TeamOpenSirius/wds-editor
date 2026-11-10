@@ -1,5 +1,6 @@
 #include <wds/chart_render/shuriken/evaluate.hpp>
 #include "internal.hpp"
+#include "mix3_lazy.hpp"
 #include "split_wall_profile.hpp"
 
 #include <wds/core/split_fade.hpp>
@@ -85,8 +86,10 @@ uint32_t rod_random_seed(const EmitContext* ctx, const SplitEffectParticle& p,
     // stable_emitter_identity carries color / line / start_ms; the salt adds the
     // Play() generation. Together they are the per-instance seed stream (Unity
     // mints one seed per split instance).
-    return mix3(id, static_cast<uint32_t>(birth_index + 1),
-                mix3(stable_emitter_identity(*ctx), split_instance_salt(*ctx), 3u));
+    const uint32_t pair = (mix3_lazy_c() && ctx->cached_salts_valid != 0)
+                              ? ctx->cached_identity_salt_mix
+                              : mix3(stable_emitter_identity(*ctx), split_instance_salt(*ctx), 3u);
+    return mix3(id, static_cast<uint32_t>(birth_index + 1), pair);
   }
   return mix3(id, static_cast<uint32_t>(birth_index + 1), 3u);
 }
@@ -129,10 +132,15 @@ uint32_t sampling_system_identity(const SplitEffectParticle& p) noexcept {
 // when no context). The authored identity keeps *different systems* on one
 // line apart; the salt keeps *different split instances of the same system*
 // apart, matching OpenWDS' one ParticleSystem (one seed) per split instance.
+uint32_t birth_sampling_extra_from_id(uint32_t identity, uint32_t tag,
+                                     uint32_t instance_salt) noexcept {
+  WDS_MIX3_COUNT("mix3.birth_extra", 1);
+  return mix3(mix3(identity, tag != 0 ? tag : 1u, 7u), instance_salt, 0x2f9a5c13u);
+}
+
 uint32_t birth_sampling_extra(const SplitEffectParticle& p, uint32_t tag,
                               uint32_t instance_salt = 0u) noexcept {
-  return mix3(mix3(sampling_system_identity(p), tag != 0 ? tag : 1u, 7u), instance_salt,
-              0x2f9a5c13u);
+  return birth_sampling_extra_from_id(sampling_system_identity(p), tag, instance_salt);
 }
 
 // Closed-form |Δps.worldPosition| when the ParticleSystem is a child of
@@ -351,9 +359,10 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
     // Wall clock is still delay + (k/rate)/speed (startDelay hop).
     const float span = looping ? now : std::min(now, length);
     const int n = std::min(cap, std::max(0, static_cast<int>(std::floor(span * rot))));
+    const uint32_t extra2 = mix3_lazy_d() ? birth_sampling_extra(p, 2u, instance_salt) : 0u;
     for (int k = 0; k < n; ++k) {
-      push_birth(out, delay + ((static_cast<float>(k) + 1.0f) / rot) / speed, next + k,
-                 birth_sampling_extra(p, 2u, instance_salt), cap);
+      const uint32_t extra = mix3_lazy_d() ? extra2 : birth_sampling_extra(p, 2u, instance_salt);
+      push_birth(out, delay + ((static_cast<float>(k) + 1.0f) / rot) / speed, next + k, extra, cap);
     }
     next = static_cast<int>(out.size());
   }
@@ -383,18 +392,20 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
         // live dump v1: n ≈ RoD × Σ|Δps.worldPosition| (distance_total). Not 2022.3.
         constexpr float kDistanceEpsilon = 1e-5f;
         int k = 0;
+        const uint32_t extra3 = mix3_lazy_d() ? birth_sampling_extra(p, 3u, instance_salt) : 0u;
         while (static_cast<int>(out.size()) < cap && k < cap) {
           const float distance = (static_cast<float>(k) + 1.0f) / rod;
           if (distance > total + kDistanceEpsilon) break;
           const float parent_z = context->parent_motion.motion_origin_z + distance;
-          push_rod_birth(out, birth_time_for_distance(distance), next + k,
-                         birth_sampling_extra(p, 3u, instance_salt), cap, parent_z,
+          const uint32_t extra = mix3_lazy_d() ? extra3 : birth_sampling_extra(p, 3u, instance_salt);
+          push_rod_birth(out, birth_time_for_distance(distance), next + k, extra, cap, parent_z,
                          context->parent_motion.birth_pose_candidate);
           ++k;
         }
       } else if (rod_two) {
         float distance = 0.0f;
         int k = 0;
+        const uint32_t extra3 = mix3_lazy_d() ? birth_sampling_extra(p, 3u, instance_salt) : 0u;
         while (static_cast<int>(out.size()) < cap && k < cap) {
           const float rate = pick(p.rate_over_distance, p.rate_over_distance_min, true,
                                   rod_random_seed(context, p, k));
@@ -402,8 +413,8 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
           distance += 1.0f / rate;
           if (distance > total + 1e-5f) break;
           const float parent_z = context->parent_motion.motion_origin_z + distance;
-          push_rod_birth(out, birth_time_for_distance(distance), next + k,
-                         birth_sampling_extra(p, 3u, instance_salt), cap, parent_z,
+          const uint32_t extra = mix3_lazy_d() ? extra3 : birth_sampling_extra(p, 3u, instance_salt);
+          push_rod_birth(out, birth_time_for_distance(distance), next + k, extra, cap, parent_z,
                          context->parent_motion.birth_pose_candidate);
           ++k;
         }
@@ -478,11 +489,12 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
                        static_cast<uint32_t>(c + 11))) > b.probability) {
             continue;
           }
+          const uint32_t tag = (4u + bi) * 17u + static_cast<uint32_t>(c + w * 32);
+          const uint32_t extra_burst =
+              mix3_lazy_d() ? birth_sampling_extra(p, tag) : 0u;
           for (int k = 0; k < count; ++k) {
-            push_birth(out, delay + t / speed, next,
-                       birth_sampling_extra(
-                           p, (4u + bi) * 17u + static_cast<uint32_t>(c + w * 32)),
-                       cap);
+            const uint32_t extra = mix3_lazy_d() ? extra_burst : birth_sampling_extra(p, tag);
+            push_birth(out, delay + t / speed, next, extra, cap);
             ++next;
           }
         }
@@ -491,8 +503,10 @@ void collect_births(const SplitEffectParticle& p, float now_t, int32_t color_id,
   } else if (p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::Burst) &&
              p.emission > 0.0f) {
     const int n = std::min(cap, std::max(1, static_cast<int>(std::lround(p.emission))));
+    const uint32_t extra1 = mix3_lazy_d() ? birth_sampling_extra(p, 1u, instance_salt) : 0u;
     for (int k = 0; k < n; ++k) {
-      push_birth(out, delay, next + k, birth_sampling_extra(p, 1u, instance_salt), cap);
+      const uint32_t extra = mix3_lazy_d() ? extra1 : birth_sampling_extra(p, 1u, instance_salt);
+      push_birth(out, delay, next + k, extra, cap);
     }
   }
 }
@@ -557,11 +571,13 @@ bool collect_births_can_extend(const SplitEffectParticle& p) noexcept {
 }
 
 void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t color_id,
-                           int first_index, std::vector<Birth>& out, const EmitContext* context) {
+                           int first_index, std::vector<Birth>& out, const EmitContext* context,
+                           bool include_expired) {
   (void)color_id;
   const uint32_t instance_salt = context != nullptr ? split_instance_salt(*context, false) : 0u;
   if (!collect_births_can_extend(p)) {
-    collect_births(p, now_t, color_id, out, context, false);
+    out.clear();
+    collect_births(p, now_t, color_id, out, context, include_expired);
     return;
   }
   const float speed = p.simulation_speed > 1e-6f ? p.simulation_speed : 1.0f;
@@ -572,7 +588,8 @@ void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t co
   const bool looping = (p.flags & kSplitEffectFlagLooping) != 0;
   const float max_life = std::max(p.lifetime, p.lifetime_min);
   const float keep = particle_keep_sim_conservative(p, max_life);
-  if (now < 0.0f || (!looping && now > length + keep)) {
+  if (now < 0.0f || (!include_expired && !looping && now > length + keep)) {
+    out.clear();
     return;
   }
   const int cap = collect_list_cap();
@@ -581,9 +598,10 @@ void collect_births_extend(const SplitEffectParticle& p, float now_t, int32_t co
     const float rot = p.rate_over_time;
     const float span = looping ? now : std::min(now, length);
     const int n = std::min(cap, std::max(0, static_cast<int>(std::floor(span * rot))));
+    const uint32_t extra2 = mix3_lazy_d() ? birth_sampling_extra(p, 2u, instance_salt) : 0u;
     for (int k = start; k < n; ++k) {
-      push_birth(out, delay + ((static_cast<float>(k) + 1.0f) / rot) / speed, k,
-                 birth_sampling_extra(p, 2u, instance_salt), cap);
+      const uint32_t extra = mix3_lazy_d() ? extra2 : birth_sampling_extra(p, 2u, instance_salt);
+      push_birth(out, delay + ((static_cast<float>(k) + 1.0f) / rot) / speed, k, extra, cap);
     }
     return;
   }
@@ -632,11 +650,13 @@ void collect_event_bursts(const SplitEffectParticle& p, float event_t, int32_t c
                    701u)) > b.probability) {
         continue;
       }
+      const uint32_t sys_id = mix3_lazy_d() ? sampling_system_identity(p) : 0u;
       for (int k = 0; k < count; ++k) {
-        push_birth(out, event_t, next,
-                   birth_sampling_extra(p, (4u + bi) * 17u + 700u + static_cast<uint32_t>(k),
-                                       instance_salt),
-                   cap);
+        const uint32_t tag = (4u + bi) * 17u + 700u + static_cast<uint32_t>(k);
+        const uint32_t extra =
+            mix3_lazy_d() ? birth_sampling_extra_from_id(sys_id, tag, instance_salt)
+                          : birth_sampling_extra(p, tag, instance_salt);
+        push_birth(out, event_t, next, extra, cap);
         ++next;
       }
     }
@@ -644,8 +664,12 @@ void collect_event_bursts(const SplitEffectParticle& p, float event_t, int32_t c
   }
   if (p.emission_kind == static_cast<uint8_t>(SplitEffectEmission::Burst) && p.emission > 0.0f) {
     const int n = std::min(cap, std::max(1, static_cast<int>(std::lround(p.emission))));
+    const uint32_t extra701 =
+        mix3_lazy_d() ? birth_sampling_extra(p, 701u, instance_salt) : 0u;
     for (int k = 0; k < n; ++k) {
-      push_birth(out, event_t, next + k, birth_sampling_extra(p, 701u, instance_salt), cap);
+      const uint32_t extra =
+          mix3_lazy_d() ? extra701 : birth_sampling_extra(p, 701u, instance_salt);
+      push_birth(out, event_t, next + k, extra, cap);
     }
   }
 }

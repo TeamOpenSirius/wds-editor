@@ -464,7 +464,14 @@ struct SplitEffectEvalCacheStats {
   int pool_p_cores = 0;
   int pool_e_cores = 0;
   const char* simd_path = "";
+  int eval_slices = 0;
+  int eval_slices_max = 0;
+  int eval_sliced_tasks = 0;
 };
+
+int split_effect_last_eval_slices() noexcept;
+int split_effect_max_eval_slices() noexcept;
+int split_effect_last_eval_sliced_tasks() noexcept;
 
 const char* split_effect_simd_name() noexcept;
 void split_effect_set_simd_for_tests(const char* name) noexcept;
@@ -507,7 +514,11 @@ struct SplitCollectPoolDiag {
   std::uint64_t run_inline_calls = 0;  // kMaxJobs exhausted: ran inline
   std::uint64_t par_calls = 0;         // calls that published a Job
   std::uint64_t sum_item_us = 0;       // Σ top-level claim µs
-  std::uint64_t wall_us = 0;           // Σ wall µs of those waves
+  std::uint64_t wall_us = 0;           // Σ wall µs of every published Job
+#if WDS_DIAG_ENABLED
+  std::uint64_t wall_top_us = 0;       // Σ wall µs of depth-0 published Jobs
+  std::uint64_t nested_wait_us = 0;    // Σ join-idle µs of nested published Jobs
+#endif  // WDS_DIAG_ENABLED
   // Who ran the work: claims/item counts for the calling (GUI) thread vs the
   // pool workers. items_caller / (items_caller + items_worker) is the share of
   // the collect the GUI thread did itself.
@@ -568,6 +579,13 @@ struct SplitEffectPhaseDiag {
   std::uint64_t pool_wait_us = 0;
   int pool_participants = 0;
   double pool_par_eff = 0.0;
+#if WDS_DIAG_ENABLED
+  // pool_par_eff is sum_busy / (wall_top × participants). v1 is the old
+  // sum_item / (wall × participants) that double-counted nested Job walls.
+  double pool_par_eff_v1 = 0.0;
+  std::uint64_t pool_wall_top_us = 0;
+  std::uint64_t pool_nested_wait_us = 0;
+#endif  // WDS_DIAG_ENABLED
   // Who ran the work: items claimed by the calling (GUI) thread vs pool
   // workers, and the µs the caller blocked in the join.
   std::uint64_t pool_claims_caller = 0;
@@ -577,6 +595,7 @@ struct SplitEffectPhaseDiag {
   std::uint64_t pool_join_us = 0;
   std::uint64_t pool_inline_calls = 0;
   std::uint64_t pool_serial_calls = 0;
+  std::uint64_t pool_run_inline = 0;  // kMaxJobs exhausted: ran inline
   std::uint64_t pool_sum_item_us = 0;
   std::uint64_t pool_wall_us = 0;
   // Cache detail (same counters as above, split by outcome / drop reason).
@@ -586,6 +605,8 @@ struct SplitEffectPhaseDiag {
   std::uint64_t cache_evict_reap = 0;
   std::uint64_t cache_evict_clear = 0;
   std::uint64_t cache_epoch_bumps = 0;
+  int eval_slices = 0;
+  int eval_sliced_tasks = 0;
 };
 
 // Diagnostics only (WDS_FRAME_DIAG). Per-frame split-phase snapshot plus the

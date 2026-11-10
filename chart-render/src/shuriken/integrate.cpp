@@ -1,5 +1,8 @@
+#include "integrate_batch.hpp"
+#include "integrate_mask0_x86.hpp"
 #include "internal.hpp"
 #include "modules_an.inl.hpp"
+#include "simd_dispatch.hpp"
 #include "split_eval_cache.hpp"
 #include "split_wall_profile.hpp"
 
@@ -20,9 +23,23 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define WDS_INTEGRATE_NEON 1
+#else
+#define WDS_INTEGRATE_NEON 0
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define WDS_INTEGRATE_SSE 1
+#else
+#define WDS_INTEGRATE_SSE 0
+#endif
 
 namespace wds::chart_render::shuriken {
 
@@ -712,6 +729,18 @@ void PoseIntegrator::run_step(int i, float t_mid, float dt, float t_end_for_nois
   }
 }
 
+namespace {
+
+// Same ops ARM scalar contracts to fmadd (vy += g*dt). Avx2 simple mask-0
+// (batch + scalar remainder) fuses gravity in mask0_*_loop_*_avx2 instead of
+// calling a per-step target("fma") helper. SSE42 / Scalar / ARM keep mul+add
+// here so their codegen is unchanged. hop.
+inline float mask0_add_grav(float v, float g, float dt) noexcept {
+  return v + g * dt;
+}
+
+}  // namespace
+
 template <uint32_t Mask>
 void PoseIntegrator::run_step_masked(int i, float t_mid, float dt, float t_end_for_noise,
                                      int step_count, float step_start, float step_end,
@@ -778,8 +807,13 @@ void PoseIntegrator::run_step_masked(int i, float t_mid, float dt, float t_end_f
   }
   if (!force_after_limit) {
     vx += fx * dt;
-    vy += (fy + grav_y) * dt;
-    vz += (fz + grav_z) * dt;
+    if constexpr (!kHasVol && !kHasForce && !kHasNoise && !kHasInherit) {
+      vy = mask0_add_grav(vy, fy + grav_y, dt);
+      vz = mask0_add_grav(vz, fz + grav_z, dt);
+    } else {
+      vy += (fy + grav_y) * dt;
+      vz += (fz + grav_z) * dt;
+    }
   }
   float inh_x = 0.0f, inh_y = 0.0f, inh_z = 0.0f;
   if constexpr (kHasInherit) {
@@ -881,8 +915,13 @@ void PoseIntegrator::run_step_masked(int i, float t_mid, float dt, float t_end_f
   }
   if (force_after_limit) {
     vx += fx * dt;
-    vy += (fy + grav_y) * dt;
-    vz += (fz + grav_z) * dt;
+    if constexpr (!kHasVol && !kHasForce && !kHasNoise && !kHasInherit) {
+      vy = mask0_add_grav(vy, fy + grav_y, dt);
+      vz = mask0_add_grav(vz, fz + grav_z, dt);
+    } else {
+      vy += (fy + grav_y) * dt;
+      vz += (fz + grav_z) * dt;
+    }
   }
   if (!noise_before_limit) {
     if constexpr (kHasNoise) {
@@ -1284,6 +1323,62 @@ void PoseIntegrator::apply_closed_form(int i0, int i1) noexcept {
   trace_.total_z = hot_->vz + volz;
 }
 
+bool PoseIntegrator::particle_can_batch_mask0(const SplitEffectParticle& p) noexcept {
+  if (split_integrator_is_legacy()) {
+    return false;
+  }
+  if ((p.flags & kSplitEffectFlagVelocity) != 0 || p.force_enabled != 0 ||
+      (p.flags & kSplitEffectFlagNoise) != 0 || p.clamp_enabled != 0) {
+    return false;
+  }
+  if (p.inherit_enabled != 0 && p.inherit_mode != 0) {
+    return false;
+  }
+  return true;
+}
+
+bool PoseIntegrator::can_batch_mask0() const noexcept {
+  if (legacy_ || step_mask_ != 0 || has_clamp_ != 0) {
+    return false;
+  }
+  if (st_ == nullptr || st_->p == nullptr) {
+    return false;
+  }
+  if (!particle_can_batch_mask0(*st_->p)) {
+    return false;
+  }
+  if (g_integration_step_observer != nullptr || grid_log_ != nullptr) {
+    return false;
+  }
+  if (std::fabs(st_->orb_x) > 1e-8f || std::fabs(st_->orb_y) > 1e-8f ||
+      std::fabs(st_->orb_z) > 1e-8f || std::fabs(st_->radial) > 1e-8f) {
+    return false;
+  }
+  return true;
+}
+
+namespace {
+
+#if WDS_INTEGRATE_NEON
+// Scalar mask-0 (no vol/force/noise/inherit, no clamp, no orbital) compiled
+// to fmadd for gravity and fmul+fmul+fadd for speedmod. NEON matches that
+// sequence per lane: vfmaq for gravity, vmulq+vmulq+vaddq for Δp. No
+// cross-lane reduction. hop / perf, not 2022.3.
+inline void mask0_simple_step_x4(float32x4_t& lx, float32x4_t& ly, float32x4_t& lz, float32x4_t& vx,
+                                 float32x4_t& vy, float32x4_t& vz, float dt, float grav_y,
+                                 float grav_z, float sm) noexcept {
+  const float32x4_t vdt = vdupq_n_f32(dt);
+  vy = vfmaq_f32(vy, vdupq_n_f32(grav_y), vdt);
+  vz = vfmaq_f32(vz, vdupq_n_f32(grav_z), vdt);
+  const float32x4_t vsm = vdupq_n_f32(sm);
+  lx = vaddq_f32(lx, vmulq_f32(vmulq_f32(vx, vdt), vsm));
+  ly = vaddq_f32(ly, vmulq_f32(vmulq_f32(vy, vdt), vsm));
+  lz = vaddq_f32(lz, vmulq_f32(vmulq_f32(vz, vdt), vsm));
+}
+#endif
+
+}  // namespace
+
 void PoseIntegrator::advance_to(int k) noexcept {
   if (legacy_ || k <= hot_->next_step) {
     return;
@@ -1305,6 +1400,21 @@ void PoseIntegrator::advance_to(int k) noexcept {
     export_grid(cur);
     grid_log_->push_back(cur);
   }
+#if WDS_INTEGRATE_SSE
+  // Avx2 simple mask-0: one dispatch into a target("avx2,fma") loop so gravity
+  // is vfmaddss in-loop (same fused ops as 4-wide). SSE42 / Scalar / ARM keep
+  // the run_step_masked<0> loop below. ISA compile boundary, not layout.
+  if (step_mask_ == 0 && grid_log_ == nullptr && can_batch_mask0() &&
+      split_simd_path() == SplitSimdPath::Avx2) {
+    const int nsteps = k - hot_->next_step;
+    integrate_batch_note_mask0_scalar(nsteps);
+    mask0_scalar_loop_avx2(hot_, &trace_, nsteps, h_, grav_y_, grav_z_, st_->p->vol_speed_mod);
+    return;
+  }
+#endif
+  if (step_mask_ == 0) {
+    integrate_batch_note_mask0_scalar(k - hot_->next_step);
+  }
   const int step_count = k;
   for (int i = hot_->next_step; i < k; ++i) {
     const float t_mid = h_ * (static_cast<float>(i) + 0.5f);
@@ -1319,6 +1429,332 @@ void PoseIntegrator::advance_to(int k) noexcept {
     }
   }
   hot_->next_step = k;
+}
+
+void PoseIntegrator::advance_mask0_batch(PoseIntegrator** xs, const int* ks, int n) noexcept {
+  if (xs == nullptr || ks == nullptr || n <= 0) {
+    return;
+  }
+  if (n > 4) {
+    n = 4;
+  }
+  const bool batch = integrate_batch_enabled() && n >= 2;
+  const bool verify = integrate_batch_verify();
+  IntegratorGridState saved[4];
+  if (verify) {
+    for (int i = 0; i < n; ++i) {
+      xs[i]->export_grid(saved[i]);
+    }
+  }
+  auto run_scalar = [&]() {
+    for (int i = 0; i < n; ++i) {
+      xs[i]->advance_to(ks[i]);
+    }
+  };
+  if (!batch) {
+    run_scalar();
+    return;
+  }
+  for (int i = 0; i < n; ++i) {
+    if (!xs[i]->can_batch_mask0()) {
+      run_scalar();
+      return;
+    }
+  }
+  const float h = xs[0]->h_;
+  const float gy = xs[0]->grav_y_;
+  const float gz = xs[0]->grav_z_;
+  const float sm = xs[0]->st_->p->vol_speed_mod;
+  for (int i = 1; i < n; ++i) {
+    if (xs[i]->h_ != h || xs[i]->grav_y_ != gy || xs[i]->grav_z_ != gz ||
+        xs[i]->st_->p->vol_speed_mod != sm) {
+      integrate_batch_note_neon(false);
+      run_scalar();
+      return;
+    }
+  }
+  int kmax = ks[0];
+  int kmin_from = xs[0]->hot_->next_step;
+  for (int i = 1; i < n; ++i) {
+    if (ks[i] > kmax) {
+      kmax = ks[i];
+    }
+    if (xs[i]->hot_->next_step < kmin_from) {
+      kmin_from = xs[i]->hot_->next_step;
+    }
+  }
+  if (kmax <= kmin_from) {
+    return;
+  }
+#if WDS_INTEGRATE_NEON
+  if (n == 4) {
+    const int i0 = xs[0]->hot_->next_step;
+    const int i1 = xs[1]->hot_->next_step;
+    const int i2 = xs[2]->hot_->next_step;
+    const int i3 = xs[3]->hot_->next_step;
+    if (i0 == i1 && i1 == i2 && i2 == i3) {
+      int kmin = ks[0];
+      for (int p = 1; p < 4; ++p) {
+        if (ks[p] < kmin) {
+          kmin = ks[p];
+        }
+      }
+      if (kmin > i0) {
+        integrate_batch_note_neon(true);
+        integrate_batch_note_mask0_simd4(kmin - i0);
+        float32x4_t lx = {xs[0]->hot_->lx, xs[1]->hot_->lx, xs[2]->hot_->lx, xs[3]->hot_->lx};
+        float32x4_t ly = {xs[0]->hot_->ly, xs[1]->hot_->ly, xs[2]->hot_->ly, xs[3]->hot_->ly};
+        float32x4_t lz = {xs[0]->hot_->lz, xs[1]->hot_->lz, xs[2]->hot_->lz, xs[3]->hot_->lz};
+        float32x4_t vx = {xs[0]->hot_->vx, xs[1]->hot_->vx, xs[2]->hot_->vx, xs[3]->hot_->vx};
+        float32x4_t vy = {xs[0]->hot_->vy, xs[1]->hot_->vy, xs[2]->hot_->vy, xs[3]->hot_->vy};
+        float32x4_t vz = {xs[0]->hot_->vz, xs[1]->hot_->vz, xs[2]->hot_->vz, xs[3]->hot_->vz};
+        for (int i = i0; i < kmin; ++i) {
+          mask0_simple_step_x4(lx, ly, lz, vx, vy, vz, h, gy, gz, sm);
+        }
+        float lxa[4], lya[4], lza[4], vxa[4], vya[4], vza[4];
+        vst1q_f32(lxa, lx);
+        vst1q_f32(lya, ly);
+        vst1q_f32(lza, lz);
+        vst1q_f32(vxa, vx);
+        vst1q_f32(vya, vy);
+        vst1q_f32(vza, vz);
+        for (int p = 0; p < 4; ++p) {
+          xs[p]->hot_->lx = lxa[p];
+          xs[p]->hot_->ly = lya[p];
+          xs[p]->hot_->lz = lza[p];
+          xs[p]->hot_->vx = vxa[p];
+          xs[p]->hot_->vy = vya[p];
+          xs[p]->hot_->vz = vza[p];
+          xs[p]->hot_->next_step = kmin;
+          auto& tr = xs[p]->trace_;
+          tr.stored_x = vxa[p];
+          tr.stored_y = vya[p];
+          tr.stored_z = vza[p];
+          tr.vol_x = tr.vol_y = tr.vol_z = 0.0f;
+          tr.noise_x = tr.noise_y = tr.noise_z = 0.0f;
+          tr.inherited_x = tr.inherited_y = tr.inherited_z = 0.0f;
+          tr.total_x = vxa[p];
+          tr.total_y = vya[p];
+          tr.total_z = vza[p];
+        }
+      }
+      for (int p = 0; p < 4; ++p) {
+        if (xs[p]->hot_->next_step < ks[p]) {
+          xs[p]->advance_to(ks[p]);
+        }
+      }
+      if (verify) {
+        bool ok = true;
+        for (int p = 0; p < 4; ++p) {
+          IntegratorHot got = *xs[p]->hot_;
+          IntegrationVelocityTrace got_tr = xs[p]->trace_;
+          xs[p]->import_grid(saved[p]);
+          xs[p]->advance_to(ks[p]);
+          if (std::memcmp(xs[p]->hot_, &got, sizeof(IntegratorHot)) != 0 ||
+              std::memcmp(&xs[p]->trace_, &got_tr, sizeof(IntegrationVelocityTrace)) != 0) {
+            ok = false;
+          } else {
+            *xs[p]->hot_ = got;
+            xs[p]->trace_ = got_tr;
+          }
+        }
+        integrate_batch_verify_note(ok, "advance_mask0_batch4");
+      }
+      return;
+    }
+  }
+#endif
+#if WDS_INTEGRATE_SSE
+  if (n == 4) {
+    const SplitSimdPath path = split_simd_path();
+    const bool use_avx2 = path == SplitSimdPath::Avx2;
+    const bool use_sse = path == SplitSimdPath::Sse42 || use_avx2;
+    if (use_sse) {
+      const int i0 = xs[0]->hot_->next_step;
+      const int i1 = xs[1]->hot_->next_step;
+      const int i2 = xs[2]->hot_->next_step;
+      const int i3 = xs[3]->hot_->next_step;
+      if (i0 == i1 && i1 == i2 && i2 == i3) {
+        int kmin = ks[0];
+        for (int p = 1; p < 4; ++p) {
+          if (ks[p] < kmin) {
+            kmin = ks[p];
+          }
+        }
+        if (kmin > i0) {
+          integrate_batch_note_neon(true);
+          integrate_batch_note_mask0_simd4(kmin - i0);
+          // Dispatch once; the named kernel holds load / n-step / store.
+          if (use_avx2) {
+            mask0_batch_loop_x4_avx2(xs[0]->hot_, xs[1]->hot_, xs[2]->hot_, xs[3]->hot_,
+                                     &xs[0]->trace_, &xs[1]->trace_, &xs[2]->trace_,
+                                     &xs[3]->trace_, kmin, h, gy, gz, sm);
+          } else {
+            mask0_batch_loop_x4_sse(xs[0]->hot_, xs[1]->hot_, xs[2]->hot_, xs[3]->hot_,
+                                    &xs[0]->trace_, &xs[1]->trace_, &xs[2]->trace_,
+                                    &xs[3]->trace_, kmin, h, gy, gz, sm);
+          }
+        }
+        for (int p = 0; p < 4; ++p) {
+          if (xs[p]->hot_->next_step < ks[p]) {
+            xs[p]->advance_to(ks[p]);
+          }
+        }
+        if (verify) {
+          bool ok = true;
+          for (int p = 0; p < 4; ++p) {
+            IntegratorHot got = *xs[p]->hot_;
+            IntegrationVelocityTrace got_tr = xs[p]->trace_;
+            xs[p]->import_grid(saved[p]);
+            xs[p]->advance_to(ks[p]);
+            if (std::memcmp(xs[p]->hot_, &got, sizeof(IntegratorHot)) != 0 ||
+                std::memcmp(&xs[p]->trace_, &got_tr, sizeof(IntegrationVelocityTrace)) != 0) {
+              ok = false;
+            } else {
+              *xs[p]->hot_ = got;
+              xs[p]->trace_ = got_tr;
+            }
+          }
+          integrate_batch_verify_note(ok, "advance_mask0_batch4");
+        }
+        return;
+      }
+    }
+  }
+#endif
+  integrate_batch_note_neon(false);
+  run_scalar();
+}
+
+void PoseIntegrator::sample_batch(PoseIntegrator** xs, const float* ages, float* wx, float* wy,
+                                  float* wz, IntegrationVelocityTrace* traces, int n) noexcept {
+  if (xs == nullptr || ages == nullptr || wx == nullptr || wy == nullptr || wz == nullptr ||
+      n <= 0) {
+    return;
+  }
+  if (n > 4) {
+    n = 4;
+  }
+  auto capture_trace = [&](int i) {
+    if (traces != nullptr) {
+      traces[i] = g_last_integration_velocity;
+    }
+  };
+  if (!integrate_batch_enabled() || n != 4) {
+    for (int i = 0; i < n; ++i) {
+      xs[i]->sample(ages[i], wx[i], wy[i], wz[i], nullptr);
+      capture_trace(i);
+    }
+    return;
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (xs[i] == nullptr || xs[i]->legacy_ || !xs[i]->can_batch_mask0()) {
+      for (int j = 0; j < 4; ++j) {
+        xs[j]->sample(ages[j], wx[j], wy[j], wz[j], nullptr);
+        capture_trace(j);
+      }
+      return;
+    }
+  }
+  const bool verify = integrate_batch_verify();
+  IntegratorGridState saved[4];
+  if (verify) {
+    for (int i = 0; i < 4; ++i) {
+      xs[i]->export_grid(saved[i]);
+    }
+  }
+  int ks[4];
+  float rs[4];
+  float t_ends[4];
+  int befores[4];
+  for (int i = 0; i < 4; ++i) {
+    xs[i]->observe_age_ = ages[i];
+    const float t_end = std::max(integration_candidate_age(ages[i]), 0.0f);
+    t_ends[i] = t_end;
+    const int k = t_end <= 0.0f ? 0 : static_cast<int>(std::floor(t_end * xs[i]->hz_ + kGridIndexEps));
+    float r = t_end - static_cast<float>(k) * xs[i]->h_;
+    if (r <= kTailEps) {
+      r = 0.0f;
+    }
+    rs[i] = r;
+    ks[i] = k;
+    if (k < xs[i]->hot_->next_step) {
+      xs[i]->reset_to_birth();
+    }
+    xs[i]->maybe_restore(k);
+    befores[i] = xs[i]->hot_->next_step;
+  }
+  advance_mask0_batch(xs, ks, 4);
+  for (int i = 0; i < 4; ++i) {
+    const int k = ks[i];
+    const float r = rs[i];
+    const float t_end = t_ends[i];
+    int ran = std::max(0, xs[i]->hot_->next_step - befores[i]);
+    if (r > 0.0f || k == 0) {
+      const float slx = xs[i]->hot_->lx;
+      const float sly = xs[i]->hot_->ly;
+      const float slz = xs[i]->hot_->lz;
+      const float svx = xs[i]->hot_->vx;
+      const float svy = xs[i]->hot_->vy;
+      const float svz = xs[i]->hot_->vz;
+      const IntegrationVelocityTrace strace = xs[i]->trace_;
+      const int snext = xs[i]->hot_->next_step;
+      const float t_start = static_cast<float>(k) * xs[i]->h_;
+      const float dt = r;
+      const float t_mid = t_start + 0.5f * dt;
+      xs[i]->run_step(k, t_mid, dt, t_end, std::max(k, 1), t_start, t_start + dt);
+      xs[i]->apply_epilogue(xs[i]->hot_->lx, xs[i]->hot_->ly, xs[i]->hot_->lz, wx[i], wy[i], wz[i]);
+      xs[i]->publish_sample(ages[i], traces != nullptr ? &traces[i] : nullptr);
+      xs[i]->hot_->lx = slx;
+      xs[i]->hot_->ly = sly;
+      xs[i]->hot_->lz = slz;
+      xs[i]->hot_->vx = svx;
+      xs[i]->hot_->vy = svy;
+      xs[i]->hot_->vz = svz;
+      xs[i]->trace_ = strace;
+      xs[i]->hot_->next_step = snext;
+      ++ran;
+    } else {
+      xs[i]->apply_epilogue(xs[i]->hot_->lx, xs[i]->hot_->ly, xs[i]->hot_->lz, wx[i], wy[i], wz[i]);
+      xs[i]->publish_sample(ages[i], traces != nullptr ? &traces[i] : nullptr);
+    }
+    xs[i]->maybe_store();
+    WDS_PERF_COUNT("shuriken.integrate.steps", ran);
+#if WDS_DIAG_ENABLED
+    split_diag_add_count(SplitDiagCount::Steps, ran);
+#endif
+  }
+  if (verify) {
+    float bwx[4], bwy[4], bwz[4];
+    IntegratorHot bhot[4];
+    IntegrationVelocityTrace btr[4];
+    for (int i = 0; i < 4; ++i) {
+      bwx[i] = wx[i];
+      bwy[i] = wy[i];
+      bwz[i] = wz[i];
+      bhot[i] = *xs[i]->hot_;
+      btr[i] = xs[i]->trace_;
+      xs[i]->import_grid(saved[i]);
+      xs[i]->sample(ages[i], wx[i], wy[i], wz[i], nullptr);
+    }
+    bool ok = true;
+    for (int i = 0; i < 4; ++i) {
+      if (std::memcmp(&wx[i], &bwx[i], sizeof(float)) != 0 ||
+          std::memcmp(&wy[i], &bwy[i], sizeof(float)) != 0 ||
+          std::memcmp(&wz[i], &bwz[i], sizeof(float)) != 0 ||
+          std::memcmp(xs[i]->hot_, &bhot[i], sizeof(IntegratorHot)) != 0 ||
+          std::memcmp(&xs[i]->trace_, &btr[i], sizeof(IntegrationVelocityTrace)) != 0) {
+        ok = false;
+      } else {
+        *xs[i]->hot_ = bhot[i];
+        xs[i]->trace_ = btr[i];
+        wx[i] = bwx[i];
+        wy[i] = bwy[i];
+        wz[i] = bwz[i];
+      }
+    }
+    integrate_batch_verify_note(ok, "sample_batch4");
+  }
 }
 
 void PoseIntegrator::sample(float age, float& world_x, float& main_y, float& world_z,
@@ -1445,6 +1881,14 @@ void integrate_pose(const ParticleState& st, float age, float& world_x, float& m
                     float& world_z) noexcept {
   PoseIntegrator integ(st);
   integ.sample(age, world_x, main_y, world_z, nullptr);
+}
+
+void flush_integrate_batch_stats() noexcept {
+  integrate_batch_flush();
+}
+
+void reset_integrate_batch_stats() noexcept {
+  integrate_batch_reset();
 }
 
 }  // namespace wds::chart_render::shuriken

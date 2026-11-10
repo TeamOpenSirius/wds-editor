@@ -22,8 +22,8 @@ constexpr int kScopeNest = 64;
 #if WDS_DIAG_ENABLED
 constexpr const char* kSecName[kSecN] = {
     "frame",      "A",          "B",           "C",           "cap",
-    "copyout",    "leak",       "births",      "filter",      "compact",
-    "stitch",     "submerge",   "cache_lu",    "cache_st",    "make_state",
+    "copyout",    "births",     "filter",      "compact",     "stitch",
+    "submerge",   "cache_lu",    "cache_st",    "make_state",
     "integrate",  "appear",     "alpha",       "trails",      "carry_lu",
     "carry_st",   "walk",       "noise",       "pose_ctor",   "cache_key",
     "stamp",      "adopt",      "hydrate",     "persist_cull","persist_cmt",
@@ -32,13 +32,53 @@ constexpr const char* kSecName[kSecN] = {
     "assemble",   "lockwait",   "pool_wake",   "pool_join",   "task_setup",
     "cf_hash",    "cf_keep",    "cf_ident",    "pe_pose_at",
     "subemit_plan", "subemit_realize",
+    "wave_b1", "wave_b2setup", "wave_b2", "wave_b2b",
+    "wave_b3setup", "wave_b3", "wave_b3b",
+    "births_plan", "capsort_plan", "births_queue", "capsort_queue",
+    "cap_push", "cap_apply", "slices", "reap",
 };
+static_assert(sizeof(kSecName) / sizeof(kSecName[0]) == static_cast<size_t>(kSecN),
+              "kSecName must match SplitWallSec::Count");
 #endif  // WDS_DIAG_ENABLED
 
+#if WDS_DIAG_ENABLED
+bool env_is_one(const char* name) noexcept {
+  const char* raw = std::getenv(name);
+  return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+}
+
+struct DiagTimingFlags {
+  bool wall = false;
+  bool lockwait = false;
+  bool waves = false;
+};
+
+DiagTimingFlags parse_diag_timing() noexcept {
+  DiagTimingFlags f;
+  f.wall = env_is_one("WDS_SPLIT_WALL");
+  const bool want_lockwait = env_is_one("WDS_SPLIT_LOCKWAIT");
+  f.waves = env_is_one("WDS_SPLIT_WAVES");
+  if (f.wall && want_lockwait) {
+    std::fprintf(stderr, "WDS_SPLIT_LOCKWAIT ignored: WDS_SPLIT_WALL=1 takes precedence\n");
+    f.lockwait = false;
+  } else {
+    f.lockwait = want_lockwait;
+  }
+  return f;
+}
+
+const DiagTimingFlags kDiagTiming = parse_diag_timing();
+const bool kLockwaitOn = kDiagTiming.lockwait;
+const bool kWavesOn = kDiagTiming.waves;
+const bool kScopeOn = kDiagTiming.wall || kDiagTiming.waves;
+const bool kFrameOn = kDiagTiming.wall || kDiagTiming.lockwait || kDiagTiming.waves;
+const bool kLockScopeOn = kDiagTiming.wall || kDiagTiming.lockwait;
+#else
 bool env_on() noexcept {
   const char* raw = std::getenv("WDS_SPLIT_WALL");
   return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
 }
+#endif
 
 void atomic_max(std::atomic<int64_t>& slot, int64_t v) noexcept {
   int64_t cur = slot.load(std::memory_order_relaxed);
@@ -59,8 +99,27 @@ struct FrameAcc {
   std::atomic<int> evaluated{0};
   std::atomic<int> kept{0};
   std::atomic<int> realized{0};
+  std::atomic<int> eval_slices{0};
+  std::atomic<int> longest_wave{-1};
+  std::atomic<int> longest_kind{-1};
+  std::atomic<int> longest_fill{0};
   std::atomic<int64_t> worker_busy[kMaxWorkers]{};
   std::atomic<int64_t> phase_b_wall{0};
+  std::atomic<int> birth_plan_n{0};
+  std::atomic<int> birth_plan_ext{0};
+  std::atomic<int> birth_plan_len_sum{0};
+  std::atomic<int> birth_plan_len_max{0};
+  std::atomic<int> birth_queue_n{0};
+  std::atomic<int> birth_queue_ext{0};
+  std::atomic<int> birth_queue_len_sum{0};
+  std::atomic<int> birth_queue_len_max{0};
+  std::atomic<int> birth_extend_hit{0};
+  std::atomic<int> birth_extend_miss{0};
+#if WDS_DIAG_ENABLED
+  std::atomic<int> lockwait_blocks{0};
+  std::atomic<int64_t> lockwait_thread_max{0};
+  std::atomic<int> cap_n{0};
+#endif
 
   void reset() noexcept {
     for (int i = 0; i < kSecN; ++i) {
@@ -77,10 +136,29 @@ struct FrameAcc {
     evaluated.store(0, std::memory_order_relaxed);
     kept.store(0, std::memory_order_relaxed);
     realized.store(0, std::memory_order_relaxed);
+    eval_slices.store(0, std::memory_order_relaxed);
+    longest_wave.store(-1, std::memory_order_relaxed);
+    longest_kind.store(-1, std::memory_order_relaxed);
+    longest_fill.store(0, std::memory_order_relaxed);
     for (int w = 0; w < kMaxWorkers; ++w) {
       worker_busy[w].store(0, std::memory_order_relaxed);
     }
     phase_b_wall.store(0, std::memory_order_relaxed);
+    birth_plan_n.store(0, std::memory_order_relaxed);
+    birth_plan_ext.store(0, std::memory_order_relaxed);
+    birth_plan_len_sum.store(0, std::memory_order_relaxed);
+    birth_plan_len_max.store(0, std::memory_order_relaxed);
+    birth_queue_n.store(0, std::memory_order_relaxed);
+    birth_queue_ext.store(0, std::memory_order_relaxed);
+    birth_queue_len_sum.store(0, std::memory_order_relaxed);
+    birth_queue_len_max.store(0, std::memory_order_relaxed);
+    birth_extend_hit.store(0, std::memory_order_relaxed);
+    birth_extend_miss.store(0, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+    lockwait_blocks.store(0, std::memory_order_relaxed);
+    lockwait_thread_max.store(0, std::memory_order_relaxed);
+    cap_n.store(0, std::memory_order_relaxed);
+#endif
   }
 };
 
@@ -97,11 +175,80 @@ struct WindowRow {
   int evaluated = 0;
   int kept = 0;
   int realized = 0;
+  int eval_slices = 0;
+  int longest_wave = -1;
+  int longest_kind = -1;
+  int longest_fill = 0;
   int64_t worker_busy[kMaxWorkers]{};
   int64_t phase_b_wall = 0;
+  int birth_plan_n = 0;
+  int birth_plan_ext = 0;
+  int birth_plan_len_sum = 0;
+  int birth_plan_len_max = 0;
+  int birth_queue_n = 0;
+  int birth_queue_ext = 0;
+  int birth_queue_len_sum = 0;
+  int birth_queue_len_max = 0;
+  int birth_extend_hit = 0;
+  int birth_extend_miss = 0;
+#if WDS_DIAG_ENABLED
+  int lockwait_blocks = 0;
+  int64_t lockwait_thread_max = 0;
+  int cap_n = 0;
+#endif
 };
 
+constexpr int kBirthHistN = 8;
+std::atomic<int64_t> g_hist_plan[kBirthHistN]{};
+std::atomic<int64_t> g_hist_queue[kBirthHistN]{};
+std::atomic<int64_t> g_hist_plan_calls{0};
+std::atomic<int64_t> g_hist_plan_ext{0};
+std::atomic<int64_t> g_hist_queue_calls{0};
+std::atomic<int64_t> g_hist_queue_ext{0};
+
+#if WDS_DIAG_ENABLED
+int birth_hist_bucket(int n) noexcept {
+  if (n <= 0) {
+    return 0;
+  }
+  if (n <= 16) {
+    return 1;
+  }
+  if (n <= 64) {
+    return 2;
+  }
+  if (n <= 256) {
+    return 3;
+  }
+  if (n <= 1024) {
+    return 4;
+  }
+  if (n <= 4096) {
+    return 5;
+  }
+  if (n <= 16384) {
+    return 6;
+  }
+  return 7;
+}
+#endif  // WDS_DIAG_ENABLED
+
+void reset_birth_hist() noexcept {
+  for (int i = 0; i < kBirthHistN; ++i) {
+    g_hist_plan[i].store(0, std::memory_order_relaxed);
+    g_hist_queue[i].store(0, std::memory_order_relaxed);
+  }
+  g_hist_plan_calls.store(0, std::memory_order_relaxed);
+  g_hist_plan_ext.store(0, std::memory_order_relaxed);
+  g_hist_queue_calls.store(0, std::memory_order_relaxed);
+  g_hist_queue_ext.store(0, std::memory_order_relaxed);
+}
+
+#if WDS_DIAG_ENABLED
+std::atomic<bool> g_on{kDiagTiming.wall};
+#else
 std::atomic<bool> g_on{env_on()};
+#endif
 FrameAcc g_frame;
 std::mutex g_mu;
 std::vector<WindowRow> g_window;
@@ -128,33 +275,116 @@ void fill_snap(const WindowRow& r, SplitWallFrameSnap& out) noexcept {
   out.evaluated = r.evaluated;
   out.kept = r.kept;
   out.realized = r.realized;
+  out.eval_slices = r.eval_slices;
+  out.longest_wave = r.longest_wave;
+  out.longest_kind = r.longest_kind;
+  out.longest_fill = r.longest_fill;
+  out.birth_plan_n = r.birth_plan_n;
+  out.birth_plan_ext = r.birth_plan_ext;
+  out.birth_plan_len_sum = r.birth_plan_len_sum;
+  out.birth_plan_len_max = r.birth_plan_len_max;
+  out.birth_queue_n = r.birth_queue_n;
+  out.birth_queue_ext = r.birth_queue_ext;
+  out.birth_queue_len_sum = r.birth_queue_len_sum;
+  out.birth_queue_len_max = r.birth_queue_len_max;
+  out.birth_extend_hit = r.birth_extend_hit;
+  out.birth_extend_miss = r.birth_extend_miss;
+#if WDS_DIAG_ENABLED
+  out.lockwait_blocks = r.lockwait_blocks;
+  const int lock_i = static_cast<int>(SplitWallSec::LockWait);
+  out.lockwait_ns = r.sum[lock_i];
+  out.lockwait_max_ns = r.mx[lock_i];
+  out.lockwait_thread_max_ns = r.lockwait_thread_max;
+  out.cap_n = r.cap_n;
+#endif
 }
 
+#if WDS_DIAG_ENABLED
+std::atomic<std::uint64_t> g_lw_gen{1};
+thread_local std::uint64_t tls_lw_gen = 0;
+thread_local int64_t tls_lw_sum = 0;
+
+void account_lockwait(int64_t ns) noexcept {
+  g_frame.lockwait_blocks.fetch_add(1, std::memory_order_relaxed);
+  const std::uint64_t gen = g_lw_gen.load(std::memory_order_relaxed);
+  if (tls_lw_gen != gen) {
+    tls_lw_sum = 0;
+    tls_lw_gen = gen;
+  }
+  if (ns > 0) {
+    tls_lw_sum += ns;
+  }
+  atomic_max(g_frame.lockwait_thread_max, tls_lw_sum);
+}
+#endif  // WDS_DIAG_ENABLED
 }  // namespace
 
 bool split_wall_enabled() noexcept {
   return g_on.load(std::memory_order_relaxed);
 }
 
+#if WDS_DIAG_ENABLED
+bool split_lockwait_enabled() noexcept {
+  return kLockwaitOn;
+}
+
+bool split_waves_enabled() noexcept {
+  return kWavesOn;
+}
+
+bool split_wall_scope_wanted() noexcept {
+  return kScopeOn;
+}
+
+bool split_lock_scope_wanted() noexcept {
+  return kLockScopeOn;
+}
+
+bool split_frame_acc_enabled() noexcept {
+  return kFrameOn;
+}
+
+void split_wall_note_cap_n(int n) noexcept {
+  if (!kFrameOn || n <= 0) {
+    return;
+  }
+  g_frame.cap_n.fetch_add(n, std::memory_order_relaxed);
+}
+#endif  // WDS_DIAG_ENABLED
 void split_wall_reset() noexcept {
   std::lock_guard<std::mutex> lock(g_mu);
   g_window.clear();
   g_frame.reset();
   g_last = {};
   g_have_last = false;
+  reset_birth_hist();
 }
 
 void split_wall_begin_frame() noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return;
+  }
+  g_frame.reset();
+  g_lw_gen.fetch_add(1, std::memory_order_relaxed);
+#else
   if (!split_wall_enabled()) {
     return;
   }
   g_frame.reset();
+#endif
 }
 
 void split_wall_end_frame() noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return;
+  }
+#else
   if (!split_wall_enabled()) {
     return;
   }
+#endif
   WindowRow row{};
   for (int i = 0; i < kSecN; ++i) {
     row.sum[i] = g_frame.sum[i].load(std::memory_order_relaxed);
@@ -170,10 +400,29 @@ void split_wall_end_frame() noexcept {
   row.evaluated = g_frame.evaluated.load(std::memory_order_relaxed);
   row.kept = g_frame.kept.load(std::memory_order_relaxed);
   row.realized = g_frame.realized.load(std::memory_order_relaxed);
+  row.eval_slices = g_frame.eval_slices.load(std::memory_order_relaxed);
+  row.longest_wave = g_frame.longest_wave.load(std::memory_order_relaxed);
+  row.longest_kind = g_frame.longest_kind.load(std::memory_order_relaxed);
+  row.longest_fill = g_frame.longest_fill.load(std::memory_order_relaxed);
   for (int w = 0; w < kMaxWorkers; ++w) {
     row.worker_busy[w] = g_frame.worker_busy[w].load(std::memory_order_relaxed);
   }
   row.phase_b_wall = g_frame.phase_b_wall.load(std::memory_order_relaxed);
+  row.birth_plan_n = g_frame.birth_plan_n.load(std::memory_order_relaxed);
+  row.birth_plan_ext = g_frame.birth_plan_ext.load(std::memory_order_relaxed);
+  row.birth_plan_len_sum = g_frame.birth_plan_len_sum.load(std::memory_order_relaxed);
+  row.birth_plan_len_max = g_frame.birth_plan_len_max.load(std::memory_order_relaxed);
+  row.birth_queue_n = g_frame.birth_queue_n.load(std::memory_order_relaxed);
+  row.birth_queue_ext = g_frame.birth_queue_ext.load(std::memory_order_relaxed);
+  row.birth_queue_len_sum = g_frame.birth_queue_len_sum.load(std::memory_order_relaxed);
+  row.birth_queue_len_max = g_frame.birth_queue_len_max.load(std::memory_order_relaxed);
+  row.birth_extend_hit = g_frame.birth_extend_hit.load(std::memory_order_relaxed);
+  row.birth_extend_miss = g_frame.birth_extend_miss.load(std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+  row.lockwait_blocks = g_frame.lockwait_blocks.load(std::memory_order_relaxed);
+  row.lockwait_thread_max = g_frame.lockwait_thread_max.load(std::memory_order_relaxed);
+  row.cap_n = g_frame.cap_n.load(std::memory_order_relaxed);
+#endif
   std::lock_guard<std::mutex> lock(g_mu);
   g_last = row;
   g_have_last = true;
@@ -186,9 +435,21 @@ void split_wall_end_frame() noexcept {
 }
 
 void split_wall_add_ns(SplitWallSec sec, int64_t ns) noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return;
+  }
+  if (sec == SplitWallSec::LockWait) {
+    account_lockwait(ns);
+  }
+  if (ns <= 0) {
+    return;
+  }
+#else
   if (!split_wall_enabled() || ns <= 0) {
     return;
   }
+#endif
   const int i = static_cast<int>(sec);
   if (i < 0 || i >= kSecN) {
     return;
@@ -210,6 +471,9 @@ thread_local int g_nest_overflow = 0;
 constexpr int kTaskNest = 8;
 thread_local int64_t g_task_ex[kTaskNest];
 thread_local int g_task_n = 0;
+thread_local int g_task_tag_wave = -1;
+thread_local int g_task_tag_kind = -1;
+thread_local int g_task_tag_fill = 0;
 
 void add_exclusive_to(int task_i, int64_t dt) noexcept {
   if (dt <= 0) {
@@ -297,6 +561,12 @@ void split_wall_max_ns(SplitWallSec sec, int64_t ns) noexcept {
   atomic_max(g_frame.mx[i], ns);
 }
 
+void split_wall_set_task_tag(int wave, int kind, int fill) noexcept {
+  g_task_tag_wave = wave;
+  g_task_tag_kind = kind;
+  g_task_tag_fill = fill;
+}
+
 void split_wall_note_task(int64_t ns) noexcept {
   if (!split_wall_enabled() || ns <= 0) {
     return;
@@ -304,6 +574,11 @@ void split_wall_note_task(int64_t ns) noexcept {
   g_frame.task_sum.fetch_add(ns, std::memory_order_relaxed);
   g_frame.ntasks.fetch_add(1, std::memory_order_relaxed);
   atomic_max(g_frame.task_max, ns);
+  if (ns >= g_frame.task_max.load(std::memory_order_relaxed)) {
+    g_frame.longest_wave.store(g_task_tag_wave, std::memory_order_relaxed);
+    g_frame.longest_kind.store(g_task_tag_kind, std::memory_order_relaxed);
+    g_frame.longest_fill.store(g_task_tag_fill, std::memory_order_relaxed);
+  }
   int64_t have = 0;
   if (g_task_n > 0) {
     --g_task_n;
@@ -366,6 +641,60 @@ void split_wall_note_splits(int n) noexcept {
   g_frame.nsplits.fetch_add(n, std::memory_order_relaxed);
 }
 
+void split_wall_note_eval_slices(int n) noexcept {
+  if (!split_wall_enabled()) {
+    return;
+  }
+  g_frame.eval_slices.store(n, std::memory_order_relaxed);
+}
+
+#if WDS_DIAG_ENABLED
+void split_wall_note_birth_table(int n, bool can_extend, bool is_queue) noexcept {
+  if (!split_wall_enabled()) {
+    return;
+  }
+  const int bucket = birth_hist_bucket(n);
+  if (is_queue) {
+    g_frame.birth_queue_n.fetch_add(1, std::memory_order_relaxed);
+    g_frame.birth_queue_len_sum.fetch_add(n, std::memory_order_relaxed);
+    int prev = g_frame.birth_queue_len_max.load(std::memory_order_relaxed);
+    while (n > prev && !g_frame.birth_queue_len_max.compare_exchange_weak(
+                           prev, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+    if (can_extend) {
+      g_frame.birth_queue_ext.fetch_add(1, std::memory_order_relaxed);
+      g_hist_queue_ext.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_hist_queue[bucket].fetch_add(1, std::memory_order_relaxed);
+    g_hist_queue_calls.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_frame.birth_plan_n.fetch_add(1, std::memory_order_relaxed);
+  g_frame.birth_plan_len_sum.fetch_add(n, std::memory_order_relaxed);
+  int prev = g_frame.birth_plan_len_max.load(std::memory_order_relaxed);
+  while (n > prev && !g_frame.birth_plan_len_max.compare_exchange_weak(
+                         prev, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+  }
+  if (can_extend) {
+    g_frame.birth_plan_ext.fetch_add(1, std::memory_order_relaxed);
+    g_hist_plan_ext.fetch_add(1, std::memory_order_relaxed);
+  }
+  g_hist_plan[bucket].fetch_add(1, std::memory_order_relaxed);
+  g_hist_plan_calls.fetch_add(1, std::memory_order_relaxed);
+}
+
+void split_wall_note_birth_extend(bool hit) noexcept {
+  if (!split_wall_enabled()) {
+    return;
+  }
+  if (hit) {
+    g_frame.birth_extend_hit.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    g_frame.birth_extend_miss.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+#endif  // WDS_DIAG_ENABLED
+
 const char* split_wall_sec_name(SplitWallSec sec) noexcept {
 #if WDS_DIAG_ENABLED
   const int i = static_cast<int>(sec);
@@ -380,9 +709,15 @@ const char* split_wall_sec_name(SplitWallSec sec) noexcept {
 }
 
 bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return false;
+  }
+#else
   if (!split_wall_enabled()) {
     return false;
   }
+#endif
   std::lock_guard<std::mutex> lock(g_mu);
   if (!g_have_last) {
     return false;
@@ -411,7 +746,6 @@ std::string split_wall_report() {
   const double c = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[3]); });
   const double cap = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[4]); });
   const double copy = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[5]); });
-  const double leak = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[6]); });
   double sec_avg[kSecN]{};
   for (int i = 0; i < kSecN; ++i) {
     sec_avg[i] = avg_ms([i](const WindowRow& r) { return static_cast<double>(r.sum[i]); });
@@ -425,6 +759,7 @@ std::string split_wall_report() {
   double evaluated = 0.0;
   double kept = 0.0;
   double realized = 0.0;
+  double eval_slices = 0.0;
   double staged = 0.0;
   int wmax = 0;
   double worker_busy_avg[kMaxWorkers]{};
@@ -435,6 +770,7 @@ std::string split_wall_report() {
     evaluated += static_cast<double>(r.evaluated);
     kept += static_cast<double>(r.kept);
     realized += static_cast<double>(r.realized);
+    eval_slices += static_cast<double>(r.eval_slices);
     staged += static_cast<double>(staged_ns(r));
     for (int w = 0; w < kMaxWorkers; ++w) {
       worker_busy_avg[w] += static_cast<double>(r.worker_busy[w]);
@@ -443,9 +779,22 @@ std::string split_wall_report() {
       }
     }
   }
+  int peak_wave = -1;
+  int peak_kind = -1;
+  int peak_fill = 0;
+  int64_t peak_ns = 0;
+  for (const WindowRow& r : g_window) {
+    if (r.task_max > peak_ns) {
+      peak_ns = r.task_max;
+      peak_wave = r.longest_wave;
+      peak_kind = r.longest_kind;
+      peak_fill = r.longest_fill;
+    }
+  }
   ntasks /= static_cast<double>(n);
   nthreads /= static_cast<double>(n);
   nsplits /= static_cast<double>(n);
+  eval_slices /= static_cast<double>(n);
   evaluated /= static_cast<double>(n);
   kept /= static_cast<double>(n);
   realized /= static_cast<double>(n);
@@ -473,12 +822,85 @@ std::string split_wall_report() {
   out += buf;
   std::snprintf(buf, sizeof(buf),
                 "  B ntasks=%.1f nthreads=%.1f longest_task=%.3f task_sum=%.3f  "
-                "C cap=%.3f copyout=%.3f leak=%.3f  eval %d kept %d realized %d (discard %.0f%%)\n",
-                ntasks, nthreads, task_max, task_sum, cap, copy, leak,
+                "C cap=%.3f copyout=%.3f  eval %d kept %d realized %d (discard %.0f%%)  "
+                "eval_slices=%.1f\n",
+                ntasks, nthreads, task_max, task_sum, cap, copy,
                 static_cast<int>(evaluated + 0.5), static_cast<int>(kept + 0.5),
                 static_cast<int>(realized + 0.5),
-                evaluated > 1e-6 ? (1.0 - kept / evaluated) * 100.0 : 0.0);
+                evaluated > 1e-6 ? (1.0 - kept / evaluated) * 100.0 : 0.0, eval_slices);
   out += buf;
+  {
+    const char* wave_name = "?";
+    switch (peak_wave) {
+      case 0:
+        wave_name = "B1";
+        break;
+      case 1:
+        wave_name = "B2setup";
+        break;
+      case 2:
+        wave_name = "B2";
+        break;
+      case 3:
+        wave_name = "B2b";
+        break;
+      case 4:
+        wave_name = "B3setup";
+        break;
+      case 5:
+        wave_name = "B3";
+        break;
+      case 6:
+        wave_name = "B3b";
+        break;
+      default:
+        break;
+    }
+    const char* kind_name = "?";
+    switch (peak_kind) {
+      case 0:
+        kind_name = "plan";
+        break;
+      case 1:
+        kind_name = "pri_setup";
+        break;
+      case 2:
+        kind_name = "pri_slice";
+        break;
+      case 3:
+        kind_name = "pri_commit";
+        break;
+      case 4:
+        kind_name = "sub_setup";
+        break;
+      case 5:
+        kind_name = "sub_slice";
+        break;
+      case 6:
+        kind_name = "sub_commit";
+        break;
+      case 7:
+        kind_name = "pri_full";
+        break;
+      case 8:
+        kind_name = "sub_full";
+        break;
+      default:
+        break;
+    }
+    std::snprintf(buf, sizeof(buf),
+                  "  longest_owner wave=%s kind=%s fill=%d peak_ms=%.3f  "
+                  "waves b1=%.3f b2setup=%.3f b2=%.3f b2b=%.3f b3setup=%.3f b3=%.3f b3b=%.3f\n",
+                  wave_name, kind_name, peak_fill, static_cast<double>(peak_ns) / 1e6,
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB1)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB2Setup)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB2)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB2b)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB3Setup)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB3)],
+                  sec_avg[static_cast<int>(SplitWallSec::WaveB3b)]);
+    out += buf;
+  }
   std::snprintf(buf, sizeof(buf),
                 "  eval thread-sum births=%.3f filter=%.3f make_state=%.3f alpha=%.3f "
                 "integrate=%.3f appear=%.3f trails=%.3f compact=%.3f stitch=%.3f "
@@ -531,6 +953,57 @@ std::string split_wall_report() {
                 sec_avg[static_cast<int>(SplitWallSec::SubemitPlan)],
                 sec_avg[static_cast<int>(SplitWallSec::SubemitRealize)]);
   out += buf;
+  {
+    const int64_t plan_n = g_hist_plan_calls.load(std::memory_order_relaxed);
+    const int64_t plan_ext = g_hist_plan_ext.load(std::memory_order_relaxed);
+    const int64_t queue_n = g_hist_queue_calls.load(std::memory_order_relaxed);
+    const int64_t queue_ext = g_hist_queue_ext.load(std::memory_order_relaxed);
+    std::snprintf(buf, sizeof(buf),
+                  "  births_plan=%.3f capsort_plan=%.3f births_queue=%.3f capsort_queue=%.3f  "
+                  "plan_calls=%lld extend=%lld (%.0f%%) queue_calls=%lld extend=%lld (%.0f%%)\n",
+                  sec_avg[static_cast<int>(SplitWallSec::BirthsPlan)],
+                  sec_avg[static_cast<int>(SplitWallSec::CapSortPlan)],
+                  sec_avg[static_cast<int>(SplitWallSec::BirthsQueue)],
+                  sec_avg[static_cast<int>(SplitWallSec::CapSortQueue)],
+                  static_cast<long long>(plan_n), static_cast<long long>(plan_ext),
+                  plan_n > 0 ? 100.0 * static_cast<double>(plan_ext) / static_cast<double>(plan_n)
+                             : 0.0,
+                  static_cast<long long>(queue_n), static_cast<long long>(queue_ext),
+                  queue_n > 0 ? 100.0 * static_cast<double>(queue_ext) / static_cast<double>(queue_n)
+                              : 0.0);
+    out += buf;
+    double hit = 0.0;
+    double miss = 0.0;
+    for (const WindowRow& r : g_window) {
+      hit += static_cast<double>(r.birth_extend_hit);
+      miss += static_cast<double>(r.birth_extend_miss);
+    }
+    hit /= static_cast<double>(n);
+    miss /= static_cast<double>(n);
+    std::snprintf(buf, sizeof(buf), "  birth_extend hit=%.1f miss=%.1f\n", hit, miss);
+    out += buf;
+    static constexpr const char* kHistLabel[kBirthHistN] = {
+        "0", "1-16", "17-64", "65-256", "257-1024", "1025-4096", "4097-16384", "16385+"};
+    out += "  birth_len_plan";
+    for (int i = 0; i < kBirthHistN; ++i) {
+      const int64_t c = g_hist_plan[i].load(std::memory_order_relaxed);
+      if (c <= 0) {
+        continue;
+      }
+      std::snprintf(buf, sizeof(buf), " %s=%lld", kHistLabel[i], static_cast<long long>(c));
+      out += buf;
+    }
+    out += "\n  birth_len_queue";
+    for (int i = 0; i < kBirthHistN; ++i) {
+      const int64_t c = g_hist_queue[i].load(std::memory_order_relaxed);
+      if (c <= 0) {
+        continue;
+      }
+      std::snprintf(buf, sizeof(buf), " %s=%lld", kHistLabel[i], static_cast<long long>(c));
+      out += buf;
+    }
+    out += "\n";
+  }
   std::snprintf(buf, sizeof(buf),
                 "  serial extra capselect=%.3f assemble=%.3f lockwait=%.3f pool_wake=%.3f "
                 "pool_join=%.3f task_setup=%.3f\n",

@@ -72,8 +72,9 @@ bool is_split_picker_search_text_valid(const std::string& text) noexcept;
 std::vector<int32_t> filter_split_picker_color_ids(const std::string& query);
 
 // Split coverage for default-lane-guide hiding. Fade windows are wall-clock
-// seconds (PreviewConfig: official fadeIn 1.0s / fadeOut 1.0s from expire), never
-// BPM/subdivision ticks — edit and preview share the same real-time windows.
+// seconds (PreviewConfig: official fadeIn 1.0s, fadeOut 0.3s from expire — the
+// line's own window, not the 1.0s pooled-instance tail), never BPM/subdivision
+// ticks — edit and preview share the same real-time windows.
 struct SplitCoverageMs {
   int64_t fade_start_ms = 0;
   int64_t fade_end_ms = 0;
@@ -143,7 +144,8 @@ void paint_timing_gutter(wds::interaction::UiPainter& painter, const EditViewpor
                          const wds::chart_editor::MusicTiming& timing, int32_t view_start_tick,
                          int32_t view_end_tick, bool show_timing_marks = true);
 
-// Far-right column: 1-based measure indices centered on each measure line.
+// Far-right column: 1-based measure indices, plus tiny tick numbers on every
+// non-measure 拍内分割 grid line (finest editor subdivision).
 void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                                 const wds::interaction::Rect& gutter,
                                 const wds::chart_editor::MusicTiming& timing,
@@ -227,6 +229,7 @@ std::optional<int32_t> speed_tick_at(const EditViewport& viewport,
                                      const std::vector<wds::chart_editor::ScrollSpeedPoint>& points,
                                      wds::interaction::Vec2 point);
 
+// Chip text: at most 4 slots (digits + decimal point), then "x". Sign is extra.
 std::string format_speed_label(double multiplier);
 
 }  // namespace wds::ui
