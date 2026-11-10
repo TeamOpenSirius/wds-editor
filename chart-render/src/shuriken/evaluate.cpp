@@ -1177,6 +1177,8 @@ ParticleCacheKey make_cache_key(const EmitContext& ctx, const SplitEffectParticl
   key.birth_extra = b.extra;
   key.line_play_gen = ctx.line_play_gen != 0 ? ctx.line_play_gen : 1u;
   key.seed = seed;
+  key.line_x_bits = persist_f32_bits(ctx.line_x);
+  key.split_count = ctx.split_count;
   if (st.p != nullptr) {
     note_eval_system_hash(*st.p, st.color_id);
   }
@@ -2041,6 +2043,8 @@ SystemCarryKey make_system_key(const EmitContext& ctx, const SplitEffectParticle
   key.catalog_index = system_id_of(ctx, p);
   key.line_play_gen = ctx.line_play_gen != 0 ? ctx.line_play_gen : 1u;
   key.input_hash = hash_system_inputs(p, ctx);
+  key.line_x_bits = persist_f32_bits(ctx.line_x);
+  key.split_count = ctx.split_count;
   key.kind = kind;
   return key;
 }
@@ -2346,7 +2350,8 @@ int finish_realize_outputs(const SplitEffectParticle& p, const EmitContext& ctx,
   if (ctx.want_trail && p.trail_mode == 1) {
     SplitWallScope wall_stitch(SplitWallSec::Stitch);
     SplitDiagScope diag_stitch(SplitDiagPhase::Stitch);
-    stitch_ribbons(p, out, written, ctx.line_index, cat, split_instance_salt(ctx));
+    stitch_ribbons(p, out, written, ctx.line_index, cat, split_instance_salt(ctx), ctx.split_count,
+                   persist_f32_bits(ctx.line_x));
   }
   if (commit_carry && split_eval_carry_enabled() && !observers_installed()) {
     commit_primary_carry(make_system_key(ctx, p, 0), ctx, jobs);
@@ -5113,7 +5118,8 @@ int evaluate_subemitters_plan(const SplitEffectParticle* particles, uint16_t cou
           }
           if (dest != nullptr && ctx.want_trail && child.trail_mode == 1 && plan.kept > ribbon0) {
             stitch_ribbons(child, dest + ribbon0, plan.kept - ribbon0, ctx.line_index,
-                           idx_of(child), split_instance_salt(ctx));
+                           idx_of(child), split_instance_salt(ctx), ctx.split_count,
+                           persist_f32_bits(ctx.line_x));
           }
         }
       }
@@ -5310,7 +5316,7 @@ void evaluate_subemitters_realize_range(const EmitContext& ctx, SubemitFillPlan&
     if (ribbon_child != nullptr && ctx.want_trail && ribbon_child->trail_mode == 1 &&
         end_i > ribbon0) {
       stitch_ribbons(*ribbon_child, out + ribbon0, end_i - ribbon0, ctx.line_index, ribbon_idx,
-                     split_instance_salt(ctx));
+                     split_instance_salt(ctx), ctx.split_count, persist_f32_bits(ctx.line_x));
     }
   };
   auto push_job = [&](int item_i, int si, PrimaryEvalJob& job) {

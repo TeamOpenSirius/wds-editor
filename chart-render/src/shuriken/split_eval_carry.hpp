@@ -38,13 +38,17 @@ struct SystemCarryKey {
   uint32_t catalog_index = 0;
   uint32_t line_play_gen = 0;
   uint64_t input_hash = 0;
+  uint32_t line_x_bits = 0;
   uint8_t kind = 0;
+  uint8_t split_count = 0;
 };
+static_assert(sizeof(SystemCarryKey) == 48, "SystemCarryKey packed");
 
 inline bool operator==(const SystemCarryKey& a, const SystemCarryKey& b) noexcept {
   return a.epoch == b.epoch && a.color_id == b.color_id && a.line_index == b.line_index &&
          a.line_start_ms == b.line_start_ms && a.catalog_index == b.catalog_index &&
-         a.line_play_gen == b.line_play_gen && a.input_hash == b.input_hash && a.kind == b.kind;
+         a.line_play_gen == b.line_play_gen && a.input_hash == b.input_hash &&
+         a.line_x_bits == b.line_x_bits && a.kind == b.kind && a.split_count == b.split_count;
 }
 
 struct CarryParticle {

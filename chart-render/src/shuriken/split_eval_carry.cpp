@@ -46,6 +46,8 @@ struct KeyHash {
     h = h * 1315423911u + static_cast<std::size_t>(k.catalog_index);
     h = h * 1315423911u + static_cast<std::size_t>(k.line_play_gen);
     h = h * 1315423911u + static_cast<std::size_t>(k.kind);
+    h = h * 1315423911u + static_cast<std::size_t>(k.split_count);
+    h = h * 1315423911u + static_cast<std::size_t>(k.line_x_bits);
     h ^= static_cast<std::size_t>(k.input_hash) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     return h;
   }

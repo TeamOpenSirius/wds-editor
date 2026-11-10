@@ -980,6 +980,8 @@ uint64_t task_cost_key(const EvalTask& t) noexcept {
   h = h * 1315423911u + static_cast<uint32_t>(t.line_index);
   h = h * 1315423911u + static_cast<uint32_t>(t.start_ms);
   h = h * 1315423911u + (t.kind == EvalKind::Subemit ? 0x80000000u : 0u) + t.layer;
+  h = h * 1315423911u + static_cast<uint32_t>(t.ctx.split_count);
+  h = h * 1315423911u + shuriken::split_lane_x_bits(t.ctx.line_x);
   return h;
 }
 
@@ -2525,6 +2527,7 @@ void prepare_split_tasks(FrameScratch& fs, SplitPrep& prep,
         ctx.line_index = index;
         ctx.line_start_ms = split.start_ms;
         ctx.line_x = world_x;
+        ctx.split_count = static_cast<uint8_t>(std::clamp(split.split_count, int32_t{0}, int32_t{255}));
         ctx.fade_scale = clock.fade_scale;
         ctx.line_alpha = line_alpha;
         ctx.now_t = clock.now_t;

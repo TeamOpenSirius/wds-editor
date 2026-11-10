@@ -499,12 +499,22 @@ class PoseIntegrator {
 
 // Stable per-particle identity for the incremental integrator cache.
 // Uniqueness: within one (color_id, line_index, line_start_ms, catalog_index,
-// line_play_gen, epoch), collect_births / subemit remapping assign unique
-// (birth_index, birth_extra). Overlapping instances differ by start_ms (or
-// are bit-identical at stagger 0). input_hash covers integration inputs so a
+// line_play_gen, epoch, split_count, line_x_bits), collect_births / subemit
+// remapping assign unique (birth_index, birth_extra). Same-start Full6×2
+// share (bit-identical inputs). Full3 vs Full6 at the same start_ms differ
+// by split_count / line_x. input_hash covers integration inputs so a
 // bind/chart change misses instead of reusing a stale pose.
 // Packed 56 B, explicit pad so memcmp is well-defined. Field order is
 // density first (input_hash / start_ms), then identity. Not a 2022.3 formula.
+// split_count + line_x_bits: overlapping Full3/Full6 at the same start_ms
+// share (color, line_index, start_ms) but read different official lane X
+// (and line 0 has the same X for 3 and 6). Same write as ChildPersistFp.
+inline uint32_t split_lane_x_bits(float x) noexcept {
+  uint32_t u = 0;
+  std::memcpy(&u, &x, sizeof(u));
+  return u;
+}
+
 struct ParticleCacheKey {
   uint64_t input_hash = 0;
   int64_t line_start_ms = 0;
@@ -516,8 +526,10 @@ struct ParticleCacheKey {
   uint32_t birth_extra = 0;
   uint32_t line_play_gen = 0;
   uint32_t seed = 0;
+  uint32_t line_x_bits = 0;
+  uint8_t split_count = 0;
   uint8_t valid = 0;
-  uint8_t pad_[7]{};
+  uint8_t pad_[2]{};
 };
 static_assert(sizeof(ParticleCacheKey) == 56, "ParticleCacheKey packed");
 
@@ -650,8 +662,8 @@ void fill_trails(PoseIntegrator& integ, const ParticleState& st, float age,
 // Unity owns one ParticleSystem per split instance, so two overlapping splits
 // of the same effect on the same line are two ribbons, not one.
 void stitch_ribbons(const SplitEffectParticle& p, SplitEffectLiveParticle* out, int n,
-                    int32_t line_index, uint32_t system_id,
-                    uint32_t instance_id) noexcept;
+                    int32_t line_index, uint32_t system_id, uint32_t instance_id,
+                    uint8_t split_count, uint32_t line_x_bits) noexcept;
 
 void fill_live(const ParticleState& st, float age, bool want_trail, SplitEffectLiveParticle& out);
 

@@ -40,6 +40,9 @@ struct EmitContext {
   int64_t line_start_ms = 0;
   // Main X from official_split_line_world_x (OpenWDS SetLineX).
   float line_x = 0.0f;
+  // Official lane count of this split instance (1–6). Cache / carry / persist
+  // / ribbon draw identity; not mixed into mix3 salts (RNG unchanged).
+  uint8_t split_count = 0;
   // Live fade for Local origin (element 2.5×27×fade). World uses birth_fade.
   // scalingMode=Local: parent 27×fade applies to Transform localPosition
   // (TransformPoint) only, not to Shape / motion offsets.
@@ -134,5 +137,6 @@ void reset_split_eval_persistence_for_tests() noexcept;
 // _exit and skip atexit; call this before _exit. Default Release is a
 // no-op: no atexit, no WDS_INTEGRATE_* lines.
 void flush_integrate_batch_stats() noexcept;
+void reset_integrate_batch_stats() noexcept;
 
 }  // namespace wds::chart_render::shuriken

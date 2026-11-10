@@ -34,6 +34,7 @@ inline std::string window_report() { return {}; }
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -202,6 +203,11 @@ void usage() {
                "      11621/10380/10660/11711 ×4 stagger 0.2. Exact vs remake + cost.\n"
                "  kf-memory --chart PATH [--gap 0.25,0.5,1,2] [--quality 1]\n"
                "      Hypothetical whole-chart snapshot bytes in note windows (alive slots).\n"
+               "\n"
+               "  key-collision-check\n"
+               "      Full6×2 stagger=0 and Full6+Full3 same start_ms: 5-run hash stability\n"
+               "      and default cache/carry vs CACHE=CARRY=PERSIST=0 particle identity.\n"
+               "      Cold (clear each frame) and play. Exit 1 if 6+3 still share keys.\n"
                "\n"
                "  dead-skip-check [--tmax 8] [--dt 0.05] [--instances 1] [--split-count 2]\n"
                "                  [--only ID[,ID...]]\n"
@@ -5924,6 +5930,373 @@ int cmd_kf_memory(const std::string& chart_path, const std::vector<double>& gaps
   return 0;
 }
 
+// Full6×2 stagger=0 and Full6+Full3 same start_ms. Default cache/carry vs
+// CACHE=CARRY=PERSIST=0 must be particle-identical; 5 repeats must hash-stable.
+// Catches the pre-keyfix hole where 6+3 shared ParticleCacheKey / SystemCarryKey.
+constexpr int32_t kKeyfixEffect = 10990;
+constexpr int kKeyfixRepeats = 5;
+constexpr int kKeyfixFrames = 4;
+
+uint64_t keyfix_fnv(uint64_t h, const void* p, size_t n) {
+  const auto* b = static_cast<const uint8_t*>(p);
+  for (size_t i = 0; i < n; ++i) {
+    h ^= b[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+void keyfix_mix_f32(uint64_t& h, float f) { h = keyfix_fnv(h, &f, sizeof(f)); }
+void keyfix_mix_u32(uint64_t& h, uint32_t u) { h = keyfix_fnv(h, &u, sizeof(u)); }
+void keyfix_mix_i32(uint64_t& h, int32_t u) { h = keyfix_fnv(h, &u, sizeof(u)); }
+void keyfix_mix_u64(uint64_t& h, uint64_t u) { h = keyfix_fnv(h, &u, sizeof(u)); }
+
+uint64_t keyfix_hash_pool(const SplitEffectLiveParticle* ps, int n, bool pose_only) {
+  struct Key {
+    int32_t line = 0;
+    uint32_t cat = 0;
+    uint32_t seed = 0;
+    float birth_t = 0.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    uint32_t idx = 0;
+  };
+  std::vector<Key> keys(static_cast<size_t>(std::max(n, 0)));
+  for (int i = 0; i < n; ++i) {
+    const SplitEffectLiveParticle& p = ps[i];
+    keys[static_cast<size_t>(i)] = Key{p.line_index, p.catalog_index, p.seed, p.birth_t, p.world_x,
+                                       p.main_y, p.z, static_cast<uint32_t>(i)};
+  }
+  std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+    if (a.line != b.line) {
+      return a.line < b.line;
+    }
+    if (a.cat != b.cat) {
+      return a.cat < b.cat;
+    }
+    if (a.seed != b.seed) {
+      return a.seed < b.seed;
+    }
+    if (a.birth_t != b.birth_t) {
+      return a.birth_t < b.birth_t;
+    }
+    if (a.x != b.x) {
+      return a.x < b.x;
+    }
+    if (a.y != b.y) {
+      return a.y < b.y;
+    }
+    if (a.z != b.z) {
+      return a.z < b.z;
+    }
+    return a.idx < b.idx;
+  });
+  uint64_t h = 1469598103934665603ull;
+  for (const Key& k : keys) {
+    const SplitEffectLiveParticle& p = ps[k.idx];
+    keyfix_mix_i32(h, p.line_index);
+    keyfix_mix_u32(h, p.catalog_index);
+    keyfix_mix_u32(h, p.seed);
+    keyfix_mix_f32(h, p.birth_t);
+    keyfix_mix_f32(h, p.world_x);
+    keyfix_mix_f32(h, p.main_y);
+    keyfix_mix_f32(h, p.z);
+    if (!pose_only) {
+      keyfix_mix_f32(h, p.age);
+      keyfix_mix_f32(h, p.size);
+      keyfix_mix_f32(h, p.r);
+      keyfix_mix_f32(h, p.g);
+      keyfix_mix_f32(h, p.b);
+      keyfix_mix_f32(h, p.a);
+      keyfix_mix_u32(h, p.trail_chain);
+      keyfix_mix_u32(h, p.trail_vertex);
+      keyfix_mix_u32(h, p.trail_count);
+    }
+  }
+  return h;
+}
+
+struct KeyfixSweep {
+  uint64_t pose = 0;
+  uint64_t full = 0;
+  int n = 0;
+  int unique_pose = 0;
+  int unique_full = 0;
+  int nan = 0;
+};
+
+void keyfix_reset() {
+  wds::chart_render::reset_split_effect_auto_seed_session(true);
+  wds::chart_render::split_effect_clear_caches();
+}
+
+KeyfixSweep keyfix_sweep(const std::vector<PreviewSplitLaneInstance>& splits,
+                         const std::vector<double>& times, bool play, bool clear_each, int repeats) {
+  KeyfixSweep out;
+  std::vector<uint64_t> poses;
+  std::vector<uint64_t> fulls;
+  poses.reserve(static_cast<size_t>(repeats));
+  fulls.reserve(static_cast<size_t>(repeats));
+  SplitEffectFrameCollect io;
+  SplitEffectPlaybackState state;
+  for (int r = 0; r < repeats; ++r) {
+    keyfix_reset();
+    state.reset();
+    uint64_t pose = 1469598103934665603ull;
+    uint64_t full = 1469598103934665603ull;
+    int n0 = 0;
+    int nan0 = 0;
+    for (size_t fi = 0; fi < times.size(); ++fi) {
+      if (clear_each) {
+        keyfix_reset();
+        state.reset();
+      }
+      (void)collect_ms(splits, 0, times[fi], play, state, io);
+      if (fi == 0) {
+        n0 = io.total;
+        for (int i = 0; i < io.total; ++i) {
+          const auto& p = io.pool[static_cast<size_t>(i)];
+          if (!std::isfinite(p.world_x) || !std::isfinite(p.main_y) || !std::isfinite(p.z)) {
+            ++nan0;
+          }
+        }
+      }
+      keyfix_mix_u64(pose, keyfix_hash_pool(io.pool.data(), io.total, true));
+      keyfix_mix_u64(full, keyfix_hash_pool(io.pool.data(), io.total, false));
+    }
+    poses.push_back(pose);
+    fulls.push_back(full);
+    if (r == 0) {
+      out.pose = pose;
+      out.full = full;
+      out.n = n0;
+      out.nan = nan0;
+    }
+  }
+  auto uniq = [](std::vector<uint64_t> v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return static_cast<int>(v.size());
+  };
+  out.unique_pose = uniq(poses);
+  out.unique_full = uniq(fulls);
+  return out;
+}
+
+struct KeyfixChildResult {
+  KeyfixSweep cold{};
+  KeyfixSweep play{};
+};
+
+int keyfix_run_one_env(const char* env_label) {
+  if (wds::chart_render::official_split_effect(kKeyfixEffect) == nullptr) {
+    std::fprintf(stderr, "key-collision-check: official_split_effect(%d) missing\n", kKeyfixEffect);
+    return 2;
+  }
+  std::vector<PreviewSplitLaneInstance> six =
+      make_instances(kKeyfixEffect, 2, 0.0, 6, SplitLaneType::Full);
+  std::vector<PreviewSplitLaneInstance> mixed;
+  mixed.push_back(make_split(kKeyfixEffect, 6, SplitLaneType::Full, kDefaultStartMs,
+                             kKeyfixEffect * 10 + 1));
+  mixed.push_back(make_split(kKeyfixEffect, 3, SplitLaneType::Full, kDefaultStartMs,
+                             kKeyfixEffect * 10 + 2));
+  std::vector<double> times;
+  times.reserve(static_cast<size_t>(kKeyfixFrames));
+  for (int i = 0; i < kKeyfixFrames; ++i) {
+    const double u = static_cast<double>(i) / static_cast<double>(kKeyfixFrames - 1);
+    times.push_back(now_sec_from_now_t(kDefaultStartMs, 0.65 + 0.5 * u));
+  }
+  struct Named {
+    const char* name;
+    const std::vector<PreviewSplitLaneInstance>* splits;
+  };
+  const Named fixtures[] = {{"full6x2-stagger0", &six}, {"full6+full3-same-start", &mixed}};
+  int fail = 0;
+  for (const Named& fx : fixtures) {
+    const KeyfixSweep cold = keyfix_sweep(*fx.splits, times, false, true, kKeyfixRepeats);
+    const KeyfixSweep play = keyfix_sweep(*fx.splits, times, true, false, kKeyfixRepeats);
+    std::fprintf(stdout,
+                 "KEYFIX_ROW env=%s fixture=%s mode=cold n=%d nan=%d pose=%016llx full=%016llx "
+                 "pose_u=%d full_u=%d\n",
+                 env_label, fx.name, cold.n, cold.nan,
+                 static_cast<unsigned long long>(cold.pose),
+                 static_cast<unsigned long long>(cold.full), cold.unique_pose, cold.unique_full);
+    std::fprintf(stdout,
+                 "KEYFIX_ROW env=%s fixture=%s mode=play n=%d nan=%d pose=%016llx full=%016llx "
+                 "pose_u=%d full_u=%d\n",
+                 env_label, fx.name, play.n, play.nan,
+                 static_cast<unsigned long long>(play.pose),
+                 static_cast<unsigned long long>(play.full), play.unique_pose, play.unique_full);
+    if (cold.unique_pose != 1 || cold.unique_full != 1 || play.unique_pose != 1 ||
+        play.unique_full != 1 || cold.nan != 0 || play.nan != 0 || cold.n <= 0 || play.n <= 0) {
+      ++fail;
+    }
+  }
+  std::fflush(stdout);
+  return fail == 0 ? 0 : 1;
+}
+
+struct KeyfixRow {
+  std::string env;
+  std::string fixture;
+  std::string mode;
+  int n = 0;
+  uint64_t pose = 0;
+  uint64_t full = 0;
+  int pose_u = 0;
+  int full_u = 0;
+};
+
+bool parse_keyfix_row(const char* line, KeyfixRow& row) {
+  char env[32]{};
+  char fixture[64]{};
+  char mode[16]{};
+  unsigned long long pose = 0;
+  unsigned long long full = 0;
+  int n = 0;
+  int nan = 0;
+  int pose_u = 0;
+  int full_u = 0;
+  if (std::sscanf(line,
+                  "KEYFIX_ROW env=%31s fixture=%63s mode=%15s n=%d nan=%d pose=%llx full=%llx "
+                  "pose_u=%d full_u=%d",
+                  env, fixture, mode, &n, &nan, &pose, &full, &pose_u, &full_u) != 9) {
+    return false;
+  }
+  row.env = env;
+  row.fixture = fixture;
+  row.mode = mode;
+  row.n = n;
+  row.pose = static_cast<uint64_t>(pose);
+  row.full = static_cast<uint64_t>(full);
+  row.pose_u = pose_u;
+  row.full_u = full_u;
+  return true;
+}
+
+int keyfix_spawn_env(char* self, const char* label, int cache, int carry, int persist,
+                     std::string& out_text) {
+  int fds[2];
+  if (pipe(fds) != 0) {
+    std::perror("pipe");
+    return 127;
+  }
+  const pid_t pid = fork();
+  if (pid < 0) {
+    std::perror("fork");
+    return 127;
+  }
+  if (pid == 0) {
+    close(fds[0]);
+    if (dup2(fds[1], STDOUT_FILENO) < 0) {
+      _exit(127);
+    }
+    close(fds[1]);
+    setenv("WDS_SPLIT_KEYFIX_CHILD", label, 1);
+    setenv("WDS_SPLIT_CACHE", cache ? "1" : "0", 1);
+    setenv("WDS_SPLIT_CARRY", carry ? "1" : "0", 1);
+    setenv("WDS_SPLIT_PERSIST", persist ? "1" : "0", 1);
+    char* args[] = {self, const_cast<char*>("key-collision-check"), nullptr};
+    execv(self, args);
+    _exit(127);
+  }
+  close(fds[1]);
+  out_text.clear();
+  char buf[4096];
+  for (;;) {
+    const ssize_t n = read(fds[0], buf, sizeof(buf));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    if (n == 0) {
+      break;
+    }
+    out_text.append(buf, static_cast<size_t>(n));
+  }
+  close(fds[0]);
+  int st = 0;
+  if (waitpid(pid, &st, 0) < 0) {
+    return 127;
+  }
+  if (WIFEXITED(st)) {
+    return WEXITSTATUS(st);
+  }
+  return 127;
+}
+
+int cmd_key_collision_check(char* self) {
+  const char* child = std::getenv("WDS_SPLIT_KEYFIX_CHILD");
+  if (child != nullptr && child[0] != '\0') {
+    return keyfix_run_one_env(child);
+  }
+  if (wds::chart_render::official_split_effect(kKeyfixEffect) == nullptr) {
+    std::fprintf(stderr, "key-collision-check: official_split_effect(%d) missing\n", kKeyfixEffect);
+    return 2;
+  }
+  std::string def_txt;
+  std::string off_txt;
+  // Default: cache on, carry on, persist off (product defaults).
+  const int def_rc = keyfix_spawn_env(self, "default", 1, 1, 0, def_txt);
+  const int off_rc = keyfix_spawn_env(self, "alloff", 0, 0, 0, off_txt);
+  std::fputs(def_txt.c_str(), stdout);
+  std::fputs(off_txt.c_str(), stdout);
+  std::map<std::tuple<std::string, std::string>, KeyfixRow> def_rows;
+  std::map<std::tuple<std::string, std::string>, KeyfixRow> off_rows;
+  auto ingest = [](const std::string& txt,
+                   std::map<std::tuple<std::string, std::string>, KeyfixRow>& dest) {
+    std::string line;
+    for (char c : txt) {
+      if (c == '\n') {
+        KeyfixRow row;
+        if (parse_keyfix_row(line.c_str(), row)) {
+          dest[{row.fixture, row.mode}] = row;
+        }
+        line.clear();
+      } else {
+        line.push_back(c);
+      }
+    }
+  };
+  ingest(def_txt, def_rows);
+  ingest(off_txt, off_rows);
+  int mismatches = 0;
+  const char* fixtures[] = {"full6x2-stagger0", "full6+full3-same-start"};
+  const char* modes[] = {"cold", "play"};
+  for (const char* fx : fixtures) {
+    for (const char* mode : modes) {
+      const auto key = std::make_tuple(std::string(fx), std::string(mode));
+      const auto d = def_rows.find(key);
+      const auto o = off_rows.find(key);
+      if (d == def_rows.end() || o == off_rows.end()) {
+        std::fprintf(stdout, "key-collision-check MISSING fixture=%s mode=%s\n", fx, mode);
+        ++mismatches;
+        continue;
+      }
+      const bool stable = d->second.pose_u == 1 && d->second.full_u == 1 && o->second.pose_u == 1 &&
+                          o->second.full_u == 1;
+      const bool match = d->second.pose == o->second.pose && d->second.full == o->second.full &&
+                         d->second.n == o->second.n;
+      std::fprintf(stdout,
+                   "key-collision-check fixture=%s mode=%s stable=%d match=%d n=%d/%d "
+                   "def_pose=%016llx off_pose=%016llx\n",
+                   fx, mode, stable ? 1 : 0, match ? 1 : 0, d->second.n, o->second.n,
+                   static_cast<unsigned long long>(d->second.pose),
+                   static_cast<unsigned long long>(o->second.pose));
+      if (!stable || !match) {
+        ++mismatches;
+      }
+    }
+  }
+  std::fprintf(stdout, "key-collision-check mismatches=%d default_rc=%d alloff_rc=%d\n", mismatches,
+               def_rc, off_rc);
+  std::fflush(stdout);
+  return mismatches == 0 && def_rc == 0 && off_rc == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -6477,6 +6850,10 @@ int main(int argc, char** argv) {
     return cmd_kf_memory(chart, gaps, quality);
   }
 
+
+  if (cmd == "key-collision-check") {
+    return cmd_key_collision_check(argv[0]);
+  }
 
   if (cmd == "dead-skip-check") {
     double tmax = 8.0;

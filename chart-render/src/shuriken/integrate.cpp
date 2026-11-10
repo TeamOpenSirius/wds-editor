@@ -1887,4 +1887,8 @@ void flush_integrate_batch_stats() noexcept {
   integrate_batch_flush();
 }
 
+void reset_integrate_batch_stats() noexcept {
+  integrate_batch_reset();
+}
+
 }  // namespace wds::chart_render::shuriken

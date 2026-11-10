@@ -42,6 +42,8 @@ std::uint64_t key_hash64(const ParticleCacheKey& k) noexcept {
   h ^= static_cast<std::uint64_t>(k.line_start_ms);
   h ^= (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.color_id)) << 32) | k.birth_extra;
   h ^= k.line_play_gen;
+  h ^= static_cast<std::uint64_t>(k.line_x_bits);
+  h ^= static_cast<std::uint64_t>(k.split_count);
   h *= 0x94d049bb133111ebull;
   return h == 0 ? 1 : h;
 }
