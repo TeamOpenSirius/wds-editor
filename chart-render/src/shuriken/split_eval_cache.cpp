@@ -8,6 +8,10 @@
 #include <wds/common/page_touch.hpp>
 #include <wds/common/perf_stages.hpp>
 
+#if WDS_DIAG_ENABLED
+#include <algorithm>
+#include <cstdio>
+#endif
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -327,7 +331,11 @@ int shard_of(std::uint64_t h) noexcept {
 std::unique_lock<std::shared_mutex> lock_shard(Shard& sh) {
   std::unique_lock<std::shared_mutex> lk(sh.mu, std::try_to_lock);
   if (!lk.owns_lock()) {
+#if WDS_DIAG_ENABLED
+    SplitLockWaitScope wall_lock;
+#else
     SplitWallScope wall_lock(SplitWallSec::LockWait);
+#endif
     lk = std::unique_lock<std::shared_mutex>(sh.mu);
     sh.store_contend.fetch_add(1, std::memory_order_relaxed);
   }
@@ -338,7 +346,11 @@ std::unique_lock<std::shared_mutex> lock_shard(Shard& sh) {
 std::shared_lock<std::shared_mutex> lock_shard_shared(Shard& sh) {
   std::shared_lock<std::shared_mutex> lk(sh.mu, std::try_to_lock);
   if (!lk.owns_lock()) {
+#if WDS_DIAG_ENABLED
+    SplitLockWaitScope wall_lock;
+#else
     SplitWallScope wall_lock(SplitWallSec::LockWait);
+#endif
     lk = std::shared_lock<std::shared_mutex>(sh.mu);
     sh.lookup_contend.fetch_add(1, std::memory_order_relaxed);
   }
@@ -947,4 +959,91 @@ void split_eval_cache_reap_unused() noexcept {
   }
 }
 
+#if WDS_DIAG_ENABLED
+void split_eval_cache_dump_shard_stats() noexcept {
+  static const bool on = [] {
+    const char* raw = std::getenv("WDS_SPLIT_SHARD_STATS");
+    return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+  }();
+  if (!on) {
+    return;
+  }
+  static std::atomic<bool> dumped{false};
+  if (dumped.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  const Cache& c = cache();
+  struct Row {
+    std::uint64_t lookup_ops = 0;
+    std::uint64_t store_ops = 0;
+    std::uint64_t lookup_contend = 0;
+    std::uint64_t store_contend = 0;
+  };
+  Row rows[kShards];
+  std::uint64_t total_ops = 0;
+  std::uint64_t total_contend = 0;
+  std::uint64_t ops_arr[kShards];
+  std::uint64_t contend_arr[kShards];
+  for (int i = 0; i < kShards; ++i) {
+    const Shard& sh = c.shards[i];
+    rows[i].lookup_ops = sh.lookup_ops.load(std::memory_order_relaxed);
+    rows[i].store_ops = sh.store_ops.load(std::memory_order_relaxed);
+    rows[i].lookup_contend = sh.lookup_contend.load(std::memory_order_relaxed);
+    rows[i].store_contend = sh.store_contend.load(std::memory_order_relaxed);
+    ops_arr[i] = rows[i].lookup_ops + rows[i].store_ops;
+    contend_arr[i] = rows[i].lookup_contend + rows[i].store_contend;
+    total_ops += ops_arr[i];
+    total_contend += contend_arr[i];
+    std::fprintf(stderr,
+                 "SHARD i=%d lookup_ops=%llu store_ops=%llu lookup_contend=%llu store_contend=%llu\n",
+                 i, static_cast<unsigned long long>(rows[i].lookup_ops),
+                 static_cast<unsigned long long>(rows[i].store_ops),
+                 static_cast<unsigned long long>(rows[i].lookup_contend),
+                 static_cast<unsigned long long>(rows[i].store_contend));
+  }
+  auto top_frac = [](std::uint64_t* arr, int n, int k, std::uint64_t total) -> double {
+    if (total == 0 || k <= 0) {
+      return 0.0;
+    }
+    const int take = k < n ? k : n;
+    std::nth_element(arr, arr + (n - take), arr + n);
+    std::uint64_t sum = 0;
+    for (int i = n - take; i < n; ++i) {
+      sum += arr[i];
+    }
+    return static_cast<double>(sum) / static_cast<double>(total);
+  };
+  std::uint64_t ops_copy[kShards];
+  std::uint64_t contend_copy[kShards];
+  std::memcpy(ops_copy, ops_arr, sizeof(ops_copy));
+  std::memcpy(contend_copy, contend_arr, sizeof(contend_copy));
+  const double c1 = top_frac(contend_copy, kShards, 1, total_contend);
+  std::memcpy(contend_copy, contend_arr, sizeof(contend_copy));
+  const double c8 = top_frac(contend_copy, kShards, 8, total_contend);
+  std::memcpy(contend_copy, contend_arr, sizeof(contend_copy));
+  const double c32 = top_frac(contend_copy, kShards, 32, total_contend);
+  const double o1 = top_frac(ops_copy, kShards, 1, total_ops);
+  std::memcpy(ops_copy, ops_arr, sizeof(ops_copy));
+  const double o8 = top_frac(ops_copy, kShards, 8, total_ops);
+  std::memcpy(ops_copy, ops_arr, sizeof(ops_copy));
+  const double o32 = top_frac(ops_copy, kShards, 32, total_ops);
+  std::fprintf(stderr,
+               "SHARDSTATS shards=%d total_ops=%llu total_contend=%llu "
+               "contend_top1=%.4f contend_top8=%.4f contend_top32=%.4f "
+               "ops_top1=%.4f ops_top8=%.4f ops_top32=%.4f\n",
+               kShards, static_cast<unsigned long long>(total_ops),
+               static_cast<unsigned long long>(total_contend), c1, c8, c32, o1, o8, o32);
+  std::fflush(stderr);
+}
+
+namespace {
+[[maybe_unused]] const int g_register_shard_stats_atexit = [] {
+  const char* raw = std::getenv("WDS_SPLIT_SHARD_STATS");
+  if (raw != nullptr && raw[0] == '1' && raw[1] == '\0') {
+    std::atexit([] { split_eval_cache_dump_shard_stats(); });
+  }
+  return 0;
+}();
+}  // namespace
+#endif  // WDS_DIAG_ENABLED
 }  // namespace wds::chart_render::shuriken

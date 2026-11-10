@@ -62,4 +62,7 @@ void split_eval_cache_note_frame_ms(double frame_ms) noexcept;
 double split_eval_cache_prev_frame_ms() noexcept;
 void split_eval_cache_reap_unused() noexcept;
 
+#if WDS_DIAG_ENABLED
+void split_eval_cache_dump_shard_stats() noexcept;
+#endif
 }  // namespace wds::chart_render::shuriken

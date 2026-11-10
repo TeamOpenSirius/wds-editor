@@ -4,6 +4,10 @@
 #include <wds/chart_render/stage_geometry.hpp>
 #include "split_wall_profile.hpp"
 #include "shuriken/internal.hpp"
+#if WDS_DIAG_ENABLED
+#include "shuriken/split_eval_cache.hpp"
+#include "split_over_cap.hpp"
+#endif
 #include "shuriken/split_eval_carry.hpp"
 #include <wds/core/gimmick.hpp>
 #include <wds/core/official_chart.hpp>
@@ -353,6 +357,66 @@ double collect_ms(const std::vector<PreviewSplitLaneInstance>& splits, int quali
   return ms;
 }
 
+#if WDS_DIAG_ENABLED
+void print_lockwait_frame(int i, double collect_ms, bool warm,
+                          const wds::chart_render::SplitEffectEvalCacheStats& prev,
+                          const wds::chart_render::SplitEffectEvalCacheStats& cur) {
+  if (!wds::chart_render::split_lockwait_enabled()) {
+    return;
+  }
+  wds::chart_render::SplitWallFrameSnap wall{};
+  const bool have = wds::chart_render::split_wall_copy_last_frame(wall);
+  const double lockwait_ms = have ? static_cast<double>(wall.lockwait_ns) / 1e6 : 0.0;
+  const double max_wait_ms = have ? static_cast<double>(wall.lockwait_max_ns) / 1e6 : 0.0;
+  const double thread_max_ms = have ? static_cast<double>(wall.lockwait_thread_max_ns) / 1e6 : 0.0;
+  std::fprintf(stdout,
+               "LOCKWAITFRAME i=%d collect_ms=%.3f lockwait_ms=%.6f blocks=%d max_wait_ms=%.6f "
+               "thread_max_ms=%.6f lookup_contend=%llu store_contend=%llu lookup_ops=%llu "
+               "store_ops=%llu%s\n",
+               i, collect_ms, lockwait_ms, have ? wall.lockwait_blocks : 0, max_wait_ms,
+               thread_max_ms,
+               static_cast<unsigned long long>(cur.lookup_contend - prev.lookup_contend),
+               static_cast<unsigned long long>(cur.store_contend - prev.store_contend),
+               static_cast<unsigned long long>(cur.lookup_ops - prev.lookup_ops),
+               static_cast<unsigned long long>(cur.store_ops - prev.store_ops),
+               warm ? " warm=1" : "");
+}
+
+void print_wave_frame(int i, double collect_ms, bool warm) {
+  if (!wds::chart_render::split_waves_enabled()) {
+    return;
+  }
+  wds::chart_render::SplitWallFrameSnap wall{};
+  const bool have = wds::chart_render::split_wall_copy_last_frame(wall);
+  auto sec = [&](wds::chart_render::SplitWallSec s) {
+    return have ? wall.sec_ms[static_cast<int>(s)] : 0.0;
+  };
+  using S = wds::chart_render::SplitWallSec;
+  std::fprintf(stdout,
+               "WAVEFRAME i=%d collect_ms=%.3f a=%.3f b1=%.3f cap_push=%.3f cap_select=%.3f "
+               "cap_n=%d slices=%.3f b2setup=%.3f b2=%.3f b2b=%.3f b3setup=%.3f b3=%.3f "
+               "b3b=%.3f c=%.3f reap=%.3f%s\n",
+               i, collect_ms, sec(S::PhaseA), sec(S::WaveB1), sec(S::CapPush), sec(S::CapApply),
+               have ? wall.cap_n : 0, sec(S::RealizeSlices), sec(S::WaveB2Setup), sec(S::WaveB2),
+               sec(S::WaveB2b), sec(S::WaveB3Setup), sec(S::WaveB3), sec(S::WaveB3b),
+               sec(S::Assemble), sec(S::Reap), warm ? " warm=1" : "");
+}
+
+void print_diag_frames(int i, double collect_ms, bool warm,
+                       wds::chart_render::SplitEffectEvalCacheStats& prev) {
+  const auto cur = wds::chart_render::split_effect_eval_cache_stats();
+  print_lockwait_frame(i, collect_ms, warm, prev, cur);
+  print_wave_frame(i, collect_ms, warm);
+  if (wds::chart_render::split_lockwait_enabled()) {
+    prev = cur;
+  }
+}
+
+void bench_diag_dump_end() {
+  wds::chart_render::shuriken::split_eval_cache_dump_shard_stats();
+  wds::chart_render::over_cap_bucket_verify_dump();
+}
+#endif  // WDS_DIAG_ENABLED
 struct MsStats {
   std::vector<double> samples;
 
@@ -1239,6 +1303,9 @@ void collect_single_group_samples(const GoldenGroupSpec& spec, int32_t scenario_
   std::fclose(wf);
   close(write_fd);
   wds::chart_render::shuriken::flush_integrate_batch_stats();
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   _exit(0);
 }
 
@@ -2208,6 +2275,9 @@ bool read_scan_pipe_msg(int fd, ScanPipeMsg& out) {
   write_scan_pipe_msg(write_fd, done);
   close(write_fd);
   wds::chart_render::shuriken::flush_integrate_batch_stats();
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   _exit(0);
 }
 
@@ -2526,6 +2596,9 @@ int cmd_scan(int quality, int32_t split_count, SplitLaneType type, double dt, do
     std::fclose(csv);
     std::fprintf(stdout, "wrote %s\n", csv_path.c_str());
   }
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return 0;
 }
 
@@ -2569,11 +2642,19 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
   std::mt19937 rng(seed);
   if (kind == "play") {
     state.reset();
+#if WDS_DIAG_ENABLED
+    auto prev_cache = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     if (warm_from_t >= 0.0) {
       double warm_sec = now_sec_from_now_t(kDefaultStartMs, warm_from_t);
       int from_t_frames = 0;
       while (warm_sec + 1e-12 < range_lo) {
+#if WDS_DIAG_ENABLED
+        const double wt = collect_ms(splits, quality, warm_sec, true, state, io);
+        print_diag_frames(from_t_frames, wt, true, prev_cache);
+#else
         (void)collect_ms(splits, quality, warm_sec, true, state, io);
+#endif
         warm_sec = std::min(range_lo, warm_sec + 1.0 / 60.0);
         ++from_t_frames;
       }
@@ -2584,7 +2665,12 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
     if (warm_frames > 0) {
       int wf = 0;
       for (; wf < warm_frames; ++wf) {
+#if WDS_DIAG_ENABLED
+        const double wt = collect_ms(splits, quality, now_sec, true, state, io);
+        print_diag_frames(wf, wt, true, prev_cache);
+#else
         (void)collect_ms(splits, quality, now_sec, true, state, io);
+#endif
         now_sec = std::min(range_hi, now_sec + (play_dt > 1e-9 ? play_dt : 1.0 / 60.0));
       }
       std::fprintf(stdout, "  warm-frames=%d now_sec=%.4f n=%d\n", wf, now_sec, io.total);
@@ -2595,7 +2681,9 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
     }();
     mark_collect_faults();
     const bool wall_on = wds::chart_render::split_wall_enabled();
+#if !WDS_DIAG_ENABLED
     auto prev_cache = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     const double origin = play_origin_sec(kDefaultStartMs);
 #if WDS_DIAG_ENABLED
     MsStats par_eff;
@@ -2616,6 +2704,9 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       }
       ms.add(t);
       ps.add(io.total);
+#if WDS_DIAG_ENABLED
+      print_diag_frames(i, t, false, prev_cache);
+#endif
       if (frame_log) {
         std::fprintf(stdout, "FRAME i=%d collect_ms=%.3f n=%d\n", i, t, io.total);
       }
@@ -2801,11 +2892,19 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       wds::common::perf::end_frame();
     }
   } else if (kind == "seek-play") {
+#if WDS_DIAG_ENABLED
+    auto prev_seek_warm = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     if (warm_frames > 0) {
       double warm_sec = range_lo;
       int wf = 0;
       for (; wf < warm_frames; ++wf) {
+#if WDS_DIAG_ENABLED
+        const double wt = collect_ms(splits, quality, warm_sec, true, state, io);
+        print_diag_frames(wf, wt, true, prev_seek_warm);
+#else
         (void)collect_ms(splits, quality, warm_sec, true, state, io);
+#endif
         warm_sec = std::min(range_hi, warm_sec + (play_dt > 1e-9 ? play_dt : 1.0 / 60.0));
       }
       std::fprintf(stdout, "  seek-play warm-frames=%d now_sec=%.4f n=%d\n", wf, warm_sec, io.total);
@@ -2837,6 +2936,10 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
       const unsigned long long d_c_miss = cur.carry_misses - prev.carry_misses;
       const unsigned long long d_w_hit = cur.carry_walk_hits - prev.carry_walk_hits;
       const unsigned long long d_w_miss = cur.carry_walk_misses - prev.carry_walk_misses;
+#if WDS_DIAG_ENABLED
+      print_lockwait_frame(i, t, false, prev, cur);
+      print_wave_frame(i, t, false);
+#endif
       prev = cur;
       std::fprintf(stdout,
                    "SEEKFRAME i=%d now_t=%.4f now_sec=%.4f collect=%.3f n=%d "
@@ -2875,12 +2978,18 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
   } else {
     std::uniform_real_distribution<double> uni(range_lo, range_hi);
     mark_collect_faults();
+#if WDS_DIAG_ENABLED
+    auto prev_cold = wds::chart_render::split_effect_eval_cache_stats();
+#endif
     for (int i = 0; i < frames; ++i) {
       wds::chart_render::split_effect_clear_caches();
       const double now_sec = uni(rng);
       const double t = collect_ms(splits, quality, now_sec, false, state, io);
       ms.add(t);
       ps.add(io.total);
+#if WDS_DIAG_ENABLED
+      print_diag_frames(i, t, false, prev_cold);
+#endif
       wds::common::perf::end_frame();
     }
   }
@@ -2910,6 +3019,9 @@ int run_scenario_mode(const char* mode_name, const std::vector<PreviewSplitLaneI
                static_cast<unsigned long long>(cache.carry_walk_hits),
                static_cast<unsigned long long>(cache.carry_walk_misses),
                static_cast<unsigned long long>(cache.carry_walk_commits));
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return 0;
 }
 
@@ -3195,6 +3307,9 @@ int cmd_golden_compare_hash(const GoldenRunConfig& cfg, const std::string& basel
                wds::chart_render::split_effect_last_eval_slices(),
                wds::chart_render::split_effect_max_eval_slices(),
                wds::chart_render::split_effect_last_eval_sliced_tasks());
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return mismatching == 0 ? 0 : 1;
 }
 
@@ -3368,6 +3483,9 @@ int cmd_golden_compare_v1(const GoldenRunConfig& cfg, const std::string& path, b
     std::fprintf(stdout, "  worst %s abs=%.6g cand=%.6g base=%.6g  %s\n", w.field.c_str(),
                  w.abs_diff, w.cand, w.base, format_key(w.key, kbuf, sizeof(kbuf)));
   }
+#if WDS_DIAG_ENABLED
+  bench_diag_dump_end();
+#endif
   return acc.mismatching == 0 ? 0 : 1;
 }
 

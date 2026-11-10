@@ -22,8 +22,8 @@ constexpr int kScopeNest = 64;
 #if WDS_DIAG_ENABLED
 constexpr const char* kSecName[kSecN] = {
     "frame",      "A",          "B",           "C",           "cap",
-    "copyout",    "leak",       "births",      "filter",      "compact",
-    "stitch",     "submerge",   "cache_lu",    "cache_st",    "make_state",
+    "copyout",    "births",     "filter",      "compact",     "stitch",
+    "submerge",   "cache_lu",    "cache_st",    "make_state",
     "integrate",  "appear",     "alpha",       "trails",      "carry_lu",
     "carry_st",   "walk",       "noise",       "pose_ctor",   "cache_key",
     "stamp",      "adopt",      "hydrate",     "persist_cull","persist_cmt",
@@ -35,13 +35,50 @@ constexpr const char* kSecName[kSecN] = {
     "wave_b1", "wave_b2setup", "wave_b2", "wave_b2b",
     "wave_b3setup", "wave_b3", "wave_b3b",
     "births_plan", "capsort_plan", "births_queue", "capsort_queue",
+    "cap_push", "cap_apply", "slices", "reap",
 };
+static_assert(sizeof(kSecName) / sizeof(kSecName[0]) == static_cast<size_t>(kSecN),
+              "kSecName must match SplitWallSec::Count");
 #endif  // WDS_DIAG_ENABLED
 
+#if WDS_DIAG_ENABLED
+bool env_is_one(const char* name) noexcept {
+  const char* raw = std::getenv(name);
+  return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+}
+
+struct DiagTimingFlags {
+  bool wall = false;
+  bool lockwait = false;
+  bool waves = false;
+};
+
+DiagTimingFlags parse_diag_timing() noexcept {
+  DiagTimingFlags f;
+  f.wall = env_is_one("WDS_SPLIT_WALL");
+  const bool want_lockwait = env_is_one("WDS_SPLIT_LOCKWAIT");
+  f.waves = env_is_one("WDS_SPLIT_WAVES");
+  if (f.wall && want_lockwait) {
+    std::fprintf(stderr, "WDS_SPLIT_LOCKWAIT ignored: WDS_SPLIT_WALL=1 takes precedence\n");
+    f.lockwait = false;
+  } else {
+    f.lockwait = want_lockwait;
+  }
+  return f;
+}
+
+const DiagTimingFlags kDiagTiming = parse_diag_timing();
+const bool kLockwaitOn = kDiagTiming.lockwait;
+const bool kWavesOn = kDiagTiming.waves;
+const bool kScopeOn = kDiagTiming.wall || kDiagTiming.waves;
+const bool kFrameOn = kDiagTiming.wall || kDiagTiming.lockwait || kDiagTiming.waves;
+const bool kLockScopeOn = kDiagTiming.wall || kDiagTiming.lockwait;
+#else
 bool env_on() noexcept {
   const char* raw = std::getenv("WDS_SPLIT_WALL");
   return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
 }
+#endif
 
 void atomic_max(std::atomic<int64_t>& slot, int64_t v) noexcept {
   int64_t cur = slot.load(std::memory_order_relaxed);
@@ -78,6 +115,11 @@ struct FrameAcc {
   std::atomic<int> birth_queue_len_max{0};
   std::atomic<int> birth_extend_hit{0};
   std::atomic<int> birth_extend_miss{0};
+#if WDS_DIAG_ENABLED
+  std::atomic<int> lockwait_blocks{0};
+  std::atomic<int64_t> lockwait_thread_max{0};
+  std::atomic<int> cap_n{0};
+#endif
 
   void reset() noexcept {
     for (int i = 0; i < kSecN; ++i) {
@@ -112,6 +154,11 @@ struct FrameAcc {
     birth_queue_len_max.store(0, std::memory_order_relaxed);
     birth_extend_hit.store(0, std::memory_order_relaxed);
     birth_extend_miss.store(0, std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+    lockwait_blocks.store(0, std::memory_order_relaxed);
+    lockwait_thread_max.store(0, std::memory_order_relaxed);
+    cap_n.store(0, std::memory_order_relaxed);
+#endif
   }
 };
 
@@ -144,6 +191,11 @@ struct WindowRow {
   int birth_queue_len_max = 0;
   int birth_extend_hit = 0;
   int birth_extend_miss = 0;
+#if WDS_DIAG_ENABLED
+  int lockwait_blocks = 0;
+  int64_t lockwait_thread_max = 0;
+  int cap_n = 0;
+#endif
 };
 
 constexpr int kBirthHistN = 8;
@@ -192,7 +244,11 @@ void reset_birth_hist() noexcept {
   g_hist_queue_ext.store(0, std::memory_order_relaxed);
 }
 
+#if WDS_DIAG_ENABLED
+std::atomic<bool> g_on{kDiagTiming.wall};
+#else
 std::atomic<bool> g_on{env_on()};
+#endif
 FrameAcc g_frame;
 std::mutex g_mu;
 std::vector<WindowRow> g_window;
@@ -233,14 +289,68 @@ void fill_snap(const WindowRow& r, SplitWallFrameSnap& out) noexcept {
   out.birth_queue_len_max = r.birth_queue_len_max;
   out.birth_extend_hit = r.birth_extend_hit;
   out.birth_extend_miss = r.birth_extend_miss;
+#if WDS_DIAG_ENABLED
+  out.lockwait_blocks = r.lockwait_blocks;
+  const int lock_i = static_cast<int>(SplitWallSec::LockWait);
+  out.lockwait_ns = r.sum[lock_i];
+  out.lockwait_max_ns = r.mx[lock_i];
+  out.lockwait_thread_max_ns = r.lockwait_thread_max;
+  out.cap_n = r.cap_n;
+#endif
 }
 
+#if WDS_DIAG_ENABLED
+std::atomic<std::uint64_t> g_lw_gen{1};
+thread_local std::uint64_t tls_lw_gen = 0;
+thread_local int64_t tls_lw_sum = 0;
+
+void account_lockwait(int64_t ns) noexcept {
+  g_frame.lockwait_blocks.fetch_add(1, std::memory_order_relaxed);
+  const std::uint64_t gen = g_lw_gen.load(std::memory_order_relaxed);
+  if (tls_lw_gen != gen) {
+    tls_lw_sum = 0;
+    tls_lw_gen = gen;
+  }
+  if (ns > 0) {
+    tls_lw_sum += ns;
+  }
+  atomic_max(g_frame.lockwait_thread_max, tls_lw_sum);
+}
+#endif  // WDS_DIAG_ENABLED
 }  // namespace
 
 bool split_wall_enabled() noexcept {
   return g_on.load(std::memory_order_relaxed);
 }
 
+#if WDS_DIAG_ENABLED
+bool split_lockwait_enabled() noexcept {
+  return kLockwaitOn;
+}
+
+bool split_waves_enabled() noexcept {
+  return kWavesOn;
+}
+
+bool split_wall_scope_wanted() noexcept {
+  return kScopeOn;
+}
+
+bool split_lock_scope_wanted() noexcept {
+  return kLockScopeOn;
+}
+
+bool split_frame_acc_enabled() noexcept {
+  return kFrameOn;
+}
+
+void split_wall_note_cap_n(int n) noexcept {
+  if (!kFrameOn || n <= 0) {
+    return;
+  }
+  g_frame.cap_n.fetch_add(n, std::memory_order_relaxed);
+}
+#endif  // WDS_DIAG_ENABLED
 void split_wall_reset() noexcept {
   std::lock_guard<std::mutex> lock(g_mu);
   g_window.clear();
@@ -251,16 +361,30 @@ void split_wall_reset() noexcept {
 }
 
 void split_wall_begin_frame() noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return;
+  }
+  g_frame.reset();
+  g_lw_gen.fetch_add(1, std::memory_order_relaxed);
+#else
   if (!split_wall_enabled()) {
     return;
   }
   g_frame.reset();
+#endif
 }
 
 void split_wall_end_frame() noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return;
+  }
+#else
   if (!split_wall_enabled()) {
     return;
   }
+#endif
   WindowRow row{};
   for (int i = 0; i < kSecN; ++i) {
     row.sum[i] = g_frame.sum[i].load(std::memory_order_relaxed);
@@ -294,6 +418,11 @@ void split_wall_end_frame() noexcept {
   row.birth_queue_len_max = g_frame.birth_queue_len_max.load(std::memory_order_relaxed);
   row.birth_extend_hit = g_frame.birth_extend_hit.load(std::memory_order_relaxed);
   row.birth_extend_miss = g_frame.birth_extend_miss.load(std::memory_order_relaxed);
+#if WDS_DIAG_ENABLED
+  row.lockwait_blocks = g_frame.lockwait_blocks.load(std::memory_order_relaxed);
+  row.lockwait_thread_max = g_frame.lockwait_thread_max.load(std::memory_order_relaxed);
+  row.cap_n = g_frame.cap_n.load(std::memory_order_relaxed);
+#endif
   std::lock_guard<std::mutex> lock(g_mu);
   g_last = row;
   g_have_last = true;
@@ -306,9 +435,21 @@ void split_wall_end_frame() noexcept {
 }
 
 void split_wall_add_ns(SplitWallSec sec, int64_t ns) noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return;
+  }
+  if (sec == SplitWallSec::LockWait) {
+    account_lockwait(ns);
+  }
+  if (ns <= 0) {
+    return;
+  }
+#else
   if (!split_wall_enabled() || ns <= 0) {
     return;
   }
+#endif
   const int i = static_cast<int>(sec);
   if (i < 0 || i >= kSecN) {
     return;
@@ -568,9 +709,15 @@ const char* split_wall_sec_name(SplitWallSec sec) noexcept {
 }
 
 bool split_wall_copy_last_frame(SplitWallFrameSnap& out) noexcept {
+#if WDS_DIAG_ENABLED
+  if (!split_frame_acc_enabled()) {
+    return false;
+  }
+#else
   if (!split_wall_enabled()) {
     return false;
   }
+#endif
   std::lock_guard<std::mutex> lock(g_mu);
   if (!g_have_last) {
     return false;
@@ -599,7 +746,6 @@ std::string split_wall_report() {
   const double c = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[3]); });
   const double cap = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[4]); });
   const double copy = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[5]); });
-  const double leak = avg_ms([](const WindowRow& r) { return static_cast<double>(r.sum[6]); });
   double sec_avg[kSecN]{};
   for (int i = 0; i < kSecN; ++i) {
     sec_avg[i] = avg_ms([i](const WindowRow& r) { return static_cast<double>(r.sum[i]); });
@@ -676,9 +822,9 @@ std::string split_wall_report() {
   out += buf;
   std::snprintf(buf, sizeof(buf),
                 "  B ntasks=%.1f nthreads=%.1f longest_task=%.3f task_sum=%.3f  "
-                "C cap=%.3f copyout=%.3f leak=%.3f  eval %d kept %d realized %d (discard %.0f%%)  "
+                "C cap=%.3f copyout=%.3f  eval %d kept %d realized %d (discard %.0f%%)  "
                 "eval_slices=%.1f\n",
-                ntasks, nthreads, task_max, task_sum, cap, copy, leak,
+                ntasks, nthreads, task_max, task_sum, cap, copy,
                 static_cast<int>(evaluated + 0.5), static_cast<int>(kept + 0.5),
                 static_cast<int>(realized + 0.5),
                 evaluated > 1e-6 ? (1.0 - kept / evaluated) * 100.0 : 0.0, eval_slices);

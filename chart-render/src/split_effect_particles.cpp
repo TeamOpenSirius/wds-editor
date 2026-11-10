@@ -874,8 +874,6 @@ struct FrameScratch {
   std::vector<const unity::ParticleSystem*> systems;
   std::vector<size_t> order;
   std::unordered_map<uint64_t, uint32_t> costs;
-  std::vector<float> leak_u0;
-  std::vector<float> leak_u1;
   std::vector<EvalSlice> pri_slices;
   std::vector<EvalSlice> sub_slices;
   std::vector<uint32_t> pri_setup;
@@ -1257,42 +1255,6 @@ void apply_over_cap(FrameScratch& fs, int cap);
 // Diagnostics-only frame publisher (defined below, after the collect code).
 void diag_finish_frame(bool frame_scope) noexcept;
 
-void apply_tmp_reuse_leak(FrameScratch& fs, size_t begin, size_t end) {
-  // evaluate() does not write trail_u0/u1 except ribbon stitch (vertex>0).
-  // Leak arrays grow to this frame's max written, never the pool cap.
-  size_t need = 0;
-  for (size_t ti = begin; ti < end; ++ti) {
-    if (fs.tasks[ti].written > 0) {
-      need = std::max(need, static_cast<size_t>(fs.tasks[ti].written));
-    }
-  }
-  if (need == 0) {
-    return;
-  }
-  if (fs.leak_u0.size() < need) {
-    fs.leak_u0.resize(need);
-    fs.leak_u1.resize(need);
-  }
-  std::fill_n(fs.leak_u0.begin(), need, 0.0f);
-  std::fill_n(fs.leak_u1.begin(), need, 1.0f);
-  for (size_t ti = begin; ti < end; ++ti) {
-    EvalTask& t = fs.tasks[ti];
-    for (int i = 0; i < t.written; ++i) {
-      if (t.kind == EvalKind::Subemit && static_cast<size_t>(i) < t.sub_plan.items.size() &&
-          t.sub_plan.items[static_cast<size_t>(i)].filled == 0) {
-        continue;
-      }
-      SplitEffectLiveParticle& p = t.out[static_cast<size_t>(i)];
-      if (!(p.trail_count > 0 && p.trail_vertex > 0)) {
-        p.trail_u0 = fs.leak_u0[static_cast<size_t>(i)];
-        p.trail_u1 = fs.leak_u1[static_cast<size_t>(i)];
-      }
-      fs.leak_u0[static_cast<size_t>(i)] = p.trail_u0;
-      fs.leak_u1[static_cast<size_t>(i)] = p.trail_u1;
-    }
-  }
-}
-
 void write_subemit_plan(EvalTask& task) {
   const int n = shuriken::evaluate_subemitters_plan(
       task.bound.data(), task.bound_count, task.element_slot, task.ctx, task.sub_plan,
@@ -1503,6 +1465,10 @@ void run_one_eval_realize(EvalTask& task) {
 
 void mark_primary_fills(FrameScratch& fs, size_t begin, size_t end, int cap) {
   fs.candidates.clear();
+#if WDS_DIAG_ENABLED
+  {
+    SplitWallScope wall_push(SplitWallSec::CapPush);
+#endif
   for (size_t ti = begin; ti < end; ++ti) {
     EvalTask& t = fs.tasks[ti];
     if (t.kind == EvalKind::Primary) {
@@ -1546,6 +1512,10 @@ void mark_primary_fills(FrameScratch& fs, size_t begin, size_t end, int cap) {
       }
     }
   }
+#if WDS_DIAG_ENABLED
+    split_wall_note_cap_n(static_cast<int>(fs.candidates.size()));
+  }
+#endif  // WDS_DIAG_ENABLED
   apply_over_cap(fs, cap);
   for (size_t ti = begin; ti < end; ++ti) {
     EvalTask& t = fs.tasks[ti];
@@ -1933,6 +1903,9 @@ void sort_eval_order(FrameScratch& fs) {
 }
 
 void build_realize_slices(FrameScratch& fs, size_t n) {
+#if WDS_DIAG_ENABLED
+  SplitWallScope wall_slices(SplitWallSec::RealizeSlices);
+#endif
   fs.pri_slices.clear();
   fs.sub_slices.clear();
   fs.pri_setup.clear();
@@ -2617,6 +2590,9 @@ void prepare_split_tasks(FrameScratch& fs, SplitPrep& prep,
 // Preview-pool hop, not Unity 2022.3 maxParticles. See split_over_cap.hpp.
 void apply_over_cap(FrameScratch& fs, int cap) {
   WDS_PERF_SCOPE("split.collect.cap");
+#if WDS_DIAG_ENABLED
+  SplitWallScope wall_apply(SplitWallSec::CapApply);
+#endif
   apply_over_cap_select(fs.candidates, cap, over_cap_legacy_env());
 }
 
@@ -2782,7 +2758,6 @@ int collect_one_split(const wds::chart_editor::PreviewSplitLaneInstance& split, 
       return 0;
     }
     run_eval_tasks(fs, fs.preps[0], max_out);
-    apply_tmp_reuse_leak(fs, fs.preps[0].task_begin, fs.preps[0].task_end);
     const int n = assemble_split(fs, fs.preps[0], out, max_out, &trails);
     shuriken::split_eval_carry_set_store_inhibited(false);
 #if WDS_DIAG_ENABLED
@@ -3965,10 +3940,6 @@ void collect_split_effect_frame(
       io.split_begin[k] = offset;
       {
         SplitWallScope wall_c(SplitWallSec::PhaseC);
-        if (fs.preps[k].has_work) {
-          SplitWallScope wall_leak(SplitWallSec::Leak);
-          apply_tmp_reuse_leak(fs, fs.preps[k].task_begin, fs.preps[k].task_end);
-        }
         int n = 0;
         {
           SplitDiagScope diag_asm(SplitDiagPhase::Assemble);
@@ -3995,9 +3966,6 @@ void collect_split_effect_frame(
     }
   }
 #if WDS_DIAG_ENABLED
-  split_wall_end_frame();
-#endif  // WDS_DIAG_ENABLED
-#if WDS_DIAG_ENABLED
   wds::common::minflt_stage("collect.after_eval");
 #endif  // WDS_DIAG_ENABLED
   shuriken::split_eval_carry_set_store_inhibited(false);
@@ -4006,8 +3974,14 @@ void collect_split_effect_frame(
     state.last_now_sec = now_sec;
   }
   if (playing) {
+#if WDS_DIAG_ENABLED
+    SplitWallScope wall_reap(SplitWallSec::Reap);
+#endif
     shuriken::split_eval_cache_reap_unused();
   }
+#if WDS_DIAG_ENABLED
+  split_wall_end_frame();
+#endif  // WDS_DIAG_ENABLED
 #if WDS_DIAG_ENABLED
   if (diag) {
     const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
