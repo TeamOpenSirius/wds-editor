@@ -9357,6 +9357,78 @@ void test_sirius_extended_csv_native_and_sus_scroll() {
   }
 }
 
+void test_duplicate_scroll_speed_ticks_rejected_on_io_and_edit() {
+  ChartDocument doc;
+  CHECK(doc.set_compatibility_profile(ChartCompatibilityProfile::SiriusExtended));
+  CHECK(doc.set_scroll_speed_points({{0, 1.0}, {480, 2.0}}));
+  CHECK(!doc.set_scroll_speed_points({{0, 1.0}, {0, 2.0}}));
+  CHECK_EQ(static_cast<int>(doc.scroll_speed_points().size()), 2);
+  CHECK_EQ(doc.scroll_speed_points()[0].tick, 0);
+  CHECK_EQ(doc.scroll_speed_points()[1].tick, 480);
+
+  NotationChart dumped;
+  dumped.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  dumped.timing.bpm = 120.0;
+  dumped.timing.ticks_per_quarter = 480;
+  dumped.scroll_speed_points = {{480, 1.5}, {480, 2.0}, {0, 1.0}};
+  ChartDocument loaded;
+  loaded.load_from_chart(dumped);
+  CHECK_EQ(static_cast<int>(loaded.scroll_speed_points().size()), 2);
+  CHECK_EQ(loaded.scroll_speed_points()[0].tick, 0);
+  CHECK_EQ(loaded.scroll_speed_points()[1].tick, 480);
+  CHECK(std::fabs(loaded.scroll_speed_points()[1].multiplier - 1.5) < 1e-9);
+
+  NotationChart file_chart;
+  file_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  file_chart.timing.bpm = 120.0;
+  file_chart.timing.ticks_per_quarter = 480;
+  file_chart.scroll_speed_points = {{0, 1.0}, {0, 2.0}};
+  CHECK_EQ(static_cast<int>(ChartSerializer::save_to_file(
+               file_chart, temp_chart_path("dup_speed_save.wdschart").string())
+               .error),
+           static_cast<int>(SerializeError::ParseError));
+  CHECK_EQ(static_cast<int>(load_chart_error(
+               "dup_speed_load.wdschart",
+               "WDSCHART 6\nBPM 120\nTPQ 480\nTIMING 0\nPROFILE SiriusExtended\n"
+               "NOTES 0\nSPEEDS 2\nS 480 1.5\nS 480 2.0\nCONCURRENT 0\nEND\n")),
+           static_cast<int>(SerializeError::ParseError));
+
+  SusChartLoadResult sus_loaded;
+  CHECK_EQ(static_cast<int>(
+               SusChartFormat::parse("#REQUEST \"ticks_per_beat 480\"\n#BPM01: 120\n"
+                                     "#00008: 01\n#TIL00: \"0'0:1.0, 0'0:2.0\"\n",
+                                     sus_loaded)
+                   .error),
+           static_cast<int>(SerializeError::ParseError));
+  NotationChart sus_chart;
+  sus_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  sus_chart.timing.bpm = 120.0;
+  sus_chart.timing.ticks_per_quarter = 480;
+  sus_chart.timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
+  sus_chart.scroll_speed_points = {{0, 1.0}, {0, 2.0}};
+  std::string sus_text;
+  CHECK_EQ(static_cast<int>(
+               SusChartFormat::serialize(sus_chart, SusChartSaveOptions{}, sus_text).error),
+           static_cast<int>(SerializeError::ParseError));
+
+  OfficialChartLoadOptions extended;
+  extended.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  NotationChart official_parsed;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::parse_chart(
+                                "1.0,2.0,-1,0,0,0,0\n1.0,3.0,-1,0,0,0,0\n", official_parsed,
+                                extended)
+                                .error),
+           static_cast<int>(SerializeError::ParseError));
+  NotationChart official_chart;
+  official_chart.compatibility_profile = ChartCompatibilityProfile::SiriusExtended;
+  official_chart.timing.bpm = 60.0;
+  official_chart.timing.ticks_per_quarter = 480;
+  official_chart.scroll_speed_points = {{480, 1.0}, {480, 2.0}};
+  std::string csv;
+  CHECK_EQ(static_cast<int>(OfficialChartFormat::serialize_chart(official_chart, csv).error),
+           static_cast<int>(SerializeError::ParseError));
+}
+
 void test_scroll_speed_zero_freezes_preview_distance() {
   MusicTiming timing;
   timing.bpm = 120.0;
@@ -11423,6 +11495,7 @@ int main() {
   test_legacy_wdschart_eighth_rows_load_ignored_and_roundtrip();
   test_sirius_features_require_extended_profile();
   test_sirius_extended_csv_native_and_sus_scroll();
+  test_duplicate_scroll_speed_ticks_rejected_on_io_and_edit();
   test_scroll_speed_zero_freezes_preview_distance();
   test_negative_scroll_speed_visibility_and_roundtrip();
   test_negative_scroll_speed_range_queries();

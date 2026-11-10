@@ -1,4 +1,5 @@
 #include "wds/ui/regions/edit/chart_edit_panel.hpp"
+#include "wds/ui/constant_expr.hpp"
 #include "wds/ui/editor_session.hpp"
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
 #include "wds/ui/regions/edit/edit_gutters.hpp"
@@ -15,6 +16,7 @@
 #include <wds/interaction/editor_input.hpp>
 #include <wds/interaction/editor_shortcuts.hpp>
 #include <wds/interaction/events.hpp>
+#include <wds/interaction/theme.hpp>
 #include <wds/interaction/ui_painter.hpp>
 #include <wds/interaction/widgets/button.hpp>
 #include <wds/interaction/widgets/dropdown.hpp>
@@ -154,7 +156,7 @@ struct Harness {
   ChartEditorEngine engine;
   ChartEditPanel panel;
 
-  Harness() : panel(engine) {
+  explicit Harness(bool seed_pointer = true) : panel(engine) {
     panel.set_bounds({0.0f, 0.0f, 800.0f, 1000.0f});
     EditGridConfig grid;
     grid.ticks_per_quarter = 480;
@@ -169,7 +171,7 @@ struct Harness {
     timing.points = {TimingPoint{0, 120.0, 4, 4, true, true}};
     engine.document().set_timing(timing);
     panel.sync_to_timeline_ms(0.0);
-    panel.on_pointer_move(PointerMoveEvent{{400.0f, 800.0f}, {}});
+    if (seed_pointer) panel.on_pointer_move(PointerMoveEvent{{400.0f, 800.0f}, {}});
   }
 
   Vec2 at_tick_lane(int32_t tick, int32_t lane) const {
@@ -3392,11 +3394,15 @@ void test_gutter_label_select_copy_mirror_and_move() {
     h.panel.on_pointer_down(PointerDownEvent{start_c, PointerButton::Left, primary_mods()});
     h.panel.on_pointer_up(PointerUpEvent{start_c, PointerButton::Left, primary_mods()});
     CHECK(h.panel.selected().count(split_id));
+    CHECK(h.panel.selected_split_starts().count(split_id));
+    CHECK(!h.panel.selected_split_ends().count(split_id));
     h.panel.on_pointer_down(PointerDownEvent{chip_center(end->bounds), PointerButton::Left,
                                              primary_mods()});
     h.panel.on_pointer_up(PointerUpEvent{chip_center(end->bounds), PointerButton::Left,
                                          primary_mods()});
-    CHECK(!h.panel.selected().count(split_id));
+    CHECK(h.panel.selected().count(split_id));
+    CHECK(h.panel.selected_split_starts().count(split_id));
+    CHECK(h.panel.selected_split_ends().count(split_id));
 
     const Vec2 box_start{h.panel.left_gutter().x + 1.0f, end->bounds.y - 12.0f};
     const Vec2 box_end{end->bounds.right() - 1.0f, end->bounds.bottom() - 1.0f};
@@ -3499,6 +3505,257 @@ void test_gutter_label_select_copy_mirror_and_move() {
     CHECK(!h.panel.mirror_selected(false));
     CHECK(!h.panel.convert_selected(NoteType::Flick, 1));
   }
+}
+
+void test_split_chip_copy_paste_cut_and_nudge() {
+  using wds::chart_editor::GimmickType;
+  auto hits_for = [](Harness& h) {
+    return wds::ui::build_split_label_hits(h.panel.viewport(), h.panel.left_gutter(),
+                                           h.engine.document().notes(), &h.engine.document());
+  };
+  auto primary_click = [](ChartEditPanel& panel, Vec2 p) {
+    panel.on_pointer_down(PointerDownEvent{p, PointerButton::Left, primary_mods()});
+    panel.on_pointer_up(PointerUpEvent{p, PointerButton::Left, primary_mods()});
+  };
+
+  // Copy origin uses the selected chip only; the paired chip still pastes and
+  // may land before the pointer.
+  {
+    Harness h;
+    const int32_t split_id = h.engine.add_note(make_split_effect(240, 960, GimmickType::Split3));
+    CHECK(split_id >= 0);
+    h.panel.sync_to_timeline_ms(0.0);
+    const auto hits = hits_for(h);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(end != nullptr);
+    if (!end) return;
+    primary_click(h.panel, chip_center(end->bounds));
+    CHECK(h.panel.selected().count(split_id));
+    CHECK(!h.panel.selected_split_starts().count(split_id));
+    CHECK(h.panel.selected_split_ends().count(split_id));
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(960, 5), {}});
+    CHECK(h.panel.paste_at_pointer());
+    int split_count = 0;
+    const NotationNote* pasted = nullptr;
+    for (const auto& n : h.engine.document().notes()) {
+      if (!wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
+      ++split_count;
+      if (n.id != split_id) pasted = &n;
+    }
+    CHECK_EQ(split_count, 2);
+    CHECK(pasted != nullptr);
+    if (pasted) {
+      CHECK_EQ(pasted->start_tick, 240);
+      CHECK_EQ(pasted->end_tick, 960);
+      CHECK(!h.panel.selected_split_starts().count(pasted->id));
+      CHECK(h.panel.selected_split_ends().count(pasted->id));
+    }
+  }
+
+  // Partner landing before first_legal_tick drops that split and warns.
+  {
+    Harness h;
+    std::string status;
+    wds::ui::StatusLevel level = wds::ui::StatusLevel::Info;
+    h.panel.set_status_handler([&](std::string text, wds::ui::StatusLevel lv) {
+      status = std::move(text);
+      level = lv;
+    });
+    const int32_t split_id = h.engine.add_note(make_split_effect(240, 960, GimmickType::Split2));
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 960;
+    tap.lane = 3;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    CHECK(split_id >= 0 && tap_id >= 0);
+    h.panel.sync_to_timeline_ms(0.0);
+    h.panel.set_selected({tap_id});
+    const auto hits = hits_for(h);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(end != nullptr);
+    if (!end) return;
+    primary_click(h.panel, chip_center(end->bounds));
+    CHECK(h.panel.copy_selected());
+    h.panel.on_pointer_move(PointerMoveEvent{h.at_tick_lane(240, 5), {}});
+    CHECK(h.panel.paste_at_pointer());
+    CHECK(level == wds::ui::StatusLevel::Warning);
+    CHECK(status.find("未粘贴") != std::string::npos);
+    int split_count = 0;
+    int tap_count = 0;
+    int32_t pasted_tap_tick = -1;
+    for (const auto& n : h.engine.document().notes()) {
+      if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) ++split_count;
+      if (n.note_type == NoteType::Normal) {
+        ++tap_count;
+        if (n.id != tap_id) pasted_tap_tick = n.start_tick;
+      }
+    }
+    CHECK_EQ(split_count, 1);
+    CHECK_EQ(tap_count, 2);
+    CHECK_EQ(pasted_tap_tick, 240);
+  }
+
+  // Cut of one chip still deletes the pair.
+  {
+    Harness h;
+    const int32_t split_id = h.engine.add_note(make_split_effect(240, 960, GimmickType::Split3));
+    CHECK(split_id >= 0);
+    h.panel.sync_to_timeline_ms(0.0);
+    const auto hits = hits_for(h);
+    const auto* start = split_hit_for(hits, split_id, true);
+    CHECK(start != nullptr);
+    if (!start) return;
+    primary_click(h.panel, chip_center(start->bounds));
+    CHECK(h.panel.cut_selected());
+    CHECK(!h.engine.document().find_note(split_id).has_value());
+  }
+
+  // Ctrl/Cmd+Up/Down path: 1-tick nudge of a note and of an independent chip.
+  {
+    Harness h;
+    NotationNote tap;
+    tap.note_type = NoteType::Normal;
+    tap.start_tick = 480;
+    tap.lane = 4;
+    tap.width = 2;
+    const int32_t tap_id = h.engine.add_note(tap);
+    const int32_t split_id = h.engine.add_note(make_split_effect(240, 960, GimmickType::Split2));
+    CHECK(tap_id >= 0 && split_id >= 0);
+    h.panel.sync_to_timeline_ms(0.0);
+    h.panel.set_selected({tap_id});
+    CHECK(h.panel.nudge_selected(1, 0));
+    CHECK_EQ(h.engine.document().find_note(tap_id)->start_tick, 481);
+    CHECK(h.panel.nudge_selected(-1, 0));
+    CHECK_EQ(h.engine.document().find_note(tap_id)->start_tick, 480);
+
+    h.panel.clear_selection();
+    const auto hits = hits_for(h);
+    const auto* end = split_hit_for(hits, split_id, false);
+    CHECK(end != nullptr);
+    if (!end) return;
+    primary_click(h.panel, chip_center(end->bounds));
+    CHECK(h.panel.nudge_selected(1, 0));
+    const auto nudged = h.engine.document().find_note(split_id);
+    CHECK(nudged.has_value());
+    if (nudged) {
+      CHECK_EQ(nudged->start_tick, 240);
+      CHECK_EQ(nudged->end_tick, 961);
+    }
+  }
+
+  {
+    using wds::interaction::EditorShortcut;
+    wds::interaction::reset_editor_shortcuts();
+    const auto up = wds::interaction::default_editor_shortcut(EditorShortcut::NudgeTickUp);
+    const auto down = wds::interaction::default_editor_shortcut(EditorShortcut::NudgeTickDown);
+    CHECK(up.key == KeyCode::Up);
+    CHECK(up.mods.control);
+    CHECK(down.key == KeyCode::Down);
+    CHECK(down.mods.control);
+    CHECK(!wds::interaction::editor_shortcut_conflicts(EditorShortcut::NudgeTickUp, up));
+    CHECK(!wds::interaction::editor_shortcut_conflicts(EditorShortcut::NudgeTickDown, down));
+    CHECK(std::string(wds::interaction::editor_shortcut_id(EditorShortcut::NudgeTickUp)) ==
+          "nudge_tick_up");
+    CHECK(std::string(wds::interaction::editor_shortcut_id(EditorShortcut::NudgeTickDown)) ==
+          "nudge_tick_down");
+    CHECK(std::string(wds::interaction::editor_shortcut_label(EditorShortcut::NudgeTickUp)) ==
+          "微调时间上移");
+    CHECK(std::string(wds::interaction::editor_shortcut_label(EditorShortcut::NudgeTickDown)) ==
+          "微调时间下移");
+  }
+}
+
+void test_constant_expr_stack_eval_and_speed_format() {
+  using wds::ui::eval_constant_expr;
+  using wds::ui::format_slot_budget_decimal;
+  using wds::ui::format_speed_label;
+  using wds::ui::format_trimmed_decimal;
+
+  auto expect_eq = [](const char* src, double want) {
+    const auto got = eval_constant_expr(src);
+    CHECK(got.has_value());
+    if (got) CHECK(std::fabs(*got - want) < 1e-12);
+  };
+
+  expect_eq("10/11", 0.909091);
+  expect_eq("(1.5+2)*9", 31.5);
+  expect_eq("1+2*3", 7.0);
+  expect_eq("(1+2)*3", 9.0);
+  expect_eq("8/2/2", 2.0);
+  expect_eq("8/(2/2)", 8.0);
+  expect_eq("-1+2", 1.0);
+  expect_eq("-(1+2)", -3.0);
+  expect_eq("+5", 5.0);
+  expect_eq("((1.5))", 1.5);
+  expect_eq("2*-3", -6.0);
+  expect_eq("2--3", 5.0);
+  expect_eq("  10 / 11  ", 0.909091);
+  expect_eq(".5", 0.5);
+  expect_eq("1.", 1.0);
+  CHECK(!eval_constant_expr("").has_value());
+  CHECK(!eval_constant_expr("   ").has_value());
+  CHECK(!eval_constant_expr("abc").has_value());
+  CHECK(!eval_constant_expr("1+").has_value());
+  CHECK(!eval_constant_expr("(1+2").has_value());
+  CHECK(!eval_constant_expr("1+2)").has_value());
+  CHECK(!eval_constant_expr("1/0").has_value());
+  CHECK(!eval_constant_expr("1/(2-2)").has_value());
+  CHECK(!eval_constant_expr("2(3+4)").has_value());
+  CHECK(!eval_constant_expr("1e3").has_value());
+  CHECK(format_trimmed_decimal(1.000000) == "1");
+  CHECK(format_trimmed_decimal(0.909091) == "0.909091");
+  CHECK(format_slot_budget_decimal(0.909091) == "0.91");
+  CHECK(format_slot_budget_decimal(12.34) == "12.3");
+  CHECK(format_speed_label(10.0 / 11.0) == "0.91x");
+}
+
+void test_measure_gutter_labels_non_measure_grid_ticks() {
+  using wds::chart_editor::GimmickType;
+  Harness h;
+  // Off-grid split-effect ticks must not be labeled; 240 is a 1/4-beat subdiv.
+  CHECK(h.engine.add_note(make_split_effect(241, 2000, GimmickType::Split3)) >= 0);
+  h.panel.sync_to_timeline_ms(0.0);
+
+  auto paint_and_find = [&](bool expect_light) {
+    wds::interaction::UiPainter painter;
+    painter.set_defer_glyphs(true);
+    h.panel.paint_side_columns(painter);
+    bool saw_120 = false;
+    bool saw_240 = false;
+    bool saw_480 = false;
+    bool saw_241 = false;
+    bool saw_1920_as_tick = false;
+    const auto want = wds::interaction::theme::kEditGridSubdiv;
+    for (const auto& label : painter.labels()) {
+      if (label.text == "120") saw_120 = true;
+      if (label.text == "240") {
+        saw_240 = true;
+        CHECK(std::fabs(label.color.r - want.r) < 1e-5f);
+        CHECK(std::fabs(label.color.g - want.g) < 1e-5f);
+        CHECK(std::fabs(label.color.b - want.b) < 1e-5f);
+        CHECK(label.color.a > 0.9f);
+        CHECK(label.pixel_size + 0.5f < wds::interaction::theme::kFontSizeGutter);
+        CHECK(label.pixel_size > 6.0f);
+      }
+      if (label.text == "480") saw_480 = true;
+      if (label.text == "241") saw_241 = true;
+      if (label.text == "1920") saw_1920_as_tick = true;
+    }
+    CHECK(saw_120);
+    CHECK(saw_240);
+    CHECK(saw_480);
+    CHECK(!saw_241);
+    CHECK(!saw_1920_as_tick);
+    (void)expect_light;
+  };
+
+  wds::interaction::theme::apply_color_scheme(wds::interaction::theme::ColorScheme::Dark);
+  paint_and_find(false);
+  wds::interaction::theme::apply_color_scheme(wds::interaction::theme::ColorScheme::Light);
+  paint_and_find(true);
+  wds::interaction::theme::apply_color_scheme(wds::interaction::theme::ColorScheme::Dark);
 }
 
 void test_split_edge_drag_allows_zero_length() {
@@ -3879,6 +4136,20 @@ void test_toolbox_hold_click_min_length_equal_tail_and_gold() {
   }
 }
 
+void test_idle_placement_ghost_appears_on_first_hover() {
+  // Qt enter/show feeds one hover and then the frame tick (update + resync)
+  // keeps running with a stationary cursor. Ghosts must appear without a
+  // second move.
+  Harness h(false);
+  h.panel.update(0.016f);
+  h.panel.resync_pointer_overlays();
+  CHECK(h.panel.skinned_ghosts().empty());
+  h.panel.on_pointer_move(PointerMoveEvent{{400.0f, 800.0f}, {}});
+  h.panel.update(0.016f);
+  h.panel.resync_pointer_overlays();
+  CHECK(!h.panel.skinned_ghosts().empty());
+}
+
 void test_toolbox_hold_ghost_follows_shift() {
   Harness h;
   h.panel.set_toolbox_place_mode(true);
@@ -3935,6 +4206,12 @@ void test_extended_speed_gutter_slider_and_nontail() {
     CHECK(wds::ui::format_speed_label(0.0) == "0x");
     CHECK(wds::ui::format_speed_label(-1.5) == "-1.5x");
     CHECK(wds::ui::format_speed_label(-0.0) == "0x");
+    CHECK(wds::ui::format_speed_label(1.0) == "1x");
+    CHECK(wds::ui::format_speed_label(0.909091) == "0.91x");
+    CHECK(wds::ui::format_speed_label(31.5) == "31.5x");
+    CHECK(wds::ui::format_trimmed_decimal(1.0) == "1");
+    CHECK(wds::ui::format_trimmed_decimal(1.5) == "1.5");
+    CHECK(wds::ui::format_trimmed_decimal(1.000000) == "1");
     const auto sg = h.panel.speed_gutter();
     const float y = h.panel.viewport().y_at(480);
     h.panel.on_pointer_move(PointerMoveEvent{{sg.x + sg.w * 0.5f, y}, {}});
@@ -5491,12 +5768,16 @@ int main() {
   test_toolbox_star_placement_snaps_to_pointer_hold();
   test_marquee_and_convert_ignore_split_lines();
   test_gutter_label_select_copy_mirror_and_move();
+  test_split_chip_copy_paste_cut_and_nudge();
+  test_constant_expr_stack_eval_and_speed_format();
+  test_measure_gutter_labels_non_measure_grid_ticks();
   test_split_edge_drag_allows_zero_length();
   test_paste_mirror_is_one_history_step_and_skips_splits();
   test_paste_can_move_backwards();
   test_split_width_follow_closed_interval_includes_endpoints();
   test_toolbox_left_click_places_selected_type_and_ignores_swipe();
   test_toolbox_hold_click_min_length_equal_tail_and_gold();
+  test_idle_placement_ghost_appears_on_first_hover();
   test_toolbox_hold_ghost_follows_shift();
   test_extended_speed_gutter_slider_and_nontail();
   test_toolbox_scratch_hold_uses_regular_hold_buttons();

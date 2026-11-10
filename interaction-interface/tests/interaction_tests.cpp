@@ -437,6 +437,26 @@ int main() {
   }
   expect(std::string(editor_shortcut_id(EditorShortcut::Cut)) == "cut", "Cut id");
   expect(std::string(editor_shortcut_label(EditorShortcut::Cut)) == "剪切", "Cut label");
+  expect(std::string(editor_shortcut_id(EditorShortcut::NudgeTickUp)) == "nudge_tick_up",
+         "NudgeTickUp id");
+  expect(std::string(editor_shortcut_id(EditorShortcut::NudgeTickDown)) == "nudge_tick_down",
+         "NudgeTickDown id");
+  expect(std::string(editor_shortcut_label(EditorShortcut::NudgeTickUp)) == "微调时间上移",
+         "NudgeTickUp label");
+  expect(std::string(editor_shortcut_label(EditorShortcut::NudgeTickDown)) == "微调时间下移",
+         "NudgeTickDown label");
+  {
+    const ShortcutChord tick_up = default_editor_shortcut(EditorShortcut::NudgeTickUp);
+    const ShortcutChord tick_down = default_editor_shortcut(EditorShortcut::NudgeTickDown);
+    expect(tick_up.key == KeyCode::Up && tick_up.mods.control,
+           "NudgeTickUp default is Ctrl/Cmd+Up");
+    expect(tick_down.key == KeyCode::Down && tick_down.mods.control,
+           "NudgeTickDown default is Ctrl/Cmd+Down");
+    expect(!editor_shortcut_conflicts(EditorShortcut::NudgeTickUp, tick_up),
+           "NudgeTickUp default does not collide");
+    expect(!editor_shortcut_conflicts(EditorShortcut::NudgeTickDown, tick_down),
+           "NudgeTickDown default does not collide");
+  }
   {
     const ShortcutChord cut = default_editor_shortcut(EditorShortcut::Cut);
     expect(cut.key == static_cast<KeyCode>('X') && cut.mods.control,

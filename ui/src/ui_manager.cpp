@@ -155,6 +155,9 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
   // stay in front of the preview hit target.
   auto edit = std::make_unique<ChartEditPanel>(session_->engine());
   edit_panel_ = edit.get();
+  edit->set_status_handler([this](std::string text, StatusLevel level) {
+    set_status(std::move(text), level);
+  });
   edit->set_back_layer_changed_handler([this] {
     if (edit_panel_ != nullptr && session_ != nullptr) {
       session_->set_active_back_layer_ids(edit_panel_->back_layer_notes());
@@ -534,6 +537,17 @@ void UiManager::bind_editor_shortcuts() {
                   wds::interaction::EditorShortcut::RestoreBackLayerNotes),
               [this] {
                 if (auto* panel = edit_panel()) panel->restore_all_back_layer_notes();
+              });
+  // 1-tick time nudge. Screen-up is later in time (same as subdivision nudge).
+  editor.bind(wds::interaction::editor_shortcut(
+                  wds::interaction::EditorShortcut::NudgeTickUp),
+              [this] {
+                if (auto* panel = edit_panel()) panel->nudge_selected(1, 0);
+              });
+  editor.bind(wds::interaction::editor_shortcut(
+                  wds::interaction::EditorShortcut::NudgeTickDown),
+              [this] {
+                if (auto* panel = edit_panel()) panel->nudge_selected(-1, 0);
               });
   // Width slots → default place width. Bound globally so focus on toolbar/settings
   // still updates the edit panel (widget key path only reaches the focused widget).

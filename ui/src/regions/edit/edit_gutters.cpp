@@ -1,5 +1,6 @@
 #include "wds/ui/regions/edit/edit_gutters.hpp"
 
+#include "wds/ui/constant_expr.hpp"
 #include "wds/ui/regions/edit/edit_viewport.hpp"
 
 #include <wds/chart_render/preview_visual_config.hpp>
@@ -28,6 +29,7 @@ using wds::interaction::Rect;
 using wds::interaction::Vec2;
 
 float gutter_font_px() { return wds::interaction::theme::kFontSizeGutter; }
+float measure_split_tick_font_px() { return wds::interaction::theme::px(9.0f); }
 float split_label_h() { return wds::interaction::theme::px(10.0f); }
 float timing_label_h() { return wds::interaction::theme::px(28.0f); }
 float split_band_gap() { return wds::interaction::theme::px(1.0f); }
@@ -38,6 +40,35 @@ float split_hot_pad() { return wds::interaction::theme::px(2.0f); }
 constexpr float kLineSnapPx = 8.0f;
 constexpr int kSplitColumns = 2;
 constexpr int kStackGuard = 64;
+
+std::vector<int32_t> subdivision_ticks_in_view(const EditViewport& viewport, int32_t start,
+                                               int32_t end) {
+  const auto& grid = viewport.grid();
+  const auto& timing = viewport.timing();
+  const int32_t tpq = std::max(1, timing.ticks_per_quarter);
+  const int32_t subdivs = std::max(1, grid.subdivisions_per_beat);
+  bool has_meter = false;
+  for (const auto& p : timing.points) {
+    if (p.has_meter) {
+      has_meter = true;
+      break;
+    }
+  }
+  if (!has_meter) {
+    wds::chart_editor::EditGridConfig cfg = grid;
+    cfg.ticks_per_quarter = tpq;
+    cfg.subdivisions_per_beat = subdivs;
+    return wds::chart_editor::subdivision_ticks_in_range(start, end, cfg);
+  }
+  return wds::chart_editor::subdivision_ticks_in_range(start, end, timing, subdivs);
+}
+
+Color ordinary_grid_label_color() {
+  // Subdiv strokes use overlay alpha; 9px glyphs need the same RGB at full opacity.
+  auto c = wds::interaction::theme::kEditGridSubdiv;
+  c.a = 1.0f;
+  return c;
+}
 
 bool rects_overlap(const Rect& a, const Rect& b) noexcept {
   return a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y;
@@ -429,7 +460,6 @@ float split_line_opacity_at_tick(const NotationNote& note,
 
 void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewport& viewport,
                            const Rect& area) {
-  const auto& grid = viewport.grid();
   const auto& timing = viewport.timing();
   const auto range = viewport.visible_tick_range();
   const int32_t start = range.first;
@@ -457,26 +487,7 @@ void paint_horizontal_grid(wds::interaction::UiPainter& painter, const EditViewp
 
   // Subdivision ticks: exact in-beat offsets (i*beat)/subdivs so odd subdivs
   // (7/9/11/13) still land flush with the next beat line.
-  std::vector<int32_t> subdiv_ticks;
-  {
-    const int32_t tpq = std::max(1, timing.ticks_per_quarter);
-    const int32_t subdivs = std::max(1, grid.subdivisions_per_beat);
-    std::vector<const wds::chart_editor::TimingPoint*> meters;
-    for (const auto& p : timing.points) {
-      if (p.has_meter) meters.push_back(&p);
-    }
-    if (meters.empty()) {
-      // Fallback: constant TPQ grid when timing is empty/unnormalized.
-      wds::chart_editor::EditGridConfig cfg = grid;
-      cfg.ticks_per_quarter = tpq;
-      cfg.subdivisions_per_beat = subdivs;
-      subdiv_ticks =
-          wds::chart_editor::subdivision_ticks_in_range(start, end, cfg);
-    } else {
-      subdiv_ticks = wds::chart_editor::subdivision_ticks_in_range(
-          start, end, timing, subdivs);
-    }
-  }
+  const auto subdiv_ticks = subdivision_ticks_in_view(viewport, start, end);
 
   painter.reserve_rects(subdiv_ticks.size() + beat_ticks.size() + measure_ticks.size() + 8);
 
@@ -555,6 +566,8 @@ void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const Edit
       wds::chart_editor::measure_ticks_in_range(0, view_end_tick, timing);
   const float font_px = gutter_font_px();
   const float label_h = timing_label_h();
+  std::vector<float> measure_ys;
+  measure_ys.reserve(ticks.size());
   for (size_t i = 0; i < ticks.size(); ++i) {
     const int32_t tick = ticks[i];
     if (tick < view_start_tick) continue;
@@ -563,6 +576,36 @@ void paint_measure_index_gutter(wds::interaction::UiPainter& painter, const Edit
     const Rect bounds{gutter.x, y - label_h * 0.5f, gutter.w, label_h};
     painter.label(bounds, std::to_string(static_cast<int>(i) + 1),
                   wds::interaction::theme::kEditMeasureIndex, 0.932f, false, font_px);
+    measure_ys.push_back(y);
+  }
+
+  // Non-measure 拍内分割 grid ticks (finest editor grid), tiny type, subdiv color.
+  const auto subdiv_ticks =
+      subdivision_ticks_in_view(viewport, view_start_tick, view_end_tick);
+  const float tick_font = std::max(8.0f, measure_split_tick_font_px());
+  const float tick_h = tick_font + wds::interaction::theme::px(8.0f);
+  const float measure_keepout = (label_h + tick_h) * 0.5f;
+  const auto line_c = ordinary_grid_label_color();
+  float last_tick_y = 0.0f;
+  bool have_tick_y = false;
+  for (const int32_t tick : subdiv_ticks) {
+    if (tick < view_start_tick || tick > view_end_tick) continue;
+    if (wds::chart_editor::is_measure_tick(tick, timing)) continue;
+    const float y = viewport.y_at(tick);
+    if (y < gutter.y - tick_h || y > gutter.bottom() + tick_h) continue;
+    bool near_measure = false;
+    for (float my : measure_ys) {
+      if (std::abs(y - my) < measure_keepout) {
+        near_measure = true;
+        break;
+      }
+    }
+    if (near_measure) continue;
+    if (have_tick_y && std::abs(y - last_tick_y) < tick_h) continue;
+    const Rect bounds{gutter.x, y - tick_h * 0.5f, gutter.w, tick_h};
+    painter.label(bounds, std::to_string(tick), line_c, 0.933f, false, tick_font);
+    last_tick_y = y;
+    have_tick_y = true;
   }
 }
 
@@ -764,7 +807,7 @@ Rect meter_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_
 std::string format_speed_label(double multiplier) {
   // Negative SV is supported; keep -0 from printing as "-0x".
   if (std::fabs(multiplier) < 1e-9) multiplier = 0.0;
-  return format_bpm_label(multiplier) + "x";
+  return format_slot_budget_decimal(multiplier, kSpeedLabelSlotBudget) + "x";
 }
 
 Rect speed_label_bounds(const EditViewport& viewport, const Rect& gutter, int32_t tick) {

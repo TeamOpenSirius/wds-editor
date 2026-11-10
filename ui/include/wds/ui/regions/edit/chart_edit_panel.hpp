@@ -1,6 +1,7 @@
 #pragma once
 
 #include "wds/ui/regions/edit/chart_edit_renderer.hpp"
+#include "wds/ui/regions/status/status_bar.hpp"
 #include "wds/ui/toolbar_curve_selection.hpp"
 
 #include <wds/core/edit_grid.hpp>
@@ -137,13 +138,25 @@ class ChartEditPanel final : public wds::interaction::Widget {
   const std::unordered_set<int32_t>& selected_speed_ticks() const noexcept {
     return selected_speed_ticks_.set();
   }
+  // Split start/end chips are independently selectable. `selected()` still
+  // contains the split note id when either chip is selected (line highlight,
+  // copy, cut, delete). These sets say which chips are on.
+  const std::unordered_set<int32_t>& selected_split_starts() const noexcept {
+    return selected_split_starts_.set();
+  }
+  const std::unordered_set<int32_t>& selected_split_ends() const noexcept {
+    return selected_split_ends_.set();
+  }
   void clear_selection() {
-    selected_.clear();
+    clear_note_selection();
     selected_speed_ticks_.clear();
     clear_hold_sel_focus();
   }
   void set_selected(std::unordered_set<int32_t> ids);
   void set_selected_speed_ticks(std::unordered_set<int32_t> ticks);
+  void set_status_handler(std::function<void(std::string, StatusLevel)> handler) {
+    status_handler_ = std::move(handler);
+  }
 
   // ---- Editor-only back layer (never written to a chart) ---------------------
   // Sending the selection back is a temporary authoring aid: the notes stay in
@@ -654,15 +667,26 @@ class ChartEditPanel final : public wds::interaction::Widget {
   std::function<void()> on_extra_visible_lanes_changed_;
   std::function<void()> on_back_layer_changed_;
   std::function<void(wds::interaction::CursorKind)> cursor_setter_;
+  std::function<void(std::string, StatusLevel)> status_handler_;
   wds::interaction::CursorKind hover_cursor_ = wds::interaction::CursorKind::Default;
   TrackedIdSet selected_;
+  TrackedIdSet selected_split_starts_;
+  TrackedIdSet selected_split_ends_;
   TrackedIdSet selected_speed_ticks_;
   // Editor-only; never serialized. TrackedIdSet gives visual_revision() an O(1)
   // change signal so both the Vulkan batch and the Qt canvas repaint.
   TrackedIdSet back_layer_;
   // Single gate for every selection insert: a back-layer note never joins the
   // selection, even when reached through a front note's hold/chain dependency.
+  // Whole-note paths (set_selected / paste of a full split) mark both chips.
   void select_note_id(int32_t id);
+  void unselect_note_id(int32_t id);
+  void clear_note_selection();
+  void select_split_edge(int32_t id, bool is_start);
+  void deselect_split_edge(int32_t id, bool is_start);
+  void toggle_split_edge(int32_t id, bool is_start);
+  bool split_edge_selected(int32_t id, bool is_start) const noexcept;
+  void report_status(std::string text, StatusLevel level);
   mutable NoteSpanCache note_span_cache_{};
   mutable std::vector<int32_t> split_mids_scratch_{};
   mutable std::vector<int32_t> split_one_scratch_{};
@@ -672,6 +696,9 @@ class ChartEditPanel final : public wds::interaction::Widget {
   mutable std::vector<int32_t> note_id_scratch_{};
   std::vector<wds::chart_editor::NotationNote> clipboard_;
   std::vector<wds::chart_editor::ScrollSpeedPoint> clipboard_speed_;
+  // Per original split id: bit0 = start chip was actually selected, bit1 = end.
+  // Copy always stores the whole split note; origin / paste selection use this.
+  std::unordered_map<int32_t, uint8_t> clipboard_split_edges_;
   int default_width_ = 3;
   bool split_width_follow_ = false;
   bool pause_at_current_ = false;

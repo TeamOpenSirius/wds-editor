@@ -122,6 +122,7 @@ endif()
 
 add_library(wds_ui STATIC
   src/ui_manager.cpp
+  src/constant_expr.cpp
   src/resource_paths.cpp
   src/startup_deps.cpp
   src/editor_session.cpp

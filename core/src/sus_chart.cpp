@@ -1897,6 +1897,13 @@ SerializeResult SusChartFormat::serialize(const NotationChart& chart,
   // Sirius #TIL00 global SV events. Negative multipliers are written as-is:
   // they are the reverse-scroll convention shared with .wdschart.
   if (!chart.scroll_speed_points.empty()) {
+    std::vector<int32_t> speed_ticks;
+    speed_ticks.reserve(chart.scroll_speed_points.size());
+    for (const auto& point : chart.scroll_speed_points) speed_ticks.push_back(point.tick);
+    std::sort(speed_ticks.begin(), speed_ticks.end());
+    if (std::adjacent_find(speed_ticks.begin(), speed_ticks.end()) != speed_ticks.end()) {
+      return {SerializeError::ParseError, "SUS #TIL00 duplicate speed tick"};
+    }
     ss << "#TIL00: \"";
     for (size_t i = 0; i < chart.scroll_speed_points.size(); ++i) {
       const auto& point = chart.scroll_speed_points[i];

@@ -62,6 +62,39 @@ bool is_user_selectable(const NotationNote& note) noexcept {
          wds::chart_editor::is_split_lane_gimmick(note.gimmick_type);
 }
 
+int32_t split_end_tick_of(const NotationNote& note) noexcept {
+  return std::max(note.start_tick, note.end_tick);
+}
+
+constexpr uint8_t kSplitEdgeStartBit = 1u;
+constexpr uint8_t kSplitEdgeEndBit = 2u;
+
+// Move selected split chips by `delta`. Both chips keep duration. A single chip
+// slides and may collapse to zero length. Returns false when the move would
+// land below `legal` (caller then refuses the whole nudge).
+bool try_nudge_split_edges(NotationNote& note, int32_t delta, int32_t legal, bool move_start,
+                           bool move_end) noexcept {
+  if (!move_start && !move_end) return true;
+  const int32_t start0 = note.start_tick;
+  const int32_t end0 = split_end_tick_of(note);
+  int32_t start = start0;
+  int32_t end = end0;
+  if (move_start && move_end) {
+    if (start0 + delta < legal || end0 + delta < legal) return false;
+    start = start0 + delta;
+    end = end0 + delta;
+  } else if (move_start) {
+    if (start0 + delta < legal) return false;
+    start = std::min(end0, start0 + delta);
+  } else {
+    if (end0 + delta < legal) return false;
+    end = std::max({end0 + delta, start0, legal});
+  }
+  note.start_tick = start;
+  note.end_tick = end;
+  return true;
+}
+
 bool rects_overlap(const wds::interaction::Rect& a, const wds::interaction::Rect& b) noexcept {
   return a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y;
 }
@@ -432,6 +465,10 @@ uint64_t ChartEditPanel::visual_revision() const {
   // clear / assignment), so selection edits can never leave the revision stale.
   h = mix(h, selected_.generation());
   h = mix(h, static_cast<uint64_t>(selected_.size()));
+  h = mix(h, selected_split_starts_.generation());
+  h = mix(h, static_cast<uint64_t>(selected_split_starts_.size()));
+  h = mix(h, selected_split_ends_.generation());
+  h = mix(h, static_cast<uint64_t>(selected_split_ends_.size()));
   h = mix(h, selected_speed_ticks_.generation());
   h = mix(h, static_cast<uint64_t>(selected_speed_ticks_.size()));
   h = mix(h, back_layer_.generation());
@@ -535,10 +572,58 @@ PlaceIntent ChartEditPanel::effective_place_intent(PlaceIntent intent) const noe
 void ChartEditPanel::select_note_id(int32_t id) {
   if (is_back_layer(id)) return;
   selected_.insert(id);
+  const auto note = engine_.document().find_note(id);
+  if (note && wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) {
+    selected_split_starts_.insert(id);
+    selected_split_ends_.insert(id);
+  }
+}
+
+void ChartEditPanel::unselect_note_id(int32_t id) {
+  selected_.erase(id);
+  selected_split_starts_.erase(id);
+  selected_split_ends_.erase(id);
+}
+
+void ChartEditPanel::clear_note_selection() {
+  selected_.clear();
+  selected_split_starts_.clear();
+  selected_split_ends_.clear();
+}
+
+void ChartEditPanel::select_split_edge(int32_t id, bool is_start) {
+  if (is_back_layer(id)) return;
+  const auto note = engine_.document().find_note(id);
+  if (!note || !wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) return;
+  if (is_start) selected_split_starts_.insert(id);
+  else selected_split_ends_.insert(id);
+  selected_.insert(id);
+}
+
+void ChartEditPanel::deselect_split_edge(int32_t id, bool is_start) {
+  if (is_start) selected_split_starts_.erase(id);
+  else selected_split_ends_.erase(id);
+  if (selected_split_starts_.count(id) == 0 && selected_split_ends_.count(id) == 0) {
+    selected_.erase(id);
+  }
+}
+
+void ChartEditPanel::toggle_split_edge(int32_t id, bool is_start) {
+  if (split_edge_selected(id, is_start)) deselect_split_edge(id, is_start);
+  else select_split_edge(id, is_start);
+}
+
+bool ChartEditPanel::split_edge_selected(int32_t id, bool is_start) const noexcept {
+  return is_start ? selected_split_starts_.count(id) != 0
+                  : selected_split_ends_.count(id) != 0;
+}
+
+void ChartEditPanel::report_status(std::string text, StatusLevel level) {
+  if (status_handler_) status_handler_(std::move(text), level);
 }
 
 void ChartEditPanel::set_selected(std::unordered_set<int32_t> ids) {
-  selected_.clear();
+  clear_note_selection();
   selected_speed_ticks_.clear();
   for (const int32_t id : ids) {
     const auto note = engine_.document().find_note(id);
@@ -589,7 +674,7 @@ std::size_t ChartEditPanel::send_selection_to_back_layer() {
   // The moved notes leave the selection immediately, so the next click
   // places/selects on top of the hold body instead of grabbing it. A split
   // selection is unrelated to this layer and stays selected.
-  for (const int32_t id : touched_ids) selected_.erase(id);
+  for (const int32_t id : touched_ids) unselect_note_id(id);
   if (selected_.empty()) {
     clear_hold_sel_focus();
   } else {
@@ -625,7 +710,10 @@ void ChartEditPanel::set_back_layer(std::unordered_set<int32_t> ids) {
   // back-layer id in the selection.
   bool selection_changed = false;
   for (const int32_t id : back_layer_) {
-    if (selected_.erase(id) != 0) selection_changed = true;
+    if (selected_.count(id) != 0) {
+      unselect_note_id(id);
+      selection_changed = true;
+    }
   }
   if (selection_changed) sync_hold_sel_focus_to_selection();
 }
@@ -1728,7 +1816,7 @@ bool ChartEditPanel::commit_notes(std::vector<NotationNote> notes, const std::st
   }
   auto cmd = std::make_unique<wds::chart_editor::AddNotesCommand>(std::move(notes), label);
   if (!execute_maybe_extended(std::move(cmd), introduces_extended, label)) return false;
-  selected_.clear();
+  clear_note_selection();
   clear_hold_sel_focus();
   return true;
 }
@@ -1763,7 +1851,7 @@ void ChartEditPanel::place_instant(NoteType type, wds::interaction::Vec2 point,
                                                               "Place note"))) {
     return;
   }
-  selected_.clear();
+  clear_note_selection();
   for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
     if (is_user_selectable(n)) select_note_id(n.id);
   });
@@ -1779,7 +1867,7 @@ void ChartEditPanel::clear_hold_chain_state() {
 }
 
 void ChartEditPanel::select_hold_chain() {
-  selected_.clear();
+  clear_note_selection();
   for (const int32_t id : hold_chain_ids_) {
     select_note_id(id);
     if (auto note = engine_.document().find_note(id)) {
@@ -1812,7 +1900,7 @@ void ChartEditPanel::select_scratch_hold_chain_from(const NotationNote& seed) {
     cur = *prev;
   }
 
-  selected_.clear();
+  clear_note_selection();
   for (int guard = 0; guard < 64; ++guard) {
     select_note_id(cur.id);
     if (auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), cur)) {
@@ -1968,7 +2056,7 @@ void ChartEditPanel::select_hold_outer(const NotationNote& body) {
 }
 
 void ChartEditPanel::select_hold_segment(const NotationNote& body) {
-  selected_.clear();
+  clear_note_selection();
   select_note_id(body.id);
   if (auto head = wds::chart_editor::paired_hold_head_for(engine_.document(), body)) {
     select_note_id(head->id);
@@ -1978,7 +2066,7 @@ void ChartEditPanel::select_hold_segment(const NotationNote& body) {
 }
 
 void ChartEditPanel::select_hold_part(const NotationNote& hit, const NotationNote& body) {
-  selected_.clear();
+  clear_note_selection();
   hold_sel_body_id_ = body.id;
   hold_sel_layer_ = HoldSelLayer::Parts;
   const auto paired_head = wds::chart_editor::paired_hold_head_for(engine_.document(), body);
@@ -1993,7 +2081,7 @@ void ChartEditPanel::select_hold_part(const NotationNote& hit, const NotationNot
 }
 
 void ChartEditPanel::select_hold_stars(const NotationNote& body) {
-  selected_.clear();
+  clear_note_selection();
   hold_sel_body_id_ = body.id;
   hold_sel_layer_ = HoldSelLayer::Stars;
   for (const auto& note :
@@ -2052,7 +2140,7 @@ void ChartEditPanel::drill_hold_selection(const NotationNote& hit) {
   if (is_visible_mid_star(hit.note_type)) {
     auto parent = wds::chart_editor::parent_hold_for(engine_.document(), hit);
     if (!parent) return;
-    selected_.clear();
+    clear_note_selection();
     select_note_id(hit.id);
     hold_sel_body_id_ = parent->id;
     hold_sel_layer_ = HoldSelLayer::Stars;
@@ -2143,7 +2231,7 @@ bool ChartEditPanel::switch_hold_selection_layer(const NotationNote& hit,
         if (!is_visible_mid_star(note.note_type)) continue;
         if (is_back_layer(note.id)) continue;
         if (viewport_.mid_star_screen_rect(note).contains(point)) {
-          selected_.clear();
+          clear_note_selection();
           select_note_id(note.id);
           hold_sel_body_id_ = body->id;
           hold_sel_layer_ = HoldSelLayer::Stars;
@@ -2656,7 +2744,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
     const int32_t first_new_id = engine_.document().next_note_id();
     engine_.execute_command(std::make_unique<wds::chart_editor::AddNotesCommand>(
         std::vector<NotationNote>{flat}, hold_scratch_ ? "Place flick" : "Place note"));
-    selected_.clear();
+    clear_note_selection();
     for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
       if (is_user_selectable(n)) select_note_id(n.id);
     });
@@ -2794,7 +2882,7 @@ void ChartEditPanel::finish_hold_body(bool chain_next) {
   // Select the new body and auto head as separate notes. Pairing is exact-span
   // only and must not hide a shortened auto head.
   clear_hold_sel_focus();
-  selected_.clear();
+  clear_note_selection();
   for (const int32_t id : hold_chain_ids_) select_note_id(id);
   // New head / body / mid-stars / eighths all carry ids >= first_new_id (ids taken
   // from the document's allocator before the edit); `before` holds only older ids.
@@ -2969,7 +3057,7 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
   const int32_t t0 = marquee_start_tick_;
   const int32_t t1 = viewport_.tick_at(end.y);
   const auto box = marquee_screen_rect(end);
-  selected_.clear();
+  clear_note_selection();
   selected_speed_ticks_.clear();
   clear_hold_sel_focus();
 
@@ -2998,18 +3086,15 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
   const bool box_over_split_gutter =
       box.x < left_gutter_.right() && box.right() > left_gutter_.x;
   for (const auto& hit : split_hits) {
-    if (rects_overlap(hit.bounds, box)) select_note_id(hit.note_id);
+    if (rects_overlap(hit.bounds, box)) select_split_edge(hit.note_id, hit.is_start);
   }
   if (box_over_split_gutter) {
     const auto& doc = engine_.document();
     const int32_t lo_tick = std::min(t0, t1);
     const int32_t hi_tick = std::max(t0, t1);
-    // A split is picked when its start OR its end (max(start, end_tick)) is inside
-    // [lo_tick, hi_tick]. Its start is at most max_split_span_ms before its end, and
-    // ms is monotone in ticks, so every candidate starts in
-    // [ms(lo) - max_split_span, ms(hi)]; 1 ms of slack on both sides, then an exact
-    // tick test below. If the cached span is stale (not expected: mutators refresh
-    // it), cover the whole timeline from the left so the result stays exact.
+    // Each chip is independent: a start in [lo, hi] selects only the start, an
+    // end in range selects only the end. Windowing is the same as before (a
+    // candidate's start is at most max_split_span_ms before its end).
     const auto& index = doc.index();
     const int64_t window_hi = wds::chart_editor::tick_to_milliseconds(hi_tick, doc.timing()) + 1;
     const int64_t window_lo =
@@ -3022,10 +3107,12 @@ void ChartEditPanel::finish_marquee(wds::interaction::Vec2 end) {
     for (const int32_t id : split_ids) {
       const auto note = doc.find_note(id);
       if (!note || !wds::chart_editor::is_split_lane_gimmick(note->gimmick_type)) continue;
-      const int32_t end_tick = std::max(note->start_tick, note->end_tick);
-      if ((note->start_tick >= lo_tick && note->start_tick <= hi_tick) ||
-          (end_tick >= lo_tick && end_tick <= hi_tick)) {
-        select_note_id(note->id);
+      const int32_t end_tick = split_end_tick_of(*note);
+      if (note->start_tick >= lo_tick && note->start_tick <= hi_tick) {
+        select_split_edge(note->id, true);
+      }
+      if (end_tick >= lo_tick && end_tick <= hi_tick) {
+        select_split_edge(note->id, false);
       }
     }
   }
@@ -3169,8 +3256,14 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
   // back to the drag origin when the cursor overshoots).
   int32_t applied_d_tick = d_tick;
   if (auto anchor_it = drag_originals_.find(anchor_note_id_); anchor_it != drag_originals_.end()) {
+    int32_t anchor_tick = anchor_it->second.start_tick;
+    if (wds::chart_editor::is_split_lane_gimmick(anchor_it->second.gimmick_type) &&
+        selected_split_starts_.count(anchor_note_id_) == 0 &&
+        selected_split_ends_.count(anchor_note_id_) != 0) {
+      anchor_tick = split_end_tick_of(anchor_it->second);
+    }
     applied_d_tick = wds::chart_editor::selection_drag_tick_delta(
-        anchor_it->second.start_tick, d_tick, viewport_.grid());
+        anchor_tick, d_tick, viewport_.grid());
   }
   const int32_t min_tick = first_legal_tick();
   for (const auto& [id, orig] : drag_originals_) {
@@ -3178,7 +3271,16 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
       continue;
     }
     const int32_t floor = clamps_to_nonnegative_music(orig) ? min_tick : 0;
-    if (orig.start_tick + applied_d_tick < floor) {
+    if (wds::chart_editor::is_split_lane_gimmick(orig.gimmick_type)) {
+      const bool move_start = selected_split_starts_.count(id) != 0;
+      const bool move_end = selected_split_ends_.count(id) != 0;
+      if (move_start && orig.start_tick + applied_d_tick < floor) {
+        applied_d_tick = floor - orig.start_tick;
+      }
+      if (move_end && split_end_tick_of(orig) + applied_d_tick < floor) {
+        applied_d_tick = floor - split_end_tick_of(orig);
+      }
+    } else if (orig.start_tick + applied_d_tick < floor) {
       applied_d_tick = floor - orig.start_tick;
     }
     if (orig.width > 0 && !wds::chart_editor::is_split_lane_gimmick(orig.gimmick_type)) {
@@ -3200,18 +3302,23 @@ void ChartEditPanel::sync_move_selection_to_pointer(wds::interaction::Vec2 point
   std::unordered_map<int32_t, NotationNote> next;
   for (const auto& [id, orig] : drag_originals_) {
     NotationNote n = orig;
-    // Grabbed note snaps to the subdivision grid; everyone else keeps their
-    // offset from that note (same applied_d_tick, no per-note snap).
-    const int32_t duration =
-        orig.end_tick > orig.start_tick ? (orig.end_tick - orig.start_tick) : 0;
     const int32_t floor = clamps_to_nonnegative_music(orig) ? min_tick : 0;
-    const int32_t new_start = std::max(floor, orig.start_tick + applied_d_tick);
-    n.start_tick = new_start;
-    n.end_tick = duration > 0 ? n.start_tick + duration : n.start_tick;
     if (wds::chart_editor::is_split_lane_gimmick(orig.gimmick_type)) {
+      const bool move_start = selected_split_starts_.count(id) != 0;
+      const bool move_end = selected_split_ends_.count(id) != 0;
+      if (!try_nudge_split_edges(n, applied_d_tick, floor, move_start, move_end)) {
+        n = orig;
+      }
       n.lane = orig.lane;
       n.width = orig.width;
     } else {
+      // Grabbed note snaps to the subdivision grid; everyone else keeps their
+      // offset from that note (same applied_d_tick, no per-note snap).
+      const int32_t duration =
+          orig.end_tick > orig.start_tick ? (orig.end_tick - orig.start_tick) : 0;
+      const int32_t new_start = std::max(floor, orig.start_tick + applied_d_tick);
+      n.start_tick = new_start;
+      n.end_tick = duration > 0 ? n.start_tick + duration : n.start_tick;
       n.lane = viewport_.clamp_lane(orig.lane + d_lane, orig.width);
     }
     next[id] = n;
@@ -3591,7 +3698,7 @@ void ChartEditPanel::finish_hold_adjust() {
   finish_move(true, true);
   // A pruned star must not linger in the selection set.
   for (const int32_t id : attached_star_ids) {
-    if (!engine_.document().find_note(id)) selected_.erase(id);
+    if (!engine_.document().find_note(id)) unselect_note_id(id);
   }
   engine_.rebuild_snapshot();
 }
@@ -3656,7 +3763,7 @@ bool ChartEditPanel::convert_selected(NoteType target, std::optional<int32_t> sc
   }
   if (!engine_.execute_command(std::move(composite))) return false;
 
-  for (const auto& removed : planned.removals) selected_.erase(removed.id);
+  for (const auto& removed : planned.removals) unselect_note_id(removed.id);
   engine_.rebuild_snapshot();
   sync_hold_sel_focus_to_selection();
   return true;
@@ -3722,9 +3829,30 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
     if (next_tick <= parent->start_tick || next_tick >= parent->end_tick) return false;
   }
   auto before = notes;
-  if (delta_tick != 0 && !notes.empty() &&
-      !wds::chart_editor::nudge_notes_time(notes, delta_tick, first_legal_tick())) {
-    return false;
+  if (delta_tick != 0 && !notes.empty()) {
+    const int32_t legal = first_legal_tick();
+    std::vector<NotationNote> whole;
+    whole.reserve(notes.size());
+    for (auto& n : notes) {
+      if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+        const bool move_start = selected_split_starts_.count(n.id) != 0;
+        const bool move_end = selected_split_ends_.count(n.id) != 0;
+        if (!try_nudge_split_edges(n, delta_tick, legal, move_start, move_end)) {
+          return false;
+        }
+      } else {
+        whole.push_back(n);
+      }
+    }
+    if (!whole.empty() &&
+        !wds::chart_editor::nudge_notes_time(whole, delta_tick, legal)) {
+      return false;
+    }
+    size_t wi = 0;
+    for (auto& n : notes) {
+      if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
+      n = whole[wi++];
+    }
   }
   if (delta_lane != 0) {
     const int32_t first = viewport_.first_visible_lane();
@@ -3825,9 +3953,19 @@ bool ChartEditPanel::nudge_selected(int32_t delta_tick, int32_t delta_lane) {
 
 bool ChartEditPanel::copy_selected() {
   // No HoldEighth (always regenerated on paste) and no mid-star whose hold is not also
-  // in the clipboard (a lone star is not copyable).
+  // in the clipboard (a lone star is not copyable). A split with only one chip
+  // selected still copies the whole note; origin/paste use clipboard_split_edges_.
   clipboard_ = clipboard_notes_for_selection(engine_.document(), selected_);
   clipboard_speed_.clear();
+  clipboard_split_edges_.clear();
+  for (const auto& n : clipboard_) {
+    if (!wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) continue;
+    uint8_t bits = 0;
+    if (selected_split_starts_.count(n.id)) bits |= kSplitEdgeStartBit;
+    if (selected_split_ends_.count(n.id)) bits |= kSplitEdgeEndBit;
+    if (bits == 0) bits = kSplitEdgeStartBit | kSplitEdgeEndBit;
+    clipboard_split_edges_[n.id] = bits;
+  }
   for (const auto& point : engine_.document().scroll_speed_points()) {
     if (selected_speed_ticks_.count(point.tick)) clipboard_speed_.push_back(point);
   }
@@ -3850,14 +3988,28 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   sync_viewport();
   const int32_t legal = first_legal_tick();
   const int32_t anchor = std::max(legal, viewport_.tick_at(pointer_.y));
+  auto copied_split_bits = [&](int32_t id) -> uint8_t {
+    const auto it = clipboard_split_edges_.find(id);
+    if (it == clipboard_split_edges_.end()) return kSplitEdgeStartBit | kSplitEdgeEndBit;
+    return it->second;
+  };
   int32_t src_earliest = std::numeric_limits<int32_t>::max();
-  for (const auto& n : clipboard_) src_earliest = std::min(src_earliest, n.start_tick);
+  for (const auto& n : clipboard_) {
+    if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+      const uint8_t bits = copied_split_bits(n.id);
+      if (bits & kSplitEdgeStartBit) src_earliest = std::min(src_earliest, n.start_tick);
+      if (bits & kSplitEdgeEndBit) {
+        src_earliest = std::min(src_earliest, split_end_tick_of(n));
+      }
+    } else {
+      src_earliest = std::min(src_earliest, n.start_tick);
+    }
+  }
   for (const auto& p : clipboard_speed_) src_earliest = std::min(src_earliest, p.tick);
   if (src_earliest == std::numeric_limits<int32_t>::max()) return false;
-  // The pointer is where the clipboard's earliest item should land, in either
-  // direction: a block copied further down may be pasted above its source. snap_tick
-  // keeps the anchor non-negative, and `shift` below pushes the whole block forward
-  // only where the destination is not allowed.
+  // The pointer is where the clipboard's earliest *selected* item should land, in
+  // either direction. An unselected paired split chip still copies with the note
+  // and can land before the pointer; illegal landings drop that split below.
   const int32_t snapped_anchor =
       wds::chart_editor::snap_tick(static_cast<float>(anchor), viewport_.grid());
   const int32_t base_delta = snapped_anchor - src_earliest;
@@ -3868,7 +4020,27 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   if (pasted.empty() && clipboard_speed_.empty()) return false;
   for (auto& n : pasted) {
     n.start_tick += base_delta;
-    if (n.end_tick > 0) n.end_tick += base_delta;
+    if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) || n.end_tick > 0) {
+      n.end_tick += base_delta;
+    }
+  }
+  int skipped_splits = 0;
+  pasted.erase(std::remove_if(pasted.begin(), pasted.end(),
+                              [&](const NotationNote& n) {
+                                if (!wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+                                  return false;
+                                }
+                                if (n.start_tick < legal || split_end_tick_of(n) < legal) {
+                                  ++skipped_splits;
+                                  return true;
+                                }
+                                return false;
+                              }),
+               pasted.end());
+  if (skipped_splits > 0) {
+    report_status("未粘贴 " + std::to_string(skipped_splits) +
+                      " 条分割线：配对标签会落到无法放置音符的区间",
+                  StatusLevel::Warning);
   }
   int32_t shift = 0;
   for (const auto& n : pasted) {
@@ -3881,13 +4053,22 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   int32_t next_id = engine_.document().next_note_id();
   const int32_t first_new_id = next_id;
   std::unordered_map<int32_t, int32_t> old_to_new;
+  std::unordered_map<int32_t, uint8_t> pasted_split_edges;
   for (auto& n : pasted) {
     if (shift > 0) {
       n.start_tick += shift;
-      if (n.end_tick > 0) n.end_tick += shift;
+      if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type) || n.end_tick > 0) {
+        n.end_tick += shift;
+      }
     }
-    if (n.id >= 0) old_to_new[n.id] = next_id;
-    n.id = next_id++;
+    const int32_t new_id = next_id++;
+    if (n.id >= 0) {
+      old_to_new[n.id] = new_id;
+      if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+        pasted_split_edges[new_id] = copied_split_bits(n.id);
+      }
+    }
+    n.id = new_id;
   }
   for (auto& n : pasted) {
     if (n.parent_hold_id < 0) continue;
@@ -3956,11 +4137,22 @@ bool ChartEditPanel::paste_at_pointer(bool mirror) {
   }
   if (!execute_maybe_extended(std::move(composite), paste_speeds, paste_label)) return false;
 
-  selected_.clear();
+  clear_note_selection();
   selected_speed_ticks_.clear();
   // Pasted notes (ids from first_new_id up) and their generated eighths are the only
-  // notes with ids >= first_new_id.
+  // notes with ids >= first_new_id. Splits restore the chips that were actually
+  // selected at copy time.
   for_each_note_allocated_since(engine_.document(), first_new_id, [&](const NotationNote& n) {
+    if (wds::chart_editor::is_split_lane_gimmick(n.gimmick_type)) {
+      const auto it = pasted_split_edges.find(n.id);
+      if (it == pasted_split_edges.end()) {
+        select_note_id(n.id);
+        return;
+      }
+      if (it->second & kSplitEdgeStartBit) select_split_edge(n.id, true);
+      if (it->second & kSplitEdgeEndBit) select_split_edge(n.id, false);
+      return;
+    }
     if (is_user_selectable(n)) select_note_id(n.id);
   });
   selected_speed_ticks_ = std::move(pasted_speed_ticks);
@@ -4106,7 +4298,7 @@ bool ChartEditPanel::remove_notes_and_speeds(std::vector<NotationNote> notes,
         std::move(speed_before), std::move(speed_after), label + " scroll speed"));
   }
   if (!engine_.execute_command(std::move(composite))) return false;
-  selected_.clear();
+  clear_note_selection();
   selected_speed_ticks_.clear();
   return true;
 }
@@ -4136,7 +4328,7 @@ bool ChartEditPanel::delete_note_at(wds::interaction::Vec2 point) {
   if (!engine_.execute_command(std::move(composite))) {
     return false;
   }
-  for (const auto& n : notes) selected_.erase(n.id);
+  for (const auto& n : notes) unselect_note_id(n.id);
   sync_hold_sel_focus_to_selection();
   return true;
 }
@@ -4947,7 +5139,7 @@ bool ChartEditPanel::delete_split_note(int32_t note_id) {
                                                                   "Delete split"))) {
     return false;
   }
-  selected_.erase(note_id);
+  unselect_note_id(note_id);
   return true;
 }
 
@@ -5051,16 +5243,15 @@ bool ChartEditPanel::handle_left_gutter_pointer_down(const wds::interaction::Poi
     }
     if (wds::interaction::is_toggle_select(event)) {
       clear_hold_sel_focus();
-      if (selected_.count(hit.note_id)) selected_.erase(hit.note_id);
-      else select_note_id(hit.note_id);
+      toggle_split_edge(hit.note_id, hit.is_start);
       hide_gutter_ghost();
       return true;
     }
     if (wds::interaction::is_left_button(event.button)) {
-      // Selected labels move the whole selection (time only). Unselected labels
-      // keep the single-edge edit / click-to-open-picker path.
+      // A selected chip moves the selection (time only). An unselected chip
+      // keeps the single-edge edit / click-to-open-picker path.
       if (!engine_.is_editable()) return true;
-      if (selected_.count(hit.note_id)) {
+      if (split_edge_selected(hit.note_id, hit.is_start)) {
         begin_move_selection_from_label(event.position, hit.note_id, -1);
         return true;
       }
@@ -5365,7 +5556,7 @@ void ChartEditPanel::paint_gutter_overlays(wds::interaction::UiPainter& painter)
     const auto& hit = *it;
     auto note = engine_.document().find_note(hit.note_id);
     if (!note) continue;
-    const bool selected = selected_.count(hit.note_id) != 0;
+    const bool selected = split_edge_selected(hit.note_id, hit.is_start);
     const wds::interaction::Color c =
         hit.is_start ? wds::interaction::Color{0.22f, 0.48f, 0.95f, 1.0f}
                      : wds::interaction::Color{0.92f, 0.28f, 0.28f, 1.0f};
@@ -5571,7 +5762,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
     }
     if (wds::interaction::is_toggle_select(event)) {
       clear_hold_sel_focus();
-      if (selected_.count(hit->id)) selected_.erase(hit->id);
+      if (selected_.count(hit->id)) unselect_note_id(hit->id);
       else select_note_id(hit->id);
       return;
     }
@@ -5696,7 +5887,7 @@ void ChartEditPanel::on_pointer_down(const wds::interaction::PointerDownEvent& e
           if (hold_body && !star_hit) {
             select_hold_outer(*hold_body);
           } else {
-            selected_.clear();
+            clear_note_selection();
             select_note_id(hit_note->id);
             // Pair head↔body so a plain body grab keeps its head.
             if (auto partner = hold_width_pair_partner(engine_.document(), *hit_note)) {
@@ -7040,7 +7231,7 @@ void ChartEditPanel::on_pointer_up(const wds::interaction::PointerUpEvent& event
 
   // Click empty to clear selection
   if (!hit_test_note(event.position) && wds::interaction::is_clear_selection_click(event)) {
-    selected_.clear();
+    clear_note_selection();
     selected_speed_ticks_.clear();
     clear_hold_sel_focus();
   }
@@ -7411,7 +7602,7 @@ bool ChartEditPanel::commit_curve_fill() {
   engine_.rebuild_snapshot();
 
   clear_hold_sel_focus();
-  selected_.clear();
+  clear_note_selection();
   for (const int32_t id : hold_chain_ids_) select_note_id(id);
   // Every note the commit introduced (head, bodies, eighths) got an id >= the
   // document's next id at build time; everything in commit->before is older.

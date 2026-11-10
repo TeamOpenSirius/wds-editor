@@ -181,14 +181,28 @@ void fill_ui_rect(QPainter& p, const wds::interaction::UiPaintRect& r) {
 }
 
 void draw_ui_label(QPainter& p, const wds::interaction::UiPaintLabel& label) {
-  // Same face as the Qt chrome. Vulkan label pixel sizes (22–26) are atlas
-  // bake metrics and must not drive QPainter.
-  (void)label.pixel_size;
+  // Same face as the Qt chrome. Vulkan atlas sizes (22–26) must not drive
+  // QPainter; the widget font is ~13px and those bake metrics would overflow
+  // gutter chips. Tiny labels below kFontSizeGutter (split ticks) are real
+  // window pixels and have to be applied or the 9px text is drawn at chrome
+  // size inside an 11px rect and fully clipped.
+  QFont restored;
+  bool swapped = false;
+  if (label.pixel_size > 0.5f &&
+      label.pixel_size + 0.5f < wds::interaction::theme::kFontSizeGutter) {
+    restored = p.font();
+    QFont tiny = restored;
+    tiny.setPixelSize(std::max(1, static_cast<int>(std::lround(label.pixel_size))));
+    p.setFont(tiny);
+    swapped = true;
+  }
   p.setPen(qcolor(label.color));
   int flags = Qt::AlignVCenter;
   flags |= label.left_align ? Qt::AlignLeft : Qt::AlignHCenter;
   if (label.wrap) flags |= Qt::TextWordWrap;
+  if (swapped) flags |= Qt::TextDontClip;
   p.drawText(qrect(label.bounds), flags, QString::fromUtf8(label.text.c_str()));
+  if (swapped) p.setFont(restored);
 }
 
 void flush_ui_painter(QPainter& p, const wds::interaction::UiPainter& ui) {
@@ -887,6 +901,9 @@ void ChartEditWidget::fade_lane_slider(bool highlighted) {
 }
 
 bool ChartEditWidget::eventFilter(QObject* watched, QEvent* event) {
+  if (watched == window() && event->type() == QEvent::WindowActivate) {
+    sync_idle_hover_from_cursor();
+  }
   if (watched == extra_lane_slider_ && extra_lane_slider_ != nullptr) {
     if (event->type() == QEvent::Enter) {
       if (panel_ != nullptr) panel_->set_lane_slider_hovered(true);
@@ -904,12 +921,20 @@ void ChartEditWidget::resizeEvent(QResizeEvent*) {
   if (panel_) panel_->set_bounds({0, 0, static_cast<float>(width()), static_cast<float>(height())});
   if (panel_) panel_->viewport();
   sync_extra_lane_slider();
+  sync_idle_hover_from_cursor();
   mark_dirty();
   update();
 }
 void ChartEditWidget::showEvent(QShowEvent* e) {
-  mark_dirty();
   QWidget::showEvent(e);
+  if (QWidget* win = window(); win != nullptr && win != this) {
+    win->removeEventFilter(this);
+    win->installEventFilter(this);
+  }
+  mark_dirty();
+  sync_idle_hover_from_cursor();
+  // Cocoa may map the window after Show. Re-sample once the cursor is over us.
+  QTimer::singleShot(0, this, [this] { sync_idle_hover_from_cursor(); });
 }
 void ChartEditWidget::changeEvent(QEvent* event) {
   QWidget::changeEvent(event);
@@ -919,9 +944,8 @@ void ChartEditWidget::changeEvent(QEvent* event) {
   extra_lane_slider_opacity_->setOpacity(lane_slider_idle_opacity());
 }
 void ChartEditWidget::enterEvent(QEnterEvent* e) {
-  mark_dirty();
   QWidget::enterEvent(e);
-  update();
+  apply_pointer_hover(e->position(), e->modifiers(), Qt::NoButton, false);
 }
 void ChartEditWidget::leaveEvent(QEvent* e) {
   if (panel_) panel_->on_hover_leave();
@@ -1628,14 +1652,17 @@ void ChartEditWidget::mousePressEvent(QMouseEvent* e) {
   mark_dirty();
   update();
 }
-void ChartEditWidget::mouseMoveEvent(QMouseEvent* e) {
+void ChartEditWidget::apply_pointer_hover(const QPointF& local, Qt::KeyboardModifiers modifiers,
+                                         Qt::MouseButtons buttons, bool journal) {
   if (!panel_) return;
-  const auto pos = point(e->position());
-  // 0 hover / 1 drag / 2 scrub. Pointer moves are hover or drag; wheel is Scroll.
-  const std::uint8_t mode = (e->buttons() != Qt::NoButton) ? std::uint8_t{1} : std::uint8_t{0};
-  wds::common::journal_note_move(pos.x, pos.y, mode);
+  const auto pos = point(local);
+  if (journal) {
+    // 0 hover / 1 drag / 2 scrub. Pointer moves are hover or drag; wheel is Scroll.
+    const std::uint8_t mode = (buttons != Qt::NoButton) ? std::uint8_t{1} : std::uint8_t{0};
+    wds::common::journal_note_move(pos.x, pos.y, mode);
+  }
   panel_->sync_global_pointer(pos);
-  panel_->on_pointer_move({pos, mods(e->modifiers())});
+  panel_->on_pointer_move({pos, mods(modifiers)});
   switch (panel_->hover_cursor()) {
     case wds::interaction::CursorKind::ResizeHorizontal: setCursor(Qt::SizeHorCursor); break;
     case wds::interaction::CursorKind::ResizeVertical: setCursor(Qt::SizeVerCursor); break;
@@ -1643,6 +1670,18 @@ void ChartEditWidget::mouseMoveEvent(QMouseEvent* e) {
   }
   mark_dirty();
   update();
+}
+
+void ChartEditWidget::sync_idle_hover_from_cursor() {
+  if (!panel_ || qt_modal_open_ || !isVisible() || width() <= 0 || height() <= 0) return;
+  if (QWidget::mouseGrabber() != nullptr) return;
+  const QPoint local = mapFromGlobal(QCursor::pos());
+  if (!rect().contains(local)) return;
+  apply_pointer_hover(QPointF(local), Qt::NoModifier, Qt::NoButton, false);
+}
+
+void ChartEditWidget::mouseMoveEvent(QMouseEvent* e) {
+  apply_pointer_hover(e->position(), e->modifiers(), e->buttons(), true);
 }
 void ChartEditWidget::mouseReleaseEvent(QMouseEvent* e) {
   if (!panel_) return;

@@ -127,6 +127,12 @@ class ChartEditWidget final : public QWidget {
   void update_extra_lane_slider_label();
   wds::interaction::Modifiers mods(Qt::KeyboardModifiers) const;
   wds::interaction::Vec2 point(const QPointF&) const;
+  // Placement ghosts are driven by pointer-move. Qt does not synthesize a move
+  // when the window appears under a stationary cursor, so enter/show/resize
+  // must feed the same hover path.
+  void apply_pointer_hover(const QPointF& local, Qt::KeyboardModifiers modifiers,
+                           Qt::MouseButtons buttons, bool journal);
+  void sync_idle_hover_from_cursor();
   // Draws notes[indices[k]]; indices must be ascending (document order) and already culled.
   void paint_notes(QPainter& painter,
                    const std::vector<wds::chart_editor::NotationNote>& notes,
