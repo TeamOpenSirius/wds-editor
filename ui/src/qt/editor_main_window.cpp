@@ -38,12 +38,16 @@
 #include <QEnterEvent>
 #include <QCursor>
 #include <QKeySequence>
+#include <QDesktopServices>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QProcess>
+#include <QUrl>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileInfo>
+#include <QFont>
 #include <QListWidget>
 #include <QLineEdit>
 #include <QComboBox>
@@ -319,6 +323,24 @@ QString normalized_project_path(const QString& path) {
   if (path.isEmpty()) return path;
   const QString canonical = QFileInfo(path).canonicalFilePath();
   return canonical.isEmpty() ? path : canonical;
+}
+
+void reveal_in_file_manager(const QString& path) {
+  const QFileInfo info(path);
+  if (!info.exists()) {
+    QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+    return;
+  }
+#if defined(Q_OS_WIN)
+  QProcess::startDetached(
+      QStringLiteral("explorer.exe"),
+      {QStringLiteral("/select,%1").arg(QDir::toNativeSeparators(info.absoluteFilePath()))});
+#elif defined(Q_OS_MACOS)
+  QProcess::startDetached(QStringLiteral("open"),
+                          {QStringLiteral("-R"), info.absoluteFilePath()});
+#else
+  QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+#endif
 }
 
 int dock_title_bar_height(const QDockWidget* dock) {
@@ -1483,10 +1505,7 @@ bool EditorMainWindow::show_startup_splash() {
   recent->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   recent->setUniformItemSizes(false);
   recent->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-  const auto recent_paths = QSettings(QSettings::defaultFormat(), QSettings::UserScope,
-                                      "WDS", "WDS Editor")
-                                .value(QStringLiteral("recent/projects"))
-                                .toStringList();
+  recent->setContextMenuPolicy(Qt::CustomContextMenu);
   const QColor path_fg = splash.palette().color(QPalette::WindowText);
   const QColor path_muted =
       path_fg.lightness() >= 128 ? path_fg.darker(140) : path_fg.lighter(180);
@@ -1495,34 +1514,45 @@ bool EditorMainWindow::show_startup_splash() {
   recent->setStyleSheet(
       QStringLiteral("QLabel#recentPath { font-size: 11px; color: %1; }")
           .arg(path_muted.name()));
-  int shown_recent = 0;
-  for (const auto& path : recent_paths) {
-    if (shown_recent >= 8) break;
-    if (!QFileInfo::exists(path)) continue;
-    auto* item = new QListWidgetItem(recent);
-    item->setToolTip(path);
-    item->setData(Qt::UserRole, path);
-    auto* row = new QWidget(recent);
-    auto* row_layout = new QHBoxLayout(row);
-    row_layout->setContentsMargins(8, 6, 8, 6);
-    row_layout->setSpacing(8);
-    auto* name_label = new QLabel(QFileInfo(path).completeBaseName(), row);
-    auto* path_label = new QLabel(path, row);
-    path_label->setObjectName(QStringLiteral("recentPath"));
-    QFont path_font = name_label->font();
-    path_font.setPixelSize(11);
-    path_label->setFont(path_font);
-    path_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    row_layout->addWidget(name_label, 0, Qt::AlignVCenter);
-    row_layout->addWidget(path_label, 1, Qt::AlignVCenter);
-    item->setSizeHint(row->sizeHint());
-    recent->setItemWidget(item, row);
-    ++shown_recent;
-  }
-  if (recent->count() == 0) {
-    auto* item = new QListWidgetItem(tr("暂无最近工程"), recent);
-    item->setFlags(Qt::NoItemFlags);
-  }
+  const auto refill_recent = [this, recent, path_muted] {
+    recent->clear();
+    const auto recent_paths = QSettings(QSettings::defaultFormat(), QSettings::UserScope,
+                                        "WDS", "WDS Editor")
+                                  .value(QStringLiteral("recent/projects"))
+                                  .toStringList();
+    int shown_recent = 0;
+    for (const auto& path : recent_paths) {
+      if (shown_recent >= 8) break;
+      if (!QFileInfo::exists(path)) continue;
+      auto* item = new QListWidgetItem(recent);
+      item->setToolTip(path);
+      item->setData(Qt::UserRole, path);
+      auto* row = new QWidget(recent);
+      row->setContextMenuPolicy(Qt::NoContextMenu);
+      auto* row_layout = new QHBoxLayout(row);
+      row_layout->setContentsMargins(8, 6, 8, 6);
+      row_layout->setSpacing(8);
+      auto* name_label = new QLabel(QFileInfo(path).completeBaseName(), row);
+      name_label->setContextMenuPolicy(Qt::NoContextMenu);
+      auto* path_label = new QLabel(path, row);
+      path_label->setObjectName(QStringLiteral("recentPath"));
+      path_label->setContextMenuPolicy(Qt::NoContextMenu);
+      QFont path_font = name_label->font();
+      path_font.setPixelSize(11);
+      path_label->setFont(path_font);
+      path_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+      row_layout->addWidget(name_label, 0, Qt::AlignVCenter);
+      row_layout->addWidget(path_label, 1, Qt::AlignVCenter);
+      item->setSizeHint(row->sizeHint());
+      recent->setItemWidget(item, row);
+      ++shown_recent;
+    }
+    if (recent->count() == 0) {
+      auto* item = new QListWidgetItem(tr("暂无最近工程"), recent);
+      item->setFlags(Qt::NoItemFlags);
+    }
+  };
+  refill_recent();
   root->addWidget(recent, 1);
   auto* loading = new QLabel(&splash);
   loading->setText(tr("准备就绪"));
@@ -1604,6 +1634,31 @@ bool EditorMainWindow::show_startup_splash() {
             journal_menu_action("splash.recent");
             start_load(item->data(Qt::UserRole).toString());
           });
+  connect(recent, &QListWidget::customContextMenuRequested, &splash,
+          [this, recent, start_load, refill_recent](const QPoint& pos) {
+            const QPoint view_pos = recent->viewport()->mapFrom(recent, pos);
+            auto* item = recent->itemAt(view_pos);
+            if (item == nullptr) return;
+            const QString path = item->data(Qt::UserRole).toString();
+            if (path.isEmpty()) return;
+            recent->setCurrentItem(item);
+            QMenu menu(recent);
+            QAction* open_act = menu.addAction(tr("打开"));
+            QAction* reveal_act = menu.addAction(tr("打开文件位置"));
+            QAction* remove_act = menu.addAction(tr("从列表中移除"));
+            QAction* chosen = menu.exec(recent->mapToGlobal(pos));
+            if (chosen == open_act) {
+              journal_menu_action("splash.recent");
+              start_load(path);
+            } else if (chosen == reveal_act) {
+              journal_menu_action("splash.recent_reveal");
+              reveal_in_file_manager(path);
+            } else if (chosen == remove_act) {
+              journal_menu_action("splash.recent_remove");
+              forget_recent_project(path);
+              refill_recent();
+            }
+          });
   connect(open, &QPushButton::clicked, &splash, [this, &splash, start_load] {
     journal_menu_action("splash.open");
     const auto path = QFileDialog::getOpenFileName(
@@ -1656,6 +1711,16 @@ void EditorMainWindow::remember_recent_project(const QString& path) {
   paths.removeAll(project_path);
   paths.prepend(project_path);
   while (paths.size() > 8) paths.removeLast();
+  prefs.setValue(QStringLiteral("recent/projects"), paths);
+}
+
+void EditorMainWindow::forget_recent_project(const QString& path) {
+  if (path.isEmpty()) return;
+  const QString project_path = normalized_project_path(path);
+  QSettings prefs(QSettings::defaultFormat(), QSettings::UserScope, "WDS", "WDS Editor");
+  auto paths = prefs.value(QStringLiteral("recent/projects")).toStringList();
+  paths.removeAll(project_path);
+  paths.removeAll(path);
   prefs.setValue(QStringLiteral("recent/projects"), paths);
 }
 
@@ -1922,25 +1987,43 @@ bool EditorMainWindow::nativeEvent(const QByteArray& eventType, void* message, q
   return QMainWindow::nativeEvent(eventType, message, result);
 }
 
+namespace {
+
+enum class UnsavedCloseChoice { Save, Discard, Cancel };
+
+UnsavedCloseChoice ask_unsaved_close_choice(QWidget* parent) {
+  QMessageBox box(QMessageBox::Warning, EditorMainWindow::tr("未保存的修改"),
+                  EditorMainWindow::tr("当前工程有未保存的修改。"), QMessageBox::NoButton,
+                  parent);
+  auto* save = box.addButton(EditorMainWindow::tr("保存"), QMessageBox::AcceptRole);
+  auto* discard = box.addButton(EditorMainWindow::tr("不保存"), QMessageBox::DestructiveRole);
+  box.addButton(EditorMainWindow::tr("取消"), QMessageBox::RejectRole);
+  box.exec();
+  if (box.clickedButton() == save) return UnsavedCloseChoice::Save;
+  if (box.clickedButton() == discard) return UnsavedCloseChoice::Discard;
+  return UnsavedCloseChoice::Cancel;
+}
+
+}  // namespace
+
 void EditorMainWindow::confirm_pending_changes(std::function<void()> on_proceed) {
   if (!on_proceed) return;
   if (ui_manager_ == nullptr || !ui_manager_->session().dirty()) {
     on_proceed();
     return;
   }
-  QMessageBox box(QMessageBox::Warning, tr("未保存的修改"),
-                  tr("当前工程有未保存的修改。"), QMessageBox::NoButton, this);
-  auto* save = box.addButton(tr("保存"), QMessageBox::AcceptRole);
-  auto* discard = box.addButton(tr("不保存"), QMessageBox::DestructiveRole);
-  box.addButton(tr("取消"), QMessageBox::RejectRole);
-  box.exec();
-  if (box.clickedButton() == save) {
-    save_project_then([this, on_proceed = std::move(on_proceed)] {
-      if (ui_manager_ != nullptr && !ui_manager_->session().dirty()) on_proceed();
-    });
-    return;
+  switch (ask_unsaved_close_choice(this)) {
+    case UnsavedCloseChoice::Save:
+      save_project_then([this, on_proceed = std::move(on_proceed)] {
+        if (ui_manager_ != nullptr && !ui_manager_->session().dirty()) on_proceed();
+      });
+      break;
+    case UnsavedCloseChoice::Discard:
+      on_proceed();
+      break;
+    case UnsavedCloseChoice::Cancel:
+      break;
   }
-  if (box.clickedButton() == discard) on_proceed();
 }
 
 bool EditorMainWindow::open_document_at_startup(const QString& path) {
@@ -2246,17 +2329,40 @@ void EditorMainWindow::export_chart() {
 }
 
 void EditorMainWindow::closeEvent(QCloseEvent* event) {
+  // Nested close while the unsaved prompt's inner loop is running: reject it.
+  // Qt's handleClose already no-ops QWidget::close() when is_closing; this
+  // covers a spontaneous second QCloseEvent that still reaches here.
+  if (unsaved_close_prompt_open_) {
+    event->ignore();
+    return;
+  }
   if (busy_active_ && !force_close_) {
     event->ignore();
     return;
   }
   if (!force_close_ && ui_manager_ != nullptr && ui_manager_->session().dirty()) {
-    event->ignore();
-    confirm_pending_changes([this] {
-      force_close_ = true;
-      close();
-    });
-    return;
+    // Do not call close() from this stack: handleClose treats a nested
+    // close() as success and the original ignored event then keeps the window.
+    // Discard accepts *this* event only. Save ignores this event and queues a
+    // fresh close after save (is_closing has cleared; document is clean so
+    // that later close is a normal one — not a nested close, not force_close_).
+    unsaved_close_prompt_open_ = true;
+    const UnsavedCloseChoice choice = ask_unsaved_close_choice(this);
+    unsaved_close_prompt_open_ = false;
+    switch (choice) {
+      case UnsavedCloseChoice::Save:
+        event->ignore();
+        save_project_then([this] {
+          if (ui_manager_ == nullptr || ui_manager_->session().dirty()) return;
+          QMetaObject::invokeMethod(this, [this] { close(); }, Qt::QueuedConnection);
+        });
+        return;
+      case UnsavedCloseChoice::Discard:
+        break;
+      case UnsavedCloseChoice::Cancel:
+        event->ignore();
+        return;
+    }
   }
   save_chrome_layout();
   ++open_generation_;
@@ -2298,6 +2404,19 @@ void EditorMainWindow::hideEvent(QHideEvent* event) {
   }
 }
 
+void EditorMainWindow::focus_startup_canvas() {
+  activateWindow();
+  if (QWindow* handle = windowHandle()) handle->requestActivate();
+  QWidget* target = nullptr;
+  if (editor_widget_ != nullptr && editor_widget_->isVisible()) {
+    target = editor_widget_;
+  } else if (preview_dock_ != nullptr && preview_dock_->widget() != nullptr &&
+             preview_dock_->widget()->isVisible()) {
+    target = preview_dock_->widget();
+  }
+  if (target != nullptr) target->setFocus(Qt::OtherFocusReason);
+}
+
 void EditorMainWindow::showEvent(QShowEvent* event) {
   QMainWindow::showEvent(event);
   reveal_concealed_floating_chrome();
@@ -2307,6 +2426,13 @@ void EditorMainWindow::showEvent(QShowEvent* event) {
   }
   for (auto* bar : {command_toolbar_, convert_toolbar_}) {
     if (bar != nullptr && bar->isFloating() && !bar->isHidden()) bar->raise();
+  }
+  // Qt activates the window after showEvent and then focusNextChild() lands on
+  // the first StrongFocus control (delay / range spin boxes). Defer one tick
+  // so the canvas wins; later unminimize keeps whatever the user last focused.
+  if (startup_canvas_focus_pending_) {
+    startup_canvas_focus_pending_ = false;
+    QTimer::singleShot(0, this, [this] { focus_startup_canvas(); });
   }
 }
 }

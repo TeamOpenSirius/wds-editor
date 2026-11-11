@@ -28,6 +28,16 @@ inline constexpr bool needs_follow_up_present(bool drew, bool rebuilt, int strea
   return drew && rebuilt && streak < max_streak;
 }
 
+// The idle loop may treat the surface as "has a picture" only after a present
+// that actually landed. A swapchain rebuild or an occluded 0×0 surface still
+// shows a blank drawable; marking presented then lets first-open dock layout
+// (resize-suspend) drop the follow-up, and a paused preview stays black until
+// play forces a frame. Keep startup frames flowing until this is true.
+inline constexpr bool preview_idle_may_mark_presented(bool follow_up_needed,
+                                                      bool occluded) noexcept {
+  return !follow_up_needed && !occluded;
+}
+
 // Before a paused preview stops presenting, every image of the current
 // swapchain must hold the latest picture: the driver/compositor may show the
 // image acquired by the next (play) frame before the GPU has drawn into it.

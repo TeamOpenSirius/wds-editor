@@ -82,6 +82,10 @@ struct EditorUiConfig {
   bool mute_hold_body_sfx = false;
   // When true, show TimingEffect Auto judgment text during preview auto-hit.
   bool show_judgment_text = false;
+  // When true, draw combo digits and the COMBO label in preview. Default on.
+  bool show_combo_numbers = true;
+  // When true, draw multi-press concurrent lines in preview. Default on.
+  bool show_concurrent_hints = true;
   // Preview stage lane count (1..32).
   int lane_count = 12;
   // New-style toolbox flow: convert buttons also lock the left-click place type.

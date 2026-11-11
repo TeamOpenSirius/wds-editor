@@ -238,7 +238,7 @@ WidthSlotsDialog::WidthSlotsDialog() {
   mute_hold_body_sfx_ = mute.get();
   add_child(std::move(mute));
 
-  auto judge_text = std::make_unique<wds::interaction::Checkbox>("开启判定文字显示");
+  auto judge_text = std::make_unique<wds::interaction::Checkbox>("显示判定文字");
   show_judgment_text_ = judge_text.get();
   add_child(std::move(judge_text));
 

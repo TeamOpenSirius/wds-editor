@@ -1863,7 +1863,13 @@ int main(int argc, char** argv) {
   });
   window.set_editor_widget(editor_widget);
   editor.chart_preview().set_after_seek_prepare(
-      [editor_widget](int64_t ms) { editor_widget->prepare_after_seek(ms); });
+      [editor_widget, preview_window](int64_t ms) {
+        editor_widget->prepare_after_seek(ms);
+        // Wheel / slider seeks never go through the Vulkan window's input
+        // queue, and first-open dock layout holds idle presents. Force the
+        // picture now or a paused preview stays blank until play.
+        preview_window->request_frame();
+      });
   wds::renderer::PreviewVisualConfig visual;
   visual.skins_directory = wds::ui::resolve_skins_dir(argv[0]);
   visual.effects_directory = wds::ui::resolve_effects_dir(argv[0]);
@@ -2107,8 +2113,12 @@ int main(int argc, char** argv) {
       editor.chart_preview().request_swapchain_fill_frame();
       editor.chart_preview().render();
       editor.chart_preview().note_frame_presented();
-      preview_window->mark_presented();
-      if (editor.chart_preview().preview().wants_follow_up_present()) {
+      const bool occluded = editor.chart_preview().preview().vulkan().health() ==
+                            wds::renderer::RendererHealth::Occluded;
+      if (wds::ui::preview_idle_may_mark_presented(
+              editor.chart_preview().preview().wants_follow_up_present(), occluded)) {
+        preview_window->mark_presented();
+      } else {
         preview_window->request_frame();
       }
       editor.chart_preview().flush_retired_font_textures();
@@ -2162,7 +2172,9 @@ int main(int argc, char** argv) {
                                       : editor.session().music_path();
         QTimer::singleShot(0, &window, [ui_alive, &editor, music] {
           if (!ui_alive->load()) return;
-          (void)editor.chart_preview().load_music(music, false);
+          // Project open (and resume) already ran before Vulkan ready. Keep that
+          // playhead; preserve=false would snap transport/engine back to chart start.
+          (void)editor.chart_preview().load_music(music, true);
         });
       }
       {
@@ -2197,12 +2209,19 @@ int main(int argc, char** argv) {
 #endif  // WDS_DIAG_ENABLED
     editor.chart_preview().render();
     editor.chart_preview().note_frame_presented();
-    preview_window->mark_presented();
-    if (editor.chart_preview().preview().wants_follow_up_present()) {
-      // That frame rebuilt the swapchain (host resize or WSI suboptimal), and the
-      // platform WSI drops the first present into a fresh one. Present once more
-      // right away; otherwise a paused preview stays black at the new size.
-      preview_window->request_frame();
+    {
+      // MoltenVK drops the first present into a fresh swapchain; a 0×0 surface
+      // during splash→chrome layout is Occluded. Do not arm the idle loop until
+      // a present actually landed, or resize-suspend eats the follow-up and the
+      // paused preview stays black until play.
+      const bool occluded = editor.chart_preview().preview().vulkan().health() ==
+                            wds::renderer::RendererHealth::Occluded;
+      if (wds::ui::preview_idle_may_mark_presented(
+              editor.chart_preview().preview().wants_follow_up_present(), occluded)) {
+        preview_window->mark_presented();
+      } else {
+        preview_window->request_frame();
+      }
     }
     static bool logged_present = false;
     if (!logged_present) {

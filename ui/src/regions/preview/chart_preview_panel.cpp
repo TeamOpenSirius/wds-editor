@@ -245,7 +245,13 @@ bool ChartPreviewPanel::finish_initialize(const wds::renderer::VulkanHostSurface
   (void)ui_font_path;
   WDS_LOG("init phase ready_ms=%lld (no FontAtlas bake)\n", static_cast<long long>(ms_since()));
 
-  transport_.request_seek_ms(transport_.chart_start_ms());
+  if (has_pending_restore_) {
+    transport_.request_pause();
+    request_seek_ms(pending_restore_ms_);
+    has_pending_restore_ = false;
+  } else {
+    transport_.request_seek_ms(transport_.chart_start_ms());
+  }
   rebuild_waveform(visual.bgm_path);
   ready_ = true;
   return true;
@@ -981,8 +987,12 @@ bool ChartPreviewPanel::load_music(const std::string& music_path, bool preserve_
   preview_.join_speculative_split_collect();
   const auto effects = preview_.config().effects_directory;
   const bool was_playing = preserve_playback && transport_.playing();
-  const int64_t pos =
-      preserve_playback ? transport_.committed_ms() : transport_.chart_start_ms();
+  // committed_ms() lags an un-polled seek (splash restore pins the engine
+  // before the first Transport::poll). Keep the visual playhead, not the
+  // last committed clock.
+  const int64_t pos = preserve_playback
+                          ? (has_pinned_seek_ ? pinned_seek_ms_ : engine_.timeline_ms())
+                          : transport_.chart_start_ms();
   const int64_t kept_offset = transport_.chart_offset_ms();
   auto finish_restore = [&] {
     transport_.set_chart_offset_ms(kept_offset);
@@ -1199,6 +1209,7 @@ void ChartPreviewPanel::bake_spectrogram_texture() {
 }
 
 void ChartPreviewPanel::reset_playback() {
+  has_pending_restore_ = false;
   if (!ready_) {
     return;
   }
@@ -1207,11 +1218,22 @@ void ChartPreviewPanel::reset_playback() {
 }
 
 void ChartPreviewPanel::restore_playback_position(int64_t time_ms) {
+  pending_restore_ms_ = time_ms;
+  has_pending_restore_ = true;
+  engine_.seek(time_ms);
+  pinned_seek_ms_ = time_ms;
+  has_pinned_seek_ = true;
   if (!ready_) {
+    // Splash opens the project before Vulkan/audio exist. Pin the engine so
+    // the edit panel lands on the saved tick; finish_initialize seeks transport.
+    if (after_seek_prepare_ && !video_export_clock_) {
+      after_seek_prepare_(time_ms);
+    }
     return;
   }
   transport_.request_pause();
   request_seek_ms(time_ms);
+  has_pending_restore_ = false;
 }
 
 bool ChartPreviewPanel::load_chart(const std::string& chart_path,

@@ -355,6 +355,12 @@ void apply_key(EditorUiConfig& cfg, const std::string& key, const std::string& v
   } else if (key == "show_judgment_text") {
     bool v = cfg.show_judgment_text;
     if (parse_bool(value, v)) cfg.show_judgment_text = v;
+  } else if (key == "show_combo_numbers") {
+    bool v = cfg.show_combo_numbers;
+    if (parse_bool(value, v)) cfg.show_combo_numbers = v;
+  } else if (key == "show_concurrent_hints") {
+    bool v = cfg.show_concurrent_hints;
+    if (parse_bool(value, v)) cfg.show_concurrent_hints = v;
   } else if (key == "lane_count") {
     int32_t v = cfg.lane_count;
     if (parse_int(value, v)) cfg.lane_count = std::clamp(static_cast<int>(v), 1, 32);
@@ -581,6 +587,8 @@ bool save_editor_ui_config(const std::string& path, const EditorUiConfig& cfg) {
       << "split_width_follow: " << emit_bool(cfg.split_width_follow) << '\n'
       << "mute_hold_body_sfx: " << emit_bool(cfg.mute_hold_body_sfx) << '\n'
       << "show_judgment_text: " << emit_bool(cfg.show_judgment_text) << '\n'
+      << "show_combo_numbers: " << emit_bool(cfg.show_combo_numbers) << '\n'
+      << "show_concurrent_hints: " << emit_bool(cfg.show_concurrent_hints) << '\n'
       << "lane_count: " << std::clamp(cfg.lane_count, 1, 32) << '\n'
       << "new_note_place_logic: " << emit_bool(cfg.new_note_place_logic) << '\n'
       << "sus_auto_convert: " << emit_bool(cfg.sus_auto_convert) << '\n'

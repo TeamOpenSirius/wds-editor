@@ -441,9 +441,9 @@ int main() {
          "NudgeTickUp id");
   expect(std::string(editor_shortcut_id(EditorShortcut::NudgeTickDown)) == "nudge_tick_down",
          "NudgeTickDown id");
-  expect(std::string(editor_shortcut_label(EditorShortcut::NudgeTickUp)) == "微调时间上移",
+  expect(std::string(editor_shortcut_label(EditorShortcut::NudgeTickUp)) == "上移1Tick",
          "NudgeTickUp label");
-  expect(std::string(editor_shortcut_label(EditorShortcut::NudgeTickDown)) == "微调时间下移",
+  expect(std::string(editor_shortcut_label(EditorShortcut::NudgeTickDown)) == "下移1Tick",
          "NudgeTickDown label");
   {
     const ShortcutChord tick_up = default_editor_shortcut(EditorShortcut::NudgeTickUp);
