@@ -3661,9 +3661,9 @@ void test_split_chip_copy_paste_cut_and_nudge() {
     CHECK(std::string(wds::interaction::editor_shortcut_id(EditorShortcut::NudgeTickDown)) ==
           "nudge_tick_down");
     CHECK(std::string(wds::interaction::editor_shortcut_label(EditorShortcut::NudgeTickUp)) ==
-          "微调时间上移");
+          "上移1Tick");
     CHECK(std::string(wds::interaction::editor_shortcut_label(EditorShortcut::NudgeTickDown)) ==
-          "微调时间下移");
+          "下移1Tick");
   }
 }
 

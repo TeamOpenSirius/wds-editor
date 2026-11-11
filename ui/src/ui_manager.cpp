@@ -335,9 +335,14 @@ UiManager::UiManager() : chart_preview_(std::make_unique<ChartPreviewPanel>()) {
     width_slots_dialog_->set_on_applied([this, persist] {
       EditorUiConfig cfg;
       width_slots_dialog_->capture_config(cfg);
+      // Qt settings owns these flags; the legacy overlay has no checkbox for them.
+      cfg.show_combo_numbers = chart_preview_->preview().show_combo_numbers();
+      cfg.show_concurrent_hints = chart_preview_->preview().show_concurrent_hints();
       session_->set_sus_auto_convert(cfg.sus_auto_convert);
       chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
       chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
+      chart_preview_->preview().set_show_combo_numbers(cfg.show_combo_numbers);
+      chart_preview_->preview().set_show_concurrent_hints(cfg.show_concurrent_hints);
       wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
       wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
       wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -952,6 +957,8 @@ void UiManager::load_ui_config() {
   backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
+  chart_preview_->preview().set_show_combo_numbers(cfg.show_combo_numbers);
+  chart_preview_->preview().set_show_concurrent_hints(cfg.show_concurrent_hints);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
   wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);
@@ -984,6 +991,8 @@ void UiManager::capture_live_ui_config(EditorUiConfig& cfg) {
   cfg.width_slots = wds::interaction::width_slot_values_const();
   cfg.mute_hold_body_sfx = chart_preview_->preview().mute_hold_body_sfx();
   cfg.show_judgment_text = chart_preview_->preview().show_judgment_text();
+  cfg.show_combo_numbers = chart_preview_->preview().show_combo_numbers();
+  cfg.show_concurrent_hints = chart_preview_->preview().show_concurrent_hints();
   cfg.sus_auto_convert = session_->sus_auto_convert();
   cfg.extended_features = session_->extended_features();
   if (const auto* edit = edit_panel()) cfg.extra_visible_lanes = edit->extra_visible_lanes();
@@ -1019,6 +1028,8 @@ void UiManager::apply_ui_config_from_qt(const EditorUiConfig& cfg) {
   backup_interval_min_ = clamp_backup_interval_min(cfg.backup_interval_min);
   chart_preview_->preview().set_mute_hold_body_sfx(cfg.mute_hold_body_sfx);
   chart_preview_->preview().set_show_judgment_text(cfg.show_judgment_text);
+  chart_preview_->preview().set_show_combo_numbers(cfg.show_combo_numbers);
+  chart_preview_->preview().set_show_concurrent_hints(cfg.show_concurrent_hints);
   wds::interaction::set_invert_scroll_wheel(cfg.invert_scroll_wheel);
   wds::interaction::set_invert_visible_range_scroll(cfg.invert_visible_range_scroll);
   wds::interaction::set_scroll_wheel_speed(cfg.scroll_wheel_speed);

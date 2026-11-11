@@ -537,5 +537,11 @@ int main() {
     assert(!needs_follow_up_present(true, true, 2));
     assert(!needs_follow_up_present(true, false, 0));
     assert(!needs_follow_up_present(false, true, 0));
+
+    using wds::ui::preview_idle_may_mark_presented;
+    assert(preview_idle_may_mark_presented(false, false));
+    assert(!preview_idle_may_mark_presented(true, false));
+    assert(!preview_idle_may_mark_presented(false, true));
+    assert(!preview_idle_may_mark_presented(true, true));
   }
 }

@@ -608,6 +608,60 @@ void test_allow_crash_log_sensitive_default_and_round_trip() {
   CHECK(!loaded_off.allow_crash_log_sensitive);
 }
 
+void test_show_combo_numbers_default_and_round_trip() {
+  EditorUiConfig defaults;
+  CHECK(defaults.show_combo_numbers);
+
+  const auto missing = temp_config_path("combo_numbers_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK(loaded_missing.show_combo_numbers);
+
+  EditorUiConfig off;
+  off.show_combo_numbers = false;
+  const auto off_path = temp_config_path("combo_numbers_off.yml");
+  CHECK(save_editor_ui_config(off_path.string(), off));
+  EditorUiConfig loaded_off;
+  CHECK(load_editor_ui_config(off_path.string(), loaded_off));
+  CHECK(!loaded_off.show_combo_numbers);
+
+  EditorUiConfig on;
+  on.show_combo_numbers = true;
+  const auto on_path = temp_config_path("combo_numbers_on.yml");
+  CHECK(save_editor_ui_config(on_path.string(), on));
+  EditorUiConfig loaded_on;
+  CHECK(load_editor_ui_config(on_path.string(), loaded_on));
+  CHECK(loaded_on.show_combo_numbers);
+}
+
+void test_show_concurrent_hints_default_and_round_trip() {
+  EditorUiConfig defaults;
+  CHECK(defaults.show_concurrent_hints);
+
+  const auto missing = temp_config_path("concurrent_hints_missing.yml");
+  CHECK(write_text_atomic(missing.string(), "note_speed: 5.0\n").error == SerializeError::Ok);
+  EditorUiConfig loaded_missing;
+  CHECK(load_editor_ui_config(missing.string(), loaded_missing));
+  CHECK(loaded_missing.show_concurrent_hints);
+
+  EditorUiConfig off;
+  off.show_concurrent_hints = false;
+  const auto off_path = temp_config_path("concurrent_hints_off.yml");
+  CHECK(save_editor_ui_config(off_path.string(), off));
+  EditorUiConfig loaded_off;
+  CHECK(load_editor_ui_config(off_path.string(), loaded_off));
+  CHECK(!loaded_off.show_concurrent_hints);
+
+  EditorUiConfig on;
+  on.show_concurrent_hints = true;
+  const auto on_path = temp_config_path("concurrent_hints_on.yml");
+  CHECK(save_editor_ui_config(on_path.string(), on));
+  EditorUiConfig loaded_on;
+  CHECK(load_editor_ui_config(on_path.string(), loaded_on));
+  CHECK(loaded_on.show_concurrent_hints);
+}
+
 void test_extended_features_default_and_round_trip() {
   EditorUiConfig defaults;
   CHECK(!defaults.extended_features);
@@ -668,6 +722,8 @@ int main() {
   test_save_truncates_in_memory_over_max();
   test_subdivisions_and_playback_rate_round_trip();
   test_allow_crash_log_sensitive_default_and_round_trip();
+  test_show_combo_numbers_default_and_round_trip();
+  test_show_concurrent_hints_default_and_round_trip();
   test_extended_features_default_and_round_trip();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);

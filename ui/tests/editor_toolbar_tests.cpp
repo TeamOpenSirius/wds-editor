@@ -980,6 +980,17 @@ void test_project_resume_position_roundtrip_and_legacy_fallback() {
     CHECK(prepared.valid());
     CHECK_EQ(prepared.active_chart_index, 2u);
     CHECK_EQ(prepared.resume_tick, expected_tick);
+
+    // Splash opens before Vulkan is ready. Restore must still seek the engine
+    // so the next initialize_empty does not leave the edit panel at tick 0.
+    wds::ui::ChartPreviewPanel preview;
+    CHECK(!preview.ready());
+    wds::ui::EditorSession session(preview);
+    CHECK(session.apply_prepared_wdsproject(std::move(prepared)));
+    CHECK_EQ(session.active_chart_index(), 2u);
+    const int64_t resume_ms = wds::chart_editor::tick_to_milliseconds(
+        expected_tick, session.engine().document().timing());
+    CHECK_EQ(session.engine().timeline_ms(), resume_ms);
   }
 
   // Downgrade to a v2-style file: no RESUME_* keys, ACTIVE_CHART still 1.

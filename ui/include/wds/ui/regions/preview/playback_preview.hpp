@@ -117,6 +117,14 @@ class PlaybackPreviewView {
   void set_show_judgment_text(bool show) noexcept { show_judgment_text_ = show; }
   bool show_judgment_text() const noexcept { return show_judgment_text_; }
 
+  // When true, draw combo digits and the COMBO label (persisted setting, default on).
+  void set_show_combo_numbers(bool show) noexcept { show_combo_numbers_ = show; }
+  bool show_combo_numbers() const noexcept { return show_combo_numbers_; }
+
+  // When true, draw multi-press concurrent lines (persisted setting, default on).
+  void set_show_concurrent_hints(bool show) noexcept { show_concurrent_hints_ = show; }
+  bool show_concurrent_hints() const noexcept { return show_concurrent_hints_; }
+
   void resize(int framebuffer_width, int framebuffer_height);
 
   // Last draw_split_particles diagnostics (frame-diag / pause-memo).
@@ -422,6 +430,8 @@ class PlaybackPreviewView {
   int follow_up_streak_ = 0;
   bool mute_hold_body_sfx_ = false;
   bool show_judgment_text_ = false;
+  bool show_combo_numbers_ = true;
+  bool show_concurrent_hints_ = true;
   int64_t chart_offset_ms_ = 0;
   int64_t preview_lead_in_visible_ms_ = 0;
   // Present-only visual lead (µs). SFX / engine snapshot stay on the committed clock.

@@ -333,9 +333,9 @@ const char* editor_shortcut_label(EditorShortcut id, bool pause_at_current) noex
     case EditorShortcut::RestoreBackLayerNotes:
       return "恢复所有背图层";
     case EditorShortcut::NudgeTickUp:
-      return "微调时间上移";
+      return "上移1Tick";
     case EditorShortcut::NudgeTickDown:
-      return "微调时间下移";
+      return "下移1Tick";
     case EditorShortcut::Count:
       break;
   }

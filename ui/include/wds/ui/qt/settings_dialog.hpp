@@ -65,6 +65,8 @@ class SettingsPanel final : public QWidget {
   QCheckBox* new_note_place_logic_ = nullptr;
   QComboBox* scroll_wheel_speed_ = nullptr;
   QCheckBox* show_judgment_text_ = nullptr;
+  QCheckBox* show_combo_numbers_ = nullptr;
+  QCheckBox* show_concurrent_hints_ = nullptr;
   QDoubleSpinBox* note_speed_ = nullptr;
   QSpinBox* note_start_offset_ = nullptr;
   QSpinBox* note_height_level_ = nullptr;

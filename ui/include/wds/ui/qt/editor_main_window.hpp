@@ -102,6 +102,7 @@ class EditorMainWindow final : public QMainWindow {
   void add_chart();
   void check_chart();
   void remember_recent_project(const QString& path);
+  void forget_recent_project(const QString& path);
  private:
   void create_control_docks();
   void ensure_stem_panel();
@@ -135,6 +136,9 @@ class EditorMainWindow final : public QMainWindow {
   // Normal-exit hook: writes RESUME_CHART / RESUME_TICK once. Reached both from
   // closeEvent (last window) and aboutToQuit (macOS Cmd+Q, which can bypass it).
   void save_resume_position_on_exit();
+  // First show after splash/--open: toolbar spin boxes are earlier in the tab
+  // order, so Qt would focus one and Space would type instead of play.
+  void focus_startup_canvas();
   QString pick_wdsproject_save_path(QWidget* parent);
   void start_busy_job();
   void track_open_watcher(QObject* watcher);
@@ -150,6 +154,9 @@ class EditorMainWindow final : public QMainWindow {
   std::deque<BusyJob> busy_queue_;
   bool busy_active_ = false;
   bool force_close_ = false;
+  // True only while the unsaved-changes QMessageBox from closeEvent is up.
+  // Nested QCloseEvents in that inner loop are ignored (not accepted).
+  bool unsaved_close_prompt_open_ = false;
   std::uint64_t open_generation_ = 0;
   std::vector<QPointer<QObject>> open_watchers_;
   std::string skins_dir_;
@@ -212,6 +219,7 @@ class EditorMainWindow final : public QMainWindow {
   UpdateChecker update_checker_;
   std::vector<QWidget*> concealed_floating_chrome_;
   bool chrome_revealed_ = false;
+  bool startup_canvas_focus_pending_ = true;
   bool persist_chrome_layout_ = true;
   // Automation closes must not overwrite the user's project resume position.
   bool persist_resume_position_ = true;

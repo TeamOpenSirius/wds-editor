@@ -132,7 +132,8 @@ class ChartPreviewPanel {
   bool want_spectrogram() const noexcept { return want_spectrogram_; }
   // Pause and seek transport + engine to t=0 so the preview window matches the chart.
   void reset_playback();
-  // Pause and seek transport + engine to a saved position (project resume).
+  // Pause and seek to a saved position (project resume). Safe before Vulkan
+  // ready: engine/edit panel update immediately; transport seek waits for init.
   void restore_playback_position(int64_t time_ms);
   // Join speculative collect, then queue a user seek (scrub / jump / CLI).
   void request_seek_ms(int64_t time_ms);
@@ -250,6 +251,10 @@ class ChartPreviewPanel {
   bool stall_injected_ = false;
   bool has_pinned_seek_ = false;
   int64_t pinned_seek_ms_ = 0;
+  // Splash can open a project before initialize_empty. Restore stores the
+  // playhead here so finish_initialize does not snap back to chart start.
+  bool has_pending_restore_ = false;
+  int64_t pending_restore_ms_ = 0;
   uint64_t last_doc_generation_ = 0;
   bool skip_precommit_pump_ = false;
   bool precommit_inited_ = false;

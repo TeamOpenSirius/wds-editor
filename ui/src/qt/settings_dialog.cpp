@@ -532,7 +532,9 @@ void SettingsPanel::build_pages() {
 
   auto* display = section_at(5);
   auto* display_host = display->parentWidget();
-  show_judgment_text_ = add_wrapping_check(display, tr("开启判定文字显示"), display_host);
+  show_judgment_text_ = add_wrapping_check(display, tr("显示判定文字"), display_host);
+  show_combo_numbers_ = add_wrapping_check(display, tr("显示连击数字"), display_host);
+  show_concurrent_hints_ = add_wrapping_check(display, tr("显示多押提示"), display_host);
   auto* form = new QFormLayout;
   note_speed_ = new QDoubleSpinBox(display_host);
   note_speed_->setRange(1.0, 15.0);
@@ -633,6 +635,8 @@ void SettingsPanel::build_pages() {
   connect(new_note_place_logic_, &QCheckBox::toggled, this, [live](bool) { live(); });
   connect(scroll_wheel_speed_, &QComboBox::currentIndexChanged, this, [live](int) { live(); });
   connect(show_judgment_text_, &QCheckBox::toggled, this, [live](bool) { live(); });
+  connect(show_combo_numbers_, &QCheckBox::toggled, this, [live](bool) { live(); });
+  connect(show_concurrent_hints_, &QCheckBox::toggled, this, [live](bool) { live(); });
   connect(note_speed_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
           [live](double) { live(); });
   connect(note_start_offset_, qOverload<int>(&QSpinBox::valueChanged), this,
@@ -692,6 +696,8 @@ void SettingsPanel::load_from_config() {
     scroll_wheel_speed_->setCurrentIndex(std::max(0, best));
   }
   show_judgment_text_->setChecked(cfg_.show_judgment_text);
+  show_combo_numbers_->setChecked(cfg_.show_combo_numbers);
+  show_concurrent_hints_->setChecked(cfg_.show_concurrent_hints);
   note_speed_->setValue(cfg_.note_speed);
   note_start_offset_->setValue(cfg_.note_start_offset);
   note_height_level_->setValue(cfg_.note_height_level);
@@ -740,6 +746,8 @@ bool SettingsPanel::capture_into_config() {
     if (ok) cfg_.scroll_wheel_speed = speed;
   }
   cfg_.show_judgment_text = show_judgment_text_->isChecked();
+  cfg_.show_combo_numbers = show_combo_numbers_->isChecked();
+  cfg_.show_concurrent_hints = show_concurrent_hints_->isChecked();
   cfg_.note_speed = note_speed_->value();
   cfg_.note_start_offset = note_start_offset_->value();
   cfg_.note_height_level = note_height_level_->value();

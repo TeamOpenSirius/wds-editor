@@ -4796,7 +4796,7 @@ void PlaybackPreviewView::draw_split_particles(const PreviewSnapshot& snapshot,
 }
 
 void PlaybackPreviewView::draw_concurrent_lines(DrawBatch& batch, const PreviewSnapshot& snapshot) {
-  if (!skin_.sync_line) {
+  if (!show_concurrent_hints_ || !skin_.sync_line) {
     return;
   }
   const double now = preview_now_sec(snapshot, visual_lead_us_);
@@ -5625,7 +5625,7 @@ void PlaybackPreviewView::draw_timing_effect(DrawBatch& batch, const PreviewSnap
 }
 
 void PlaybackPreviewView::draw_combo(DrawBatch& batch, const PreviewSnapshot& snapshot) {
-  if (snapshot.combo_count <= 0 || !skin_.combo_ap_text) {
+  if (!show_combo_numbers_ || snapshot.combo_count <= 0 || !skin_.combo_ap_text) {
     return;
   }
   for (int i = 0; i < 10; ++i) {
